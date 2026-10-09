@@ -250,6 +250,15 @@ test_run_clear_and_compact_reemit() {
   pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
 }
 
+test_codex_compaction_event_is_required() {
+  local out status=0
+  out=$("$ROOT/tests/fm-sessionstart-hook-live-e2e.test.sh" --test-missing-codex-compact 2>&1) || status=$?
+  expect_code 0 "$status" "Codex missing-compaction verdict regression"
+  assert_contains "$out" "withholding Codex compact produces a nonzero compaction verdict" \
+    "the live guard accepted a missing Codex compaction event"
+  pass "Codex live guard rejects a withheld compaction event"
+}
+
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
   local root="$TMP_ROOT/run-instruction-refresh" baseline compact_out clear_out resume_out
   make_run_primary "$root"
@@ -1023,6 +1032,7 @@ test_namespace_pid1_lock_holder_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
+test_codex_compaction_event_is_required
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh
 test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup

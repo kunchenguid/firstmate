@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in live guard for the Claude, Codex exec, and Pi RUN-tier session-open adapters.
+# Opt-in live guard for the Claude, Codex CLI, and Pi RUN-tier session-open adapters.
 # Cursor's source-free RUN-tier transport is covered with its stop-hook park by
 # tests/fm-cursor-primary-live-e2e.test.sh.
 #
@@ -42,6 +42,27 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+compaction_event_verdict() {  # <harness> <record-file>
+  local harness=$1 record=$2
+  grep -qx compact "$record" && return 0
+  case "$harness" in
+    codex|pi) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+if [ "${1:-}" = --test-missing-codex-compact ]; then
+  record=$(mktemp "${TMPDIR:-/tmp}/fm-codex-compact-verdict.XXXXXX") || exit 1
+  printf 'startup\nclear\n' > "$record"
+  verdict=0
+  compaction_event_verdict codex "$record" || verdict=$?
+  rm -f "$record"
+  [ "$verdict" -eq 1 ] \
+    || { printf 'not ok - a Codex compact event was withheld but the verdict was %s\n' "$verdict" >&2; exit 1; }
+  printf 'ok - withholding Codex compact produces a nonzero compaction verdict\n'
+  exit 0
+fi
 
 fm_live_gate opt-in FM_SESSIONSTART_HOOK_LIVE_E2E,FM_PI_SESSIONSTART_RACE_LIVE_E2E tmux
 
@@ -245,7 +266,7 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
 probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-argv...>
   local harness=$1 version=$2 lab=$3 clear_cmd=$4
   shift 4
-  local record="$lab/record" session="fmss-$harness" reset n compact_seed compact_reply
+  local record="$lab/record" session="fmss-$harness" reset n ready compact_seed compact_reply
   : > "$record"
   tmux -L "$SOCKET" new-session -d -s "$session" -c "$lab" -x 200 -y 50 \
     -e FM_LIVE_RECORD="$record" -e FM_ROOT_OVERRIDE="$lab" -e FM_HOME="$lab" \
@@ -253,11 +274,27 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     "$*" \
     || fail "$harness $version: could not start an interactive lab session"
 
-  # Every run-tier TUI asks whether it trusts a folder it has not seen, and the
-  # session-open hook only fires once that is answered. Each harness's default
-  # selection IS the trusting one, so a bare Enter clears it; the loop keeps
-  # waiting for the recorded open either way, so a harness that stops prompting
-  # costs nothing. harness-adapters owns trust handling outside tests.
+  # Codex dispatches its SessionStart hook with the first request, so wait for
+  # its TUI prompt and submit before looking for the recorded event.
+  if [ "$harness" = codex ]; then
+    n=0
+    ready=0
+    while [ "$n" -lt 60 ] && [ "$ready" -lt 3 ]; do
+      if capture "$session" | grep -qiE 'trust (this|the|parent)?[[:space:]]*(folder|project)'; then
+        tmux -L "$SOCKET" send-keys -t "$session" Enter
+        ready=0
+        sleep 5
+      else
+        ready=$((ready + 1))
+      fi
+      sleep 2
+      n=$((n + 1))
+    done
+    send_line "$session" "$ASK"
+  fi
+
+  # Claude and Pi retain their pre-prompt startup assertion: the registration
+  # must fire on its own after any folder-trust prompt is answered.
   n=0
   while [ "$n" -lt 60 ] && ! grep -q . "$record" 2>/dev/null; do
     if capture "$session" | grep -qiE 'trust (this|the|parent)?[[:space:]]*(folder|project)'; then
@@ -269,13 +306,13 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   done
   grep -q . "$record" 2>/dev/null \
     || { capture "$session" >&2; fail "$harness $version: the interactive session fired no session-open hook"; }
+  if [ "$harness" != codex ]; then send_line "$session" "$ASK"; fi
   sleep 10
-
-  send_line "$session" "$ASK"
   wait_for_text "$session" "FMHOOKTOKEN-$(head -n 1 "$record")-1-$LIVE_NONCE" \
     || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach interactive model context"; }
 
   send_line "$session" "$clear_cmd"
+  if [ "$harness" = codex ]; then send_line "$session" "$ASK"; fi
   n=0
   while [ "$n" -lt 20 ] && [ -z "$(sed -n '2p' "$record")" ]; do sleep 2; n=$((n + 1)); done
   reset=$(sed -n '2p' "$record")
@@ -285,12 +322,12 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     clear|compact|new) : ;;
     *) fail "$harness $version: '$clear_cmd' reported source '$reset', which the run tier would treat as a cold startup" ;;
   esac
-  send_line "$session" "$ASK"
+  if [ "$harness" != codex ]; then send_line "$session" "$ASK"; fi
   wait_for_text "$session" "FMHOOKTOKEN-$reset-2-$LIVE_NONCE" \
     || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach model context after '$clear_cmd'"; }
   pass "$harness $version: '$clear_cmd' reports source '$reset' and re-injects hook stdout into model context"
 
-  if [ "$harness" = pi ]; then
+  if [ "$harness" = pi ] || [ "$harness" = codex ]; then
     compact_seed="seed-$session-$$"
     compact_reply="FMCOMPACTDONE-$compact_seed"
     printf '%s\n' "$compact_seed" > "$lab/compact-seed.txt"
@@ -305,16 +342,22 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     done
   fi
   send_line "$session" /compact
+  if [ "$harness" = codex ]; then send_line "$session" "$ASK"; fi
   n=0
   while [ "$n" -lt 40 ] && ! grep -qx compact "$record"; do sleep 3; n=$((n + 1)); done
-  if grep -qx compact "$record"; then
-    send_line "$session" "$ASK"
+  compact_verdict=0
+  compaction_event_verdict "$harness" "$record" || compact_verdict=$?
+  if [ "$compact_verdict" -eq 0 ]; then
+    if [ "$harness" != codex ]; then send_line "$session" "$ASK"; fi
     wait_for_text "$session" "FMHOOKTOKEN-compact-$(grep -c . "$record" | tr -d ' ')-$LIVE_NONCE" \
       || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach model context after a compaction"; }
     pass "$harness $version: a compaction reports source 'compact' and re-injects hook stdout into model context"
-  elif [ "$harness" = pi ]; then
+  elif [ "$compact_verdict" -eq 1 ] && [ "$harness" = pi ]; then
     capture "$session" >&2
     fail "$harness $version: /compact did not raise session_compact after a completed substantial turn with keepRecentTokens=200"
+  elif [ "$compact_verdict" -eq 1 ]; then
+    capture "$session" >&2
+    fail "$harness $version: /compact did not raise the Codex compact session-start event"
   else
     note "$harness $version: compaction was NOT reached in this lab (recorded: $(tr '\n' ' ' < "$record")); its compact evidence was not refreshed"
   fi
@@ -607,7 +650,8 @@ for harness in claude codex pi; do
       probe_process_opens codex "$version" "$lab" resume \
         codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
         -- codex exec resume --last --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
-      note "codex $version: codex exec run-tier evidence refreshed; the interactive TUI remains uncovered because tracked project hooks provide no session-open or re-emit channel there"
+      probe_context_reset codex "$version" "$lab" /clear \
+        codex --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --no-alt-screen
       ;;
     pi)
       probe_process_opens pi "$version" "$lab" resume \

@@ -582,8 +582,9 @@ agents_baseline_drifted() {  # <rebuilding-session-pid>
 }
 
 # Only run-tier source pairs with both a stale native instruction cache and a
-# working Firstmate delivery path arrive here. Claude fresh-reads on reset, and
-# Codex has no tracked interactive reset delivery path.
+# working Firstmate delivery path arrive here. Claude fresh-reads on reset.
+# Codex's reset re-emits the digest, but its AGENTS.md refresh after compaction
+# has not been verified.
 agents_refresh_required() {  # <rebuilding-session-pid>
   local lock_pid=$1
   case "$PRIMARY_HARNESS:$SESSION_SOURCE" in

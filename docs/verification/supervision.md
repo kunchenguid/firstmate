@@ -58,21 +58,53 @@ A file named both by `-e` and by auto-discovery loads twice (two factory calls, 
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.
-The first two were measured on 2026-08-05 against a throwaway Firstmate-shaped lab carrying each harness's own tracked registration with a recorder standing in for `bin/fm-sessionstart-run.sh`.
+The first two were measured on 2026-08-05 against a throwaway Firstmate-shaped lab carrying each harness's own tracked registration with a recorder standing in for `bin/fm-sessionstart-run.sh` (Codex refreshed 2026-10-09).
 Each open printed a source-stamped token, and the model was asked to quote that token back, so producing hook stdout could never be mistaken for delivering it.
 The third is recorded below.
 
 | Harness | Version verified | Cold open | Context reset | Context-preserving reopen |
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
-| Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
+| Codex | codex-cli 0.161.0 | `source=startup` under `codex exec` and the interactive TUI, token quoted back | TUI `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `codex exec resume --last` reports `source=resume` |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
-Two harness-specific consequences are load-bearing rather than incidental.
+The Codex interactive TUI gap recorded for 0.145.0 and 0.146.0 was rechecked on 2026-10-09 with codex-cli 0.161.0.
+The same tracked project `SessionStart` registration now ran in the TUI, and the existing wrapper re-emitted its output on both `/clear` and `/compact`.
 
-Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
-Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
-The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
+```text
+$ codex features list | grep '^hooks'
+hooks                                    stable             true
+```
+
+The Codex live guard was run with a Codex-only `PATH` to isolate it from the other installed interactive harnesses:
+
+```sh
+FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
+```
+
+Claude and Pi were absent from that `PATH`, so this run refreshed only Codex evidence.
+The compaction check uses the manual `/compact` command; automatic compaction was not exercised.
+The portable regression also proves the Codex guard rejects a recorded startup and clear with no following `compact` event:
+
+```text
+FM_TEST_BEGIN 2026-10-09T07:32:18Z tests/fm-sessionstart-nudge.test.sh family=session-bootstrap expected_gate_skip=none
+ok - Codex live guard rejects a withheld compaction event
+FM_TEST_END 2026-10-09T07:33:21Z tests/fm-sessionstart-nudge.test.sh exit=0 duration_ms=62562 gate_skip=false
+```
+
+Observed Codex output:
+
+```text
+ok - codex codex-cli 0.161.0: a cold open reports source 'startup' and its hook stdout reaches model context
+ok - codex codex-cli 0.161.0: a worker detached by the session-open hook outlives it, so the deferred network checks still run
+ok - codex codex-cli 0.161.0: a context-preserving reopen reports source 'resume', which the run tier routes without a re-emit
+ok - codex codex-cli 0.161.0: '/clear' reports source 'clear' and re-injects hook stdout into model context
+ok - codex codex-cli 0.161.0: a compaction reports source 'compact' and re-injects hook stdout into model context
+# claude: not installed on this host, so its run-tier evidence was NOT refreshed
+# pi: not installed on this host, so its run-tier evidence was NOT refreshed
+# run-tier evidence was refreshed for 1 harness(es); still missing: claude pi
+# fm-sessionstart-hook-live-e2e.test.sh: all live assertions passed
+```
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -134,10 +166,10 @@ tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 # ok - Pi 0.84.0 re-injects updated AGENTS.md after a real compact in an isolated session
 ```
 
-This is live coverage only for Pi compaction.
+This is live coverage only for Pi's `AGENTS.md` refresh after compaction.
 The portable session-start tests cover continuation classification, baseline immutability, and source-routing behavior.
-Pi compaction is the only supported stale-cache refresh pair.
-Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
+Pi remains the only harness with a verified post-start `AGENTS.md` refresh pair.
+Codex CLI compaction hook delivery is verified separately under native session-start delivery above.
 
 ### Detached session-open workers survive the hook
 
@@ -298,7 +330,7 @@ Cursor compaction instruction refresh is DEFERRED and not shipped, so a Cursor p
 Two static facts decided that: `PreCompactRequestResponse` carries only `user_message`, and `preCompact` is absent from the `additional_context` step set (`index.js` @ 4814884), so the step cannot inject a digest and any delivery has to be routed through a later boundary.
 A staged-then-delivered design is rejected because carrying a digest across two concurrently running `stop` hooks can deliver it twice or strand it indefinitely, while closing those races enlarges a critical section inside a hook Cursor awaits at the turn boundary.
 Native `preCompact` firing was not observed because a real compaction could not be forced in the isolated session, so the surface has no empirical basis yet.
-It is therefore recorded as uncovered in the same sense as the Codex interactive TUI, and `tests/fm-cursor-primary.test.sh` asserts `preCompact` stays unregistered so it cannot return unnoticed without its own design and evidence.
+`tests/fm-cursor-primary.test.sh` asserts `preCompact` stays unregistered so it cannot return unnoticed without its own design and evidence.
 
 The Grok adaptive matrix ran on 2026-07-28 with separate scratch repositories and homes, dedicated tmux sockets, one target plus one control window, ambient tmux variables removed, and a socket-bound wrapper first in `PATH`.
 
