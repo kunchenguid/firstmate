@@ -358,6 +358,25 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# The PR identity block is the record's tail: after the one pr= line only
+# pr_head= and the x_* link fields may follow, and any other key there makes
+# fm_pr_metadata_identity_parse refuse the record, which the watcher reads as an
+# unauthenticated merge poll. Every writer that rewrites a task record which
+# may already carry a pr= line therefore passes its output through
+# fm_pr_metadata_identity_last.
+
+# fm_pr_metadata_identity_last: copy a task record from stdin to stdout with
+# every pr= and pr_head= line moved, in order, after all other lines. A record
+# without pr= passes through unchanged, and a key some earlier writer left after
+# the PR block moves ahead of it, so the rewrite also repairs that record.
+fm_pr_metadata_identity_last() {
+  awk '
+    /^pr=/ || /^pr_head=/ { tail[++n] = $0; next }
+    { print }
+    END { for (i = 1; i <= n; i++) print tail[i] }
+  '
+}
+
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=

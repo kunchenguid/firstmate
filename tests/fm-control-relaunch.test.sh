@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -488,6 +490,47 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_keeps_an_armed_merge_poll_authenticated() {
+  local dir out rc url head state last
+  dir=$(new_case armed-poll rl53)
+  add_ship_task "$dir" rl53 claude
+  state="$dir/home/state"
+  url=https://github.com/example/repo/pull/53
+  head=0123456789abcdef0123456789abcdef01234567
+  {
+    printf 'x_request=%s\n' request-53
+    printf 'pr=%s\n' "$url"
+    printf 'pr_head=%s\n' "$head"
+  } >> "$state/rl53.meta"
+  chmod 0600 "$state/rl53.meta"
+  # Tracing on adds the second record writer that runs after publication.
+  printf '%s\n' "$$" > "$state/.lock"
+  printf '%s on\n' "$$" > "$state/.trace-context-effective"
+  fm_pr_url_parse "$url" || fail "armed-poll fixture URL was invalid"
+  fm_pr_poll_prepare "$state" rl53 "$FM_PR_PROVIDER" "$url" "$FM_PR_HOST" "$FM_PR_PATH" \
+    "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" || fail "could not prepare the armed poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the armed poll"
+  fm_pr_poll_artifacts_valid "$state" rl53 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the armed poll fixture did not authenticate before relaunch"
+
+  out=$(run_control "$dir" rl53 relaunch --note "continuing after the PR opened"); rc=$?
+  expect_code 0 "$rc" "relaunch of a task with an armed poll should succeed"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl53 control_relaunch_tx)" ] \
+    || fail "the relaunch should have recorded its transaction"
+  fm_pr_metadata_identity_parse "$state/rl53.meta" \
+    || fail "relaunch left a task record the PR identity parser refuses:"$'\n'"$(cat "$state/rl53.meta")"
+  fm_pr_poll_artifacts_valid "$state" rl53 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "relaunch left the armed merge poll unauthenticated"
+  last=$(tail -2 "$state/rl53.meta")
+  [ "$last" = "pr=$url"$'\n'"pr_head=$head" ] \
+    || fail "the PR identity lines must stay the record's tail, got:"$'\n'"$last"
+  [ "$(meta_field "$dir" rl53 x_request)" = request-53 ] \
+    || fail "the X request must survive relaunch"
+  fm_trace_context_valid "$(meta_field "$dir" rl53 traceparent)" \
+    || fail "the relaunch should have recorded the replacement's trace carrier"
+  pass "fm-control relaunch: an armed merge poll stays authenticated across the relaunch"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2493,6 +2536,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_merge_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

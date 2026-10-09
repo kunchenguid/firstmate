@@ -10,6 +10,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -1285,6 +1287,30 @@ EOF
     (.decisions_open | any(.id | startswith("sample-resolved-review")) | not)
   ' >/dev/null || fail "resolved findings or decision-like prose created a false captain call: $json"
   pass "resolved findings and decision-like prose do not create captain-held tasks"
+}
+
+test_completion_keeps_a_recorded_pr_the_record_tail() {
+  local home id meta url head
+  home=$(make_home pr-tail-completion)
+  id=sample-pr-ship
+  meta="$home/state/$id.meta"
+  url=https://github.com/example/repo/pull/71
+  head=0123456789abcdef0123456789abcdef01234567
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Ship a sample change" --kind ship --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id" ship
+  printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$meta"
+  printf 'done: PR ready\n' > "$home/state/$id.status"
+  fm_pr_metadata_identity_parse "$meta" || fail "the PR fixture record was not parseable"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "no-call inventory completion failed on a task with a recorded PR"
+  assert_grep "decisions_reviewed=1" "$meta" "completion attestation missing"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "completion left a task record the PR identity parser refuses:"$'\n'"$(cat "$meta")"
+  [ "$FM_PR_META_URL" = "$url" ] || fail "completion changed the recorded PR"
+  [ "$(tail -2 "$meta")" = "pr=$url"$'\n'"pr_head=$head" ] \
+    || fail "the PR identity lines must stay the record's tail:"$'\n'"$(cat "$meta")"
+  pass "captain-call completion keeps a recorded PR the task record's tail"
 }
 
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
@@ -4686,6 +4712,7 @@ test_verify_resolves_a_hold_migrated_to_beads_notes
 test_verify_resolves_a_hold_migrated_under_the_configured_prefix
 test_marker_noted_row_wins_over_a_prefix_namesake
 test_complete_accepts_a_migrated_inventory_on_beads
+test_completion_keeps_a_recorded_pr_the_record_tail
 test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
