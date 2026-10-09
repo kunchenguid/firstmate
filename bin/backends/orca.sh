@@ -601,7 +601,7 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
   target=${FM_ORCA_RESOLVED_TERMINAL:-$terminal}
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
-    "$target" "$retries" "$sleep_s"
+    "$target" "$retries" "$sleep_s" "" FM_ORCA_RESOLVED_TERMINAL
 }
 
 # fm_backend_orca_kill: close one recorded task terminal. A missing CLI is a
