@@ -65,6 +65,66 @@ screen=$'╭──────────╮\n│ >        │\n╰────
 [ "$(fm_composer_classify_screen "$caps" "$screen")" = unknown ] || fail 'arbitrary activity was accepted as a Droid footer'
 pass 'Droid elapsed-time footer preserves box delivery without hiding shell or activity'
 
+# Droid 0.237.0 leaves the terminal cursor below its composer after Stop.
+# Render that placement with a real named process in a private tmux server.
+test_droid_parked_cursor() (
+  command -v tmux >/dev/null 2>&1 || { echo 'skip: tmux not found for Droid composer regression'; exit 0; }
+  real_tmux=$(command -v tmux)
+  socket="fm-droid-composer-$$"
+  lab="$TMP_ROOT/composer"
+  mkdir -p "$lab/bin" "$lab/shim"
+  trap '"$real_tmux" -L "$socket" kill-server >/dev/null 2>&1 || true' EXIT
+  for name in droid android claude; do cp "$(command -v bash)" "$lab/bin/$name"; done
+  cat > "$lab/shim/tmux" <<SH
+#!/usr/bin/env bash
+exec "$real_tmux" -L "$socket" "\$@"
+SH
+  chmod +x "$lab/shim/tmux"
+  . "$ROOT/bin/fm-tmux-lib.sh"
+  idle=$'╭──────────╮\n│ >        │\n╰──────────╯\n[⏱ 17s, context: <1%] TMUX ⧉\nworkspace main'
+  for name in droid android claude; do
+    printf '%s\n' "$idle" > "$lab/screen"
+    "$real_tmux" -L "$socket" new-session -d -s "$name" -x 40 -y 10 \
+      "$lab/bin/$name" -c 'cat "$1"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/screen" \
+      || fail 'cannot start private composer pane'
+    for _ in $(seq 1 100); do
+      current=$("$real_tmux" -L "$socket" display-message -p -t "$name" '#{pane_current_command}')
+      cy=$("$real_tmux" -L "$socket" display-message -p -t "$name" '#{cursor_y}')
+      [ "$current" != "$name" ] || [ "$cy" != 7 ] || break
+      sleep 0.1
+    done
+    [ "$current" = "$name" ] && [ "$cy" = 7 ] || fail "fixture did not park $name below the box (command=$current cursor=$cy)"
+    want=unknown
+    [ "$name" != droid ] || want=empty
+    verdict=$(PATH="$lab/shim:$PATH" fm_tmux_composer_state "$name")
+    [ "$verdict" = "$want" ] || fail "$name parked composer classified $verdict, expected $want"
+    "$real_tmux" -L "$socket" kill-session -t "$name"
+  done
+  # Preserve user text and refuse a newer shell composer despite Droid identity.
+  for variant in typed shell activity; do
+    case "$variant" in
+      typed) screen=${idle/│ >        │/│ > draft  │}; want=pending ;;
+      shell) screen="$idle"$'\n$ typed command'; want=unknown ;;
+      activity) screen=$'╭──────────╮\n│ >        │\n╰──────────╯\nunclaimed activity'; want=unknown ;;
+    esac
+    printf '%s\n' "$screen" > "$lab/screen"
+    "$real_tmux" -L "$socket" new-session -d -s droid -x 40 -y 10 \
+      "$lab/bin/droid" -c 'cat "$1"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/screen" \
+      || fail 'cannot start private refusal pane'
+    for _ in $(seq 1 100); do
+      current=$("$real_tmux" -L "$socket" display-message -p -t droid '#{pane_current_command}')
+      [ "$current" != droid ] || break
+      sleep 0.1
+    done
+    [ "$current" = droid ] || fail 'refusal fixture lacks live Droid identity'
+    verdict=$(PATH="$lab/shim:$PATH" fm_tmux_composer_state droid)
+    [ "$verdict" = "$want" ] || fail "$variant Droid composer classified $verdict, expected $want"
+    "$real_tmux" -L "$socket" kill-session -t droid
+  done
+  pass 'Droid parked cursor uses composer structure without relaxing other process or input guards'
+)
+test_droid_parked_cursor || exit 1
+
 fm_git_worktree "$TMP_ROOT/project" "$TMP_ROOT/task" droid-trust
 mkdir -p "$TMP_ROOT/user/.factory"
 store="$TMP_ROOT/user/.factory/settings.json"
