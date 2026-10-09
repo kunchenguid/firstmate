@@ -86,8 +86,12 @@
 # durable in the queue, so the arm re-executes itself in place as a handling
 # successor (same pid and command line, so --take-over still matches it) and
 # the home keeps a live watcher through main's turn. Any other close, a signal,
-# a record that no longer names this arm, or a 20th consecutive re-arm (a
-# condition that closes every cycle at once must not spin) ends it as usual.
+# a record that no longer names this arm, or a close after at most 20 re-arms
+# (a condition that closes every cycle at once must not spin) ends it as usual.
+# An arm attached to that left arm's watcher does not follow the re-armed one:
+# when the next healthy holder is a child of the same parent as the watcher
+# whose cycle ended, the attached arm reports that cycle's delivered reason and
+# exits 0 (attach_and_wait), so a re-arm in place never hides a close from it.
 #
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
 # its own supervision cycle on purpose (the supervision host's park boundary,
@@ -179,6 +183,7 @@ WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
 cycle_active=0
 cycle_watcher_pid=none
 cycle_watcher_identity=none
+cycle_watcher_ppid=
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
@@ -187,6 +192,10 @@ cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
   cycle_watcher_identity=$3
+  cycle_watcher_ppid=
+  if [ "$2" = attached ]; then
+    cycle_watcher_ppid=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  fi
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
   cycle_active=1
@@ -393,6 +402,19 @@ attached_holder_live() {
   [ "$FM_WATCHER_MATCHED_IDENTITY" = "$cycle_watcher_identity" ]
 }
 
+# A left arm (header, FM_WATCH_ARM_LEFT_RECORD) re-arms in place after a
+# delivered close, so its next watcher shares the ended one's parent. Report the
+# ended cycle's delivered reason instead of following the re-armed cycle.
+report_rearmed_close() {
+  local ppid
+  case "$cycle_watcher_ppid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  ppid=$(ps -o ppid= -p "$HEALTHY_PID" 2>/dev/null | tr -d ' ')
+  [ "$ppid" = "$cycle_watcher_ppid" ] || return 1
+  cycle_delivered_reason || return 1
+  printf '%s\n' "$DELIVERED_REASON"
+  cycle_log_append unknown unknown attached-delivered-wake none
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, report the wake that cycle durably
 # delivered, or fail loudly - never a clean empty completion that an adapter could
@@ -407,6 +429,7 @@ attach_and_wait() {
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
+        report_rearmed_close && return 0
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
         cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
@@ -426,6 +449,7 @@ attach_and_wait() {
       return 1
     fi
     if wait_for_healthy_successor; then
+      report_rearmed_close && return 0
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
       cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
