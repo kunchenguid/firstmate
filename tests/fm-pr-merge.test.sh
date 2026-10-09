@@ -2056,6 +2056,156 @@ test_github_still_forwards_sha_arg() {
   pass "fm-pr-merge refuses a caller --sha on GitHub because the head comes from the live read"
 }
 
+# --expect-head names the head a caller already verified, so a newer head pushed
+# just before the merge is refused even when its own checks are empty or skipped.
+test_github_expect_head_matching_binds_the_merge() {
+  local case_dir rc head=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  case_dir=$(make_case github-expect-head-match)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/45 --expect-head "$head" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-expect-head-match: a matching expected head should merge"
+  assert_logged_gh_merge "$case_dir" 45 example/repo --squash
+  pass "fm-pr-merge --expect-head merges a matching GitHub head bound to that SHA"
+}
+
+test_github_expect_head_mismatch_refuses_before_the_forge() {
+  local case_dir rc live=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  local expected=1111111111111111111111111111111111111111
+  case_dir=$(make_case github-expect-head-mismatch)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$live"
+  # The newer head's checks have not started: an empty rollup is green today.
+  write_github_rollup_json "$case_dir" "$live"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/46 --expect-head "$expected" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-expect-head-mismatch: a moved head must refuse"
+  assert_grep "$expected" "$case_dir/stderr" \
+    "github-expect-head-mismatch: the refusal did not name the expected head"
+  assert_grep "$live" "$case_dir/stderr" \
+    "github-expect-head-mismatch: the refusal did not name the live head"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-expect-head-mismatch: gh pr merge ran despite the moved head"
+  assert_absent "$case_dir/state/.control-task-x1.lock" \
+    "github-expect-head-mismatch: the per-task control lock was left behind"
+  assert_absent "$case_dir/state/.afk-contract.lock" \
+    "github-expect-head-mismatch: the away-record lock was left behind"
+  pass "fm-pr-merge --expect-head refuses a moved GitHub head before any forge merge call"
+}
+
+# A SHA-256 object-format head is as full as the live read accepts, so a caller
+# can name it too.
+test_github_expect_head_accepts_a_sha256_head() {
+  local case_dir rc head=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  case_dir=$(make_case github-expect-head-sha256)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/48 --expect-head "$head" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-expect-head-sha256: a matching 64-hex expected head should merge"
+  assert_logged_gh_merge "$case_dir" 48 example/repo --squash
+  pass "fm-pr-merge --expect-head merges a matching 64-hex GitHub head bound to that SHA"
+}
+
+test_gitlab_expect_head_matching_and_mismatch() {
+  local case_dir rc merge_line
+  case_dir=$(make_gitlab_case gitlab-expect-head-match)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --expect-head "$MR_HEAD" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "gitlab-expect-head-match: a matching expected head should merge"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+    || fail "gitlab-expect-head-match: unexpected merge invocation: '$merge_line'"
+
+  case_dir=$(make_gitlab_case gitlab-expect-head-mismatch)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --expect-head "$MR_STALE_HEAD" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-expect-head-mismatch: a moved head must refuse"
+  assert_grep "$MR_STALE_HEAD" "$case_dir/stderr" \
+    "gitlab-expect-head-mismatch: the refusal did not name the expected head"
+  assert_grep "$MR_HEAD" "$case_dir/stderr" \
+    "gitlab-expect-head-mismatch: the refusal did not name the live head"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-expect-head-mismatch: glab mr merge ran despite the moved head"
+  assert_absent "$case_dir/state/.control-task-x1.lock" \
+    "gitlab-expect-head-mismatch: the per-task control lock was left behind"
+  pass "fm-pr-merge --expect-head binds a matching GitLab head and refuses a moved one"
+}
+
+test_expect_head_rejects_malformed_values() {
+  local case_dir rc value
+  for value in abc123 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE \
+    EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE \
+    gggggggggggggggggggggggggggggggggggggggg ''; do
+    case_dir=$(make_case "expect-head-malformed-${#value}-${value:0:1}")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    : > "$case_dir/gh-axi.log"
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/47 --expect-head "$value" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 2 "$rc" "expect-head-malformed: '$value' should be refused"
+    assert_grep '--expect-head requires a full commit SHA as the live head read accepts it' "$case_dir/stderr" \
+      "expect-head-malformed: '$value' was not refused with the named error"
+    assert_no_grep 'pr=' "$case_dir/state/task-x1.meta" \
+      "expect-head-malformed: '$value' recorded the PR before refusing"
+    [ ! -s "$case_dir/gh.log" ] || fail "expect-head-malformed: '$value' reached gh"
+  done
+
+  case_dir=$(make_case expect-head-equals-form)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/47 \
+    --expect-head=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "expect-head-equals-form: the = form should be refused"
+  assert_grep '--expect-head requires a separate SHA argument' "$case_dir/stderr" \
+    "expect-head-equals-form: the = form was not refused with the named error"
+
+  case_dir=$(make_case expect-head-twice)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/47 \
+    --expect-head eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+    --expect-head eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "expect-head-twice: a repeated option should be refused"
+  assert_grep '--expect-head may be specified only once' "$case_dir/stderr" \
+    "expect-head-twice: the repetition was not refused with the named error"
+  pass "fm-pr-merge --expect-head refuses anything but one full commit SHA before recording state"
+}
+
 # --- durable merge outcome ---------------------------------------------------
 # A merge that lands must leave a record outside the merging agent's memory.
 # bin/fm-merge-outcome-lib.sh owns where that record goes; these cases pin the
@@ -2401,6 +2551,11 @@ test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_github_still_forwards_sha_arg
+test_github_expect_head_matching_binds_the_merge
+test_github_expect_head_mismatch_refuses_before_the_forge
+test_github_expect_head_accepts_a_sha256_head
+test_gitlab_expect_head_matching_and_mismatch
+test_expect_head_rejects_malformed_values
 test_gitlab_url_resolves_and_merges
 test_gitlab_host_comes_from_the_url
 test_gitlab_imposes_no_merge_method
