@@ -3707,6 +3707,24 @@ test_parse_target() {
   pass "fm_backend_herdr_parse_target: splits '<session>:<pane_id>' on the FIRST colon (pane_id itself contains one)"
 }
 
+test_parse_target_refuses_bare_pane_id() {
+  ( . "$ROOT/bin/backends/herdr.sh"
+    if fm_backend_herdr_parse_target "wPW:p2"; then
+      echo "bare pane id should be refused" >&2
+      exit 1
+    fi
+    if fm_backend_herdr_parse_target "p2"; then
+      echo "single token should be refused" >&2
+      exit 1
+    fi
+    if fm_backend_herdr_parse_target ""; then
+      echo "empty target should be refused" >&2
+      exit 1
+    fi
+  ) || fail "fm_backend_herdr_parse_target did not refuse bare pane id or malformed target"
+  pass "fm_backend_herdr_parse_target: refuses bare pane identifiers lacking session prefix"
+}
+
 test_normalize_key() {
   ( . "$ROOT/bin/backends/herdr.sh"
     [ "$(fm_backend_herdr_normalize_key Enter)" = enter ] || exit 1
@@ -3955,6 +3973,30 @@ test_composer_state_unknown_on_capture_failure() {
   [ "$status" -eq 0 ] || fail "composer_state should not itself fail the caller"
   [ "$out" = unknown ] || fail "an unreadable pane should read as unknown, got '$out'"
   pass "fm_backend_herdr_composer_state: reports unknown when the pane cannot be captured"
+}
+
+test_composer_state_inactive_session_fails_fast_without_server_autostart() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/composer-inactive-session"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # status --json reports stopped server
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":false}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state nonexistent:w1:p2' "$ROOT" )
+  status=$?
+  [ "$status" -eq 0 ] || fail "composer_state should exit 0 on inactive session"
+  [ "$out" = unknown ] || fail "composer_state on inactive session should read unknown, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''server' "composer probe on inactive session must never autostart a herdr server"
+  pass "fm_backend_herdr_composer_state: fails fast to unknown for inactive session without starting server"
+}
+
+# shellcheck disable=SC2016
+test_composer_state_piped_reader_does_not_hang() {
+  local out rc=0
+  out=$( timeout 3s bash -c '. "$0/bin/fm-backend.sh"; ( fm_backend_composer_state herdr nonexistent-session:p2 ) 2>&1 | head -20' "$ROOT" ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "piped composer probe on bad target hung or failed with rc=$rc"
+  [ "$out" = unknown ] || fail "piped composer probe should print unknown, got '$out'"
+  pass "fm_backend_composer_state (herdr): piped probe on bad target does not hang EOF-sensitive readers"
 }
 
 test_composer_state_unknown_when_no_composer_row_found() {
@@ -5986,6 +6028,7 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
+test_parse_target_refuses_bare_pane_id
 test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
@@ -6002,6 +6045,8 @@ test_composer_state_real_text_is_pending
 test_composer_state_grok_oversized_title_preserves_safe_verdicts
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
+test_composer_state_inactive_session_fails_fast_without_server_autostart
+test_composer_state_piped_reader_does_not_hang
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_parked_prompt_is_not_empty
 test_composer_state_pi_separator_idle_is_empty
