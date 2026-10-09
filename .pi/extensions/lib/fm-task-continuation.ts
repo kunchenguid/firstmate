@@ -139,6 +139,13 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           reconciliations.push({ task_id: id, reason, key });
           continue;
         }
+        if (taskState === "unknown") {
+          const detail = `${executorState}\n${current.stderr.trim()}`.trim().slice(0, 1200);
+          const reason = "current executor evidence is unavailable or unparseable; MAIN must reconcile the executor generation and state before routing continuation";
+          const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${current.status}\0${detail}\0unknown`).digest("hex");
+          reconciliations.push({ task_id: id, reason, key });
+          continue;
+        }
         if (continuation.kind === "action" && continuation.owner !== "same-worker-inbox") {
           const reason = `authorized action belongs to ${continuation.owner}; MAIN must route it through that existing owner and verify receipt/start: ${progress.next_step}`;
           const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${continuation.owner}`).digest("hex");

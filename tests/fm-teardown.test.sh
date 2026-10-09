@@ -203,7 +203,7 @@ write_meta() {
   seed_backlog_in_flight "$case_dir" "$kind"
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-task-state.sh" \
     update-progress task-x1 --progress \
-      '{"acceptance":"The teardown safety fixture is verified","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":""}' >/dev/null \
+      '{"acceptance":"The teardown safety fixture is verified","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":"","continuation":null}' >/dev/null \
     || fail 'canonical teardown acceptance fixture failed'
 }
 
@@ -694,7 +694,7 @@ accept_canonical_teardown_fixture() {
   local case_dir=$1 url head
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-task-state.sh" \
     update-progress task-x1 --progress \
-      '{"acceptance":"The teardown fixture outcome is landed","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":""}' >/dev/null
+      '{"acceptance":"The teardown fixture outcome is landed","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":"","continuation":null}' >/dev/null
   url=$(sed -n 's/^pr=//p' "$case_dir/state/task-x1.meta" | tail -1)
   [ -n "$url" ] || url=local:main
   head=$(git -C "$case_dir/wt" rev-parse HEAD) || return 1
@@ -803,7 +803,7 @@ test_compact_progress_requires_main_acceptance_before_teardown() {
     "$ROOT/bin/fm-task-state.sh" progress task-x1) || fail 'compact cleanup fixture read failed'
   open=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-task-state.sh" update-progress task-x1 \
-    --progress '{"acceptance":"The landed result is reviewed","current_state":"Implementation landed","remaining_gap":"MAIN has not accepted the result","next_step":"Review the requested behavior"}') \
+    --progress '{"acceptance":"The landed result is reviewed","current_state":"Implementation landed","remaining_gap":"MAIN has not accepted the result","next_step":"Review the requested behavior","continuation":{"kind":"action","owner":"MAIN semantic acceptance owner","review_at":"","effect_id":""}}') \
     || fail 'compact cleanup fixture update failed'
 
   set +e
@@ -820,7 +820,7 @@ test_compact_progress_requires_main_acceptance_before_teardown() {
     "$ROOT/bin/fm-task-state.sh" progress task-x1) || fail 'compact cleanup fixture reread failed'
   accepted=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-task-state.sh" update-progress task-x1 \
-    --progress '{"acceptance":"The landed result is reviewed","current_state":"MAIN verified the requested behavior","remaining_gap":"","next_step":""}') \
+    --progress '{"acceptance":"The landed result is reviewed","current_state":"MAIN verified the requested behavior","remaining_gap":"","next_step":"","continuation":null}') \
     || fail 'compact acceptance update failed'
   printf '%s' "$accepted" | jq -e '.recorded == true and .remaining_gap == "" and .next_step == ""' >/dev/null \
     || fail 'compact acceptance fixture did not reach a satisfied state'

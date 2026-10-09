@@ -612,6 +612,6 @@ fm_test_archive_goal() { # <home> <task>
   fixture_data=${FM_DATA_OVERRIDE:-$fixture_home/data}
   FM_HOME="$fixture_home" FM_DATA_OVERRIDE="$fixture_data" \
     "$ROOT/bin/fm-task-state.sh" update-progress "$task" --progress \
-      '{"acceptance":"The synthetic provider result is reviewed","current_state":"Fixture supervisor accepted the retained result","remaining_gap":"","next_step":""}' \
+      '{"acceptance":"The synthetic provider result is reviewed","current_state":"Fixture supervisor accepted the retained result","remaining_gap":"","next_step":"","continuation":null}' \
       >/dev/null || fail 'fixture semantic acceptance failed'
 }

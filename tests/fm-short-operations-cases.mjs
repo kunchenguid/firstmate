@@ -350,7 +350,7 @@ execFileSync('bash',['-c','. "$1/tests/fixtures.sh"; fm_test_fake_herdr_spawn "$
 const replayEnv={...process.env,FM_HOME:replayHome,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:replayState,FM_DATA_OVERRIDE:replayData,FM_CONFIG_OVERRIDE:path.join(replayHome,'config'),FM_FAKE_HERDR_STATE:path.join(recoveryRoot,'state.json'),FM_HERDR_LOG:path.join(recoveryRoot,'herdr.log'),HERDR_SESSION:'fixture'};
 const compactAccept=(task,env)=>{
   const current=JSON.parse(execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'progress',task],{env,encoding:'utf8'}));
-  execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'update-progress',task,'--progress',JSON.stringify({acceptance:'The completed cleanup behavior is verified',current_state:'The task result is semantically accepted',remaining_gap:'',next_step:''})],{env});
+  execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'update-progress',task,'--progress',JSON.stringify({acceptance:'The completed cleanup behavior is verified',current_state:'The task result is semantically accepted',remaining_gap:'',next_step:'',continuation:null})],{env});
 };
 const canonicalTasks=(env,...args)=>execFileSync('bash',[path.join(root,'bin/fm-tasks-axi.sh'),...args],{env,encoding:'utf8'});
 const addCompactTask=(task,title,env)=>canonicalTasks(env,'add',task,title,'--kind','ship','--repo','sample','--start');

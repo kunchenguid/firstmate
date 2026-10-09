@@ -107,7 +107,7 @@ write_herdr_meta() {
       "Endpoint fixture $id" --kind "$kind" --start >/dev/null \
       || fail "canonical endpoint task fixture failed: $id"
     FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" --progress \
-      '{"acceptance":"The endpoint fixture outcome is verified","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":""}' \
+      '{"acceptance":"The endpoint fixture outcome is verified","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":"","continuation":null}' \
       >/dev/null || fail "canonical endpoint acceptance fixture failed: $id"
   fi
   if [ "$kind" = scout ] && [ ! -f "$home/data/$id/report.md" ]; then
@@ -319,7 +319,7 @@ test_control_lock_contention_refuses_before_mutation() {
     "window=isolated:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" --progress \
-    '{"acceptance":"The lock test completes","current_state":"The lifecycle action is still active","remaining_gap":"The control lock must be observed","next_step":"Wait for the current lifecycle action"}' \
+    '{"acceptance":"The lock test completes","current_state":"The lifecycle action is still active","remaining_gap":"The control lock must be observed","next_step":"Wait for the current lifecycle action","continuation":{"kind":"action","owner":"same-worker-inbox","review_at":"","effect_id":""}}' \
     >/dev/null
   lock="$dir/home/state/.control-$id.lock"
   (
@@ -832,7 +832,7 @@ EOF
     current=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress "$id") \
       || fail 'open-goal progress read failed'
     FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" \
-      --progress '{"acceptance":"The requested result is reviewed","current_state":"Only a partial milestone exists","remaining_gap":"The final result is not accepted","next_step":"Continue the authorized work"}' \
+      --progress '{"acceptance":"The requested result is reviewed","current_state":"Only a partial milestone exists","remaining_gap":"The final result is not accepted","next_step":"Continue the authorized work","continuation":{"kind":"action","owner":"same-worker-inbox","review_at":"","effect_id":""}}' \
       >/dev/null || fail 'open-goal progress update failed'
     # Retained private rich state from an older scope must never override the
     # current original task's nonempty gap.
@@ -889,7 +889,7 @@ EOF
   current=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress "$id") \
     || fail 'done-open-gap progress read failed'
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" \
-    --progress '{"acceptance":"MAIN reviews the complete result","current_state":"Only a partial report exists","remaining_gap":"The complete result is still missing","next_step":"Continue the authorized work"}' \
+    --progress '{"acceptance":"MAIN reviews the complete result","current_state":"Only a partial report exists","remaining_gap":"The complete result is still missing","next_step":"Continue the authorized work","continuation":{"kind":"action","owner":"same-worker-inbox","review_at":"","effect_id":""}}' \
     >/dev/null || fail 'done-open-gap progress update failed'
   FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" "done" "$id" \
     --report "data/$id/report.md" >/dev/null || fail 'done-open-gap row could not move to Done'

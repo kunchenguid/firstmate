@@ -146,6 +146,13 @@ continuation = await install();
 const resumed = await tool({ action: 'read', task: 'task' });
 assert.equal(resumed.next_step, progress.next_step, 'restart lost the authorized next step');
 
+const unknownSettle = await fire('agent_before_settle');
+const unknownEntry = unknownSettle.flatMap(value => value?.entries || [])
+  .find(entry => entry.customType === 'fm-task-continuation-escalation');
+assert.ok(unknownEntry, 'missing executor evidence entered action delivery');
+assert.match(unknownEntry.content, /current executor evidence is unavailable or unparseable/);
+session.appendCustomMessageEntry(unknownEntry.customType, unknownEntry.content, unknownEntry.display, unknownEntry.details);
+
 // A genuine captain hold changes task disposition, not the descriptive
 // progress. Reads remain useful while the continuation consumer waits instead
 // of manufacturing a stale-context reconciliation action.

@@ -81,7 +81,7 @@ FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add completed-task 'Dashboar
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-task >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$ARCHIVED_ID" 'Dashboard archived task' --repo viewer --kind ship --start >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" archive "$ARCHIVED_ID" >/dev/null
-FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" update-progress-view "$REPORT_ID" --progress '{"acceptance":"All contracts pass","current_state":"Recorded current action <img id=progress-unsafe src=x onerror=alert(1)>","remaining_gap":"Finish behavioral verification","next_step":"Refresh canonical progress"}' >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" update-progress-view "$REPORT_ID" --progress '{"acceptance":"All contracts pass","current_state":"Recorded current action <img id=progress-unsafe src=x onerror=alert(1)>","remaining_gap":"Finish behavioral verification","next_step":"Refresh canonical progress","continuation":{"kind":"action","owner":"MAIN viewer fixture","review_at":"","effect_id":""}}' >/dev/null
 node - "$HOME_FIXTURE/data/$REPORT_ID/task.json" "$HOME_FIXTURE/data/$FIRST_REPORT_ID/task.json" "$HOME_FIXTURE/data/tall-task-01/task.json" "$HOME_FIXTURE/data/tall-task-02/task.json" "$HOME_FIXTURE/data/completed-task/task.json" <<'NODE'
 import fs from "node:fs";
 const [report, firstReport, tallOne, tallTwo, completed] = process.argv.slice(2);
@@ -402,7 +402,7 @@ try {
     if (!(await progressDetail.innerText()).includes(value)) throw new Error(`canonical progress detail omitted ${value}`);
   }
   if (await page.locator("#progress-unsafe").count()) throw new Error("progress text became executable markup");
-  execFileSync(`${process.env.VIEWER_ROOT}/bin/fm-tasks-axi.sh`, ["update-progress-view", process.env.VIEWER_REPORT_ID, "--progress", JSON.stringify({acceptance:"All contracts pass",current_state:"Canonical progress refreshed",remaining_gap:"Finish behavioral verification",next_step:"Refresh canonical progress"})], { env: {...process.env,FM_HOME:process.env.VIEWER_HOME},stdio:"ignore" });
+  execFileSync(`${process.env.VIEWER_ROOT}/bin/fm-tasks-axi.sh`, ["update-progress-view", process.env.VIEWER_REPORT_ID, "--progress", JSON.stringify({acceptance:"All contracts pass",current_state:"Canonical progress refreshed",remaining_gap:"Finish behavioral verification",next_step:"Refresh canonical progress",continuation:{kind:"action",owner:"MAIN viewer fixture",review_at:"",effect_id:""}})], { env: {...process.env,FM_HOME:process.env.VIEWER_HOME},stdio:"ignore" });
   await page.locator("#task-follow").check();
   await progressDetail.getByText("Canonical progress refreshed", {exact:true}).waitFor({state:"visible",timeout:12000});
   await page.locator("#task-follow").uncheck();

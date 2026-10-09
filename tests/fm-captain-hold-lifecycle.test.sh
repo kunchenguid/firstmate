@@ -129,7 +129,7 @@ test_ordinary_done_task_cannot_be_recast_as_a_captain_answer() {
   run_tasks "$home" add finished-work 'Already finished work' --kind ship --start >/dev/null \
     || fail 'could not create ordinary work fixture'
   run_progress "$home" finished-work \
-    '{"acceptance":"The work is complete","current_state":"MAIN accepted the outcome","remaining_gap":"","next_step":""}' \
+    '{"acceptance":"The work is complete","current_state":"MAIN accepted the outcome","remaining_gap":"","next_step":"","continuation":null}' \
     >/dev/null || fail 'could not accept ordinary work fixture'
   run_tasks "$home" 'done' finished-work >/dev/null || fail 'could not close ordinary work fixture'
   answer="$home/answer.txt"

@@ -1766,7 +1766,7 @@ test_main_accepted_compact_task_stays_terminal_and_quiet() {
   current=$(FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" progress accepted) \
     || fail 'accepted watcher progress read failed'
   FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" update-progress accepted \
-    --progress '{"acceptance":"The requested result is reviewed","current_state":"MAIN accepted the result","remaining_gap":"","next_step":""}' \
+    --progress '{"acceptance":"The requested result is reviewed","current_state":"MAIN accepted the result","remaining_gap":"","next_step":"","continuation":null}' \
     >/dev/null || fail 'accepted watcher progress update failed'
   FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" "done" accepted >/dev/null || fail 'canonical done fixture failed'
   printf 'done: implementation returned\n' > "$state/accepted.status"

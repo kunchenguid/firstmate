@@ -140,7 +140,7 @@ EOF
   FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" hold parked-task --kind parked --reason 'Parked fixture' >/dev/null
   FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add done-task 'Done Task' --kind ship --start >/dev/null
   FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" update-progress done-task --progress \
-    '{"acceptance":"MAIN verifies the requested result","current_state":"Only an intermediate result exists","remaining_gap":"Acceptance is still unmet","next_step":"Continue the authorized work"}' >/dev/null
+    '{"acceptance":"MAIN verifies the requested result","current_state":"Only an intermediate result exists","remaining_gap":"Acceptance is still unmet","next_step":"Continue the authorized work","continuation":{"kind":"action","owner":"same-worker-inbox","review_at":"","effect_id":""}}' >/dev/null
   FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "done" done-task >/dev/null
   FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add archived-task 'Archived Task' --kind ship >/dev/null
   FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" archive archived-task >/dev/null

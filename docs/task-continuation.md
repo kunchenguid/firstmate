@@ -22,6 +22,7 @@ The existing `fm-task-state.sh update-progress` command and Pi's existing `fm_ta
 The task record contains only the business and progress fields current behavior consumes.
 An open record written through `fm_task_continuation` classifies its continuation as `action`, `wait`, or `readback`, names the existing owner, and records either a UTC review checkpoint or an exact effect identity where that kind requires one.
 Historical four-field progress remains readable but is reconciliation-only until MAIN records the missing structured continuation.
+New progress writes never create that legacy shape: an open update requires a structured continuation, while an accepted update explicitly records `continuation: null`.
 There is no shared canonical backlog, persisted aggregate index, second progress mirror, evidence ledger, goal scheduler, assessment state machine, or model-maintained coordination record.
 
 MAIN is the only writer and updates the record only after a material change.
@@ -53,6 +54,7 @@ A captain hold remains an independent disposition constraint: cleanup verifies i
 
 Healthy unchanged execution and deliberate external waits stay quiet.
 An `action` owned by `same-worker-inbox` may enter that inbox path only for the exact MAIN-authored text, and quiet advancement requires its token-bound inbox record under `handled/` with the current executor generation.
+Missing or unparseable executor evidence returns to MAIN for reconciliation before any action or readback routing.
 An action naming any other existing owner returns to MAIN for that owner's interface and receipt/start verification.
 A `wait` stays quiet before its RFC3339 UTC `review_at`, then emits one reconciliation request to its named owner; that due request never authorizes replay of the awaited effect.
 A `readback` requires an exact `effect_id` and cannot enter the action-delivery path.

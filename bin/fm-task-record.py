@@ -78,9 +78,12 @@ def clean_continuation(value: Any) -> dict[str, str] | None:
     return clean
 
 
-def clean_progress(value: Any) -> dict[str, Any]:
+def clean_progress(value: Any, allow_legacy: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) not in (set(PROGRESS_FIELDS), set(PROGRESS_FIELDS) | {"continuation"}):
         raise Refusal("progress must contain acceptance, current_state, remaining_gap and next_step, plus optional continuation")
+    has_continuation = "continuation" in value
+    if not has_continuation and not allow_legacy:
+        raise Refusal("progress updates must include continuation; open goals require a structured owner and accepted goals require null")
     clean = {name: text(value[name], name, empty=True) for name in PROGRESS_FIELDS}
     for name, field in clean.items():
         if "\n" in field or "\r" in field:
@@ -92,6 +95,8 @@ def clean_progress(value: Any) -> dict[str, Any]:
     if bool(clean["remaining_gap"]) != bool(clean["next_step"]):
         raise Refusal("remaining_gap and next_step must both be empty or both be present")
     continuation = clean_continuation(value.get("continuation"))
+    if clean["remaining_gap"] and continuation is None and not allow_legacy:
+        raise Refusal("open progress requires a structured continuation owner")
     if not clean["remaining_gap"] and continuation is not None:
         raise Refusal("accepted progress must clear continuation with the remaining gap")
     clean["continuation"] = continuation
@@ -139,7 +144,7 @@ def validate(record: Any, expected_id: str | None = None) -> dict[str, Any]:
         "completion": completion,
         "hold": hold, "deferred_until": record.get("deferred_until") if isinstance(record.get("deferred_until"), str) else None,
         "blocked_by": blocked_by, "links": links, "history": history,
-        "progress": clean_progress(record.get("progress")),
+        "progress": clean_progress(record.get("progress"), allow_legacy=True),
         "updated_at": text(record.get("updated_at"), "updated_at"),
     }
 
@@ -297,7 +302,7 @@ def new_record(task_id: str, title: str, args: argparse.Namespace) -> dict[str, 
             "state": "in_flight" if args.start else "queued", "kind": args.kind or "task",
             "repo": args.repo or "", "priority": args.priority or "", "created": date.today().isoformat(),
             "closed": None, "completion": None, "hold": None, "deferred_until": None, "blocked_by": [], "links": {},
-            "history": [], "progress": {name: "" for name in PROGRESS_FIELDS}, "updated_at": now}
+            "history": [], "progress": {**{name: "" for name in PROGRESS_FIELDS}, "continuation": None}, "updated_at": now}
 
 
 def update_common(record: dict[str, Any], args: argparse.Namespace) -> bool:

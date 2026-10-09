@@ -1452,6 +1452,7 @@ taskCommand("fm-tasks-axi.sh", ["add", "task-f", "Observe exact batch identity",
 taskCommand("fm-task-state.sh", ["update-progress", "task-f", "--progress", JSON.stringify({
   acceptance: "The exact batch is processed once", current_state: "Initial observation",
   remaining_gap: "MAIN handling remains", next_step: "Process the authenticated outcome",
+  continuation: { kind: "action", owner: "MAIN outcome owner", review_at: "", effect_id: "" },
 })]);
 const taskFMeta = `${home}/state/task-f.meta`;
 writeFileSync(taskFMeta, `spawn_gen=g-task-f\npr_head=${"a".repeat(40)}\n`);
@@ -1660,6 +1661,7 @@ if (staleIdentity.isError || !staleIdentityText.includes('"recorded_task_generat
 taskCommand("fm-task-state.sh", ["update-progress", "task-f", "--progress", JSON.stringify({
   acceptance: "The exact batch is processed once", current_state: "Concurrent material revision",
   remaining_gap: "Handle the already-loaded outcome", next_step: "Acknowledge its exact durable sequence",
+  continuation: { kind: "action", owner: "MAIN outcome owner", review_at: "", effect_id: "" },
 })]);
 const wrongMembership = await processed.execute("ack-wrong-membership", { sequences: String(seqE) }, undefined, undefined, {});
 if (!wrongMembership.isError || !wrongMembership.content.some((item) => item.type === "text" && item.text.includes(`exact sequence membership must be ${seqE},${seqF}`))) {

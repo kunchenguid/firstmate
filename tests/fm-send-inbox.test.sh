@@ -531,7 +531,7 @@ test_done_row_with_open_gap_requires_main_reopen() {
   err="$dir/send.err"
   mkdir -p "$dir/home/data"
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 --progress \
-    '{"acceptance":"MAIN verifies the complete outcome","current_state":"Only a partial result exists","remaining_gap":"Acceptance is not met","next_step":"Continue the authorized work"}' >/dev/null
+    '{"acceptance":"MAIN verifies the complete outcome","current_state":"Only a partial result exists","remaining_gap":"Acceptance is not met","next_step":"Continue the authorized work","continuation":{"kind":"action","owner":"same-worker-inbox","review_at":"","effect_id":""}}' >/dev/null
   FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" 'done' t1 >/dev/null
   run_send "$dir" "$err" -- t1 "repair the unfinished goal"
   rc=$?
