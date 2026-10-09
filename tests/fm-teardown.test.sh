@@ -726,6 +726,25 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+test_droid_teardown_removes_task_trust() {
+  local case_dir trust_home store
+  case_dir=$(make_case droid-trust-cleanup)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "Droid task"
+  add_fork_with_pushed_branch "$case_dir"
+  trust_home="$case_dir/user"
+  mkdir -p "$trust_home/.factory"
+  store="$trust_home/.factory/settings.json"
+  printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
+  HOME="$trust_home" "$ROOT/bin/fm-droid-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null || fail 'teardown trust setup failed'
+  # The receipt survives a harness switch; current harness alone is insufficient.
+  touch "$case_dir/state/task-x1.droid-trust"
+  HOME="$trust_home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || fail 'Droid teardown failed'
+  jq -e '.otherSetting == "preserve" and .trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'teardown retained task trust or changed unrelated settings'
+  [ ! -e "$case_dir/state/task-x1.droid-trust" ] || fail 'teardown left its trust receipt'
+  pass 'teardown retires exact-worktree Droid trust even after a harness switch'
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -6192,6 +6211,7 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_droid_teardown_removes_task_trust
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note

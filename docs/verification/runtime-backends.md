@@ -3769,10 +3769,12 @@ ok - Droid 0.237.0 process-local dynamic effort and requested model apply in nat
 ok - Droid 0.237.0 single Escape interrupts a running turn
 ok - Droid 0.237.0 /quit exits the agent
 DROID_LIVE_RESULT version=0.237.0 detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass
+ok - Droid 0.237.0 exact-worktree trust is retired after exit
 ```
 
 Droid stores folder trust in the persistent `trustedFolders` object in `~/.factory/settings.json`; adding that field to a process-only `--settings` file did not suppress the fresh-folder dialog on 0.233.0.
 The live guard proves that exact-worktree registration through `bin/fm-droid-trust.sh` suppresses the gate on 0.237.0 and that the launched worker actually executes its brief.
+After `/quit`, the same guard removes the exact logical and physical worktree trust keys and confirms they are absent from native settings.
 The working spinner row and interrupt hint each classify busy when the other is deliberately removed from the native capture.
 It also proves `Auto (High)` survives inherited medium-autonomy user session defaults when the process settings pin the template's autonomy.
 The native `/settings` surface confirms the requested model and `Dynamic` reasoning level are overridden by the runtime settings file.
@@ -3783,5 +3785,5 @@ The portable guards refresh with:
 bin/fm-test-run.sh tests/fm-droid-harness.test.sh tests/fm-harness-precedence.test.sh tests/fm-spawn-dispatch-profile.test.sh tests/fm-control-relaunch.test.sh
 ```
 
-The portable cases cover exact-name process detection, foreign-marker precedence, adapter-scoped busy classification including cmux, timer-footer composer safety, scoped trust registration and malformed-store refusal, model/effort settings, hook quoting, collisions, failed-spawn cleanup, and dynamic-effort relaunch.
+The portable cases cover exact-name process detection, foreign-marker precedence, adapter-scoped busy classification including cmux, timer-footer composer safety, scoped trust registration, exact-path cleanup, and malformed-store refusal, model/effort settings, hook quoting, collisions, failed-spawn cleanup, and dynamic-effort relaunch.
 Herdr, Zellij, cmux, and Orca have no new credentialed Droid placement evidence in this record; they retain their existing backend delivery and control limitations.

@@ -858,6 +858,27 @@ SH
   pass "bootstrap requires jq for the static Droid crew harness"
 }
 
+test_non_droid_bootstrap_does_not_probe_harness() {
+  local case_dir home fakebin bash_env out
+  case_dir="$TMP_ROOT/non-droid-no-probe"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' claude > "$home/config/crew-harness"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  bash_env="$case_dir/probe-watch.bash"
+  cat > "$bash_env" <<'SH'
+if [ "${0##*/}" = fm-harness.sh ]; then
+  printf '%s\n' probed >> "$FM_TEST_HARNESS_PROBE_LOG"
+fi
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_TEST_HARNESS_PROBE_LOG="$case_dir/probes" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ ! -e "$case_dir/probes" ] || fail 'non-Droid bootstrap unnecessarily invoked harness detection'
+  assert_not_contains "$out" 'MISSING: jq' 'non-Droid tmux home acquired a jq dependency'
+  pass 'non-Droid bootstrap has no adapter probe or new jq dependency'
+}
+
 test_treehouse_lease_check_follows_resolved_backend() {
   local case_dir fakebin out
   # A treehouse that lacks durable --lease support is only a problem for a backend
@@ -1585,6 +1606,7 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_static_droid_harnesses_require_jq
+test_non_droid_bootstrap_does_not_probe_harness
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets

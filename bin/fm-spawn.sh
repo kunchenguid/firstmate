@@ -6224,6 +6224,8 @@ if [ "$DROID_TEMPLATE" -eq 1 ]; then
     echo "error: could not register Droid trust for the isolated worktree $WT; refusing launch" >&2
     exit 1
   }
+  # Keep cleanup ownership across a later switch to another harness.
+  touch "$STATE/$ID.droid-trust" || exit 1
 fi
 
 # agy gates a fresh worktree or secondmate home behind its own folder-trust

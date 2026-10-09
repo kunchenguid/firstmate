@@ -3028,6 +3028,7 @@ test_droid_scout_trust_and_profile() {
   jq -e '.sessionDefaultSettings.reasoningEffort == "high" and .hooks.Stop[0].hooks[0].type == "command"' "$settings" >/dev/null || fail 'Droid scout lost its profile or Stop hook'
   physical=$(cd "$WT_DIR" && pwd -P)
   jq -e --arg path "$physical" '.trustedFolders[$path].trustedAt | type == "string"' "$HOME_DIR/user-home/.factory/settings.json" >/dev/null || fail 'Droid scout did not trust its exact worktree'
+  [ -f "$HOME_DIR/state/$id.droid-trust" ] || fail 'Droid scout did not retain teardown trust ownership'
   pass 'Droid scouts retain profiles and trust only their isolated worktree'
 }
 
