@@ -466,7 +466,7 @@ print_watch_output() {
 
 handling_successor_generation() {
   [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] || return 0
-  fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
+  fm_recovery_marker_snapshot "$STATE/.watcher-down" "$FM_MARKER_LOCK_TIMEOUT" || return 1
   case "$FM_RECOVERY_MARKER_TOKEN" in
     pending:downtime:*|pending:handling:*|announced:downtime:*|announced:handling:*) printf '%s' "${FM_RECOVERY_MARKER_TOKEN##*:}" ;;
     acked:*|'') ;;

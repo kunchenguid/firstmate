@@ -475,6 +475,7 @@ fm_lock_clean_known_files() {
   rm -f \
     "$lockdir/pid" \
     "$lockdir/fm-home" \
+    "$lockdir/owner-identity" \
     "$lockdir/pid-identity" \
     "$lockdir/role" \
     "$lockdir/watcher-path" \
@@ -513,6 +514,23 @@ fm_lock_owner_dir() {
   mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
 }
 
+# fm_lock_publish_identity <ownerdir> <pid>
+# Atomically replace the owner record's owner-identity with "<pid> <identity>"
+# so a concurrent fm_lock_holder_alive never reads a torn record or pairs one
+# process's pid with another's identity. An uncomputable identity drops the
+# record, falling back to the liveness-only verdict. This is separate from
+# .watch.lock's raw pid-identity, which fm_watcher_lock_matches_pid owns.
+fm_lock_publish_identity() {
+  local ownerdir=$1 pid=$2 tmp
+  tmp="$ownerdir/.owner-identity.$$.$RANDOM"
+  if { printf '%s ' "$pid" > "$tmp" && fm_pid_identity "$pid" >> "$tmp"; } 2>/dev/null \
+    && [ -n "$(sed -n '1s/^[0-9]* //p' "$tmp" 2>/dev/null)" ] \
+    && mv -f "$tmp" "$ownerdir/owner-identity" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" "$ownerdir/owner-identity" 2>/dev/null
+}
+
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
   fm_current_pid mypid || return 1
@@ -520,12 +538,9 @@ fm_lock_prepare_owner() {
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ] || return 1
   # Record this holder's process identity beside its pid so a later contender
-  # can tell a zombie or pid-recycled holder apart from a live one
-  # (fm_lock_holder_alive). Best effort: an unwritable or uncomputable identity
-  # leaves no record and the holder check falls back to liveness alone.
-  if ! { fm_pid_identity "$mypid" > "$ownerdir/pid-identity"; } 2>/dev/null; then
-    rm -f "$ownerdir/pid-identity" 2>/dev/null || true
-  fi
+  # can tell a pid recycled by an unrelated process apart from the real holder
+  # (fm_lock_holder_alive). Best effort: no record keeps liveness alone.
+  fm_lock_publish_identity "$ownerdir" "$mypid" || true
   return 0
 }
 
@@ -583,10 +598,8 @@ fm_lock_claim() {
     return 1
   fi
   # The pid record is final at claim time, so refresh the identity record here
-  # too: fm_lock_holder_alive verifies it whenever it is present.
-  if ! { fm_pid_identity "$mypid" > "$ownerdir/pid-identity"; } 2>/dev/null; then
-    rm -f "$ownerdir/pid-identity" 2>/dev/null || true
-  fi
+  # too: fm_lock_holder_alive verifies it whenever it is bound to this pid.
+  fm_lock_publish_identity "$ownerdir" "$mypid" || true
   if ! fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -653,20 +666,37 @@ fm_lock_mid_acquire_is_fresh() {
   return 1
 }
 
+# fm_pid_is_zombie <pid>
+# Positive zombie evidence from the process table; any read failure is "not
+# known to be a zombie" so the caller keeps its live verdict.
+fm_pid_is_zombie() {
+  local state
+  state=$(ps -p "$1" -o stat= 2>/dev/null) || return 1
+  case "${state#"${state%%[![:space:]]*}"}" in Z*) return 0 ;; esac
+  return 1
+}
+
 # fm_lock_holder_alive <lockdir> <pid>
 # Live-holder verdict for the lock primitives. kill -0 alone cannot tell a
 # zombie or a pid recycled by an unrelated process from the real holder, and
-# treating either as live wedges every waiter forever. When the owner record
-# carries a pid-identity (written by fm_lock_prepare_owner/fm_lock_claim), the
-# recorded identity must match the pid's CURRENT identity, exactly as
-# fm_watcher_lock_matches_pid requires for .watch.lock; an absent or empty
-# record keeps the legacy liveness-only verdict.
+# treating either as live wedges every waiter forever. The owner record's
+# owner-identity is "<pid> <identity>" (fm_lock_publish_identity). Only positive
+# evidence reclaims a live pid: a record bound to this same pid whose identity
+# differs from the pid's CURRENT identity (as fm_watcher_lock_matches_pid
+# requires for .watch.lock), or a zombie. A record bound to another pid is a
+# handoff in flight, and an absent record or an uncomputable current identity
+# keeps the liveness-only verdict, so neither can steal a live lock.
 fm_lock_holder_alive() {
-  local lockdir=$1 pid=$2 recorded
+  local lockdir=$1 pid=$2 recorded current
   fm_pid_alive "$pid" || return 1
-  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ -n "$recorded" ] || return 0
-  [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$recorded" ]
+  recorded=$(cat "$lockdir/owner-identity" 2>/dev/null || true)
+  [ "${recorded%% *}" = "$pid" ] || return 0
+  recorded=${recorded#* }
+  if ! current=$(fm_pid_identity "$pid" 2>/dev/null) || [ -z "$current" ]; then
+    ! fm_pid_is_zombie "$pid"
+    return
+  fi
+  [ "$current" = "$recorded" ]
 }
 
 fm_lock_recheck_stale_owner() {
@@ -879,11 +909,19 @@ _fm_recovery_marker_begin_handling() {
   fm_lock_release "$lock"
 }
 
+# fm_recovery_marker_snapshot <marker> [bound-seconds]
+# A bound makes a wedged marker lock a returned failure instead of a hang; use
+# it only where the caller treats any failure as a refusal, never where a
+# failure is read as an empty marker.
 fm_recovery_marker_snapshot() {
-  local marker=$1 lock
+  local marker=$1 bound=${2:-} lock
   FM_RECOVERY_MARKER_TOKEN=
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$lock" || return 1
+  if [ -n "$bound" ]; then
+    fm_lock_acquire_wait_bounded "$lock" "$bound" || return 1
+  else
+    fm_lock_acquire_wait "$lock" || return 1
+  fi
   fm_recovery_marker_read "$marker" || true
   fm_lock_release "$lock"
 }
@@ -1337,21 +1375,22 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   fi
   fm_current_pid current || { fm_lock_release "$lockdir"; return 1; }
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  if [ "$back" != "$current" ] \
-    || ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
-    || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
+  if [ "$back" != "$current" ]; then
     fm_lock_release "$lockdir"
     return 1
   fi
-  # The pid record now names the caller, so the identity record must too:
-  # leaving the helper's identity would let the next contender read a foreign
-  # holder and steal a live lock. An uncomputable caller identity drops the
-  # record instead, falling back to the liveness-only verdict.
-  if ! { fm_pid_identity "$caller_pid" > "$ownerdir/pid-identity"; } 2>/dev/null; then
-    if ! rm -f "$ownerdir/pid-identity" 2>/dev/null; then
-      fm_lock_release "$lockdir"
-      return 1
-    fi
+  # Publish the caller-bound identity before the pid record names the caller.
+  # fm_lock_holder_alive ignores a record bound to another pid, so every
+  # intermediate state reads as the live helper or the live caller and no
+  # contender can pair a live pid with a foreign identity and steal the lock.
+  fm_lock_publish_identity "$ownerdir" "$caller_pid" || {
+    fm_lock_release "$lockdir"
+    return 1
+  }
+  if ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
+    || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
+    fm_lock_release "$lockdir"
+    return 1
   fi
   trap - TERM INT
 }

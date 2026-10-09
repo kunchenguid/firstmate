@@ -2686,7 +2686,7 @@ SH
     || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock ownership to its caller"; }
 
   waiter_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$waiter_pid" 2>/dev/null || true)
-  [ -n "$waiter_identity" ] && [ "$(cat "$lock/pid-identity" 2>/dev/null || true)" = "$waiter_identity" ] \
+  [ -n "$waiter_identity" ] && [ "$(cat "$lock/owner-identity" 2>/dev/null || true)" = "$waiter_pid $waiter_identity" ] \
     || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock identity to its caller"; }
 
   : > "$dir/release-waiter"
@@ -2699,10 +2699,12 @@ SH
 # presentation remains retriable on the next pass, while the separate queue
 # mutation lock keeps its blocking all-or-nothing acknowledgement contract.
 
-# A lock owner record carries the holder's pid-identity beside its pid, so a
-# contender can prove a live pid is NOT the recorded holder - a recycled pid,
-# or a zombie whose identity no longer matches - and reclaim instead of
-# wedging forever on a bare kill -0 verdict.
+# A lock owner record carries "<pid> <identity>" beside its pid, so a contender
+# can prove a live pid is NOT the recorded holder - a recycled pid whose
+# identity no longer matches - and reclaim instead of wedging forever on a bare
+# kill -0 verdict. Only that positive evidence may reclaim: a record bound to
+# another pid (a handoff in flight) or an unreadable current identity must keep
+# the live holder.
 test_lock_records_pid_identity_and_reclaims_foreign_holder() {
   local dir state lock holder_pid holder_identity i rc
   dir=$(make_case lock-identity-reclaim)
@@ -2729,8 +2731,8 @@ test_lock_records_pid_identity_and_reclaims_foreign_holder() {
   holder_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder_pid" 2>/dev/null || true)
   [ -n "$holder_identity" ] \
     || { kill "$holder_pid" 2>/dev/null || true; fail "could not compute the holder identity"; }
-  [ "$(cat "$lock/pid-identity" 2>/dev/null || true)" = "$holder_identity" ] \
-    || { kill "$holder_pid" 2>/dev/null || true; fail "holder pid-identity was not recorded"; }
+  [ "$(cat "$lock/owner-identity" 2>/dev/null || true)" = "$holder_pid $holder_identity" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "holder owner-identity was not recorded"; }
 
   # A live pid whose recorded identity matches is still held: the contender
   # must refuse, not steal.
@@ -2743,9 +2745,36 @@ test_lock_records_pid_identity_and_reclaims_foreign_holder() {
   [ "$rc" -eq 0 ] \
     || { : > "$dir/release-holder"; kill "$holder_pid" 2>/dev/null || true; fail "identity-matched live holder was not honored (rc=$rc)"; }
 
+  # A record bound to another pid is a bounded-acquire handoff in flight: the
+  # live pid in the pid record still holds the lock.
+  printf '%s foreign-identity\n' "$$" > "$lock/owner-identity"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 11
+    [ "$FM_LOCK_HELD_PID" = "$3" ] || exit 12
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$holder_pid" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || { : > "$dir/release-holder"; kill "$holder_pid" 2>/dev/null || true; fail "handoff-in-flight live holder was stolen (rc=$rc)"; }
+
+  # The holder's current identity cannot be read: no positive evidence, so the
+  # live holder is kept even beside a mismatched record.
+  printf '%s foreign-identity\n' "$holder_pid" > "$lock/owner-identity"
+  mkdir -p "$dir/noproc" "$dir/failps"
+  printf '#!/bin/sh\nexit 1\n' > "$dir/failps/ps"
+  chmod +x "$dir/failps/ps"
+  rc=0
+  PATH="$dir/failps:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/noproc" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 11
+    [ "$FM_LOCK_HELD_PID" = "$3" ] || exit 12
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$holder_pid" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || { : > "$dir/release-holder"; kill "$holder_pid" 2>/dev/null || true; fail "unreadable-identity live holder was stolen (rc=$rc)"; }
+
   # Same live pid, foreign recorded identity: exactly what a recycled pid looks
   # like. The contender must reclaim rather than wedge.
-  printf 'foreign-identity\n' > "$lock/pid-identity"
+  printf '%s foreign-identity\n' "$holder_pid" > "$lock/owner-identity"
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 11
@@ -2756,7 +2785,7 @@ test_lock_records_pid_identity_and_reclaims_foreign_holder() {
     || { : > "$dir/release-holder"; kill "$holder_pid" 2>/dev/null || true; fail "reclaimed lock was not released cleanly"; }
   : > "$dir/release-holder"
   wait "$holder_pid" 2>/dev/null || true
-  pass "lock records pid-identity and reclaims a live holder whose identity does not match"
+  pass "lock records owner-identity and reclaims only a live holder whose identity provably does not match"
 }
 test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   local dir state status queue_out queue_err first_out first_err second_out second_err replay_out replay_err
@@ -2779,7 +2808,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
 
   # The holder must keep a stable process identity while it holds the lock:
   # exec'ing sleep would replace this process's command line and make the
-  # recorded pid-identity read as a foreign holder.
+  # recorded owner-identity read as a foreign holder.
 
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"

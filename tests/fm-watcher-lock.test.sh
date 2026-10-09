@@ -1598,17 +1598,22 @@ test_sigterm_during_marker_wait_releases_watch_lock() {
   [ -s "$dir/holder.ready" ] \
     || { kill "$holder_pid" 2>/dev/null || true; fail "marker-lock fixture holder never acquired"; }
 
+  rm -f "$state/.last-watcher-beat"
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=5 \
     "$WATCH" > "$out" 2>&1 &
   wpid=$!
+  # Wait for the state the watcher publishes only after installing its cleanup
+  # traps (lock identity plus first beacon), so the TERM lands in the marker
+  # wait this case describes rather than inside the lock claim itself.
   i=0
-  while [ "$i" -lt 100 ] && [ ! -e "$state/.watch.lock" ]; do
+  while [ "$i" -lt 100 ] \
+    && ! { [ -s "$state/.watch.lock/pid-identity" ] && [ -e "$state/.last-watcher-beat" ]; }; do
     sleep 0.05
     i=$((i + 1))
   done
-  [ -e "$state/.watch.lock" ] \
-    || { kill "$wpid" "$holder_pid" 2>/dev/null || true; fail "watcher never acquired its lock: $(cat "$out")"; }
+  [ -s "$state/.watch.lock/pid-identity" ] && [ -e "$state/.last-watcher-beat" ] \
+    || { kill "$wpid" "$holder_pid" 2>/dev/null || true; fail "watcher never published its lock state: $(cat "$out")"; }
 
   kill -TERM "$wpid" 2>/dev/null || true
   # Free the marker lock so the cleanup path's bounded publish can finish.
