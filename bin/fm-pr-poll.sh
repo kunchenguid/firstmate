@@ -198,18 +198,25 @@ case "$provider" in
     # for this exact host is resolved fresh on every poll rather than trusted
     # from anywhere durable. Refuse to guess when zero or more than one
     # registered login matches, rather than picking one arbitrarily.
+    # The list is parsed as JSON, never split on quotes per line, so a login
+    # printed as one compact object still matches; this is the same filter
+    # bin/fm-pr-lib.sh's fm_pr_forgejo_login applies.
     login=$(
-      tea login list --output json 2>/dev/null | awk -F'"' -v h="$host" '
-        /"name":/ { name = $4 }
-        /"url":/ {
-          u = $4
-          sub(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "", u)
-          sub(/\/.*$/, "", u)
-          sub(/:[0-9]+$/, "", u)
-          if (u == h) { print name; n++ }
-        }
-        END { exit (n == 1) ? 0 : 1 }
-      '
+      tea login list --output json 2>/dev/null | jq -er --arg h "$host" '
+        if type == "array" then
+          [ .[]
+            | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
+                     and (.url | type) == "string")
+            | select((.url
+                      | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                      | sub("[/?#].*$"; "")
+                      | sub("^.*@"; "")
+                      | sub(":[0-9]+$"; "")) == $h)
+            | .name ]
+          | if length == 1 then .[0] else error("not exactly one matching login") end
+        else
+          error("login list is not an array")
+        end' 2>/dev/null
     ) || exit 0
     [ -n "$login" ] || exit 0
     # tea's single-PR view ignores field selection, so the one pull request

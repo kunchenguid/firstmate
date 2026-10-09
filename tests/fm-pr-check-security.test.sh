@@ -2053,6 +2053,87 @@ SH
   pass "Forgejo poll reads one pull request by number through tea api and wakes only on merged true"
 }
 
+# The one tea login for a Forgejo host is found by parsing
+# `tea login list --output json` as JSON, never by splitting each line on
+# quotes. The pretty-printed fixture below is byte-for-byte what tea 0.14.0
+# prints for two logins; the two compact fixtures are the same records with one
+# object per line and as one line, the shapes a line-oriented split misread as
+# a url equal to the login name, refusing every host. Both the sourced helper
+# and the static watcher body, which keeps its own copy of the filter, must
+# resolve every shape, strip scheme, port, and path from the url, and refuse
+# an ambiguous host.
+test_forgejo_login_list_shapes() {
+  local dir state out shape url
+  dir=$(make_case forgejo-login-shapes)
+  state="$dir/home/state"
+  cat > "$dir/tea-multiline.json" <<'JSON'
+[
+  {
+    "name": "fixture-one",
+    "url": "https://git.example.com",
+    "ssh_host": "git.example.com",
+    "user": "someone",
+    "default": "true"
+  },
+  {
+    "name": "fixture-two",
+    "url": "http://code.internal:3000/",
+    "ssh_host": "code.internal",
+    "user": "other",
+    "default": "false"
+  }
+]
+JSON
+  jq -c . "$dir/tea-multiline.json" > "$dir/tea-oneline.json"
+  { printf '[\n'; jq -c '.[]' "$dir/tea-multiline.json" | sed '1!s/^/,/'; printf ']\n'; } \
+    > "$dir/tea-perobject.json"
+  [ "$(wc -l < "$dir/tea-oneline.json")" -eq 1 ] || fail "the one-line fixture is not one line"
+  grep -q '^{"name":"fixture-one","url":"https://git.example.com"' "$dir/tea-perobject.json" \
+    || fail "the per-object fixture does not put a whole login on one line"
+  printf '[{"name":"a","url":"https://git.example.com"},{"name":"b","url":"https://git.example.com:3000/x"}]\n' \
+    > "$dir/tea-ambiguous.json"
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  cat "$FM_TEST_TEA_LOGINS"
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n'
+SH
+  chmod +x "$dir/fakebin/tea"
+  ln -sf "$(command -v jq)" "$dir/fakebin/jq"
+  : > "$dir/tea.log"
+
+  url=https://code.internal/o/r/pulls/7
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a forgejo "$url" code.internal o/r 7 "$POLL" \
+    || fail "could not prepare a Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Forgejo poll"
+
+  for shape in multiline oneline perobject; do
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login git.example.com) \
+      || fail "$shape: the login helper refused a host with exactly one login"
+    [ "$out" = fixture-one ] || fail "$shape: the login helper resolved '$out' for git.example.com"
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal) \
+      || fail "$shape: the login helper refused a url with a port and trailing slash"
+    [ "$out" = fixture-two ] || fail "$shape: the login helper resolved '$out' for code.internal"
+    ! FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login elsewhere.example >/dev/null \
+      || fail "$shape: the login helper resolved a host with no registered login"
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" FM_TEST_TEA_LOG="$dir/tea.log" run_poll "$dir")
+    [ "$out" = merged ] || fail "$shape: the static poll did not resolve the login and report the merge"
+    grep -qF -- "api --login fixture-two --repo o/r" "$dir/tea.log" \
+      || fail "$shape: the static poll did not read through the host's login"
+    : > "$dir/tea.log"
+  done
+  ! FM_TEST_TEA_LOGINS="$dir/tea-ambiguous.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login git.example.com >/dev/null \
+    || fail "the login helper picked one of two logins for the same host"
+  out=$(FM_TEST_TEA_LOGINS="$dir/tea-ambiguous.json" FM_TEST_TEA_LOG="$dir/tea.log" run_poll "$dir")
+  [ -z "$out" ] || fail "the static poll read through an ambiguous login"
+  pass "Forgejo login match parses tea's JSON in every line shape, in the helper and the static poll"
+}
+
 test_gitlab_merge_watch() {
   local dir state out rc url value noglab entry bindir name
   dir=$(make_case gitlab-merge-watch)
@@ -3524,6 +3605,7 @@ SH
 test_parser_matrix
 test_gitlab_merge_watch
 test_forgejo_merge_watch
+test_forgejo_login_list_shapes
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree

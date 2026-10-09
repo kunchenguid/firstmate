@@ -55,9 +55,9 @@
 # required source or producer read. Both are
 # refused while the away-posture record exists, and neither
 # applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded; --allow-red is refused on Forgejo too, where a merge already
-# requires the head's combined commit status to have succeeded. After gh
-# returns success, GitHub's live state is read back and
+# succeeded, or on Forgejo, where a merge already requires the head's combined
+# commit status to have succeeded. After gh returns success, GitHub's live
+# state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
@@ -278,9 +278,17 @@ if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
       ;;
   esac
 fi
-if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
-  echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
-  exit 2
+if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
+  case "$PROVIDER" in
+    gitlab)
+      echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+      exit 2
+      ;;
+    forgejo)
+      echo "error: --allow-missing does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded" >&2
+      exit 2
+      ;;
+  esac
 fi
 
 caller_has_merge_method() {

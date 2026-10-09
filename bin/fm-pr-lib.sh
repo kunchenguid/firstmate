@@ -1083,21 +1083,33 @@ FIELDS
 
 # tea addresses a repo by slug only and takes the host from a named login, so
 # the one login registered for <host> is printed by name, and zero or several
-# matches fail rather than pick one. bin/fm-pr-poll.sh keeps its own copy of
-# this match because the watcher body sources nothing.
+# matches fail rather than pick one. The list is parsed as JSON with jq rather
+# than split on quotes per line, because tea's JSON is not guaranteed to put
+# each field on its own line: a login printed as one compact object would hand
+# a line-oriented split the name where it expects the url, and arming would
+# then refuse every host. A login matches when its url's host - scheme,
+# userinfo, port, and path stripped - is exactly <host>. bin/fm-pr-poll.sh keeps
+# its own copy of this filter because the watcher body sources nothing.
+# shellcheck disable=SC2016 # $h is a jq variable bound by --arg, not a shell one.
+FM_PR_FORGEJO_LOGIN_JQ='
+  if type == "array" then
+    [ .[]
+      | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
+               and (.url | type) == "string")
+      | select((.url
+                | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                | sub("[/?#].*$"; "")
+                | sub("^.*@"; "")
+                | sub(":[0-9]+$"; "")) == $h)
+      | .name ]
+    | if length == 1 then .[0] else error("not exactly one matching login") end
+  else
+    error("login list is not an array")
+  end'
 fm_pr_forgejo_login() {  # <host>
   command -v tea >/dev/null 2>&1 || return 1
-  tea login list --output json 2>/dev/null | awk -F'"' -v h="$1" '
-    /"name":/ { name = $4 }
-    /"url":/ {
-      u = $4
-      sub(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "", u)
-      sub(/\/.*$/, "", u)
-      sub(/:[0-9]+$/, "", u)
-      if (u == h) { print name; n++ }
-    }
-    END { exit (n == 1) ? 0 : 1 }
-  '
+  command -v jq >/dev/null 2>&1 || return 1
+  tea login list --output json 2>/dev/null | jq -er --arg h "$1" "$FM_PR_FORGEJO_LOGIN_JQ" 2>/dev/null
 }
 
 # The state, merged flag, and head commit of one Forgejo pull request, read

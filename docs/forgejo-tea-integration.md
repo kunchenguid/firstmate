@@ -98,7 +98,8 @@ $ tea login list --output json
 ]
 ```
 
-Every Forgejo read matches the validated PR host against this list's bare hostnames (stripping scheme and port) and refuses when zero or more than one login matches, rather than guessing.
+Every Forgejo read parses this list as JSON with `jq`, matches the validated PR host against each login's bare hostname (stripping scheme, userinfo, port, and path), and refuses when zero or more than one login matches, rather than guessing.
+It never splits the output line by line, because a login printed as one compact object would then read its name where the url belongs.
 `fm_pr_forgejo_login` in `bin/fm-pr-lib.sh` owns that match for every sourcing script; `bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it keeps its own copy and re-derives the match on every poll instead of trusting a name recorded anywhere durable.
 
 ## URL shape

@@ -552,12 +552,10 @@ write_forgejo_status_json() {
 }
 
 # write_tea_logins_json <file> <name> <url> [<name> <url> ...]
-# Reproduces the exact multi-line pretty-printed shape of a real
-# `tea login list --output json` (docs/forgejo-tea-integration.md), one field
-# per line, because bin/fm-pr-merge.sh's (and fm-pr-check.sh's and
-# fm-pr-poll.sh's) host-matching awk reads it that way rather than as a single
-# compact line - a single-line fixture would silently never match either
-# pattern and every login-resolution case would refuse for the wrong reason.
+# Reproduces the multi-line pretty-printed shape of a real
+# `tea login list --output json` (docs/forgejo-tea-integration.md). The login
+# match parses it as JSON, so tests/fm-pr-check-security.test.sh pins the
+# compact single-line shapes separately.
 write_tea_logins_json() {
   local file=$1 name url first=1
   shift
@@ -4350,6 +4348,21 @@ test_allow_red_refused_on_forgejo() {
   pass "fm-pr-merge refuses --allow-red on Forgejo"
 }
 
+test_allow_missing_refused_on_forgejo() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-allow-missing)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-missing validate \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "forgejo-allow-missing: --allow-missing must not apply on Forgejo"
+  assert_grep '--allow-missing does not apply to Forgejo' "$case_dir/stderr" \
+    "forgejo-allow-missing: refusal did not name Forgejo"
+  [ ! -s "$case_dir/tea.log" ] || fail "forgejo-allow-missing: tea ran despite --allow-missing"
+  pass "fm-pr-merge refuses --allow-missing on Forgejo"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
@@ -4405,3 +4418,4 @@ test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
+test_allow_missing_refused_on_forgejo
