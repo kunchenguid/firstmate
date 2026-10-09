@@ -87,6 +87,7 @@ SH
   idle=$'╭──────────╮\n│ >        │\n╰──────────╯\n[⏱ 17s, context: <1%] TMUX ⧉\nworkspace main'
   for name in droid android claude; do
     printf '%s\n' "$idle" > "$lab/screen"
+    # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
     "$real_tmux" -L "$socket" new-session -d -s "$name" -x 40 -y 10 \
       "$lab/bin/$name" -c 'cat "$1"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/screen" \
       || fail 'cannot start private composer pane'
@@ -122,6 +123,7 @@ SH
       activity) screen=$'╭──────────╮\n│ >        │\n╰──────────╯\nunclaimed activity'; want=unknown ;;
     esac
     printf '%s\n' "$screen" > "$lab/screen"
+    # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
     "$real_tmux" -L "$socket" new-session -d -s droid -x 40 -y 10 \
       "$lab/bin/droid" -c 'cat "$1"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/screen" \
       || fail 'cannot start private refusal pane'
@@ -138,6 +140,7 @@ SH
   # A background Droid must not authorize input to the foreground shell,
   # even when the old rendered composer remains on screen.
   printf '%s\n' "$idle" > "$lab/screen"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   "$real_tmux" -L "$socket" new-session -d -s background -x 40 -y 10 \
     bash --noprofile --norc -m -c '"$1" -c "while :; do sleep 1; done" & cat "$2"; printf "\033[8;1H"; while IFS= read -r line; do :; done' _ "$lab/bin/droid" "$lab/screen" \
     || fail 'cannot start background Droid fixture'
