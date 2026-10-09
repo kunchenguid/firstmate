@@ -65,8 +65,8 @@
 # A final observation applies
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
-# next URL that still has a full observation reserve; only a genuine forge
-# failure or head change records an error.
+# next URL that still has a full observation reserve; a genuine forge failure,
+# head change or invalid response records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
@@ -74,6 +74,14 @@
 # observation, with a stale error beside it cleared.
 # A genuine failure prints its unavailable line only when it starts an episode
 # (no prior owner has an error); a successful read ends the episode.
+# Failed forge reads name their fixed read stage, exit code and first recognized
+# HTTP status in the first 4096 stderr bytes, or say HTTP status unavailable.
+# Only that numeric status is copied from stderr into durable records and
+# diagnostics, never raw stderr, endpoints, headers or response bodies.
+# Parallel failures are joined in sorted stage-name order, not completion order.
+# Head drift has its own fixed reason; response-validation failures retain the
+# generic reason. These same sanitized reasons appear in error and the first
+# unavailable line.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -214,8 +222,10 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
-forge() {
-  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
+forge() { # fixed read stage, then native gh arguments
+  local stage=$1 remaining rc=0 http_status forge_err
+  shift
+  forge_err="$TMP/$stage.err"
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
@@ -229,6 +239,14 @@ forge() {
     : > "$TMP/budget-exhausted"
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
+    # Allowlist the numeric HTTP status, not arbitrary (potentially private)
+    # forge stderr. Each parallel stage owns its own sanitized scratch file.
+    http_status=$(LC_ALL=C head -c 4096 "$forge_err" | LC_ALL=C tr '\n' ' ' | LC_ALL=C grep -Eo 'HTTP [1-5][0-9]{2}[^0-9]' | head -n 1 | cut -c 6-8)
+    if [ -n "$http_status" ]; then
+      printf 'forge read failed at %s (HTTP %s; exit %s)\n' "$stage" "$http_status" "$rc" > "$TMP/read-failure-$stage"
+    else
+      printf 'forge read failed at %s (exit %s; HTTP status unavailable)\n' "$stage" "$rc" > "$TMP/read-failure-$stage"
+    fi
   fi
   return "$rc"
 }
@@ -246,32 +264,33 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
+  rm -f -- "$TMP"/read-failure-* "$TMP/head-failure"
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   BUDGET_EXHAUSTED=0
-  forge api "$endpoint" > "$TMP/core.json" || return 1
+  forge core api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    forge comments api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/reviews.err" forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
+    forge reviews api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
     local reviews_pid=$!
-    FORGE_ERR="$TMP/inline.err" forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
+    forge inline api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
     local inline_pid=$!
-    FORGE_ERR="$TMP/checks.err" forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
+    forge checks api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
     local checks_pid=$!
-    FORGE_ERR="$TMP/statuses.err" forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
+    forge statuses api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
     local statuses_pid=$!
-    FORGE_ERR="$TMP/repo.err" forge api "repos/$part" > "$TMP/repo.json" &
+    forge repo api "repos/$part" > "$TMP/repo.json" &
     local repo_pid=$!
     wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
-    forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
+    forge closing pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
     after=$(jq -er .headRefOid "$TMP/after.json")
-    [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
+    [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/head-failure"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
       --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
@@ -293,9 +312,9 @@ observe() { # canonical GitHub URL -> normalized JSON
                  author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    forge comments api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/issue-events.err" forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
+    forge issue-events api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
     local events_pid=$!
     wait_forges "$comments_pid" "$events_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
@@ -362,7 +381,7 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
 }
 
 poll() {
-  local task url old kind error observed
+  local task url old kind error observed failure detail
   local -a row
   acquire
   get_input
@@ -397,11 +416,20 @@ poll() {
     observed=0
     observe "$url" || observed=$?
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
+    error=
+    if [ "$observed" -ne 0 ]; then
+      for failure in "$TMP"/read-failure-* "$TMP/head-failure"; do
+        [ -f "$failure" ] || continue
+        IFS= read -r detail < "$failure"
+        error="${error:+$error; }$detail"
+      done
+      error=${error:-forge observation unavailable or changed during read}
+    fi
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
         .error == null)' "${row[@]:1}" >/dev/null; then
-      printf 'contributions: observation unavailable for %s\n' "$url"
+      printf 'contributions: observation unavailable for %s: %s\n' "$url" "$error"
     fi
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
@@ -421,7 +449,6 @@ poll() {
             seen:($events | map(.token)),
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else
-        error='forge observation unavailable or changed during read'
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
