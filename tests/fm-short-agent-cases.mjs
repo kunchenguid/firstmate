@@ -161,6 +161,12 @@ assert.equal(service.status(legacy.id).state,'interrupted');
 const legacyTerminal=service.submit(request('legacy-terminal'),false),legacyTerminalFile=path.join(service.dir(legacyTerminal.id),'request.json');
 const legacyTerminalRecord=JSON.parse(fs.readFileSync(legacyTerminalFile));legacyTerminalRecord.version=1;legacyTerminalRecord.input.budget={timeMs:1000,tools:1,outputTokens:64,requests:1};fs.writeFileSync(legacyTerminalFile,JSON.stringify(legacyTerminalRecord));
 service.finish(legacyTerminal.id,'budget','historical budget result');assert.equal(service.status(legacyTerminal.id).state,'budget');
+for(const version of [1,2]) {
+ const historical=service.submit(request(`historical-v${version}-cancel-reconcile`),false),historicalDir=service.dir(historical.id),historicalFile=path.join(historicalDir,'request.json');
+ const historicalRecord=JSON.parse(fs.readFileSync(historicalFile));historicalRecord.version=version;if(version===1)historicalRecord.input.budget={timeMs:1};fs.writeFileSync(historicalFile,JSON.stringify(historicalRecord));
+ assert.equal(service.cancel(historical.id).state,'cancelled',`historical v${version} cancellation remains readable`);
+ await service.reconcile();assert.equal(service.status(historical.id).state,'cancelled');assert.ok(fs.existsSync(path.join(historicalDir,'notified.json')),`historical v${version} reconciliation remains readable`);
+}
 const crash=service.submit(request('crash','crash'));await wait(500);
 // Age only the specific crashed lease; do not rely on broad process scans.
 const crashDir=service.dir(crash.id);fs.writeFileSync(path.join(crashDir,'heartbeat'),'old');fs.utimesSync(path.join(crashDir,'heartbeat'),new Date(0),new Date(0));
