@@ -3389,23 +3389,13 @@ fi
 # idempotent pickup action and happens before any endpoint or worktree exists.
 if [ "$RELAUNCH" -eq 0 ] && [ -n "$ISSUE_URL" ]; then
   PROJECT_REMOTE=$(git -C "$PROJ_ABS" remote get-url origin 2>/dev/null || true)
-  case "$PROJECT_REMOTE" in
-    https://github.com/*) PROJECT_REMOTE_PATH=${PROJECT_REMOTE#https://github.com/} ;;
-    ssh://git@github.com/*) PROJECT_REMOTE_PATH=${PROJECT_REMOTE#ssh://git@github.com/} ;;
-    git@github.com:*) PROJECT_REMOTE_PATH=${PROJECT_REMOTE#git@github.com:} ;;
-    *) echo "error: --issue requires the project origin to be a GitHub repository" >&2; exit 1 ;;
-  esac
-  PROJECT_REMOTE_PATH=${PROJECT_REMOTE_PATH%.git}
-  case "$PROJECT_REMOTE_PATH" in
-    */*)
-      PROJECT_REMOTE_OWNER=${PROJECT_REMOTE_PATH%%/*}
-      PROJECT_REMOTE_REPO=${PROJECT_REMOTE_PATH#*/}
-      case "$PROJECT_REMOTE_REPO" in */*|'') echo "error: project origin is not a canonical GitHub repository" >&2; exit 1 ;; esac
-      ;;
-    *) echo "error: project origin is not a canonical GitHub repository" >&2; exit 1 ;;
-  esac
-  [ "$ISSUE_REPO" = "$PROJECT_REMOTE_OWNER/$PROJECT_REMOTE_REPO" ] || {
-    echo "error: issue repository $ISSUE_REPO does not match project GitHub origin $PROJECT_REMOTE_OWNER/$PROJECT_REMOTE_REPO" >&2
+  PROJECT_REMOTE_REPO=$(fm_pr_github_repo_from_origin "$PROJECT_REMOTE" 2>/dev/null || true)
+  [ -n "$PROJECT_REMOTE_REPO" ] || {
+    echo "error: --issue requires the project origin to be a GitHub repository" >&2
+    exit 1
+  }
+  [ "$ISSUE_REPO" = "$PROJECT_REMOTE_REPO" ] || {
+    echo "error: issue repository $ISSUE_REPO does not match project GitHub origin $PROJECT_REMOTE_REPO" >&2
     exit 1
   }
   OPERATOR_LOGIN_FILE="$CONFIG/github-operator-login"

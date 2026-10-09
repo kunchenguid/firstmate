@@ -286,6 +286,69 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+test_issue_linked_promotion_assigns_before_promoting() {
+  local rec home proj fakebin id issue_url meta out status
+  rec=$(make_home promote-issue)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  mkdir -p "$home/config"
+  printf 'morecoffeyplease\n' > "$home/config/github-operator-login"
+  git -C "$proj" remote add origin ssh://git@github.com/example/project.git
+  issue_url=https://github.com/example/project/issues/43
+
+  id=promote-issue-wrong-repo
+  write_brief "$home" "$id"
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  out=$(run_promote "$home" "$id" --mode direct-PR --yolo off --issue https://github.com/other/repo/issues/43 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "issue-linked promotion with a mismatched repository should fail"
+  assert_contains "$out" "issue repository must match" "promotion did not reject a mismatched issue repository"
+  assert_grep 'kind=scout' "$meta" "repository mismatch changed the scout task"
+
+  id=promote-issue-assign-failure
+  write_brief "$home" "$id"
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_PROMOTE_ASSIGN_LOG"
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(FM_TEST_PROMOTE_ASSIGN_LOG="$home/assign.log" PATH="$fakebin:$PATH" \
+    run_promote "$home" "$id" --mode direct-PR --yolo off --issue "$issue_url" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "issue-linked promotion with failed assignment should fail"
+  assert_contains "$out" "could not assign issue" "promotion did not report failed issue assignment"
+  assert_grep 'kind=scout' "$meta" "failed assignment changed the scout task"
+  assert_grep 'issue edit https://github.com/example/project/issues/43 --add-assignee morecoffeyplease' \
+    "$home/assign.log" "promotion did not assign the configured login"
+
+  id=promote-issue-success
+  write_brief "$home" "$id"
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_PROMOTE_ASSIGN_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(FM_TEST_PROMOTE_ASSIGN_LOG="$home/assign-success.log" PATH="$fakebin:$PATH" \
+    run_promote "$home" "$id" --mode direct-PR --yolo off --issue "$issue_url" 2>&1)
+  status=$?
+  expect_code 0 "$status" "issue-linked scout promotion should succeed: $out"
+  assert_grep 'kind=ship' "$meta" "successful issue promotion did not promote the task"
+  assert_grep "issue=$issue_url" "$meta" "successful issue promotion did not record the issue"
+  assert_grep 'Closes #N' "$home/data/$id/ship-instructions.md" \
+    "issue promotion instructions omitted the PR closing-reference requirement"
+  assert_grep 'issue edit https://github.com/example/project/issues/43 --add-assignee morecoffeyplease' \
+    "$home/assign-success.log" "successful promotion did not assign the configured login"
+  pass "fm-promote: issue-linked scouts share origin normalization and assign before promotion"
+}
+
 # A symlink at state/<id>.meta is the containment hazard the shared publisher
 # refuses: promotion must not rewrite the symlink target in place.
 test_promote_refuses_a_symlinked_task_record() {
@@ -704,6 +767,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_issue_linked_promotion_assigns_before_promoting
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_spawn_and_promote_require_filled_task_subsections

@@ -1136,7 +1136,7 @@ printf '%s\n' "$*" >> "$FM_TEST_ASSIGN_LOG"
 exit 0
 SH
   chmod +x "$FAKEBIN_DIR/gh"
-  out=$(FM_TEST_ASSIGN_LOG="$CASE_DIR/assign.log" FM_TEST_GITHUB_ORIGIN=https://github.com/example/project.git \
+  out=$(FM_TEST_ASSIGN_LOG="$CASE_DIR/assign.log" FM_TEST_GITHUB_ORIGIN=ssh://git@github.com/example/project.git \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --mode direct-PR --yolo off --issue "$issue_url")
   status=$?

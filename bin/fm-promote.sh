@@ -35,6 +35,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
@@ -168,12 +170,7 @@ if [ "$ISSUE_SET" = 1 ]; then
   ORIGIN=$(git -C "$PROJECT" remote get-url origin 2>/dev/null || true)
   ISSUE_REPO=${ISSUE_URL#https://github.com/}
   ISSUE_REPO=${ISSUE_REPO%/issues/*}
-  case "$ORIGIN" in
-    https://github.com/*) ORIGIN_REPO=${ORIGIN#https://github.com/} ;;
-    git@github.com:*) ORIGIN_REPO=${ORIGIN#git@github.com:} ;;
-    *) ORIGIN_REPO= ;;
-  esac
-  ORIGIN_REPO=${ORIGIN_REPO%.git}
+  ORIGIN_REPO=$(fm_pr_github_repo_from_origin "$ORIGIN" 2>/dev/null || true)
   [ -n "$ORIGIN_REPO" ] && [ "$ISSUE_REPO" = "$ORIGIN_REPO" ] || {
     echo "error: issue repository must match the project GitHub origin ($ORIGIN)" >&2
     exit 1
