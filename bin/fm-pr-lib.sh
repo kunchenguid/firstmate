@@ -383,14 +383,17 @@ fm_pr_forgejo_tea_pull_head() {  # <pull-json>
 
 # The one reading of a Forgejo pull request's draft state. tea's JSON record
 # carries no draft field, so this reads the CLI's detail text instead, where an
-# open draft is the CLI's one exact marker line. It prints "true" only for that
-# line and nothing for anything else, so free text cannot read as a draft and
+# open draft is the CLI's one marker line: the plain markdown item "- Draft
+# (not mergeable until marked ready)", or the "•" bullet tea's markdown
+# renderer turns it into, either one optionally padded with whitespace. It
+# prints "true" only for that line and nothing for anything else, so free text cannot read as a draft and
 # an unreadable or reformatted payload reads as not-a-draft, matching
 # fm_pr_json_draft_state's contract: only a positive reading refuses, which
 # bin/fm-pr-check.sh does at arming time.
 fm_pr_forgejo_tea_draft_state() {  # <pull-detail-text>
   if printf '%s\n' "${1-}" \
-    | grep -qxF -- '- Draft (not mergeable until marked ready)'; then
+    | LC_ALL=C grep -qE -- \
+      '^[[:space:]]*(-|•) Draft \(not mergeable until marked ready\)[[:space:]]*$'; then
     printf '%s\n' true
   fi
   return 0

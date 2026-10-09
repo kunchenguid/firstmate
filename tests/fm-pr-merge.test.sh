@@ -413,15 +413,18 @@ write_pull_json() {
     "$state" "$merged" "$mergeable" "$head" > "$file"
 }
 
-# tea's detail text for one pull request, draft or not: the one place the CLI
-# surfaces a draft is its exact marker line.
+# tea's detail text for one pull request, draft or not, as the CLI renders it:
+# the one place it surfaces a draft is its padded "•" marker line. Draft "plain"
+# writes the unrendered markdown marker instead.
 write_pull_detail() {
   local file=$1 draft=${2:-false}
   printf '#7 fixture pull (open)\n@captain wants to merge 1 commit\n' > "$file"
-  if [ "$draft" = true ]; then
+  if [ "$draft" = plain ]; then
     printf '%s\n' '- Draft (not mergeable until marked ready)' >> "$file"
+  elif [ "$draft" = true ]; then
+    printf '%s\n' '  • Draft (not mergeable until marked ready)          ' >> "$file"
   else
-    printf '%s\n' '- No Conflicts' >> "$file"
+    printf '%s\n' '  • No Conflicts          ' >> "$file"
   fi
 }
 
@@ -2471,19 +2474,22 @@ test_forgejo_each_condition_refuses_independently() {
     assert_present "$case_dir/state/task-x1.check.sh" \
       "forgejo-refuse-$name: a refusal should still leave the merge poll armed"
   done
-  # The draft marker lives in tea's detail text, so it gets its own fixture.
-  case_dir=$(make_forgejo_case forgejo-refuse-draft)
-  write_pull_detail "$case_dir/pull-detail.txt" true
-  set +e
-  run_pr_merge "$case_dir" task-x1 "$FR_URL" \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" "forgejo-refuse-draft: a draft must refuse"
-  assert_grep 'the pull request is a draft' "$case_dir/stderr" \
-    "forgejo-refuse-draft: refusal did not name the draft"
-  [ -z "$(forgejo_merge_line "$case_dir/curl.log")" ] \
-    || fail "forgejo-refuse-draft: a merge was attempted on a draft"
+  # The draft marker lives in tea's detail text, so it gets its own fixture;
+  # both tea's rendered bullet and the plain markdown marker refuse.
+  for form in true plain; do
+    case_dir=$(make_forgejo_case "forgejo-refuse-draft-$form")
+    write_pull_detail "$case_dir/pull-detail.txt" "$form"
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "forgejo-refuse-draft-$form: a draft must refuse"
+    assert_grep 'the pull request is a draft' "$case_dir/stderr" \
+      "forgejo-refuse-draft-$form: refusal did not name the draft"
+    [ -z "$(forgejo_merge_line "$case_dir/curl.log")" ] \
+      || fail "forgejo-refuse-draft-$form: a merge was attempted on a draft"
+  done
   pass "fm-pr-merge refuses on each Forgejo pre-merge condition independently"
 }
 

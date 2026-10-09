@@ -260,9 +260,13 @@ case "${1:-}" in
           "${2:-0}" "${FM_TEST_TEA_TITLE:-fixture pull}" \
           "$([ "${FM_TEST_TEA_MERGED:-false}" = true ] && echo merged || echo "${FM_TEST_TEA_STATE:-open}")"
         if [ "${FM_TEST_TEA_DRAFT:-false}" = true ]; then
-          printf '%s\n' '- Draft (not mergeable until marked ready)'
+          if [ "${FM_TEST_TEA_DRAFT_FORM:-rendered}" = plain ]; then
+            printf '%s\n' '- Draft (not mergeable until marked ready)'
+          else
+            printf '%s\n' '  • Draft (not mergeable until marked ready)          '
+          fi
         else
-          printf '%s\n' '- No Conflicts'
+          printf '%s\n' '  • No Conflicts          '
         fi
         ;;
     esac
@@ -2344,23 +2348,26 @@ EOF
   # unreadable draft state is tea's ordinary detail text with no marker line,
   # which arms as before. tea's JSON record carries no draft field, so the
   # marker is the only draft evidence there is.
-  write_task_meta "$dir" task-f
-  cp "$state/task-f.meta" "$dir/meta.f.before"
-  : > "$dir/guard.log"
-  set +e
-  out=$(FM_TEST_TEA_DRAFT=true run_check_entry "$dir" task-f "$url" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "arming accepted a draft pull request"
-  case "$out" in
-    *"is a draft pull request"*) ;;
-    *) fail "the refusal did not name the draft state" ;;
-  esac
-  grep -qF -- "$url" <<<"$out" || fail "the refusal did not name the pull request"
-  cmp -s "$dir/meta.f.before" "$state/task-f.meta" \
-    || fail "a refused draft changed the task metadata"
-  [ ! -e "$state/task-f.check.sh" ] || fail "a refused draft armed a poll"
-  [ ! -s "$dir/guard.log" ] || fail "a refused draft reached the guard"
+  # Both the plain markdown marker and tea's rendered, padded bullet refuse.
+  for form in rendered plain; do
+    write_task_meta "$dir" task-f
+    cp "$state/task-f.meta" "$dir/meta.f.before"
+    : > "$dir/guard.log"
+    set +e
+    out=$(FM_TEST_TEA_DRAFT=true FM_TEST_TEA_DRAFT_FORM=$form run_check_entry "$dir" task-f "$url" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "arming accepted a $form draft pull request"
+    case "$out" in
+      *"is a draft pull request"*) ;;
+      *) fail "the refusal did not name the draft state" ;;
+    esac
+    grep -qF -- "$url" <<<"$out" || fail "the refusal did not name the pull request"
+    cmp -s "$dir/meta.f.before" "$state/task-f.meta" \
+      || fail "a refused draft changed the task metadata"
+    [ ! -e "$state/task-f.check.sh" ] || fail "a refused draft armed a poll"
+    [ ! -s "$dir/guard.log" ] || fail "a refused draft reached the guard"
+  done
 
   # Forgejo has no nested organizations, so a deeper path is a subpath-served
   # instance whose prefix would address the wrong repository; it is refused
