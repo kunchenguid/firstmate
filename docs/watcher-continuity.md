@@ -317,6 +317,9 @@ Every settled branch prompt releases any residual grant.
 So an omitted or failed acknowledgement leaves the durable row available to a later main drain.
 A successful acknowledgement has already removed it.
 
+A successful acknowledgement prints one confirmation line naming the cutoff and the number of rows it consumed.
+An acknowledgement that consumes nothing while no presented row waits above its cutoff, such as a repeated acknowledgement, prints the same line with zero rows.
+
 An acknowledgement can remove none of the actor's rows while a presented row above the cutoff still waits.
 Such an acknowledgement is reported as having acknowledged nothing, together with the exact `--ack-through` and `--recovery-generation` command for that presented row.
 The presented set is read before any re-claim, so a row that arrived after presentation is never named for unseen acknowledgement.

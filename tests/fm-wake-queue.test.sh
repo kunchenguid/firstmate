@@ -54,6 +54,36 @@ test_concurrent_append_and_drain() {
   pass "concurrent append plus drain preserves durable records through acknowledgement"
 }
 
+test_ack_through_success_prints_confirmation() {
+  local dir state sequence generation rc
+  dir=$(make_case ack-success-confirmation)
+  state="$dir/state"
+
+  append_wake "$state" signal confirm 'signal: confirm.status' || fail "append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" || fail "drain failed"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "drain printed no acknowledgement command"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    > "$dir/ack.out" 2> "$dir/ack.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "acknowledgement failed: $(cat "$dir/ack.err")"
+  [ ! -s "$dir/ack.out" ] || fail "acknowledgement wrote to stdout: $(cat "$dir/ack.out")"
+  [ "$(cat "$dir/ack.err")" = "wake drain: acknowledged wakes through $sequence (1 row(s) consumed)" ] \
+    || fail "successful acknowledgement did not print its confirmation line: $(cat "$dir/ack.err")"
+
+  # Repeating the same acknowledgement consumes nothing and nothing is pending:
+  # the cutoff is still confirmed, with zero rows.
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    > "$dir/repeat.out" 2> "$dir/repeat.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "repeated acknowledgement failed: $(cat "$dir/repeat.err")"
+  [ "$(cat "$dir/repeat.err")" = "wake drain: acknowledged wakes through $sequence (0 row(s) consumed)" ] \
+    || fail "repeated acknowledgement did not print its zero-row confirmation: $(cat "$dir/repeat.err")"
+  pass "ack-through prints one confirmation line naming the cutoff and rows consumed"
+}
+
 test_signal_catchup_without_running_watcher() {
   local dir state fakebin out drain_out drain_err status_file sequence generation
   dir=$(make_case signal)
@@ -3529,6 +3559,7 @@ test_folded_worker_resolved_is_not_owned_lag
 test_owned_growth_still_annotates_turn_ended
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
+test_ack_through_success_prints_confirmation
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
