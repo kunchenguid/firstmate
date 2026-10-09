@@ -56,8 +56,15 @@
 #                still starts and ends with the family's rule glyph is
 #                tolerated, including Grok 1.0.5's three-column title overhang.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
-#                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
+#                codex `›`, muse `⟩`, cursor `→`, omp 18.8's `╰─` corner). The
+#                agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
+#                omp's corner is the one glyph that is NOT proof on its own:
+#                omp closes transcript frames with the same lone dim `╰─`, so
+#                the corner anchors a composer only on the row directly
+#                beneath omp's status row, the two-row shape omp 18.8 draws
+#                (status row above, `╰─ ` prompt below, wrapped input on
+#                three-space-indented rows beneath).
 #                A bare composer's WRAP region (typed input continuing on the
 #                rows beneath the glyph row) is bounded by blank rows, by
 #                structural edges, and by the FURNITURE rows a harness draws
@@ -455,7 +462,18 @@ fm_busy_lines_match() {  # [harness]
 # a dead-shell prompt and must never read `empty`. Newline-separated and
 # consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
 # literal and no entry is ever exposed to pathname expansion.
-FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→' '❭')
+# omp 18.8 draws its prompt as a rounded corner `╰─` (its `boxRound.bottomLeft`
+# and `boxRound.horizontal` symbols, `╰` + `─` under both the unicode and the
+# nerd preset; the ascii preset's `+-` is unverified and not claimed), one
+# space, then the typed text, with wrapped input continuing on three-space
+# indented rows and the status row drawn directly ABOVE the prompt. Verified
+# live on omp 18.8.7 through tmux (docs/verification/runtime-backends.md).
+# The corner is an AGENT glyph so every strip and emptiness test treats it
+# like the others, but the row scan anchors it ONLY directly beneath omp's
+# status row (_fm_composer_glyph_anchors_row): omp closes a transcript frame
+# with the same lone dim `╰─`, and a frame footer must never read `empty`.
+FM_COMPOSER_OMP_PROMPT_GLYPH='╰─'
+FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→' '❭' "$FM_COMPOSER_OMP_PROMPT_GLYPH")
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
@@ -467,9 +485,17 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). Devin renders the anchored `Ask Devin to build features,
 # fix bugs, or work on your code` as dim text after its `❭` glyph (verified
-# live, devin 3000.11.1). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
+# live, devin 3000.11.1). omp 18.8.7 right-aligns a learn-once hint on its
+# `╰─` prompt row until the feature has been used three times: the keybinding
+# cell in accent colour, then the label in dim italics (`󰘶 󰌒 to change
+# thinking effort` until the conversation starts, `<key> to see N running
+# agents` while subagents run; verified live through tmux, both hints read
+# from omp's composer-hints table). Ghost stripping removes the dim label but
+# keeps the bright key cell, so the key cell is judged as the remnant of the
+# anchored hint; a key cell is one or two tokens (`󰘶 󰌒`, `shift+tab`).
+# FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^[^[:space:]]+([[:space:]]+[^[:space:]]+)?[[:space:]]+(to change thinking effort|to see [0-9]+ running agents?)$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -498,9 +524,18 @@ FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
 # ` - `, so its status row never carries a middle dot and a `pi ·` alternative
 # could only ever match typed text), when it opens with one of omp's spinner
 # frames then an elapsed cell, or when it carries the context-usage cell after
-# a middle dot. It is consulted only as the boundary BELOW a bare composer,
-# never on the composer row itself.
-FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+# a middle dot.
+# omp 18.8.7 moved the status row ABOVE its `╰─` prompt and redraws it as
+# powerline segments with the context cells embedded in a `─` rule that runs
+# to the right edge: ` 󰵗  MAI Pro (F2 stage, Kimi)  ⇄ collab:1  fm-lab
+# ────8%──────…──󰁨───────262K─` under nerd, verified live through tmux. That
+# form is recognised by its rule-embedded context-usage cell (`─N%─`, or
+# `─N.N%─`) on a row that closes with the rule; omp's symbol tables keep the
+# `─` rule and `π` identity cell under the unicode preset, while the ascii
+# preset's `-` rules are unverified and not claimed. It is consulted as the
+# boundary BELOW a bare composer and as the proof directly ABOVE omp's corner
+# prompt, never on the composer row itself.
+FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K|─[0-9]+(\.[0-9]+)?%─.*─$'
 # Pi's footer stats row opens at column 0 with the session cost when every
 # token counter is zero (`$0.000 (sub) 5.4%/272k (auto)` on pi 0.85.1).
 # That leading `$` is a cost cell, not a dead-shell prompt, only when a digit
@@ -793,11 +828,23 @@ _fm_composer_titled_rule_row() {  # <trimmed-row> <plain-rule-spaces>
   [ "$spaces" = "$expected" ]
 }
 
+# _fm_composer_glyph_anchors_row: 0 when agent glyph <glyph> may anchor a bare
+# composer (or prove an envelope) on a row whose trimmed row above is <above>.
+# Every agent glyph is its own proof except omp's `╰─` corner, which omp also
+# uses to close transcript frames: the corner anchors only directly beneath
+# omp's status row (_fm_composer_row_is_omp_status), the two-row shape omp
+# 18.8 draws. A frame footer, a tree branch, or a corner on the top row of a
+# capture never becomes a composer candidate.
+_fm_composer_glyph_anchors_row() {  # <glyph> <above-trimmed>
+  [ "$1" = "$FM_COMPOSER_OMP_PROMPT_GLYPH" ] || return 0
+  _fm_composer_row_is_omp_status "$2"
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   local pane=$1 cy=${2:-}
-  local line indent left_stripped trimmed kind family side_family
+  local line indent left_stripped trimmed kind family side_family prev_trimmed=''
   local top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0
   local content_inner content_spaces bottom_inner bottom_spaces glyph
   local current_indent='' current_family='' row=0 top=-1 valid=0 content_rows=0
@@ -867,7 +914,8 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         '┃'*) probe=${probe#┃} ;;
       esac
       fm_composer_normalize_trim_var probe
-      if fm_composer_leading_agent_glyph_var glyph "$probe"; then
+      if fm_composer_leading_agent_glyph_var glyph "$probe" \
+         && _fm_composer_glyph_anchors_row "$glyph" "$prev_trimmed"; then
         row_glyph=$glyph
         row_glyph_row=$row
       fi
@@ -921,14 +969,17 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         ;;
       *) leftbar_start=-1 ;;
     esac
-    # Bare agent-glyph rows: the glyph itself is the container proof. Bare
+    # Bare agent-glyph rows: the glyph itself is the container proof (omp's
+    # corner only directly beneath omp's status row, and a border row - a
+    # rounded box bottom also opens with `╰─` - is never a candidate). Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
     # lower shell prompts as staleness evidence for cursorless selection.
     # Pi's cost footer can open with `$0.000`; that is furniture, not a prompt.
     if [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed" \
        && ! _fm_composer_row_is_pi_status "$trimmed"; then
       FM_COMPOSER_SCAN_SHELL_ROW=$row
-    elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
+    elif [ -z "$kind" ] && fm_composer_leading_agent_glyph_var glyph "$trimmed" \
+         && _fm_composer_glyph_anchors_row "$glyph" "$prev_trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
     fi
     # Cursor safety: a cursor sitting on a structural edge row is never an
@@ -1051,6 +1102,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         *) valid=0 ;;
       esac
     fi
+    prev_trimmed=$trimmed
     row=$((row + 1))
   done <<EOF
 $pane
@@ -1392,6 +1444,9 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
   fm_composer_idle_matches "$row" \
     "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && return 0
   fm_composer_leading_agent_glyph_var glyph "$row" || return 1
+  # omp's corner proves only omp's own two-row shape (see its declaration);
+  # anywhere else it is a transcript frame footer, not a foreign prompt.
+  [ "$glyph" != "$FM_COMPOSER_OMP_PROMPT_GLYPH" ] || return 1
   [ -n "$proof" ] && [ "$glyph" != "$proof" ]
 }
 

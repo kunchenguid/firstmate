@@ -486,6 +486,100 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   pass "matrix: omp's status row bounds the bare composer's wrap region"
 }
 
+test_matrix_omp_corner_prompt_row() {
+  # omp 18.8.7 (nerd preset) captured byte-for-byte through tmux
+  # (`capture-pane -p -e`, 180x45) on 2026-10-09: the status row now sits
+  # directly ABOVE the prompt as powerline segments with the context cells
+  # embedded in a `─` rule, and the prompt row is a dark-grey (38;2;74;80;88,
+  # below the ghost-luma ceiling) `╰─` corner, one space, then the typed text;
+  # wrapped input continues on three-space-indented rows. A fresh session
+  # right-aligns `󰘶 󰌒 to change thinking effort` on the prompt row (accent
+  # key cell, dim italic label) until the conversation starts, and omp's
+  # inline suggestion (`'s`) follows typed text in the same dim grey.
+  # Before this shape was taught the real fm_tmux_composer_state read the idle
+  # pane `unknown`: the corner is neither an agent glyph nor a complete
+  # border, and the cursor sits on an edge row. The quiet-mode daemon on an
+  # omp primary therefore deferred its failure escalation 146 times and
+  # raised its wedge alarm instead of reaching the captain.
+  local cap sep capr omp_icon model_icon path_icon ctx_icon key_a key_b
+  local plain_status status dim grey hint prompt_idle prompt_hint prompt_typed wrap1 wrap2
+  local head screen plain out
+  cap=$(printf '\356\202\266'); sep=$(printf '\356\202\261'); capr=$(printf '\356\202\260')
+  omp_icon=$(printf '\363\260\265\227'); model_icon=$(printf '\357\201\236')
+  path_icon=$(printf '\357\200\224'); ctx_icon=$(printf '\363\260\201\250')
+  key_a=$(printf '\363\260\230\266'); key_b=$(printf '\363\260\214\222')
+  plain_status=" $cap $omp_icon $sep $model_icon MAI Pro (F2 stage, Kimi) $sep ⇄ collab:1 $sep $path_icon fm-lab-repo.tBArxP ${capr}────8%──────────────────────────────${ctx_icon}───────────────262K─"
+  status="${ESC}[38;2;15;18;22m${cap}${ESC}[39m${ESC}[48;2;15;18;22m ${ESC}[38;2;107;114;128m${omp_icon}${ESC}[39m ${ESC}[38;2;42;48;56m${sep}${ESC}[39m ${ESC}[38;2;0;180;255m${model_icon} MAI Pro (F2 stage, Kimi)${ESC}[39m ${ESC}[38;2;42;48;56m${sep}${ESC}[39m ${ESC}[38;2;0;180;255m⇄ collab:1${ESC}[39m ${ESC}[38;2;42;48;56m${sep}${ESC}[39m ${ESC}[38;2;232;236;244m${path_icon} fm-lab-repo.tBArxP${ESC}[39m ${ESC}[38;2;15;18;22m${ESC}[49m${capr}${ESC}[38;2;0;180;255m────8%${ESC}[38;2;42;48;56m──────────────────────────────${ESC}[38;2;57;152;191m${ctx_icon}${ESC}[38;2;42;48;56m───────────────${ESC}[38;2;57;152;191m262K${ESC}[38;2;42;48;56m─"
+  dim="${ESC}[38;2;74;80;88m"; grey="${ESC}[38;2;229;229;231m"
+  prompt_idle="${dim}╰─ ${grey}"
+  hint="${ESC}[38;2;0;180;255m${key_a} ${key_b}${grey} ${ESC}[3m${ESC}[38;2;107;114;128mto change thinking effort"
+  prompt_hint="${dim}╰─ ${grey}$(printf '%*s' 120 '')${hint}"
+  prompt_typed="${dim}╰─ ${grey}hello captain${ESC}[38;2;107;114;128m's${ESC}[39m"
+  wrap1="${dim}╰─ ${grey}word word word word word word word word "
+  wrap2="${dim}   ${grey}word word word${ESC}[39m"
+  head=$'Tip: Type `/` at the start of your prompt to browse every command\n'
+  # Non-vacuousness: the 18.8.7 status row is real non-blank content, and it
+  # is what proves the corner beneath it; ordinary text carrying a percentage
+  # is not that row.
+  _fm_composer_row_is_omp_status "${plain_status# }" \
+    || fail "the omp 18.8.7 powerline status row must be recognized as omp status furniture"
+  _fm_composer_row_is_omp_status 'rollout ──8%── of the fleet is done' \
+    && fail "prose with a rule-wrapped percentage that does not close on the rule must not be omp status"
+  _fm_composer_row_is_omp_status 'retry at 8% capacity' \
+    && fail "ordinary text with a percentage must not be mistaken for omp status furniture"
+  # The content classifier: the corner alone is the empty composer, the
+  # corner with text is unsubmitted input, and the ghost-stripped-to-nothing
+  # corner row is named by its plain row (the corner is darker than the
+  # ghost-luma ceiling).
+  out=$(classify 0 '╰─'); [ "$out" = empty ] || fail "bare omp corner should read empty, got '$out'"
+  out=$(classify 0 '╰─ hello'); [ "$out" = pending ] || fail "omp corner with text should read pending, got '$out'"
+  out=$(classify 0 '' '' sensitive '╰─'); [ "$out" = empty ] || fail "a ghost-stripped omp corner must remain empty, got '$out'"
+  # Fresh session, hint on the prompt row. Rows: 0 tip, 1 blank, 2 status,
+  # 3 prompt (cursor), 4-5 blank.
+  screen="$head"$'\n'"$status"$'\n'"$prompt_hint"$'\n\n'
+  assert_screen "idle omp 18.8.7 with hint on tmux" empty "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "idle omp 18.8.7 with hint on herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "idle omp 18.8.7 with hint on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  # A plain capture cannot tell the hint from typed text: degrade, never fabricate.
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  assert_screen "idle omp 18.8.7 with hint on a plain capture" unknown "$CAPS_PLAIN" "$plain"
+  # After the first turn the hint is gone and the prompt row is the bare corner.
+  screen="$head"$'\n'"$status"$'\n'"$prompt_idle"$'\n\n'
+  assert_screen "idle omp 18.8.7 on tmux" empty "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "idle omp 18.8.7 on herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  assert_screen "idle omp 18.8.7 on a plain capture" empty "$CAPS_PLAIN" "$plain"
+  # Typed text is pending; omp's dim inline suggestion is not part of it.
+  screen="$head"$'\n'"$status"$'\n'"$prompt_typed"$'\n\n'
+  assert_screen "typed omp 18.8.7 on tmux" pending "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "typed omp 18.8.7 on herdr" pending "$CAPS_STYLED" "$screen" '' probe-absent
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  assert_screen "typed omp 18.8.7 on a plain capture" unknown "$CAPS_PLAIN" "$plain"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'hello captain' ] || fail "the typed omp text must be extracted without the corner or the suggestion, got '$out'"
+  # Wrapped input: the cursor sits on the indented continuation row.
+  screen="$head"$'\n'"$status"$'\n'"$wrap1"$'\n'"$wrap2"$'\n\n'
+  assert_screen "wrapped omp 18.8.7 input on tmux" pending "$CAPS_TMUX" "$screen" 4 probe-absent
+  assert_screen "wrapped omp 18.8.7 input on herdr" pending "$CAPS_STYLED" "$screen" '' probe-absent
+  # The corner is not proof on its own: omp closes a transcript frame with the
+  # same lone dim corner, and a frame footer must never be a composer, whether
+  # the cursor is parked on it or it is the bottom-most row.
+  screen=$'transcript\n╭─ subtask\n│ step one\n'"${dim}╰─${ESC}[39m"$'\n'
+  assert_screen "a lone omp frame footer under the cursor" unknown "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "a lone omp frame footer as the bottom row" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  screen=$'transcript\n╭─ subtask\n│ step one\n╰─ 3 files\n'
+  assert_screen "a labelled omp frame footer as the bottom row" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  # The same frame above the live composer never outranks it.
+  screen=$'╭─ subtask\n│ step one\n╰─\n\n'"$status"$'\n'"$prompt_idle"$'\n\n'
+  assert_screen "omp frame footer above the idle composer" empty "$CAPS_TMUX" "$screen" 5 probe-absent
+  assert_screen "omp frame footer above the idle composer, cursorless" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  # A rounded box bottom opens with the same bytes and is a border, never a
+  # bare composer: a typed bordered composer stays pending.
+  screen=$'╭────────╮\n│ ❯ hi   │\n╰────────╯'
+  assert_screen "a rounded box bottom is not an empty omp corner" pending "$CAPS_STYLED" "$screen" '' probe-absent
+  pass "matrix: omp 18.8.7's corner prompt beneath its status row reads empty idle, pending typed, and never from a frame footer"
+}
+
 # codex_cell <grey> <glyph>: one codex 0.154 starfield cell exactly as the
 # harness draws it - a truecolor grey foreground, the composer's grey
 # background, the braille glyph, then a reset.
@@ -1030,6 +1124,7 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
+test_matrix_omp_corner_prompt_row
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty

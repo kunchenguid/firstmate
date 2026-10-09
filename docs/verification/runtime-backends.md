@@ -2454,6 +2454,26 @@ Before the status-row rule the shared classifier folded that row into the bare c
 After the rule, the same live Herdr capture read `empty`, a steer's doorbell landed, and the worker opened a turn on it.
 `tests/fm-composer-lib.test.sh` pins the unicode idle row, the nerd-preset idle row, the busy spinner row, and typed text over the same fixture in both locales.
 
+### 2026-10-09 omp 18.8.7 corner prompt through tmux
+
+omp 18.8.7 redraws the composer: the status row now sits directly above the prompt as powerline segments with the context cells embedded in a `─` rule, and the prompt row is a dark-grey `╰─` corner (omp's `boxRound.bottomLeft` and `boxRound.horizontal` symbols) followed by one space and the typed text, with wrapped input continuing on three-space-indented rows.
+A fresh session right-aligns a learn-once hint on the prompt row (`󰘶 󰌒 to change thinking effort`, an accent key cell then a dim italic label) until the conversation starts.
+
+Captured on 2026-10-09 (macOS arm64, tmux 3.6a, private socket, 180x45, the `nerd` symbol preset) with `tmux capture-pane -p -e`:
+
+```text
+ 󰵗   MAI Pro (F2 stage, Kimi)  ⇄ collab:1   fm-omp-fix/cwd ────3%──────…──󰁨───────────────262K─
+╰─                                                                        󰘶 󰌒 to change thinking effort
+```
+
+Before this shape was taught, the real `fm_tmux_composer_state` read that idle pane `unknown`: the corner is neither an agent glyph nor a complete border, and the cursor sits on an edge row.
+The quiet-mode daemon on an omp primary therefore deferred its failure escalation with `supervisor composer not confirmed-empty (state=unknown)` 146 times and raised its 301s wedge alarm, and the failure reached the captain only in the `bin/fm-afk-return.sh` brief.
+After it, the same live pane read `empty` idle with the hint showing, `pending` with `hello captain` typed, and `pending` with the cursor parked on a wrapped continuation row.
+
+The corner is deliberately not proof on its own: omp closes transcript frames (`╭─ title`, `│ …`, `╰─`) with the same lone dim corner, so the classifier anchors the corner only on the row directly beneath omp's status row.
+The status-row rule recognises the 18.8 powerline form by its rule-embedded context cell (`─N%─` on a row closing with the rule); omp's symbol tables keep the `─` rule and the `π` identity cell under the `unicode` preset, while the `ascii` preset (`+-` corner, `-` rules) is unverified and still reads `unknown`.
+`tests/fm-composer-lib.test.sh` pins the captured rows (idle with the hint, idle after a turn, typed, wrapped, a frame footer, and the plain-capture degradation) in both locales.
+
 ### Busy state and lifecycle
 
 | Fact | Observed |
