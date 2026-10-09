@@ -53,6 +53,10 @@
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
 #                          that writes nothing keeps the unchanged schedule.
+#                          Each long-cadence recheck (declared pause, deferred
+#                          wait, or deferred write) ends with " task=<id>" after
+#                          its parenthetical, so the supervisor reports on the
+#                          task rather than the pane.
 #                          A pane whose recorded endpoint holds no agent at all is
 #                          not a wedge and is reported ONCE instead of escalating
 #                          on that cadence forever (wedge_dead_record); only the
@@ -81,6 +85,7 @@
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
 #                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
 #                          delivery-attempt, busy-deferral, and unavailable-endpoint policy
+#                          (each of these also ends with " task=<id>")
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -501,7 +506,7 @@ window_key() {  # <window>
 
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   local w=$1 task=$2 rec=$3 reason
-  reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
+  reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker) task=$task"
   if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
     fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
     return 0
@@ -555,15 +560,15 @@ inbox_steer_check() {  # <window> <task>
     [ "$verb" != retry ] || return 0
     if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
       [ -f "$rec" ] || return 0
-      reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be written while $rec stays unhandled; inspect the inbox directory)"
+      reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be written while $rec stays unhandled; inspect the inbox directory) task=$task"
     elif [ "$count" -ge "$(fm_task_inbox_busy_max)" ]; then
-      reason="stale: $w (unread firstmate instruction: stuck-busy after $count consecutive busy-deferred due doorbells; $rec stays unhandled and no doorbell was typed; inspect the worker)"
+      reason="stale: $w (unread firstmate instruction: stuck-busy after $count consecutive busy-deferred due doorbells; $rec stays unhandled and no doorbell was typed; inspect the worker) task=$task"
     else
       return 0
     fi
     verb=escalate
   elif [ "$verb" != retry ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
-    reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after a non-busy check; inspect the inbox directory)"
+    reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after a non-busy check; inspect the inbox directory) task=$task"
     verb=escalate
   fi
   case "$verb" in
@@ -580,7 +585,7 @@ inbox_steer_check() {  # <window> <task>
           return 0
         fi
         if [ -d "${rec%/*}" ]; then
-          reason="stale: $w (steering-inbox ladder bookkeeping unwritable: ${rec%/*}/.ring-state cannot be written while $rec stays unhandled; the doorbell cannot advance toward escalation - inspect the inbox directory)"
+          reason="stale: $w (steering-inbox ladder bookkeeping unwritable: ${rec%/*}/.ring-state cannot be written while $rec stays unhandled; the doorbell cannot advance toward escalation - inspect the inbox directory) task=$task"
           fm_wake_append stale "$w" "$reason" || exit 1
           wake "$reason"
         fi
@@ -591,14 +596,14 @@ inbox_steer_check() {  # <window> <task>
       ring_rc=0
       fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
       if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
-        reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
+        reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory) task=$task"
         fm_wake_append stale "$w" "$reason" || exit 1
         wake "$reason"
       fi
       triage_log "steer-inbox retry ring: $task ${rec##*/} result=$ring_rc"
       ;;
     escalate)
-      reason=${reason:-"stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"}
+      reason=${reason:-"stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker) task=$task"}
       if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
@@ -1189,15 +1194,15 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
 # counter is left alone: it is neither advanced (this is not an escalation) nor
 # reset (a later genuine escalation must still carry the demand-deep-inspection
 # history it had already earned).
-wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
-  local win=$1 since_file=$2 label=$3 age=$4 key wsf wage
+wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age> <task>
+  local win=$1 since_file=$2 label=$3 age=$4 task=$5 key wsf wage
   key=$(window_key "$win")
   wsf="$STATE/.writing-since-$key"
   [ -e "$wsf" ] || date +%s > "$wsf"
   wage=$(age_of "$wsf")
   date +%s > "$since_file"
   resurface_absorbed "$win" "$STATE/.writing-resurfaced-$key" "$wage" \
-    "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
+    "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress) task=$task"
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
@@ -1364,8 +1369,8 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # The escalation counter is left alone, exactly as the write deferral leaves it:
 # this is not an escalation, and a later genuine one must keep the
 # demand-inspection history it had already earned.
-wedge_defer_wait() {  # <window> <since-file> <triage-label> <idle-age> <wait-record>
-  local win=$1 since_file=$2 label=$3 age=$4 record=$5
+wedge_defer_wait() {  # <window> <since-file> <triage-label> <idle-age> <wait-record> <task>
+  local win=$1 since_file=$2 label=$3 age=$4 record=$5 task=$6
   local kind subject whom action anchor key mtime wage min_age waited us ok
   us=$(printf '\037')
   IFS=$us read -r kind subject whom action anchor <<EOF
@@ -1419,7 +1424,7 @@ EOF
   clear_write_tracking "$key"
   date +%s > "$since_file"
   resurface_absorbed "$win" "$STATE/.waiting-resurfaced-$key" "$wage" \
-    "stale: $win (idle ${age}s${waited} - $kind, $subject, rechecked on a long cadence not a wedge; $action)" \
+    "stale: $win (idle ${age}s${waited} - $kind, $subject, rechecked on a long cadence not a wedge; $action) task=$task" \
     '' "$min_age"
   triage_log "absorbed $label ($kind explains the quiet, idle ${age}s): $win"
   return 0
@@ -1535,11 +1540,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       age=$(( age - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         if evidence=$(wedge_wait_evidence "$task") &&
-           wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
+           wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence" "$task"; then
           return 0
         fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
-          wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          wedge_defer_writing "$win" "$since_file" "$label" "$age" "$task"
           return 0
         fi
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
@@ -1631,7 +1636,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason) task=$task" "$declaration" "$min_age"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
