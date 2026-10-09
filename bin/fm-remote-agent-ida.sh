@@ -215,7 +215,7 @@ cmd_dispatch() {
 
 cmd_followup() (
   local id=${1-} action='' expected='' instructions='' lock meta_lock root sha marker provider session parent_task
-  local baseline output task='' current_action current_generation old_generation rc=0 old_report preserved_report record
+  local baseline output task='' detail_session detail_task current_action current_generation old_generation rc=0 old_report preserved_report record
   local capability_code capability_class
   [ -n "$id" ] || usage; shift
   fm_remote_task_id_valid "$id" || die 'invalid task id'
@@ -262,7 +262,10 @@ cmd_followup() (
       task=$(jq -r --arg prefix "[Firstmate session marker: $IDA_STATE_MARKER]" '
         [.data.messages[]? | select(.type==0 and (.text|type)=="string")
           | select(.text==$prefix or (.text|startswith($prefix+"\n")))
-          | .task_result.task_id? | select(.!=null) | tostring] | unique
+          | {normalized:(.task_result.task_id? // null),raw:(.deep_research_content.taskId? // null)}]
+        | if any(.[]; .normalized != null and .raw != null and (.normalized|tostring) != (.raw|tostring)) then []
+          else [.[] | (.normalized // .raw) | select(.!=null) | tostring] | unique
+          end
         | if length==1 then .[0] else empty end' "$output")
       [ -n "$task" ] || die 'submission-unknown: official readback cannot uniquely correlate the followup marker to a turn; supply provider-supported identity evidence; no create repeated'
     fi
@@ -314,6 +317,21 @@ cmd_followup() (
     if [ "$rc" = 0 ] && fm_ida_structured_success "$output" && \
         [ "$(jq -r '.data.session_id | tostring' "$output")" = "$session" ]; then
       task=$(jq -r '.data.task_id // empty | tostring' "$output")
+    fi
+    if [ -z "$task" ] && jq -e '
+        .status == "error" and .data == null and (.error | type == "object")
+      ' "$output" >/dev/null 2>&1; then
+      detail_session=$(jq -r '
+        [.error.details.session_id?, .error.details.sessionId?]
+        | map(select(. != null) | tostring) | unique
+        | if length == 1 then .[0] else empty end' "$output" 2>/dev/null)
+      detail_task=$(jq -r '
+        [.error.details.task_id?, .error.details.taskId?]
+        | map(select(. != null) | tostring) | unique
+        | if length == 1 then .[0] else empty end' "$output" 2>/dev/null)
+      if [ "$detail_session" = "$session" ] && fm_ida_numeric_id "$detail_task"; then
+        task=$detail_task
+      fi
     fi
     [ -n "$task" ] || die 'submission-unknown: followup may have been accepted; replay this action for readback only, never create again'
   fi

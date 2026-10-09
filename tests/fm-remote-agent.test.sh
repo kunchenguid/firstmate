@@ -225,6 +225,19 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
               result=$(printf '{"status":"error","data":null,"error":{"code":"IDA_EMPTY_RESULT","message":"completed without an answer","details":{"session_id":%s,"task_id":%s}}}' "$session" "$remote_task")
               mcp_error=true
               ;;
+            renamed-empty-conflict)
+              printf '%s\tprovider-renamed\tcompleted\t%s\n' "$session" "$marker" >"$sessions"
+              result=$(printf '{"status":"error","data":null,"error":{"code":"IDA_EMPTY_RESULT","message":"completed without an answer","details":{"session_id":%s,"sessionId":%s,"task_id":%s,"taskId":%s}}}' "$session" "$((session + 1))" "$remote_task" "$((remote_task + 1))")
+              mcp_error=true
+              ;;
+            renamed-invalid-success)
+              printf '%s\tprovider-renamed\tcompleted\t%s\n' "$session" "$marker" >"$sessions"
+              result=$(printf '{"status":"success","data":null,"error":{"code":"IDA_EMPTY_RESULT","message":"contradictory success envelope","details":{"session_id":%s,"task_id":%s}}}' "$session" "$remote_task")
+              ;;
+            renamed-invalid-data)
+              printf '%s\tprovider-renamed\tcompleted\t%s\n' "$session" "$marker" >"$sessions"
+              result=$(printf '{"status":"error","data":{"unexpected":true},"error":{"code":"IDA_EMPTY_RESULT","message":"contradictory data envelope","details":{"session_id":%s,"task_id":%s}}}' "$session" "$remote_task")
+              ;;
             zero) printf '%s\t%s\tcompleted\t%s\n' "$session" "$stored_marker" "$stored_marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":""},"error":null}' "$session" "$remote_task") ;;
             step-answer-only)
               printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"
@@ -321,18 +334,26 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
       || [ "$mode" = failed-answered ] || [ "$mode" = cancelled-answered ] || [ "$mode" = closed-answered ]; then answer=${FM_IDA_FAKE_ANSWER:-'Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com'}; else answer=''; fi
     structured_answer=${FM_IDA_FAKE_ANSWER:-'FM_IDA_READINESS_V1 {"status":"ok","instruction_received":true,"business_data_accessed":false,"external_write_performed":false,"echo":"sg-ida-e2e-20260825-v1"}'}
     jq -cn --argjson sid "$session" --arg name "$name" --arg status "$status" --arg user "$user" \
-      --arg answer "$answer" --arg structured_answer "$structured_answer" --arg mode "$mode" --arg task "$remote_task" '
+      --arg answer "$answer" --arg structured_answer "$structured_answer" --arg mode "$mode" --arg task "$remote_task" \
+      --arg marker_task_shape "${FM_IDA_FAKE_MARKER_TASK_SHAPE:-}" '
       def task_status:
         if $mode=="aggregate-error-running" or $mode=="recorded-task-missing" then "running"
         elif $mode=="aggregate-error-success" or $mode=="recorded-task-conflict" then "success"
         else $status
+        end;
+      def marker_task_fields:
+        if $marker_task_shape=="normalized" then {task_result:{task_id:$task}}
+        elif $marker_task_shape=="raw" then {deep_research_content:{taskId:$task}}
+        elif $marker_task_shape=="conflict" then
+          {task_result:{task_id:$task},deep_research_content:{taskId:(($task|tonumber)+1|tostring)}}
+        else {}
         end;
       def recorded_task_message:
         {id:91,type:8,status:1,visible:true,
          deep_research_content:{taskId:$task,terminalStatus:task_status},
          task_result:{task_id:$task,terminal_status:task_status}};
       {status:"success",data:{session:{id:$sid,name:$name,agent_id:9001,agent_name:"iDA Test",latest_task_status:$status},
-       messages:([{id:90,type:0,status:0,visible:true,text:$user}]
+       messages:([({id:90,type:0,status:0,visible:true,text:$user} + marker_task_fields)]
          + (if $answer=="" then [] else [(recorded_task_message + {text:$answer})] end)
          + (if $mode=="step-answer-only" then [{
              id:92,type:8,status:1,visible:true,
@@ -1859,7 +1880,7 @@ SH
 }
 
 test_followup_identity_and_unknown_submission() {
-  local home fakebin id=ida-followup old_sha creates outcome rc=0
+  local home fakebin id=ida-followup old_sha creates outcome mode rc=0
   home=$(new_home followup); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
   dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'initial followup fixture dispatch'
@@ -1886,6 +1907,130 @@ test_followup_identity_and_unknown_submission() {
   [ "$creates" = 2 ] || fail "followup replay created $creates total requests"
   pass 'same-session followup freezes prior terminal/report and replays without duplicate create'
 
+  id=ida-followup-error-receipt
+  home=$(new_home followup-error-receipt); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+  REMOTE_TASK_ID=80001
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'error-receipt initial dispatch'
+  wait_phase "$home" "$id" terminal-success || fail 'error-receipt initial terminal'
+  printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  REMOTE_TASK_ID=80002
+  FM_IDA_FAKE_MODE=renamed-empty run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null \
+    || fail 'structured error receipt did not bind its exact followup identity'
+  wait_phase "$home" "$id" terminal-success || fail 'structured error receipt followup did not finish'
+  jq -e '.generation==2 and .provider_state.task_id=="80002" and .provider_state.parent_task_id=="80001"' "$(state_file "$home" "$id")" >/dev/null \
+    || fail 'structured error receipt lost its exact followup pair'
+  creates=$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")
+  [ "$creates" = 2 ] || fail "structured error receipt caused $creates total creates"
+  pass 'structured error receipt preserves the accepted followup identity without replay'
+
+  id=ida-followup-conflicting-error-receipt
+  home=$(new_home followup-conflicting-error-receipt); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+  REMOTE_TASK_ID=80001
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'conflicting error-receipt initial dispatch'
+  wait_phase "$home" "$id" terminal-success || fail 'conflicting error-receipt initial terminal'
+  printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  REMOTE_TASK_ID=80002
+  if FM_IDA_FAKE_MODE=renamed-empty-conflict run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/conflicting-receipt" 2>&1; then
+    fail 'conflicting structured error receipt was accepted'
+  fi
+  [ "$(phase_of "$home" "$id")" = submission-unknown ] || fail 'conflicting error receipt lost submission-unknown'
+  jq -e '.provider_state.task_id==null' "$(state_file "$home" "$id")" >/dev/null || fail 'conflicting error receipt bound an ambiguous task'
+  if run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/conflicting-receipt-replay" 2>&1; then
+    fail 'conflicting error receipt replay inferred a task without exact evidence'
+  fi
+  creates=$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")
+  [ "$creates" = 2 ] || fail "conflicting error receipt repeated create: $creates total"
+  pass 'conflicting structured error receipt aliases stay unknown without duplicate create'
+
+  for mode in renamed-invalid-success renamed-invalid-data; do
+    id="ida-followup-$mode"
+    home=$(new_home "followup-$mode"); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+    : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+    REMOTE_TASK_ID=80001
+    dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "$mode initial dispatch"
+    wait_phase "$home" "$id" terminal-success || fail "$mode initial terminal"
+    printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+    chmod 600 "$home/data/$id/followup.txt"
+    REMOTE_TASK_ID=80002
+    if FM_IDA_FAKE_MODE="$mode" run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/invalid-receipt" 2>&1; then
+      fail "$mode invalid structured receipt was accepted"
+    fi
+    [ "$(phase_of "$home" "$id")" = submission-unknown ] || fail "$mode invalid receipt lost submission-unknown"
+    jq -e '.provider_state.task_id==null' "$(state_file "$home" "$id")" >/dev/null || fail "$mode invalid receipt bound an unverified task"
+    if run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/invalid-receipt-replay" 2>&1; then
+      fail "$mode invalid receipt replay inferred a task without exact evidence"
+    fi
+    creates=$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")
+    [ "$creates" = 2 ] || fail "$mode invalid receipt repeated create: $creates total"
+  done
+  pass 'invalid structured receipt envelopes stay unknown without duplicate create'
+
+  id=ida-followup-normalized-marker
+  home=$(new_home followup-normalized-marker); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+  REMOTE_TASK_ID=80001
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'normalized-marker initial dispatch'
+  wait_phase "$home" "$id" terminal-success || fail 'normalized-marker initial terminal'
+  printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  REMOTE_TASK_ID=80002
+  rc=0
+  FM_IDA_FAKE_MODE=timeout-created run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail 'normalized-marker lost response reported success'
+  FM_IDA_FAKE_MODE=zero FM_IDA_FAKE_MARKER_TASK_SHAPE=normalized run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null \
+    || fail 'normalized marker/task binding was not recovered'
+  wait_phase "$home" "$id" terminal-success || fail 'normalized marker/task followup did not finish'
+  jq -e '.generation==2 and .provider_state.task_id=="80002" and .provider_state.parent_task_id=="80001"' "$(state_file "$home" "$id")" >/dev/null \
+    || fail 'normalized marker/task recovery lost the exact followup pair'
+  creates=$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")
+  [ "$creates" = 2 ] || fail "normalized marker/task recovery repeated create: $creates total"
+  pass 'normalized marker/task binding recovers the exact followup without duplicate create'
+
+  id=ida-followup-raw-marker
+  home=$(new_home followup-raw-marker); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+  REMOTE_TASK_ID=80001
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'raw-marker initial dispatch'
+  wait_phase "$home" "$id" terminal-success || fail 'raw-marker initial terminal'
+  printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  REMOTE_TASK_ID=80002
+  rc=0
+  FM_IDA_FAKE_MODE=timeout-created run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail 'raw-marker lost response reported success'
+  FM_IDA_FAKE_MODE=zero FM_IDA_FAKE_MARKER_TASK_SHAPE=raw run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null \
+    || fail 'raw marker/task binding was not recovered'
+  wait_phase "$home" "$id" terminal-success || fail 'raw marker/task followup did not finish'
+  jq -e '.generation==2 and .provider_state.task_id=="80002" and .provider_state.parent_task_id=="80001"' "$(state_file "$home" "$id")" >/dev/null \
+    || fail 'raw marker/task recovery lost the exact followup pair'
+  creates=$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")
+  [ "$creates" = 2 ] || fail "raw marker/task recovery repeated create: $creates total"
+  pass 'raw marker/task binding recovers the exact followup without duplicate create'
+
+  id=ida-followup-conflicting-marker
+  home=$(new_home followup-conflicting-marker); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+  REMOTE_TASK_ID=80001
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'conflicting-marker initial dispatch'
+  wait_phase "$home" "$id" terminal-success || fail 'conflicting-marker initial terminal'
+  printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  REMOTE_TASK_ID=80002
+  rc=0
+  FM_IDA_FAKE_MODE=timeout-created run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail 'conflicting-marker lost response reported success'
+  if FM_IDA_FAKE_MODE=zero FM_IDA_FAKE_MARKER_TASK_SHAPE=conflict run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/replay" 2>&1; then
+    fail 'conflicting normalized/raw marker identity was accepted'
+  fi
+  [ "$(phase_of "$home" "$id")" = submission-unknown ] || fail 'conflicting marker identity lost submission-unknown'
+  creates=$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")
+  [ "$creates" = 2 ] || fail "conflicting marker identity repeated create: $creates total"
+  pass 'conflicting normalized/raw marker identity stays unknown without duplicate create'
+
   id=ida-followup-baseline
   home=$(new_home followup-baseline); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
   : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
@@ -1911,6 +2056,7 @@ test_followup_identity_and_unknown_submission() {
   printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
   chmod 600 "$home/data/$id/followup.txt"
   REMOTE_TASK_ID=80002
+  rc=0
   FM_IDA_FAKE_MODE=timeout-created run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null 2>&1 || rc=$?
   [ "$rc" != 0 ] || fail 'lost response reported success'
   if run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/replay" 2>&1; then fail 'ambiguous turn adopted by order'; fi
