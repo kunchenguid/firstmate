@@ -886,8 +886,8 @@ export function completionSeqsToWithhold(state: string): string[] {
     const seq = fields[1];
     if (!granted.has(seq) || fields[2] !== "signal") continue;
     const key = fields[3] ?? "";
-    if (!key.endsWith(".status")) continue;
-    const task = key.slice(0, -".status".length);
+    if (!/\.(?:status|turn-ended)$/.test(key)) continue;
+    const task = key.replace(/\.(?:status|turn-ended)$/, "");
     if (!/^[A-Za-z0-9._-]+$/.test(task)) continue;
     const presented = presentedCompletion(state, task);
     if (presented.classification === "unreadable" || presented.classification === "owned") {

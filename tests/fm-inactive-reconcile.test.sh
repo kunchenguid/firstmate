@@ -1502,14 +1502,6 @@ test_handoff_idle_skips_final_deliveries_and_secondmates() {
   home=$MAIN
   mkdir -p "$WORLD/harbor-home"
 
-  write_child "$home" ship-direct "$plain" inc-direct-1
-  awk '$0 ~ /^mode=/ { print "mode=direct-PR"; next } { print }' \
-    "$home/state/ship-direct.meta" > "$home/state/ship-direct.meta.tmp"
-  mv "$home/state/ship-direct.meta.tmp" "$home/state/ship-direct.meta"
-  write_child "$home" ship-local "$plain" inc-local-1
-  awk '$0 ~ /^mode=/ { print "mode=local-only"; next } { print }' \
-    "$home/state/ship-local.meta" > "$home/state/ship-local.meta.tmp"
-  mv "$home/state/ship-local.meta.tmp" "$home/state/ship-local.meta"
   write_child "$home" ship-ready \
     "done [at=$HANDOFF_OLD]: PR https://example.test/owner/repo/pull/1 checks green" inc-ready-1
   write_child "$home" ship-published \
@@ -1537,7 +1529,7 @@ test_handoff_idle_skips_final_deliveries_and_secondmates() {
   write_child "$home" keel "$plain" inc-keel-1
 
   scan_handoff "$home"
-  for id in ship-direct ship-local ship-ready ship-published harbor; do
+  for id in ship-ready ship-published harbor; do
     [ "$(records_for_count "$home" "$id")" = 0 ] || fail "$id opened a handoff episode"
   done
   for id in ship-empty ship-validation ship-failed ship-scout ship-mergeable ship-mentioned keel; do
@@ -1545,6 +1537,66 @@ test_handoff_idle_skips_final_deliveries_and_secondmates() {
     [ -z "$(handoff_field "$(one_record "$home" "$id")" cleared_epoch)" ] || fail "$id was cleared without a continuation"
   done
   pass "canonical final deliveries and a secondmate record stay off the handoff path; validation, failure, scout, and nonfinal done reports stay on it"
+}
+
+test_handoff_idle_requires_canonical_delivery_for_every_mode() {
+  local home mode id completion record candidate url
+  make_world handoff-canonical-delivery
+  install_handoff_fakes
+  home=$MAIN
+  completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  url="https://github.com/owner/repo/pull/1"
+  for mode in no-mistakes direct-PR local-only; do
+    id="delivery-${mode}"
+    write_child "$home" "$id" "$completion" "inc-${mode}-1"
+    awk -v mode="$mode" -v url="$url" '
+      /^mode=/ { print "mode=" mode; next }
+      /^pr=/ { print "pr=" url; next }
+      { print }
+    ' "$home/state/$id.meta" > "$home/state/$id.meta.tmp"
+    mv "$home/state/$id.meta.tmp" "$home/state/$id.meta"
+    printf '%s\n' "done [at=$HANDOFF_CONT]: shipped" >> "$home/state/$id.status"
+  done
+  scan_handoff "$home"
+  for mode in no-mistakes direct-PR local-only; do
+    id="delivery-${mode}"
+    record=
+    while IFS= read -r candidate; do
+      [ "$(handoff_field "$candidate" completion_line)" = "$completion" ] && record=$candidate
+    done < <(records_for "$home" "$id")
+    [ -n "$record" ] || fail "$mode: validation completion was not recorded"
+    [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+      || fail "$mode: unverified done cleared the validation completion"
+    [ -f "$home/state/handoff-continuations/$id.open" ] \
+      || fail "$mode: unverified done retired the open handoff"
+  done
+
+  for mode in no-mistakes direct-PR local-only; do
+    id="delivery-${mode}"
+    case "$mode" in
+      no-mistakes) ;;
+      *)
+        printf '%s\n' \
+          fm-pr-poll-merge-notified-v1 github github.com owner/repo 1 \
+          > "$home/state/$id.pr-poll-merge-notified"
+        chmod 600 "$home/state/$id.pr-poll-merge-notified"
+        ;;
+    esac
+    printf '%s\n' "done [at=$HANDOFF_CONT]: PR $url checks green" >> "$home/state/$id.status"
+  done
+  scan_handoff "$home"
+  for mode in no-mistakes direct-PR local-only; do
+    id="delivery-${mode}"
+    record=
+    while IFS= read -r candidate; do
+      [ "$(handoff_field "$candidate" completion_line)" = "$completion" ] && record=$candidate
+    done < <(records_for "$home" "$id")
+    [ "$(handoff_field "$record" clear_reason)" = status:done ] \
+      || fail "$mode: canonical delivery did not clear the validation completion"
+    [ ! -e "$home/state/handoff-continuations/$id.open" ] \
+      || fail "$mode: canonical delivery left the validation handoff open"
+  done
+  pass "only canonical delivery clears handoffs across delivery modes"
 }
 
 test_handoff_idle_rejects_a_bare_pr_as_final_delivery() {
@@ -1671,6 +1723,7 @@ test_handoff_idle_records_the_episode_and_alerts_once
 test_handoff_idle_records_early_attributed_continuation_latency
 test_handoff_idle_clears_only_on_continuation
 test_handoff_idle_skips_final_deliveries_and_secondmates
+test_handoff_idle_requires_canonical_delivery_for_every_mode
 test_handoff_idle_rejects_a_bare_pr_as_final_delivery
 test_handoff_idle_rejects_an_unverified_green_followup
 test_handoff_idle_uses_only_positional_status_timestamps

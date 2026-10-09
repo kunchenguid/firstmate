@@ -635,9 +635,8 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 }
 
 # 0 when this status event is a completion that still needs a local supervisor
-# continuation. Direct-PR and local-only done lines, and a no-mistakes done
-# whose canonical PR metadata records delivery, are final deliveries and return
-# 1. needs-validation and failed always return 0. A scout done returns 0. A
+# continuation. A ship done with canonical delivery proof returns 1.
+# needs-validation and failed always return 0. A scout done returns 0. A
 # legacy no-mistakes ship done that is not one of those final reports returns 0.
 handoff_is_completion() { # <verb> <line> <kind> <mode> <task-id> <meta>
   local verb=$1 line=$2 kind=$3 mode=$4 id=$5 meta=$6 note url
@@ -649,11 +648,6 @@ handoff_is_completion() { # <verb> <line> <kind> <mode> <task-id> <meta>
   case "$kind" in
     scout) return 0 ;;
     ship) ;;
-    *) return 1 ;;
-  esac
-  case "$mode" in
-    direct-PR|local-only) return 1 ;;
-    no-mistakes|'') ;;
     *) return 1 ;;
   esac
   note=$(status_line_note "$line")

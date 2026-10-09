@@ -3054,30 +3054,38 @@ test_completion_handoff_is_main_owned_while_attended() {
   home="$TMP_ROOT/completion-withhold"
   state="$home/state"
   mkdir -p "$state" "$home/projects/approved"
-  for task in busy note intake; do
+  for task in busy note intake turn; do
     printf 'project=%s\nwindow=%s-window\nkind=ship\nmode=no-mistakes\n' \
       "$home/projects/approved" "$task" > "$state/$task.meta"
   done
   printf 'working: step one\n' > "$state/busy.status"
   printf 'note: routine follow-up\n' > "$state/note.status"
   printf 'needs-validation [at=1791534938]: committed c118078, 706 tests\n' > "$state/intake.status"
+  printf 'working: step one\n' > "$state/turn.status"
+  : > "$state/turn.turn-ended"
   append_wake "$state" signal busy.status "signal: $state/busy.status"
   append_wake "$state" signal note.status "signal: $state/note.status"
   append_wake "$state" signal intake.status "signal: $state/intake.status"
+  append_wake "$state" signal turn.turn-ended "signal: $state/turn.turn-ended"
   seq_busy=$(awk -F '\t' '$4 == "busy.status" { print $2; exit }' "$state/.wake-queue")
   seq_note=$(awk -F '\t' '$4 == "note.status" { print $2; exit }' "$state/.wake-queue")
   seq_intake=$(awk -F '\t' '$4 == "intake.status" { print $2; exit }' "$state/.wake-queue")
-  [ -n "$seq_busy" ] && [ -n "$seq_note" ] && [ -n "$seq_intake" ] || fail "fixture: withhold queue did not record its rows"
+  seq_turn=$(awk -F '\t' '$4 == "turn.turn-ended" { print $2; exit }' "$state/.wake-queue")
+  [ -n "$seq_busy" ] && [ -n "$seq_note" ] && [ -n "$seq_intake" ] && [ -n "$seq_turn" ] \
+    || fail "fixture: withhold queue did not record its rows"
   FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" handoff-grant || fail "fixture: grant activation failed"
-  FM_STATE_OVERRIDE="$state" "$GRANT" publish handoff-grant "$seq_busy" "$seq_note" \
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish handoff-grant "$seq_busy" "$seq_note" "$seq_turn" \
     || fail "fixture: grant publication failed"
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$home/drain.out" 2> "$home/drain.err" \
     || fail "branch drain failed: $(cat "$home/drain.err")"
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$home/drain.err")
   [ -n "$generation" ] || fail "branch drain omitted its recovery generation: $(cat "$home/drain.err")"
   printf 'needs-validation [at=1791535500]: committed while the branch turn ran\n' >> "$state/busy.status"
+  printf 'needs-validation [at=1791535500]: committed while the branch turn ran\n' >> "$state/turn.status"
   withheld=$(FM_HOME="$home" node "$DISPATCH" withhold-acked)
-  [ "$withheld" = "$seq_busy" ] || fail "the mid-turn completion was not withheld (got ${withheld:-none}, want $seq_busy)"
+  expected_withheld=$(printf '%s\n%s' "$seq_busy" "$seq_turn")
+  [ "$withheld" = "$expected_withheld" ] \
+    || fail "mid-turn completions were not withheld (got ${withheld:-none}, want $expected_withheld)"
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
     --ack-through "$seq_note" --recovery-generation "$generation" \
     || fail "branch acknowledgement failed"
