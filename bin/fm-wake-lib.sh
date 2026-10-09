@@ -1268,6 +1268,19 @@ fm_lock_acquire_wait() {
   done
 }
 
+# Normalize the watcher's cleanup lock bound at the shared lock boundary.
+# Shell arithmetic otherwise treats a leading zero as octal on some supported
+# Bash versions, while the operator-facing setting is decimal seconds.
+fm_watcher_cleanup_lock_bound() {  # <requested-seconds>
+  local bound=${1:-}
+  case "$bound" in
+    ''|*[!0-9]*) printf '%s\n' 2; return 0 ;;
+  esac
+  bound=$((10#$bound))
+  [ "$bound" -gt 0 ] || bound=2
+  printf '%s\n' "$bound"
+}
+
 # Bounded in-process variant of fm_lock_acquire_wait for the watcher's EXIT
 # cleanup: a live foreign holder must not let one TERM strand the watcher in
 # its trap, so the wait gives up after <seconds> and leaves the ordinary

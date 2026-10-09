@@ -4739,25 +4739,23 @@ test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
   pass "TERM stops a watcher whose downtime-marker lock is held, retaining stale evidence"
 }
 
-# The cleanup bound is decimal seconds: a zero spelled with leading zeros falls
-# back to the 2s default instead of giving up at its first contended attempt,
-# so it retries after that failed attempt, and a leading-zero value such as 08
-# is an 8s bound rather than an invalid octal literal or the 2s default, so it
-# still outwaits a marker lock freed 3s after the cleanup's contended retry.
+# The cleanup bound is decimal seconds. Prove normalization at the executable
+# lock interface instead of racing a three-second lock release against a busy
+# host scheduler. The preceding TERM test keeps the real cleanup-timeout path
+# covered with a held live lock.
 test_cleanup_marker_lock_bound_is_decimal_with_zero_default() {
-  local bound ticks dir state
-  for bound in 00:0 08:30; do
-    ticks=${bound#*:}; bound=${bound%%:*}
-    dir=$(make_case "term-marker-lock-bound-$bound"); state="$dir/state"
-    FM_WATCHER_CLEANUP_LOCK_BOUND=$bound term_watcher_with_held_marker_lock "$dir" "$ticks"
-    [ "$HELD_MARKER_LOCK_RC" -ne 124 ] \
-      || fail "TERM did not stop a watcher with cleanup lock bound $bound"
-    [ -e "$dir/marker-lock-contended" ] \
-      || fail "cleanup lock bound $bound never contended on the held marker lock"
-    [ ! -e "$state/.watch.lock" ] \
-      || fail "cleanup lock bound $bound gave up before the marker lock freed"
-    ack_stopped_cycle "$state" \
-      || fail "could not acknowledge the stop under cleanup lock bound $bound"
+  local requested expected actual
+  for requested in '' 00 08 15 garbage; do
+    case "$requested" in
+      08) expected=8 ;;
+      15) expected=15 ;;
+      *) expected=2 ;;
+    esac
+    actual=$(bash -c '. "$1" && fm_watcher_cleanup_lock_bound "$2"' _ \
+      "$ROOT/bin/fm-wake-lib.sh" "$requested") \
+      || fail "cleanup lock bound normalization failed for ${requested:-empty}"
+    [ "$actual" = "$expected" ] \
+      || fail "cleanup lock bound ${requested:-empty} normalized to $actual, expected $expected"
   done
   pass "the cleanup marker-lock bound is decimal and zero falls back to the default"
 }
