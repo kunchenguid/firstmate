@@ -1280,7 +1280,7 @@ test_handoff_idle_clears_only_on_continuation() {
 
   write_child "$home" final "$completion" inc-final-1
   printf '%s\n%s\n' "$completion" \
-    "done [at=$HANDOFF_CONT]: PR https://example.test/o/r/pull/9 checks green" \
+    "done [at=$HANDOFF_CONT]: PR https://example.test/owner/repo/pull/1 checks green" \
     > "$home/state/final.status"
   scan_handoff "$home"
   record=$(one_record "$home" final) || fail "a ci-ready follow-up left no record of the handoff it closed"
@@ -1340,9 +1340,9 @@ test_handoff_idle_skips_final_deliveries_and_secondmates() {
     "$home/state/ship-local.meta" > "$home/state/ship-local.meta.tmp"
   mv "$home/state/ship-local.meta.tmp" "$home/state/ship-local.meta"
   write_child "$home" ship-ready \
-    "done [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/3 checks green" inc-ready-1
+    "done [at=$HANDOFF_OLD]: PR https://example.test/owner/repo/pull/1 checks green" inc-ready-1
   write_child "$home" ship-published \
-    "done [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/3 published for review" inc-published-1
+    "done [at=$HANDOFF_OLD]: PR https://example.test/owner/repo/pull/1 published for review" inc-published-1
   write_child "$home" ship-mergeable \
     "done [at=$HANDOFF_OLD]: PR https://example.test/o/r/pull/153 open, green, mergeable" inc-mergeable-1
   write_child "$home" ship-mentioned \
@@ -1396,6 +1396,28 @@ test_handoff_idle_rejects_a_bare_pr_as_final_delivery() {
   grep -Fq "$key" "$home/state/.wake-queue" \
     || fail "a bare PR report retired the validation idle alert"
   pass "a bare PR report remains a validation handoff rather than final delivery"
+}
+
+test_handoff_idle_rejects_an_unverified_green_followup() {
+  local home completion record fp8 key
+  completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  make_world handoff-unverified-green
+  install_handoff_fakes
+  home=$MAIN
+  write_child "$home" intake "$completion" inc-unverified-green-1
+  scan_handoff "$home"
+  record=$(one_record "$home" intake) || fail "the validation handoff was not recorded"
+  fp8=$(basename "$record" .record)
+  key="handoff-idle-intake-${fp8:0:8}"
+  awk '$0 !~ /^pr_head=/ { print }' "$home/state/intake.meta" > "$home/state/intake.meta.tmp"
+  mv "$home/state/intake.meta.tmp" "$home/state/intake.meta"
+  printf '%s\n' "done [at=$HANDOFF_CONT]: PR https://example.test/owner/repo/pull/1 checks green" >> "$home/state/intake.status"
+  scan_handoff "$home"
+  [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+    || fail "an unverified green report cleared the validation handoff"
+  grep -Fq "$key" "$home/state/.wake-queue" \
+    || fail "an unverified green report retired the validation idle alert"
+  pass "an unverified green report remains a validation handoff"
 }
 
 test_handoff_idle_uses_only_positional_status_timestamps() {
@@ -1478,6 +1500,7 @@ test_handoff_idle_records_the_episode_and_alerts_once
 test_handoff_idle_clears_only_on_continuation
 test_handoff_idle_skips_final_deliveries_and_secondmates
 test_handoff_idle_rejects_a_bare_pr_as_final_delivery
+test_handoff_idle_rejects_an_unverified_green_followup
 test_handoff_idle_uses_only_positional_status_timestamps
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan

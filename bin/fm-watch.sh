@@ -1052,7 +1052,7 @@ EOF
 # never reads any other home. fm_watcher_continuity_note owns the gap, the
 # bound, and the repeat.
 secondmate_watcher_continuity_tick() {
-  local meta task kind remote_host home
+  local meta task kind remote_host home child_watch_path
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind)
@@ -1067,7 +1067,8 @@ secondmate_watcher_continuity_tick() {
     [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || continue
     [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] || continue
     [ -d "$home/state" ] && [ ! -L "$home/state" ] || continue
-    fm_watcher_continuity_note "$home/state" "watcher-continuity-$task" "mate=$task" "$WATCH_PATH" "$home" || return 1
+    child_watch_path="$home/bin/fm-watch.sh"
+    fm_watcher_continuity_note "$home/state" "watcher-continuity-$task" "mate=$task" "$child_watch_path" "$home" || return 1
   done
   return 0
 }

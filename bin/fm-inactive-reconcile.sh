@@ -634,12 +634,11 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 
 # 0 when this status event is a completion that still needs a local supervisor
 # continuation. Direct-PR and local-only done lines, and a no-mistakes done
-# that already reports CI-ready or published-for-review, are final deliveries
-# and return 1. needs-validation and failed always return 0. A scout done
-# returns 0. A legacy no-mistakes ship done that is not one of those final
-# reports returns 0.
-handoff_is_completion() { # <verb> <line> <kind> <mode>
-  local verb=$1 line=$2 kind=$3 mode=$4 note
+# whose canonical PR metadata records delivery, are final deliveries and return
+# 1. needs-validation and failed always return 0. A scout done returns 0. A
+# legacy no-mistakes ship done that is not one of those final reports returns 0.
+handoff_is_completion() { # <verb> <line> <kind> <mode> <task-id> <meta>
+  local verb=$1 line=$2 kind=$3 mode=$4 id=$5 meta=$6 note url
   case "$verb" in
     needs-validation|failed) return 0 ;;
     done) ;;
@@ -656,15 +655,19 @@ handoff_is_completion() { # <verb> <line> <kind> <mode>
     *) return 1 ;;
   esac
   note=$(status_line_note "$line")
-  fm_dod_note_reports_ci_ready "$note" && return 1
-  fm_dod_note_reports_published_change "$note" && return 1
+  if ! fm_dod_note_reports_ci_ready "$note" \
+    && ! fm_dod_note_reports_published_change "$note"; then
+    return 0
+  fi
+  url=$(fm_dod_pr_url_from_done_note "$note") || return 0
+  fm_dod_recorded_pr_on_forge "$STATE" "$id" "$meta" "$mode" "$url" && return 1
   return 0
 }
 
 # 0 when this event is evidence the open handoff continued: working, paused,
 # an explicit hold, or a final done. A later note, or another completion, is
 # not that evidence.
-handoff_clears() { # <verb> <line> <kind> <mode>
+handoff_clears() { # <verb> <line> <kind> <mode> <task-id> <meta>
   local verb=$1 line=$2
   case "$verb" in
     working|needs-decision|blocked|captain-held) return 0 ;;
@@ -673,7 +676,7 @@ handoff_clears() { # <verb> <line> <kind> <mode>
     return 0
   fi
   if [ "$verb" = "done" ]; then
-    handoff_is_completion "$verb" "$line" "$3" "$4" && return 1
+    handoff_is_completion "$verb" "$line" "$3" "$4" "$5" "$6" && return 1
     return 0
   fi
   return 1
@@ -780,7 +783,7 @@ handoff_one() { # <id> <meta>
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     verb=$(status_line_verb "$line")
     _fm_status_verb_recognized "$verb" || continue
-    if handoff_is_completion "$verb" "$line" "$kind" "$mode"; then
+    if handoff_is_completion "$verb" "$line" "$kind" "$mode" "$id" "$meta"; then
       fingerprint=$(sha256_text "$incarnation|$id|$line")
       observed=$(handoff_line_epoch "$line")
       case "$observed" in
@@ -795,7 +798,7 @@ handoff_one() { # <id> <meta>
       if [ -z "$(handoff_value "$(handoff_record_path "$fingerprint")" cleared_epoch)" ]; then
         open_fps+=("$fingerprint|$observed")
       fi
-    elif handoff_clears "$verb" "$line" "$kind" "$mode"; then
+    elif handoff_clears "$verb" "$line" "$kind" "$mode" "$id" "$meta"; then
       clearer_epoch=$(handoff_line_epoch "$line")
       for item in "${open_fps[@]+"${open_fps[@]}"}"; do
         fp=${item%%|*}

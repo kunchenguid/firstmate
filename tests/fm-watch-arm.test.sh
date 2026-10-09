@@ -1892,7 +1892,7 @@ test_live_watcher_with_a_fresh_beacon_is_not_a_continuity_gap() {
 }
 
 test_parent_watcher_notes_a_local_mates_missing_successor() {
-  local dir parent state fakebin pid i mate child
+  local dir parent state fakebin pid i mate child lighthouse_pid lighthouse_identity
   dir=$(make_case continuity-parent)
   parent="$dir/parent"
   state="$parent/state"
@@ -1913,6 +1913,20 @@ test_parent_watcher_notes_a_local_mates_missing_successor() {
   fm_write_secondmate_meta "$state/offshore.meta" "$child"
   printf 'remote_host=example.test\n' >> "$state/offshore.meta"
   write_gap_log "$child/state"
+  child="$dir/lighthouse-home"
+  mkdir -p "$child/state/.watch.lock" "$child/bin"
+  printf '%s\n' lighthouse > "$child/.fm-secondmate-home"
+  fm_write_secondmate_meta "$state/lighthouse.meta" "$child"
+  write_gap_log "$child/state"
+  sleep 60 &
+  lighthouse_pid=$!
+  lighthouse_identity=$(FM_STATE_OVERRIDE="$child/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$lighthouse_pid") \
+    || fail "could not identify the live child watcher fixture"
+  printf '%s\n' "$lighthouse_pid" > "$child/state/.watch.lock/pid"
+  printf '%s\n' "$child" > "$child/state/.watch.lock/fm-home"
+  printf '%s\n' "$child/bin/fm-watch.sh" > "$child/state/.watch.lock/watcher-path"
+  printf '%s\n' "$lighthouse_identity" > "$child/state/.watch.lock/pid-identity"
+  touch "$child/state/.last-watcher-beat"
 
   PATH="$fakebin:$PATH" FM_HOME="$parent" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
@@ -1930,6 +1944,8 @@ test_parent_watcher_notes_a_local_mates_missing_successor() {
   done
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  kill "$lighthouse_pid" 2>/dev/null || true
+  wait "$lighthouse_pid" 2>/dev/null || true
   PATH="$fakebin:$PATH" FM_HOME="$parent" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop >/dev/null 2>&1 || true
   grep -q 'watcher-continuity-harbor-15024-1000' "$state/.wake-queue" \
     || fail "parent did not note harbor: $(cat "$dir/watch.out" 2>/dev/null; echo '---'; cat "$state/.wake-queue" 2>/dev/null)"
@@ -1938,6 +1954,9 @@ test_parent_watcher_notes_a_local_mates_missing_successor() {
   grep -q 'successor=none' "$state/.wake-queue" || fail "the parent payload omitted successor=none"
   if grep -q 'watcher-continuity-offshore' "$state/.wake-queue" 2>/dev/null; then
     fail "parent noted a remote mate"
+  fi
+  if grep -q 'watcher-continuity-lighthouse' "$state/.wake-queue" 2>/dev/null; then
+    fail "parent noted a healthy local mate"
   fi
   [ ! -f "$dir/harbor-home/state/.watch.lock/pid" ] || fail "parent started harbor's watcher"
   [ ! -f "$dir/keel-home/state/.watch.lock/pid" ] || fail "parent started keel's watcher"
