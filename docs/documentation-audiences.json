@@ -509,6 +509,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/review-watch.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },
