@@ -115,6 +115,13 @@ It verifies:
 `fm-aime-cloud-worker.test.sh` remains the regression owner for AIME create/send checkpoints, Feishu document results, event cursor and replay behavior, legacy recovery, interruption versus cancellation, terminal-unavailable sealing, decision gating, and local-agent delegation.
 The shared runner's changed-file coverage maps both suites to the remote-agent owner scripts.
 
+## Unknown followup diagnosis
+
+On 2026-10-09, `FM_REMOTE_TEST_CASE=recovery bin/fm-test-run.sh tests/fm-remote-agent.test.sh` passed with `total=1 failed=0 skipped_gate=0`.
+The public-interface fixture verifies bounded transient retries, local JSON failure classification, the raw session-info reachability alternative, unchanged unknown records during diagnosis, durable-only network avoidance, source exhaustion without endless rearming, and exact marker recovery through adopt without another create.
+The existing `FM_REMOTE_TEST_CASE=followup` cases retain authoritative receipt recovery and reject conflicting, baseline, and uncorrelated identities.
+Live identity recovery is a separate task-specific finding; reachable control-plane reads and passing fixtures do not authenticate a historical submission or prove its business result.
+
 ## State and recovery boundary
 
 New native tasks publish `executor=remote-agent` and `provider=aime|ida`.

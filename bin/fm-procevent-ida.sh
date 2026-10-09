@@ -39,6 +39,9 @@
 # The retry delay defaults to 5000 ms, doubles to a 60000 ms cap, and is tuned
 # only through FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS and
 # FM_IDA_TRANSIENT_BACKOFF_MAX_MS.
+# Unknown followups actively use the bounded recovery helper before emitting an
+# ambiguity. Exhaustion stops this source with its exact repair/evidence gap;
+# MAIN uses diagnose/adopt, without a second watcher or another create.
 # Local CLI or invalid-response failures end only the current waiter, publish
 # an ida-readback-local blocker, and preserve remote identity and nonterminal
 # state. After repairing local readback, adopt retries the same task; a healthy
@@ -521,7 +524,15 @@ observe_or_submit() ( # <id> <allow-submit:true|false>
   local id=$1 allow_submit=$2 root session_id
   fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
   if jq -e '.provider_state.followup_action_id != null and .provider_state.task_id == null' "$REMOTE_STATE_FILE" >/dev/null; then
-    ambiguous_observation "$id" reconcile followup-turn-identity-unproven 0 "$IDA_STATE_SESSION_ID"
+    root=$(temp_root)
+    trap 'rm -rf -- "$root"' EXIT
+    if fm_ida_followup_recover "$root"; then
+      session_observation "$id" "$IDA_STATE_SESSION_ID" reconcile "$IDA_RECOVERY_TASK"
+    else
+      # End this source generation after bounded diagnosis, not an unlimited
+      # read loop. The exact class tells MAIN which repair/escalation to act on.
+      ambiguous_observation "$id" reconcile "followup-$IDA_RECOVERY_OUTCOME-$IDA_RECOVERY_CLASS" 0 "$IDA_STATE_SESSION_ID"
+    fi
     return
   fi
   if [ -n "$IDA_STATE_SESSION_ID" ]; then session_observation "$id" "$IDA_STATE_SESSION_ID" session; return; fi
@@ -662,7 +673,7 @@ write_report() { # <id> <observation> <outcome>
 }
 
 cmd_handle_locked() {
-  local id=$1 seq=$2 result=$3 source artifact patch report outcome availability class status_kind session_id next_phase
+  local id=$1 seq=$2 result=$3 source artifact patch report outcome availability class status_kind session_id next_phase recovered_followup=false
   source=$(fm_remote_source_id ida "$id") || die "invalid iDA task id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be nonnegative" ;; esac
   fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
@@ -701,6 +712,8 @@ cmd_handle_locked() {
     printf 'handled: %s cancellation-preserved=true\n' "$id"
     return 0
   fi
+  if jq -e '.provider_state.followup_action_id != null and .provider_state.task_id == null' "$REMOTE_STATE_FILE" >/dev/null \
+      && jq -e '.ambiguous==false and .task_id_remote!=null' "$result" >/dev/null; then recovered_followup=true; fi
   artifact=$(fm_remote_artifact_store "$id" observation "$result") || die "cannot store normalized iDA observation"
   session_id=$(jq -r '.session_id // ""' "$result")
   patch=$(jq -c '{session_id:.session_id,task_id:.task_id_remote,agent_id:.agent_id,agent_name:.agent_name,model:.model,provider_status:.provider_status,result_kind:.result_kind} | with_entries(select(.value != null))' "$result")
@@ -714,7 +727,7 @@ cmd_handle_locked() {
   fi
   if jq -e '.ambiguous == true' "$result" >/dev/null; then
     fm_remote_state_transition "$id" ambiguous submission-acceptance-unknown "$class" reconcile-ambiguous interrupted "$availability" "$artifact" "" "$patch" || die "cannot checkpoint ambiguous iDA state"
-    fm_remote_status_append "$id" "blocked [key=ida-submission-ambiguous]: iDA session identity is ambiguous; reconcile or adopt before any retry" || die "cannot append iDA blocker"
+    fm_remote_status_append "$id" "blocked [key=ida-submission-ambiguous]: iDA identity is unproven ($class); run fm-remote-agent-ida.sh diagnose $id for a followup, otherwise adopt; repair read failures before declaring an external wait; never repeat create" || die "cannot append iDA blocker"
   elif jq -e '.terminal == false' "$result" >/dev/null; then
     if [ "$availability" = error ]; then
       next_phase="result-unavailable"
@@ -751,6 +764,10 @@ cmd_handle_locked() {
     if [ "$outcome" = succeeded ]; then fm_remote_status_append "$id" "done: iDA remote research complete; see data/$id/report.md";
     elif [ "$outcome" = cancelled ]; then fm_remote_status_append "$id" "failed: iDA remote research cancelled; see data/$id/report.md";
     else fm_remote_status_append "$id" "failed: iDA remote research failed; see data/$id/report.md"; fi || die "cannot append terminal iDA status"
+  fi
+  if [ "$recovered_followup" = true ]; then
+    fm_remote_status_append "$id" "resolved [key=ida-followup-recovery]: exact followup identity recovered through provider observation" || die 'cannot resolve followup recovery'
+    fm_remote_status_append "$id" "resolved [key=ida-submission-ambiguous]: exact followup identity recovered through provider observation" || die 'cannot resolve followup ambiguity'
   fi
   "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq" >/dev/null || die "cannot acknowledge iDA observation"
   printf 'handled: %s phase=%s session=%s\n' "$id" "$(jq -r '.phase' "$(fm_remote_state_path "$id")")" "${session_id:-unavailable}"

@@ -115,6 +115,13 @@ No ambiguous or `submission-unknown` state authorizes another create.
 When the official create succeeds with an exact session and task identity, the existing provider or follow-up action record retains that pair and subsequent reads select that exact turn without requiring the marker to reappear in the session messages.
 Marker matching remains the recovery path only while no authenticated receipt identity exists; task order, adjacency, answer text, and session task counts never establish a turn identity.
 
+For an uncertain same-session followup, run the existing iDA owner's `diagnose` command before assigning an external wait; its header owns bounded reads, classifications, and recovery commands.
+Act on its next action: repair a local CLI/schema failure, resolve a transient/authentication read failure, or use `adopt` when exact identity is confirmed.
+Inspect retained task-local receipts and supported official association surfaces when identity remains unproven; a reachable session alone is not a request/task link.
+An escalation to MAIN transfers active diagnosis responsibility, not permission to park the business goal.
+Only after bounded supported alternatives and fixable local defects are exhausted may MAIN retain an evidenced blocker naming the required receipt/association or authority-bearing decision, its owner, and observable clearing condition.
+Never infer a turn from order, timestamps, task counts, or answer resemblance, and never repeat create/INSERT to diagnose an uncertain effect.
+
 An `ambiguous` or `submission-unknown` record that stays wedged has exactly one captain-authorized escape: `bin/fm-remote-agent-ida.sh abandon <id> --authorize-abandon`.
 Abandonment re-verifies an authoritative complete non-truncated zero-match session list, fail-terminals the durable record with a bound report, performs no provider write, and never retries or recreates; any future execution requires a separate explicit dispatch of a new task.
 Multiple matches, truncation, provider unavailability, or any non-zero match refuse abandonment and keep the honest blocker or adoption path.

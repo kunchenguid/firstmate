@@ -5,6 +5,14 @@
 #   fm-remote-agent-ida.sh probe
 #   fm-remote-agent-ida.sh dispatch <task-id> --instructions <private-file> [--model <name>] [--document]
 #   fm-remote-agent-ida.sh adopt <task-id>
+#   fm-remote-agent-ida.sh diagnose <task-id>
+# `diagnose` reads a recorded followup without changing local/provider state.
+# It returns bounded identity/error evidence and a concrete next_action. Unknown
+# followups get at most two 30-second session-get reads (transient retry only)
+# plus one 30-second raw session-info control read, never another create.
+# `state` performs that diagnosis too unless --durable-only is requested.
+# `adopt` replays the exact recorded action through followup to reconcile/re-arm;
+# only a retained receipt or exact marker/task binding permits progress.
 #   fm-remote-agent-ida.sh followup <task-id> --action-id <id> --expected-terminal-generation <n> --instructions <private-file>
 # A followup is one new turn in the SAME session. It freezes the prior terminal
 # record and checkpoints attempted before the sole create. Replaying the action
@@ -216,7 +224,7 @@ cmd_dispatch() {
 cmd_followup() (
   local id=${1-} action='' expected='' instructions='' lock meta_lock root sha marker provider session parent_task
   local baseline output task='' detail_session detail_task current_action current_generation old_generation rc=0 old_report preserved_report record
-  local capability_code capability_class
+  local capability_code capability_class prior_phase
   [ -n "$id" ] || usage; shift
   fm_remote_task_id_valid "$id" || die 'invalid task id'
   while [ "$#" -gt 0 ]; do
@@ -254,20 +262,11 @@ cmd_followup() (
     session=$IDA_STATE_SESSION_ID
     task=$IDA_STATE_TASK_ID
     if [ -z "$task" ]; then
-      # Only the provider exposing the marker and task on the SAME user
-      # message can repair a lost response. New task count/order is irrelevant.
-      fm_run_bash_timeout 30 fm_ida_run_bytedcli --json --as user ida --region sg session get --session-id "$session" > "$output" 2> "$root/error" || die 'followup readback unavailable; no request repeated'
-      fm_ida_structured_success "$output" || die 'followup readback invalid; no request repeated'
-      [ "$(jq -r '.data.session.id // empty | tostring' "$output")" = "$session" ] || die 'followup readback session mismatch; no request repeated'
-      task=$(jq -r --arg prefix "[Firstmate session marker: $IDA_STATE_MARKER]" '
-        [.data.messages[]? | select(.type==0 and (.text|type)=="string")
-          | select(.text==$prefix or (.text|startswith($prefix+"\n")))
-          | {normalized:(.task_result.task_id? // null),raw:(.deep_research_content.taskId? // null)}]
-        | if any(.[]; .normalized != null and .raw != null and (.normalized|tostring) != (.raw|tostring)) then []
-          else [.[] | (.normalized // .raw) | select(.!=null) | tostring] | unique
-          end
-        | if length==1 then .[0] else empty end' "$output")
-      [ -n "$task" ] || die 'submission-unknown: official readback cannot uniquely correlate the followup marker to a turn; supply provider-supported identity evidence; no create repeated'
+      if ! fm_ida_followup_recover "$root"; then
+        fm_ida_followup_diagnosis "$id" >&2
+        die "submission-unknown: $IDA_RECOVERY_OUTCOME ($IDA_RECOVERY_CLASS); run fm-remote-agent-ida.sh diagnose $id and execute its next_action; no create repeated"
+      fi
+      task=$IDA_RECOVERY_TASK
     fi
   else
     [ "$current_generation" = "$expected" ] || die 'terminal generation changed'
@@ -333,14 +332,27 @@ cmd_followup() (
         task=$detail_task
       fi
     fi
-    [ -n "$task" ] || die 'submission-unknown: followup may have been accepted; replay this action for readback only, never create again'
+    if [ -z "$task" ]; then
+      fm_ida_state_load "$id" || exit 1
+      if ! fm_ida_followup_recover "$root"; then
+        fm_ida_followup_diagnosis "$id" >&2
+        fm_remote_status_append "$id" "blocked [key=ida-followup-recovery]: $IDA_RECOVERY_OUTCOME ($IDA_RECOVERY_CLASS); run fm-remote-agent-ida.sh diagnose $id, repair the named read failure or obtain an authenticated request/task link; no create repeated" || exit 1
+        die 'submission-unknown: bounded diagnosis exhausted; no create repeated'
+      fi
+      task=$IDA_RECOVERY_TASK
+    fi
   fi
   fm_ida_numeric_id "$task" || die 'unverified followup task identity'
   fm_ida_state_load "$id" || exit 1
   jq -e --arg task "$task" '.provider_state.baseline_task_ids | index($task)==null' "$REMOTE_STATE_FILE" >/dev/null || die 'followup response reused a pre-existing turn'
   provider=$(jq -cn --arg task "$task" '{task_id:$task}')
   if [ "$IDA_STATE_TASK_ID" != "$task" ]; then
+    prior_phase=$REMOTE_STATE_PHASE
     fm_remote_state_transition "$id" submitted '' '' followup-identity-confirmed not-armed '' '' '' "$provider" || exit 1
+    fm_remote_status_append "$id" "resolved [key=ida-followup-recovery]: exact followup identity recovered; rearming the original execution" || exit 1
+    if [ "$prior_phase" = ambiguous ]; then
+      fm_remote_status_append "$id" "resolved [key=ida-submission-ambiguous]: exact followup identity recovered" || exit 1
+    fi
   fi
   fm_lock_release "$lock"; fm_lock_release "$meta_lock"; fm_lease_guard_release
   case "$REMOTE_STATE_PHASE" in
@@ -351,10 +363,27 @@ cmd_followup() (
   printf 'followup recorded: %s action=%s; prior terminal and report retained\n' "$id" "$action"
 )
 
+cmd_diagnose() (
+  local id=${1-} root
+  [ "$#" -eq 1 ] || usage
+  fm_ida_state_load "$id" || die 'iDA task state is missing or invalid'
+  jq -e '.provider_state.followup_action_id != null' "$REMOTE_STATE_FILE" >/dev/null || die 'diagnose requires a recorded followup'
+  root=$(temp_root)
+  trap 'rm -rf -- "$root"' EXIT
+  fm_ida_followup_recover "$root" || true
+  fm_ida_followup_diagnosis "$id"
+)
+
 cmd_adopt() (
   local id=${1-} lock root observation patch
   [ "$#" -eq 1 ] || usage
   fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
+  if jq -e '.provider_state.followup_action_id != null and .provider_state.task_id == null' "$REMOTE_STATE_FILE" >/dev/null; then
+    cmd_followup "$id" --action-id "$(jq -r '.provider_state.followup_action_id' "$REMOTE_STATE_FILE")" \
+      --expected-terminal-generation "$(jq -r '.provider_state.parent_generation' "$REMOTE_STATE_FILE")" \
+      --instructions "$REMOTE_STATE_INSTRUCTION_FILE"
+    return $?
+  fi
   if [ ! -f "$STATE/$id.meta" ]; then fm_remote_meta_write "$id" ida "$REMOTE_STATE_TASK_TYPE" || die "cannot repair missing iDA metadata";
   else fm_remote_meta_validate "$id" ida "$REMOTE_STATE_TASK_TYPE" || die "iDA metadata does not match durable state"; fi
   case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure|terminal-cancelled) printf 'already-terminal: %s phase=%s\n' "$id" "$REMOTE_STATE_PHASE"; return ;; esac
@@ -382,7 +411,7 @@ cmd_adopt() (
 )
 
 cmd_state() (
-  local id=${1-} root observation state status kind availability class durable_only=0
+  local id=${1-} root observation state status kind availability class durable_only=0 next
   if [ "$#" -eq 2 ] && [ "$2" = --durable-only ]; then durable_only=1
   elif [ "$#" -ne 1 ]; then usage
   fi
@@ -399,6 +428,16 @@ cmd_state() (
           "$state" "$REMOTE_STATE_PHASE" "${REMOTE_STATE_OUTCOME:-none}"
         ;;
     esac
+    return
+  fi
+  if jq -e '.provider_state.followup_action_id != null and .provider_state.task_id == null' "$REMOTE_STATE_FILE" >/dev/null; then
+    root=$(temp_root)
+    trap 'rm -rf -- "$root"' EXIT
+    fm_ida_followup_recover "$root" || true
+    next=diagnose
+    [ "$IDA_RECOVERY_OUTCOME" != confirmed ] || next=adopt
+    printf 'state: blocked · source: remote-readback · provider=ida phase=%s recovery=%s error=%s next=fm-remote-agent-ida.sh %s %s\n' \
+      "$REMOTE_STATE_PHASE" "$IDA_RECOVERY_OUTCOME" "${IDA_RECOVERY_CLASS:-none}" "$next" "$id"
     return
   fi
   case "$REMOTE_STATE_PHASE" in
@@ -673,6 +712,7 @@ cmd_retire() {
 }
 
 case "${1-}" in
+  diagnose) shift; cmd_diagnose "$@" ;;
   followup) shift; cmd_followup "$@" ;;
   probe) shift; cmd_probe "$@" ;;
   dispatch) shift; cmd_dispatch "$@" ;;
