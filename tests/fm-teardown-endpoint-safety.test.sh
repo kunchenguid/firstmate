@@ -60,6 +60,85 @@ run_case() {  # <case> <id>
     "$TEARDOWN" "$id" --force
 }
 
+run_stale_owner_case() {  # <case> <obsolete-id> <expected-current-id> [authority] [home]
+  local dir=$1 obsolete=$2 current=$3 authority=${4:-force} home=${5:-$1/home}
+  local -a args
+  args=("$obsolete")
+  [ "$authority" != force ] || args+=(--force)
+  args+=(--retire-stale-owner "$current")
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "${args[@]}"
+}
+
+add_empty_cwd_lsof() {  # <case>
+  cat > "$1/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" -d cwd "*) exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$1/fakebin/lsof"
+}
+
+write_stale_owner_collision() {  # <case> <obsolete-id> <current-id>
+  local dir=$1 obsolete=$2 current=$3
+  fm_write_meta "$dir/home/state/$obsolete.meta" \
+    "window=firstmate:fm-$obsolete" "endpoint_task_id=$obsolete" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$current.meta" \
+    "window=firstmate:fm-$current" "endpoint_task_id=$current" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+}
+
+make_stale_owner_collision() {  # <name> <obsolete-id> <current-id>
+  local dir
+  dir=$(make_case "$1")
+  mark_case_as_treehouse_pool "$dir"
+  add_empty_cwd_lsof "$dir"
+  write_stale_owner_collision "$dir" "$2" "$3"
+  printf '%s\n' "$dir"
+}
+
+set_stale_owner_endpoint_gone() {
+  local dir=$1 obsolete=$2
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"status --json"*) printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  *"pane get"*) printf '{"error":{"code":"pane_not_found"}}\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/herdr"
+  fm_write_meta "$dir/home/state/$obsolete.meta" \
+    "window=gone-session:w1:p1" "endpoint_task_id=$obsolete" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "backend=herdr" \
+    "herdr_session=gone-session" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1" "herdr_pane_id=w1:p1"
+}
+
+assert_stale_owner_refused_unchanged() {  # <case> <obsolete-id> <current-id> <description>
+  local dir=$1 obsolete=$2 current=$3 description=$4 rc old_meta current_meta sentinel
+  old_meta=$(git hash-object "$dir/home/state/$obsolete.meta")
+  current_meta=$(git hash-object "$dir/home/state/$current.meta" 2>/dev/null || printf absent)
+  sentinel=$(git hash-object "$dir/worktree/sentinel")
+  : > "$dir/runtime.log"
+  set +e
+  run_stale_owner_case "$dir" "$obsolete" "$current" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$description: stale-owner retirement unexpectedly succeeded"
+  [ "$(git hash-object "$dir/home/state/$obsolete.meta")" = "$old_meta" ] \
+    || fail "$description: refusal changed the obsolete record"
+  [ "$(git hash-object "$dir/home/state/$current.meta" 2>/dev/null || printf absent)" = "$current_meta" ] \
+    || fail "$description: refusal changed the expected current-owner record"
+  [ "$(git hash-object "$dir/worktree/sentinel")" = "$sentinel" ] \
+    || fail "$description: refusal changed shared checkout bytes"
+  ! grep -Eq 'kill-window|treehouse <return>' "$dir/runtime.log" \
+    || fail "$description: refusal reached destructive runtime actions: $(cat "$dir/runtime.log")"
+}
+
 assert_refused_without_mutation() {  # <case> <id> <description>
   local dir=$1 id=$2 description=$3 rc
   set +e
@@ -548,6 +627,284 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
     "hardlink refusal should name the other task record"
 
   pass "fm-teardown: a pool slot named by a second task record is never returned, killed, or reset"
+}
+
+test_explicit_stale_owner_retirement_preserves_the_shared_owner() {
+  local dir obsolete=obsolete-task current=current-task control current_before head_before branch_before unrelated_head rc
+  dir=$(make_stale_owner_collision stale-owner-success "$obsolete" "$current")
+  set_stale_owner_endpoint_gone "$dir" "$obsolete"
+  printf 'shared checkout bytes\n' > "$dir/worktree/sentinel"
+  mkdir -p "$dir/home/data/$obsolete"
+  printf 'preserved findings\n' > "$dir/home/data/$obsolete/report.md"
+  printf 'done: preserved outcome\n' > "$dir/home/state/$obsolete.status"
+  mkdir -p "$dir/unrelated-project"
+  git init -q -b main "$dir/unrelated-project"
+  printf 'unrelated bytes\n' > "$dir/unrelated-project/file"
+  git -C "$dir/unrelated-project" add file
+  git -C "$dir/unrelated-project" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm unrelated
+  unrelated_head=$(git -C "$dir/unrelated-project" rev-parse HEAD)
+  current_before=$(git hash-object "$dir/home/state/$current.meta")
+  head_before=$(git -C "$dir/worktree" rev-parse HEAD)
+  branch_before=$(git -C "$dir/worktree" rev-parse --abbrev-ref HEAD)
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+case "\$*" in
+  *'list-windows'*) printf 'fm-$current\n' ;;
+  *'#{pane_current_command}'*) printf 'claude\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  sleep 30 &
+  control=$!
+
+  set +e
+  run_stale_owner_case "$dir" "$obsolete" "$current" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "explicit stale-owner retirement failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$obsolete.meta" "stale-owner retirement left the obsolete record"
+  [ "$(git hash-object "$dir/home/state/$current.meta")" = "$current_before" ] \
+    || fail "stale-owner retirement changed the current-owner record"
+  assert_grep 'shared checkout bytes' "$dir/worktree/sentinel" \
+    "stale-owner retirement changed shared checkout bytes"
+  [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$head_before" ] \
+    || fail "stale-owner retirement moved the shared checkout HEAD"
+  [ "$(git -C "$dir/worktree" rev-parse --abbrev-ref HEAD)" = "$branch_before" ] \
+    || fail "stale-owner retirement switched or deleted the current owner's branch"
+  [ "$(git -C "$dir/unrelated-project" rev-parse HEAD)" = "$unrelated_head" ] \
+    || fail "stale-owner retirement moved an unrelated project's HEAD"
+  assert_grep 'unrelated bytes' "$dir/unrelated-project/file" \
+    "stale-owner retirement changed an unrelated project's working directory"
+  kill -0 "$control" 2>/dev/null \
+    || fail "stale-owner retirement killed an unrelated current-owner process"
+  assert_grep 'preserved findings' "$dir/home/data/$obsolete/report.md" \
+    "stale-owner retirement removed completed report evidence"
+  ! grep -Eq 'kill-window|treehouse <return>' "$dir/runtime.log" \
+    || fail "stale-owner retirement reached the shared endpoint or Treehouse return: $(cat "$dir/runtime.log")"
+
+  : > "$dir/runtime.log"
+  run_case "$dir" "$current" > "$dir/current.stdout" 2> "$dir/current.stderr" \
+    || fail "ordinary current-owner teardown stayed blocked after stale retirement: $(cat "$dir/current.stderr")"
+  assert_absent "$dir/home/state/$current.meta" "current-owner teardown left its record"
+  grep -Fq 'treehouse <return>' "$dir/runtime.log" \
+    || fail "current-owner teardown did not run its ordinary Treehouse return"
+  kill "$control" 2>/dev/null || true
+  wait "$control" 2>/dev/null || true
+  pass "explicit stale-owner retirement removes only the obsolete records and unblocks ordinary owner cleanup"
+}
+
+test_stale_owner_retirement_deduplicates_aliased_local_state() {
+  local dir obsolete=obsolete-aliased-state current=current-aliased-state current_before
+  dir=$(make_stale_owner_collision stale-owner-aliased-state "$obsolete" "$current")
+  set_stale_owner_endpoint_gone "$dir" "$obsolete"
+  ln -s "$dir/home" "$dir/home-alias"
+  current_before=$(git hash-object "$dir/home/state/$current.meta")
+
+  run_stale_owner_case "$dir" "$obsolete" "$current" force "$dir/home-alias" \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "stale-owner retirement counted aliased local state twice: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$obsolete.meta" \
+    "aliased-state stale-owner retirement left the obsolete record"
+  [ "$(git hash-object "$dir/home/state/$current.meta")" = "$current_before" ] \
+    || fail "aliased-state stale-owner retirement changed the current-owner record"
+  assert_present "$dir/worktree/sentinel" \
+    "aliased-state stale-owner retirement changed the shared checkout"
+  pass "stale-owner retirement treats aliased local state directories as one owner set"
+}
+
+test_stale_owner_recovery_requires_explicit_discard_authority() {
+  local dir obsolete=obsolete-auth current=current-auth rc
+  dir=$(make_stale_owner_collision stale-owner-authority "$obsolete" "$current")
+  set +e
+  run_stale_owner_case "$dir" "$obsolete" "$current" without-force > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "stale-owner retirement ran without --force"
+  assert_present "$dir/home/state/$obsolete.meta" "missing-force refusal removed the obsolete record"
+  assert_present "$dir/home/state/$current.meta" "missing-force refusal removed the current-owner record"
+  assert_contains "$(cat "$dir/stderr")" "requires --force" \
+    "missing-force refusal did not name the discard boundary"
+
+  set +e
+  run_stale_owner_case "$dir" "$obsolete" "$obsolete" > "$dir/same.stdout" 2> "$dir/same.stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "stale-owner retirement accepted the same obsolete and current task"
+  assert_contains "$(cat "$dir/same.stderr")" "other than obsolete task" \
+    "same-task refusal did not explain the two-owner requirement"
+
+  set +e
+  run_stale_owner_case "$dir" "$obsolete" 'invalid/current' > "$dir/invalid.stdout" 2> "$dir/invalid.stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "stale-owner retirement accepted an invalid current task id"
+  assert_present "$dir/home/state/$obsolete.meta" "invalid-id refusal removed the obsolete record"
+  pass "stale-owner recovery requires distinct valid task names and explicit discard authority"
+}
+
+test_stale_owner_structural_evidence_refuses_ambiguity() {
+  local dir obsolete current other foreign rc actual_hash
+  obsolete='obsolete-struct'
+  current='current-struct'
+
+  dir=$(make_stale_owner_collision stale-owner-wrong-expected "$obsolete" "$current")
+  actual_hash=$(git hash-object "$dir/home/state/$current.meta")
+  set +e
+  run_stale_owner_case "$dir" "$obsolete" wrong-expected-owner > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "stale-owner retirement accepted an incorrect expected owner"
+  assert_present "$dir/home/state/$obsolete.meta" "incorrect-owner refusal removed the obsolete record"
+  [ "$(git hash-object "$dir/home/state/$current.meta")" = "$actual_hash" ] \
+    || fail "incorrect-owner refusal changed the actual current-owner record"
+
+  dir=$(make_stale_owner_collision stale-owner-nontreehouse "$obsolete" "$current")
+  rm "$dir/pool/treehouse-state.json"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "non-Treehouse records"
+
+  dir=$(make_stale_owner_collision stale-owner-path-drift "$obsolete" "$current")
+  mkdir -p "$dir/other-worktree"
+  perl -pi -e "s#^worktree=.*#worktree=$dir/other-worktree#" "$dir/home/state/$current.meta"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "path-drifted current owner"
+
+  dir=$(make_stale_owner_collision stale-owner-cross-project "$obsolete" "$current")
+  mkdir -p "$dir/other-project"
+  git init -q "$dir/other-project"
+  perl -pi -e "s#^project=.*#project=$dir/other-project#" "$dir/home/state/$current.meta"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "cross-project current owner"
+
+  dir=$(make_stale_owner_collision stale-owner-third "$obsolete" "$current")
+  other=third-owner
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "third task record"
+
+  dir=$(make_stale_owner_collision stale-owner-ambiguous "$obsolete" "$current")
+  printf 'worktree=%s\n' "$dir/worktree" >> "$dir/home/state/$current.meta"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "ambiguous current-owner path"
+
+  dir=$(make_stale_owner_collision stale-owner-unsafe-tasktmp "$obsolete" "$current")
+  printf 'tasktmp=%s\n' "$dir/unrelated-temp" >> "$dir/home/state/$obsolete.meta"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "unsafe obsolete tasktmp evidence"
+
+  dir=$(make_stale_owner_collision stale-owner-cross-home "$obsolete" "$current")
+  foreign="$dir/foreign-home"
+  mkdir -p "$foreign/state" "$foreign/data"
+  mv "$dir/home/state/$current.meta" "$foreign/state/$current.meta"
+  printf '%s\n' "- mate - fixture (home: $foreign; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "cross-home current owner"
+
+  dir=$(make_stale_owner_collision stale-owner-other-claim "$obsolete" "$current")
+  printf 'task=claim-third-owner\nhome=%s\n' "$dir/home" > "$dir/pool/1/.fm-slot-owner"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "third-owner slot claim"
+
+  dir=$(make_stale_owner_collision stale-owner-bad-claim "$obsolete" "$current")
+  printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "unreadable slot claim"
+
+  pass "stale-owner recovery refuses wrong owners, non-Treehouse, drifted, cross-project, third-owner, ambiguous, cross-home, and unreadable ownership evidence"
+}
+
+test_stale_owner_runtime_evidence_refuses() {
+  local dir obsolete=obsolete-runtime current=current-runtime temp_obsolete temp_current tasktmp
+
+  dir=$(make_stale_owner_collision stale-owner-live-endpoint "$obsolete" "$current")
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+case "\$*" in
+  *'list-windows'*) printf 'fm-$obsolete\n' ;;
+  *'#{pane_current_command}'*) printf 'claude\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "live obsolete agent"
+
+  dir=$(make_stale_owner_collision stale-owner-tmux-missing "$obsolete" "$current")
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "unprovable tmux missing endpoint"
+  assert_contains "$(cat "$dir/stderr")" "absence cannot be proven" \
+    "tmux-missing refusal did not explain its unproven absence"
+
+  dir=$(make_stale_owner_collision stale-owner-windowless "$obsolete" "$current")
+  perl -ni -e 'print unless /^window=/' "$dir/home/state/$obsolete.meta"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "windowless obsolete endpoint"
+  assert_contains "$(cat "$dir/stderr")" "has no endpoint" \
+    "windowless refusal did not explain its missing endpoint"
+
+  dir=$(make_stale_owner_collision stale-owner-process "$obsolete" "$current")
+  set_stale_owner_endpoint_gone "$dir" "$obsolete"
+  cat > "$dir/fakebin/lsof" <<SH
+#!/usr/bin/env bash
+printf 'p424242\nfcwd\nn%s\n' '$(cd "$dir/worktree" && pwd -P)'
+SH
+  chmod +x "$dir/fakebin/lsof"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "process under shared slot"
+
+  temp_obsolete="obsolete-tasktmp-$$"
+  temp_current="current-tasktmp-$$"
+  dir=$(make_stale_owner_collision stale-owner-tasktmp-process "$temp_obsolete" "$temp_current")
+  set_stale_owner_endpoint_gone "$dir" "$temp_obsolete"
+  tasktmp="/tmp/fm-$temp_obsolete"
+  mkdir -m 700 "$tasktmp"
+  printf '%s\n' "$tasktmp" >> "$FM_TEST_CLEANUP_REGISTRY"
+  printf 'tasktmp=%s\n' "$tasktmp" >> "$dir/home/state/$temp_obsolete.meta"
+  cat > "$dir/fakebin/lsof" <<SH
+#!/usr/bin/env bash
+printf 'p434343\nfcwd\nn%s\n' '$(cd "$tasktmp" && pwd -P)'
+SH
+  chmod +x "$dir/fakebin/lsof"
+  assert_stale_owner_refused_unchanged "$dir" "$temp_obsolete" "$temp_current" "process under obsolete tasktmp"
+
+  dir=$(make_stale_owner_collision stale-owner-remote "$obsolete" "$current")
+  printf 'remote_host=example.invalid\n' >> "$dir/home/state/$obsolete.meta"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "remote obsolete record"
+
+  dir=$(make_stale_owner_collision stale-owner-unverified "$obsolete" "$current")
+  fm_write_meta "$dir/home/state/$obsolete.meta" \
+    "window=lab:7" "endpoint_task_id=$obsolete" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=zellij" "zellij_session=lab" "zellij_tab_id=3" "zellij_pane_id=7"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "unverified obsolete endpoint"
+
+  dir=$(make_stale_owner_collision stale-owner-orca "$obsolete" "$current")
+  fm_write_meta "$dir/home/state/$obsolete.meta" \
+    "window=fm-$obsolete" "endpoint_task_id=$obsolete" "terminal=term-old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=orca" "orca_worktree_id=worktree-old::$dir/worktree"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "Orca obsolete record"
+
+  pass "stale-owner recovery refuses live processes, remote routes, unverified endpoints, and Orca ownership"
+}
+
+test_stale_owner_recovery_refuses_changing_evidence() {
+  local dir obsolete=obsolete-changing current=current-changing
+  dir=$(make_stale_owner_collision stale-owner-changing "$obsolete" "$current")
+  set_stale_owner_endpoint_gone "$dir" "$obsolete"
+  cat > "$dir/fakebin/lsof" <<SH
+#!/usr/bin/env bash
+count=0
+[ ! -f '$dir/lsof-count' ] || count=\$(cat '$dir/lsof-count')
+count=\$((count + 1))
+printf '%s\n' "\$count" > '$dir/lsof-count'
+if [ "\$count" -gt 1 ]; then
+  printf 'p525252\nfcwd\nn%s\n' '$(cd "$dir/worktree" && pwd -P)'
+fi
+SH
+  chmod +x "$dir/fakebin/lsof"
+  assert_stale_owner_refused_unchanged "$dir" "$obsolete" "$current" "changing process evidence"
+  assert_contains "$(cat "$dir/stderr")" "processes still have" \
+    "changing evidence refusal did not report the new process ownership"
+  pass "stale-owner recovery rechecks evidence immediately before recording retirement"
 }
 
 test_cross_home_pool_slot_collision_refuses() {
@@ -1437,6 +1794,12 @@ test_orca_close_failure_refuses_even_under_force
 test_already_gone_endpoint_still_completes_without_a_refusal
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
+test_explicit_stale_owner_retirement_preserves_the_shared_owner
+test_stale_owner_retirement_deduplicates_aliased_local_state
+test_stale_owner_recovery_requires_explicit_discard_authority
+test_stale_owner_structural_evidence_refuses_ambiguity
+test_stale_owner_runtime_evidence_refuses
+test_stale_owner_recovery_refuses_changing_evidence
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot

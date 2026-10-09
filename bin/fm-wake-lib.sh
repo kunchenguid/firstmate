@@ -1559,6 +1559,61 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
+# Enumerate the state directories of this local Firstmate home tree.
+# Treehouse's pool is machine-local, so remote secondmate routes are excluded;
+# a remote-seeded home is its own local root and includes only its descendants.
+# The registry parser remains the format owner and is loaded lazily because most
+# wake-library consumers never inspect slot ownership.
+fm_treehouse_collect_local_states() {  # <calling-state-dir>
+  local record_state=$1 root home reg line child known existing i=0
+  local -a homes
+  FM_TREEHOUSE_OWNER_STATES=("$record_state")
+  root=$(fm_firstmate_root_home "$FM_HOME") || {
+    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
+    return 1
+  }
+  homes=("$root")
+  if ! command -v secondmate_registry_parse_line >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-secondmate-registry-lib.sh
+    . "$FM_WAKE_LIB_DIR/fm-secondmate-registry-lib.sh"
+  fi
+  while [ "$i" -lt "${#homes[@]}" ]; do
+    home=${homes[$i]}
+    i=$((i + 1))
+    known=0
+    for existing in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do
+      [ "$existing" -ef "$home/state" ] && known=1
+    done
+    [ "$known" = 1 ] || FM_TREEHOUSE_OWNER_STATES+=("$home/state")
+    reg="$home/data/secondmates.md"
+    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
+    [ -f "$reg" ] && [ ! -L "$reg" ] || {
+      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
+      return 1
+    }
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- "*)
+          secondmate_registry_parse_line "$line" || {
+            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
+            return 1
+          }
+          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+          child=$(CDPATH='' cd -- "$SECONDMATE_REGISTRY_HOME" 2>/dev/null && pwd -P) || {
+            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
+            return 1
+          }
+          known=0
+          for existing in "${homes[@]}"; do
+            [ "$existing" != "$child" ] || known=1
+          done
+          [ "$known" = 1 ] || homes+=("$child")
+          ;;
+      esac
+    done < "$reg"
+  done
+}
+
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
 # Require both its pool state and the same Git common directory as the recorded
 # project; an ordinary linked worktree is not evidence that Treehouse owns it.
@@ -1630,12 +1685,14 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
 #   mine   - the claim names this task
 #   other  - the claim names a different task, so the slot was reassigned
 #   absent - no claim: the slot was taken before claims existed, or returned since
-#   unsafe - a claim file exists but cannot be read as a claim
+#   unsafe - a claim file exists but does not contain exactly one non-empty
+#            task= line and one non-empty home= line, or has any extra content
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
-# claimant as evidence. The home is reported, never matched: a home that moved
-# must not turn a task's own slot into a refusal.
+# claimant as evidence. The home is reported, never matched by this primitive:
+# callers that rely on home identity canonicalize it for their own scope.
 fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+  local task_count=0 home_count=0
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
@@ -1647,11 +1704,13 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      task=*) owner_id=${line#task=} ;;
-      home=*) owner_home=${line#home=} ;;
+      task=*) owner_id=${line#task=}; task_count=$((task_count + 1)) ;;
+      home=*) owner_home=${line#home=}; home_count=$((home_count + 1)) ;;
+      *) return 0 ;;
     esac
   done < "$marker" || return 0
-  [ -n "$owner_id" ] || return 0
+  [ "$task_count" -eq 1 ] && [ "$home_count" -eq 1 ] \
+    && [ -n "$owner_id" ] && [ -n "$owner_home" ] || return 0
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
