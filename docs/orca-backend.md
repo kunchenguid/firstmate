@@ -61,11 +61,17 @@ Exact command flags and response parsing are owned by `bin/backends/orca.sh` and
 `fm-peek.sh` reads with `orca terminal read`.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
 Replacement panes showing a blocking dialog refuse text and Enter; an explicit Ctrl-C remains available.
-After resolving a replacement pane, an inbox ring defers if its composer is unreadable or unproven, holds other input, or shows delivery-busy state; a proven pending own doorbell is submitted without appending another copy.
-An empty replacement may receive the doorbell text, but never a bare inbox Enter. Any inbox Enter on a replacement leaves the send unconfirmed, stops further Enter attempts in that send, and retains the watcher retry mark for a later poll, even if the Enter was accepted. Sends on the original handle retain their two-Enter budget. Duplicate retries are an accepted cost.
-Draft and busy deferral applies to inbox rings; explicit typed text and Enter retain their existing semantics.
+After resolving a replacement pane, an inbox ring defers if its composer is unreadable or unproven, holds other input, or shows delivery-busy state; a proven pending own doorbell is reused without appending another copy.
+An empty replacement may receive the doorbell text, but never a bare inbox Enter.
+Immediately before Enter on a replacement, including after the settle delay, the inbox gate requires the pane to still hold its own doorbell and refuses empty, foreign draft, busy, unreadable, or blocking-dialog states without pressing Enter.
+Any inbox Enter on a replacement leaves the ring deferred and stops further Enter attempts in that send, even if the Enter was accepted.
+The durable steer remains recorded; the watcher's retry-mark policy is owned by [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh).
+Inbox rings on the original handle retain their two-Enter budget.
+Duplicate retries are an accepted cost.
+Draft and busy deferral applies to inbox rings; explicit typed text and Enter retain their existing semantics subject to the dialog guard and typed submission rule below.
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
-If typed submission Enter changes terminal endpoints, verification stops without retyping or further Enter attempts. `fm-send.sh` exits 3 with an unconfirmed-submission message directing the caller to inspect the replacement before deciding whether to resend.
+If typed submission Enter changes the endpoint from the one that received the literal text, verification stops without retyping or further Enter attempts; an empty replacement composer cannot confirm text typed elsewhere.
+`fm-send.sh` exits 3 with an unconfirmed-submission message directing the caller to inspect the replacement before deciding whether to resend.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
@@ -95,7 +101,10 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-backend-orca.test.sh
 tests/fm-spawn-orca-worktree.test.sh
+tests/fm-orca-submit-restart.test.sh
+tests/fm-orca-typed-restart.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 tests/fm-teardown-endpoint-safety.test.sh

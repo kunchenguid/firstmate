@@ -2314,6 +2314,8 @@ On 2026-10-08, Orca CLI 1.4.222 did not accept a window title as a terminal hand
 `orca terminal list --worktree name:fm-sparkdash-deploy-macnode --json` returned the one live terminal whose handle matched that task's recorded `terminal=`, and `name:fm-does-not-exist-probe` exited 1 with `selector_not_found`.
 The current send-time contract is owned by [`orca-backend.md`](../orca-backend.md#task-shape-and-metadata).
 `tests/fm-backend-orca.test.sh` pins fake-CLI delivery for both restart errors, unchanged healthy-handle commands, missing and ambiguous selector refusal, replacement-dialog guards, inbox draft and busy deferral, exact-own-doorbell retries, and explicit typed and key semantics.
+`tests/fm-orca-submit-restart.test.sh` covers inbox restarts before typing and before Enter, replacement content changing during settle, retained watcher retry marks, and the original endpoint's two-Enter budget.
+`tests/fm-orca-typed-restart.test.sh` covers a typed slash command lost during restart, unconfirmed exit 3 without retyping or further Enter attempts, and unchanged original-endpoint submission.
 
 ### Orca environment source
 

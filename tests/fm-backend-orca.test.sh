@@ -1492,14 +1492,14 @@ test_fm_send_doorbell_and_key_reach_live_window_when_terminal_stale() {
   # Replacement inbox input requires a positively identified empty composer.
   printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/5.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/6.out"
-  printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/7.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/8.out"
+  # The settled replacement has lost the doorbell: defer without bare Enter.
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/7.out"
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-send.sh" "$id" "steer through the window" 2>&1 )
   status=$?
-  expect_code 0 "$status" "a stale terminal with a live window must still deliver its steer"$'\n'"$out"
+  expect_code 0 "$status" "a stale terminal with a live window must still enqueue its steer"$'\n'"$out"
   assert_not_contains "$out" "doorbell did not reach" \
     "the doorbell reached the live pane; the stale-handle refusal must not fire"
   record="$state/$id.inbox/001.msg"
@@ -1513,10 +1513,14 @@ test_fm_send_doorbell_and_key_reach_live_window_when_terminal_stale() {
     "the doorbell did not ring through the live terminal handle"
   assert_grep "terminal=term-stale" "$state/$id.meta" \
     "fm-send must not rewrite the producer-owned terminal field"
-  printf '{"ok":false,"error":{"code":"terminal_not_writable","message":"terminal_not_writable"}}\n' > "$RESP/9.out"
-  printf '{"ok":true,"result":{"terminals":[{"handle":"term-live-9","writable":true,"connected":true}]}}\n' > "$RESP/10.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/11.out"
-  printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/12.out"
+  assert_not_contains "$log_text" $'--terminal\x1fterm-live-9\x1f--text\x1f\x1f--enter' \
+    "an empty replacement must not receive bare inbox Enter"
+  # Keep explicit key delivery independent of the inbox response budget.
+  orca_case winz5-key
+  printf '{"ok":false,"error":{"code":"terminal_not_writable","message":"terminal_not_writable"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-live-9","writable":true,"connected":true}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/4.out"
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
