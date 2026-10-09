@@ -49,10 +49,8 @@ This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `pro
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
 Never add an agent name as a commit co-author.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `lavish-axi` for visual decisions or reports; consult current help rather than memorizing flags.
-When a needed command is not on `PATH`, run it through `bin/fm-require-cmd.sh <command> [args...]`.
-Add `--resolve-only` to get the discovered executable path or `--expect-artifact <path>` when a successful exit is not proof of completion.
-The helper resolves commands from `PATH`, `~/.local/bin`, and the npm exec cache, refuses with every location it searched when it cannot, and with `--expect-artifact` reports completion only after a fresh non-empty artifact exists.
-For Backpass, use `BACKPASS=$(bin/fm-require-cmd.sh --resolve-only backpass)` then `bin/fm-require-cmd.sh --expect-artifact "$synthesis" "$BACKPASS" [args...]`; never call a pass complete until that synthesis output is non-empty.
+When a needed command is not on `PATH`, use `bin/fm-require-cmd.sh`; its header owns invocation and resolution mechanics.
+For Backpass, resolve through that helper and report a pass only after it verifies the required fresh non-empty synthesis artifact.
 
 ## 2. Layout and state
 
