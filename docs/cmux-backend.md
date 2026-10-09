@@ -69,6 +69,7 @@ Each task owns one cmux workspace with one surface.
 The caller-facing label remains `fm-<id>`, while the visible workspace title is `fm-<home-label>-<id>`.
 The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Firstmate root.
 cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
+At creation the workspace description, which the cmux sidebar shows, is set to the task's backlog title when one exists; it is display-only and never used for lookup.
 Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
 
 ```text
