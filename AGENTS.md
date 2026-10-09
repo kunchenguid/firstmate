@@ -170,6 +170,7 @@ Route by the nature of the work against each registered secondmate scope, not by
 Keep `local-only` work in the main home.
 Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
+When `config/lane-placement.json` exists, run `bin/fm-place.sh` after routing by scope with the fitting homes and `--fallback main` (only `main` for `local-only` work), treat its answer as advice while choosing among those homes, and record the home you choose with `fm-place.sh outcome` (contract: `docs/configuration.md` "Lane placement").
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
 

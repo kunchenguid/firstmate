@@ -619,6 +619,94 @@ A pressure file is any producer of the `lookout.beat` 1.x shape, read by its own
 While the file exists, the watcher runs `bin/fm-capacity.sh --publish` detached at most every 30 seconds, writing this home's lane facts to `state/lane-capacity.json`: its lanes, its cap and limits, its machine's pressure and boots, its watcher's freshness, and its own admission verdict.
 Publishing is best-effort and never changes what the watcher does; no spawn reads the verdict.
 The script's header owns the report line, the published document's fields, the verdict, the beat freshness rules, the host-constraint thresholds, and the probe fallbacks.
+`bin/fm-place.sh` reads these published facts to advise which home should take a new lane; see "Lane placement (config/lane-placement.json)" below.
+
+## Lane placement (config/lane-placement.json)
+
+The optional local, gitignored `config/lane-placement.json` file opts the placing home, in practice the main home, into advisory lane placement.
+At intake, after firstmate has routed by scope, it runs `bin/fm-place.sh` with the fitting homes, the fallback home, and the task's project, delivery mode, and resource profile.
+The script reads each candidate home's published `state/lane-capacity.json` (see "Lane capacity" above), ranks the homes that can start the lane now, prints one short answer with every home's reasons, and appends one line to a decision log.
+It never decides scope, never spawns, routes, sends, or moves a lane, never overrides a home the captain named, and never writes any home's configuration.
+The file is the placing home's own choice and is not inherited by secondmate homes.
+
+```sh
+bin/fm-place.sh --task <id> --project <name> --delivery no-mistakes --fitting pc-lanes,scholar-lanes --fallback main --profile engine-heavy
+bin/fm-place.sh outcome <id> <home>          # record the home firstmate chose
+bin/fm-place.sh review --since 14d           # the advice period's evidence
+```
+
+See [`docs/examples/lane-placement.json`](examples/lane-placement.json) for a starting point to copy into local `config/lane-placement.json`.
+
+**Modes and kill switches**
+
+`mode` is `off` or `advise`.
+In `advise`, the script prints and logs its answer and firstmate decides exactly as it would without it, then records its choice with `outcome`.
+Placement that firstmate must follow is not available in this version, so `"mode": "enforce"` is a configuration error.
+An absent file, `"mode": "off"`, or `FM_PLACE=off` for one call each print one `place: off (<why>)` line on stderr and nothing on stdout, and read no home's facts.
+
+**Members**
+
+| Member | Meaning | Default |
+| --- | --- | --- |
+| `schema` | `fm-lane-placement.v1` | required |
+| `mode` | `off` or `advise` | required |
+| `homes` | one entry per home that may be placed to, keyed by `main` or a secondmate id from `data/secondmates.md`: `rank` (the fixed tie-break, lower first), `captain_machine` (true when the captain works on that machine), and `tags` (capabilities such as `macos`) | required |
+| `profiles` | lane resource profiles by name: `footprint_gb` (memory a lane needs) and `requires` (tags a lane needs) | `default` is 1.0 GB |
+| `reserve_gb` | memory always kept free on every home; a home's own `min-avail-gb` wins when larger | 2 |
+| `facts_max_age_s` | published facts older than this make a home unknown | 120 |
+| `facts_budget_s` | bound on each remote home's read | 5 |
+| `min_uptime_s` | a home booted more recently is warming and refused | 1800 |
+| `unstable_window_s` | the span in which restarts and failed reads count against a home | 21600 |
+| `pending_ttl_s` | how long a recorded outcome holds a place in a home that has not started the lane yet | 600 |
+
+Every other member, a wrong type, an unknown mode, a home id that is not `main` or one registered secondmate, a home or profile named on the command line that the file does not declare, or missing `jq` exits 2 naming the problem, because the captain's numbers are never guessed.
+
+**Facts**
+
+The main home's facts come from its own `state/lane-capacity.json`, a local secondmate's from its registered home, and a remote secondmate's through `bin/fm-on.sh <id> fm-remote-file.sh get state/lane-capacity.json`, all remote reads at once and each bounded by `facts_budget_s`.
+A home whose facts are missing, unreadable, from another home, older than `facts_max_age_s`, dated more than 60 seconds ahead (clock skew), from a watcher silent for over 300 seconds, or unreachable is unknown for that one decision.
+Facts failing only remove a home from one decision or turn the answer into "decide as today"; nothing is moved or stopped.
+
+**How a home is judged**
+
+Each candidate is refused with a plain reason when local-only work is not for the main home, the task already runs there (an error, since placement is for new lanes only), its project clone is missing, it lacks a required tag, the captain's reserve flag is up, it booted within `min_uptime_s`, it restarted twice or more within `unstable_window_s`, it is on battery, its `config/lane-capacity` is invalid, its lanes plus pending places reach its cap, its pressure is `warn` or `critical`, its available memory minus the kept reserve does not fit the profile's footprint, its quota runway is exhausted now, or its own published verdict does not admit a lane.
+A missing clone, a missing tag, and local-only work are permanent refusals; the rest are temporary.
+A home that passes every filter but has unknown pressure, no declared cap, or unknown memory or run queue is eligible but unranked, and is never scored as if unknown were zero.
+
+Eligible homes get an integer score of at most 85, with every term printed:
+
+```text
+mem      = floor(40 * clamp((avail_gb - kept_gb - footprint_gb) / (total_gb * 0.5), 0, 1))
+cpu      = floor(25 * clamp(1 - runq_per_core / 3, 0, 1))
+room     = floor(20 * (cap - lanes - pending) / cap)
+captain  = -15 on a captain_machine home unless its captain presence is idle or away, then -5
+quota    = -10 when the home's quota runway exhausts before reset
+unstable = -10 after one restart or one failed read of that home within unstable_window_s
+```
+
+The best fitting home wins; the fallback homes are considered only when no fitting home is eligible or unranked.
+Equal scores go to the lower `rank`, then the lower home id, never to list order or chance.
+
+| Status | Means | Firstmate does |
+| --- | --- | --- |
+| `clear` | one best home, named on the `place:` line | decides as today and records its choice with `outcome` |
+| `captain` | the captain named the home; its facts are shown for the record | routes there |
+| `ambiguous` | no home is rankable on known facts | decides as today |
+| `full` | every candidate is refused for a temporary reason | keeps the item queued for the next re-evaluation |
+| `escalate` | every candidate is refused for a permanent reason | asks the captain, as today |
+| `error` | the task already runs in a candidate, or the decision failed | decides as today |
+
+Every outcome exits 0, so intake is never blocked.
+
+**Decision log, outcomes, and review**
+
+Each decision appends one `place.advice` JSON line to `state/lane-placement.jsonl` naming every candidate, its class, its reasons, and its score terms, so "why this home?" is answerable from one line.
+The log is private (mode 0600), holds home ids, task ids, project names, and numbers only, and is renamed to `state/lane-placement.jsonl.1` once it passes 5 MB.
+A log that cannot be written leaves the advice printed with `log: unwritten (<why>)`.
+`outcome` appends one `place.outcome` line recording the home firstmate chose, whether that followed the latest advice for the task, and why when it did not; a recent outcome whose task the chosen home has not yet published as a lane counts there as a pending place for `pending_ttl_s`, so two intakes in one turn do not both take the same free place.
+`review` summarizes a span of the log: advice by status, how often outcomes followed advice, every override and its reason, and per home how often it was advised, chosen, unknown, unreachable, and refused.
+
+The script's header owns the exact flags, output lines, and exit codes.
 
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
@@ -2408,6 +2496,8 @@ FM_HOME_SUMMARY_FAILURE_REPORT=2   # recorded publication failures since the led
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=10   # seconds bounding each local per-task current-state read inside bin/fm-fleet-snapshot.sh; remote endpoint liveness is not probed on the snapshot path
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8   # maximum local tasks whose current-state and endpoint observations are collected concurrently during snapshot composition
 FM_SNAPSHOT_BUDGET=5                # one total seconds budget for all concurrent remote home-ledger reads
+FM_PLACE=                # off skips one bin/fm-place.sh placement call; see "Lane placement"
+FM_PLACE_NOW=            # test and replay override for bin/fm-place.sh's clock, in epoch seconds
 FM_SNAPSHOT_CACHE_DIR=$FM_HOME/state/secondmate-summary-cache   # private parent-side cache of successfully fetched remote home ledgers
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=14  # floored elapsed-day threshold at which an undated captain hold (no hold-until; age from its UTC hold-set timestamp, falling back to since for legacy unstamped holds) is projected as a Charted Next gate instead of a live Captain's Call; 0 applies once the computed age is non-negative
 FM_RECONCILE_REQUEST_MAX_BYTES=1048576   # maximum captured Bearings or fleet snapshot accepted for durable reconcile-notify request publication
