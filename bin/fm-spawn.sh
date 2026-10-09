@@ -1792,10 +1792,6 @@ spawn_orca_reclaim_launch_file() {
 
 spawn_abort_cleanup() {
   local status=$?
-  if [ -n "$DROID_SETTINGS_CLEANUP" ]; then
-    rm -f "$DROID_SETTINGS_CLEANUP" || true
-    DROID_SETTINGS_CLEANUP=
-  fi
   if [ -n "$DROID_SETTINGS_TMP" ]; then
     rm -f "$DROID_SETTINGS_TMP" || true
     DROID_SETTINGS_TMP=
@@ -1805,6 +1801,7 @@ spawn_abort_cleanup() {
     [ -n "$SPAWN_META_TMP" ] &&
     [ ! -e "$SPAWN_META_TMP" ] &&
     [ ! -L "$SPAWN_META_TMP" ]; then
+    DROID_SETTINGS_CLEANUP=
     RELAUNCH_REPLACEMENT_PENDING=0
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
@@ -1945,6 +1942,13 @@ spawn_abort_cleanup() {
     if ! spawn_fresh_commit_rollback; then
       status=1
     fi
+  fi
+  if [ -n "$DROID_SETTINGS_CLEANUP" ]; then
+    if [ "${RELAUNCH:-0}" -eq 1 ] ||
+      { [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; }; then
+      rm -f "$DROID_SETTINGS_CLEANUP" || true
+    fi
+    DROID_SETTINGS_CLEANUP=
   fi
   if [ "$status" -ne 0 ] && [ "$DROID_TRUST_PENDING" = 1 ] &&
     [ "${RELAUNCH:-0}" -ne 1 ] &&
@@ -7651,6 +7655,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+  DROID_SETTINGS_CLEANUP=
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
@@ -7677,7 +7682,6 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
-[ "$RELAUNCH" -ne 1 ] || DROID_SETTINGS_CLEANUP=
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

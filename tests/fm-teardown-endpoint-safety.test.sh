@@ -1214,6 +1214,32 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   pass "fm-teardown: a stale record transfers trust cleanup to a non-Droid claimant, which retires it"
 }
 
+test_retired_droid_record_does_not_trust_a_pooled_successor() {
+  local dir id=retired-droid other=live-task trust_home store
+  dir=$(make_case retired-droid-slot)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "harness=droid" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+  trust_home="$dir/user-home"
+  mkdir -p "$trust_home/.factory"
+  store="$trust_home/.factory/settings.json"
+  printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
+
+  HOME="$trust_home" run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "receipt-free records-only cleanup failed: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" 'retired Droid task beside its successor'
+  assert_present "$dir/home/state/$other.meta" 'receipt-free cleanup removed the successor record'
+  assert_absent "$dir/home/state/$id.droid-trust" 'receipt-free cleanup recreated retired trust ownership'
+  assert_absent "$dir/home/state/$other.droid-trust" 'receipt-free cleanup created trust ownership for the successor'
+  jq -e '.otherSetting == "preserve" and .trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'receipt-free cleanup trusted the successor or changed unrelated settings'
+  pass 'a receipt-free retired Droid task does not recreate trust for a pooled successor'
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1637,6 +1663,7 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
+test_retired_droid_record_does_not_trust_a_pooled_successor
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
