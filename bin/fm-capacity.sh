@@ -78,8 +78,8 @@ done
 target=none
 target_error=
 if [ -e "$CONFIG/lane-capacity" ]; then
-  raw=$(tr -d ' \t\r\n' < "$CONFIG/lane-capacity" 2>/dev/null) || raw=
-  if is_uint "$raw"; then
+  raw=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' "$CONFIG/lane-capacity" 2>/dev/null) || raw=
+  if is_uint "$raw" && [ "${#raw}" -le 9 ]; then
     target=$((10#$raw))
   else
     target=invalid
