@@ -2523,7 +2523,29 @@ fi
 # first. Publication is eventually consistent by design and every reader
 # re-derives current state from the owning home anyway, while beacon freshness
 # is what the whole supervision chain rests on.
+#
+# Detachment keeps a slow publication off the beacon but not off the host: a
+# producer that keeps missing its deadline leaves the ledger stale, so every
+# poll would start another full-deadline attempt back to back. After a missed
+# deadline, recorded by the refresh in state/.home-summary-refresh.backoff
+# (bin/fm-home-summary-refresh.sh owns that record), neither trigger starts
+# another attempt until HOME_SUMMARY_INTERVAL has passed since the miss, doubling
+# per consecutive miss up to 8 times that interval. A successful publication
+# removes the record and restores the ordinary cadence.
 HOME_SUMMARY_PID=
+home_summary_backoff_active() {
+  local misses delay
+  [ -f "$STATE/.home-summary-refresh.backoff" ] || return 1
+  misses=$(head -n 1 "$STATE/.home-summary-refresh.backoff" 2>/dev/null) || return 1
+  case "$misses" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$misses" -ge 1 ] || return 1
+  [ "$misses" -gt 4 ] && misses=4
+  delay=$(( HOME_SUMMARY_INTERVAL * (1 << (misses - 1)) ))
+  [ "$(age_of "$STATE/.home-summary-refresh.backoff")" -lt "$delay" ]
+}
+
 home_summary_refresh_detached() {
   if [ -n "$HOME_SUMMARY_PID" ]; then
     if kill -0 "$HOME_SUMMARY_PID" 2>/dev/null; then
@@ -2532,6 +2554,7 @@ home_summary_refresh_detached() {
     wait "$HOME_SUMMARY_PID" 2>/dev/null || true
     HOME_SUMMARY_PID=
   fi
+  ! home_summary_backoff_active || return 0
   FM_HOME_SUMMARY_IF_IDLE=1 \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
   HOME_SUMMARY_PID=$!

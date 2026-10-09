@@ -309,6 +309,61 @@ wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
 pass "live watcher cadence bounds publication staleness without signals"
 
+# After a missed deadline the watcher must not start another attempt on its
+# very next poll: a producer that keeps missing would otherwise run back to
+# back. Seed a fresh record of four consecutive misses, which holds refreshes
+# for eight intervals, while the ledger is already due; then age the record
+# past its delay and require the ordinary cadence to resume and clear it.
+BACKOFF_HOME="$TMP_ROOT/backoff-home"
+mkdir -p "$BACKOFF_HOME/state" "$BACKOFF_HOME/data" "$BACKOFF_HOME/config" \
+  "$BACKOFF_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$BACKOFF_HOME/AGENTS.md"
+printf 'backoff\n' > "$BACKOFF_HOME/.fm-secondmate-home"
+printf '## In flight\n\n## Queued\n\n## Done\n' > "$BACKOFF_HOME/data/backlog.md"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
+  "$WRITER" || fail "could not seed the backoff ledger"
+touch -t 203801010000 "$BACKOFF_HOME/state/home-summary.json"
+printf '4\n' > "$BACKOFF_HOME/state/.home-summary-refresh.backoff"
+PATH="$FAKEBIN:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=2 FM_SIGNAL_GRACE=0 \
+  FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
+  "$WATCH" > "$TMP_ROOT/backoff-watch.out" 2> "$TMP_ROOT/backoff-watch.err" &
+WATCH_PID=$!
+i=0
+while [ ! -e "$BACKOFF_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$WATCH_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$BACKOFF_HOME/state/.last-watcher-beat" ] \
+  || fail "the backoff watcher did not complete its initial cycle"
+sleep 4
+kill -0 "$WATCH_PID" 2>/dev/null \
+  || fail "the backoff watcher exited: $(cat "$TMP_ROOT/backoff-watch.out" "$TMP_ROOT/backoff-watch.err" 2>/dev/null)"
+jq -e --arg now "$NOW_TWO" '.generated == $now' \
+  "$BACKOFF_HOME/state/home-summary.json" >/dev/null \
+  || fail "the watcher refreshed during its deadline-miss backoff"
+touch -t 200001010000 "$BACKOFF_HOME/state/.home-summary-refresh.backoff"
+i=0
+while ! jq -e --arg now "$NOW_THREE" '.generated == $now' \
+  "$BACKOFF_HOME/state/home-summary.json" >/dev/null 2>&1; do
+  kill -0 "$WATCH_PID" 2>/dev/null \
+    || fail "the backoff watcher exited before resuming publication"
+  [ "$i" -lt 100 ] \
+    || fail "the watcher did not resume publication once its backoff expired"
+  sleep 0.1
+  i=$((i + 1))
+done
+[ ! -e "$BACKOFF_HOME/state/.home-summary-refresh.backoff" ] \
+  || fail "the resumed publication kept the deadline-miss record"
+kill "$WATCH_PID" >/dev/null 2>&1 || true
+wait "$WATCH_PID" >/dev/null 2>&1 || true
+WATCH_PID=
+pass "the watcher backs off its refresh after a missed deadline and resumes once the delay passes"
+
 # Consumer boundary: first serialize behind any watcher-started publication,
 # then replace the ledger with a structurally complete but semantically false
 # state. The default parent snapshot must consume that publication rather than
@@ -506,6 +561,49 @@ grep -F 'refresh exceeded its 1-second deadline' \
   "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "publication validation timeout was not logged"
 pass "best-effort refresh bounds validation and publication"
+
+# A worker killed at its deadline never runs its own cleanup, so the parent
+# must remove that attempt's temporary files and record the miss for the
+# watcher's backoff. A validation stall that ignores TERM forces the KILL path;
+# the deadline leaves the producer room to reach that stall on a loaded host.
+STUBBORNBIN="$TMP_ROOT/stubbornbin"
+STUBBORN_MARKER="$TMP_ROOT/stubborn-stalled"
+mkdir -p "$STUBBORNBIN"
+cat > "$STUBBORNBIN/jq" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.home-summary.json.*)
+      trap '' TERM
+      : > "$FM_TEST_STUBBORN_MARKER"
+      i=0
+      while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+chmod +x "$STUBBORNBIN/jq"
+rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
+for attempt in 1 2; do
+  rm -f "$STUBBORN_MARKER"
+  PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+    FM_TEST_STUBBORN_MARKER="$STUBBORN_MARKER" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=3 \
+    "$WRITER" --best-effort \
+    || fail "a killed worker changed the best-effort caller result"
+  [ -e "$STUBBORN_MARKER" ] || fail "the stubborn validation stall was never reached"
+  leftovers=$(find "$HOME_DIR/state" -maxdepth 1 \
+    \( -name '.home-summary.json.*' -o -name '.home-summary-error.*' \) -print)
+  [ -z "$leftovers" ] || fail "a killed worker left its temporary files behind: $leftovers"
+  [ "$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)" = "$attempt" ] \
+    || fail "deadline miss $attempt was not counted: $(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)"
+done
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the counted deadline misses"
+[ ! -e "$HOME_DIR/state/.home-summary-refresh.backoff" ] \
+  || fail "a successful publication kept the deadline-miss record"
+pass "the parent removes a killed worker's temporary files and counts consecutive deadline misses"
 
 MKBIN="$TMP_ROOT/mkdir-hangbin"
 REAL_MKDIR=$(command -v mkdir)
