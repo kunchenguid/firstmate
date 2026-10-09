@@ -550,9 +550,11 @@ home=$(make_home subscribed)
 mkdir -p "$TMP_ROOT/owner-bin"
 ln -s /bin/bash "$TMP_ROOT/owner-bin/claude"
 owned() {
+  # The trailing exit keeps newer bash from exec-replacing the owner harness
+  # with the last command, which would drop it from the command's ancestry.
   # shellcheck disable=SC2016 # The fixture harness expands its own environment.
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
-    "$TMP_ROOT/owner-bin/claude" -c 'printf "%s\n" "$$" > "$FM_HOME/state/.lock"; "$@"' owner "$@"
+    "$TMP_ROOT/owner-bin/claude" -c 'printf "%s\n" "$$" > "$FM_HOME/state/.lock"; "$@"; exit' owner "$@"
 }
 needed() {
   bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2/state"' check "$ROOT" "$home"
