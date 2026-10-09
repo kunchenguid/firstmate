@@ -156,12 +156,14 @@ test_artifact_completion_gate() {
     *"analysis only"*) fail "the command ran despite a stale artifact directory" ;;
   esac
 
+  # shellcheck disable=SC2016 # The fixture body must retain the child's $1 literally.
   writer=$(fake_tool artifact-writer 'printf "synthesis\n" > "$1"')
   artifact="$TMP_ROOT/fresh-synthesis"
   out=$("$REQUIRE" --expect-artifact "$artifact" "$writer" "$artifact" 2>&1) ||
     fail "a fresh non-empty artifact failed the completion gate"
   assert_contains "$out" "verified $artifact" "success did not name the verified artifact"
 
+  # shellcheck disable=SC2016 # The fixture body must retain the child's $1 literally.
   directory_writer=$(fake_tool artifact-directory-writer 'mkdir -p "$1"; printf "synthesis\n" > "$1/AGENTS.md"')
   directory="$TMP_ROOT/fresh-synthesis.d"
   "$REQUIRE" --expect-artifact "$directory" "$directory_writer" "$directory" >/dev/null 2>&1 ||
