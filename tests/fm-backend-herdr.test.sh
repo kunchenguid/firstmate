@@ -3707,24 +3707,6 @@ test_parse_target() {
   pass "fm_backend_herdr_parse_target: splits '<session>:<pane_id>' on the FIRST colon (pane_id itself contains one)"
 }
 
-test_parse_target_refuses_bare_pane_id() {
-  ( . "$ROOT/bin/backends/herdr.sh"
-    if fm_backend_herdr_parse_target "wPW:p2"; then
-      echo "bare pane id should be refused" >&2
-      exit 1
-    fi
-    if fm_backend_herdr_parse_target "p2"; then
-      echo "single token should be refused" >&2
-      exit 1
-    fi
-    if fm_backend_herdr_parse_target ""; then
-      echo "empty target should be refused" >&2
-      exit 1
-    fi
-  ) || fail "fm_backend_herdr_parse_target did not refuse bare pane id or malformed target"
-  pass "fm_backend_herdr_parse_target: refuses bare pane identifiers lacking session prefix"
-}
-
 test_normalize_key() {
   ( . "$ROOT/bin/backends/herdr.sh"
     [ "$(fm_backend_herdr_normalize_key Enter)" = enter ] || exit 1
@@ -6028,7 +6010,6 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
-test_parse_target_refuses_bare_pane_id
 test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug

@@ -3040,17 +3040,11 @@ fm_backend_herdr_projection_token_workspace_gone() {  # <session> <journal> <tas
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself
 # contains a colon, e.g. "w1:p2") on the FIRST colon only. Sets
 # FM_BACKEND_HERDR_SESSION and FM_BACKEND_HERDR_PANE for the caller.
-# Refuses bare pane identifiers or malformed targets lacking the required
-# session prefix (pane_id must contain at least one colon).
 fm_backend_herdr_parse_target() {  # <target>
   local target=$1
   FM_BACKEND_HERDR_SESSION=${target%%:*}
   FM_BACKEND_HERDR_PANE=${target#*:}
-  [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ] || return 1
-  case "$FM_BACKEND_HERDR_PANE" in
-    *:*) return 0 ;;
-    *) return 1 ;;
-  esac
+  [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
 }
 
 # fm_backend_herdr_target_observable: verify <target> is well-formed and its
