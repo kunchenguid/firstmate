@@ -86,7 +86,7 @@ Linux ownership records use the clock-stable `/proc` starttime when it is availa
 A worker started before this update records the old start format, so restart it once by hand after updating, while no job is in flight.
 On the host, with the remote account home and the updated code root, run `bash -c ". <code-root>/bin/fm-remote-job-lib.sh; fm_remote_job_stop_worker_tree \"\$(cat ~/.firstmate/remote-job/worker.pid)\""`.
 The next remote command, or `fm-on.sh <route> fm-remote-doctor.sh --fix`, then starts a fresh worker.
-[`bin/fm-remote-job-lib.sh`](../bin/fm-remote-job-lib.sh) owns the start identity format and the handoff checks.
+[`bin/fm-remote-job-lib.sh`](../bin/fm-remote-job-lib.sh) owns the start identity format.
 The [`fm-remote-job-worker.sh` header](../bin/fm-remote-job-worker.sh) owns dispatch cadence and the quiet-scan latency for work arriving after its post-activity burst.
 Active-command and result waits use a separate sampling interval; the [`fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns its defaults, overrides, and completion, cancellation, and timeout latency contract.
 
