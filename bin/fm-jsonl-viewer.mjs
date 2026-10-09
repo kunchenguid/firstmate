@@ -47,11 +47,14 @@ function taskSortPriority(task) {
 }
 
 function taskSortTimestamp(task) {
-  const value = task.category === "completed" || task.category === "history"
-    ? task.completionAt
-    : task.updatedAt;
-  const timestamp = typeof value === "string" ? Date.parse(value) : NaN;
-  return Number.isFinite(timestamp) ? timestamp : null;
+  const candidates = task.category === "completed" || task.category === "history"
+    ? [task.completionAt, task.updatedAt]
+    : [task.updatedAt];
+  for (const value of candidates) {
+    const timestamp = typeof value === "string" ? Date.parse(value) : NaN;
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+  return null;
 }
 
 function compareTasks(left, right) {

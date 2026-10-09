@@ -318,6 +318,7 @@ jq -e '
   (.tasks | any(.id == "task-one" and .category == "processing" and .status == "Processing" and .hasDocument == true and .documentType == "report" and .documentTypes == ["report","brief"]))
     and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null and .documentTypes == []))
     and ([.tasks[] | select(.category == "completed") | .id] | .[0:2] == ["completed-newer", "completed-task"])
+    and (.tasks | any(.id == "completed-newer" and .completionAt == "2026-10-08" and .updatedAt == "2026-10-08T00:00:00Z"))
     and (.tasks | any(.id == "held-task" and .category == "held" and (.wait | contains("upstream-task")) and .hasDocument == true and .documentType == "brief" and .documentTypes == ["brief"]))
     and (.tasks | any(.id == "archived-task" and .category == "history" and .status == "Archived"))
     and (.tasks

@@ -254,12 +254,22 @@ await page.route("**/api/tasks*", async route => {
   }
   if (Array.isArray(body.tasks)) {
     if (!replayedFullSnapshot) {
+      body.tasks = body.tasks.map(task => {
+        if (task.id === process.env.VIEWER_REPORT_ID) return { ...task, updatedAt: "2026-10-08T00:00:00Z" };
+        if (task.id === process.env.VIEWER_FIRST_REPORT_ID) return { ...task, updatedAt: "2026-10-07T00:00:00Z" };
+        if (task.id === "tall-task-01") return { ...task, updatedAt: "2026-10-06T00:00:00Z" };
+        if (task.id === "tall-task-02") return { ...task, updatedAt: "not-a-timestamp" };
+        if (task.id === "completed-task") return { ...task, completionAt: "2026-10-09", updatedAt: "2026-10-01T00:00:00Z" };
+        return task;
+      });
       body.tasks = body.tasks.flatMap(task => task.category !== "completed" ? [task] : [
         task,
         ...Array.from({ length: 40 }, (_, index) => ({
           ...task,
           id: `completed-copy-${String(index + 1).padStart(2, "0")}`,
           title: `Dashboard completed task copy ${String(index + 1).padStart(2, "0")}`,
+          completionAt: "2026-10-01",
+          updatedAt: "2026-10-09T00:00:00Z",
         })),
       ]);
       body.tasks.push({
@@ -375,6 +385,8 @@ try {
   if (!await page.locator('nav [data-route="dashboard"]').evaluate(element => element.classList.contains("active"))) throw new Error("Dashboard navigation identity was not active");
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
   if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 4) throw new Error("processing task category was not rendered");
+  const processingOrder = await page.locator('#sessions .task-card[data-category="processing"] small:first-of-type').allTextContents();
+  if (processingOrder.slice(0, 4).join(",") !== `${process.env.VIEWER_REPORT_ID},${process.env.VIEWER_FIRST_REPORT_ID},tall-task-01,tall-task-02`) throw new Error(`processing cards were not ordered by updated time with invalid values last: ${processingOrder.join(",")}`);
   if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count() !== 1) throw new Error("completed task counter was not rendered");
   const activeCards = page.locator('#sessions .task-card[data-category="processing"]');
   if (await activeCards.locator(".task-progress").count() !== 4) throw new Error("multiple active goals lost their progress summaries");
@@ -407,6 +419,8 @@ try {
     .filter(card => card.textContent.includes("Needs reconciliation") || card.textContent.includes("Dashboard completed task"))
     .map(card => card.textContent.includes("Needs reconciliation") ? "reconciliation" : "completed"));
   if (sharedCompletedOrder[0] !== "completed" || sharedCompletedOrder.at(-1) !== "reconciliation") throw new Error(`completed and reconciliation tasks did not share title ordering: ${sharedCompletedOrder.join(",")}`);
+  const completedOrder = await page.locator('#sessions .task-card[data-category="completed"] strong').allTextContents();
+  if (completedOrder[0] !== "Dashboard completed task" || completedOrder[1] !== "Dashboard completed task copy 01") throw new Error(`completed cards ignored completion time when update time conflicted: ${completedOrder.slice(0, 2).join(",")}`);
   await completedCounter.click();
   if (await page.locator('#sessions .task-card').count() !== 42) throw new Error("combined Completed counter did not filter both task groups");
   if (await page.locator('#sessions .task-card[data-category="completed"]').count() !== 41) throw new Error("completed filter changed completed task membership");
