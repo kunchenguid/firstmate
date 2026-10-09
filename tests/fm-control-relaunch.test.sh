@@ -2175,6 +2175,13 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session() {
       return 0
     }
     dir=$HERDR_CASE_DIR
+    # The relaunch lands on the pi harness, and fm-spawn verifies a resolvable
+    # pi executable that advertises --tui-mode before composing the launch; the
+    # fake herdr only records that launch and never runs the harness, so the
+    # same fakebin stub as the native-Ultra case keeps this hermetic on hosts
+    # without a real Pi install (CI installs one; this suite must not need it).
+    printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+    chmod +x "$dir/fakebin/pi"
     rm -f "$dir/fake/herdr-stopped"
     sed -i 's/^harness=claude$/harness=pi/' "$dir/home/state/resume-$registered.meta"
     # Keep the pane's status authority registered to an existing Pi session,

@@ -205,6 +205,131 @@ test_spawn_isolation_abort() {
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
+# --- GUARD 1b': foreign-repository checkout ---------------------------------
+
+# The isolation conditions must reject a checkout of a DIFFERENT repository,
+# not just the spawning project's own paths. This is the 2026-09-29 leak shape:
+# on WSL a brand-new window's pane read transiently reported firstmate's own
+# checkout - a real, clean worktree root of an unrelated repository - during a
+# spawn of another project; the adopted path passed a comparison that only
+# knew the spawning project, and the task's claude hooks plus a fetch+reset
+# base refresh landed in the primary checkout's .claude and git metadata.
+test_spawn_isolation_foreign_repo_abort() {
+  local home proj foreign fakebin out status
+  home="$TMP_ROOT/spawn-foreign-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-foreign-proj")
+  foreign=$(make_repo "$TMP_ROOT/spawn-foreign-wt")
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-foreign-fake")
+  fm_test_fake_sleep_noop "$fakebin"
+
+  # Abort: the pane resolves to the root checkout of an unrelated repository.
+  out=$(run_spawn "$home" abort-foreign-repo-hh8 "$proj" "$foreign" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn into another repository's checkout should abort"
+  assert_contains "$out" "did not enter an isolated worktree" "foreign-repo spawn lacked the isolation error"
+  assert_contains "$out" "checkout of a different repository" "foreign-repo spawn did not say why the path was rejected"
+  assert_absent "$home/state/abort-foreign-repo-hh8.meta" "aborted foreign-repo spawn must not record meta"
+
+  pass "fm-spawn: aborts when the resolved worktree belongs to a different repository"
+}
+
+# --- GUARD 1b'': own-checkout identity refusal -------------------------------
+
+# The isolation conditions now refuse foreign-repository checkouts, but the one
+# directory whose pollution is fleet-wide - firstmate's own running checkout -
+# also carries a second, independent identity refusal
+# (spawn_assert_worktree_not_own_root) ahead of any task wiring. The only path
+# that reaches it is a worktree that IS a legitimate linked worktree of the
+# spawning project while also being the directory firstmate runs from, so this
+# stages exactly that shape: FM_ROOT_OVERRIDE adopts a linked worktree of the
+# project and the pane reports that same worktree. On the 2026-09-29 leak the
+# claude-hook quartet for a dead task landed in that checkout's
+# .claude/settings.local.json, and the leak's other half was a fetch+reset base
+# refresh into its git metadata. The refusal alone is not the contract: nothing
+# the spawn does below that point may touch the checkout either, so the fixture
+# stages a base refresh that WOULD move HEAD (origin's default advanced past
+# the checkout) and settings the wiring WOULD merge into, then fingerprints the
+# whole checkout before the spawn and requires it identical after.
+
+# checkout_fingerprint <dir>: path+content fingerprint of every regular file in
+# a work tree, .git aside. Task wiring lands as files (claude hooks, settings,
+# plugins), so a write anywhere in the checkout changes it.
+checkout_fingerprint() { # <dir>
+  (cd "$1" && find . -name .git -prune -o -type f -exec cksum {} + | LC_ALL=C sort)
+}
+
+test_spawn_own_root_identity_abort() {
+  local home proj ownroot fakebin config settings excl fetch_head
+  local head_before origin_main status_before tree_before excl_before out status
+  home="$TMP_ROOT/spawn-ownroot-home"
+  mkdir -p "$home/data" "$home/user-home"
+  proj=$(make_repo "$TMP_ROOT/spawn-ownroot-proj")
+  ownroot="$TMP_ROOT/spawn-ownroot-fm"
+  git -C "$proj" worktree add -q --detach "$ownroot" >/dev/null 2>&1
+  # Early spawn phases call $FM_ROOT/bin tools; keep them resolvable.
+  ln -s "$ROOT/bin" "$ownroot/bin"
+  # The running checkout already carries local settings of its own; the leak
+  # MERGED the claude-hook quartet into a file like this, so the fixture starts
+  # from one rather than from its absence.
+  settings="$ownroot/.claude/settings.local.json"
+  mkdir -p "$ownroot/.claude"
+  printf '{\n  "permissions": {\n    "allow": [\n      "Bash(git diff:*)"\n    ]\n  }\n}\n' > "$settings"
+  # Keep the fixture invisible to the freshen cleanliness check: info/exclude
+  # resolves through the common git dir even for a linked worktree.
+  excl=$(git -C "$ownroot" rev-parse --git-path info/exclude)
+  mkdir -p "$(dirname "$excl")"
+  printf 'bin\n.claude/\n' >> "$excl"
+  # Advance origin's default branch past the checkout's detached HEAD. The
+  # worktree shares the project's origin through the common config, so an
+  # unguarded base refresh here would fetch and reset --hard onto that commit -
+  # at the same commit as HEAD, a refresh leaves nothing a HEAD comparison
+  # could catch. FETCH_HEAD is per-worktree, so it names the fetch alone.
+  git -C "$proj" commit -q --allow-empty -m advance-origin-default
+  git -C "$proj" push -q origin main
+  fetch_head=$(git -C "$ownroot" rev-parse --git-path FETCH_HEAD)
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-ownroot-fake" claude)
+  fm_test_fake_sleep_noop "$fakebin"
+  config="$TMP_ROOT/spawn-ownroot-claude"
+  mkdir -p "$config"
+  fm_test_spawn_brief "$home" ownroot-ii9
+
+  head_before=$(git -C "$ownroot" rev-parse HEAD)
+  origin_main=$(git -C "$ownroot" rev-parse --verify --quiet origin/main 2>/dev/null || true)
+  assert_not_equals "" "$origin_main" "fixture must expose origin's default branch to the worktree, else the refresh path never runs"
+  assert_not_equals "$head_before" "$origin_main" \
+    "fixture must stage origin's default ahead of the checkout, else a base refresh here cannot move HEAD"
+  status_before=$(git -C "$ownroot" -c core.quotePath=false status --porcelain)
+  assert_equals "" "$status_before" "fixture checkout must start clean, else the refusal could be blamed on dirt"
+  tree_before=$(checkout_fingerprint "$ownroot")
+  excl_before=$(cksum <"$excl")
+
+  # fm_test_run_spawn pins FM_ROOT_OVERRIDE empty, so this inlines its env with
+  # FM_ROOT_OVERRIDE naming the pane-reported worktree.
+  out=$(FM_ROOT_OVERRIDE="$ownroot" FM_HOME="$home" HOME="$home/user-home" \
+    CLAUDE_CONFIG_DIR="$config" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$ownroot" TMUX="fake,1,0" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" ownroot-ii9 "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "spawn adopting firstmate own checkout should abort"
+  assert_contains "$out" "firstmate's own checkout" "own-root spawn lacked the identity refusal"
+  assert_absent "$home/state/ownroot-ii9.meta" "aborted own-root spawn must not record meta"
+  assert_equals "$head_before" "$(git -C "$ownroot" rev-parse HEAD)" \
+    "a base refresh ran on firstmate's own checkout: HEAD moved toward origin's advanced default"
+  assert_absent "$fetch_head" "the spawn fetched inside firstmate's own checkout before refusing"
+  assert_equals "$status_before" "$(git -C "$ownroot" -c core.quotePath=false status --porcelain)" \
+    "the spawn left firstmate's own checkout dirtier than it started"
+  assert_equals "$tree_before" "$(checkout_fingerprint "$ownroot")" \
+    "the spawn wrote task wiring into firstmate's own checkout"
+  assert_no_grep "UserPromptSubmit" "$settings" \
+    "own-root spawn leaked the claude-hook quartet into the running checkout's settings"
+  assert_equals "$excl_before" "$(cksum <"$excl")" \
+    "the spawn appended task excludes to the shared info/exclude of the running checkout"
+  pass "fm-spawn: refuses before any base refresh or task wiring when the resolved worktree is firstmate's own checkout"
+}
+
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
 
 # The prevention guard also depends on fm-spawn building robust tmux commands
@@ -292,4 +417,6 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_isolation_foreign_repo_abort
+test_spawn_own_root_identity_abort
 test_spawn_tmux_window_construction
