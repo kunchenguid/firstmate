@@ -53,7 +53,23 @@ esac
 # a doctored sidecar cannot redirect this poll at another host or project.
 case "$provider" in
   github)
-    [ "$host" = github.com ] || exit 0
+    # The host is a GitHub host, github.com or any other, and is validated as
+    # the lowercase DNS name the parser accepts.
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    rest=$host
+    while [ -n "$rest" ]; do
+      case "$rest" in
+        *.*) label=${rest%%.*}; rest=${rest#*.} ;;
+        *) label=$rest; rest= ;;
+      esac
+      [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || exit 0
+      case "$label" in
+        -*|*-) exit 0 ;;
+      esac
+    done
     owner=${path%%/*}
     repo=${path#*/}
     [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
@@ -64,8 +80,14 @@ case "$provider" in
     case "$repo" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
-    [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
+    # gh takes the host from the URL; GH_HOST keeps it from falling back to an
+    # ambient default, and github.com is left untouched.
+    if [ "$host" = github.com ]; then
+      state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    else
+      state=$(GH_HOST=$host gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    fi
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gitlab)

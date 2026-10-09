@@ -9,10 +9,10 @@
 # arbitrarily nested project name on Gerrit, where "number" is the change
 # number. A GitLab or Gerrit project can sit at any depth, so no
 # owner/repository pair can address one and the sidecar carries the whole path
-# instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
-# so the host is part of that identity rather than a constant. Every consumer re-derives the identity
-# from the stored URL and refuses any record whose parts do not reconstruct that
-# exact URL.
+# instead. All three also run on self-hosted instances, and Gerrit runs nowhere
+# else, so the host is part of that identity rather than a constant. Every
+# consumer re-derives the identity from the stored URL and refuses any record
+# whose parts do not reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -140,6 +140,39 @@ fm_pr_forge_host_valid() {
   done
 }
 
+# A GitHub pull request URL may name github.com or any other GitHub host, so
+# its host is the same lowercase DNS name a forge instance uses, with github.com
+# itself also accepted.
+fm_pr_github_host_valid() {
+  local host=${1-}
+  [ "$host" = github.com ] || fm_pr_forge_host_valid "$host"
+}
+
+# The GitHub host to assume where none can be read from a URL, such as a pull
+# request known only by number: FM_GITHUB_HOST, else github.com. GH_HOST is never
+# read here; github.com is left untouched by fm_gh_at, so gh keeps honoring its
+# own GH_HOST selection. A value that is not a valid host is refused rather than
+# passed on to gh.
+fm_github_default_host() {
+  local host=${FM_GITHUB_HOST:-github.com}
+  fm_pr_github_host_valid "$host" || return 1
+  printf '%s\n' "$host"
+}
+
+# Run a gh or gh-axi command addressed at <host>. gh selects its host for every
+# subcommand, api and graphql included, from GH_HOST, so it is set for that one
+# command only. github.com needs no selection and always leaves the command
+# untouched.
+fm_gh_at() {  # <host> <command> [args...]
+  local host=$1
+  shift
+  if [ "$host" = github.com ]; then
+    "$@"
+  else
+    GH_HOST=$host "$@"
+  fi
+}
+
 # A GitLab project path is group[/subgroup...]/project, so at least two
 # segments and no fixed depth. GitLab reserves "-" as its route separator and
 # forbids a leading hyphen, ".git", and ".atom", so none of those can name a
@@ -208,20 +241,21 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
-    [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
-    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    fm_pr_github_host_valid "${BASH_REMATCH[1]}" || return 1
+    [[ "${BASH_REMATCH[2]}" != *--* ]] || return 1
+    [ "${BASH_REMATCH[3]}" != . ] && [ "${BASH_REMATCH[3]}" != .. ] || return 1
     FM_PR_PROVIDER=github
     FM_PR_URL=$raw
-    FM_PR_HOST=github.com
-    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_HOST=${BASH_REMATCH[1]}
+    FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
     # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
     # shellcheck disable=SC2034
-    FM_PR_OWNER=${BASH_REMATCH[1]}
+    FM_PR_OWNER=${BASH_REMATCH[2]}
     # shellcheck disable=SC2034
-    FM_PR_REPO=${BASH_REMATCH[2]}
-    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    FM_PR_REPO=${BASH_REMATCH[3]}
+    FM_PR_NUMBER=${BASH_REMATCH[4]}
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -911,14 +945,14 @@ fm_pr_poll_retirement_receipt_valid() {
   FM_PR_RETIRE_RECEIPT_IDENTITY=$(fm_pr_file_identity "$receipt") || return 1
 }
 
-fm_pr_github_read_record_with_gh() {  # <owner> <repo> <number>
-  local owner=$1 repo=$2 number=$3 fields line total=0 named=0
+fm_pr_github_read_record_with_gh() {  # <owner> <repo> <number> <host>
+  local owner=$1 repo=$2 number=$3 host=$4 fields line total=0 named=0
   local state='' merged=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
 
   # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
-  if ! fields=$(gh api graphql \
+  if ! fields=$(fm_gh_at "$host" gh api graphql \
     -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged}}}' \
     -F "owner=$owner" -F "repo=$repo" -F "number=$number" \
     --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring)' \
@@ -949,11 +983,11 @@ FIELDS
   FM_PR_RECORD_MERGED=$merged
 }
 
-fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number>
-  local owner=$1 repo=$2 number=$3 output state
+fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number> <host>
+  local owner=$1 repo=$2 number=$3 host=$4 output state
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
-  if ! output=$(gh-axi pr view "$number" --repo "$owner/$repo" 2>/dev/null); then
+  if ! output=$(fm_gh_at "$host" gh-axi pr view "$number" --repo "$owner/$repo" 2>/dev/null); then
     return 1
   fi
   if ! state=$(printf '%s\n' "$output" | awk '
@@ -993,12 +1027,14 @@ fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number>
   esac
 }
 
-fm_pr_github_read_record() {  # <owner> <repo> <number>
-  if command -v gh >/dev/null 2>&1 && fm_pr_github_read_record_with_gh "$@"; then
+fm_pr_github_read_record() {  # <owner> <repo> <number> <host>
+  local host=${4-}
+  [ -n "$host" ] || return 1
+  if command -v gh >/dev/null 2>&1 && fm_pr_github_read_record_with_gh "$1" "$2" "$3" "$host"; then
     return 0
   fi
   command -v gh-axi >/dev/null 2>&1 || return 1
-  fm_pr_github_read_record_with_gh_axi "$@"
+  fm_pr_github_read_record_with_gh_axi "$1" "$2" "$3" "$host"
 }
 
 fm_pr_gitlab_read_record() {  # <host> <path> <number>

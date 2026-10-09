@@ -170,6 +170,7 @@ SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+printf '%s\n' "${GH_HOST-unset}" >> "${FM_TEST_GH_HOST_LOG:-/dev/null}"
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
@@ -457,6 +458,7 @@ run_pr_merge() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_HOST_LOG="$case_dir/gh-host.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
   FM_TEST_GH_VIEW_JSON="$case_dir/github-view.json" \
@@ -1728,6 +1730,43 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# A pull request on another GitHub host is addressed at that host for every gh
+# call, branch protection and ruleset reads included, while github.com leaves the
+# environment untouched.
+test_github_host_reaches_every_gh_call() {
+  local case_dir hosts
+  unset GH_HOST
+  case_dir=$(make_case github-host-other)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  write_github_required "$case_dir" classic:ci ruleset:ci
+  : > "$case_dir/gh-axi.log"
+  run_pr_merge "$case_dir" task-x1 https://ghe.example.com/my-org/my-repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "github-host-other: fm-pr-merge failed: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 31 my-org/my-repo --squash
+  assert_grep 'pr=https://ghe.example.com/my-org/my-repo/pull/31' "$case_dir/state/task-x1.meta" \
+    "github-host-other: pr= did not keep the host"
+  assert_grep 'api repos/my-org/my-repo/branches/main' "$case_dir/gh.log" \
+    "github-host-other: branch protection was not read"
+  assert_grep 'api --paginate repos/my-org/my-repo/rules/branches/main' "$case_dir/gh.log" \
+    "github-host-other: branch rules were not read"
+  assert_grep 'api graphql' "$case_dir/gh.log" "github-host-other: outcome was not read"
+  hosts=$(sort -u "$case_dir/gh-host.log")
+  [ "$hosts" = ghe.example.com ] \
+    || fail "github-host-other: every gh call must target the PR's host, saw: $hosts"
+
+  case_dir=$(make_case github-host-default)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+  : > "$case_dir/gh-axi.log"
+  run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/32 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "github-host-default: fm-pr-merge failed"
+  hosts=$(sort -u "$case_dir/gh-host.log")
+  [ "$hosts" = unset ] \
+    || fail "github-host-default: github.com must not select a host, saw: $hosts"
+  pass "fm-pr-merge addresses every gh call at the pull request's own host and leaves github.com untouched"
+}
+
 test_gitlab_url_resolves_and_merges() {
   local case_dir rc merge_line
   case_dir=$(make_gitlab_case gitlab-merges)
@@ -2400,6 +2439,7 @@ test_bundled_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_github_host_reaches_every_gh_call
 test_github_still_forwards_sha_arg
 test_gitlab_url_resolves_and_merges
 test_gitlab_host_comes_from_the_url
