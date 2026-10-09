@@ -1696,9 +1696,9 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
         return 0
       fi
       if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
-        fm_wake_append stale "$win" "stale: $win" || exit 1
+        fm_wake_append stale "$win" "stale: $win (task=$task)" || exit 1
         printf '%s' "$declared" > "$STATE/.stale-$key"
-        wake "stale: $win"
+        wake "stale: $win (task=$task)"
       fi
       return 0
     fi
@@ -1945,7 +1945,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     bounded=0
   fi
   if [ "$throttled" -ne 0 ]; then
-    fm_wake_append stale "$win" "stale: $win" || exit 1
+    fm_wake_append stale "$win" "stale: $win (task=$task)" || exit 1
     stale_wait_record "$key"
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
@@ -1969,7 +1969,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     triage_log "absorbed non-terminal stale (declared wait or open captain call already re-surfaced this window): $win"
     return 0
   fi
-  wake "stale: $win"
+  wake "stale: $win (task=$task)"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -3108,9 +3108,9 @@ EOF
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
+            fm_wake_append stale "$w" "stale: $w (task=$task)" || exit 1
             printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            wake "stale: $w (task=$task)"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's latest status event is captain-relevant - but that alone is not
@@ -3146,7 +3146,7 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              fm_wake_append stale "$w" "stale: $w (task=$task)" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
@@ -3158,7 +3158,7 @@ EOF
                 *) stale_end=''; stale_ident='' ;;
               esac
               mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
-              wake "stale: $w"
+              wake "stale: $w (task=$task)"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
