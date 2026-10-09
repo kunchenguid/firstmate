@@ -516,6 +516,9 @@ test_lock_steal_reap_cannot_remove_successor() {
   fakebin="$dir/fakebin"
   out="$dir/competitor"
   leave_dead_link_locks "$state" "$steal"
+  # The killed fixture owner may have its PID reused during a loaded serial
+  # shard. Pin a verified-dead PID so the race exercises reaping, not liveness.
+  printf '%s\n' "$(dead_pid)" > "$steal/pid"
   cat > "$fakebin/rm" <<'SH'
 #!/usr/bin/env bash
 last=
@@ -562,32 +565,51 @@ SH
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker i pids pid wins
+  local dir state lockdir dead marker gate hold i pids pid waiter winner wins
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  gate="$dir/first-winner"
+  hold="$dir/winner-release"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   : > "$marker"
+  mkfifo "$gate" "$hold"
+  # try_acquire is nonblocking: all one-shot candidates may lose to a transient
+  # steal mutex. A waiting contender guarantees eventual acquisition, and the
+  # FIFO keeps the winner alive until every other contender has finished.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    printf "%s\n" "${BASHPID:-$$}" >> "$3"
+    printf "%s\n" "${BASHPID:-$$}" > "$4"
+    IFS= read -r _ < "$5"
+  ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
+  waiter=$!
   pids=
   i=1
-  while [ "$i" -le 40 ]; do
+  while [ "$i" -le 39 ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        sleep 1
+        printf "%s\n" "${BASHPID:-$$}" > "$4"
+        IFS= read -r _ < "$5"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
     pids="$pids $!"
     i=$((i + 1))
   done
+  IFS= read -r winner < "$gate"
+  [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   for pid in $pids; do
-    wait "$pid" 2>/dev/null || true
+    [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true
   done
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  printf 'release\n' > "$hold"
+  wait "$winner" 2>/dev/null || true
   [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
   pass "concurrent stale-lock steal yields exactly one winner"
 }

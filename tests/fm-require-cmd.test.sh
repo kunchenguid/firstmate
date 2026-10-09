@@ -37,16 +37,44 @@ test_slash_command_is_taken_as_a_path() {
   pass "a command written as a path resolves to itself"
 }
 
-test_off_path_dir_resolves() {
-  local dir out
-  dir="$TMP_ROOT/offpath"
-  mkdir -p "$dir"
-  printf '%s\n' '#!/usr/bin/env bash' 'echo ran' > "$dir/offpath-tool"
-  chmod +x "$dir/offpath-tool"
-  out=$(FM_REQUIRE_CMD_DIRS="$dir" "$REQUIRE" --resolve-only offpath-tool) ||
-    fail "an off-PATH tool did not resolve"
-  [ "$out" = "$dir/offpath-tool" ] || fail "resolved the wrong off-PATH tool: $out"
-  pass "a tool outside PATH resolves through FM_REQUIRE_CMD_DIRS"
+test_directories_do_not_resolve() {
+  local explicit first second out rc
+  explicit="$TMP_ROOT/explicit-command"
+  first="$TMP_ROOT/path-first"
+  second="$TMP_ROOT/path-second"
+  mkdir -p "$explicit" "$first/path-command" "$second"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo ran' > "$second/path-command"
+  chmod +x "$second/path-command"
+
+  out=$("$REQUIRE" --resolve-only "$explicit" 2>&1)
+  rc=$?
+  [ "$rc" -eq 127 ] || fail "an explicit directory resolved successfully (got $rc)"
+  assert_contains "$out" "not an executable file" "the explicit-directory diagnostic was unclear"
+
+  out=$(PATH="$first" "$BASH" "$REQUIRE" --resolve-only path-command 2>&1)
+  rc=$?
+  [ "$rc" -eq 127 ] || fail "a PATH directory resolved successfully (got $rc)"
+  assert_contains "$out" "no executable found" "the PATH-directory diagnostic was unclear"
+
+  out=$(PATH="$first:$second" "$BASH" "$REQUIRE" --resolve-only path-command) ||
+    fail "a regular PATH executable after a directory did not resolve"
+  [ "$out" = "$second/path-command" ] || fail "resolved the wrong PATH command: $out"
+  pass "directories do not resolve as commands"
+}
+
+test_nonregular_fallback_does_not_resolve() {
+  local home path out rc
+  home="$TMP_ROOT/fifo-home"
+  path="$TMP_ROOT/fifo-path"
+  mkdir -p "$home/.local/bin" "$path"
+  mkfifo "$home/.local/bin/fifo-command"
+  chmod +x "$home/.local/bin/fifo-command"
+
+  out=$(HOME="$home" PATH="$path" "$BASH" "$REQUIRE" --resolve-only fifo-command 2>&1)
+  rc=$?
+  [ "$rc" -eq 127 ] || fail "a FIFO fallback resolved successfully (got $rc)"
+  assert_contains "$out" "no executable found" "the FIFO diagnostic was unclear"
+  pass "nonregular fallback candidates do not resolve"
 }
 
 test_npx_cache_resolves() {
@@ -62,21 +90,19 @@ test_npx_cache_resolves() {
 }
 
 test_unavailable_command_is_actionable() {
-  local out rc
-  out=$(FM_REQUIRE_CMD_DIRS="$TMP_ROOT/empty" "$REQUIRE" --resolve-only definitely-not-a-real-command 2>&1)
+  local first second home out rc
+  first="$TMP_ROOT/path-first"
+  second="$TMP_ROOT/path-second"
+  home="$TMP_ROOT/home"
+  mkdir -p "$first" "$second" "$home"
+  out=$(PATH="$first:$second" HOME="$home" "$BASH" "$REQUIRE" --resolve-only definitely-not-a-real-command 2>&1)
   rc=$?
   [ "$rc" -eq 127 ] || fail "an unavailable command did not exit 127 (got $rc)"
   assert_contains "$out" "definitely-not-a-real-command" "the diagnostic did not name the command"
-  assert_contains "$out" "searched PATH and:" "the diagnostic did not report where it looked"
-  assert_contains "$out" "FM_REQUIRE_CMD_DIRS" "the diagnostic offered no way forward"
-  pass "an unavailable command exits 127 naming the searched locations"
-}
-
-test_install_hint_replaces_advice() {
-  local out
-  out=$("$REQUIRE" --resolve-only --install-hint "run npm i -g backpass" definitely-not-a-real-command 2>&1 || true)
-  assert_contains "$out" "run npm i -g backpass" "the supplied install hint was ignored"
-  pass "a supplied install hint replaces the default advice"
+  assert_contains "$out" "$first" "the diagnostic omitted the first PATH location"
+  assert_contains "$out" "$second" "the diagnostic omitted the second PATH location"
+  assert_contains "$out" "$home/.local/bin" "the diagnostic omitted a fallback location"
+  pass "an unavailable command exits 127 naming every searched location"
 }
 
 test_resolve_only_does_not_run() {
@@ -101,31 +127,48 @@ test_run_passes_arguments_and_status() {
 }
 
 test_artifact_completion_gate() {
-  local tool artifact out rc
+  local tool writer directory_writer artifact directory out rc
   tool=$(fake_tool artifact-tool "printf 'analysis only\\n'")
   artifact="$TMP_ROOT/synthesis"
+  directory="$TMP_ROOT/synthesis.d"
 
   out=$("$REQUIRE" --expect-artifact "$artifact" "$tool" 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "an analysis-only run with no artifact exited 0"
   assert_contains "$out" "produced no artifact" "the missing-artifact diagnostic was not actionable"
 
-  : > "$artifact"
-  "$REQUIRE" --expect-artifact "$artifact" "$tool" >/dev/null 2>&1 &&
-    fail "an empty artifact file passed the completion gate"
+  printf 'stale synthesis\n' > "$artifact"
+  out=$("$REQUIRE" --expect-artifact "$artifact" "$tool" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a stale artifact file passed the completion gate"
+  assert_contains "$out" "artifact target already exists" "the stale-file diagnostic was not actionable"
+  case "$out" in
+    *"analysis only"*) fail "the command ran despite a stale artifact file" ;;
+  esac
 
-  mkdir -p "$artifact.d"
-  "$REQUIRE" --expect-artifact "$artifact.d" "$tool" >/dev/null 2>&1 &&
-    fail "an empty artifact directory passed the completion gate"
-  printf 'synthesis\n' > "$artifact.d/AGENTS.md"
-  "$REQUIRE" --expect-artifact "$artifact.d" "$tool" >/dev/null 2>&1 ||
-    fail "a populated artifact directory failed the completion gate"
+  mkdir -p "$directory"
+  printf 'stale synthesis\n' > "$directory/AGENTS.md"
+  out=$("$REQUIRE" --expect-artifact "$directory" "$tool" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a stale artifact directory passed the completion gate"
+  assert_contains "$out" "artifact target already exists" "the stale-directory diagnostic was not actionable"
+  case "$out" in
+    *"analysis only"*) fail "the command ran despite a stale artifact directory" ;;
+  esac
 
-  printf 'synthesis\n' > "$artifact"
-  out=$("$REQUIRE" --expect-artifact "$artifact" "$tool" 2>&1) ||
-    fail "a non-empty artifact failed the completion gate"
+  # shellcheck disable=SC2016 # The fixture body must retain the child's $1 literally.
+  writer=$(fake_tool artifact-writer 'printf "synthesis\n" > "$1"')
+  artifact="$TMP_ROOT/fresh-synthesis"
+  out=$("$REQUIRE" --expect-artifact "$artifact" "$writer" "$artifact" 2>&1) ||
+    fail "a fresh non-empty artifact failed the completion gate"
   assert_contains "$out" "verified $artifact" "success did not name the verified artifact"
-  pass "completion depends on a non-empty artifact, not on exit status"
+
+  # shellcheck disable=SC2016 # The fixture body must retain the child's $1 literally.
+  directory_writer=$(fake_tool artifact-directory-writer 'mkdir -p "$1"; printf "synthesis\n" > "$1/AGENTS.md"')
+  directory="$TMP_ROOT/fresh-synthesis.d"
+  "$REQUIRE" --expect-artifact "$directory" "$directory_writer" "$directory" >/dev/null 2>&1 ||
+    fail "a fresh populated artifact directory failed the completion gate"
+  pass "completion depends on a fresh non-empty artifact, not on exit status"
 }
 
 test_nonexecutable_slash_path_is_named() {
@@ -139,11 +182,12 @@ test_nonexecutable_slash_path_is_named() {
 
 test_path_command_resolves
 test_slash_command_is_taken_as_a_path
-test_off_path_dir_resolves
+test_directories_do_not_resolve
+test_nonregular_fallback_does_not_resolve
 test_npx_cache_resolves
 test_unavailable_command_is_actionable
-test_install_hint_replaces_advice
 test_resolve_only_does_not_run
 test_run_passes_arguments_and_status
 test_artifact_completion_gate
+test_nonexecutable_slash_path_is_named
 echo "# all fm-require-cmd tests passed"

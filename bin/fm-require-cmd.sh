@@ -1,39 +1,33 @@
 #!/usr/bin/env bash
 # Resolve a command to a runnable executable, run it, and verify its final artifact.
-# Prints the resolved absolute path on stdout before running anything, so a
+# Prints the resolved executable path on stdout before running anything, so a
 # caller that only needs the path captures it with --resolve-only.
 #
-# Resolution order, most authoritative first:
-#   1. PATH, via command -v.
-#   2. A command containing a slash, taken as a path as written.
-#   3. Every directory in $FM_REQUIRE_CMD_DIRS (colon-separated), the override
-#      seam for install locations outside PATH.
-#   4. ~/.local/bin.
-#   5. The npm exec cache, ~/.npm/_npx/*/node_modules/.bin, where an `npx <cmd>`
+# A command containing a slash is taken as a path as written.
+# Otherwise resolution searches, in order:
+#   1. PATH.
+#   2. ~/.local/bin.
+#   3. The npm exec cache, ~/.npm/_npx/*/node_modules/.bin, where an `npx <cmd>`
 #      package that was never installed globally still keeps a runnable binary.
 # An unresolved command exits 127 with a diagnostic naming every location it
 # searched, because the alternative a caller otherwise takes - reading the
 # shell's own "command not found", then reporting on anyway - is what ends a
 # task with neither a result nor a reason.
 #
-# --expect-artifact makes completion depend on the artifact rather than on the
-# command's exit status or on a timeout: a tool that exits 0 after analysis but
-# writes nothing still fails here. A file must exist and be non-empty; a
+# --expect-artifact makes completion depend on a fresh artifact rather than on
+# the command's exit status or on a timeout: a tool that exits 0 after analysis
+# but writes nothing still fails here. A file must exist and be non-empty; a
 # directory must exist and hold at least one entry.
 #
-# --install-hint replaces the default install advice in the unresolved
-# diagnostic.
-#
-# Usage: fm-require-cmd.sh [--resolve-only] [--expect-artifact <path>] [--install-hint <text>] <command> [args...]
+# Usage: fm-require-cmd.sh [--resolve-only] [--expect-artifact <path>] <command> [args...]
 set -eu
 
 usage() {
-  echo "usage: fm-require-cmd.sh [--resolve-only] [--expect-artifact <path>] [--install-hint <text>] <command> [args...]" >&2
+  echo "usage: fm-require-cmd.sh [--resolve-only] [--expect-artifact <path>] <command> [args...]" >&2
 }
 
 RESOLVE_ONLY=0
 ARTIFACT=""
-HINT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --resolve-only)
@@ -42,11 +36,6 @@ while [ "$#" -gt 0 ]; do
     --expect-artifact)
       [ "$#" -ge 2 ] || { usage; exit 1; }
       ARTIFACT=$2
-      shift
-      ;;
-    --install-hint)
-      [ "$#" -ge 2 ] || { usage; exit 1; }
-      HINT=$2
       shift
       ;;
     --)
@@ -69,34 +58,36 @@ done
 CMD=$1
 shift
 
-SEARCH="${FM_REQUIRE_CMD_DIRS:-}
-${HOME:-}/.local/bin"
+PATH_DIRS=()
+if [ -n "${PATH:-}" ]; then
+  PATH_REST=$PATH
+  while :; do
+    PATH_DIRS+=("${PATH_REST%%:*}")
+    [ "$PATH_REST" = "${PATH_REST#*:}" ] && break
+    PATH_REST=${PATH_REST#*:}
+  done
+fi
+SEARCH=("${HOME:-}/.local/bin")
 for bin in "${HOME:-}"/.npm/_npx/*/node_modules/.bin; do
   [ -d "$bin" ] || continue
-  SEARCH="$SEARCH
-$bin"
+  SEARCH+=("$bin")
 done
 
 EXE=""
 case "$CMD" in
   */*)
-    if [ -x "$CMD" ]; then
+    if [ -f "$CMD" ] && [ -x "$CMD" ]; then
       EXE=$CMD
     fi
     ;;
   *)
-    found=$(command -v "$CMD" 2>/dev/null) || found=""
-    if [ -n "$found" ] && [ -x "$found" ]; then
-      EXE=$found
-    else
-      for dir in $SEARCH; do
-        [ -n "$dir" ] || continue
-        if [ -x "$dir/$CMD" ] && [ ! -d "$dir/$CMD" ]; then
-          EXE="$dir/$CMD"
-          break
-        fi
-      done
-    fi
+    for dir in "${PATH_DIRS[@]}" "${SEARCH[@]}"; do
+      [ -n "$dir" ] || dir=$PWD
+      if [ -f "$dir/$CMD" ] && [ -x "$dir/$CMD" ]; then
+        EXE="$dir/$CMD"
+        break
+      fi
+    done
     ;;
 esac
 
@@ -107,14 +98,14 @@ if [ -z "$EXE" ]; then
       ;;
     *)
       PRETTY=""
-      for dir in $SEARCH; do
-        [ -n "$dir" ] || continue
+      for dir in "${PATH_DIRS[@]}" "${SEARCH[@]}"; do
+        [ -n "$dir" ] || dir=$PWD
         PRETTY="$PRETTY${PRETTY:+, }$dir"
       done
       {
         echo "fm-require-cmd.sh: $CMD: no executable found"
-        echo "fm-require-cmd.sh: searched PATH and: $PRETTY"
-        echo "fm-require-cmd.sh: ${HINT:-install $CMD and put it on PATH, or set FM_REQUIRE_CMD_DIRS to the directory holding it}"
+        echo "fm-require-cmd.sh: searched: $PRETTY"
+        echo "fm-require-cmd.sh: install $CMD and put it on PATH"
       } >&2
       ;;
   esac
@@ -123,6 +114,11 @@ fi
 
 printf '%s\n' "$EXE"
 [ "$RESOLVE_ONLY" -eq 0 ] || exit 0
+
+if [ -n "$ARTIFACT" ] && { [ -e "$ARTIFACT" ] || [ -L "$ARTIFACT" ]; }; then
+  echo "fm-require-cmd.sh: artifact target already exists at $ARTIFACT; remove it before running" >&2
+  exit 1
+fi
 
 set +e
 "$EXE" "$@"
