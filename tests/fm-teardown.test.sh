@@ -744,6 +744,53 @@ test_droid_teardown_removes_task_trust() {
   pass 'teardown retires exact-worktree Droid trust even after a harness switch'
 }
 
+test_droid_teardown_retry_after_trust_retirement() {
+  local case_dir trust_home store rc=0
+  case_dir=$(make_case droid-trust-retired-retry)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' harness=droid >> "$case_dir/state/task-x1.meta"
+  trust_home="$case_dir/user"
+  mkdir -p "$trust_home/.factory"
+  store="$trust_home/.factory/settings.json"
+  printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
+  HOME="$trust_home" "$ROOT/bin/fm-droid-trust.sh" --receipt "$case_dir/state/task-x1.droid-trust" "$case_dir/wt" "$case_dir/project" >/dev/null || fail 'retry trust setup failed'
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$case_dir/fakebin/treehouse"
+
+  HOME="$trust_home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'failed worktree return did not retain the task for retry'
+  assert_present "$case_dir/state/task-x1.meta" 'failed worktree return lost task metadata'
+  assert_absent "$case_dir/state/task-x1.droid-trust" 'first retirement retained its receipt'
+  jq -e '.otherSetting == "preserve" and .trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'first retirement changed unrelated trust'
+
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt" || fail 'could not remove the retired worktree'
+  HOME="$trust_home" run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || fail "receipt-free retry failed: $(cat "$case_dir/retry.stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" 'retry retained task metadata'
+  assert_absent "$case_dir/state/task-x1.droid-trust" 'retry recreated a trust receipt'
+  jq -e '.otherSetting == "preserve" and .trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'retry recreated trust or changed unrelated settings'
+  pass 'Droid teardown retries after retirement without requiring or trusting a vanished worktree'
+}
+
+test_forced_droid_child_cleanup_without_receipts() {
+  local case_dir trust_home store home child
+  case_dir=$(make_case droid-child-receipt-free)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  for child in child-a child-b; do
+    printf '%s\n' harness=droid >> "$home/state/$child.meta"
+  done
+  git -C "$case_dir/project" worktree remove --force "$case_dir/child-a-wt" || fail 'could not remove the retired child worktree'
+  trust_home="$case_dir/user"
+  mkdir -p "$trust_home/.factory"
+  store="$trust_home/.factory/settings.json"
+  printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
+  HOME="$trust_home" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "receipt-free child cleanup failed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" 'forced child cleanup retained the parent record'
+  assert_absent "$home" 'forced child cleanup retained the retired home'
+  jq -e '.otherSetting == "preserve" and .trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'child cleanup changed unrecorded trust'
+  pass 'forced Droid child cleanup is receipt-only for present and missing worktrees'
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -6211,6 +6258,8 @@ test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_droid_teardown_removes_task_trust
+test_droid_teardown_retry_after_trust_retirement
+test_forced_droid_child_cleanup_without_receipts
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note

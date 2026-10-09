@@ -3170,16 +3170,7 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
-<<<<<<< HEAD
-if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
-  exit 0
-fi
-
-
 test_relaunch_off_opencode_removes_tracked_wiring
-=======
->>>>>>> 56a607b0 (fix: preserve Droid trust cleanup ownership)
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint

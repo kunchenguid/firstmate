@@ -3458,12 +3458,8 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   return 1
 }
 
-remove_droid_task_trust() {  # <meta> <state> <id> <worktree> <project>
-  local meta=$1 state=$2 id=$3 wt=$4 project=$5
-  if [ ! -e "$state/$id.droid-trust" ] && [ "$(meta_value "$meta" harness)" = droid ]; then
-    # Capture exact paths for a task created before receipt-based registration.
-    "$SCRIPT_DIR/fm-droid-trust.sh" --receipt "$state/$id.droid-trust" "$wt" "$project" >/dev/null || return 1
-  fi
+remove_droid_task_trust() {  # <state> <id>
+  local state=$1 id=$2
   if [ -e "$state/$id.droid-trust" ] || [ -L "$state/$id.droid-trust" ]; then
     "$SCRIPT_DIR/fm-droid-trust.sh" --retire "$state/$id.droid-trust" "$state" "$id" >/dev/null || return 1
   fi
@@ -3525,8 +3521,9 @@ cleanup_firstmate_home_children() {
     fi
     teardown_export_records "$sub_state" "$child_id" || return 1
     if [ "$child_kind" != secondmate ]; then
-      remove_droid_task_trust "$child_meta" "$sub_state" "$child_id" "$child_wt" "$child_proj" || return 1
-    fi    if [ "$child_kind" = secondmate ]; then
+      remove_droid_task_trust "$sub_state" "$child_id" || return 1
+    fi
+    if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
@@ -3994,7 +3991,7 @@ fi
 # Retire stored trust ownership even for a missing or reassigned pooled slot.
 # The helper transfers cleanup when another recorded task still uses that path.
 if [ "$KIND" != secondmate ]; then
-  remove_droid_task_trust "$META" "$STATE" "$ID" "$WT" "$PROJ" || exit 1
+  remove_droid_task_trust "$STATE" "$ID" || exit 1
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
