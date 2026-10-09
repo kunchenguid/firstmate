@@ -136,7 +136,7 @@ test_markerless_ancestry_outranks_foreign_marker() {
   local dir fakebin bin got name
   dir="$TMP_ROOT/markerless"
   fakebin=$(blind_ancestry_bin "$dir/blind")
-  for name in codex opencode kimi muse-bin-0.1.0 agy; do
+  for name in codex opencode kimi muse-bin-0.1.0 agy droid; do
     bin=$(named_bin "$dir/$name-tree" "$name")
     local expect=$name
     case "$name" in muse-bin-*) expect=muse ;; esac
