@@ -196,6 +196,12 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
 jq -e '.schema == "fm-secondmate-home-summary.v1"' "$TMP_ROOT/large-summary.json" \
   >/dev/null || fail "large secondmate home-summary output was not valid"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  "$SNAPSHOT" --contribution-input > "$TMP_ROOT/large-contribution-input.json" \
+  || fail "fleet snapshot contribution-input mode failed for a large backlog"
+jq -e '(.backlog.records | length) == 1200 and (.tasks | type) == "array"' \
+  "$TMP_ROOT/large-contribution-input.json" >/dev/null \
+  || fail "large contribution-input output was not valid"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
   FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
   "$WRITER" || fail "home-summary writer failed for a large backlog"
 jq -e '.schema == "fm-secondmate-home-summary.v1"' \
@@ -1076,3 +1082,131 @@ case "$report_out" in
     ;;
 esac
 pass "repeated publication failure is reported at session start until it clears"
+
+# --- adaptive profile-informed bound and exponential retry backoff -----------
+
+ADAPT_HOME="$TMP_ROOT/adapt-home"
+mkdir -p "$ADAPT_HOME/state" "$ADAPT_HOME/data" "$ADAPT_HOME/config" \
+  "$ADAPT_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$ADAPT_HOME/AGENTS.md"
+printf 'adapt\n' > "$ADAPT_HOME/.fm-secondmate-home"
+cat > "$ADAPT_HOME/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+
+for i in $(seq 1 10); do
+  printf 'window=fmtest:task-%d\n' "$i" > "$ADAPT_HOME/state/task-$i.meta"
+done
+
+ADAPT_LOCK_MARKER="$TMP_ROOT/adapt-lock-held"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ADAPT_HOME" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$2/state/.home-summary-refresh.lock"
+  : > "$3"
+  sleep 30
+' _ "$ROOT" "$ADAPT_HOME" "$ADAPT_LOCK_MARKER" &
+LOCK_HOLDER_PID=$!
+i=0
+while [ ! -e "$ADAPT_LOCK_MARKER" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$LOCK_HOLDER_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$ADAPT_LOCK_MARKER" ] || fail "could not hold lock for adaptive timeout coverage"
+
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ADAPT_HOME" \
+  FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort || fail "explicit timeout best-effort failed"
+grep -F 'refresh exceeded its 1-second deadline' "$ADAPT_HOME/state/.home-summary-refresh.log" >/dev/null \
+  || fail "explicit timeout override was not reflected in failure log"
+rm -f "$ADAPT_HOME/state/.home-summary-refresh.log"
+kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+LOCK_HOLDER_PID=
+pass "explicit timeout override takes precedence over adaptive timeout"
+
+BACKOFF_HOME="$TMP_ROOT/backoff-home"
+mkdir -p "$BACKOFF_HOME/state" "$BACKOFF_HOME/data" "$BACKOFF_HOME/config" \
+  "$BACKOFF_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$BACKOFF_HOME/AGENTS.md"
+printf 'backoff\n' > "$BACKOFF_HOME/.fm-secondmate-home"
+cat > "$BACKOFF_HOME/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+
+FAIL_WORKER_BIN="$TMP_ROOT/fail-worker-bin"
+CALLED_MARKER="$TMP_ROOT/fail-worker-called"
+mkdir -p "$FAIL_WORKER_BIN"
+cat > "$FAIL_WORKER_BIN/jq" <<'SH'
+#!/usr/bin/env bash
+if [ -n "$CALLED_MARKER_PATH" ]; then
+  : > "$CALLED_MARKER_PATH"
+fi
+exit 9
+SH
+chmod +x "$FAIL_WORKER_BIN/jq"
+
+PATH="$FAIL_WORKER_BIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  "$WRITER" --best-effort || fail "initial failure failed best-effort"
+[ "$(wc -l < "$BACKOFF_HOME/state/.home-summary-refresh.log" | tr -d '[:space:]')" -eq 1 ] \
+  || fail "first failure was not logged"
+
+PATH="$FAIL_WORKER_BIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  "$WRITER" --best-effort || fail "immediate retry failed best-effort"
+[ "$(wc -l < "$BACKOFF_HOME/state/.home-summary-refresh.log" | tr -d '[:space:]')" -eq 2 ] \
+  || fail "immediate retry did not execute and log failure #2"
+
+rm -f "$CALLED_MARKER"
+
+PATH="$FAIL_WORKER_BIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  CALLED_MARKER_PATH="$CALLED_MARKER" "$WRITER" --best-effort || fail "backed-off best-effort returned non-zero"
+[ ! -e "$CALLED_MARKER" ] || fail "backed-off call executed the refresh worker instead of skipping"
+[ "$(wc -l < "$BACKOFF_HOME/state/.home-summary-refresh.log" | tr -d '[:space:]')" -eq 2 ] \
+  || fail "backed-off call added spurious entries to the failure log"
+
+PATH="$FAIL_WORKER_BIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  CALLED_MARKER_PATH="$CALLED_MARKER" "$WRITER" >/dev/null 2>&1 && fail "non-best-effort call did not propagate worker failure"
+[ -e "$CALLED_MARKER" ] || fail "non-best-effort call did not bypass backoff"
+rm -f "$CALLED_MARKER"
+
+PATH="$FAIL_WORKER_BIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  FM_HOME_SUMMARY_BACKOFF=0 CALLED_MARKER_PATH="$CALLED_MARKER" "$WRITER" --best-effort || fail "disabled backoff best-effort failed"
+[ -e "$CALLED_MARKER" ] || fail "FM_HOME_SUMMARY_BACKOFF=0 did not execute worker"
+rm -f "$CALLED_MARKER"
+
+sleep 2.5
+PATH="$FAIL_WORKER_BIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  FM_HOME_SUMMARY_BACKOFF_BASE=1 CALLED_MARKER_PATH="$CALLED_MARKER" "$WRITER" --best-effort || fail "expired backoff best-effort failed"
+[ -e "$CALLED_MARKER" ] || fail "retry did not execute after backoff expired"
+rm -f "$CALLED_MARKER"
+
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  "$WRITER" || fail "publication failed"
+jq -e --arg home "$BACKOFF_HOME" '.schema == "fm-secondmate-home-summary.v1" and .home == $home' \
+  "$BACKOFF_HOME/state/home-summary.json" >/dev/null || fail "publication was invalid"
+
+PATH="$FAIL_WORKER_BIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  CALLED_MARKER_PATH="$CALLED_MARKER" "$WRITER" --best-effort || fail "post-publication first failure failed best-effort"
+[ -e "$CALLED_MARKER" ] || fail "post-publication call did not execute immediately"
+pass "exponential backoff suppresses repeated best-effort retries and clears on publication"
+
+ANCHOR_HOME="$TMP_ROOT/backoff-anchor-home"
+mkdir -p "$ANCHOR_HOME/state" "$ANCHOR_HOME/data" "$ANCHOR_HOME/config" \
+  "$ANCHOR_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$ANCHOR_HOME/AGENTS.md"
+printf 'anchor\n' > "$ANCHOR_HOME/.fm-secondmate-home"
+cp "$BACKOFF_HOME/data/backlog.md" "$ANCHOR_HOME/data/backlog.md"
+printf '[2000-01-01T00:00:00Z] refresh exceeded its 120-second deadline\n[2000-01-01T00:00:01Z] refresh exceeded its 120-second deadline\n' \
+  > "$ANCHOR_HOME/state/.home-summary-refresh.log"
+rm -f "$CALLED_MARKER"
+PATH="$FAIL_WORKER_BIN:$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ANCHOR_HOME" \
+  CALLED_MARKER_PATH="$CALLED_MARKER" "$WRITER" --best-effort || fail "anchored backoff best-effort failed"
+[ ! -e "$CALLED_MARKER" ] || fail "backoff measured from the attempt start stamp instead of when the failure was recorded"
+pass "backoff window starts when the failure was recorded, not when the attempt started"

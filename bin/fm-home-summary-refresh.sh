@@ -16,7 +16,10 @@
 # A home-local refresh lock serializes concurrent triggers so an older in-flight
 # summary cannot overwrite one computed after a later status change. The shared
 # timeout owner bounds the complete refresh with FM_HOME_SUMMARY_TIMEOUT
-# (default 60 seconds). No reader can observe temporary output through the
+# (default: 120 seconds plus 0.5s per task in state, capped at 300 seconds).
+# Repeated best-effort failures back off exponentially before retrying
+# (FM_HOME_SUMMARY_BACKOFF, FM_HOME_SUMMARY_BACKOFF_BASE=30,
+# FM_HOME_SUMMARY_BACKOFF_MAX=900). No reader can observe temporary output through the
 # ledger path.
 #
 # With --best-effort, a failure is appended to the bounded home-local
@@ -38,7 +41,7 @@ LEDGER="$STATE/home-summary.json"
 ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
-HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
+HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
@@ -71,7 +74,13 @@ case "$ERROR_LOG_MAX_BYTES" in
   ''|*[!0-9]*|0) ERROR_LOG_MAX_BYTES=65536 ;;
 esac
 case "$HOME_SUMMARY_TIMEOUT" in
-  ''|*[!0-9]*|0) HOME_SUMMARY_TIMEOUT=60 ;;
+  ''|*[!0-9]*|0)
+    task_count=$(find "$STATE" -maxdepth 1 -name "*.meta" 2>/dev/null | wc -l)
+    case "$task_count" in ''|*[!0-9]*) task_count=0 ;; esac
+    # 120s base on slow hosts, plus 0.5s per task bounds prefetch and serial task json formatting, capped for synchronous callers
+    HOME_SUMMARY_TIMEOUT=$(( 120 + task_count / 2 ))
+    [ "$HOME_SUMMARY_TIMEOUT" -le 300 ] || HOME_SUMMARY_TIMEOUT=300
+    ;;
 esac
 case "$HOME_SUMMARY_IF_IDLE" in
   0|1) ;;
@@ -215,9 +224,74 @@ if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
   exit 0
 fi
 
+home_summary_backoff_active() {
+  [ "${FM_HOME_SUMMARY_BACKOFF:-1}" != 0 ] && [ "${FM_HOME_SUMMARY_BACKOFF:-1}" != off ] || return 1
+  [ -f "$ERROR_LOG" ] && [ -r "$ERROR_LOG" ] || return 1
+
+  local since=''
+  if [ -f "$LEDGER" ] && [ -r "$LEDGER" ]; then
+    since=$(LC_ALL=C sed -n 's/.*"generated"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$LEDGER" 2>/dev/null | head -1)
+  fi
+
+  local failures
+  failures=$(LC_ALL=C awk -v since="$since" '
+    match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\]/) {
+      stamp = substr($0, 2, RLENGTH - 2)
+      if (since == "" || stamp > since) {
+        n += 1
+      } else if (stamp == since) {
+        same_second += 1
+      }
+    }
+    END {
+      if (since != "" && n > 0) n += same_second
+      printf "%d", n + 0
+    }' "$ERROR_LOG" 2>/dev/null) || return 1
+
+  case "$failures" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$failures" -ge 2 ] || return 1
+
+  local last_epoch now_epoch
+  last_epoch=$(date -u -r "$ERROR_LOG" +%s 2>/dev/null) || return 1
+  now_epoch=$(date -u +%s 2>/dev/null || date +%s)
+  case "$last_epoch" in ''|*[!0-9]*) return 1 ;; esac
+  case "$now_epoch" in ''|*[!0-9]*) return 1 ;; esac
+
+  local base=${FM_HOME_SUMMARY_BACKOFF_BASE:-30}
+  case "$base" in ''|*[!0-9]*|0) base=30 ;; esac
+  local max_backoff=${FM_HOME_SUMMARY_BACKOFF_MAX:-900}
+  case "$max_backoff" in ''|*[!0-9]*|0) max_backoff=900 ;; esac
+
+  local exp=$(( failures - 2 ))
+  local backoff=$base
+  if [ "$exp" -gt 20 ]; then
+    backoff=$max_backoff
+  else
+    local i=0
+    while [ "$i" -lt "$exp" ] && [ "$backoff" -lt "$max_backoff" ]; do
+      backoff=$(( backoff * 2 ))
+      i=$(( i + 1 ))
+    done
+    if [ "$backoff" -gt "$max_backoff" ]; then
+      backoff=$max_backoff
+    fi
+  fi
+
+  local elapsed=$(( now_epoch - last_epoch ))
+  if [ "$elapsed" -lt "$backoff" ]; then
+    return 0
+  fi
+  return 1
+}
+
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
+  if [ "$BEST_EFFORT" -eq 1 ] && home_summary_backoff_active; then
+    exit 0
+  fi
   attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
+    FM_HOME_SUMMARY_TIMEOUT="$HOME_SUMMARY_TIMEOUT" \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
     FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_worker; then
