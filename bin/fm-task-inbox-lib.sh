@@ -407,12 +407,6 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
         [ "$backend" = orca ] && [ "$key_rc" -eq 4 ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ] && return 1
         return 2
       fi
-      if [ "$backend" = orca ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ]; then
-        target=$FM_ORCA_RESOLVED_TERMINAL
-        sleep 0.3
-        [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" = empty ] || return 1
-        return 0
-      fi
       sleep 0.3
       fm_task_inbox_composer_holds "$backend" "$target" "$FM_TASK_INBOX_RING_LINE" "$label" || return 0
       key_rc=0
@@ -420,11 +414,6 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
       if [ "$key_rc" -ne 0 ]; then
         [ "$backend" = orca ] && [ "$key_rc" -eq 4 ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ] && return 1
         return 2
-      fi
-      if [ "$backend" = orca ] && [ -n "${FM_ORCA_RESOLVED_TERMINAL:-}" ]; then
-        target=$FM_ORCA_RESOLVED_TERMINAL
-        sleep 0.3
-        [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" = empty ] || return 1
       fi
       return 0
       ;;

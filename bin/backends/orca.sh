@@ -574,6 +574,9 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
       esac
       if fm_backend_orca_send_key_once "$live" "$key"; then
         FM_ORCA_RESOLVED_TERMINAL=$live
+        case "$key" in
+          Enter|enter) [ -z "${FM_TASK_INBOX_RING_LINE:-}" ] || return 4 ;;
+        esac
         return 0
       else
         fm_backend_orca_replay_last
@@ -606,6 +609,11 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
   fi
   target=${FM_ORCA_RESOLVED_TERMINAL:-$terminal}
   sleep "$settle"
+  if [ "$target" != "$terminal" ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+    fm_backend_orca_send_key_once "$target" Enter >/dev/null 2>&1 || true
+    printf 'inbox-deferred'
+    return 0
+  fi
   fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
     "$target" "$retries" "$sleep_s" "" FM_ORCA_RESOLVED_TERMINAL
 }

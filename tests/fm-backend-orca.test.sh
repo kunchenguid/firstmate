@@ -2002,7 +2002,10 @@ test_inbox_retarget_preserves_pending_content_and_explicit_input() {
       esac
       case "$mode" in
         cursor-*|unreadable) expected=1 ;;
-        initial-empty-busy) held=; busy=unknown ;;
+        initial-empty-busy) held=; busy=unknown; expected=1 ;;
+      esac
+      case "$mode" in
+        initial-empty|initial-own|retry-own|second-own) expected=1 ;;
       esac
       case "$mode" in initial-own|retry-own) drops=1 ;; esac
       printf '%s' "$held" > "$CASE_DIR/composer"
@@ -2116,7 +2119,14 @@ JS
         || fail "$mode failed: $(cat "$CASE_DIR/err")"
       [ "$out" = "$expected" ] || fail "$code $mode: expected ring status $expected, got '$out'"
       events=$(cat "$CASE_DIR/inputs")
-      if [ "$expected" -eq 1 ]; then
+      if [[ "$mode" =~ ^(initial-empty|initial-own|retry-own|second-own)$ ]]; then
+        [ "$(printf "%s\n" "$events" | rg -c "^live Enter$")" = 1 ] || fail "$mode retried Enter on replacement"
+        if [ -s "$CASE_DIR/submitted" ]; then
+          [ "$(cat "$CASE_DIR/submitted")" = "$bell" ] || fail "$mode submitted other content"
+        else
+          [ "$(cat "$CASE_DIR/composer")" = "$bell" ] || fail "$mode lost the pending doorbell"
+        fi
+      elif [ "$expected" -eq 1 ]; then
         assert_not_contains "$events" live "$mode sent replacement input despite pending content"
         [ "$(cat "$CASE_DIR/composer")" = "$held" ] || fail "$mode changed the protected composer"
         [ ! -s "$CASE_DIR/submitted" ] || fail "$mode submitted pending content"

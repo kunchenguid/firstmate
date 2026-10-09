@@ -2483,9 +2483,6 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
         [ "$i" -ge "$retries" ] || continue
         ;;
     esac
-    if [ "$state" != empty ] && [ -n "$resolved_target_var" ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
-      state=inbox-deferred
-    fi
     printf '%s' "$state"
     return 0
   done

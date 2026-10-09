@@ -4,8 +4,9 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-orca-submit-restart)
 
-for order in before-text before-enter pending second-enter; do
+for order in before-text before-enter pending second-enter original-pending original-typed; do
   for mode in empty draft busy unreadable failure success unknown-after pending-after; do
+    case "$order/$mode" in original-*/success) ;; original-*/*) continue ;; esac
     evidence="$TMP_ROOT/$order-$mode"
     mkdir -p "$evidence"
     case "$mode" in
@@ -13,10 +14,13 @@ for order in before-text before-enter pending second-enter; do
       empty|unreadable) : > "$evidence/composer" ;;
       *) printf doorbell > "$evidence/composer" ;;
     esac
+    [ "$order" != original-typed ] || : > "$evidence/composer"
     out=$(bash -c '
-      . "$1/bin/backends/orca.sh"
-      . "$1/bin/fm-task-inbox-lib.sh"
       order=$2 mode=$3 evidence=$4
+      export FM_HOME="$evidence" FM_STATE_OVERRIDE="$evidence/state" FM_CONFIG_OVERRIDE="$evidence/config"
+      mkdir -p "$FM_STATE_OVERRIDE" "$FM_CONFIG_OVERRIDE"
+      . "$1/bin/fm-watch.sh"
+      . "$1/bin/backends/orca.sh"
       fm_backend_orca_tool_check() { return 0; }
       stale() {
         FM_ORCA_LAST_STDERR=terminal_handle_stale
@@ -28,11 +32,18 @@ for order in before-text before-enter pending second-enter; do
         local terminal=$5 text=$7
         printf "%s text\n" "$terminal" >> "$evidence/inputs"
         if [ "$terminal" = old ] && [ "$order" = before-text ]; then stale; return 1; fi
-        if [ "$terminal" = live ]; then printf "%s" "$text" >> "$evidence/composer"; fi
+        if [ "$terminal" = live ] || [ "$order" = original-typed ]; then printf "%s" "$text" >> "$evidence/composer"; fi
         printf "%s\n" "$terminal" >> "$evidence/typed"
       }
       fm_backend_orca_send_key_once() {
         printf "%s Enter\n" "$1" >> "$evidence/inputs"
+        case "$order" in
+          original-*)
+            if [ ! -f "$evidence/first-enter" ]; then touch "$evidence/first-enter"; return 0; fi
+            cat "$evidence/composer" > "$evidence/submitted"
+            : > "$evidence/composer"
+            return 0 ;;
+        esac
         if [ "$1" = old ]; then
           if [ "$order" = second-enter ] && [ ! -f "$evidence/first-enter" ]; then
             touch "$evidence/first-enter"
@@ -42,14 +53,15 @@ for order in before-text before-enter pending second-enter; do
           return 1
         fi
         if [ "$mode" = failure ]; then FM_ORCA_LAST_RC=1; return 1; fi
+        [ "$mode" != pending-after ] || return 0
         cat "$evidence/composer" >> "$evidence/submitted"
-        [ "$mode" = pending-after ] || : > "$evidence/composer"
+        : > "$evidence/composer"
       }
       fm_backend_orca_resolve_live_terminal() { printf live; }
       fm_backend_orca_composer_capture() {
         local body rule
         printf "%s\n" "$1" >> "$evidence/reads"
-        if [ "$1" = old ]; then
+        if [ "$1" = old ] && [[ "$order" != original-* ]]; then
           body=doorbell
         else
           [ "$mode" != unreadable ] || return 1
@@ -79,19 +91,40 @@ for order in before-text before-enter pending second-enter; do
       fm_backend_send_text_submit() { shift; fm_backend_orca_send_text_submit "$@"; }
       rc=0
       fm_task_inbox_ring orca old record || rc=$?
+      if [ "$mode" = pending-after ]; then
+        : > "$FM_CONFIG_OVERRIDE/wait-no-turns"
+        rec=$(fm_task_inbox_write "$STATE" t1 "durable steer" fire-and-forget)
+        fm_task_inbox_mark_retry "$STATE" t1 "$rec"
+        touch -t 202001010000 "$STATE/t1.inbox/.retry-ring"
+        window_backend() { printf orca; }
+        window_label() { printf label; }
+        watcher_capture() { WATCHER_CAPTURE=; }
+        window_is_busy() { return 1; }
+        status_own_open_decisions() { return 0; }
+        triage_log() { return 0; }
+        inbox_steer_check old t1
+        [ "$(cat "$STATE/t1.inbox/.retry-ring")" = "${rec##*/}" ] || exit 1
+        [ -f "$rec" ] || exit 1
+        [ "$(cat "$evidence/composer")" = doorbell ] || exit 1
+      fi
       printf "%s" "$rc"
     ' bash "$ROOT" "$order" "$mode" "$evidence")
     expected=1
-    case "$mode" in
-      failure) expected=2 ;;
-      success) expected=0 ;;
-      empty) [ "$order" != before-text ] || expected=0 ;;
+    case "$order/$mode" in
+      original-*/success) expected=0 ;;
+      before-text/failure) ;;
+      */failure) expected=2 ;;
     esac
     [ "$out" = "$expected" ] || fail "$order/$mode: expected status $expected, got $out"
     if [ "$expected" = 0 ]; then
       [ "$(cat "$evidence/submitted")" = doorbell ] || fail "$order/$mode: own doorbell was not submitted exactly once"
       [ ! -s "$evidence/composer" ] || fail "$order/$mode: composer did not clear"
-      [ "$(tail -n 1 "$evidence/reads")" = live ] || fail "$order/$mode: verification missed the replacement"
+      [ "$(rg -c '^old Enter$' "$evidence/inputs")" = 2 ] || fail "$order/$mode: original two-Enter budget changed"
+    else
+      enters=$(rg -c '^live Enter$' "$evidence/inputs" || true)
+      limit=1
+      [ "$mode" != pending-after ] || limit=2
+      [ "${enters:-0}" -le "$limit" ] || fail "$order/$mode: retried Enter on replacement in the same send"
     fi
     case "$mode" in
       empty|draft|busy|unreadable)
@@ -103,4 +136,4 @@ for order in before-text before-enter pending second-enter; do
     esac
   done
 done
-pass "Orca restart orders require own doorbell submission or defer"
+pass "Orca retargets retain retry marks; original sends retain two Enter attempts"
