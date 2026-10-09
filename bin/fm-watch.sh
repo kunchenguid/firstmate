@@ -12,10 +12,16 @@
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # That cadence is hours long and condition-aware: a paused: line naming
-# `until <UTC ISO 8601>` is rechecked when that time passes, but a declared time
-# beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
-# while an away record (state/.afk-contract, never quiet mode's) exists an
-# item held for the captain is never rechecked at all, in either posture.
+# `until <UTC ISO 8601>` is rechecked when that time passes, and a declared time
+# further out extends the cadence up to the FM_PAUSE_UNTIL_MAX_SECS ceiling.
+# An item held for the captain is never rechecked at all while an away record
+# (state/.afk-contract, never quiet mode's) exists, and with a present captain -
+# attended or in quiet mode - an ordinary crew task's unanswered hold surfaces
+# once, then is rechecked at most once per the far longer
+# FM_CAPTAIN_HOLD_RESURFACE_SECS, because until the captain answers a recheck can
+# only restate their own question; a captain-held line on the paused path
+# (secondmate windows, confirmed-dead crews, busy over-age panes, a live idle
+# pane whose display hash stays unchanged) keeps the PAUSE_RESURFACE_SECS cadence.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -39,7 +45,10 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane about to escalate
+#                          resume, and further unchanged escalations then move to
+#                          the bounded PAUSE_RESURFACE_SECS recheck cadence
+#                          instead of repeating on the wedge clock.
+#                          Unless afk is active. A pane about to escalate
 #                          that can account for its quiet - a `paused:` external
 #                          wait or a verified `captain-held` transfer its worker
 #                          declared, or, where config/wedge-defer-parked-gate
@@ -376,13 +385,26 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 # (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten wait cannot rot
-# invisibly - except an item held for the captain while the away-posture record
-# exists, which is never rechecked (away_record_present below).
+# invisibly - except an item held for the captain, which is never rechecked
+# while an away record exists (away_record_present below) and, for an ordinary
+# crew task whose pane hash keeps changing, takes the far longer ceiling below instead.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# The separate, far longer ceiling an UNANSWERED captain call is silent for,
+# attended as well as away. A recheck inside it can only restate the captain's
+# own open question back at them, so after its first alarm it is rechecked at
+# most once per this ceiling so a forgotten one cannot rot invisibly. 0 disables
+# the silence and leaves the PAUSE_RESURFACE_SECS cadence alone.
+CAPTAIN_HOLD_RESURFACE_SECS=${FM_CAPTAIN_HOLD_RESURFACE_SECS:-86400}
+case "$CAPTAIN_HOLD_RESURFACE_SECS" in ''|*[!0-9]*) CAPTAIN_HOLD_RESURFACE_SECS=86400 ;; esac
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
 # rechecked before that time, and it is rechecked once as soon as that time
 # passes even when the flat cadence has not elapsed, then held to the cadence.
+# A time further out than the flat cadence extends the recheck instead of being
+# capped by it, up to this ceiling (fm-classify-lib.sh owns why).
+PAUSE_UNTIL_MAX_SECS=${FM_PAUSE_UNTIL_MAX_SECS:-$FM_PAUSE_UNTIL_MAX_SECS_DEFAULT}
+[ "$PAUSE_UNTIL_MAX_SECS" -ge "$PAUSE_RESURFACE_SECS" ] 2>/dev/null \
+  || PAUSE_UNTIL_MAX_SECS=$PAUSE_RESURFACE_SECS
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -418,6 +440,8 @@ away_record_present() { fm_afk_contract_away_present "$STATE"; }
 captain_held_silenced() {  # <status-line>
   status_is_captain_held "$1" && away_record_present
 }
+
+
 
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
@@ -1145,9 +1169,13 @@ secondmate_liveness_tick() {
 # no longer a one-off. At the threshold, wedge_timer_check appends a
 # "demand-deep-inspection" marker to the wake payload so the wake reason itself
 # (not just repetition the supervisor has to notice on its own) forces a closer
-# look instead of another routine supervision resume. Reset wherever a window's
-# pane/hash state resets to genuinely active (see the two rm-on-reset call sites
-# below).
+# look instead of another routine supervision resume. Past the threshold the
+# closer look is already demanded, so an unchanged pane moves to the bounded
+# PAUSE_RESURFACE_SECS recheck cadence rather than re-escalating every
+# STALE_ESCALATE_SECS; this file's own mtime is that cadence's throttle, which is
+# why the counter is written only when an escalation actually fires. Reset
+# wherever a window's pane/hash state resets to genuinely active (see the two
+# rm-on-reset call sites below), which also restores the ordinary ladder.
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
@@ -1162,13 +1190,16 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # window; wake() itself exits the cycle, exactly as it does inline. An optional
 # <min-age> replaces the cadence as the absorb-age gate for one call (0 lets a
 # declared `until` time that has just passed re-surface at once), while the
-# throttle keeps the cadence between repeats.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age]
+# throttle keeps the cadence between repeats. An optional <repeat-secs> widens
+# that repeat cadence too, so a wait whose own declared time earned a longer
+# absorb does not fall back to the flat cadence the moment it re-surfaces once.
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [repeat-secs]
   local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS}
+  local repeat_secs=${7:-$PAUSE_RESURFACE_SECS}
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$age" -ge "$min_age" ] || return 0
-    [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
+    [ "$(age_of "$throttle")" -ge "$repeat_secs" ] || return 0   # 999999 when no prior re-surface
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
@@ -1545,7 +1576,21 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+        # Past the demand threshold the closer look is already demanded and the
+        # pane has not changed since, so repeating it on the STALE_ESCALATE_SECS
+        # clock adds nothing a supervisor can act on: drop to the same bounded
+        # PAUSE_RESURFACE_SECS recheck every other absorb here uses, throttled by
+        # the counter file's own mtime (the moment of the last escalation), so the
+        # window still cannot rot invisibly. Any pane change clears the counter
+        # upstream and restores the ordinary ladder.
+        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ] \
+          && [ "$(age_of "$escalation_file")" -lt "$PAUSE_RESURFACE_SECS" ]; then
+          date +%s > "$since_file"
+          triage_log "absorbed $label (deep inspection already demanded at escalation $n, idle ${age}s, rechecked on a long cadence): $win"
+          return 0
+        fi
+        n=$(( n + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
@@ -1591,7 +1636,7 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age repeat_secs
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -1604,6 +1649,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( now - mtime ))
   last=$(status_declared_wait_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
+  repeat_secs=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   if status_is_captain_held "$last"; then
     if away_record_present; then
@@ -1613,12 +1659,14 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   elif until=$(status_paused_until "$last"); then
-    if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
+    if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_UNTIL_MAX_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
       return 0
     elif [ "$now" -lt "$until" ]; then
-      detail="paused, declared time beyond recheck cadence"
-      reason="paused ${age}s, awaiting external - the declared time is beyond the recheck cadence; confirm the wait still holds"
+      detail="paused, declared time beyond recheck ceiling"
+      reason="paused ${age}s, awaiting external - the declared time is beyond the recheck ceiling; confirm the wait still holds"
+      min_age=$PAUSE_UNTIL_MAX_SECS
+      repeat_secs=$PAUSE_UNTIL_MAX_SECS
     else
       # The declared time has passed: recheck now, once per declaration, then
       # hold the cadence.
@@ -1631,7 +1679,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$repeat_secs"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -1843,12 +1891,25 @@ captain_call_declaration() {  # <task> <call-identity>
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
-# current PAUSE_RESURFACE_SECS. A pure read: recording an alarm is the caller's,
-# so the throttle is never advanced by a sighting it just absorbed.
-stale_wait_throttled() {  # <window-key> <declaration>
-  local throttle="$STATE/.paused-resurfaced-$1"
+# current PAUSE_RESURFACE_SECS, or inside <bound> when a caller passes its own.
+# A pure read: recording an alarm is the caller's, so the throttle is never
+# advanced by a sighting it just absorbed.
+stale_wait_throttled() {  # <window-key> <declaration> [bound-secs]
+  local throttle="$STATE/.paused-resurfaced-$1" bound=${3:-$PAUSE_RESURFACE_SECS}
   [ "$(cat "$throttle" 2>/dev/null || true)" = "$2" ] \
-    && [ "$(age_of "$throttle")" -lt "$PAUSE_RESURFACE_SECS" ]
+    && [ "$(age_of "$throttle")" -lt "$bound" ]
+}
+
+# The bound an UNANSWERED captain call is silent for once its first sight has
+# alarmed. The first sight still reaches the captain either way: the throttle
+# only absorbs a declaration it has already recorded, and the declaration
+# carries the call's own identity, so re-holding starts a fresh window.
+captain_hold_bound() {
+  if [ "$CAPTAIN_HOLD_RESURFACE_SECS" -gt "$PAUSE_RESURFACE_SECS" ]; then
+    printf '%s' "$CAPTAIN_HOLD_RESURFACE_SECS"
+  else
+    printf '%s' "$PAUSE_RESURFACE_SECS"
+  fi
 }
 
 # The same bound, for a stale window whose last line IS captain-relevant. That
@@ -1875,13 +1936,18 @@ stale_wait_record() {  # <window-key>
 # While the away-posture record exists the bound is absolute: an open captain
 # call is never rechecked, whatever the throttle says, because nobody is there
 # to answer it and the return brief lists it.
+# Attended it is the same silence, bounded by a ceiling rather than lifted by a
+# posture: `open` is already the answered test - an answered or released call
+# leaves by the line above - so while it holds, a recheck has nothing to tell the
+# captain but their own unanswered question. It surfaces once, then rechecks at
+# most once per CAPTAIN_HOLD_RESURFACE_SECS, so a forgotten hold still shows.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   away_record_present && return 0
-  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" "$(captain_hold_bound)"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -1931,7 +1997,11 @@ surface_nonterminal_stale() {  # <window> <hash>
     if captain_held_silenced "$last"; then
       throttled=0
     else
-      stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
+      # With a present captain the declared transfer IS the unanswered test - an
+      # answer replaces the line with a `resolved` one and leaves this branch -
+      # so a recheck inside the hold's own bound could only restate it.
+      stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" "$(captain_hold_bound)" \
+        && throttled=0
     fi
   elif captain_call_stale_bound "$key" "$task"; then
     bounded=0
@@ -2583,9 +2653,10 @@ watcher_cleanup() {
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
-    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
-      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
-      transition=release-lock-existing
+    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ]; then
+      case "${FM_WATCH_DELIVERED_REASON:-}" in
+        "check: rearm-resurface"*) transition=release-lock-existing ;;
+      esac
     fi
   fi
   fm_active_check_stop || cleanup_status=1
@@ -2660,19 +2731,81 @@ rerecord_device_shifted_pr_poll() {  # <id>
   return 0
 }
 
+# A resurface nobody acknowledges is re-delivered by the next turn end, which
+# in 2026-09 spent 45 minutes and ~500M cache-read tokens re-firing every few
+# seconds after one denied drain. Each consecutive undelivered resurface waits
+# longer, and at the cap the watcher stops re-firing and keeps supervising.
+RESURFACE_STREAK_FILE="$STATE/.resurface-streak"
+RESURFACE_STREAK_CAP=${FM_RESURFACE_STREAK_CAP:-5}
+case "$RESURFACE_STREAK_CAP" in ''|*[!0-9]*|0) RESURFACE_STREAK_CAP=5 ;; esac
+RESURFACE_BACKOFF_BASE=${FM_RESURFACE_BACKOFF_BASE:-5}
+case "$RESURFACE_BACKOFF_BASE" in ''|*[!0-9]*) RESURFACE_BACKOFF_BASE=5 ;; esac
+RESURFACE_BACKOFF_MAX=${FM_RESURFACE_BACKOFF_MAX:-300}
+case "$RESURFACE_BACKOFF_MAX" in ''|*[!0-9]*|0) RESURFACE_BACKOFF_MAX=300 ;; esac
+
+# Acknowledging a wake clears the streak (bin/fm-wake-drain.sh), and a queue
+# whose byte length moved is new or consumed work rather than the same
+# unanswered wake, so the record only ever counts resurfaces of one unchanged
+# queue.
+resurface_streak_read() {  # -> RESURFACE_STREAK RESURFACE_LAST RESURFACE_SIG
+  local line rest
+  line=$(cat "$RESURFACE_STREAK_FILE" 2>/dev/null || true)
+  RESURFACE_STREAK=${line%% *}
+  rest=${line#* }
+  RESURFACE_LAST=${rest%% *}
+  RESURFACE_SIG=${line##* }
+  case "$RESURFACE_STREAK" in ''|*[!0-9]*) RESURFACE_STREAK=0 ;; esac
+  case "$RESURFACE_LAST" in ''|*[!0-9]*) RESURFACE_LAST=0 ;; esac
+  case "$RESURFACE_SIG" in ''|*[!0-9]*) RESURFACE_SIG=-1 ;; esac
+}
+
+resurface_queue_signature() {
+  local size
+  size=$(wc -c < "$FM_WAKE_QUEUE" 2>/dev/null | tr -d '[:space:]')
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  printf '%s' "$size"
+}
+
 resurface_after_downtime() {
+  local streak now delay steps sig
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
   # unbounded recovery loop; stay in the poll loop and supervise instead.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
     return 0
   fi
+  # The marker gate stays first so a cycle with nothing to recover reaches no
+  # command substitution at all: one parsed mid-poll can swallow a pending TERM
+  # on bash 5.2 (tests/fm-watch-triage.test.sh, TERM inside a blocked poll).
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
       echo "watcher: recovery state could not be consumed safely" >&2
       exit 1
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+  fi
+  resurface_streak_read
+  sig=$(resurface_queue_signature)
+  streak=$((RESURFACE_STREAK + 1))
+  [ "$sig" = "$RESURFACE_SIG" ] || streak=1
+  now=$(date +%s)
+  if [ "$streak" -gt 1 ]; then
+    steps=$((streak - 2))
+    [ "$steps" -le 16 ] || steps=16
+    delay=$((RESURFACE_BACKOFF_BASE << steps))
+    [ "$delay" -le "$RESURFACE_BACKOFF_MAX" ] || delay=$RESURFACE_BACKOFF_MAX
+    # Withholding the delivery is safe: the queue row is durable, so the next
+    # cycle's arm check re-opens the episode when the backoff has elapsed.
+    [ "$now" -ge $((RESURFACE_LAST + delay)) ] || return 0
+  fi
+  printf '%s %s %s\n' "$streak" "$now" "$sig" > "$RESURFACE_STREAK_FILE" 2>/dev/null || true
+  if [ "$streak" -gt "$RESURFACE_STREAK_CAP" ]; then
+    [ "$streak" -gt $((RESURFACE_STREAK_CAP + 1)) ] \
+      || triage_log "resurface suppressed after $RESURFACE_STREAK_CAP unacknowledged deliveries; supervision continues without re-firing until a wake is acknowledged"
+    return 0
+  fi
+  if [ "$streak" -eq "$RESURFACE_STREAK_CAP" ]; then
+    wake "check: rearm-resurface unacknowledged $streak times - the queued wake was never acknowledged, so this is the last automatic re-delivery: drain the queue and run its exact WAKE_ACK_REQUIRED command, or supervision keeps running without resurfacing it"
   fi
   wake "check: rearm-resurface"
 }

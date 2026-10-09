@@ -2791,7 +2791,8 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
     FM_FAKE_CREW_STATE='state: paused · source: status-log · parked' \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_CAPTAIN_HOLD_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
   if [ "$mode" = exit ]; then
@@ -3170,6 +3171,59 @@ test_wedge_threshold_keeps_a_wait_past_a_default_key_answer() {
 # recheck is the one who can clear it, so wording it as an external dependency to
 # confirm points them away from the only action that ends the wait. The sibling
 # absorber makes exactly this distinction, and a lane routed here must not lose it.
+# --- past demand-deep-inspection the unchanged pane leaves the wedge clock ---
+# The marker's own wording forbids re-absorbing on the run-step/pane state, so
+# every further escalation of the SAME unchanged pane cost a supervising turn it
+# could do nothing new with: 46 of 69 such wakes over one 14-day sample already
+# carried the marker. Past the threshold the pane moves to the bounded
+# PAUSE_RESURFACE_SECS recheck instead, and both directions are pinned here: the
+# escalations BEFORE the marker keep the unchanged ladder, and the bounded
+# recheck still eventually re-surfaces the pane so it cannot rot invisibly.
+test_wedge_past_demand_inspect_moves_to_the_long_recheck() {
+  local dir state fakebin out capture window key n queued
+  local working='state: working · source: run-step · ci running'
+
+  dir=$(wedge_threshold_fixture demand-inspect-cadence 'working: validation under way' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  n=1
+  while [ "$n" -le 3 ]; do
+    FM_TEST_PAUSE_RESURFACE=999999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "an unchanged working lane stopped escalating at threshold $n: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge wedge escalation $n"
+    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
+      || fail "the ladder before the marker did not reach escalation $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  grep -F 'demand-deep-inspection' "$out" >/dev/null \
+    || fail "the third escalation lost the demand-deep-inspection wording: $(cat "$out")"
+
+  # The next threshold on the same unchanged pane: the closer look is already
+  # demanded, so it must not spend another wake on the 240s clock.
+  queued=$(wedge_stale_wakes "$state" "$window")
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=999999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+    || fail "an unchanged pane re-escalated on the wedge clock after deep inspection was demanded: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq "$queued" ] \
+    || fail "a pane past the demand marker queued another wedge wake inside the recheck cadence: $(cat "$state/.wake-queue")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null)" = 3 ] \
+    || fail "the absorbed recheck advanced the escalation count to $(cat "$state/.wedge-escalations-$key" 2>/dev/null)"
+
+  # Bounded, not silenced: once the recheck cadence elapses the same pane
+  # re-surfaces, with the count and marker it had already earned.
+  set_mtime "$(( $(date +%s) - 2000 ))" "$state/.wedge-escalations-$key"
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=1200 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "the long recheck never re-surfaced a pane past the demand marker: $(cat "$out")"
+  grep -F "possible wedge, escalation 4" "$out" >/dev/null \
+    || fail "the long recheck lost the escalation count: $(cat "$out")"
+  grep -F 'demand-deep-inspection' "$out" >/dev/null \
+    || fail "the long recheck lost the demand-deep-inspection wording: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the long-cadence recheck"
+  pass "a pane past demand-deep-inspection leaves the wedge clock for the bounded recheck, while the escalations before it are unchanged"
+}
+
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   local dir state fakebin out capture window key n armed_timer
   local working='state: working · source: run-step · ci running'
@@ -3938,11 +3992,14 @@ test_identical_dead_display_of_a_successor_still_reports() {
 # and the inconclusive one - re-fired on every new pane hash for as long as the
 # captain was deciding, which is the 2026-09 loop observed on delivered work
 # awaiting their merge word.
-# Pinned here, in both directions: while the call stands the first sight still
-# alarms, further sights of the SAME call and status-log state are absorbed, and
-# a new pane hash after the window's end alarms once more; and the identical
-# fixture WITHOUT the hold keeps alarming on every hash, because a bound that
-# swallowed an unheld delivery or blocker would be worse than the churn it removes.
+# Pinned here, in every direction: while the call is open and UNANSWERED no
+# sight of it alarms at all, because a recheck can only restate the captain's own
+# question back at them; once the hold ages past its ceiling it rejoins the
+# ordinary cadence, alarming once per window, so a forgotten hold still shows;
+# an answer or release alarms immediately whatever the ceiling says; and the
+# identical fixture WITHOUT the hold keeps alarming on every hash, because a
+# bound that swallowed an unheld delivery or blocker would be worse than the
+# churn it removes.
 #
 # The backlog is real rather than a fixture file: bin/fm-captain-hold.sh is the
 # only writer of a hold and tasks-axi the only reader, so a hand-written row
@@ -3999,7 +4056,8 @@ hold_watch_launch() {  # <dir> <out> <capture>
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS="${FM_HOLD_PAUSE_RESURFACE_SECS:-999}" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_PAUSE_RESURFACE_SECS="${FM_HOLD_PAUSE_RESURFACE_SECS:-999}" \
+    FM_CAPTAIN_HOLD_RESURFACE_SECS="${FM_HOLD_CEILING_SECS:-86400}" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
   HOLD_WATCH_PID=$!
 }
@@ -4044,13 +4102,17 @@ hold_stale_wakes() {  # <state>
 # the captain-relevant stale branch, and a worker line that routes through the
 # inconclusive one. The hold is invisible to the status line in both, so both
 # branches had the same blindness and both are covered.
-test_open_captain_call_bounds_stale_churn() {
-  local spec name line dir state out capture throttle wakes
+#
+# The measured cost of the old cadence: one attended hold re-woke firstmate for
+# 11.7 hours, 14 wakes over 14 days, each one a supervision turn spent telling
+# the captain their own question was still unanswered.
+test_unanswered_captain_call_is_silent_while_it_stands() {
+  local spec name line dir state out capture wakes throttle
   command -v tasks-axi >/dev/null 2>&1 \
-    || { echo "skip: tasks-axi not found (captain-hold stale bound)"; return 0; }
+    || { echo "skip: tasks-axi not found (captain-hold silence)"; return 0; }
   for spec in \
-    'held-delivery|done: PR https://example.invalid/pull/1 checks green' \
-    'held-worker-line|working: still tidying the branch'
+    'silent-delivery|done: PR https://example.invalid/pull/1 checks green' \
+    'silent-worker-line|working: still tidying the branch'
   do
     name=${spec%%|*}; line=${spec#*|}
     dir=$(make_hold_home "$name" "$line" hold) \
@@ -4058,33 +4120,112 @@ test_open_captain_call_bounds_stale_churn() {
     state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
     throttle="$state/.paused-resurfaced-$(hold_key)"
 
-    # First sight still alarms: the call bounds repetition, never the first look.
+    # The first sight still reaches the captain: the pane is inconclusive and
+    # the hold has not been looked at once yet.
     hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
-      || fail "[$name] first sight of held work did not surface"
-    wakes=$(hold_stale_wakes "$state")
-    [ "$wakes" -eq 1 ] || fail "[$name] first sight produced $wakes wakes instead of one"
-    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
-
-    # The pane churns while the SAME call stands. Every one of these alarmed.
-    hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
-      || fail "[$name] watcher exited during pane churn instead of supervising through it"
-    wakes=$(hold_stale_wakes "$state")
-    [ "$wakes" -eq 0 ] \
-      || fail "[$name] pane churn re-alarmed held work $wakes time(s) inside the re-surface window"
-
-    # After the window ends, the next new pane hash re-surfaces held work exactly
-    # once, so a forgotten call on a churning pane cannot hide behind the bound.
-    [ -e "$throttle" ] || fail "[$name] the absorbed churn recorded no re-surface cadence to elapse"
-    set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
-    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
-      || fail "[$name] held work did not re-surface once its re-surface window elapsed"
+      || fail "[$name] first sight of an unanswered hold did not surface"
     wakes=$(hold_stale_wakes "$state")
     [ "$wakes" -eq 1 ] \
-      || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
+      || fail "[$name] first sight of an unanswered hold produced $wakes wakes instead of one"
+    [ -e "$throttle" ] || fail "[$name] the first surface recorded no re-surface throttle"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
+
+    # Every later sight is absorbed while the call stands unanswered: a recheck
+    # could only restate the captain's own open question back at them.
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 3 \
+      || fail "[$name] watcher exited inside the hold's silence instead of supervising through it"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 0 ] \
+      || fail "[$name] an unanswered captain call alarmed $wakes time(s) inside its ceiling"
+
+    # The point of the ceiling: the silence outlasts the ordinary declared-wait
+    # cadence, which an unanswered hold used to rejoin every window.
+    set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, later tick' 1 \
+      || fail "[$name] watcher exited past the ordinary cadence instead of supervising through it"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 0 ] \
+      || fail "[$name] an unanswered hold rejoined the ordinary cadence after $wakes wake(s)"
+
+    # Finite, so a forgotten hold cannot rot invisibly: past the ceiling it
+    # rejoins the ordinary cadence and surfaces once.
+    set_mtime "$(( $(date +%s) - 90000 ))" "$throttle"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+      || fail "[$name] an unanswered hold never re-surfaced once its ceiling elapsed"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "[$name] the elapsed ceiling produced $wakes wakes instead of one"
   done
-  pass "work under an open captain call surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+  pass "an unanswered captain call surfaces once, then stays silent past the ordinary cadence until its ceiling elapses"
 }
 
+# The escape hatch, on the same fixtures: a hold nobody ever answers must not
+# vanish, so past its ceiling it rejoins the ordinary bounded cadence rather
+# than staying silent forever. The ceiling is driven to one second so the hold
+# really is past it, which is the only part of the state this test fakes.
+test_captain_call_past_its_ceiling_resurfaces_on_the_cadence() {
+  local name=aged-hold dir state out capture throttle wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (captain-hold ceiling)"; return 0; }
+  dir=$(make_hold_home "$name" 'done: PR https://example.invalid/pull/1 checks green' hold) \
+    || fail "could not build a captain-held backlog fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+  sleep 2
+  export FM_HOLD_CEILING_SECS=1
+
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "a hold past its ceiling did not resurface"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "the first sight past the ceiling produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
+
+  # Past the ceiling the ordinary window still bounds repetition, so pane churn
+  # under one standing call stays absorbed.
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "watcher exited during pane churn instead of supervising through it"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] \
+    || fail "pane churn re-alarmed an aged hold $wakes time(s) inside the re-surface window"
+
+  [ -e "$throttle" ] || fail "the absorbed churn recorded no re-surface cadence to elapse"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "an aged hold did not re-surface once its re-surface window elapsed"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "the elapsed re-surface window produced $wakes wakes instead of one"
+  unset FM_HOLD_CEILING_SECS
+  pass "a hold past its ceiling rejoins the bounded cadence instead of staying silent"
+}
+
+# The silence is bought by the OPEN call and nothing else, so the captain's own
+# answer must end it at once - inside the ceiling, on the very next sight.
+test_answered_captain_call_alarms_immediately() {
+  local mode name dir state out capture wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (answered captain call)"; return 0; }
+  for mode in answered released
+  do
+    name="$mode-hold"
+    dir=$(make_hold_home "$name" 'done: PR https://example.invalid/pull/1 checks green' hold) \
+      || fail "[$mode] could not build a captain-held backlog fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    printf 'merge it\n' > "$dir/decision.txt"
+    if [ "$mode" = released ]; then
+      run_hold "$dir" answer held-merge --decision-file "$dir/decision.txt" --release \
+        || fail "[$mode] could not release the hold"
+    else
+      run_hold "$dir" answer held-merge --decision-file "$dir/decision.txt" \
+        || fail "[$mode] could not answer the hold"
+    fi
+
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+      || fail "[$mode] an answered captain call stayed silenced by the ceiling"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] || fail "[$mode] an answered call produced $wakes wakes instead of one"
+  done
+  pass "an answered or released captain call alarms immediately, inside the ceiling"
+}
 
 
 # The other half of the same bound, and the one that decides whether widening the
@@ -6322,7 +6463,9 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 # absorbs such a pane silently: the declared-wait cadence, the live-agent first
 # sight, the backlog-hold bound, and the daemon-owned one-shot handoff. Archiving
 # the record restores the ordinary bounded recheck, so the rule is the record's,
-# not a lost alarm.
+# not a lost alarm. Attended, the same hold is separately silent until it ages
+# past its own ceiling, so each case below drives that ceiling to zero: what is
+# left silent is then the record's doing and nothing else.
 
 # A UTC ISO 8601 stamp for an epoch, on either date flavor.
 iso_utc_at() {  # <epoch>
@@ -6362,6 +6505,7 @@ test_captain_held_never_rechecked_while_away_record_exists() {
   # watcher still absorbs it across whole poll cycles: no wake, no throttle.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CAPTAIN_HOLD_RESURFACE_SECS=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
@@ -6379,6 +6523,7 @@ test_captain_held_never_rechecked_while_away_record_exists() {
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CAPTAIN_HOLD_RESURFACE_SECS=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "archiving the away-posture record did not restore the captain-held recheck"; }
@@ -6464,6 +6609,7 @@ test_live_captain_held_first_sight_silenced_by_away_record() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CAPTAIN_HOLD_RESURFACE_SECS=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
@@ -6484,12 +6630,15 @@ test_backlog_hold_never_rechecked_while_away_record_exists() {
     || fail "could not build the backlog-hold fixture"
   out="$dir/watch.out"; capture="$dir/pane.txt"
   write_away_record "$dir/state"
-  # Without the record the FIRST sight of a held delivery alarms
-  # (test_stale_churn_without_a_captain_call_still_alarms and its siblings). With
-  # it, even the first sight and every later hash are absorbed.
+  # The ceiling is disabled, so attended every one of these hashes would alarm
+  # (test_captain_call_past_its_ceiling_resurfaces_on_the_cadence drives the same
+  # fixture that way). With the record, the first sight and every later hash are
+  # absorbed, and the silence is the record's alone.
+  export FM_HOLD_CEILING_SECS=0
   hold_watch_churn "$dir" "$out" "$capture" 'held delivery, pane tick' 3 \
     || fail "watcher exited while churning a backlog-held delivery under the away-posture record: $(cat "$out")"
   wakes=$(hold_stale_wakes "$dir/state")
+  unset FM_HOLD_CEILING_SECS
   [ "$wakes" -eq 0 ] || fail "a backlog-held delivery was rechecked $wakes time(s) while the away-posture record exists"
   pass "a delivery the captain already holds is never rechecked while the away-posture record exists"
 }
@@ -6543,12 +6692,12 @@ paused_until_fixture() {  # <name> <until-epoch> <status-age-secs>
   printf '%s\n' "$dir"
 }
 
-until_watch() {  # <dir> <cadence> -> pid in UNTIL_PID
+until_watch() {  # <dir> <cadence> [until-ceiling] -> pid in UNTIL_PID
   local dir=$1
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-until FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS="$2" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_PAUSE_RESURFACE_SECS="$2" FM_PAUSE_UNTIL_MAX_SECS="${3:-$2}" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2>&1 &
   UNTIL_PID=$!
 }
@@ -6575,11 +6724,38 @@ test_paused_until_wrong_year_is_bounded_by_the_cadence() {
     || { reap "$UNTIL_PID"; fail "a wrong-year declared time silenced the wait beyond the recheck cadence"; }
   grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null \
     || fail "the bounded wrong-year recheck did not print a stale wake: $(cat "$dir/watch.out")"
-  grep -F 'declared time is beyond the recheck cadence' "$dir/watch.out" >/dev/null \
+  grep -F 'declared time is beyond the recheck ceiling' "$dir/watch.out" >/dev/null \
     || fail "the bounded recheck gave the wrong reason: $(cat "$dir/watch.out")"
   grep -F 'declared clearing time has passed' "$dir/watch.out" >/dev/null \
     && fail "the bounded recheck falsely claimed the future declared time passed"
   pass "a wrong-year declared time cannot silence the watcher beyond the recheck cadence"
+}
+
+test_paused_until_extends_the_recheck_past_the_flat_cadence() {
+  local dir state
+  dir=$(paused_until_fixture until-extends "$(( $(date +%s) + 31536000 ))" 300); state="$dir/state"
+  until_watch "$dir" 240 86400
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "a declared time past the flat cadence did not extend the recheck: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "a declared time inside the ceiling was still queued for a recheck"
+  grep -F 'declared time not reached' "$state/.watch-triage.log" >/dev/null \
+    || fail "the extended absorb did not cite the declared time in the triage log"
+  reap "$UNTIL_PID"
+  pass "a declared time beyond the flat cadence extends the recheck up to the ceiling"
+}
+
+# The ceiling is clamped up to the flat cadence, so configuring it lower can
+# never make a wait that names its clearing time noisier than one that does not.
+test_paused_until_ceiling_below_the_cadence_is_clamped_up() {
+  local dir state
+  dir=$(paused_until_fixture until-clamped "$(( $(date +%s) + 31536000 ))" 300); state="$dir/state"
+  until_watch "$dir" 240 1
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "a clamped ceiling silenced the wait beyond the flat cadence"; }
+  grep -F 'declared time is beyond the recheck ceiling' "$dir/watch.out" >/dev/null \
+    || fail "the clamped recheck gave the wrong reason: $(cat "$dir/watch.out")"
+  pass "an until ceiling below the flat cadence is clamped up to it"
 }
 
 test_paused_until_that_passed_is_rechecked_before_the_cadence() {
@@ -6705,12 +6881,15 @@ test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
+test_wedge_past_demand_inspect_moves_to_the_long_recheck
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
-test_open_captain_call_bounds_stale_churn
+test_unanswered_captain_call_is_silent_while_it_stands
+test_captain_call_past_its_ceiling_resurfaces_on_the_cadence
+test_answered_captain_call_alarms_immediately
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
@@ -6750,4 +6929,6 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
+test_paused_until_extends_the_recheck_past_the_flat_cadence
+test_paused_until_ceiling_below_the_cadence_is_clamped_up
 test_paused_until_that_passed_is_rechecked_before_the_cadence
