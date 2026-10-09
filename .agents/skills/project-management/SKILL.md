@@ -81,11 +81,11 @@ The captain's request to create that local project authorizes this local initial
 
 ## Local material
 
-A clone holds only what the forge tracks, so a project whose work needs a running app - a dev server, an end-to-end suite, screenshots - gives every worktree cut from it none of the environment files, local tool configuration, or stored sessions that make the app start.
-At add, create, or initialize time, ask whether this project's work needs any of that, and record what it needs in `config/project-local-material.json` so every spawn carries it.
+A clone holds only what the forge tracks, so a worktree cut from it has none of the environment files, local tool configuration, or stored sessions an app needs to start.
+At add, create, or initialize time, ask about local material only when the project's work runs the app: a dev server, an end-to-end suite, or screenshots.
+For any other project, skip this step silently.
+When the captain names material, record it in `config/project-local-material.json` so every fresh worktree carries it; a project left unconfigured spawns exactly as before.
 [`docs/configuration.md`](../../../docs/configuration.md) "Project local material" owns the schema and [`bin/fm-local-material.sh`](../../../bin/fm-local-material.sh) owns the placement, including which files belong in which mode and which must never be listed.
-Skip this for a project whose work never runs the app.
-Leaving it unconfigured is not a safe default when the work does: it produces a worktree that looks ready and cannot test, and a worker that needs a server running will otherwise go looking for credentials elsewhere.
 
 ## Initialize
 
