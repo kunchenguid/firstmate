@@ -36,6 +36,8 @@ pass 'Droid process identity is anchored to the executable name'
 [ "$(fm_busy_classify tmux target claude task "$TMP_ROOT/state" 'Press ESC to stop')" = 'unknown missing' ] \
   || fail 'Droid rendered fallback leaked into Claude'
 if printf '%s' 'Press ESC to stop' | fm_busy_lines_match claude; then fail 'Droid delivery signature leaked into Claude'; fi
+if printf '%s' 'Press ESC to stop' | fm_busy_lines_match; then fail 'Droid delivery signature leaked into the shared fallback'; fi
+printf '%s' 'Press ESC to stop' | fm_busy_lines_match droid || fail 'Droid scoped delivery signature disappeared'
 spinner=' ⠸ Thinking...'
 [ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" "$spinner")" = 'busy droid-regex' ] \
   || fail 'Droid working spinner alone did not classify busy'
@@ -93,3 +95,15 @@ fi
 assert_not_contains "$out" 'secret-reg' 'invalid settings error exposed settings contents'
 [ "$(cat "$store")" = "$before" ] || fail 'Droid replaced invalid settings JSON'
 pass 'Droid trust is exact-worktree scoped, idempotent, and preserves user settings'
+
+# Cleanup is idempotent and preserves settings outside the task's exact paths.
+printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/already-trusted":{"trustedAt":"existing"}}}' > "$store"
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'cleanup setup failed'
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'Droid trust cleanup failed'
+jq -e --arg path "$physical" '.otherSetting == "preserve" and .trustedFolders["/already-trusted"].trustedAt == "existing" and (.trustedFolders | has($path) | not) and (.trustedFolders | length == 1)' "$store" >/dev/null || fail 'cleanup changed unrelated settings or retained task trust'
+before=$(cat "$store")
+HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/task" "$TMP_ROOT/project" >/dev/null || fail 'repeated trust cleanup failed'
+[ "$(cat "$store")" = "$before" ] || fail 'repeated trust cleanup changed settings'
+if HOME="$TMP_ROOT/user" "$ROOT/bin/fm-droid-trust.sh" --remove "$TMP_ROOT/project" "$TMP_ROOT/project" >/dev/null 2>&1; then fail 'cleanup accepted the primary checkout'; fi
+[ "$(cat "$store")" = "$before" ] || fail 'scope refusal changed trust during cleanup'
+pass 'Droid trust cleanup removes only task paths and is idempotent'

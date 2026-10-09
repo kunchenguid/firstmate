@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Pre-register Droid folder trust for exactly an isolated ship/scout worktree.
-# Usage: fm-droid-trust.sh <worktree> <project>
+# Register or retire Droid folder trust for exactly an isolated task worktree.
+# Usage: fm-droid-trust.sh [--remove] <worktree> <project>
+# --remove retires only those exact paths before teardown returns the worktree.
 # The worktree must be a linked worktree of that project, never its primary
 # checkout, a parent, or the user's home. Only the exact logical and physical
 # worktree paths enter ~/.factory/settings.json trustedFolders. Other settings
 # and existing trust entries are preserved; malformed or racing stores refuse.
 # Verified on Droid 0.237.0; runtime --settings trust entries are not sufficient.
-# This helper owns persistent trust mutation; fm-spawn refuses if it fails.
+# This helper owns trust mutation; spawn and teardown refuse if it fails.
 set -u
 unset CDPATH \
   GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_INDEX_FILE \
@@ -14,11 +15,13 @@ unset CDPATH \
   GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
   GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
 
-[ "$#" -eq 2 ] || { echo "usage: fm-droid-trust.sh <worktree> <project>" >&2; exit 2; }
+ACTION=register
+if [ "${1:-}" = --remove ]; then ACTION=remove; shift; fi
+[ "$#" -eq 2 ] || { echo "usage: fm-droid-trust.sh [--remove] <worktree> <project>" >&2; exit 2; }
 WT_ARG=$1
 PROJ_ARG=$2
 
-refuse() { echo "error: refusing to pre-register Droid trust: $1" >&2; exit 1; }
+refuse() { echo "error: refusing to change Droid trust: $1" >&2; exit 1; }
 
 real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
 logical_dir() { (cd -- "$1" 2>/dev/null && pwd -L); }
@@ -59,9 +62,10 @@ PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
 [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
 [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
 
-command -v node >/dev/null 2>&1 || refuse "node is required to record workspace trust and was not found on PATH"
+command -v node >/dev/null 2>&1 || refuse "node is required to change workspace trust and was not found on PATH"
 
 STORE_DIR="$HOME_REAL/.factory"
+[ "$ACTION" != remove ] || [ -e "$STORE_DIR/settings.json" ] || [ -L "$STORE_DIR/settings.json" ] || exit 0
 mkdir -p "$STORE_DIR" 2>/dev/null || true
 STORE_DIR_REAL=$(real_dir "$STORE_DIR") || true
 [ -n "$STORE_DIR_REAL" ] || refuse "Droid settings directory '$STORE_DIR' does not exist and could not be created"
@@ -81,11 +85,11 @@ fi
 # Droid itself rewrites this file
 # when a worker answers a dialog or changes a setting, so a store that moved
 # under us is retried once and then refused rather than clobbered.
-if ! node - "$STORE" "$WT_LOGICAL" "$WT_REAL" <<'NODE'
+if ! node - "$STORE" "$ACTION" "$WT_LOGICAL" "$WT_REAL" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const [store, ...wanted] = process.argv.slice(2);
+const [store, action, ...wanted] = process.argv.slice(2);
 const paths = [...new Set(wanted)];
 const readStore = () => {
   try {
@@ -108,6 +112,9 @@ const validEntry = (entry) =>
   entry !== null && typeof entry === "object" && !Array.isArray(entry) && typeof entry.trustedAt === "string" && entry.trustedAt.length > 0;
 const listed = (root) =>
   root.trustedFolders !== null && typeof root.trustedFolders === "object" && !Array.isArray(root.trustedFolders) && paths.every((p) => Object.prototype.hasOwnProperty.call(root.trustedFolders, p) && validEntry(root.trustedFolders[p]));
+const satisfied = (root) => action === "remove"
+  ? paths.every((p) => !Object.prototype.hasOwnProperty.call(root.trustedFolders || {}, p))
+  : listed(root);
 const attempt = () => {
   const original = readStore();
   const before = fingerprint(original);
@@ -130,9 +137,11 @@ const attempt = () => {
       throw new Error(`${store} has an invalid trusted-folder entry for ${p}`);
     }
   }
-  if (listed(root)) return "recorded";
+  if (satisfied(root)) return "recorded";
   for (const p of paths) {
-    if (!Object.prototype.hasOwnProperty.call(root.trustedFolders, p)) {
+    if (action === "remove") {
+      delete root.trustedFolders[p];
+    } else if (!Object.prototype.hasOwnProperty.call(root.trustedFolders, p)) {
       root.trustedFolders[p] = { trustedAt: new Date().toISOString() };
     }
   }
@@ -147,14 +156,14 @@ const attempt = () => {
   } finally {
     if (!renamed) fs.rmSync(tmp, { force: true });
   }
-  return listed(parseSettings(fs.readFileSync(store, "utf8"))) ? "recorded" : "dropped";
+  return satisfied(parseSettings(fs.readFileSync(store, "utf8"))) ? "recorded" : "dropped";
 };
 try {
   for (let i = 0; i < 3; i += 1) {
     const result = attempt();
     if (result === "recorded") process.exit(0);
     if (result === "moved" && i >= 1) {
-      console.error(`error: ${store} was modified while trust was being recorded; refusing to overwrite it`);
+      console.error(`error: ${store} was modified while trust was being changed; refusing to overwrite it`);
       process.exit(1);
     }
   }
@@ -162,14 +171,16 @@ try {
   console.error(`error: ${err.message}`);
   process.exit(1);
 }
-console.error(`error: ${store} did not retain trust for ${paths.join(", ")} after 3 attempts`);
+console.error(`error: ${store} did not retain the requested trust ${action} for ${paths.join(", ")} after 3 attempts`);
 process.exit(1);
 NODE
 then
-  refuse "could not record trust for '$WT_LOGICAL' in '$STORE'"
+  refuse "could not change trust for '$WT_LOGICAL' in '$STORE'"
 fi
 
-if [ "$WT_LOGICAL" != "$WT_REAL" ]; then
+if [ "$ACTION" = remove ]; then
+  echo "untrusted: $WT_REAL"
+elif [ "$WT_LOGICAL" != "$WT_REAL" ]; then
   echo "trusted: $WT_LOGICAL ($WT_REAL)"
 else
   echo "trusted: $WT_REAL"

@@ -141,3 +141,8 @@ done
 [ "$current" != droid ] || fail '/quit left Droid running'
 pass "Droid $VERSION /quit exits the agent"
 printf 'DROID_LIVE_RESULT version=%s detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass\n' "$VERSION"
+
+HOME="$LAB/home" "$ROOT/bin/fm-droid-trust.sh" --remove "$LAB/task" "$LAB/workspace" >/dev/null || fail 'exact-worktree trust cleanup failed'
+physical=$(cd "$LAB/task" && pwd -P)
+jq -e --arg logical "$LAB/task" --arg physical "$physical" '.trustedFolders | has($logical) == false and has($physical) == false' "$LAB/home/.factory/settings.json" >/dev/null || fail 'native settings retained task trust'
+printf 'ok - Droid %s exact-worktree trust is retired after exit\n' "$VERSION"
