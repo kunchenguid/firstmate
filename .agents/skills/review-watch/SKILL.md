@@ -8,14 +8,15 @@ metadata:
 
 # Review watch
 
-Every open firstmate GitHub pull request is reviewed once after it is opened and once after each push, and the human, OpenCode, and Relay findings it attracts are recorded, surfaced, and acted on.
+Every open firstmate GitHub pull request is considered for OpenCode review after it is opened and after each known push, and the human, OpenCode, and Relay findings it attracts are recorded, surfaced, and acted on.
 This is an operating rule: the monitoring is the armed contributions observer, and the request-triage-repair loop is firstmate's own practice, not a new service.
+The [2026-10-09 named sweep evidence](../../../docs/verification/review-watch.md) records the required existing GitHub pull-request outcomes.
 
 ## Requesting a review
 
-After a ship reports a GitHub PR (see `ship-landing`), request one OpenCode review with a `/oc review` comment on the pull request, and request it again after each push.
+After a ship reports a GitHub PR (see `ship-landing`), request one OpenCode review with a `/oc review` comment on the pull request.
 Request it only where the repository carries the OpenCode caller workflow on its default branch; a repository without one cannot run a review, so leave it alone.
-Post at most one request per head, so a poll, restart, or later pass never creates a duplicate request comment: check for an existing `/oc review` already covering the current head before posting, and let a new head move past it.
+Request a review after the pull request is opened and after each known push, without creating an obvious duplicate.
 
 ## Monitoring findings
 
