@@ -963,6 +963,44 @@ EOF
   pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
 }
 
+test_codex_hook_routes_through_orca_stop_glue() {
+  local settings command dir expected_root payload out status
+  settings="$ROOT/.codex/hooks.json"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-glue")
+  mark_codex_hook_root "$dir"
+  expected_root=$(cd "$dir" && pwd -P)
+  payload=$(jq -cn '{stop_hook_active:false}')
+  # shellcheck disable=SC2016 # $0 expands in the child stub at runtime.
+  printf '#!/usr/bin/env bash\nprintf "glue=%%s\\n" "$0"\ncat\n' > "$dir/bin/fm-codex-orca-stop.sh"
+  # shellcheck disable=SC2016 # $0 and ${FM_TEST_GUARD_STATUS:-0} expand in the child stub at runtime.
+  printf '#!/usr/bin/env bash\nprintf "guard=%%s\\n" "$0"\ncat\nexit "${FM_TEST_GUARD_STATUS:-0}"\n' > "$dir/bin/fm-turnend-guard.sh"
+  chmod +x "$dir/bin/fm-codex-orca-stop.sh" "$dir/bin/fm-turnend-guard.sh"
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
+  expect_code 0 "$status" "codex hook must run the installed Orca Stop glue"
+  assert_contains "$out" "glue=$expected_root/bin/fm-codex-orca-stop.sh" "codex hook must route through the Orca Stop glue when installed"
+  assert_not_contains "$out" "guard=" "codex hook must not also call the guard directly when the glue is installed"
+  assert_contains "$out" "$payload" "codex hook must pass the original payload to the glue"
+
+  cp "$ROOT/bin/fm-codex-orca-stop.sh" "$dir/bin/fm-codex-orca-stop.sh"
+  chmod +x "$dir/bin/fm-codex-orca-stop.sh"
+  out=$(printf '%s' "$payload" | (cd "$dir" && env -u ORCA_TERMINAL_HANDLE bash -c "$command") 2>&1); status=$?
+  expect_code 0 "$status" "Orca Stop glue must pass a passing guard through outside Orca"
+  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "Orca Stop glue must call the hook-root guard"
+  assert_contains "$out" "$payload" "Orca Stop glue must pass the original payload to the guard"
+  out=$(printf '%s' "$payload" | (cd "$dir" && env -u ORCA_TERMINAL_HANDLE FM_TEST_GUARD_STATUS=2 bash -c "$command") 2>&1); status=$?
+  expect_code 2 "$status" "Orca Stop glue must propagate a blocking guard outside Orca"
+
+  printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$dir/bin/fm-codex-orca-continuation.py"
+  out=$(printf '%s' "$payload" | (cd "$dir" && ORCA_TERMINAL_HANDLE=term-fixture FM_TEST_GUARD_STATUS=2 bash -c "$command") 2>&1); status=$?
+  expect_code 2 "$status" "Orca Stop glue must propagate a blocking guard after a successful ensure"
+  assert_not_contains "$out" "Orca owner/delivery is unconfirmed" "a successful ensure must not add the Orca refusal"
+  out=$(printf '%s' "$payload" | (cd "$dir" && ORCA_TERMINAL_HANDLE=term-fixture bash -c "$command") 2>&1); status=$?
+  expect_code 0 "$status" "Orca Stop glue must allow a passing guard after a successful ensure"
+  pass ".codex/hooks.json: Stop hook routes through the Orca glue, which preserves the guard verdict"
+}
+
 test_codex_hook_ignores_nested_git_root_guard() {
   local settings command dir nested subdir expected_root payload out status
   settings="$ROOT/.codex/hooks.json"
@@ -2242,6 +2280,7 @@ test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
+test_codex_hook_routes_through_orca_stop_glue
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run

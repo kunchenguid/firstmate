@@ -11,6 +11,8 @@
 # (bin/fm-claude-stop-autoarm.sh), where the harness owns the process group and
 # the hook's exit-2 rewake is the notification. Run it as its own standalone
 # background task, never bundled onto the tail of another command.
+# Orca/Codex uses the foreground app-terminal owner in
+# bin/fm-codex-orca-continuation.py, which verifies a successor before delivery.
 # NEVER fire it and forget with a shell `&` inside another call: that backgrounded
 # child is reaped when the call returns, leaving NO watcher running and a false
 # "already running" off the dying process. That exact mistake silently took
