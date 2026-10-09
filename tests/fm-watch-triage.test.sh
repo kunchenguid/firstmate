@@ -2977,7 +2977,9 @@ wedge_threshold_round() {  # <state> <fakebin> <out> <capture> <window> <verdict
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_CONFIG_OVERRIDE="$(dirname "$state")/config" \
     FM_FAKE_TMUX_CURRENT_COMMAND="${FM_TEST_PANE_COMMAND-grok}" \
-    FM_FAKE_TMUX_WINDOWS="${FM_TEST_TMUX_WINDOWS-}" FM_FAKE_CREW_STATE="$verdict" \
+    FM_FAKE_TMUX_WINDOWS="${FM_TEST_TMUX_WINDOWS-}" \
+    FM_FAKE_TMUX_FORBIDDEN_TARGET="${FM_FAKE_TMUX_FORBIDDEN_TARGET-}" \
+    FM_FAKE_CREW_STATE="$verdict" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_STALE_ESCALATE_SECS="${FM_TEST_STALE_ESCALATE:-1}" \
@@ -3666,8 +3668,8 @@ test_wedge_defer_refuses_a_half_filled_wait_record() {
 # and `missing` is an inventory that no longer carries that window at all.
 gone_endpoint_env() {  # <dead|missing> -> assignments for the round below
   case "$1" in
-    dead)    FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-wedge ;;
-    missing) FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-someone-else ;;
+    dead)    FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-wedge FM_FAKE_TMUX_FORBIDDEN_TARGET= ;;
+    missing) FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-someone-else FM_FAKE_TMUX_FORBIDDEN_TARGET=test:fm-wedge ;;
   esac
 }
 
@@ -3679,7 +3681,7 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
     dir=$(wedge_threshold_fixture "gone-endpoint-$verdict" 'working: still compiling' 0)
     state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
     gone_endpoint_env "$verdict"
-    export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+    export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_FORBIDDEN_TARGET
 
     wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
       || fail "a $verdict endpoint was never reported at the wedge threshold: $(cat "$out")"
@@ -3706,7 +3708,7 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
         || fail "a $verdict endpoint advanced the escalation count on round $round"
       round=$((round + 1))
     done
-    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_FORBIDDEN_TARGET
   done
   pass "a record whose endpoint is dead or missing reports itself once and is never re-escalated"
 }
@@ -3757,14 +3759,14 @@ test_gone_report_rearms_when_the_endpoint_comes_back() {
   dir=$(wedge_threshold_fixture gone-rearm 'working: still compiling' 0)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
 
-  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_FORBIDDEN_TARGET
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
     || fail "the gone endpoint was never reported: $(cat "$out")"
   [ -s "$state/.dead-reported-$key" ] || fail "the once-only report left no record of itself"
   ack_stopped_cycle "$state" || fail "could not acknowledge the first gone report"
 
   # A replacement is launched into the same window and then wedges for real.
-  FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge
+  FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge FM_FAKE_TMUX_FORBIDDEN_TARGET=
   : > "$out"
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
     || fail "a replacement agent's wedge was swallowed by the earlier gone report: $(cat "$out")"
@@ -3782,7 +3784,7 @@ test_gone_report_rearms_when_the_endpoint_comes_back() {
   grep -F 'agent dead' "$out" >/dev/null \
     || fail "a second death was not reported as a gone endpoint: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the second gone report"
-  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_FORBIDDEN_TARGET
   pass "the once-only gone report re-arms when the endpoint comes back, and reports a later death again"
 }
 
@@ -3805,7 +3807,7 @@ test_second_death_after_a_same_window_relaunch_reports_in_full() {
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
 
   # Death #1: the endpoint is gone and reported once, in full.
-  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_FORBIDDEN_TARGET
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
     || fail "the first death was never reported: $(cat "$out")"
   grep -F 'agent missing' "$out" >/dev/null \
@@ -3816,7 +3818,7 @@ test_second_death_after_a_same_window_relaunch_reports_in_full() {
   # A replacement launches: the pane churns and the bookkeeping resets, but the
   # round ends before the fresh timer could reach a threshold, so no probe runs
   # and the once-record survives the churn untouched.
-  FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge
+  FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge FM_FAKE_TMUX_FORBIDDEN_TARGET=
   printf '%s\n' 'waiting on the build queue' > "$capture"
   : > "$out"
   FM_TEST_STALE_ESCALATE=999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
@@ -3854,7 +3856,7 @@ test_second_death_after_a_same_window_relaunch_reports_in_full() {
     || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "an unchanged dead pane advanced the escalation count"
-  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_FORBIDDEN_TARGET
   pass "a second death after a same-window relaunch reports in full without a live probe, and an unchanged dead pane stays silent"
 }
 
@@ -3881,7 +3883,7 @@ test_identical_dead_display_of_a_successor_still_reports() {
     || fail "could not arm the lane's busy incarnation"
 
   # Death #1: the endpoint is gone and reported once, in full.
-  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_FORBIDDEN_TARGET
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
     || fail "the first death was never reported: $(cat "$out")"
   grep -F 'agent missing' "$out" >/dev/null \
@@ -3925,7 +3927,7 @@ test_identical_dead_display_of_a_successor_still_reports() {
     || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "an unchanged dead pane advanced the escalation count"
-  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS FM_FAKE_TMUX_FORBIDDEN_TARGET
   pass "a successor's byte-identical dead display reports in full, and the same incarnation still absorbs"
 }
 
