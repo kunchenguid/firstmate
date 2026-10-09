@@ -118,7 +118,7 @@ The shared runner's changed-file coverage maps both suites to the remote-agent o
 ## Unknown followup diagnosis
 
 On 2026-10-09, `FM_REMOTE_TEST_CASE=recovery bin/fm-test-run.sh tests/fm-remote-agent.test.sh` passed with `total=1 failed=0 skipped_gate=0`.
-The public-interface fixture verifies bounded transient retries, local JSON failure classification, the raw session-info reachability alternative, unchanged unknown records during diagnosis, durable-only network avoidance, source exhaustion without endless rearming, reuse of the authenticated response, missing-metadata reconstruction, and exact marker recovery through adopt without another create.
+The public-interface fixture verifies bounded transient retries for string and official numeric HTTP error codes, local JSON and official iDA schema failure classification, the raw session-info reachability alternative, unchanged unknown records during diagnosis, durable-only network avoidance, source exhaustion without endless rearming, reuse of the authenticated response, missing-metadata reconstruction, and exact marker recovery through adopt without another create.
 The existing `FM_REMOTE_TEST_CASE=followup` cases retain authoritative receipt recovery and reject conflicting, baseline, and uncorrelated identities.
 Live identity recovery is a separate task-specific finding; reachable control-plane reads and passing fixtures do not authenticate a historical submission or prove its business result.
 

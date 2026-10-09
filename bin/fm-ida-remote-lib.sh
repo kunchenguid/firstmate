@@ -184,7 +184,7 @@ fm_ida_structured_success() {
 # Read-only CLI calls preserve local failure categories without exposing stderr.
 # Recognized transient stderr is classified in place and never persisted.
 fm_ida_read_error_classify() { # <stdout-file> <stderr-file> <exit-code>; empty means success
-  local out=$1 err=$2 rc=$3 class
+  local out=$1 err=$2 rc=$3 class code
   case "$rc" in
     126) printf 'cli-not-executable\n'; return ;;
     127) printf 'cli-not-found\n'; return ;;
@@ -202,9 +202,21 @@ fm_ida_read_error_classify() { # <stdout-file> <stderr-file> <exit-code>; empty 
     printf 'response-invalid-json\n'
   elif jq -e 'type == "object" and .status == "error"
       and (.error | type == "object")
-      and (.error.code | type == "string")
+      and (.error.code | type == "string" or type == "number")
       and (.error.message | type == "string")' "$out" >/dev/null 2>&1; then
-    fm_remote_error_classify "$out"
+    # Official bytedcli HttpError envelopes retain numeric HTTP codes, while
+    # its iDA schema parser uses a named response error. Neither is a local
+    # executable failure, and schema errors must not masquerade as outages.
+    code=$(jq -r '.error.code | tostring' "$out")
+    case "$code" in
+      408) printf 'timeout\n' ;;
+      429) printf 'rate-limited\n' ;;
+      425|500|502|503|504) printf 'unavailable\n' ;;
+      401|403) printf 'auth\n' ;;
+      404) printf 'remote-not-found\n' ;;
+      IDA_API_RESPONSE_ERROR) printf 'response-invalid-structure\n' ;;
+      *) fm_remote_error_classify "$out" ;;
+    esac
   elif [ "$rc" -ne 0 ]; then
     printf 'cli-exit-error\n'
   elif ! jq -e 'type == "object" and .status == "success"

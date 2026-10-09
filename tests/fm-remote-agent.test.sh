@@ -317,6 +317,8 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
       get-stderr-unavailable) printf 'network request failed: HTTP 503 token=synthetic-secret\n' >&2; exit 1 ;;
       get-provider-error) error INTERNAL_ERROR 'temporary provider read failure'; exit 1 ;;
       get-unavailable) error HTTP_503 'service unavailable'; exit 1 ;;
+      get-official-503) printf '%s\n' '{"status":"error","data":null,"error":{"code":503,"status_code":503,"message":"HTTP 503"}}'; exit 1 ;;
+      get-official-schema) error IDA_API_RESPONSE_ERROR 'IDA session detail response is incomplete.'; exit 1 ;;
       get-auth) error AUTH_REQUIRED 'authentication required'; exit 1 ;;
     esac
     [ "$mode" != list-unavailable ] || { error HTTP_503 'service unavailable'; exit 1; }
@@ -1109,13 +1111,13 @@ test_timeout_reconciliation_and_no_duplicate() {
 
 test_local_readback_failure_and_recovery() {
   local mode class home fakebin id source mode_file sha marker provider state first status before tries expected_phase recovery_seq
-  for mode in launch-126 launch-127 empty malformed multiple exit-error structure session-mismatch; do
+  for mode in launch-126 launch-127 empty malformed multiple exit-error structure official-schema session-mismatch; do
     case "$mode" in
       launch-126|launch-127) class=cli-exit-error ;;
       empty) class=response-empty ;;
       malformed|multiple) class=response-invalid-json ;;
       exit-error) class=cli-exit-error ;;
-      structure) class=response-invalid-structure ;;
+      structure|official-schema) class=response-invalid-structure ;;
       session-mismatch) class=session-identity-mismatch ;;
     esac
     id="ida-local-$mode"; source="ida-$id"
@@ -2094,17 +2096,20 @@ test_followup_active_recovery() {
   assert_grep 'bounded diagnosis exhausted' "$home/uncertain" 'unknown submission skipped active diagnosis'
   assert_grep 'ida-followup-recovery' "$home/state/$id.status" 'unknown submission did not wake MAIN with the repair gap'
   state_sha=$(shasum -a 256 "$(state_file "$home" "$id")")
-  for mode in get-unavailable get-malformed success; do
+  for mode in get-unavailable get-official-503 get-malformed get-official-schema success; do
     before=$(grep -c 'argv:.*session get ' "$home/bytedcli.log")
     FM_IDA_FAKE_MODE="$mode" run_ida "$home" "$fakebin" diagnose "$id" > "$home/diagnosis" || fail 'read-only diagnosis failed'
     after=$(grep -c 'argv:.*session get ' "$home/bytedcli.log")
     case "$mode" in
-      get-unavailable)
+      get-unavailable|get-official-503)
         [ "$((after-before))" = 2 ] || fail 'transient diagnosis did not bound retries at two'
         jq -e '.outcome=="read-retry-exhausted" and .error_class=="unavailable" and .next_action=="resolve-read-failure-then-diagnose"' "$home/diagnosis" >/dev/null || fail 'transient failure mislabeled as missing evidence' ;;
       get-malformed)
         [ "$((after-before))" = 1 ] || fail 'local invalid JSON was blindly polled'
         jq -e '.outcome=="local-repair-required" and .error_class=="response-invalid-json"' "$home/diagnosis" >/dev/null || fail 'local repair gap not classified' ;;
+      get-official-schema)
+        [ "$((after-before))" = 1 ] || fail 'official schema failure was blindly polled'
+        jq -e '.outcome=="local-repair-required" and .error_class=="response-invalid-structure"' "$home/diagnosis" >/dev/null || fail 'official schema failure was mislabeled as a provider outage' ;;
       success)
         jq -e '.outcome=="identity-unproven" and .next_action=="obtain-authenticated-receipt-or-request-task-link"' "$home/diagnosis" >/dev/null || fail 'unlinked new task was inferred' ;;
     esac
@@ -2237,6 +2242,10 @@ case "${FM_REMOTE_TEST_CASE:-}" in
   compatibility)
     test_aime_compatibility_and_local_unchanged
     test_remote_aime_dispatch_metadata
+    exit 0
+    ;;
+  readback)
+    test_local_readback_failure_and_recovery
     exit 0
     ;;
   recovery)
