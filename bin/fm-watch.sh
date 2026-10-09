@@ -2341,9 +2341,9 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
         return 0
       fi
       if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
-        fm_wake_append stale "$win" "stale: $win" || exit 1
+        fm_wake_append stale "$win" "stale: $win (task=$task)" || exit 1
         printf '%s' "$declared" > "$STATE/.stale-$key"
-        wake "stale: $win"
+        wake "stale: $win (task=$task)"
       fi
       return 0
     fi
@@ -2626,7 +2626,7 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
     bounded=0
   fi
   if [ "$throttled" -ne 0 ]; then
-    reason=$(stale_reason_naming_dialog "stale: $win" "$dialog")
+    reason=$(stale_reason_naming_dialog "stale: $win (task=$task)" "$dialog")
     fm_wake_append stale "$win" "$reason" || exit 1
     stale_wait_record "$key"
   fi
@@ -3880,7 +3880,7 @@ EOF
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
+            stale_reason=$(stale_reason_naming_dialog "stale: $w (task=$task)" "$dialog")
             fm_wake_append stale "$w" "$stale_reason" || exit 1
             printf '%s' "$h" > "$sf"
             _wedge_cap_markers_clear "$key"
@@ -3923,7 +3923,7 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
-              stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
+              stale_reason=$(stale_reason_naming_dialog "stale: $w (task=$task)" "$dialog")
               fm_wake_append stale "$w" "$stale_reason" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
