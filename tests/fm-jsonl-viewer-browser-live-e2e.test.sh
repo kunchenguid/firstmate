@@ -82,6 +82,19 @@ FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" "done" completed-task >/dev/
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" add "$ARCHIVED_ID" 'Dashboard archived task' --repo viewer --kind ship --start >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" archive "$ARCHIVED_ID" >/dev/null
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-tasks-axi.sh" update-progress-view "$REPORT_ID" --progress '{"acceptance":"All contracts pass","current_state":"Recorded current action <img id=progress-unsafe src=x onerror=alert(1)>","remaining_gap":"Finish behavioral verification","next_step":"Refresh canonical progress"}' >/dev/null
+node - "$HOME_FIXTURE/data/$REPORT_ID/task.json" "$HOME_FIXTURE/data/$FIRST_REPORT_ID/task.json" "$HOME_FIXTURE/data/tall-task-01/task.json" "$HOME_FIXTURE/data/tall-task-02/task.json" "$HOME_FIXTURE/data/completed-task/task.json" <<'NODE'
+import fs from "node:fs";
+const [report, firstReport, tallOne, tallTwo, completed] = process.argv.slice(2);
+for (const [path, updatedAt] of [[report, "2026-10-08T00:00:00Z"], [firstReport, "2026-10-07T00:00:00Z"], [tallOne, "2026-10-06T00:00:00Z"], [tallTwo, "not-a-timestamp"]]) {
+  const record = JSON.parse(fs.readFileSync(path));
+  record.updated_at = updatedAt;
+  fs.writeFileSync(path, `${JSON.stringify(record)}\n`);
+}
+const completedRecord = JSON.parse(fs.readFileSync(completed));
+completedRecord.completion = { verb: "done", date: "2026-10-09" };
+completedRecord.updated_at = "2026-10-01T00:00:00Z";
+fs.writeFileSync(completed, `${JSON.stringify(completedRecord)}\n`);
+NODE
 printf 'kind=ship\nharness=codex\nmodel=gpt-6.1-sol\nspawn_gen=browser-fixture-g1\n' > "$HOME_FIXTURE/state/$REPORT_ID.meta"
 printf 'kind=ship\nharness=pi\nmodel=claude-sonnet-4-6\nspawn_gen=browser-fixture-g2\n' > "$HOME_FIXTURE/state/$FIRST_REPORT_ID.meta"
 cat > "$FIRST_SHORT_DIR/journal.jsonl" <<'JSONL'
@@ -254,14 +267,6 @@ await page.route("**/api/tasks*", async route => {
   }
   if (Array.isArray(body.tasks)) {
     if (!replayedFullSnapshot) {
-      body.tasks = body.tasks.map(task => {
-        if (task.id === process.env.VIEWER_REPORT_ID) return { ...task, updatedAt: "2026-10-08T00:00:00Z" };
-        if (task.id === process.env.VIEWER_FIRST_REPORT_ID) return { ...task, updatedAt: "2026-10-07T00:00:00Z" };
-        if (task.id === "tall-task-01") return { ...task, updatedAt: "2026-10-06T00:00:00Z" };
-        if (task.id === "tall-task-02") return { ...task, updatedAt: "not-a-timestamp" };
-        if (task.id === "completed-task") return { ...task, completionAt: "2026-10-09", updatedAt: "2026-10-01T00:00:00Z" };
-        return task;
-      });
       body.tasks = body.tasks.flatMap(task => task.category !== "completed" ? [task] : [
         task,
         ...Array.from({ length: 40 }, (_, index) => ({
