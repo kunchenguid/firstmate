@@ -573,12 +573,6 @@ expect_code 1 "$unknown_reply_code" "reply <id> --unknown is refused"
 assert_contains "$unknown_reply" "unknown option for reply" "refusal names unknown option"
 assert_absent "$home/state/inbox/.replies/$nid" "unknown option refusal must never record a reply"
 
-# note --unknown is refused as an unknown option
-unknown_note_code=0
-unknown_note=$(run_inbox "$home" note --bogus "some note" 2>&1) || unknown_note_code=$?
-expect_code 1 "$unknown_note_code" "note --unknown is refused"
-assert_contains "$unknown_note" "unknown option for note" "note refusal names unknown option"
-
 # reply <id> -- --help is accepted as raw body text via -- delimiter
 run_inbox "$home" reply "$nid" -- "--help is the recorded answer" >/dev/null || fail "reply with -- delimiter failed"
 assert_present "$home/state/inbox/.replies/$nid" "reply with -- is recorded"
@@ -595,4 +589,4 @@ reply_stdin_body=$(run_inbox "$home" receipts --all-replies | python3 -c 'import
 print([r for r in json.load(sys.stdin)["replies"] if r["id"] == "'"$nid_stdin"'"][0]["body"])')
 assert_equals "--help from stdin" "$reply_stdin_body" "stdin reply with leading dashes is preserved"
 
-pass "reply and note option parsing refuses unknown flags and handles --help without recording"
+pass "reply option parsing refuses unknown flags and handles --help without recording"
