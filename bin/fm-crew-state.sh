@@ -479,6 +479,16 @@ passed_pr_detail() {
         *)           printf 'run passed: PR state %s' "$state_lc" ;;
       esac
       ;;
+    azuredevops)
+      if ! state_lc=$(fm_run_timed 5 python3 "$SCRIPT_DIR/fm-azure-pr.py" disposition "$url" 2>/dev/null); then
+        printf 'run passed: PR state unknown (unreadable)'
+        return
+      fi
+      case "$state_lc" in
+        open|closed|merged) printf 'run passed: PR %s' "$state_lc" ;;
+        *) printf 'run passed: PR state unknown (unreadable)' ;;
+      esac
+      ;;
     gerrit)
       if ! change_read_record_bounded "$host" "$number"; then
         printf 'run passed: PR state unknown (unreadable)'

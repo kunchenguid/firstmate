@@ -34,7 +34,7 @@
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
 #   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
-#   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
+#   (n) no-mistakes + replayed patch and parent both landed -> ALLOW; a missing parent -> REFUSE
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
@@ -58,6 +58,9 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
+# Never inherit the operator's home; individual parent-channel cases explicitly
+# supply their own fixture-local home when they need one.
+unset FM_HOME
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
@@ -70,6 +73,7 @@ REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
+#   $CASE/active-home/  - isolated supervisor home, beside removable child homes
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
 #   $CASE/fakebin/      - mocks for treehouse, tmux (PATH-prepended by caller)
 #   $CASE/origin.git/   - bare upstream repo (so the project clone has origin)
@@ -80,7 +84,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  mkdir -p "$case_dir/active-home" "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -251,9 +255,77 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
-# Override GitHub lookups to report PR 7 as merged with the supplied head.
+setup_submodule_fixture() {
+  local case_dir=$1 tmp head
+  git init -q --bare "$case_dir/submodule-origin.git"
+  git -C "$case_dir/submodule-origin.git" symbolic-ref HEAD refs/heads/main
+
+  tmp="$case_dir/_submodule-seed"
+  git clone -q "$case_dir/submodule-origin.git" "$tmp"
+  printf '%s\n' base > "$tmp/README.md"
+  git -C "$tmp" add -- README.md
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "submodule base"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  tmp="$case_dir/_super-with-submodule"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" -c protocol.file.allow=always submodule add -q "$case_dir/submodule-origin.git" libs/sdk
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "add submodule"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/wt" reset -q --hard origin/main
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init --recursive >/dev/null 2>&1
+  head=$(git -C "$case_dir/wt/libs/sdk" rev-parse HEAD)
+  printf '%s\n' "$head"
+}
+
+advance_submodule_origin() {
+  local case_dir=$1 file=$2 content=$3 msg=$4 tmp head
+  tmp="$case_dir/_submodule-advance"
+  git clone -q "$case_dir/submodule-origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+  git -C "$tmp" push -q origin main
+  head=$(git -C "$tmp" rev-parse HEAD)
+  rm -rf "$tmp"
+  printf '%s\n' "$head"
+}
+
+update_worktree_submodule_to() {
+  local case_dir=$1 head=$2 msg=$3
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init --recursive >/dev/null 2>&1
+  git -C "$case_dir/wt/libs/sdk" fetch -q origin
+  git -C "$case_dir/wt/libs/sdk" checkout -q "$head"
+  git -C "$case_dir/wt" add -- libs/sdk
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+}
+
+land_submodule_pointer_on_origin_main() {
+  local case_dir=$1 head=$2 msg=$3 tmp
+  tmp="$case_dir/_land-submodule"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" -c protocol.file.allow=always submodule update --init --recursive >/dev/null 2>&1
+  git -C "$tmp/libs/sdk" fetch -q origin
+  git -C "$tmp/libs/sdk" checkout -q "$head"
+  git -C "$tmp" add -- libs/sdk
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+  git -C "$tmp" push -q origin HEAD:main
+  rm -rf "$tmp"
+}
+
+set_submodule_ignores_all() {
+  local case_dir=$1
+  git -C "$case_dir/wt" config diff.ignoreSubmodules all
+  git -C "$case_dir/wt" config submodule.libs/sdk.ignore all
+}
+
+# Report a merged PR with independently selectable source and merge-result heads.
 add_gh_pr_merged_for_head() {
-  local case_dir=$1 head=$2
+  local case_dir=$1 head=$2 merged=${3:-$2}
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -269,6 +341,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *"state,mergeCommit,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$merged' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
@@ -593,21 +666,17 @@ add_git_status_lock_failure() {
 #!/usr/bin/env bash
 real=${REAL_GIT_FOR_TEST:?}
 dir=
-args=()
+args=("$@")
+# Locate the subcommand after Git's global options, retaining all original
+# arguments for the real Git call, including explicit submodule-ignore guards.
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -C)
-      dir=$2
-      args+=("$1" "$2")
-      shift 2
-      ;;
-    *)
-      args+=("$1")
-      shift
-      ;;
+    -C) dir=$2; shift 2 ;;
+    -c) shift 2 ;;
+    *) break ;;
   esac
 done
-if [ -n "$dir" ] && [ "${args[2]:-}" = status ] && [ "${args[3]:-}" = --porcelain ]; then
+if [ -n "$dir" ] && [ "${1:-}" = status ] && [ "${2:-}" = --porcelain ]; then
   lock=$("$real" -C "$dir" rev-parse --git-path index.lock 2>/dev/null || true)
   case "$lock" in
     /*|'') ;;
@@ -629,7 +698,9 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
-  FM_ROOT_OVERRIDE="$ROOT" \
+  # Child homes and worktrees must be siblings of the supervisor home, not
+  # descendants of it: the removal guard correctly refuses the latter layout.
+  FM_HOME="${FM_HOME:-$case_dir/active-home}" FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
@@ -661,12 +732,100 @@ backlog_row_state() {
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+  for cmd in awk bash basename cat chmod cksum cp cut date dirname env find git grep head hostname id ln \
+    mkdir mktemp mv perl ps python3 readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
+}
+
+test_history_location_containment_matrix() {
+  local scenario route case_dir merged local_head expected rc
+  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/containment-contract.py" \
+    || fail "independent small-history containment oracle failed"
+  for scenario in unlanded-delete landed-delete unlanded-replace same-file-restoration \
+    literal-path ordinary-path successive-upstream one-upstream partial-two-file \
+    whole-file-restoration missing-intermediate-tree complete-enumeration \
+    large-rebased-upstream large-rebased-unlanded large-alignment-bound \
+    merge-main-upstream merge-main-same-file merge-main-resolution \
+    merge-main-merge-restoration merge-main-local-restoration; do
+    for route in pr default; do
+      case_dir=$(make_case "history-$scenario-$route")
+      write_meta "$case_dir" no-mistakes ship
+      add_lsof_no_holder "$case_dir"
+      python3 "$ROOT/tests/containment-fixtures.py" "$case_dir" "$scenario" \
+        || fail "$scenario: could not construct independent history"
+      merged=$(cat "$case_dir/merged-sha")
+      local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      case "$scenario" in
+        large-*|merge-main-*)
+          local proof_path=shared.txt
+          case "$scenario" in
+            merge-main-upstream|merge-main-resolution|merge-main-merge-restoration) proof_path=g.txt ;;
+            merge-main-local-restoration) proof_path=f.txt ;;
+          esac
+          [ "$(git -C "$case_dir/wt" rev-parse HEAD:"$proof_path")" != "$(git -C "$case_dir/wt" rev-parse "$merged:$proof_path")" ] \
+            || fail "$scenario: fixture must require non-identical text alignment"
+          if git -C "$case_dir/wt" merge-base --is-ancestor "$local_head" "$merged"; then
+            fail "$scenario: fixture must require rewritten-history proof"
+          fi
+          ;;
+      esac
+      if [ "$route" = pr ]; then
+        add_gh_pr_merged_for_head "$case_dir" "$merged" "$merged"
+        append_pr_meta_url "$case_dir"
+        case "$scenario" in
+          large-*|merge-main-*) printf 'base_branch=unavailable-fallback\n' >> "$case_dir/state/task-x1.meta" ;;
+        esac
+      else
+        add_gh_axi_error "$case_dir"
+      fi
+      case "$scenario" in
+        landed-delete|successive-upstream|one-upstream|large-rebased-upstream|merge-main-upstream|merge-main-same-file) expected=0 ;;
+        *) expected=1 ;;
+      esac
+      rc=0
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      expect_code "$expected" "$rc" "$scenario/$route: wrong final-content verdict"$'\n'"$(cat "$case_dir/stderr")"
+      if [ "$scenario" = large-alignment-bound ]; then
+        assert_grep 'text alignment exceeds the exact-proof memory bound' "$case_dir/stderr" \
+          "$scenario/$route: refusal did not report bounded-computation exhaustion"
+      fi
+      if [ "$expected" = 1 ]; then
+        assert_refusal_retained_task_state "$case_dir" "$scenario/$route" "$local_head"
+      else
+        [ ! -e "$case_dir/state/task-x1.meta" ] \
+          || fail "$scenario/$route: allowed cleanup did not retire its record"
+      fi
+    done
+  done
+  pass "history/location containment passes the combined 40-case matrix and independent oracles"
+}
+
+test_dirty_initialized_nested_submodule_refuses() {
+  local case_dir head rc
+  case_dir=$(make_case dirty-initialized-nested)
+  setup_submodule_fixture "$case_dir" >/dev/null
+  git init -q "$case_dir/vendor"
+  printf '%s\n' clean > "$case_dir/vendor/README.md"
+  git -C "$case_dir/vendor" add README.md
+  git -C "$case_dir/vendor" -c user.name=t -c user.email=t@t commit -qm "vendor baseline"
+  git -C "$case_dir/wt/libs/sdk" -c protocol.file.allow=always submodule add -q "$case_dir/vendor" vendor
+  git -C "$case_dir/wt/libs/sdk" -c user.name=t -c user.email=t@t commit -qam "nested module"
+  git -C "$case_dir/wt" -c user.name=t -c user.email=t@t commit -qam "nested pointer"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  set_submodule_ignores_all "$case_dir"
+  git -C "$case_dir/wt/libs/sdk" config submodule.vendor.ignore all
+  printf '%s\n' uncommitted > "$case_dir/wt/libs/sdk/vendor/README.md"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "dirty nested module hidden by ignore settings must refuse"
+  assert_refusal_retained_task_state "$case_dir" nested-dirty "$head"
+  pass "dirty initialized nested submodule survives cleanup despite parent ignore settings"
 }
 
 test_local_only_fork_remote_allows() {
@@ -872,6 +1031,194 @@ test_no_mistakes_truly_unpushed_refuses() {
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
 }
 
+test_azure_requires_completed_pr_and_local_containment() {
+  local case_dir state head local_head rc expected api_state
+  for state in active abandoned completed unreadable dirty later \
+    unregistered-https unregistered-https-port unregistered-https-mixed unregistered-https-gitcase \
+    unregistered-new-ssh unregistered-new-ssh-no-user unregistered-new-ssh-url unregistered-new-ssh-url-no-user \
+    unregistered-legacy unregistered-legacy-no-user unregistered-legacy-ssh; do
+    case_dir=$(make_case "azure-$state")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    if [[ "$state" != unregistered-* ]]; then
+      printf '%s\n' 'pr=https://dev.azure.com/example/Project/_git/repo/pullrequest/7' >> "$case_dir/state/task-x1.meta"
+    fi
+    api_state=$state
+    case "$state" in dirty|later) api_state=completed ;; esac
+    cat > "$case_dir/fakebin/az" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '{"continuation_token":null,"pullRequestId":7,"status":"$api_state","mergeStatus":"succeeded","closedDate":"2026-01-01T00:00:00Z","lastMergeSourceCommit":{"commitId":"$head"},"lastMergeCommit":{"commitId":"$head"},"repository":{"id":"22222222-2222-2222-2222-222222222222","name":"repo","project":{"id":"11111111-1111-1111-1111-111111111111","name":"Project"}}}'
+SH
+    chmod +x "$case_dir/fakebin/az"
+    case "$state" in
+      unreadable) printf '#!/usr/bin/env bash\nexit 1\n' > "$case_dir/fakebin/az" ;;
+      dirty|later)
+        # API says completed, but later local work must survive cleanup.
+        if [ "$state" = dirty ]; then
+          printf 'uncommitted\n' >> "$case_dir/wt/feature.txt"
+        else
+          wt_commit_file "$case_dir" extra.txt unlanded
+        fi
+        ;;
+    esac
+    # Reaching a remote feature branch is not evidence of Azure completion.
+    add_fork_with_pushed_branch "$case_dir"
+    case "$state" in
+      unregistered-https)
+        git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/repo'
+        ;;
+      unregistered-https-port)
+        git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com:443/example/Project/_git/repo'
+        ;;
+      unregistered-https-mixed)
+        git -C "$case_dir/wt" remote set-url origin 'https://Dev.Azure.Com/example/Project/_git/repo'
+        ;;
+      unregistered-https-gitcase)
+        git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_GIT/repo'
+        ;;
+      unregistered-new-ssh)
+        git -C "$case_dir/wt" remote set-url origin 'git@ssh.dev.azure.com:v3/example/Project/repo'
+        ;;
+      unregistered-new-ssh-no-user)
+        git -C "$case_dir/wt" remote set-url origin 'ssh.dev.azure.com:v3/example/Project/repo'
+        ;;
+      unregistered-new-ssh-url)
+        git -C "$case_dir/wt" remote set-url origin 'ssh://git@ssh.dev.azure.com:22/v3/example/Project/repo'
+        ;;
+      unregistered-new-ssh-url-no-user)
+        git -C "$case_dir/wt" remote set-url origin 'ssh://ssh.dev.azure.com/v3/example/Project/repo'
+        ;;
+      unregistered-legacy)
+        git -C "$case_dir/wt" remote set-url origin 'example@vs-ssh.visualstudio.com:v3/example/Project/repo'
+        ;;
+      unregistered-legacy-no-user)
+        git -C "$case_dir/wt" remote set-url origin 'vs-ssh.visualstudio.com:v3/example/Project/repo'
+        ;;
+      unregistered-legacy-ssh)
+        git -C "$case_dir/wt" remote set-url origin 'ssh://example@vs-ssh.visualstudio.com:22/Project/_ssh/repo'
+        ;;
+    esac
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    [ "$(git -C "$case_dir/wt" rev-list --count HEAD --not --remotes --)" = 0 ] \
+      || fail "Azure $state fixture has unpushed commits"
+    expected=1
+    [ "$state" != completed ] || expected=0
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code "$expected" "$rc" "Azure $state teardown"
+    if [ "$expected" = 1 ]; then
+      assert_refusal_retained_task_state "$case_dir" "Azure $state" "$local_head"
+      if [[ "$state" = unregistered-* ]]; then
+        assert_grep 'Azure task has no registered PR URL' "$case_dir/stderr" \
+          "Azure $state bypassed the completion guard"
+      fi
+    else
+      [ ! -e "$case_dir/state/task-x1.meta" ] || fail "Azure $state did not retire task record"
+    fi
+  done
+  pass "Azure cleanup requires completed PR and contained clean local work, even after push"
+}
+
+test_azure_origin_classification_failures_preserve_work() {
+  local case_dir rc path_without_python local_head
+
+  case_dir=$(make_case azure-no-python)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/repo'
+  path_without_python=$(make_path_without_lsof "$case_dir")
+  # This case tests Python's absence, not lsof's: the shared PATH fixture keeps
+  # Python available for its ordinary cleanup and process-group scenarios.
+  rm "$path_without_python/python3"
+  # Prime the caller's cache as earlier matrix cases do. Bash 3.2 can reuse a
+  # cached command for a temporary PATH assignment to a builtin. Probe a fresh
+  # shell, matching the executable's command lookup without changing this shell.
+  python3 -c 'pass'
+  if PATH="$case_dir/fakebin:$path_without_python" bash -c 'command -v python3' >/dev/null 2>&1; then
+    fail "azure-no-python: fixture unexpectedly exposes python3"
+  fi
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  set +e
+  FM_TEARDOWN_TEST_PATH="$path_without_python" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-no-python: teardown should refuse when classification cannot run"
+  assert_grep 'Azure-origin classification could not be completed' "$case_dir/stderr" \
+    "azure-no-python: missing python did not preserve work"
+  assert_refusal_retained_task_state "$case_dir" azure-no-python "$local_head"
+
+  case_dir=$(make_case azure-classifier-failed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'git@ssh.dev.azure.com:v3/example/Project/repo'
+  cat > "$case_dir/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+exit 7
+SH
+  chmod +x "$case_dir/fakebin/python3"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-classifier-failed: teardown should refuse when classification errors"
+  assert_grep 'Azure-origin classification could not be completed' "$case_dir/stderr" \
+    "azure-classifier-failed: classifier failure did not preserve work"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "azure-classifier-failed: lost task record"
+  [ -d "$case_dir/wt" ] || fail "azure-classifier-failed: lost local work"
+
+  case_dir=$(make_case azure-classifier-exit1)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/repo'
+  cat > "$case_dir/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/python3"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-classifier-exit1: teardown should refuse when classification exits 1"
+  assert_grep 'Azure-origin classification could not be completed' "$case_dir/stderr" \
+    "azure-classifier-exit1: exit 1 did not preserve work"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "azure-classifier-exit1: lost task record"
+  [ -d "$case_dir/wt" ] || fail "azure-classifier-exit1: lost local work"
+
+  case_dir=$(make_case azure-repo-name-collision)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'https://dev.azure.com/example/Project/_git/ssh.dev.azure.com'
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-repo-name-collision: teardown should still detect Azure https origins"
+  assert_grep 'Azure task has no registered PR URL' "$case_dir/stderr" \
+    "azure-repo-name-collision: https repo-name collision bypassed Azure classification"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "azure-repo-name-collision: lost task record"
+  [ -d "$case_dir/wt" ] || fail "azure-repo-name-collision: lost local work"
+
+  case_dir=$(make_case non-azure-origin)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin 'https://github.com/example/repo'
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "non-azure-origin: teardown should still use ordinary remote reachability"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "non-azure-origin: teardown unexpectedly refused"
+
+  pass "Azure origin classification is explicit and preserves work on failures"
+}
+
 test_squash_merged_branch_deleted_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-merged)
@@ -950,17 +1297,26 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
-test_squash_merged_pr_allows_replayed_unpushed_patch() {
-  local case_dir rc parent_head pr_head
-  case_dir=$(make_case squash-replayed-patch)
+test_merged_pr_history_with_reapplied_local_change_refuses() {
+  local case_dir rc pr_head local_head tmp
+  case_dir=$(make_case merged-revert-reapply)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit_file "$case_dir" local-parent.txt parent "local parent"
-  parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
-  git -C "$case_dir/project" fetch -q origin fm/task-x1
-  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_commit_file "$case_dir" feature.txt hello "reapplied local change"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   append_pr_meta_url "$case_dir"
-  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
+
+  tmp="$case_dir/_pr-history"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -b fm/task-x1
+  printf '%s\n' hello > "$tmp/feature.txt"
+  git -C "$tmp" add -- feature.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "add feature"
+  git -C "$tmp" rm -q feature.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "revert feature"
+  pr_head=$(git -C "$tmp" rev-parse HEAD)
+  git -C "$tmp" push -q origin "HEAD:refs/pull/7/head"
+  rm -rf "$tmp"
+  git -C "$case_dir/project" fetch -q origin "refs/pull/7/head:refs/fm-test/pr-head"
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
@@ -968,9 +1324,114 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
-  pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+  expect_code 1 "$rc" "merged-revert-reapply: teardown should refuse when final PR content does not contain the local change"
+  grep -q REFUSED "$case_dir/stderr" || fail "merged-revert-reapply: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" merged-revert-reapply "$local_head"
+  pass "merged PR history does not authorize a reapplied local change absent from final content"
+}
+
+test_merged_pr_refuses_unicode_merge_only_adjustment() {
+  local case_dir rc pr_head local_head tmp file
+  case_dir=$(make_case merged-unicode-merge-only)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+
+  tmp="$case_dir/_main-move"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' upstream > "$tmp/upstream.txt"
+  git -C "$tmp" add -- upstream.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "upstream change"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  tmp="$case_dir/_pr-head"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -b fm/task-x1
+  printf '%s\n' hello > "$tmp/feature.txt"
+  git -C "$tmp" add -- feature.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "add feature"
+  pr_head=$(git -C "$tmp" rev-parse HEAD)
+  git -C "$tmp" push -q origin "HEAD:refs/pull/7/head"
+  rm -rf "$tmp"
+
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" merge --no-ff --no-commit origin/main >/dev/null \
+    || fail "merged-unicode-merge-only: could not stage merge"
+  file='résumé file.txt'
+  wt_commit_file "$case_dir" "$file" local-only "merge-only unicode adjustment"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-unicode-merge-only: teardown should refuse a merge-only Unicode adjustment absent from the merged PR"
+  grep -q REFUSED "$case_dir/stderr" || fail "merged-unicode-merge-only: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" merged-unicode-merge-only "$local_head"
+  pass "merged PR containment preserves Unicode merge-only files absent from final content"
+}
+
+test_merged_pr_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings() {
+  local case_dir rc pr_head local_head sub_head
+  case_dir=$(make_case merged-submodule-gitlink)
+  write_meta "$case_dir" no-mistakes ship
+  setup_submodule_fixture "$case_dir" >/dev/null
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  append_pr_meta_url "$case_dir"
+  sub_head=$(advance_submodule_origin "$case_dir" README.md updated "advance submodule")
+  update_worktree_submodule_to "$case_dir" "$sub_head" "update submodule gitlink"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  set_submodule_ignores_all "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-submodule-gitlink: teardown should refuse an unlanded gitlink update despite ignore settings"
+  grep -q REFUSED "$case_dir/stderr" || fail "merged-submodule-gitlink: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" merged-submodule-gitlink "$local_head"
+  pass "merged PR containment preserves unlanded gitlink updates despite ignore settings"
+}
+
+test_squash_merged_pr_contains_the_replayed_patch_and_parent() {
+  local case_dir rc parent_head pr_head local_head parent_landed
+  for parent_landed in no yes; do
+    case_dir=$(make_case "squash-replayed-patch-parent-$parent_landed")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" local-parent.txt parent "local parent"
+    parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
+    git -C "$case_dir/project" fetch -q origin fm/task-x1
+    # Merely publishing a parent on the source branch does not establish that
+    # its content landed. Only this control puts it in the merged result's base.
+    if [ "$parent_landed" = yes ]; then
+      git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/main"
+    fi
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    append_pr_meta_url "$case_dir"
+    pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "replay feature in merged result")
+    [ "$local_head" != "$pr_head" ] || fail "replayed-patch fixture did not rewrite the local commit"
+    add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$parent_landed" = yes ]; then
+      expect_code 0 "$rc" "replayed patch and parent are both landed: $(cat "$case_dir/stderr")"
+      [ ! -e "$case_dir/state/task-x1.meta" ] || fail "landed replay kept the task record"
+    else
+      expect_code 1 "$rc" "replayed patch cannot cover its published but unlanded parent"
+      assert_refusal_retained_task_state "$case_dir" unlanded-replayed-parent "$local_head"
+      [ "$(git -C "$case_dir/wt" show HEAD:local-parent.txt)" = parent ] \
+        || fail "refusal lost the unlanded parent contents"
+    fi
+  done
+  pass "replayed local patches permit cleanup only when their parent changes also landed"
 }
 
 test_merged_pr_with_later_local_commit_refuses() {
@@ -1142,6 +1603,68 @@ test_pr_check_records_remote_head_when_local_lags() {
   pass "fm-pr-check records the remote PR head when the local worktree lags"
 }
 
+test_content_fallback_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings() {
+  local case_dir rc local_head sub_head
+  case_dir=$(make_case content-submodule-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  setup_submodule_fixture "$case_dir" >/dev/null
+  sub_head=$(advance_submodule_origin "$case_dir" README.md updated "advance submodule")
+  update_worktree_submodule_to "$case_dir" "$sub_head" "update submodule gitlink"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  set_submodule_ignores_all "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-submodule-unlanded: teardown should refuse an unlanded gitlink update despite ignore settings"
+  grep -q REFUSED "$case_dir/stderr" || fail "content-submodule-unlanded: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" content-submodule-unlanded "$local_head"
+  pass "content fallback preserves unlanded gitlink updates despite ignore settings"
+}
+
+test_content_fallback_allows_contained_submodule_gitlink_update_despite_ignore_settings() {
+  local case_dir rc sub_head
+  case_dir=$(make_case content-submodule-contained)
+  write_meta "$case_dir" no-mistakes ship
+  setup_submodule_fixture "$case_dir" >/dev/null
+  sub_head=$(advance_submodule_origin "$case_dir" README.md updated "advance submodule")
+  update_worktree_submodule_to "$case_dir" "$sub_head" "update submodule gitlink"
+  land_submodule_pointer_on_origin_main "$case_dir" "$sub_head" "land submodule gitlink"
+  set_submodule_ignores_all "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-submodule-contained: teardown should succeed when the landed default branch contains the gitlink update"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-submodule-contained: teardown printed a REFUSED line"
+  pass "content fallback accepts contained gitlink updates despite ignore settings"
+}
+
+test_dirty_submodule_work_refuses_despite_ignore_settings() {
+  local case_dir rc head
+  case_dir=$(make_case dirty-submodule-work)
+  write_meta "$case_dir" no-mistakes ship
+  setup_submodule_fixture "$case_dir" >/dev/null
+  set_submodule_ignores_all "$case_dir"
+  printf '%s\n' dirty >> "$case_dir/wt/libs/sdk/README.md"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "dirty-submodule-work: teardown should refuse dirty submodule work despite ignore settings"
+  grep -q REFUSED "$case_dir/stderr" || fail "dirty-submodule-work: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-submodule-work: refusal did not cite uncommitted changes"
+  assert_refusal_retained_task_state "$case_dir" dirty-submodule-work "$head"
+  pass "dirty submodule work is never hidden by ignore settings"
+}
+
 test_content_in_default_fallback_allows() {
   local case_dir rc
   case_dir=$(make_case content-landed)
@@ -1171,6 +1694,93 @@ SH
   assert_absent "$case_dir/state/task-x1.meta" \
     "content-landed: teardown left task metadata after destructive cleanup"
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
+}
+
+test_content_fallback_contained_merge_history_allows() {
+  local case_dir rc tmp
+  case_dir=$(make_case content-merge-contained)
+  write_meta "$case_dir" no-mistakes ship
+
+  tmp="$case_dir/_base"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' base > "$tmp/shared.txt"
+  git -C "$tmp" add -- shared.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "shared base"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" reset -q --hard origin/main
+
+  git -C "$case_dir/wt" rm -q shared.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "remove shared"
+
+  tmp="$case_dir/_landed"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" rm -q shared.txt
+  printf '%s\n' upstream > "$tmp/upstream.txt"
+  git -C "$tmp" add -- upstream.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "landed removal"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" merge --no-ff origin/main -m "merge landed removal" >/dev/null \
+    || fail "content-merge-contained: could not merge landed history"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-merge-contained: teardown should succeed when a merge history is fully contained in the default branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-merge-contained: teardown printed a REFUSED line"
+  pass "content fallback accepts merge histories whose final content is already in default"
+}
+
+test_content_fallback_merge_only_restoration_refuses() {
+  local case_dir rc local_head tmp
+  case_dir=$(make_case content-merge-restore)
+  write_meta "$case_dir" no-mistakes ship
+
+  tmp="$case_dir/_base"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' base > "$tmp/shared.txt"
+  git -C "$tmp" add -- shared.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "shared base"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" reset -q --hard origin/main
+
+  git -C "$case_dir/wt" rm -q shared.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "remove shared"
+
+  tmp="$case_dir/_landed"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" rm -q shared.txt
+  printf '%s\n' upstream > "$tmp/upstream.txt"
+  git -C "$tmp" add -- upstream.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "landed removal"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" merge --no-ff --no-commit origin/main >/dev/null \
+    || fail "content-merge-restore: could not stage merge"
+  printf '%s\n' base > "$case_dir/wt/shared.txt"
+  git -C "$case_dir/wt" add -- shared.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "restore in merge"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-merge-restore: teardown should refuse a merge-only restoration absent from default"
+  grep -q REFUSED "$case_dir/stderr" || fail "content-merge-restore: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" content-merge-restore "$local_head"
+  pass "content fallback preserves merge-only restorations absent from default"
 }
 
 # A task recording base_branch= landed when its content reached that branch, not
@@ -4651,6 +5261,8 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_azure_requires_completed_pr_and_local_containment
+test_azure_origin_classification_failures_preserve_work
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
@@ -4675,15 +5287,25 @@ test_teardown_retains_v1_journal_when_workspace_query_ambiguous
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
-test_squash_merged_pr_allows_replayed_unpushed_patch
+test_merged_pr_refuses_unicode_merge_only_adjustment
+test_merged_pr_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings
+test_squash_merged_pr_contains_the_replayed_patch_and_parent
 test_merged_pr_with_later_local_commit_refuses
+test_merged_pr_history_with_reapplied_local_change_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
+test_content_fallback_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings
+test_content_fallback_allows_contained_submodule_gitlink_update_despite_ignore_settings
+test_dirty_submodule_work_refuses_despite_ignore_settings
 test_content_in_default_fallback_allows
+test_history_location_containment_matrix
+test_dirty_initialized_nested_submodule_refuses
+test_content_fallback_contained_merge_history_allows
+test_content_fallback_merge_only_restoration_refuses
 test_content_fallback_uses_recorded_base_branch
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses

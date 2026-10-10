@@ -42,33 +42,36 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. A task whose meta records
-# base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch.
-# Squash merges collapse the branch's commits, so per-commit patch ids against main
-# no longer match, and a pipeline rebase can leave the local worktree diverged from
-# the PR head. A diverged copy is not treated as landed: path-set coverage, git
-# cherry, and merge-tree containment each fail to prove content landed without also
-# accepting unlanded edits to the same paths. Teardown still accepts a merged PR
-# whose head contains the current local work (ancestor or equivalent patch ids),
-# or a clean content-in-default tree match. Anything else refuses.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
-# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
-# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed; dirty refusals distinguish untracked-only
-# leftovers from tracked edits and list at most ten non-exempt untracked paths.
+# hard-resets/removes the worktree and kills its processes. Except for the Azure
+# prerequisite below, committed work is accepted when reachable from any
+# remote-tracking branch (including a fork), OR - for a normal ship task whose
+# commits are not so reachable - when GitHub confirms a merged PR whose actual
+# merge result contains the local work, or the up-to-date default branch contains
+# it. A task whose meta records base_branch= (bin/fm-spawn.sh) runs that branch
+# content check against origin's copy of its base instead of the default branch.
+# A merged PR's result proves containment by ancestry or by the shared
+# bin/fm-content-containment.py proof; the branch-content fallback uses that same
+# helper. Its header owns the raw-history, final-content and location obligations,
+# including restorations, and the ambiguity/resource limits. This recognizes
+# rebased and squash-merged work without accepting unmatched later local changes;
+# patch-id matches and merge/apply heuristics never override a failed proof.
+# GitHub PR discovery uses recorded pr= first, or looks up the local branch when
+# no PR was recorded; either route requires a confirmed merge. Missing result objects are fetched by SHA,
+# then via the PR head ref or default branch as available; the source head itself
+# is never substituted for the actual merge result. A gh lookup error falls back
+# to the branch-content proof; an inconclusive proof refuses cleanup.
+# Azure PR tasks instead require a registered canonical URL and confirmed
+# completion from bin/fm-azure-pr.py before any remote-reachability shortcut.
+# They then prove local work contained in the completed merge result or the
+# branch-content fallback above. An active, abandoned or unreadable Azure PR
+# cannot use that fallback to bypass completion. With no pr=, a non-local-only
+# task whose origin identifies Azure (HTTPS or SSH) refuses; an unreadable origin
+# classification also refuses. This prerequisite still applies when the task's
+# worktree is absent but an Azure PR URL is recorded.
+# Uncommitted changes are never landed, including in initialized nested
+# submodules even when ignore settings hide them. Dirty refusals distinguish
+# untracked-only leftovers from tracked edits and list at most ten non-exempt
+# untracked paths.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1465,6 +1468,44 @@ remove_pr_poll_artifacts() {
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
 }
 
+# Azure tasks require an actual completed PR, even when their commits are on a
+# remote feature branch. An abandoned/unreadable PR never reaches the generic
+# content fallback. bin/fm-azure-pr.py owns the provider proof.
+azure_work_is_landed() {
+  local head current
+  head=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" landed "$PR_URL") || return 1
+  [ -d "$WT" ] || return 0
+  ensure_commit_object "$PR_URL" "$head" || return 1
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null \
+    || content_in_commit "$head" || content_in_default
+}
+
+azure_remote_origin_requires_pr() {
+  local origin_url=${1-}
+  [ -n "$origin_url" ] || return 1
+  python3 - "$origin_url" <<'PY'
+import re
+import sys
+from urllib.parse import urlsplit
+
+url = sys.argv[1]
+scp = re.fullmatch(r"((?:[^@/:]+@)?[^@/:]+):(?!//)(.*)", url)
+if scp:
+    url = f"ssh://{scp[1]}/{scp[2]}"
+parsed = urlsplit(url)
+host = (parsed.hostname or "").lower()
+kind = "non-azure"
+if parsed.scheme in ("http", "https") and host == "dev.azure.com":
+    kind = "azure"
+elif parsed.scheme in ("http", "https") and host.endswith(".visualstudio.com"):
+    kind = "azure"
+elif parsed.scheme == "ssh" and host in ("ssh.dev.azure.com", "vs-ssh.visualstudio.com"):
+    kind = "azure"
+print(kind)
+PY
+}
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
@@ -1495,50 +1536,30 @@ pr_number_from_target() {
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n name
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "$commit" >/dev/null 2>&1 || true
+  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  if n=$(pr_number_from_target "$target"); then
+    git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || true
+    git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  fi
+  name=$(default_branch) || return 1
+  git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
-patch_id_for_commit() {
-  local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
-}
-
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
-      | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
-  done <<EOF
-$unpushed
-EOF
+# One raw-object, history/location-aware proof for PR and default-branch paths.
+# The helper owns its exact evidence, ambiguity and resource-bound contract.
+content_in_commit() {
+  python3 "$SCRIPT_DIR/fm-content-containment.py" "$WT" "$1"
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
+# for both the PR state and actual merge result. Returns non-zero when the PR is
+# not merged, the result does not contain current local work, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
@@ -1548,7 +1569,7 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  view=$(cd "$WT" && gh pr view "$target" --json state,mergeCommit,url -q '.state + "\t" + (.mergeCommit.oid // "") + "\t" + .url' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   remainder=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
@@ -1564,7 +1585,7 @@ pr_is_merged() {
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
+  elif content_in_commit "$head"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
@@ -1575,15 +1596,11 @@ pr_is_merged() {
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# Fetch current recorded-base (or default) content, then use exactly the same
+# final-content proof as the PR path. No alternate merge/apply heuristic may
+# override a refusal.
 content_in_default() {
-  local name=${BASE_BRANCH:-} ref default_tree merged_tree
+  local name=${BASE_BRANCH:-} ref
   [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -1593,20 +1610,14 @@ content_in_default() {
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  content_in_commit "$ref"
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# The script header owns the landed-work decision; an unknown proof is a refusal,
+# not evidence that the local work is absent or safe to discard.
 work_is_landed() {
   local branch=$1
+  [ "${TEARDOWN_AZURE_LANDED:-0}" != 1 ] || return 0
   pr_is_merged "$branch" && return 0
   content_in_default
 }
@@ -1892,14 +1903,41 @@ report_worktree_dirt() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
-  [ -d "$WT" ] || return 0
+  local dirty_raw dirty submodule_dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch origin_url verdict
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
+  # An Azure feature branch being pushed is not proof of completion. Without
+  # the registered PR identity, preserve it rather than using the generic
+  # remote-reachability shortcut. SSH clone URLs identify Azure here as well.
+  if [ -z "$PR_URL" ] && [ "$MODE" != local-only ] && [ -d "$WT" ]; then
+    origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null || true)
+    verdict=$(azure_remote_origin_requires_pr "$origin_url" 2>/dev/null) || verdict=
+    case "$verdict" in
+      azure)
+        echo "REFUSED: Azure task has no registered PR URL; completion cannot be confirmed." >&2
+        return 1
+        ;;
+      non-azure) ;;
+      *)
+        echo "REFUSED: Azure-origin classification could not be completed; preserving work." >&2
+        return 1
+        ;;
+    esac
+  fi
+  case "$PR_URL" in
+    https://dev.azure.com/*|https://*.visualstudio.com/*)
+      if ! azure_work_is_landed; then
+        echo "REFUSED: Azure PR completion and containment of local work are not confirmed; preserving work." >&2
+        return 1
+      fi
+      TEARDOWN_AZURE_LANDED=1
+      ;;
+  esac
+  [ -d "$WT" ] || return 0
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty_raw=$(git -C "$WT" -c diff.ignoreSubmodules=none status --porcelain --ignore-submodules=none 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1908,6 +1946,17 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
+  # Each initialized level gets an explicit ignore override. A parent's status
+  # alone can hide a dirty nested module through that module's own configuration.
+  # shellcheck disable=SC2016 # These variables belong to each submodule's shell.
+  if ! submodule_dirty=$(git -C "$WT" submodule foreach --quiet --recursive '
+    changes=$(git -c diff.ignoreSubmodules=none status --porcelain --ignore-submodules=none) || exit 1
+    [ -z "$changes" ] || printf "%s\n" "submodule has uncommitted changes"
+  ' 2>/dev/null); then
+    echo "REFUSED: cannot inspect initialized submodules for uncommitted changes." >&2
+    return 1
+  fi
+  [ -z "$submodule_dirty" ] || dirty="${dirty:+$dirty$'\n'}$submodule_dirty"
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then

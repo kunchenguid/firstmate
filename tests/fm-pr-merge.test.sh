@@ -1325,7 +1325,7 @@ test_github_zero_exit_queue_required_refuses_with_exact_retry() {
 
   expect_code 1 "$rc" "github-zero-exit-queue-required: an unproved merge must fail"
   assert_grep 'state=OPEN, merged=false, isInMergeQueue=false' "$case_dir/stderr" \
-    "github-zero-exit-queue-required: refusal did not name the concrete observed state"
+    "github-zero-exit-queue-required: refusal did not name the concrete observed state: $(cat "$case_dir/stderr")"
   assert_grep 'base branch release/2026 requires the merge queue' "$case_dir/stderr" \
     "github-zero-exit-queue-required: refusal did not name the queue requirement"
   assert_grep '--attended-override -- --auto --rebase' "$case_dir/stderr" \
@@ -3886,3 +3886,5 @@ test_allow_missing_follows_the_allow_red_rules
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
+python3 "$ROOT/tests/azure-pr-contract.py" || fail "Azure PR contract regression"
+pass "Azure identities, exact-revision policies, guarded completion and merge polls"

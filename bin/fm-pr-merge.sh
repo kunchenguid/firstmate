@@ -96,13 +96,19 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
-# Before either forge merge, the task's existing per-task control lock
+# Azure Services uses bin/fm-azure-pr.py for live policy/revision verification
+# and a non-bypass completion PATCH. It accepts no extra forge flags or red
+# waiver, preserves an allowed PR-selected merge strategy, and refuses while
+# away because Azure completion may be asynchronous. Accepted-but-unconfirmed
+# completion leaves the poll armed and returns nonzero, never a landed outcome.
+#
+# Before any forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
 # an away record exists (a quiet-mode record is a present captain, so its
-# merges stay attended: bin/fm-afk-contract.sh mode) any green merge may
-# proceed under away authority:
+# merges stay attended: bin/fm-afk-contract.sh mode) an otherwise permitted
+# synchronous green merge may proceed under away authority:
 # the record's presence is the whole mechanical fact, and which merge the
 # captain's away words meant is the supervision session's reading
 # (bin/fm-branch-prompt.sh "Postures"). An unreadable record refuses rather
@@ -236,6 +242,11 @@ if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
 fi
 if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  exit 2
+fi
+
+if [ "$PROVIDER" = azuredevops ] && { [ "$#" -ne 0 ] || [ "${#ALLOW_RED[@]}" -gt 0 ] || [ "${#ALLOW_MISSING[@]}" -gt 0 ]; }; then
+  echo "error: Azure completion accepts no extra merge flags, --allow-red, or --allow-missing; repository policies cannot be bypassed" >&2
   exit 2
 fi
 
@@ -1121,6 +1132,10 @@ require_current_away_authority() {
   FM_PR_AWAY_POSTURE=false
   if fm_afk_contract_away_present "$STATE"; then
     FM_PR_AWAY_POSTURE=true
+    if [ "$PROVIDER" = azuredevops ]; then
+      echo "error: Azure completion is attended-only because its server operation can be asynchronous" >&2
+      return 2
+    fi
     if [ "$PROVIDER" = github ] && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
       echo "error: --auto is attended-only; while the away-posture record exists only a synchronous merge may run under its authority lock" >&2
       return 2
@@ -1326,7 +1341,7 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
-# Record before either forge call. This arms the merge poll without claiming a
+# Record before the forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 away_status=0
@@ -1458,6 +1473,22 @@ case "$PROVIDER" in
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    ;;
+  azuredevops)
+    hold_away_record_for_merge || exit 1
+    require_current_away_authority || exit 1
+    # The helper verifies inside this same authority lock and uses Azure's
+    # lastMergeSourceCommit compare-and-swap, never a convenience update that
+    # re-reads a different source, or inherited options that could bypass policy.
+    python3 "$SCRIPT_DIR/fm-azure-pr.py" complete "$URL" || exit 1
+    persist_accepted_merge_authority || exit 1
+    fm_afk_contract_lock_release || true
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
+    if ! python3 "$SCRIPT_DIR/fm-azure-pr.py" merged "$URL"; then
+      echo "actionable: Azure accepted completion but landing is unconfirmed; the merge poll remains armed" >&2
+      exit 1
+    fi
     ;;
   *)
     echo "error: invalid PR merge request" >&2

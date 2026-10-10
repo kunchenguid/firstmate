@@ -1148,7 +1148,7 @@ test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch() {
 }
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
-  local dir home id brief launch out mode rule
+  local dir home id brief launch out mode rule branch_prefix branch
   for mode in no-mistakes direct-PR local-only; do
     id="rl-promoted-${mode}"
     dir=$(new_case "promoted-scout-$mode" "$id")
@@ -1174,9 +1174,19 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     printf '%s\n' "fm-$id" > "$dir/fake/windows"
     printf '%s' "$dir/wt" > "$dir/fake/cwd"
 
-    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-      "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
-      || fail "$mode: scout promotion should succeed: $out"
+    branch_prefix=
+    branch="fm/$id"
+    if [ "$mode" != local-only ]; then
+      branch_prefix='users/example/'
+      branch="$branch_prefix$id"
+      out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+        "$PROMOTE" "$id" --mode "$mode" --yolo off --branch-prefix "$branch_prefix" 2>&1) \
+        || fail "$mode: scout promotion should succeed: $out"
+    else
+      out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+        "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
+        || fail "$mode: scout promotion should succeed: $out"
+    fi
     assert_grep 'This is a SCOUT task' "$brief" \
       "$mode: the reproduction fixture lost the original scout delivery text"
     assert_grep 'Never push to any remote and never open a PR' "$brief" \
@@ -1192,15 +1202,15 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       "$mode: the replacement launch left the stale scout prohibition readable at face value"
     case "$mode" in
       direct-PR)
-        rule="1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR." ;;
+        rule="1. Never push to the default branch (push only your \`$branch\` branch). Never merge a PR." ;;
       local-only)
-        rule="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`." ;;
+        rule="1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`." ;;
       *)
         rule='1. Never push to the default branch. Never merge a PR.' ;;
     esac
     assert_grep "$rule" "$launch" \
       "$mode: the replacement launch did not receive the current ship push and merge safety rule"
-    assert_grep "git checkout -b fm/$id" "$launch" \
+    assert_grep "git checkout -b $branch" "$launch" \
       "$mode: the replacement launch did not receive its promoted branch name"
     assert_grep 'Inventory this worktree' "$launch" \
       "$mode: the replacement launch did not receive the scratch-state inventory step"

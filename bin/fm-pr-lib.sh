@@ -7,10 +7,12 @@
 # "path" is the full project path, which is owner/repository on GitHub, an
 # arbitrarily nested group/subgroup/project namespace on GitLab, and an
 # arbitrarily nested project name on Gerrit, where "number" is the change
-# number. A GitLab or Gerrit project can sit at any depth, so no
-# owner/repository pair can address one and the sidecar carries the whole path
-# instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
-# so the host is part of that identity rather than a constant. Every consumer re-derives the identity
+# number. Azure Services uses organization/project/_git/repository (or the
+# legacy collection route); bin/fm-azure-pr.py owns its URL and REST contract.
+# A GitLab or Gerrit project can sit at any depth, so no owner/repository pair
+# can address one and the sidecar carries the whole path instead. Both also run
+# on self-hosted instances, and Gerrit runs nowhere else, so the host is part of
+# that identity rather than a constant. Every consumer re-derives the identity
 # from the stored URL and refuses any record whose parts do not reconstruct that
 # exact URL.
 #
@@ -199,7 +201,7 @@ fm_pr_gerrit_path_valid() {
 # FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
 # host.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path azure
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -224,6 +226,18 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
+  case "$raw" in
+    https://dev.azure.com/*|https://*.visualstudio.com/*)
+      azure=$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-azure-pr.py" parse "$raw" 2>/dev/null) || return 1
+      FM_PR_PROVIDER=azuredevops
+      FM_PR_URL=$raw
+      FM_PR_HOST=${azure%%$'\n'*}
+      azure=${azure#*$'\n'}
+      FM_PR_PATH=${azure%%$'\n'*}
+      FM_PR_NUMBER=${azure#*$'\n'}
+      return 0
+      ;;
+  esac
   # The path class contains "/" and "-", so this match is greedy to the last
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.

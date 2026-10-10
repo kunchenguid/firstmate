@@ -175,6 +175,59 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_project_prefix_branch_review() {
+  local case_dir out
+  case_dir=$(make_case project-prefix)
+  # Keep a stale fm/<id> branch so default naming cannot accidentally win.
+  git -C "$case_dir/wt" checkout -qb users/example/task-x1
+  printf 'project-convention\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm 'project prefix change'
+  write_task_meta "$case_dir" mode=no-mistakes kind=ship branch=users/example/task-x1
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" '+project-convention' "review used the stale fm branch"
+  pass "project-specific PR branch selection survives review"
+}
+
+test_azure_draft_review_uses_live_source_revision() {
+  local case_dir out stale
+  case_dir=$(make_case azure-review)
+  stale_and_pr_commits "$case_dir"
+  stale=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  write_task_meta "$case_dir" \
+    'pr=https://dev.azure.com/example/Project/_git/repo/pullrequest/7' "pr_head=$stale"
+  mkdir -p "$case_dir/fakebin"
+  cat > "$case_dir/fakebin/az" <<SH
+#!/usr/bin/env bash
+resource=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    --resource) resource=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$resource" in
+  pullRequests)
+    printf '%s\n' '{"continuation_token":null,"pullRequestId":7,"isDraft":true,"lastMergeSourceCommit":{"commitId":"$stale"},"repository":{"id":"22222222-2222-2222-2222-222222222222","name":"repo","project":{"id":"11111111-1111-1111-1111-111111111111","name":"Project"}}}'
+    ;;
+  pullRequestIterations)
+    printf '%s\n' '{"continuation_token":null,"count":1,"value":[{"id":2,"sourceRefCommit":{"commitId":"$PR_SHA"},"targetRefCommit":{"commitId":"ffffffffffffffffffffffffffffffffffffffff"}}]}'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/az"
+  out=$(PATH="$case_dir/fakebin:$PATH" run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  assert_contains "$out" '+pr-fixed' "Azure diff did not use live source SHA"
+  assert_not_contains "$out" 'stale-local' "Azure diff used stale recorded head"
+  pass "Azure draft review prefers the live source revision over a stale recorded head"
+}
+
+test_azure_draft_review_uses_live_source_revision
+test_project_prefix_branch_review
+
 test_recorded_branch_beats_moved_worktree_head() {
   local case_dir out
   case_dir=$(make_case recorded-branch)
