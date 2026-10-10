@@ -2525,13 +2525,16 @@ crew_absorb_class() {  # <id>
 }
 
 # 0 when crew <id>'s reconciled current state is terminal `done`: the work is
-# finished and what remains is the captain's word on it. The positive evidence a
-# supervisor needs to read a quiet pane as a deliberate wait rather than a wedge
-# suspect - and deliberately the RECONCILED state, not the status line, because a
-# `done:` leftover in the log can predate a validation run that is still going
-# (fm-crew-state.sh gives the run step precedence over the log for exactly that
-# reason). A crew that is anything else - working, parked, blocked, failed,
-# stopped, or unreadable - is not terminal here and keeps every alarm it has.
+# finished and what remains is the captain's word on it. One half of the positive
+# evidence a supervisor needs to read a quiet pane as a deliberate wait rather
+# than a wedge suspect - deliberately the RECONCILED state, not the status line,
+# because a `done:` leftover in the log can predate a validation run that is
+# still going (fm-crew-state.sh gives the run step precedence over the log for
+# exactly that reason). It is not sufficient alone: that same precedence lets a
+# passed run supersede a later `needs-decision:`, `blocked:` or `failed:` line,
+# so fm-watch.sh's terminal_done_stale_bound also requires the delivery verb on
+# the task's own last line and owns why. A crew that is anything else - working,
+# parked, blocked, failed, stopped, or unreadable - is not terminal here.
 crew_is_terminal_done() {  # <id>
   local verdict
   verdict=$(crew_state_read "$1")

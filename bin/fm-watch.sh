@@ -31,9 +31,10 @@
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Work already in a human's hands -
 #                          an open captain call, or a terminal delivery whose
-#                          reconciled state is done and which waits only on the
-#                          merge word - alarms on first sight and is then bounded
-#                          to that same re-surface cadence. Only when neither
+#                          own last line is `done` and whose reconciled state is
+#                          done too, waiting only on the merge word - alarms on
+#                          first sight and is then bounded to that same
+#                          re-surface cadence. Only when neither
 #                          absorb class applies does the log's latest recognized
 #                          status event decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
