@@ -97,6 +97,71 @@ fm_supervision_status() {
   return 0
 }
 
+# Build a content-sensitive snapshot of every inventory that contributes to
+# FM_SUP_NEEDED or FM_SUP_QUEUE_PENDING.  Unlike fm_supervision_status, this
+# helper fails when an inventory is unreadable or structurally unsafe; startup
+# reservation must distinguish a proven idle home from one it merely failed to
+# inspect.  Callers serialize the wake queue with its existing queue lock while
+# taking the two snapshots below.
+fm_supervision_inventory_snapshot() {  # <state-dir>
+  local state=$1 path rel id kind digest listing
+  [ -d "$state" ] && [ ! -L "$state" ] && [ -r "$state" ] && [ -x "$state" ] || return 1
+  if [ -e "$state/procevent" ] || [ -L "$state/procevent" ]; then
+    [ -d "$state/procevent" ] && [ ! -L "$state/procevent" ] \
+      && [ -r "$state/procevent" ] && [ -x "$state/procevent" ] || return 1
+  fi
+  listing=$(
+    set -o pipefail
+    for path in "$state"/*.meta "$state"/*.check.sh "$state"/*.check-trust \
+      "$state"/procevent/*.source "$state/.wake-queue"; do
+      [ -e "$path" ] || [ -L "$path" ] || continue
+      [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || exit 1
+      rel=${path#"$state"/}
+      if [[ "$rel" = *.meta ]]; then
+        kind=meta
+      elif [[ "$rel" = *.check.sh ]]; then
+        id=${path##*/}
+        id=${id%.check.sh}
+        if [ "$id" != x-watch ] && [ ! -e "$state/$id.check-trust" ]; then
+          continue
+        fi
+        kind=check
+      elif [[ "$rel" = *.check-trust ]]; then
+        id=${path##*/}
+        id=${id%.check-trust}
+        [ -e "$state/$id.check.sh" ] || continue
+        kind=trust
+      elif [[ "$rel" = procevent/*.source ]]; then
+        kind=source
+      elif [ "$rel" = .wake-queue ]; then
+        kind=queue
+      else
+        exit 1
+      fi
+      digest=$(LC_ALL=C cksum < "$path" 2>/dev/null) || exit 1
+      printf '%s\t%s\t%s\n' "$kind" "${path#"$state"/}" "$digest"
+    done | LC_ALL=C sort
+  ) || return 1
+  printf '%s\n' "$listing"
+}
+
+# Strict reservation-time form of fm_supervision_status.  The ordinary helper
+# stays always-zero for reporting callers; this form succeeds only when the
+# inventories were readable and byte-stable around that status calculation.
+# Sets FM_SUP_SNAPSHOT to the verified snapshot on success.
+# shellcheck disable=SC2034 # Output global, read by strict reservation callers.
+FM_SUP_SNAPSHOT=
+fm_supervision_status_strict() {  # <state-dir> [grace-seconds]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} before after
+  FM_SUP_SNAPSHOT=
+  before=$(fm_supervision_inventory_snapshot "$state") || return 1
+  fm_supervision_status "$state" "$grace"
+  after=$(fm_supervision_inventory_snapshot "$state") || return 1
+  [ "$before" = "$after" ] || return 1
+  # shellcheck disable=SC2034 # Output global, read by strict reservation callers.
+  FM_SUP_SNAPSHOT=$after
+}
+
 # fm_supervision_needed <state-dir> [grace-seconds]
 # Exit 0 (true) exactly when the home needs a watcher.
 fm_supervision_needed() {

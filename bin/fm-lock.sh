@@ -149,6 +149,94 @@ publish_lock_session_or_die() {
   exit 1
 }
 
+PRELAUNCH_MATCHED=0
+PRELAUNCH_HOME=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || {
+  echo "error: cannot resolve the physical firstmate home; operate read-only until resolved" >&2
+  exit 1
+}
+
+# Classify the pre-harness reservation while the ordinary claim mutex is held.
+# A raw launch may proceed when none exists, but a live reservation belongs only
+# to the authenticated child harness below its recorded launcher.  Unknown
+# state refuses, and a dead or PID-reused owner is the only reclaimable state.
+prepare_prelaunch_reservation() {
+  local owner=${FM_PRELAUNCH_OWNER_PID:-} token=${FM_PRELAUNCH_TOKEN:-} head dirty
+  PRELAUNCH_MATCHED=0
+  fm_prelaunch_reservation_inspect "$STATE" "$PRELAUNCH_HOME"
+  case "$FM_PRELAUNCH_INSPECT_STATE" in
+    free) return 0 ;;
+    stale)
+      rm -f -- "$STATE/$FM_PRELAUNCH_RESERVATION_FILE" || {
+        echo "error: cannot reclaim the dead prelaunch reservation; operate read-only until resolved" >&2
+        exit 1
+      }
+      return 0
+      ;;
+    live) ;;
+    *)
+      echo "error: prelaunch reservation ownership is unreadable or unknown; operate read-only until resolved" >&2
+      exit 1
+      ;;
+  esac
+  case "$owner" in ''|*[!0-9]*|0)
+    echo "error: another live prelaunch owner reserved this home; operate read-only until resolved" >&2
+    exit 1
+    ;;
+  esac
+  if [ "$FM_PRELAUNCH_RECORD_OWNER_PID" != "$owner" ] \
+    || ! fm_prelaunch_attached_child_authenticated "$STATE" "$PRELAUNCH_HOME" "$token"; then
+    echo "error: another live prelaunch owner reserved this home; operate read-only until resolved" >&2
+    exit 1
+  fi
+  case "$FM_PRELAUNCH_RECORD_UPDATE_STATUS" in current|updated) ;;
+    *)
+      echo "error: authenticated prelaunch child started before its source update completed; operate read-only until resolved" >&2
+      exit 1
+      ;;
+  esac
+  [ -n "$FM_PRELAUNCH_RECORD_TARGET_COMMIT" ] || {
+    echo "error: authenticated prelaunch child has no verified source target; operate read-only until resolved" >&2
+    exit 1
+  }
+  head=$(fm_prelaunch_git -C "$PRELAUNCH_HOME" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || {
+    echo "error: cannot verify prelaunch source HEAD; operate read-only until resolved" >&2
+    exit 1
+  }
+  [ "$head" = "$FM_PRELAUNCH_RECORD_TARGET_COMMIT" ] || {
+    echo "error: prelaunch source HEAD changed before session-lock handoff; operate read-only until resolved" >&2
+    exit 1
+  }
+  dirty=$(GIT_ATTR_NOSYSTEM=1 fm_prelaunch_git -C "$PRELAUNCH_HOME" \
+    -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null \
+    -c core.fsmonitor=false status --porcelain --untracked-files=all 2>/dev/null) || {
+    echo "error: cannot verify prelaunch source cleanliness before session-lock handoff; operate read-only until resolved" >&2
+    exit 1
+  }
+  if [ -n "$dirty" ]; then
+    echo "error: prelaunch source became dirty before session-lock handoff; operate read-only until resolved" >&2
+    exit 1
+  fi
+  PRELAUNCH_MATCHED=1
+}
+
+complete_prelaunch_handoff() {  # <verified-lock-pid>
+  local lock_pid=$1 owner=${FM_PRELAUNCH_OWNER_PID:-} token=${FM_PRELAUNCH_TOKEN:-}
+  [ "$PRELAUNCH_MATCHED" -eq 1 ] || return 0
+  # Re-read under the still-held claim mutex immediately before publishing the
+  # exchange.  This makes an interrupted prior attempt idempotent without ever
+  # trusting the environment alone.
+  fm_prelaunch_reservation_inspect "$STATE" "$PRELAUNCH_HOME"
+  if [ "$FM_PRELAUNCH_RECORD_OWNER_PID" != "$owner" ] \
+    || ! fm_prelaunch_attached_child_authenticated "$STATE" "$PRELAUNCH_HOME" "$token"; then
+    echo "error: prelaunch reservation changed before session-lock handoff; operate read-only until resolved" >&2
+    exit 1
+  fi
+  fm_prelaunch_handoff_publish "$STATE" "$lock_pid" || {
+    echo "error: cannot publish the verified prelaunch session handoff; operate read-only until resolved" >&2
+    exit 1
+  }
+}
+
 # This session already holds the lock, recorded as pid $1. Line 1 stays exactly
 # as recorded while that pid is alive; only the sidecar is refreshed, under the
 # claim lock, so a /clear re-key inside the same process replaces the old id.
@@ -167,7 +255,9 @@ confirm_own_lock() {  # <recorded-pid>
   fi
   recorded=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$recorded" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
+    prepare_prelaunch_reservation
     publish_lock_session_or_die
+    complete_prelaunch_handoff "$recorded"
     commit_lock_session
     release_claim_lock
     echo "lock acquired: harness pid $recorded"
@@ -227,6 +317,7 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     fi
   fi
 fi
+prepare_prelaunch_reservation
 # The sidecar goes first: a fresh pid beside a previous session's id would let
 # that session's resume own this lock. If the sidecar changes before line 1 is
 # written, a failure restores the previous sidecar. If line 1 is written but
@@ -270,6 +361,7 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+complete_prelaunch_handoff "$me"
 commit_lock_session
 release_claim_lock
 echo "lock acquired: harness pid $me"

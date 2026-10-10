@@ -498,6 +498,30 @@ Dirty, uniquely diverged, offline, and off-default targets are reported and left
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md); the relevant script headers own the mechanics.
 
+## Fresh primary startup pull
+
+An enrolled fresh primary launch uses the dotfiles-installed `firstmate-start` wrapper before any agent process exists.
+The installed wrapper owns fetch, portable-preference publication, whole-pull evidence, and child creation, while the frozen trusted Firstmate closure owns primary scope, reservation/session coordination, supported fresh profiles, and the pinned source fast-forward.
+It never invokes code from the fetched candidate.
+
+`bin/fm-prelaunch.sh` serializes its reservation with the existing `state/.lock.acquire` claim mutex and binds the exact physical home, standalone Git identity, launcher process identity, and invocation token.
+Reservation also holds the existing wake-queue mutex while `fm_supervision_status_strict` proves that the task, event-source, registered-check, and queue inventories are readable, content-stable, idle, and empty.
+A live or ambiguous session, launcher, dotfiles publication, fleet, or queue refuses startup mutation.
+
+The launcher attaches its pipe-blocked child before allowing the vendor exec.
+The reservation records an exec-stable child generation, so launcher death does not make a still-live child look reclaimable.
+Only a genuine attached harness descendant carrying the matching owner hint and token can exchange that reservation through `bin/fm-lock.sh`; raw and foreign harnesses remain denied until the owner exits or the verified child takes the ordinary lock.
+No shell process is manufactured as a harness lock owner.
+
+The source leg passes one already fetched full commit ID to the existing fast-forward owner in startup mode.
+That mode refuses dirty, detached, off-default, ahead, divergent, filtered, or unknown checkouts and disables external attributes and Git hooks for the update.
+Every ordinary source or preference writer must call `guard-write` before its mutation; without a reservation the explicit workflow retains its existing authority, while a live reservation permits only its authenticated owner.
+Secondmates, linked workers, no-mistakes phases, lab homes, and unsafe or unrecognized homes never enter automatic replacement.
+
+The synchronous digest performs no startup-pull network work.
+For a true fresh open it reports the authenticated handoff commits and status when present, or names the launch as a bypass; re-emits and saved-session sources do not claim a new pull.
+The operator-facing entry and bypass list lives in [`sessionstart-nudge.md`](sessionstart-nudge.md#fresh-primary-launcher-pull).
+
 ## Restart-proof
 
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
