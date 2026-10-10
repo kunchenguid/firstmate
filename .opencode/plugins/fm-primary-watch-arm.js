@@ -358,7 +358,9 @@ function restorationFailure(status) {
 async function restoreAfterActionableClose(paths, sessionID, ctx, predecessorArmPid) {
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
+    if (unloading) return { failure: "", recovery: null };
     const { status, armChild } = await ensureArm(paths, sessionID, ctx, predecessorArmPid, true);
+    if (unloading) return { failure: "", recovery: null };
     if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
@@ -372,6 +374,7 @@ async function restoreAfterActionableClose(paths, sessionID, ctx, predecessorArm
     if (attempt === REARM_RETRY_LIMIT) break;
     await waitForRetry(attempt + 1);
   }
+  if (unloading) return { failure: "", recovery: null };
   setArmStatus("failed");
   return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries` };
 }
@@ -521,12 +524,14 @@ function spawnArm(paths, sessionID, ctx, predecessorArmPid = "") {
 }
 
 async function beginArm(paths, sessionID, ctx, predecessorArmPid) {
+  if (unloading) return { status: "unloading", armChild: null };
   if (!sessionID) return { status: "skipped", armChild: null };
   if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
+  if (unloading) return { status: "unloading", armChild: null };
   return { status: "spawned", armChild: spawnArm(paths, sessionID, ctx, predecessorArmPid) };
 }
 
@@ -535,6 +540,7 @@ function armAttempt(status, armChild, includeArmChild) {
 }
 
 async function ensureArm(paths, sessionID, ctx, predecessorArmPid = "", includeArmChild = false) {
+  if (unloading) return armAttempt("unloading", null, includeArmChild);
   let launchResult = null;
   if (!launchInFlight) {
     const launch = beginArm(paths, sessionID, ctx, predecessorArmPid);
@@ -547,6 +553,7 @@ async function ensureArm(paths, sessionID, ctx, predecessorArmPid = "", includeA
   } else {
     launchResult = await launchInFlight;
   }
+  if (unloading) return armAttempt("unloading", null, includeArmChild);
   const armChild = launchResult.armChild;
   if (!armChild) {
     return armAttempt(launchResult.status, null, includeArmChild);

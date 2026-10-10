@@ -349,11 +349,10 @@ DRIVER
   pass "the contract helpers classify v2 turn ends and location scoping correctly"
 }
 
-# An unloading watch-arm adapter must not leave a successor armed. Its cleanup
-# retires the live arm child, and that child's own close handler reads the signal
-# as a watcher failure, so without a shutdown marker the plugin would schedule
-# another arm that nothing owns once it is gone.
-test_watch_arm_cleanup_does_not_rearm_after_unload() {
+# An actionable close can leave restoration waiting for a successor's
+# readiness. Unload during that wait must stop the retry loop from launching
+# another arm.
+test_watch_arm_cleanup_stops_actionable_restoration() {
   local repo home out
   repo="$TMP_ROOT/cleanup-primary"
   home="$TMP_ROOT/cleanup-home"
@@ -363,9 +362,12 @@ test_watch_arm_cleanup_does_not_rearm_after_unload() {
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-# Answer the readiness probe, then linger until this arm is retired, so cleanup
-# is the only thing that can end it.
-printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$(wc -l < "$FM_ARM_LOG")" -eq 1 ]; then
+  printf 'signal: actionable test wake\n'
+  exit 0
+fi
+# Leave the successor unready so restoration remains in flight during cleanup.
+printf 'watcher: starting pid=%s\n' "$$"
 while [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.05; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
@@ -374,7 +376,8 @@ SH
     PLUGIN="$PLUGIN_DIR/fm-primary-watch-arm.js" REPO="$repo" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
     FM_ARM_LOG="$TMP_ROOT/cleanup-arm.log" FM_STOP_FILE="$TMP_ROOT/cleanup.stop" \
-    FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 \
+    FM_OPENCODE_ARM_READY_TIMEOUT_MS=50 \
+    FM_WATCH_REARM_RETRY_BASE_MS=500 FM_WATCH_REARM_RETRY_MAX_MS=500 FM_WATCH_REARM_RETRY_LIMIT=2 \
     node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
@@ -389,21 +392,29 @@ for (let i = 0; i < 300 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("the arm never started");
+for (let i = 0; i < 300; i += 1) {
+  const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
+  if (arms >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const beforeCleanup = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
+if (beforeCleanup !== 2) throw new Error(`expected actionable restoration successor, got ${beforeCleanup} arms`);
+// Let the unready successor time out and be retired, placing restoration in
+// its bounded retry delay when cleanup starts.
+await new Promise((resolve) => setTimeout(resolve, 120));
 
 await hooks.cleanup();
-// The retired child closes on the cleanup SIGTERM. Its close handler must see
-// the shutdown and not schedule a successor, so give it well past the retry
-// backoff before counting the arms.
-await new Promise((resolve) => setTimeout(resolve, 1200));
+// Give the in-flight restoration time to pass its retry delay.
+await new Promise((resolve) => setTimeout(resolve, 600));
 const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
-if (arms !== 1) throw new Error(`expected exactly one arm, got ${arms}`);
+if (arms !== 2) throw new Error(`expected no arm after unload, got ${arms} total`);
 console.log(`arms=${arms}`);
 EOF
   ) || fail "watch-arm cleanup drive failed: $out"
-  printf '%s' "$out" | grep -q "arms=1" \
+  printf '%s' "$out" | grep -q "arms=2" \
     || fail "the plugin armed a successor after unloading: $out"
-  pass "the watch-arm plugin does not re-arm after its cleanup retires the arm child"
+  pass "the watch-arm plugin stops actionable restoration on unload"
 }
 
 PRIMARY="$TMP_ROOT/primary"
@@ -416,4 +427,4 @@ test_cd_seatbelt_denies_stray_persistent_cd
 test_root_resolution_follows_the_instance_location
 test_event_handling_is_scoped_to_this_location
 test_contract_helpers_classify_turn_end
-test_watch_arm_cleanup_does_not_rearm_after_unload
+test_watch_arm_cleanup_stops_actionable_restoration
