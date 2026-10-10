@@ -411,6 +411,20 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
     nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto, opens its PR against, and watches CI for that branch.
 "
   fi
+  if [ "$mode" != local-only ]; then
+    local public_check
+    printf -v public_check '%q' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-public-text-check.sh"
+    cat <<EOF
+# Public publication text
+\`$public_check\` owns the public-evidence policy and checks a text file or stdin (\`-\`).
+Before publishing or editing a PR description, comment, review description, or other public text, run it on the exact outgoing title and body; if it refuses, retain the original privately and write a self-contained factual explanation or verified public URL instead.
+Check authored publication text before handing it to a forge CLI or no-mistakes; do not change the captain's authorized \`--intent\` to satisfy this check.
+When no-mistakes generates and publishes the body itself, its outbound publication step is the necessary prevention boundary outside Firstmate; these instructions alone cannot guarantee that generated text is safe.
+Read the complete published title and body back before reporting ready; apply the same check and inspect evidence URLs for public accessibility.
+If generated text leaked a local reference, correct the public text without removing required attestations, retain evidence privately, and report the publication failure to Firstmate rather than treating a green run as sufficient.
+
+EOF
+  fi
   case "$mode:$forge" in
     direct-PR:gerrit)
       cat <<EOF
