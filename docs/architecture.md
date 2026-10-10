@@ -496,6 +496,7 @@ For a remote route, the configured code root updates from its own origin on that
 The primary update is fast-forward only, while a clean secondmate divergence may reconcile with `reset --keep` only when a three-way temporary-index proof shows its complete local tree result is already present at the target, including after a squash merge.
 Dirty, uniquely diverged, offline, and off-default targets are reported and left untouched, and genuine secondmate divergence remains visible through a durable reconciliation record until a later successful convergence clears it.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
+The same skill then updates the stack tools firstmate installs on that host through their own update paths, and leaves the shared no-mistakes daemon alone while any pipeline run is active.
 The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md); the relevant script headers own the mechanics.
 
 ## Restart-proof
