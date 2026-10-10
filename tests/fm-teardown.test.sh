@@ -4643,6 +4643,39 @@ test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
+test_published_fork_remote_refuses_until_upstream_lands() {
+  local case_dir rc
+  case_dir=$(make_case published-fork)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" contribution.txt 'published contribution with an upstream obligation'
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'delivery_state=published\nci_destination=fork-contribution\n' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  tasks-axi hold task-x1 --kind external --reason 'published, waiting on upstream maintainers' \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'published contribution was discarded because its head was on a fork'
+  assert_grep 'is not landed upstream' "$case_dir/stderr" 'refusal omitted upstream obligation'
+  assert_present "$case_dir/state/task-x1.meta" 'refusal removed metadata'
+  assert_present "$case_dir/wt" 'refusal removed published worktree'
+  [ "$(backlog_row_state "$case_dir")" != "done" ] || fail 'refusal closed published work as landed'
+  git -C "$case_dir/wt" checkout -q --detach
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'detached published contribution was discarded'
+  assert_grep 'is not on its branch' "$case_dir/stderr" 'detached published refusal gave no reason'
+  assert_present "$case_dir/wt" 'detached refusal removed published worktree'
+  git -C "$case_dir/wt" checkout -q -
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail 'upstream merge did not release published contribution cleanup'
+  [ "$(backlog_row_state "$case_dir")" = "done" ] || fail 'landed contribution did not close backlog'
+  pass 'published external hold protects fork work until upstream merge'
+}
+
+
+test_published_fork_remote_refuses_until_upstream_lands
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note

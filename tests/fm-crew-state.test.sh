@@ -1861,6 +1861,52 @@ checks failed: 1 of 2 checks red" ;;
   [ "$failures" -eq 0 ] || fail "$failures cancellation verdict regressions"
 }
 
+# A run the CI witness ended by explicit abort reads as the worker's witnessed
+# done only for that exact recorded run and head; any other cancellation keeps
+# no verdict.
+test_cancelled_run_ended_by_ci_witness() {
+  local scenario failures=0
+  for scenario in outcome status fork-absent other-run stale-head no-report; do
+    (
+      reset_fakes
+      local d out head witness run=01RUN
+      d=$(new_case "witness-cancel-$scenario")
+      make_repo_on_branch "$d/wt" fm/witness
+      make_fakebin "$d" >/dev/null
+      head=$FM_FAKE_RUN_HEAD
+      witness=awaiting-destination-approval
+      case "$scenario" in
+        fork-absent) witness=absent ;;
+        other-run) run=02OTHER ;;
+        stale-head) head=0000000000000000000000000000000000000000 ;;
+      esac
+      fm_write_meta "$d/state/witness.meta" "window=fm:fm-witness" "worktree=$d/wt" "kind=ship" \
+        "mode=no-mistakes" "pr=https://github.com/o/r/pull/203" "ci_witness=$witness" \
+        "ci_witness_head=$head" "ci_witness_run=$run" "delivery_state=published"
+      [ "$scenario" = no-report ] \
+        || printf 'done: PR https://github.com/o/r/pull/203 published, waiting on upstream\n' > "$d/state/witness.status"
+      FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/witness)"
+      FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//failed/cancelled}
+      [ "$scenario" != status ] || FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed '/^outcome:/d')
+      FM_FAKE_CI_LOGS="no CI checks reported yet"
+      out=$(FM_HOME="$d" run_crew_state "$d" witness)
+      case "$scenario" in
+        outcome|status|fork-absent)
+          assert_contains "$out" "state: done" "$scenario: recorded witness was masked by the cancel: $out"
+          assert_contains "$out" "published, waiting on upstream" "$scenario: witness report missing" ;;
+        stale-head)
+          assert_contains "$out" "state: blocked" "$scenario: stale witness head was accepted: $out"
+          assert_contains "$out" "does not bind the current named head" "$scenario: explicit reason" ;;
+        *)
+          assert_contains "$out" "state: unknown" "$scenario: unrelated cancellation became done: $out"
+          assert_contains "$out" "run cancelled: no verdict" "$scenario: explicit reason" ;;
+      esac
+      pass "$scenario: a witness-ended cancel reads only its exact recorded witness"
+    ) || failures=$((failures + 1))
+  done
+  [ "$failures" -eq 0 ] || fail "$failures witness cancellation regressions"
+}
+
 # The real inventory consumer must not confuse a cancellation with a failed
 # child contradicting an In flight row. Unknown remains explicitly partial.
 test_cancelled_fleet_inventory_is_unverified_not_contradictory() {
@@ -5506,6 +5552,7 @@ cancellation_failures=0
 for cancellation_test in test_captured_cancelled_review_has_no_verdict \
   test_terminal_green_delivery_disposition \
   test_cancelled_without_delivery_has_no_verdict \
+  test_cancelled_run_ended_by_ci_witness \
   test_cancelled_fleet_inventory_is_unverified_not_contradictory \
   test_cancelled_delivery_and_skipped_rebase; do
   ("$cancellation_test") || cancellation_failures=$((cancellation_failures + 1))

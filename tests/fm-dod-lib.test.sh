@@ -424,6 +424,302 @@ EOF
   pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
 }
 
+# These fixtures exercise the public witness gate and its CLI using the exact
+# scalar API envelope gh-axi exposes. No real forge or pipeline is mutated.
+make_ci_case() {  # <name> <owned|fork> <workflow-count>
+  local name=$1 kind=$2 workflows=$3 case_dir head push
+  case_dir="$TMP_ROOT/ci-$name"
+  mkdir -p "$case_dir/fakebin" "$case_dir/state" "$case_dir/data" "$case_dir/config"
+  fm_git_worktree "$case_dir/project" "$case_dir/wt" fm/witness
+  git -C "$case_dir/wt" remote set-url origin https://github.com/owner/repo.git
+  push=owner/repo
+  if [ "$kind" = fork ]; then
+    push=contributor/repo
+    git -C "$case_dir/wt" remote set-url --push origin git@github.com:contributor/repo.git
+  fi
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  python3 - "$case_dir" "$head" "$push" "$workflows" <<'PYFIX'
+import json, pathlib, sys
+p, head, push, count = sys.argv[1:]
+p = pathlib.Path(p)
+fixtures = {
+ 'history': {'data':{'repository':{'defaultBranchRef':{'target':{'history':{'pageInfo':{'hasNextPage':False,'endCursor':None},'nodes':[{'statusCheckRollup':None}]}}}}}},
+ 'pr': {'state':'open','draft':False,'head':{'sha':head,'ref':'fm/witness','repo':{'full_name':push}},'base':{'ref':'main','repo':{'full_name':'owner/repo'}}},
+ 'workflows': {'total_count':int(count),'workflows':[{'id':i} for i in range(int(count))]},
+ 'checks': {'total_count':0,'check_runs':[]},
+ 'statuses': {'total_count':0,'statuses':[]},
+ 'branch': {'protected':False},
+ 'rules': [],
+ 'runs': {'total_count':1,'workflow_runs':[{'head_sha':head,'event':'pull_request','status':'completed','conclusion':'action_required','pull_requests':[],'head_branch':'fm/witness','head_repository':{'full_name':push},'repository':{'full_name':'owner/repo'}}]}
+}
+for name, value in fixtures.items():
+ (p / (name+'.json')).write_text(json.dumps(value))
+PYFIX
+  cat > "$case_dir/fakebin/gh-axi" <<'FAKE'
+#!/usr/bin/env python3
+import base64, os, pathlib, sys
+p = pathlib.Path(os.environ['WITNESS_FIXTURE'])
+args = sys.argv[2:]
+method = args.pop(0) if args[0] == 'POST' else 'GET'
+path = args[0]
+if path == 'graphql' and method != 'POST': sys.exit(1)
+after = [a[6:] for a in sys.argv if a.startswith('after=')]
+if path == 'graphql' and after:
+    with open(p/'cursors','a') as f: f.write(after[0]+'\n')
+    name='history-next'
+elif path == 'graphql': name='history'
+elif '/pulls/' in path: name='pr'
+elif '/workflows?' in path: name='workflows'
+elif '/check-runs?' in path: name='checks'
+elif '/status?' in path: name='statuses'
+elif '/runs?' in path: name='runs'
+elif '/rules/branches/' in path: name='rules'
+elif '/branches/' in path: name='branch'
+else: sys.exit(1)
+if (p/'api-error').exists(): sys.exit(1)
+print('api_response:\n  body: '+base64.b64encode((p/(name+'.json')).read_bytes()).decode()+'\n  truncated: false')
+FAKE
+  cat > "$case_dir/fakebin/no-mistakes" <<'FAKE'
+#!/usr/bin/env bash
+case "$1 $2" in
+  'axi status') cat "$WITNESS_FIXTURE/run.toon" ;;
+  'axi respond') printf '%s\n' "$*" >> "$WITNESS_FIXTURE/responded" ;;
+  'axi abort') printf '%s\n' "$*" >> "$WITNESS_FIXTURE/aborted" ;;
+  *) exit 1 ;;
+esac
+FAKE
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/no-mistakes"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\n' "$case_dir/wt" "$case_dir/project" > "$case_dir/state/witness.meta"
+  chmod 600 "$case_dir/state/witness.meta"
+  printf 'backend = "markdown"\n[markdown]\npath = "data/backlog.md"\n' > "$case_dir/.tasks.toml"
+  tasks-axi add witness 'CI witness fixture' --start --file "$case_dir/data/backlog.md" >/dev/null
+  write_ci_run "$case_dir" skipped passed-with-skips
+  printf '%s\n' "$case_dir"
+}
+
+write_ci_run() {  # <case> <CI-status> <outcome>
+  local head step
+  head=$(git -C "$1/wt" rev-parse HEAD)
+  {
+    printf 'current_branch: fm/witness\nrun:\n  id: witness-run\n  branch: fm/witness\n  head_sha: %s\n  pr: https://github.com/owner/repo/pull/1\n' "$head"
+    printf 'steps[9]{step,status,findings,duration_ms}:\n'
+    for step in intent rebase review test document lint push pr; do printf '  %s,completed,0,1\n' "$step"; done
+    printf '  ci,%s,0,1\noutcome: %s\n' "$2" "$3"
+  } > "$1/run.toon"
+}
+
+ci_command() {  # <case> <action>
+  WITNESS_FIXTURE=$1 PATH="$1/fakebin:$PATH" FM_HOME=$1 \
+    bash "$ROOT/bin/fm-ci-witness.sh" witness https://github.com/owner/repo/pull/1 "$2"
+}
+
+ci_assess() {  # <case>
+  WITNESS_FIXTURE=$1 PATH="$1/fakebin:$PATH" fm_dod_ci_not_witnessed \
+    "$1/wt" https://github.com/owner/repo/pull/1 "$(git -C "$1/wt" rev-parse HEAD)"
+}
+
+ci_class() { WITNESS_FIXTURE=$1 PATH="$1/fakebin:$PATH" fm_dod_destination_class "$1/wt"; }
+
+ci_edit() {  # <case> <fixture-name> <jq-expression>
+  jq "$3" "$1/$2.json" > "$1/edit.json" && mv "$1/edit.json" "$1/$2.json"
+}
+
+test_ci_destination_classes_and_refusals() {
+  local owned no_ci fork
+  owned=$(make_ci_case owned owned 1)
+  no_ci=$(make_ci_case absent owned 0)
+  fork=$(make_ci_case fork fork 1)
+  [ "$(ci_class "$owned")" = owned-ci ] || fail 'owned CI class changed'
+  [ "$(ci_class "$no_ci")" = owned-no-ci ] || fail 'owned no-CI class missing'
+  [ "$(ci_class "$fork")" = fork-contribution ] || fail 'fork class must use normalized fetch/push targets'
+  [ "$(ci_assess "$no_ci")" = absent ] || fail 'positive CI absence was refused'
+  [ "$(ci_assess "$fork")" = awaiting-destination-approval ] || fail 'fork approval boundary was refused'
+  ci_edit "$owned" checks '.total_count=1 | .check_runs=[{status:"completed",conclusion:"failure"}]'
+  write_ci_run "$owned" awaiting_approval ''
+  if ci_command "$owned" --skip >/dev/null 2>&1; then fail 'owned configured failing CI was skipped'; fi
+  assert_absent "$owned/responded" 'a failed owned check reached skip'
+  ci_edit "$owned" checks '.check_runs[0].status="in_progress" | .check_runs[0].conclusion=null'
+  if ci_assess "$owned" >/dev/null; then fail 'owned pending CI qualified'; fi
+  ci_edit "$no_ci" statuses '.total_count=1 | .statuses=[{state:"pending"}]'
+  if ci_assess "$no_ci" >/dev/null; then fail 'external configured CI was treated as absent'; fi
+  ci_edit "$fork" runs '.workflow_runs[0].head_repository.full_name="unrelated/repo"'
+  if ci_assess "$fork" >/dev/null; then fail 'another fork workflow authorized this PR'; fi
+  ci_edit "$fork" runs '.workflow_runs[0].head_repository.full_name="contributor/repo"'
+  ci_edit "$fork" checks '.total_count=1 | .check_runs=[{status:"completed",conclusion:"failure"}]'
+  if ci_assess "$fork" >/dev/null; then fail 'fork approval masked a red check'; fi
+  ci_edit "$fork" checks '.total_count=0 | .check_runs=[]'
+  ci_edit "$fork" runs '.workflow_runs[0].conclusion=null | .workflow_runs[0].status="queued"'
+  if ci_assess "$fork" >/dev/null; then fail 'a slow fork check qualified without structural approval evidence'; fi
+  ci_edit "$no_ci" statuses '.total_count=0 | .statuses=[]'
+  ci_edit "$no_ci" history '.data.repository.defaultBranchRef.target.history.nodes[0].statusCheckRollup={state:"SUCCESS"}'
+  [ "$(ci_class "$no_ci")" = owned-ci ] || fail 'historical default-branch checks did not mark CI configured'
+  if ci_assess "$no_ci" >/dev/null; then fail 'a not-yet-reported check with history was treated as absent'; fi
+  ci_edit "$no_ci" history '.data.repository.defaultBranchRef.target.history.nodes[0].statusCheckRollup=null'
+  cp "$no_ci/history.json" "$no_ci/history-next.json"
+  ci_edit "$no_ci" history '.data.repository.defaultBranchRef.target.history.pageInfo={hasNextPage:true,endCursor:"9c1f0e2 99"}'
+  [ "$(ci_class "$no_ci")" = owned-no-ci ] || fail 'a realistic multi-page check-free history was not classified'
+  [ "$(ci_assess "$no_ci")" = absent ] || fail 'a realistic multi-page check-free history did not prove absence'
+  [ "$(sort -u "$no_ci/cursors")" = '9c1f0e2 99' ] || fail 'history cursor was not passed through verbatim'
+  ci_edit "$no_ci" history-next '.data.repository.defaultBranchRef.target.history.nodes[0].statusCheckRollup={state:"SUCCESS"}'
+  [ "$(ci_class "$no_ci")" = owned-ci ] || fail 'a check on a later history page did not mark CI configured'
+  if ci_assess "$no_ci" >/dev/null; then fail 'a check on a later history page was treated as absent'; fi
+  ci_edit "$no_ci" history-next '.data.repository.defaultBranchRef.target.history.nodes[0].statusCheckRollup=null'
+  ci_edit "$no_ci" history '.data.repository.defaultBranchRef.target.history.pageInfo.endCursor="\"quoted\" 99"'
+  [ "$(ci_assess "$no_ci")" = absent ] || fail 'an opaque cursor with quotes was not carried safely'
+  ci_edit "$no_ci" history '.data.repository.defaultBranchRef.target.history.pageInfo.endCursor=null'
+  [ "$(ci_class "$no_ci")" = unclassified ] || fail 'incomplete check history was classified'
+  if ci_assess "$no_ci" >/dev/null; then fail 'incomplete check history proved absence'; fi
+  ci_edit "$no_ci" history '.data.repository.defaultBranchRef.target.history.pageInfo.endCursor="@/etc/passwd"'
+  if ci_assess "$no_ci" >/dev/null; then fail 'a file-reading cursor was sent'; fi
+  ci_edit "$no_ci" history '.data.repository.defaultBranchRef.target.history.pageInfo={hasNextPage:false,endCursor:null}'
+  ci_edit "$no_ci" rules '[{type:"required_status_checks",parameters:{required_status_checks:[{context:"required CI"}]}}]'
+  if ci_assess "$no_ci" >/dev/null; then fail 'unreported required CI was treated as absent'; fi
+  touch "$owned/api-error"
+  [ "$(ci_class "$owned")" = unclassified ] || fail 'unreadable API silently asserted ownership and CI'
+  if ci_assess "$owned" >/dev/null; then fail 'unreadable evidence qualified'; fi
+  [ "$(fm_dod_destination_class '')" = unclassified ] || fail 'empty project used the current checkout'
+  [ "$(fm_dod_destination_class "$TMP_ROOT/no-such-project")" = unclassified ] || fail 'missing project was classified as owned'
+  pass 'three destination classes and owned failing, pending, external and unreadable CI refusals'
+}
+
+test_ci_witness_skip_record_and_publication() {
+  local no_ci fork out row head
+  no_ci=$(make_ci_case absent-record owned 0)
+  write_ci_run "$no_ci" awaiting_approval ''
+  ci_command "$no_ci" --skip >/dev/null || fail 'structural no-CI skip refused'
+  assert_grep 'axi respond --step ci --action skip --wait 1s' "$no_ci/responded" 'verified skip did not reach existing pipeline API'
+  write_ci_run "$no_ci" skipped passed-with-skips
+  out=$(ci_command "$no_ci" --record) || fail "no-CI witness record failed: $out"
+  assert_contains "$out" 'CI not witnessed - absent' 'absence was not stated'
+  assert_no_grep 'delivery_state=published' "$no_ci/state/witness.meta" 'owned no-CI PR was called a contribution'
+  git -C "$no_ci/wt" update-ref refs/remotes/origin/fm/witness "$(git -C "$no_ci/wt" rev-parse HEAD)"
+  accept_done ship no-mistakes "$no_ci/wt" "$no_ci/project" \
+    'done: PR https://github.com/owner/repo/pull/1 CI absent' \
+    "$no_ci/state" witness "$no_ci/state/witness.meta" || fail 'the shared done gate refused a recorded owned absence'
+  if accept_done ship no-mistakes "$no_ci/wt" "$no_ci/project" \
+    'done: PR https://github.com/owner/repo/pull/1 published, waiting on upstream' \
+    "$no_ci/state" witness "$no_ci/state/witness.meta" >/dev/null; then fail 'an owned no-CI PR was reported as waiting on upstream'; fi
+  fork=$(make_ci_case fork-record fork 1)
+  out=$(ci_command "$fork" --record) || fail "fork publication failed: $out"
+  assert_contains "$out" 'destination withholds fork workflows pending maintainer approval' 'structural reason missing'
+  assert_contains "$out" 'wait owned by destination maintainers' 'wait ownership missing'
+  row=$(tasks-axi show witness --file "$fork/data/backlog.md")
+  assert_contains "$row" 'hold_kind: external' 'contribution did not leave active work through an external hold'
+  assert_contains "$row" 'published, waiting on upstream' 'witness not visible in backlog'
+  assert_grep 'delivery_state=published' "$fork/state/witness.meta" 'publication metadata missing'
+  ci_command "$fork" --record >/dev/null || fail 'repeated publication was not idempotent'
+  ci_edit "$fork" checks '.total_count=1 | .check_runs=[{status:"completed",conclusion:"success"}]'
+  write_ci_run "$fork" running ''
+  out=$(ci_command "$fork" --record) || fail "green third-party check beside approval-required runs was refused: $out"
+  assert_contains "$out" 'destination withholds fork workflows pending maintainer approval' 'a third-party check was recorded as green CI'
+  assert_grep 'ci_witness=awaiting-destination-approval' "$fork/state/witness.meta" 'approval-required CI was recorded as green'
+  assert_grep 'axi abort --run witness-run' "$fork/aborted" 'approval-required monitor was left to time out'
+  rm -f "$fork/aborted"
+  ci_edit "$fork" runs '.workflow_runs[0].conclusion="success"'
+  out=$(ci_command "$fork" --record) || fail "green fork CI-ready monitor was not published: $out"
+  assert_contains "$out" 'CI witnessed green' 'green fork CI was mislabeled unwitnessed'
+  head=$(git -C "$fork/wt" rev-parse HEAD)
+  git -C "$fork/wt" update-ref refs/remotes/fork/fm/witness "$head"
+  accept_done ship no-mistakes "$fork/wt" "$fork/project" \
+    'done: PR https://github.com/owner/repo/pull/1 published, waiting on upstream' \
+    "$fork/state" witness "$fork/state/witness.meta" || fail 'verified published head refused'
+  git -C "$fork/wt" commit -q --allow-empty -m 'unvalidated later head'
+  if accept_done ship no-mistakes "$fork/wt" "$fork/project" \
+    'done: PR https://github.com/owner/repo/pull/1 published, waiting on upstream' \
+    "$fork/state" witness "$fork/state/witness.meta" >/dev/null; then fail 'stale witness covered an unvalidated head'; fi
+  pass 'verified skips, honest records, external publication and named-head custody'
+}
+
+test_ci_witness_ends_a_running_monitor_only_for_structural_causes() {
+  local no_ci fork owned out
+  fork=$(make_ci_case running-fork fork 1)
+  write_ci_run "$fork" running ''
+  if ci_command "$fork" --skip >/dev/null 2>&1; then fail 'skip answered a running monitor'; fi
+  out=$(ci_command "$fork" --record) || fail "running fork monitor awaiting approval was refused: $out"
+  assert_grep 'axi abort --run witness-run' "$fork/aborted" 'structural fork monitor was not ended'
+  assert_contains "$out" 'destination withholds fork workflows pending maintainer approval' 'structural reason missing'
+  assert_contains "$out" 'pipeline records that run as cancelled, not abandoned' 'cancelled label not explained'
+  assert_grep 'delivery_state=published' "$fork/state/witness.meta" 'running fork was not published'
+  no_ci=$(make_ci_case running-absent owned 0)
+  write_ci_run "$no_ci" running ''
+  out=$(ci_command "$no_ci" --record) || fail "running owned no-CI monitor was refused: $out"
+  assert_grep 'axi abort --run witness-run' "$no_ci/aborted" 'no-CI monitor was not ended'
+  assert_contains "$out" 'CI not witnessed - absent' 'absence was not stated'
+  assert_grep 'ci_witness=absent' "$no_ci/state/witness.meta" 'absence witness not recorded'
+  assert_grep 'ci_witness_run=witness-run' "$no_ci/state/witness.meta" 'aborted run was not bound to the witness'
+  owned=$(make_ci_case running-owned owned 0)
+  write_ci_run "$owned" running ''
+  ci_edit "$owned" history '.data.repository.defaultBranchRef.target.history.nodes[0].statusCheckRollup={state:"PENDING"}'
+  if ci_command "$owned" --record >/dev/null 2>&1; then fail 'slow configured CI ended its monitor'; fi
+  assert_absent "$owned/aborted" 'slow configured CI was aborted'
+  assert_no_grep 'ci_witness=' "$owned/state/witness.meta" 'slow configured CI recorded a witness'
+  ci_edit "$fork" runs '.workflow_runs[0].conclusion=null | .workflow_runs[0].status="queued"'
+  rm -f "$fork/aborted"
+  if ci_command "$fork" --record >/dev/null 2>&1; then fail 'slow fork CI ended its monitor'; fi
+  assert_absent "$fork/aborted" 'slow fork CI was aborted'
+  pass 'a running CI monitor ends with an honest witness only for structural causes'
+}
+
+test_ci_witness_green_needs_destination_workflow_runs() {
+  local fork out
+  fork=$(make_ci_case app-check-only fork 1)
+  ci_edit "$fork" checks '.total_count=1 | .check_runs=[{name:"Greptile Review",status:"completed",conclusion:"success"}]'
+  ci_edit "$fork" runs '.total_count=0 | .workflow_runs=[]'
+  write_ci_run "$fork" running ''
+  if out=$(ci_command "$fork" --record 2>&1); then fail "an app check without destination workflow runs recorded: $out"; fi
+  assert_no_grep 'ci_witness=' "$fork/state/witness.meta" 'an app check alone recorded a witness'
+  assert_absent "$fork/aborted" 'an app check alone ended the CI monitor'
+  write_ci_run "$fork" completed passed
+  if ci_command "$fork" --record >/dev/null 2>&1; then fail 'a passed run with only an app check was recorded green'; fi
+  assert_no_grep 'ci_witness=green' "$fork/state/witness.meta" 'an app check alone recorded green'
+  ci_edit "$fork" runs '.total_count=1 | .workflow_runs=[{head_sha:"'"$(git -C "$fork/wt" rev-parse HEAD)"'",status:"completed",conclusion:"skipped"}]'
+  if ci_command "$fork" --record >/dev/null 2>&1; then fail 'only skipped destination workflow runs were recorded green'; fi
+  ci_edit "$fork" runs '.workflow_runs[0].conclusion="success"'
+  out=$(ci_command "$fork" --record) || fail "a successful destination workflow run was refused: $out"
+  assert_grep 'ci_witness=green' "$fork/state/witness.meta" 'destination workflow success was not recorded green'
+  pass 'a green witness needs the destination'"'"'s own successful workflow runs, never an app check alone'
+}
+
+test_ci_witness_fork_destination_without_ci() {
+  local fork out row
+  fork=$(make_ci_case fork-no-ci fork 0)
+  ci_edit "$fork" runs '.total_count=0 | .workflow_runs=[]'
+  [ "$(ci_assess "$fork")" = absent ] || fail 'a fork destination without CI did not record absence'
+  write_ci_run "$fork" running ''
+  out=$(ci_command "$fork" --record) || fail "a fork destination without CI could not finish: $out"
+  assert_contains "$out" 'CI not witnessed - absent' 'fork absence was not stated'
+  assert_grep 'ci_witness=absent' "$fork/state/witness.meta" 'fork absence witness not recorded'
+  assert_grep 'delivery_state=published' "$fork/state/witness.meta" 'fork without CI was not published'
+  assert_grep 'axi abort --run witness-run' "$fork/aborted" 'fork no-CI monitor was left to time out'
+  row=$(tasks-axi show witness --file "$fork/data/backlog.md")
+  assert_contains "$row" 'hold_kind: external' 'fork without CI did not take the external hold'
+  git -C "$fork/wt" update-ref refs/remotes/fork/fm/witness "$(git -C "$fork/wt" rev-parse HEAD)"
+  accept_done ship no-mistakes "$fork/wt" "$fork/project" \
+    'done: PR https://github.com/owner/repo/pull/1 published, waiting on upstream' \
+    "$fork/state" witness "$fork/state/witness.meta" || fail 'the shared done gate refused a recorded fork absence'
+  if accept_done ship no-mistakes "$fork/wt" "$fork/project" \
+    'done: PR https://github.com/owner/repo/pull/1 CI absent' \
+    "$fork/state" witness "$fork/state/witness.meta" >/dev/null; then fail 'a published fork contribution was reported as an owned no-CI landing'; fi
+  ci_edit "$fork" history '.data.repository.defaultBranchRef.target.history.nodes[0].statusCheckRollup={state:"SUCCESS"}'
+  if ci_assess "$fork" >/dev/null; then fail 'a fork whose default branch carried checks was treated as absent'; fi
+  pass 'a fork destination that never carried CI records absence and takes the external hold'
+}
+
+test_ci_witness_ledger_refuses_uncontrolled_skips() {
+  local case_dir
+  case_dir=$(make_ci_case ledger owned 0)
+  write_ci_run "$case_dir" awaiting_approval ''
+  sed 's/review,completed/review,skipped/' "$case_dir/run.toon" > "$case_dir/run-edited"
+  mv "$case_dir/run-edited" "$case_dir/run.toon"
+  if ci_command "$case_dir" --skip >/dev/null 2>&1; then fail 'skipped review was accepted as green'; fi
+  assert_absent "$case_dir/responded" 'uncontrolled skip reached pipeline'
+  write_ci_run "$case_dir" skipped failed
+  if ci_command "$case_dir" --record >/dev/null 2>&1; then fail 'failed run was published'; fi
+  assert_no_grep 'ci_witness=' "$case_dir/state/witness.meta" 'failed run recorded a witness'
+  pass 'CI exception never waives another gate or a failed run'
+}
+
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -464,5 +760,11 @@ test_worker_role_names_skill_and_fallback_file() {
 }
 
 test_worker_role_names_skill_and_fallback_file
+test_ci_destination_classes_and_refusals
+test_ci_witness_skip_record_and_publication
+test_ci_witness_ends_a_running_monitor_only_for_structural_causes
+test_ci_witness_ledger_refuses_uncontrolled_skips
+test_ci_witness_green_needs_destination_workflow_runs
+test_ci_witness_fork_destination_without_ci
 
 echo "all fm-dod-lib tests passed"

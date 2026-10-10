@@ -23,8 +23,10 @@
 # accepted while the named head exists only in the worker's disposable copy.
 # The check tests that head, not whether some branch moved. In no-mistakes
 # mode the pre-validation `done: {summary}` is the pipeline handoff and is
-# not gated; only the later CI-ready `done: PR <url> checks green` is, or on a
-# Gerrit project the later `done: PR <change url> published for review`. The
+# not gated; only the later CI-ready `done: PR <url> checks green` is (or its
+# recorded structural-witness forms `CI absent` and `published, waiting on
+# upstream`), or on a Gerrit project the later `done: PR <change url> published
+# for review`. The
 # named head is the worker copy's HEAD, except that a done naming the task's
 # recorded pr= passes when the forge holds that head: a forge-reported
 # pr_head= in no-mistakes mode, or a recorded merge
@@ -114,6 +116,261 @@
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
+
+# CI witness policy lives here with the definition of done. Destination identity
+# comes from origin's existing fetch/push URLs, not a new registry setting.
+# Unknown identity or unreadable API evidence keeps the ordinary CI gate.
+fm_dod_github_repo() {  # <remote-url>
+  local value=$1
+  case "$value" in
+    https://github.com/*) value=${value#https://github.com/} ;;
+    git@github.com:*) value=${value#git@github.com:} ;;
+    ssh://git@github.com/*) value=${value#ssh://git@github.com/} ;;
+    *) return 1 ;;
+  esac
+  value=${value%/}; value=${value%.git}
+  case "$value" in
+    */*) ;;
+    *) return 1 ;;
+  esac
+  case "$value" in ''|*[!A-Za-z0-9._/-]*|*/*/*|/*|*/|*/.*|.*) return 1 ;; esac
+  printf '%s\n' "$value" | tr '[:upper:]' '[:lower:]'
+}
+
+# gh-axi renders API results as TOON. Ask it for a base64-encoded JSON scalar,
+# then decode only its non-truncated body, avoiding rendered array/table parsing.
+fm_dod_api_json() {  # <GitHub REST path | POST graphql --field query=...>
+  local out body
+  out=$(fm_run_timed 15 gh-axi api "$@" --full --jq 'tojson | @base64') || return 1
+  [ "$(printf '%s\n' "$out" | sed -n 's/^  truncated: //p')" = false ] || return 1
+  body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p')
+  case "$body" in ''|*[!A-Za-z0-9+/=]*) return 1 ;; esac
+  printf '%s' "$body" | perl -MMIME::Base64 -MJSON::PP -e '
+    local $/; my $s = decode_base64(<STDIN>);
+    my $v = eval { JSON::PP->new->utf8->decode($s) };
+    exit 1 if $@ || ref($v) ne "HASH" && ref($v) ne "ARRAY";
+    print $s;
+  '
+}
+
+# CI absence needs positive history, never one empty instant: a default branch
+# that has ever carried a check run or commit status has CI configured, however
+# slowly it reports now. Prints never only after reading the complete history,
+# carried on the first rollup found; unreadable or malformed history fails.
+# The opaque page cursor travels as a GraphQL variable, never inside the query;
+# gh reads an @-prefixed field value as a file, so such a cursor fails.
+# gh-axi defaults to GET, which answers graphql with the schema, so POST is explicit.
+fm_dod_default_branch_checks() {  # <owner/repo>
+  local owner=${1%%/*} name=${1#*/} page state
+  local after=()
+  while :; do
+    page=$(fm_dod_api_json POST graphql --field "query=query(\$after:String){repository(owner:\"$owner\",name:\"$name\"){defaultBranchRef{target{...on Commit{history(first:100,after:\$after){pageInfo{hasNextPage endCursor}nodes{statusCheckRollup{state}}}}}}}}" ${after[@]+"${after[@]}"}) || return 1
+    state=$(printf '%s' "$page" | jq -r '.data.repository.defaultBranchRef.target.history
+      | if (.nodes | type) != "array" or (.pageInfo.hasNextPage | type) != "boolean" then "bad"
+        elif any(.nodes[]; .statusCheckRollup != null) then "carried"
+        elif .pageInfo.hasNextPage then "next:" + (.pageInfo.endCursor // "")
+        else "never" end') || return 1
+    case "$state" in
+      carried|never) echo "$state"; return 0 ;;
+      next:|next:@*) return 1 ;;
+      next:*) after=(--field "after=${state#next:}") ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+# Classify only an explicit task project at dispatch/promotion. Scaffolding
+# performs no network read and carries no CI contract. In particular,
+# git -C "" is forbidden: Git interprets it as the caller's checkout.
+# Someone else's repository is proxied by origin fetch differing from push, with
+# no ownership lookup. Limit: a repository we own but push through a personal
+# fork is classified fork-contribution, so it is held externally and refused at
+# cleanup until it lands upstream - it stalls loudly rather than losing work.
+# An owned repository is owned-no-ci only with no Actions workflows and a
+# default branch that has never carried a check run or commit status.
+# The one owner of the offline fork rule: origin's normalized GitHub fetch and
+# push identities both parse and differ.
+fm_dod_origin_is_fork() {  # <repository>
+  local fetch push
+  fetch=$(fm_dod_github_repo "$(git -C "$1" remote get-url origin 2>/dev/null)") || return 1
+  push=$(fm_dod_github_repo "$(git -C "$1" remote get-url --push origin 2>/dev/null)") || return 1
+  [ "$fetch" != "$push" ]
+}
+
+fm_dod_destination_class() {  # <explicit-task-project-path>
+  local repo=$1 fetch push workflows
+  if [ -z "$repo" ] || [ ! -d "$repo" ] || ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    echo 'CI destination unclassified: no explicit Git task project; ordinary CI gate retained' >&2
+    echo unclassified; return
+  fi
+  fetch=$(git -C "$repo" remote get-url origin 2>/dev/null) || fetch=
+  push=$(git -C "$repo" remote get-url --push origin 2>/dev/null) || push=
+  if ! fetch=$(fm_dod_github_repo "$fetch") || ! push=$(fm_dod_github_repo "$push"); then
+    echo 'CI destination unclassified: origin fetch/push GitHub identities unavailable; ordinary CI gate retained' >&2
+    echo unclassified; return
+  fi
+  if fm_dod_origin_is_fork "$repo"; then echo fork-contribution; return; fi
+  if ! workflows=$(fm_dod_api_json "repos/$fetch/actions/workflows?per_page=100"); then
+    echo 'CI destination unclassified: workflow inventory unreadable; ordinary CI gate retained' >&2
+    echo unclassified; return
+  fi
+  if printf '%s' "$workflows" | jq -e '.total_count == 0 and .workflows == []' >/dev/null; then
+    case "$(fm_dod_default_branch_checks "$fetch")" in
+      never) echo owned-no-ci ;;
+      carried) echo owned-ci ;;
+      *)
+        echo 'CI destination unclassified: default-branch check history unreadable; ordinary CI gate retained' >&2
+        echo unclassified ;;
+    esac
+  elif printf '%s' "$workflows" | jq -e '(.total_count | type) == "number" and .total_count > 0 and (.workflows | type) == "array"' >/dev/null; then
+    echo owned-ci
+  else
+    echo 'CI destination unclassified: workflow inventory malformed; ordinary CI gate retained' >&2
+    echo unclassified
+  fi
+}
+
+fm_dod_ci_contract() {  # <class> <firstmate-code-root> <task-id>
+  local class=$1 root=$2 id=$3
+  case "$class" in
+    owned-ci|owned-no-ci|fork-contribution|unclassified) ;;
+    *) echo 'error: unknown CI destination class' >&2; return 1 ;;
+  esac
+  cat <<EOF
+
+# Current CI witness contract
+CI destination class: $class
+This section supersedes the earlier requirement to report only CI green when a structural CI exception is verified.
+Scaffolding performs no destination lookup; dispatch or promotion classifies the explicit task project through origin's existing fetch/push URLs and the destination workflow inventory.
+An unclassified destination retains the ordinary CI gate until live evidence establishes a structural exception.
+Every controllable no-mistakes gate must pass; only CI can be recorded as not witnessed.
+At the CI gate or in the running CI monitor, if workflows are absent or the destination requires approval for this fork's workflows, report \`needs-decision [at=<epoch>] [key=ci-witness]: PR {url} structural CI witness needed\` to firstmate.
+Never skip or abort CI yourself or infer an exception from empty checks, elapsed time, pending checks, or a red or flaky check.
+When the CI gate is parked for a decision, firstmate uses \`$root/bin/fm-ci-witness.sh $id {url} --skip\` to verify live structural evidence and respond through the existing no-mistakes skip action; after the drive call returns a passing outcome, firstmate runs the same helper with \`--record\`.
+When the CI monitor is running, firstmate runs \`--record\` directly: it rechecks the published head, every controllable gate, and the structural evidence, records the witness, then ends the monitor with an explicit \`no-mistakes axi abort\`.
+The pipeline labels that run cancelled; the recorded witness, not that label, is the outcome, and the work is not abandoned.
+For an owned no-CI repository, report \`done [at=<epoch>]: PR {url} CI absent\` only after that witness is recorded; configured merge authority still approves landing.
+For a fork contribution, report \`done [at=<epoch>]: PR {url} published, waiting on upstream\` after the witness is recorded; the external hold records the maintainers' wait and is neither merged nor failed.
+A structural exception never authorizes merge or branch disposal; firstmate keeps merge monitoring and refuses cleanup until the work lands upstream.
+If CI runs, use the ordinary checks-green outcome; a fork PR still belongs to upstream maintainers, so firstmate records its published external hold with \`--record\` after all gates pass.
+Keep the pull request non-draft and commit nothing after the validated head was published.
+EOF
+}
+
+# Positive ledger evidence for all eight controllable pipeline gates, plus the
+# required CI status. Missing/duplicate rows, reordered schemas without named
+# columns, skips and failed gates all refuse. This does not modify no-mistakes.
+fm_dod_nm_witness_gates() {  # <axi-status> <ci-status>
+  printf '%s\n' "$1" | awk -v ci="$2" '
+    /^[[:space:]]*steps\[[0-9]+\]\{/ {
+      if (table++) exit 1
+      hdr=index($0,"steps"); cols=$0; sub(/^[^{]*\{/,"",cols); sub(/\}.*/,"",cols)
+      n=split(cols,a,","); for(i=1;i<=n;i++) { if(a[i]=="step") si=i; if(a[i]=="status") ti=i }
+      active=1; next
+    }
+    active {
+      match($0,/[^ \t]/); if (!RSTART || RSTART<=hdr) {active=0; next}
+      row=$0; sub(/^[ \t]*/,"",row); split(row,b,",")
+      step=b[si]; status=b[ti]; gsub(/"/,"",step); gsub(/"/,"",status)
+      if(seen[step]++) bad=1
+      if(step=="ci") { if(status!=ci) bad=1 }
+      else if(step ~ /^(intent|rebase|review|test|document|lint|push|pr)$/) { if(status!="completed") bad=1; count++ }
+      else bad=1
+    }
+    END { exit !(table==1 && si && ti && count==8 && seen["ci"]==1 && !bad) }
+  '
+}
+
+# The ordinary witnessed-green fork ready point need not wait for the pipeline's
+# merge monitor to end. It still needs positive CI at this exact open PR head:
+# the destination's own workflow runs at that head, at least one of them
+# successful and every one completed without failure. A check or status from any
+# other app is never destination CI, and an empty run list is absence of
+# evidence, never success.
+fm_dod_pr_ci_green() {  # <PR-url> <head>
+  local url=$1 head=$2 path number pr checks statuses runs
+  fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] && [ "$FM_PR_HOST" = github.com ] || return 1
+  path=$FM_PR_PATH number=$FM_PR_NUMBER
+  pr=$(fm_dod_api_json "repos/$path/pulls/$number") || return 1
+  printf '%s' "$pr" | jq -e --arg head "$head" '
+    .state == "open" and .draft == false and .head.sha == $head' >/dev/null || return 1
+  checks=$(fm_dod_api_json "repos/$path/commits/$head/check-runs?per_page=100") || return 1
+  statuses=$(fm_dod_api_json "repos/$path/commits/$head/status?per_page=100") || return 1
+  printf '%s' "$checks" | jq -e '
+    (.total_count == (.check_runs | length)) and all(.check_runs[];
+      .status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped"))' >/dev/null || return 1
+  printf '%s' "$statuses" | jq -e '
+    (.total_count == (.statuses | length)) and all(.statuses[]; .state == "success")' >/dev/null || return 1
+  runs=$(fm_dod_api_json "repos/$path/actions/runs?head_sha=$head&per_page=100") || return 1
+  printf '%s' "$runs" | jq -e --arg head "$head" '
+    (.total_count == (.workflow_runs | length))
+    and all(.workflow_runs[]; .head_sha == $head and .status == "completed"
+      and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped"))
+    and any(.workflow_runs[]; .conclusion == "success")' >/dev/null
+}
+
+# CI is absent from a destination, owned or fork alike, only with no check or
+# status at the head, no workflows, a default branch that has never carried a
+# check or status, and no required check on the PR's base branch.
+fm_dod_ci_absent() {  # <owner/repo> <PR-json> <head-check-runs-json> <head-statuses-json>
+  local path=$1 pr=$2 checks=$3 statuses=$4 workflows base branch rules
+  printf '%s' "$checks" | jq -e '.total_count == 0 and .check_runs == []' >/dev/null \
+    && printf '%s' "$statuses" | jq -e '.total_count == 0 and .statuses == []' >/dev/null || return 1
+  workflows=$(fm_dod_api_json "repos/$path/actions/workflows?per_page=100") || return 1
+  printf '%s' "$workflows" | jq -e '.total_count == 0 and .workflows == []' >/dev/null || return 1
+  [ "$(fm_dod_default_branch_checks "$path")" = never ] || return 1
+  base=$(printf '%s' "$pr" | jq -er '.base.ref | @uri') || return 1
+  branch=$(fm_dod_api_json "repos/$path/branches/$base") || return 1
+  printf '%s' "$branch" | jq -e '
+    .protected == false or (.protected == true and (.protection | type) == "object"
+      and (.protection.required_status_checks | type) == "object"
+      and (.protection.required_status_checks.contexts == [])
+      and ((.protection.required_status_checks.checks // []) == []))' >/dev/null || return 1
+  rules=$(fm_dod_api_json "repos/$path/rules/branches/$base") || return 1
+  printf '%s' "$rules" | jq -e 'type == "array" and all(.[]; .type != "required_status_checks")' >/dev/null
+}
+
+# Prints absent or awaiting-destination-approval on verified structural evidence.
+# Without positive absence, only a fork qualifies, through its approval-required
+# workflow runs.
+# PR identity, current head, open/non-draft state, complete check inventories and
+# the approval-required workflow all bind to the same destination and head.
+# Red, incomplete, pending or unknown observations refuse, even on a fork.
+fm_dod_ci_not_witnessed() {  # <repository> <canonical-PR-url> <expected-head>
+  local repo=$1 url=$2 head=$3 fetch push path number pr checks statuses runs head_branch
+  fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] && [ "$FM_PR_HOST" = github.com ] || return 1
+  path=$FM_PR_PATH number=$FM_PR_NUMBER
+  fetch=$(fm_dod_github_repo "$(git -C "$repo" remote get-url origin)") || return 1
+  push=$(fm_dod_github_repo "$(git -C "$repo" remote get-url --push origin)") || return 1
+  [ "$fetch" = "$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')" ] || return 1
+  pr=$(fm_dod_api_json "repos/$path/pulls/$number") || return 1
+  printf '%s' "$pr" | jq -e --arg head "$head" --arg fetch "$fetch" --arg push "$push" '
+    .state == "open" and .draft == false and .head.sha == $head
+    and (.base.repo.full_name | ascii_downcase) == $fetch
+    and (.head.repo.full_name | ascii_downcase) == $push' >/dev/null || return 1
+  checks=$(fm_dod_api_json "repos/$path/commits/$head/check-runs?per_page=100") || return 1
+  statuses=$(fm_dod_api_json "repos/$path/commits/$head/status?per_page=100") || return 1
+  if fm_dod_ci_absent "$path" "$pr" "$checks" "$statuses"; then echo absent; return 0; fi
+  [ "$fetch" != "$push" ] || return 1
+  printf '%s' "$checks" | jq -e '
+    (.total_count == (.check_runs | length)) and all(.check_runs[];
+      .status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped" or .conclusion == "action_required"))' >/dev/null || return 1
+  printf '%s' "$statuses" | jq -e '
+    (.total_count == (.statuses | length)) and all(.statuses[]; .state == "success")' >/dev/null || return 1
+  head_branch=$(printf '%s' "$pr" | jq -er '.head.ref') || return 1
+  runs=$(fm_dod_api_json "repos/$path/actions/runs?head_sha=$head&event=pull_request&per_page=100") || return 1
+  printf '%s' "$runs" | jq -e --arg head "$head" --argjson number "$number" \
+    --arg push "$push" --arg fetch "$fetch" --arg branch "$head_branch" '
+    (.total_count == (.workflow_runs | length)) and (.total_count > 0)
+    and all(.workflow_runs[]; .head_sha == $head and .event == "pull_request"
+      and (.head_repository.full_name | ascii_downcase) == $push
+      and (.repository.full_name | ascii_downcase) == $fetch
+      and .head_branch == $branch
+      and ((.pull_requests == []) or any(.pull_requests[]; .number == $number))
+      and .status == "completed" and (.conclusion == "success" or .conclusion == "action_required"))
+    and any(.workflow_runs[]; .conclusion == "action_required")' >/dev/null || return 1
+  echo awaiting-destination-approval
+}
 
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
   local state=$1 task_id=$2 root=$3
@@ -531,7 +788,7 @@ fm_dod_ref_contains() {  # <repo> <ref-namespace> <sha>
 # path on this same test, so every CI-ready line it acts on is gated.
 fm_dod_note_reports_ci_ready() {  # <note>
   case "$1" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
+    *PR*"checks green"*|*"checks green"*PR*|*PR*"CI absent"*|*PR*"published, waiting on upstream"*) return 0 ;;
   esac
   return 1
 }
@@ -699,6 +956,25 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
+  case "$(status_line_note "$line")" in
+    *"CI absent"*|*"published, waiting on upstream"*)
+      if [ ! -f "$meta" ] || [ -z "$wt" ] || [ ! -d "$wt" ]; then
+        echo 'CI witness report has no verified task record'; return 1
+      fi
+      url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") || return 1
+      if [ "$(sed -n 's/^pr=//p' "$meta" | tail -1)" != "$url" ]; then
+        echo 'CI witness report does not name the verified pull request'; return 1
+      fi
+      sha=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
+      if [ "$(sed -n 's/^ci_witness_head=//p' "$meta" | tail -1)" != "$sha" ]; then
+        echo 'CI witness report does not bind the current named head'; return 1
+      fi
+      case "$(status_line_note "$line"):$(sed -n 's/^ci_witness=//p' "$meta" | tail -1):$(sed -n 's/^delivery_state=//p' "$meta" | tail -1)" in
+        *"CI absent"*:absent:|*"published, waiting on upstream"*:absent:published|*"published, waiting on upstream"*:awaiting-destination-approval:published|*"published, waiting on upstream"*:green:published) ;;
+        *) echo 'CI witness report does not match the verified structural evidence'; return 1 ;;
+      esac
+      ;;
+  esac
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0

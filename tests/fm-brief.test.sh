@@ -1465,6 +1465,32 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+test_scaffolding_does_not_classify_through_network_or_cwd() {
+  local home fakebin marker
+  home="$TMP_ROOT/ci-scaffold-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/ci-scaffold")
+  marker="$TMP_ROOT/ci-scaffold-called"
+  mkdir -p "$home/projects/fork-project"
+  git -C "$home/projects/fork-project" init -q
+  git -C "$home/projects/fork-project" remote add origin https://github.com/upstream/repo.git
+  git -C "$home/projects/fork-project" remote set-url --push origin https://github.com/contributor/repo.git
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected API call\n' >> "$FM_CI_SCAFFOLD_MARKER"
+exit 1
+SH
+  chmod +x "$fakebin/gh-axi"
+  FM_CI_SCAFFOLD_MARKER="$marker" FM_HOME="$home" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-brief.sh" ci-scaffold fork-project --mode no-mistakes >/dev/null \
+    || fail 'offline scaffolding failed'
+  assert_absent "$marker" 'brief scaffolding looked up destination workflows'
+  assert_no_grep 'Current CI witness contract' "$home/data/ci-scaffold/brief.md" \
+    'scaffolding wrote a CI contract that dispatch would duplicate'
+  pass 'brief scaffolding is offline and defers the CI witness contract to dispatch'
+}
+
+
+test_scaffolding_does_not_classify_through_network_or_cwd
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header

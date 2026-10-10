@@ -44,7 +44,9 @@
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
+# upstream contributions dispatched with ci_destination=fork-contribution or
+# recorded delivery_state=published are excluded: they must pass work_is_landed
+# against upstream even when their head is reachable on the fork), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
@@ -1942,6 +1944,16 @@ validate_worktree_teardown_safety() {
     report_worktree_dirt "$dirty"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
+  elif [ "$(sed -n 's/^delivery_state=//p' "$META" | tail -1)" = published ] \
+    || [ "$(sed -n 's/^ci_destination=//p' "$META" | tail -1)" = fork-contribution ]; then
+    if ! branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+      echo "REFUSED: published contribution $ID is not on its branch, so its upstream landing cannot be checked; restore the branch (or get the captain's explicit OK to discard, then --force)." >&2
+      return 1
+    fi
+    if ! work_is_landed "$branch"; then
+      echo "REFUSED: published contribution $ID is not landed upstream; a fork push or external hold does not authorize disposal." >&2
+      return 1
+    fi
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then

@@ -540,6 +540,24 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$data" "done" "$id" "${done_args[@]+"${done_args[@]}"}"
 }
 
+# Published contributions retain their task metadata and worktree until upstream
+# lands them. The external hold takes them off active dispatch without closing
+# the row, declaring a merge, or retiring the remaining maintainer obligation.
+# Repeating this transition backfills the same witness and hold idempotently.
+fm_backlog_published() {  # <data-dir> <id> <PR-url> <witness>
+  local data=$1 id=$2 url=$3 witness=$4
+  fm_backlog_row_probe "$data" "$id" || {
+    FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+    return 1
+  }
+  if [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ] || [ "${FM_BACKLOG_ROW_STATE%% *}" = "done" ]; then
+    FM_BACKLOG_TRANSITION_ERROR="refusing to replace a captain hold or closed task with a published contribution"
+    return 1
+  fi
+  fm_backlog_mutate "$data" update "$id" --pr "$url" || return 1
+  fm_backlog_mutate "$data" hold "$id" --kind external --reason "$witness"
+}
+
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in

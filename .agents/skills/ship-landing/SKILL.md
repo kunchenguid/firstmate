@@ -8,7 +8,10 @@ metadata:
 
 # Ship landing
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done [at=<epoch>]: PR <url> checks green` after CI is green, while `direct-PR` reports `done [at=<epoch>]: PR <url>` after opening the PR, each only for a non-draft PR; a lane that deliberately holds a draft declares a wait instead, and `bin/fm-pr-check.sh` refuses to arm merge monitoring on a draft.
+`bin/fm-dod-lib.sh` owns the mode- and destination-specific PR-ready signals, including structural CI witnesses; a deliberate draft remains paused, and `bin/fm-pr-check.sh` refuses to arm merge monitoring on a draft.
+For a fork contribution, record the passing publication with `bin/fm-ci-witness.sh --record` before registering merge monitoring, including when CI was witnessed green.
+That helper's header owns invocation and replay; `bin/fm-backlog-transition-lib.sh` owns the external-hold transition.
+Keep the contribution published and held for destination maintainers rather than requesting or performing a local merge; report its witness and full PR URL.
 Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal or the resolved checks-green `fm-crew-state.sh` line - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 `bin/fm-dod-lib.sh` owns the named-head gate on that ready signal: a ship `done:` whose named head exists only in the worker's disposable copy is not ready (`bin/fm-crew-state.sh` reports blocked, `bin/fm-pr-check.sh` refuses to register, and a secondmate does not publish that done upstream).
 That blocked reading is the gate working, not a stuck worker, so steer the worker on the commit the refusal names rather than waiting.
