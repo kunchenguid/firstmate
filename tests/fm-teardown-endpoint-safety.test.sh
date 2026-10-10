@@ -1020,6 +1020,151 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
 }
 
+# The deadlock the pool reuse can leave across homes: a finished task in a
+# secondmate home still names a slot that a main-home task now claims, and both
+# teardowns used to refuse on each other's record. The claim names the main-home
+# task, so the secondmate-home record retires records-only first, and the
+# claimant then returns the slot through its normal path.
+test_stale_record_in_another_home_retires_then_claimant_tears_down() {
+  local dir stale=qr-produce claimant=sm-sidebar-layout second_home rc
+
+  dir=$(make_case slot-reassigned-cross-home)
+  mark_case_as_treehouse_pool "$dir"
+  second_home="$dir/secondmate-home"
+  mkdir -p "$second_home/state" "$second_home/data" "$second_home/config"
+  printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$second_home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$claimant.meta" \
+    "window=firstmate:fm-$claimant" "endpoint_task_id=$claimant" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$claimant"
+
+  set +e
+  FM_HOME="$second_home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$stale" --force > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown of the stale record in another home failed: $(cat "$dir/stderr")"
+  assert_absent "$second_home/state/$stale.meta" "the stale record in the other home was not retired"
+  assert_present "$dir/home/state/$claimant.meta" "retiring the stale record removed the claimant's record"
+  assert_present "$dir/worktree/sentinel" "retiring the stale record reset the claimant's slot"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$claimant" \
+    "retiring the stale record rewrote the claimant's slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "retiring the stale record returned the claimant's slot: $(cat "$dir/runtime.log")"
+
+  : > "$dir/runtime.log"
+  run_case "$dir" "$claimant" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "claimant teardown failed after the stale record retired: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$claimant.meta" "claimant teardown left its record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "claimant teardown left its spent slot claim behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "claimant teardown did not return its pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: a stale record in another home retires records-only, then the claimant tears down"
+}
+
+# A scout's record can carry no worktree= line at all (a Pi scout seen
+# 2026-10-05). With its report and captain-call gate in place there is no slot to
+# return, so cleanup finishes instead of refusing; a ship with the same gap, or a
+# scout with no report, still refuses before anything changes.
+test_scout_without_worktree_line_finishes_cleanup() {
+  local dir id=lull-appstore-copy rc
+
+  dir=$(make_case scout-no-worktree)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "project=$dir/project" "kind=scout" \
+    "decisions_reviewed=1" "decision_keys="
+  mkdir -p "$dir/home/data/$id"
+  printf 'report\n' > "$dir/home/data/$id/report.md"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown of a finished scout with no worktree line failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "scout teardown left its record"
+  assert_present "$dir/worktree/sentinel" "scout teardown touched a worktree it never recorded"
+  assert_present "$dir/home/data/$id/report.md" "scout teardown removed the report"
+  ! grep -Fq "treehouse" "$dir/runtime.log" \
+    || fail "scout teardown reached the pool: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stdout")" "teardown $id complete" \
+    "scout teardown did not report a completed cleanup"
+
+  dir=$(make_case scout-no-worktree-gate-open)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "project=$dir/project" "kind=scout"
+  mkdir -p "$dir/home/data/$id"
+  printf 'report\n' > "$dir/home/data/$id/report.md"
+  assert_refused_without_mutation "$dir" "$id" "scout with no worktree line and an open captain-call gate"
+
+  dir=$(make_case scout-no-worktree-no-report)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "project=$dir/project" "kind=scout" \
+    "decisions_reviewed=1" "decision_keys="
+  assert_refused_without_mutation "$dir" "$id" "scout with no worktree line and no report"
+  assert_contains "$(cat "$dir/stderr")" "worktree identity" \
+    "a scout with no report should keep the worktree identity refusal"
+
+  dir=$(make_case ship-no-worktree)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "project=$dir/project" "kind=ship" \
+    "decisions_reviewed=1" "decision_keys="
+  mkdir -p "$dir/home/data/$id"
+  printf 'report\n' > "$dir/home/data/$id/report.md"
+  assert_refused_without_mutation "$dir" "$id" "ship with no worktree line"
+  assert_contains "$(cat "$dir/stderr")" "worktree identity" \
+    "a ship with no worktree line should keep the worktree identity refusal"
+
+  dir=$(make_case scout-empty-worktree)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=" "project=$dir/project" "kind=scout" \
+    "decisions_reviewed=1" "decision_keys="
+  mkdir -p "$dir/home/data/$id"
+  printf 'report\n' > "$dir/home/data/$id/report.md"
+  assert_refused_without_mutation "$dir" "$id" "scout with an empty worktree line"
+
+  pass "fm-teardown: a finished scout with no worktree line completes; ships, reportless scouts, and empty lines still refuse"
+}
+
+# The no-worktree scout exemption covers only a record with no worktree identity
+# of any kind. An Orca scout that names an orca_worktree_id but no worktree= line
+# still refuses, so teardown never runs `orca worktree rm` on a copy it did not
+# identify.
+test_scout_with_orca_worktree_id_but_no_worktree_line_refuses() {
+  local dir id=orca-scout-no-worktree
+
+  dir=$(make_case scout-orca-id-no-worktree)
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf 'orca' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$dir/fakebin/orca"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9::/orca/worktree-9" \
+    "kind=scout" "decisions_reviewed=1" "decision_keys="
+  mkdir -p "$dir/home/data/$id"
+  printf 'report\n' > "$dir/home/data/$id/report.md"
+  assert_refused_without_mutation "$dir" "$id" "Orca scout with an orca_worktree_id and no worktree line"
+  assert_present "$dir/home/data/$id/report.md" "the refused Orca scout teardown removed the report"
+  assert_contains "$(cat "$dir/stderr")" "worktree identity" \
+    "an Orca scout with no worktree line should keep the worktree identity refusal"
+
+  pass "fm-teardown: a scout with an orca_worktree_id but no worktree line still refuses"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1441,6 +1586,9 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
+test_stale_record_in_another_home_retires_then_claimant_tears_down
+test_scout_without_worktree_line_finishes_cleanup
+test_scout_with_orca_worktree_id_but_no_worktree_line_refuses
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

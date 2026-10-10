@@ -76,6 +76,12 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# A scout whose record has no worktree identity at all (no worktree= line and no
+# backend worktree id such as orca_worktree_id) has no slot to return: once
+# its report exists and that gate passes, teardown finishes the rest of its
+# cleanup and skips every slot step, even under --force. Without the report and
+# a passing gate, and for any other kind, the missing worktree identity still
+# refuses; an empty or duplicated worktree= line always refuses.
 # Before destructive cleanup, teardown validates task check artifacts as
 # ordinary single-link files on the state device. It refuses and preserves
 # task state when that proof fails; otherwise it removes the task's check,
@@ -1118,11 +1124,27 @@ fi
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
+# A finished scout whose record never named a worktree has no slot to return, so
+# the shared validator's worktree requirement would only strand it. The record must
+# carry no worktree identity of any kind (no worktree= and no backend id such as
+# orca_worktree_id), and the report and the captain-call gate must already pass;
+# every slot step is then skipped through teardown_owns_worktree, exactly as for a
+# reassigned slot.
+TEARDOWN_NO_WORKTREE=0
+TEARDOWN_VALIDATE_WORKTREE_ARG=
+if [ "$TEARDOWN_META_KIND" = scout ] && [ -z "$WT" ] \
+   && [ "$(LC_ALL=C grep -c '^[a-z_]*worktree[a-z_]*=' "$META" 2>/dev/null || true)" = 0 ] \
+   && [ -f "$DATA/$ID/report.md" ] \
+   && FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null 2>&1; then
+  TEARDOWN_NO_WORKTREE=1
+  TEARDOWN_VALIDATE_WORKTREE_ARG=--worktree-optional
+fi
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
   BACKEND=tmux
   T=
 else
-  fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+  fm_backend_validate_task_endpoint "$META" "$ID" $TEARDOWN_VALIDATE_WORKTREE_ARG || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
@@ -2451,7 +2473,7 @@ require_owned_task_worktree_slot() {
 }
 
 teardown_owns_worktree() {
-  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ] && [ "${TEARDOWN_NO_WORKTREE:-0}" != 1 ]
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3845,6 +3867,8 @@ if [ -d "$STATE" ]; then
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+elif [ "$TEARDOWN_NO_WORKTREE" = 1 ]; then
+  echo "teardown $ID complete (window ${T:-none}; scout record named no worktree, so no slot was returned)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
 else
