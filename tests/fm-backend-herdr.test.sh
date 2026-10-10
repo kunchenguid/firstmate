@@ -3655,6 +3655,116 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   pass "herdr presentation recovery: duplicate-token inspection is read-only and live-agent risk refuses fallback"
 }
 
+test_projection_token_hidden_after_binding() {
+  local dir state log resp fb token journal home out status visible
+  dir="$TMP_ROOT/projection-hidden-token"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  visible=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_visible_label 2ndmate-fmdev-f2/fm-task-p3' "$ROOT")
+  [ "$visible" = "└ task-p3" ] || fail "visible projection label was wrong: $visible"
+
+  printf '{"result":{}}\n' > "$resp/1.out"
+  printf '{"result":{"workspace":{"workspace_id":"w2","label":"└ task-p3"}}}\n' > "$resp/2.out"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_hide_token fmtest w2 "└ task-p3"' "$ROOT" \
+    || fail "a confirmed rename should hide the projection token"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw2\x1f└ task-p3' "token hide did not rename the exact workspace"
+  : > "$log"; rm -f "$resp"/*.out "$resp/.count"
+  printf '{"result":{}}\n' > "$resp/1.out"
+  printf '{"result":{"workspace":{"workspace_id":"w2","label":"└ task-p3 · p:AbCdEfGhIjKlMnOpQrStUv"}}}\n' > "$resp/2.out"
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_hide_token fmtest w2 "└ task-p3"' "$ROOT"; then
+    fail "an unconfirmed rename must not report the token hidden"
+  fi
+
+  token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_create "$1" task-p3' "$ROOT" "$state")
+  journal="$state/task-p3.herdr-presentation"
+  bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_bind "$1" task-p3 "$2" fmtest w2 w2:t1 w2:p1 w1 firstmate "└ task-p3" fm-task-p3' \
+    "$ROOT" "$journal" "$home" || fail "a visible-label binding should publish"
+
+  for label in "└ task-p3" "└ task-p3 · p:$token"; do
+    : > "$log"; rm -f "$resp"/*.out "$resp/.count"
+    printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"%s"}]}}\n' "$label" > "$resp/1.out"
+    printf '{"result":{"tabs":[{"tab_id":"w2:t1","label":"fm-task-p3"}]}}\n' > "$resp/2.out"
+    printf '{"result":{"panes":[{"pane_id":"w2:p1","tab_id":"w2:t1"}]}}\n' > "$resp/3.out"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_projection_live_binding_matches fmtest "$1" w2 w2:t1 w2:p1 w1 firstmate "└ task-p3" fm-task-p3' \
+      "$ROOT" "$token" || fail "live binding rejected the projection label: $label"
+  done
+  : > "$log"; rm -f "$resp"/*.out "$resp/.count"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"└ task-p3"},{"workspace_id":"w3","label":"└ copy · p:%s"}]}}\n' "$token" > "$resp/1.out"
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_live_binding_matches fmtest "$1" w2 w2:t1 w2:p1 w1 firstmate "└ task-p3" fm-task-p3' \
+    "$ROOT" "$token"; then
+    fail "live binding accepted a second workspace carrying the token"
+  fi
+
+  : > "$log"; rm -f "$resp"/*.out "$resp/.count"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"└ task-p3"}]}}\n' > "$resp/1.out"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_endpoint_matches_journal fmtest w2 "$1" task-p3' \
+    "$ROOT" "$journal" || fail "teardown correlation rejected the bound visible-label workspace"
+
+  : > "$log"; rm -f "$resp"/*.out "$resp/.count"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"└ task-p3"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w2:p1","tab_id":"w2:t1"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w2:p1"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p1","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi"}]}}}\n' > "$resp/5.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_recovery_allows_flat fmtest "$1" task-p3' "$ROOT" "$journal" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a live agent in the bound token-free workspace must refuse duplicate launch"
+  assert_contains "$out" "has a live pane" "bound token-free recovery did not explain the live-agent risk"
+  pass "herdr presentation token: a bound projection shows only its visible label and keeps exact binding, teardown, and recovery correlation"
+}
+
+test_projection_cross_home_child_counts_as_child() {
+  local dir state home log resp fb mover mover_log token out status
+  dir="$TMP_ROOT/projection-cross-home-child"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  fb=$(make_herdr_fakebin "$dir")
+  # w5 is a token-free child that another home bound; this home has no binding for it.
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w5","label":"└ other"},{"workspace_id":"w9","label":"scratch"},{"workspace_id":"w3","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w5","label":"└ other"},{"workspace_id":"w3","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"},{"workspace_id":"w9","label":"scratch"}]}}'
+SH
+  chmod +x "$mover"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3 firstmate w1' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "ordering past a cross-home child must not fail: $out"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w3"$'\t'"2" ] \
+    || fail "a token-free cross-home child did not count as a projected child: $(cat "$mover_log") $out"
+
+  token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_create "$1" task-p3' "$ROOT" "$state")
+  bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_bind "$1/task-p3.herdr-presentation" task-p3 "$2" fmtest w2 w2:t1 w2:p1 w1 firstmate "└ task-p3" fm-task-p3' \
+    "$ROOT" "$state" "$home" || fail "the task binding should publish"
+  : > "$log"; rm -f "$resp"/*.out "$resp/.count"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w5","label":"└ other"},{"workspace_id":"w2","label":"└ task-p3"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w2:t1","label":"fm-task-p3"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w2:p1","tab_id":"w2:t1"}]}}\n' > "$resp/3.out"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_live_binding_matches fmtest "$1" w2 w2:t1 w2:p1 w1 firstmate "└ task-p3" fm-task-p3' \
+    "$ROOT" "$token" || fail "live binding rejected a cross-home child between the parent and the child"
+  pass "herdr presentation: a token-free cross-home └ child counts as a projected child in placement and binding"
+}
+
 # --- workspace_find: scoped to THIS home's own label, not just any match ----
 
 test_workspace_find_matches_only_this_homes_own_label() {
@@ -6007,6 +6117,8 @@ test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
+test_projection_token_hidden_after_binding
+test_projection_cross_home_child_counts_as_child
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
