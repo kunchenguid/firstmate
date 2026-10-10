@@ -479,13 +479,13 @@ ff_target_jj() {
 
   instr=$(jj_changed_instr "$dir" "@" "$base")
   before=$(jj -R "$dir" log -r '@' --no-graph -T 'commit_id.short(7)' 2>/dev/null)
-  if ! jj -R "$dir" new "$base" >/dev/null 2>&1; then
-    echo "$label: skipped: could not move working copy to $base"
-    return 0
-  fi
   if [ "$cur_rev" != "$base_rev" ] \
     && ! jj -R "$dir" bookmark set "$default" -r "$base" >/dev/null 2>&1; then
     echo "$label: skipped: could not advance $default to $base"
+    return 0
+  fi
+  if ! jj -R "$dir" new "$base" >/dev/null 2>&1; then
+    echo "$label: skipped: could not move working copy to $base"
     return 0
   fi
   after=$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id.short(7)' 2>/dev/null)
