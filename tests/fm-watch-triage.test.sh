@@ -6207,6 +6207,71 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+wait_heartbeat_absorbed() {  # <state> <pid> <out> <label>: the heartbeat absorbs without a wake; reaps pid
+  local state=$1 pid=$2 out=$3 label=$4 i=0
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a cleanup finding woke the heartbeat ($label): $(cat "$out")"
+  fi
+  while [ "$i" -lt 200 ]; do
+    [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ ! -s "$out" ] || fail "a cleanup finding printed a wake reason ($label): $(cat "$out")"
+  [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] \
+    || fail "the heartbeat did not absorb a cleanup finding ($label)"
+  reap "$pid"
+}
+
+test_heartbeat_wakes_once_for_new_cleanup_findings() {
+  local dir state fakebin out pid audit_env
+  dir=$(make_case heartbeat-hygiene); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # The home's own clone holds an unpushed fm/* branch no task record owns.
+  fm_git_init_commit "$dir/seed"
+  git clone --quiet --bare "$dir/seed" "$dir/origin.git"
+  git clone --quiet "file://$dir/origin.git" "$dir/projects/alpha"
+  git -C "$dir/projects/alpha" checkout -q -b fm/lost
+  printf 'lost\n' > "$dir/projects/alpha/lost.txt"
+  git -C "$dir/projects/alpha" add lost.txt
+  git -C "$dir/projects/alpha" -c user.name=t -c user.email=t@example.invalid commit -qm lost
+  git -C "$dir/projects/alpha" checkout -q main
+  # Without the opt-in, the heartbeat neither runs the audit nor wakes for it.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 env -u FM_HEARTBEAT_HYGIENE "$WATCH" > "$out" &
+  pid=$!
+  wait_heartbeat_absorbed "$state" "$pid" "$out" "audit not opted in"
+  [ ! -e "$state/.hygiene-surfaced" ] || fail "the heartbeat ran the cleanup audit without FM_HEARTBEAT_HYGIENE=1"
+  rm -f "$state/.heartbeat-streak"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_HYGIENE=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a new cleanup finding did not wake the heartbeat"; }
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "the cleanup backstop did not exit with a heartbeat wake"
+  grep -F "fm/lost" "$state/.hygiene-surfaced" >/dev/null \
+    || fail "the surfaced cleanup finding was not recorded (would re-fire every heartbeat)"
+  ack_stopped_cycle "$state" >/dev/null || fail "acknowledging the cleanup heartbeat failed"
+  # A failed audit absorbs the heartbeat and must leave the surfaced set intact;
+  # an audit that must not run at all (switched off) must leave it intact too.
+  # Later rounds run as a handled successor so the reaped round's downtime is
+  # not re-announced.
+  for audit_env in FM_HYGIENE_BRANCH_LIMIT=abc FM_HEARTBEAT_HYGIENE=0 none=; do
+    rm -f "$state/.heartbeat-streak"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_WATCH_HANDLING_SUCCESSOR=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_HYGIENE=1 \
+      env "$audit_env" "$WATCH" > "$out" &
+    pid=$!
+    wait_heartbeat_absorbed "$state" "$pid" "$out" "$audit_env"
+    grep -F "fm/lost" "$state/.hygiene-surfaced" >/dev/null \
+      || fail "the surfaced cleanup set was lost after a heartbeat ($audit_env), so it would wake again"
+  done
+  git -C "$dir/projects/alpha" rev-parse --verify -q fm/lost >/dev/null || fail "the heartbeat audit changed the branch"
+  pass "the opted-in heartbeat wakes once for new leftover-state cleanup findings and absorbs standing ones; it is off by default"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -6739,6 +6804,7 @@ test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
+test_heartbeat_wakes_once_for_new_cleanup_findings
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
