@@ -967,6 +967,13 @@ When the file is absent, worker launches do not add a board address and retain t
 Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
 
+## Lavish off switch (config/lavish-off)
+
+The optional local, gitignored `config/lavish-off` presence flag turns Lavish boards off for this home, whatever its contents.
+While it exists, `fm-brief.sh` gives new scout briefs the text-report contract instead of the Lavish review loop, and `fm-bearings-board.sh build` builds and arms no board for `/bearings lavish`, reporting `lavish-off:` instead.
+When the file is absent, both keep their existing behavior.
+The flag does not stop, start, or rebind a Lavish server, and boards already armed keep their listeners until retired.
+
 ## Home brief include (config/brief-include.md)
 
 The optional local, gitignored `config/brief-include.md` adds standing worker instructions to every ship and scout brief.

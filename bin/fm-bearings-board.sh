@@ -35,6 +35,10 @@
 #            shrinking Captain's Call.
 # path       Print the stable board path for this home.
 #
+# When the opt-in config/lavish-off presence flag exists, build touches no
+# board, session, binding, or source: it prints one `lavish-off:` line saying
+# no board was built or armed, and exits 0.
+#
 # A LIVE SESSION IS PROVED, NEVER ASSUMED. `lavish-axi <file>` exits 0 even
 # when it refuses to reopen a session the captain ended from the browser,
 # reporting `status: user-ended` with the same session id, so exit status alone
@@ -91,6 +95,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
@@ -360,6 +365,10 @@ await_source_owner() {  # <source-id>
 command_build() {
   local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  if [ -e "$CONFIG/lavish-off" ]; then
+    printf 'lavish-off: no board built or armed (%s/lavish-off exists)\n' "$CONFIG"
+    return 0
+  fi
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
   jq empty "$data" 2>/dev/null || fail "board data is not valid JSON: $data"
