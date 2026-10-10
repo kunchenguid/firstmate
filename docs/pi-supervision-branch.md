@@ -147,6 +147,7 @@ A `note` after that completion does not clear it.
 Progress, an unchanged stale observation, and a verified active-run wait stay branch-owned.
 A completion inside the triggering close goes wholly to main, including a batch that also contains routine rows.
 A completion sitting unread beside a different task, or beside a heartbeat, stays queued until its own trigger and does not carry that other close to main.
+After that span is consumed, its durable handoff marker still upgrades a task-level routine report to a captain outcome until the shared continuation-evidence predicate positively clears it.
 Before acknowledgement, a granted signal whose span is now completion-owned or unreadable is left queued, so a routine report cannot retire it.
 Away, the branch takes the row and must leave a durable captain outcome rather than a silent routine success; main stays parked.
 `bin/fm-inactive-reconcile.sh` keeps the separate idle-after-handoff record for the same completion.
