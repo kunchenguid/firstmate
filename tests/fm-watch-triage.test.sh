@@ -24,6 +24,7 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+STATUS_APPEND="$ROOT/bin/fm-status-append.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
@@ -4808,8 +4809,8 @@ test_current_busy_generation_pause_uses_long_cadence() {
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/current-pause.meta"
   record_pi_busy "$state" current-pause
   busy_ts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state/current-pause.busy-state")
-  printf 'paused: foreground keeper deliberately parked for review\n' > "$state/current-pause.status"
-  set_mtime $((busy_ts + 1)) "$state/current-pause.status"
+  "$STATUS_APPEND" "$state" current-pause 'paused: foreground keeper deliberately parked for review'
+  set_mtime "$busy_ts" "$state/current-pause.status"
   sig=$(seen_sig "$state/current-pause.status"); printf '%s' "$sig" > "$state/.seen-current-pause_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "Working... current paused generation")
@@ -4829,7 +4830,7 @@ test_current_busy_generation_pause_uses_long_cadence() {
     || { reap "$pid"; fail "a current-generation pause used wedge cadence: $(cat "$out")"; }
   [ ! -s "$out" ] || { reap "$pid"; fail "a current-generation pause printed a wake"; }
   reap "$pid"
-  pass "a pause newer than the current busy generation uses long-cadence tracking"
+  pass "a pause bound to the current busy generation uses long-cadence tracking"
 }
 
 test_old_or_unordered_pause_does_not_mask_newer_busy_generation() {
@@ -6378,8 +6379,8 @@ test_afk_current_busy_generation_pause_leaves_long_cadence_to_daemon() {
   record_pi_busy "$state" afk-current-pause
   busy_ts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state/afk-current-pause.busy-state")
   [ -n "$busy_ts" ] || fail "could not read the away-mode busy event timestamp"
-  printf 'paused: foreground keeper deliberately parked for an external review\n' > "$state/afk-current-pause.status"
-  set_mtime $((busy_ts + 1)) "$state/afk-current-pause.status"
+  "$STATUS_APPEND" "$state" afk-current-pause 'paused: foreground keeper deliberately parked for an external review'
+  set_mtime "$busy_ts" "$state/afk-current-pause.status"
   sig=$(seen_sig "$state/afk-current-pause.status"); printf '%s' "$sig" > "$state/.seen-afk-current-pause_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "Working... current paused generation")

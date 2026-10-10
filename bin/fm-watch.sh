@@ -76,9 +76,9 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
-#                          A paused append proved newer than the exact current
-#                          validated busy generation uses the long pause cadence
-#                          instead; old or ambiguously ordered pauses do not.
+#                          A paused append bound to the exact current validated
+#                          busy generation and sequence uses the long pause
+#                          cadence instead; unbound or stale pauses do not.
 #   stale: <window> (unread firstmate instruction: ...)
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
@@ -340,8 +340,8 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
 # automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, when its declaration is strictly newer than the exact current
-# validated busy generation; old or ambiguously ordered pauses do not defer.
+# itself, when its declaration is bound to the exact current validated busy
+# generation and sequence; unbound or stale pauses do not defer.
 # Set generously above
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
@@ -1304,17 +1304,17 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # so it is taken only behind a first fold read that finds some open
 # `needs-decision` at all, and only in the at-threshold branch - at most once per
 # window per STALE_ESCALATE_SECS, never on an ordinary poll.
-wedge_wait_evidence() {  # <task> -> one wait_record on stdout
-  local task=$1 last until statusf run
+wedge_wait_evidence() {  # <task> [skip-declared] -> one wait_record on stdout
+  local task=$1 mode=${2:-} last until statusf run
   [ -n "$task" ] || return 1
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
-  if status_is_captain_held "$last"; then
+  if [ "$mode" != skip-declared ] && status_is_captain_held "$last"; then
     wait_record 'captain-held' 'awaiting the captain - verified hold transfer' \
       captain 'answer the held decision or release the hold' "$statusf"
     return 0
   fi
-  if status_is_paused "$last"; then
+  if [ "$mode" != skip-declared ] && status_is_paused "$last"; then
     if until=$(status_paused_until "$last"); then
       [ "$(date +%s)" -lt "$until" ] || return 1
     fi
@@ -1524,8 +1524,8 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [wait-mode]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 wait_mode=${7:-} since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1539,7 +1539,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fm_epoch_seconds_to age
       age=$(( age - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        if evidence=$(wedge_wait_evidence "$task") &&
+        if evidence=$(wedge_wait_evidence "$task" "$wait_mode") &&
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
         fi
@@ -1571,7 +1571,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # change semantic busy state. Before either marker exists, age the spawn record.
 # The caller checks busy state and routes a crossed bound through inspection.
 current_busy_generation_is_paused() {  # <task>
-  local task=$1 meta statusf harness before after status_sig_before status_sig_after last pause_ts
+  local task=$1 meta statusf harness before after status_sig_before status_sig_after last pause_gen pause_seq
   local busy_state busy_source busy_event busy_seq busy_ts busy_gen
   meta="$STATE/$task.meta"
   statusf="$STATE/$task.status"
@@ -1588,13 +1588,14 @@ EOF
   fm_busy_token_valid "$busy_gen" || return 1
   case "$busy_seq" in ''|*[!0-9]*) return 1 ;; esac
   case "$busy_ts" in ''|*[!0-9]*) return 1 ;; esac
-  status_sig_before=$(stat_sig "$statusf") || return 1
+  status_sig_before=$(status_observed_signature "$statusf") || return 1
   last=$(last_status_line "$statusf")
   status_is_paused "$last" || return 1
-  pause_ts=$(stat_mtime "$statusf") || return 1
-  case "$pause_ts" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$pause_ts" -gt "$busy_ts" ] || return 1
-  status_sig_after=$(stat_sig "$statusf") || return 1
+  pause_gen=$(printf '%s\n' "${last%%:*}" | sed -n 's/.*\[busy-gen=\([^]]*\)\].*/\1/p')
+  pause_seq=$(printf '%s\n' "${last%%:*}" | sed -n 's/.*\[busy-seq=\([^]]*\)\].*/\1/p')
+  [ "$pause_gen" = "$busy_gen" ] || return 1
+  [ "$pause_seq" = "$busy_seq" ] || return 1
+  status_sig_after=$(status_observed_signature "$statusf") || return 1
   [ "$status_sig_before" = "$status_sig_after" ] || return 1
   after=$(fm_busy_record_read "$STATE" "$task" snapshot) || return 1
   [ "$before" = "$after" ]
@@ -1746,7 +1747,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" "$h"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" "$h" skip-declared
   return 1
 }
 
