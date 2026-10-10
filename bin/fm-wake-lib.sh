@@ -654,6 +654,7 @@ fm_lock_recheck_stale_owner() {
 FM_RECOVERY_MARKER_TOKEN=
 FM_RECOVERY_MARKER_ACTION='none'
 FM_RECOVERY_MARKER_WRITTEN_TOKEN=
+FM_RECOVERY_MARKER_SEQ=
 FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
 FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
 
@@ -882,12 +883,15 @@ _fm_recovery_marker_ack() {
 _fm_recovery_marker_arm_check() {
   local marker=$1 lock line quarantine
   FM_RECOVERY_MARKER_ACTION='none'
+  FM_RECOVERY_MARKER_SEQ=
   lock="${marker}.lock"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   if ! fm_lock_acquire_wait "$lock"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
+  # shellcheck disable=SC2034 # Read by callers after this function returns.
+  FM_RECOVERY_MARKER_SEQ=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || true)
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     if [ -s "$FM_WAKE_QUEUE" ]; then
       if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
@@ -951,6 +955,52 @@ _fm_recovery_marker_arm_check() {
   esac
   fm_lock_release "$lock"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
+# Delivery/drain ordering for handling successors, kept under the queue lock
+# (docs/watcher-continuity.md "Durable queue and turn-end backstop"). A
+# delivering watcher close leaves .wake-queue.delivered-seq outstanding; a later
+# drain consumes it, and only a main drain records .wake-queue.drained-seq. Every
+# failure removes .wake-queue.drained-seq, so a successor without that evidence
+# never re-announces.
+fm_wake_queue_seq_mark_locked() {  # <file>
+  local file=$1 seq=0 tmp
+  if [ -f "$STATE/.wake-queue.seq" ]; then
+    seq=
+    IFS= read -r seq < "$STATE/.wake-queue.seq" || true
+  fi
+  tmp=$(mktemp "${file}.tmp.XXXXXX") || tmp=
+  if [ -z "$tmp" ] || ! printf '%s\n' "$seq" > "$tmp" || ! mv -f -- "$tmp" "$file"; then
+    [ -z "$tmp" ] || rm -f -- "$tmp"
+    rm -f -- "$file"
+    return 1
+  fi
+}
+
+fm_wake_queue_delivered_record() {  # <bound-seconds>
+  local status=0
+  if ! fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$1"; then
+    rm -f -- "$STATE/.wake-queue.drained-seq"
+    return 1
+  fi
+  if ! fm_wake_queue_seq_mark_locked "$STATE/.wake-queue.delivered-seq"; then
+    rm -f -- "$STATE/.wake-queue.drained-seq"
+    status=1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+fm_wake_queue_drained_record_locked() {  # <actor>
+  if [ "$1" != main ]; then
+    rm -f -- "$STATE/.wake-queue.delivered-seq"
+    return
+  fi
+  fm_wake_queue_seq_mark_locked "$STATE/.wake-queue.drained-seq" || return 1
+  if ! rm -f -- "$STATE/.wake-queue.delivered-seq"; then
+    rm -f -- "$STATE/.wake-queue.drained-seq"
+    return 1
+  fi
 }
 
 # Apply the owner-documented announced-episode arm transition atomically with

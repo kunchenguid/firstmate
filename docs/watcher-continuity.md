@@ -191,8 +191,21 @@ The bounded turn-end guard enforces recovery at Stop when no watcher is live and
 So a finished, hung, or identity-mismatched claim cannot suppress that recovery ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
 
 The recovery-episode contract below owns once-per-generation announcement.
-A handling successor does not re-announce.
+A handling successor does not re-announce the episode its predecessor delivered.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+A delivering watcher close leaves `state/.wake-queue.delivered-seq` outstanding, whether or not its wake appended a queue row.
+A later drain consumes that record under the queue lock.
+A main drain also records the queue sequence it covered in `state/.wake-queue.drained-seq`.
+A supervision-branch drain consumes the delivery without advancing that sequence, so a delivery the branch handled never stays outstanding against main.
+A branch drain covers only the rows its grant holds, so once it consumes the delivery, the successor surfaces any other row past the last main drain, whether it was appended before the predecessor's close or after it.
+A row appended while a delivery is still outstanding is left to that wake's drain, so it does not cause a second wake.
+Once a main drain has consumed the last delivery, a durable row appended past that drain has no wake on the way, so the successor surfaces it once through the ordinary arm check, whether it arrived mid-cycle or before the successor started (such as during an adapter's retry backoff).
+A failed delivery or drain record removes the drain record, and a missing or unreadable drain record leaves the successor not re-announcing.
+A drain is not tied to the delivery it answers, so a rare doubled wake remains possible:
+- A main drain that did not answer the outstanding delivery (an earlier turn's drain, session start, or away return) can still consume it.
+- A branch drain can likewise consume a delivery main has yet to drain.
+- A row appended in that narrow window then gets one extra wake from the successor.
+- That cost is bounded to at most one extra wake per append, and it is never a loop or a stranded row.
 
 ### Manual recovery and other harnesses
 
@@ -464,6 +477,10 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
+- A handling successor that must surface a durable row appended mid-cycle without re-announcing predecessor-delivered work.
+- A handling successor started after a row was appended past the drain of the last delivery, which must surface that row.
+- A row appended while the delivered wake is still undrained, with and without a queue row of its own, which must produce no second wake once the real drain consumes it, while a later append still surfaces.
+- A delivered wake drained by the supervision branch, after which a main-owned row must surface, whether it landed after the successor started, before it started, or before the predecessor's close.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.

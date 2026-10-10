@@ -2502,11 +2502,69 @@ if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
   exit 1
 fi
+# True when queue sequence <seq> holds rows no wake is on the way for: no
+# delivered wake is still outstanding, and <seq> is past the main drain that
+# consumed the last one. A missing or malformed drain record answers false, so
+# a handling successor never re-announces.
+successor_rows_undelivered() {  # <seq>
+  local seq=$1 drained=''
+  [ ! -e "$STATE/.wake-queue.delivered-seq" ] || return 1
+  if [ -f "$STATE/.wake-queue.drained-seq" ]; then
+    IFS= read -r drained < "$STATE/.wake-queue.drained-seq" || true
+  fi
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  case "$drained" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$((10#$seq))" -gt "$((10#$drained))" ]
+}
+
+# True, under the queue lock, when a supervision-branch drain consumed the
+# delivered wake while the queue still holds a main-owned row past the last main
+# drain: no wake is on the way for it. Rows the branch's grant holds are the
+# branch's own. Returns 2 when the queue lock cannot be taken.
+successor_main_row_stranded() {
+  local drained='' status=1
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 2
+  if successor_rows_undelivered "$SUCCESSOR_QUEUE_SEQ" && [ -f "$FM_WAKE_QUEUE" ]; then
+    IFS= read -r drained < "$STATE/.wake-queue.drained-seq" || true
+    awk -F '\t' -v drained="$drained" -v branch="$STATE/.branch-eligible-rows" '
+      BEGIN { while ((getline line < branch) > 0) reserved[line]=1 }
+      NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 > drained + 0 && !($2 in reserved) { found=1; exit }
+      END { exit !found }
+    ' "$FM_WAKE_QUEUE" && status=0
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+# A handling successor's baseline: rows through this sequence already have a
+# predecessor-delivered wake on the way (resurface_after_downtime). It is the
+# sequence the start-time arm check saw under the queue lock, so an append
+# landing after that check is never folded into the baseline.
+SUCCESSOR_QUEUE_SEQ=$FM_RECOVERY_MARKER_SEQ
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
+  # A row appended after the last delivered wake was drained (say, during a
+  # retry backoff) has no wake on the way even though this start announced it.
+  if [ "$FM_RECOVERY_MARKER_ACTION" = recover ] \
+    && successor_rows_undelivered "$SUCCESSOR_QUEUE_SEQ"; then
+    WATCHER_RECOVERY_PENDING=1
+  fi
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+
+# The durable queue's append sequence, read under the queue lock so a
+# concurrent append is never observed half-written.
+WAKE_QUEUE_SEQ=
+wake_queue_seq_read() {
+  WAKE_QUEUE_SEQ=
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ -f "$STATE/.wake-queue.seq" ]; then
+    IFS= read -r WAKE_QUEUE_SEQ < "$STATE/.wake-queue.seq" || true
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
@@ -2592,6 +2650,9 @@ watcher_cleanup() {
   fm_check_output_cleanup
   fm_capture_output_cleanup
   fm_custom_check_snapshot_cleanup
+  if [ "$owns_lock" -eq 1 ] && [ -n "${FM_WATCH_DELIVERED_REASON:-}" ]; then
+    fm_wake_queue_delivered_record "$CLEANUP_LOCK_BOUND" || true
+  fi
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
       downtime "$CLEANUP_LOCK_BOUND"; then
@@ -2664,8 +2725,28 @@ resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
   # unbounded recovery loop; stay in the poll loop and supervise instead.
-  if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+  # A row appended after a drain covered the last delivered wake has no such
+  # wake on the way, so it takes the ordinary arm check below; otherwise it
+  # would wait for this cycle to close on something else, which a quiet fleet
+  # may never produce.
+  # A branch that consumed the delivered wake drains only its grant, so a
+  # main-owned row past the last main drain, whether appended before or after
+  # the predecessor's close, also has no wake on the way.
+  if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ] && [ "$WATCHER_RECOVERY_PENDING" -ne 1 ] \
+    && successor_rows_undelivered "$SUCCESSOR_QUEUE_SEQ"; then
+    successor_main_row_stranded
+    case $? in
+      0) WATCHER_RECOVERY_PENDING=1 ;;
+      2) echo "watcher: wake queue could not be read safely" >&2; exit 1 ;;
+    esac
+  fi
+  if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ] && [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
+    if ! wake_queue_seq_read; then
+      echo "watcher: wake queue sequence could not be read safely" >&2
+      exit 1
+    fi
+    [ "$WAKE_QUEUE_SEQ" != "$SUCCESSOR_QUEUE_SEQ" ] || return 0
+    successor_rows_undelivered "$WAKE_QUEUE_SEQ" || return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
