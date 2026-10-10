@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
-# Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
-# outside the worker's disposable copy; in no-mistakes mode a forge-reported
-# head is that named head and is already stored on the forge.
+# PR-ready registration uses the named-head gate owned by bin/fm-dod-lib.sh.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
@@ -16,7 +14,8 @@
 # draft on purpose declares a wait instead of reporting done. An unreadable
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
-# skips this refusal, because its own merge-time draft refusal is authoritative.
+# skips this refusal and the named-head gate below, because its own merge-time
+# draft and named-head checks are authoritative.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -144,7 +143,8 @@ case "$PROVIDER:$MODE" in
   *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
 esac
-if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] \
+  && { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2
   exit 1
@@ -238,15 +238,19 @@ fi
 # silent no-op there. The poll is armed either way; a channel that cannot be
 # written is reported as actionable, and bin/fm-inactive-reconcile.sh still
 # delivers the child's own ready line on the next supervision poll.
-READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
-PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
-[ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
-[ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
-READY_RC=0
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
-case "$READY_RC" in
-  0|1) ;;
-  *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
-esac
+# The merge-time re-record publishes no ready line, as with the ledger above,
+# because bin/fm-pr-merge.sh can still refuse the merge after it.
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
+  PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+  PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
+  [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
+  READY_RC=0
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+  case "$READY_RC" in
+    0|1) ;;
+    *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
+  esac
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

@@ -23,6 +23,7 @@ MR_HOST=gitlab.example
 MR_PATH=group/subgroup/project
 MR_PROJECT_URL="https://$MR_HOST/$MR_PATH"
 MR_URL="$MR_PROJECT_URL/-/merge_requests/7"
+MR_FORK_URL="https://$MR_HOST/fork-owner/project"
 MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
@@ -196,6 +197,10 @@ case "${1:-} ${2:-}" in
         fi
         exit 0
         ;;
+      *headRefName*)
+        printf '%s\n' 'fm/task-x1'
+        exit 0
+        ;;
       *headRefOid*)
         cat "$FM_TEST_GH_HEAD"
         exit 0
@@ -358,6 +363,11 @@ case "${1:-} ${2:-}" in
     : > "$case_dir/glab-merge-called"
     exit 0
     ;;
+  "api projects/2")
+    [ ! -e "$case_dir/glab-api-fails" ] || exit 1
+    cat "$case_dir/source-project.json"
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -372,7 +382,7 @@ SH
 write_mr_json() {
   local file=$1 kv key value
   local state=opened detail=mergeable conflicts=false discussions=true
-  local head=$MR_HEAD pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
+  local head=$MR_HEAD branch=fm/task-x1 source_project=1 pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
   local merge_when_pipeline_succeeds=false merge_after=null
   shift
   for kv in "$@"; do
@@ -384,6 +394,8 @@ write_mr_json() {
       conflicts) conflicts=$value ;;
       discussions) discussions=$value ;;
       head) head=$value ;;
+      branch) branch=$value ;;
+      source_project) source_project=$value ;;
       pipeline_sha) pipeline_sha=$value ;;
       pipeline_status) pipeline_status=$value ;;
       pipeline) pipeline=$value ;;
@@ -397,14 +409,15 @@ write_mr_json() {
   fi
   printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
     "$state" "$detail" "$conflicts" > "$file"
-  printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
-    "$discussions" "$head" "$pipeline" >> "$file"
-  printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
-    "$merge_when_pipeline_succeeds" "$merge_after" >> "$file"
+  printf '"blocking_discussions_resolved":%s,"sha":"%s","source_branch":"%s","head_pipeline":%s,' \
+    "$discussions" "$head" "$branch" "$pipeline" >> "$file"
+  printf '"source_project_id":%s,"target_project_id":1,"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
+    "$source_project" "$merge_when_pipeline_succeeds" "$merge_after" >> "$file"
 }
 
 # make_gitlab_case <name> [<field>=<value> ...]: a case dir with both forge
-# mocks and a merge request payload. Echoes the case dir.
+# mocks, a merge request payload, and the fork project 2 a payload with
+# source_project=2 comes from. Echoes the case dir.
 make_gitlab_case() {
   local name=$1 case_dir
   shift
@@ -416,6 +429,8 @@ make_gitlab_case() {
   : > "$case_dir/glab.log"
   write_mr_json "$case_dir/mr.json" "$@"
   write_mr_json "$case_dir/mr-post.json" state=merged
+  printf '{"id":2,"web_url":"%s","http_url_to_repo":"%s.git","ssh_url_to_repo":"git@%s:fork-owner/project.git"}\n' \
+    "$MR_FORK_URL" "$MR_FORK_URL" "$MR_HOST" > "$case_dir/source-project.json"
   printf '%s\n' "$case_dir"
 }
 
@@ -573,6 +588,41 @@ test_merge_failure_propagates_after_recording() {
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
+}
+
+# The task's recorded worktree is gone. A no-mistakes merge still lands, since
+# the verified forge head is its named head, while a direct-PR merge still
+# refuses, since nothing outside the copy proves its named head.
+test_missing_worktree_merge_follows_the_mode() {
+  local case_dir mode rc
+  for mode in no-mistakes direct-PR; do
+    case_dir=$(make_case "missing-worktree-$mode")
+    rm -rf "$case_dir/wt"
+    printf 'mode=%s\n' "$mode" >> "$case_dir/state/task-x1.meta"
+    add_gh_mocks "$case_dir" 6363636363636363636363636363636363636363
+    : > "$case_dir/gh-axi.log"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    case "$mode" in
+      no-mistakes)
+        expect_code 0 "$rc" "missing-worktree-$mode: the merge was refused for a gone worktree"
+        assert_logged_gh_merge "$case_dir" 63 example/repo --squash
+        ;;
+      direct-PR)
+        expect_code 1 "$rc" "missing-worktree-$mode: the merge landed without a provable named head"
+        assert_grep 'named head cannot be verified: worktree missing' "$case_dir/stderr" \
+          "missing-worktree-$mode: the refusal did not name the missing worktree"
+        assert_no_grep '^pr merge ' "$case_dir/gh.log" \
+          "missing-worktree-$mode: a merge was attempted despite the refusal"
+        ;;
+    esac
+  done
+  pass "fm-pr-merge merges a no-mistakes PR whose worktree is gone and refuses a direct-PR one"
 }
 
 test_github_merged_outcome_is_verified() {
@@ -1937,6 +1987,150 @@ test_gitlab_stale_recorded_head_is_reported() {
   pass "fm-pr-merge reports a stale recorded head and verifies the live one"
 }
 
+# A direct-PR copy building stacked merge requests: part-1 is pushed and is the
+# verified head, while the copy's HEAD is on part-2, a later branch only in the
+# copy. The merge checks part-1's own source branch, so it lands, also when the
+# merge request comes from a fork that part-1 tracks through any URL form of
+# that fork; a part-1 fix that was never pushed still refuses the merge, leaving
+# pr= recorded and the poll armed as a failed live verification does.
+test_gitlab_direct_pr_merge_checks_the_source_branch() {
+  local case_dir case_name rc part1 fix source_project fork_url merge_line
+  for case_name in pushed fork fork-slash fork-ssh fork-scp unpushed-fix fork-unpushed-fix; do
+    case_dir=$(make_gitlab_case "gitlab-stacked-$case_name")
+    printf 'mode=direct-PR\n' >> "$case_dir/state/task-x1.meta"
+    git -C "$case_dir/wt" checkout -q -b part-1
+    git -C "$case_dir/wt" commit -q --allow-empty -m 'part 1'
+    part1=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/wt" update-ref refs/remotes/origin/part-1 "$part1"
+    source_project=1
+    case "$case_name" in
+      fork*)
+        source_project=2
+        case "$case_name" in
+          fork-slash) fork_url="https://GitLab.Example/fork-owner/project/" ;;
+          fork-ssh) fork_url="ssh://git@$MR_HOST/fork-owner/project.git" ;;
+          fork-scp) fork_url="git@$MR_HOST:fork-owner/project" ;;
+          *) fork_url="$MR_FORK_URL.git" ;;
+        esac
+        git -C "$case_dir/wt" remote add fork "$fork_url"
+        git -C "$case_dir/wt" config branch.part-1.remote fork
+        git -C "$case_dir/wt" config branch.part-1.merge refs/heads/part-1
+        ;;
+    esac
+    fix=
+    case "$case_name" in
+      *unpushed-fix)
+        git -C "$case_dir/wt" commit -q --allow-empty -m 'part 1 fix, only in the copy'
+        fix=$(git -C "$case_dir/wt" rev-parse HEAD)
+        ;;
+    esac
+    git -C "$case_dir/wt" checkout -q -b part-2
+    git -C "$case_dir/wt" commit -q --allow-empty -m 'part 2, only in the copy'
+    write_mr_json "$case_dir/mr.json" "head=$part1" "pipeline_sha=$part1" branch=part-1 \
+      "source_project=$source_project"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    merge_line=$(glab_merge_line "$case_dir/glab.log")
+    case "$case_name" in
+      fork*)
+        assert_grep "GITLAB_HOST=$MR_HOST api projects/2 --hostname $MR_HOST" "$case_dir/glab.log" \
+          "gitlab-stacked-$case_name: the fork's URLs were not read from the merge request's instance"
+        ;;
+    esac
+    if [ -z "$fix" ]; then
+      expect_code 0 "$rc" "gitlab-stacked-$case_name: a pushed part-1 was refused for a later unpushed branch"
+      [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $part1 --yes" ] \
+        || fail "gitlab-stacked-$case_name: the merge was not bound to part-1's verified head: '$merge_line'"
+      assert_grep "pr=$MR_URL" "$case_dir/state/task-x1.meta" \
+        "gitlab-stacked-$case_name: pr= was not recorded before merging"
+    else
+      expect_code 1 "$rc" "gitlab-stacked-$case_name: part-1 merged without its unpushed fix"
+      assert_grep "named head $fix could not be verified in pull request head $part1" "$case_dir/stderr" \
+        "gitlab-stacked-$case_name: the refusal did not name part-1's unpushed fix"
+      [ -z "$merge_line" ] || fail "gitlab-stacked-$case_name: a merge was attempted despite the refusal"
+      assert_grep "pr=$MR_URL" "$case_dir/state/task-x1.meta" \
+        "gitlab-stacked-$case_name: a publication refusal should still leave the recorded PR reference"
+      assert_present "$case_dir/state/task-x1.check.sh" \
+        "gitlab-stacked-$case_name: a publication refusal should still leave the merge poll armed"
+    fi
+  done
+  pass "fm-pr-merge checks a GitLab direct-PR merge request's own source branch, not the copy's later HEAD"
+}
+
+# A local branch that only shares the merge request's source-branch name and
+# tracks origin, or nothing, not the fork. For a fork merge request whose URLs
+# were read it is not the source branch, so the copy's HEAD is gated instead: a
+# pushed HEAD merges and an unpushed one refuses. A fork whose URLs cannot be
+# read leaves the branch unidentified, so even a pushed HEAD refuses. For a
+# same-project merge request it is the source branch, and its commit missing
+# from the verified head refuses.
+test_gitlab_fork_ignores_an_unrelated_same_named_branch() {
+  local case_dir case_name rc unrelated head merge_line
+  for case_name in fork-pushed-head fork-unpushed-head fork-no-upstream fork-lookup-fails fork-lookup-empty \
+    same-project; do
+    case_dir=$(make_gitlab_case "gitlab-namesake-$case_name")
+    printf 'mode=direct-PR\n' >> "$case_dir/state/task-x1.meta"
+    unrelated=$(git -C "$case_dir/wt" commit-tree -m 'unrelated, only in the copy' \
+      -p HEAD "$(git -C "$case_dir/wt" rev-parse 'HEAD^{tree}')")
+    git -C "$case_dir/wt" branch fm/task-x1 "$unrelated"
+    if [ "$case_name" != fork-no-upstream ]; then
+      git -C "$case_dir/wt" remote add origin "$case_dir/origin.git"
+      git -C "$case_dir/wt" config branch.fm/task-x1.remote origin
+      git -C "$case_dir/wt" config branch.fm/task-x1.merge refs/heads/fm/task-x1
+    fi
+    if [ "$case_name" = fork-unpushed-head ]; then
+      git -C "$case_dir/wt" commit -q --allow-empty -m 'later work, only in the copy'
+    fi
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    case "$case_name" in
+      fork-*) write_mr_json "$case_dir/mr.json" source_project=2 ;;
+    esac
+    case "$case_name" in
+      fork-lookup-fails) : > "$case_dir/glab-api-fails" ;;
+      fork-lookup-empty) printf '{"message":"404 Project Not Found"}\n' > "$case_dir/source-project.json" ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    merge_line=$(glab_merge_line "$case_dir/glab.log")
+    case "$case_name" in
+      fork-pushed-head|fork-no-upstream)
+        expect_code 0 "$rc" "gitlab-namesake-$case_name: a fork merge request was refused for an unrelated same-named branch"
+        [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+          || fail "gitlab-namesake-$case_name: the merge was not bound to the verified head: '$merge_line'"
+        ;;
+      fork-lookup-*)
+        expect_code 1 "$rc" "gitlab-namesake-$case_name: an unreadable fork fell back to the copy's pushed HEAD"
+        assert_grep "source project 2 could not be read to tell whether local branch fm/task-x1 is the merge request's source branch" \
+          "$case_dir/stderr" "gitlab-namesake-$case_name: the refusal did not name the unreadable fork"
+        [ -z "$merge_line" ] || fail "gitlab-namesake-$case_name: a merge was attempted despite the refusal"
+        ;;
+      fork-unpushed-head)
+        expect_code 1 "$rc" "gitlab-namesake-$case_name: the copy's unpushed HEAD did not refuse"
+        assert_grep "named head $head is unreachable outside the worker copy" "$case_dir/stderr" \
+          "gitlab-namesake-$case_name: the refusal did not come from the copy's HEAD"
+        [ -z "$merge_line" ] || fail "gitlab-namesake-$case_name: a merge was attempted despite the refusal"
+        ;;
+      same-project)
+        expect_code 1 "$rc" "gitlab-namesake-$case_name: the source branch's missing commit did not refuse"
+        assert_grep "named head $unrelated could not be verified in pull request head $MR_HEAD" "$case_dir/stderr" \
+          "gitlab-namesake-$case_name: the refusal did not name the source branch's missing commit"
+        [ -z "$merge_line" ] || fail "gitlab-namesake-$case_name: a merge was attempted despite the refusal"
+        ;;
+    esac
+  done
+  pass "fm-pr-merge gates the copy's HEAD when a fork merge request's branch name matches an unrelated local branch, and refuses when the fork cannot be read"
+}
+
 test_gitlab_unreadable_state_refuses() {
   local case_dir rc name
   for name in view-fails not-an-object split-value; do
@@ -2099,10 +2293,10 @@ test_secondmate_merge_reports_upward_once() {
     "secondmate-merge-reports: the landed PR was not reported upward"
   [ "$(grep -c 'merged-task-x1' "$replies")" -eq 1 ] \
     || fail "secondmate-merge-reports: one merge produced more than one upward merge line"
-  # The merge path registers the PR first, and that registration publishes the
-  # child's ready line on the same channel from fm-pr-check itself.
-  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url" <(sed -E 's/ \[at=[0-9]+\]//' "$replies") \
-    "secondmate-merge-reports: the registration's ready line was not reported upward"
+  # The merge path registers the PR first, but that merge-time re-record
+  # publishes no ready line, because the merge could still have been refused.
+  assert_no_grep "child-pr-task-x1" "$replies" \
+    "secondmate-merge-reports: the merge-time re-record reported the PR ready upward"
 
   # The same merge again: the forge accepts it in this fixture, so only the
   # at-most-once contract can keep the parent from being told twice.
@@ -2110,7 +2304,7 @@ test_secondmate_merge_reports_upward_once() {
     >"$case_dir/stdout2" 2>"$case_dir/stderr2" || fail "secondmate-merge-reports: repeat merge failed"
   [ "$(grep -c 'merged-task-x1' "$replies")" -eq 1 ] \
     || fail "secondmate-merge-reports: a repeat merge of the same PR duplicated the upward line"
-  [ "$(parent_reply_lines "$replies" "$url")" -eq 2 ] \
+  [ "$(parent_reply_lines "$replies" "$url")" -eq 1 ] \
     || fail "secondmate-merge-reports: a repeat merge changed the upward lines: $(cat "$replies")"
   pass "a merge a secondmate home performs itself is reported upward exactly once"
 }
@@ -2168,8 +2362,11 @@ test_gitlab_refusal_reports_nothing() {
   set -e
 
   expect_code 1 "$rc" "gitlab-refusal-silent: a refused GitLab merge should exit non-zero"
-  # Registration succeeds before the later GitLab pre-merge refusal, so the
-  # PR-ready fact is expected; only a merged outcome would be false.
+  # Registration succeeds before the later GitLab pre-merge refusal, but the
+  # merge-time re-record reports no PR-ready fact, and a merged outcome would
+  # be false.
+  assert_no_grep 'child-pr-task-x1' "$case_dir/state/parent-replies.status" \
+    "gitlab-refusal-silent: a refused merge request was reported ready"
   assert_no_grep 'merged-task-x1' "$case_dir/state/parent-replies.status" \
     "gitlab-refusal-silent: a refused merge request was reported as landed"
   pass "a GitLab merge refused before the forge call reports no outcome"
@@ -2365,6 +2562,7 @@ test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
+test_missing_worktree_merge_follows_the_mode
 test_github_open_unqueued_outcome_refuses
 test_github_mergeable_unknown_retries_then_succeeds
 test_github_mergeable_unknown_exhausts_bound_and_reports_pending
@@ -2409,6 +2607,8 @@ test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently
 test_gitlab_reports_every_failing_condition
 test_gitlab_stale_recorded_head_is_reported
+test_gitlab_direct_pr_merge_checks_the_source_branch
+test_gitlab_fork_ignores_an_unrelated_same_named_branch
 test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording

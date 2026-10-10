@@ -17,7 +17,7 @@
 # --base-branch; empty means the repository default. A named base is the branch
 # the worker starts from, never pushes to, and targets with its pull request, and
 # fm_base_branch_valid refuses it where no pull request carries the work.
-# Callers of the gate are bin/fm-crew-state.sh (current-state done),
+# Ready-report callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
 # accepted while the named head exists only in the worker's disposable copy.
@@ -683,6 +683,21 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   fm_dod_ref_contains "$wt" refs/remotes "$sha" && return 0
   fm_dod_ref_contains "$project" refs/remotes "$sha" && return 0
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
+}
+
+# Merge-time publication check; bin/fm-pr-merge.sh's header owns its contract.
+# Returns 0 for verified containment, nonzero otherwise.
+fm_dod_pr_branch_pushed() {  # <worktree> <branch> <forge-head>
+  local wt=$1 branch=$2 forge_head=$3 tip
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  fm_pr_head_valid "$forge_head" || return 1
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 || return 1
+  tip=$(git -C "$wt" rev-parse --verify --quiet "refs/heads/$branch^{commit}" 2>/dev/null) || return 1
+  [ "$tip" = "$forge_head" ] && return 0
+  if ! git -C "$wt" cat-file -e "$forge_head^{commit}" 2>/dev/null; then
+    git -C "$wt" fetch --quiet --no-tags -- origin "$forge_head" >/dev/null 2>&1 || return 1
+  fi
+  git -C "$wt" merge-base --is-ancestor "$tip" "$forge_head" 2>/dev/null
 }
 
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
