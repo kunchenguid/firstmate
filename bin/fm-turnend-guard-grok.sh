@@ -12,6 +12,8 @@ PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 
 command -v jq >/dev/null 2>&1 || exit 0
+# shellcheck source=bin/fm-jq-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-jq-lib.sh"
 printf '%s' "$PAYLOAD" | jq -n --stream -e '
   reduce inputs as $item (
     {};

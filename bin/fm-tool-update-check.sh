@@ -86,6 +86,8 @@ RECORD_SCHEMA=fm-tool-updates-v1
 # their two versions, and several tools can report in the same sweep.
 MAX_LINE=1000
 
+# shellcheck source=bin/fm-jq-lib.sh
+. "$SCRIPT_DIR/fm-jq-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh

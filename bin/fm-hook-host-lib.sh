@@ -24,6 +24,9 @@
 # caller RUNS. A redundant run under Cursor wastes work; a skipped run under
 # Claude breaks the primary's supervision, which is the worse failure.
 
+# shellcheck source=bin/fm-jq-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-jq-lib.sh"
+
 # Return 0 when payload $1 was delivered by a foreign host whose own tracked
 # Firstmate registration already covers this event.
 fm_hook_payload_is_foreign_host() {  # <payload>

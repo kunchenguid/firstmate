@@ -84,6 +84,8 @@
 # those remain that file's contract and are not restated here.
 
 _FM_PF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PF_LIB_DIR="."
+# shellcheck source=bin/fm-jq-lib.sh
+. "$_FM_PF_LIB_DIR/fm-jq-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$_FM_PF_LIB_DIR/fm-x-lib.sh"
 

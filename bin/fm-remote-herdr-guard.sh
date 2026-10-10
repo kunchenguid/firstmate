@@ -42,6 +42,8 @@ SCRIPT_SELF=${BASH_SOURCE[0]}
 SCRIPT_DIR=${SCRIPT_SELF%/*}
 [ "$SCRIPT_DIR" != "$SCRIPT_SELF" ] || SCRIPT_DIR=.
 SCRIPT_DIR=$(CDPATH='' cd -- "$SCRIPT_DIR" && pwd -P)
+# shellcheck source=bin/fm-jq-lib.sh
+. "$SCRIPT_DIR/fm-jq-lib.sh"
 # shellcheck source=bin/fm-remote-herdr-owner-lib.sh
 . "$SCRIPT_DIR/fm-remote-herdr-owner-lib.sh"
 

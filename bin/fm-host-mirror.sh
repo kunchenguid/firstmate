@@ -96,6 +96,8 @@ MIRROR_CAP=4000
 MIRROR_KEEP=200
 FEED_CAP=16000
 
+# shellcheck source=bin/fm-jq-lib.sh
+. "$SCRIPT_DIR/fm-jq-lib.sh"
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 
