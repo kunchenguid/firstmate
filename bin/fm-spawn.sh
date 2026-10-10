@@ -4592,6 +4592,35 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >>"$EXCL"
 }
+# Write stdin to a per-task wiring file by replacing the path itself, never by
+# writing through it. A project may symlink a harness settings file (for
+# example .claude/settings.local.json) into a folder that several worktrees
+# share; writing through that link would overwrite the shared file, so every
+# linked worktree would run this task's hooks. The content lands in a temp file
+# beside the target and is renamed into place, after removing any symlink at
+# the path, so the link's target is left untouched. The replacement keeps the
+# mode of whatever file the path already resolves to, so a restrictive 0600
+# settings file is never widened; a new file takes the umask default.
+write_wiring_file() {  # <path>; content on stdin
+  local path=$1 tmp mode=
+  tmp=$(mktemp "$(dirname -- "$path")/.fm-wiring.XXXXXX") || return 1
+  if [ -f "$path" ]; then
+    if [ "$(uname)" = Darwin ]; then
+      mode=$(/usr/bin/stat -L -f %Lp "$path" 2>/dev/null) || mode=
+    else
+      mode=$(stat -L -c %a "$path" 2>/dev/null) || mode=
+    fi
+  fi
+  [ -n "$mode" ] || mode=$(printf '%o' $((0666 & ~0$(umask))))
+  if ! cat >"$tmp" || ! chmod "$mode" "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if [ -L "$path" ]; then
+    rm -f -- "$path" || { rm -f -- "$tmp"; return 1; }
+  fi
+  mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
@@ -4672,7 +4701,7 @@ if [ "$KIND" != secondmate ]; then
     j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-    cat >"$WT/.claude/settings.local.json" <<EOF
+    write_wiring_file "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
@@ -4711,14 +4740,14 @@ EOF
       g_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-agent >/dev/null 2>&1 || true; printf '{}'")
       g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
       g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
-      cat >"$STATE_REAL/$ID.gemini-settings.json" <<EOF
+      write_wiring_file "$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
 EOF
     fi
     ;;
   opencode*)
     mkdir -p "$WT/.opencode/plugins"
-    cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
+    write_wiring_file "$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state comes from OpenCode's session.status events: busy and retry
@@ -4773,7 +4802,7 @@ EOF
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
     # loaded from inside the project (verified live), but an explicit -e path
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
-    cat >"$STATE/$ID.pi-ext.ts" <<EOF
+    write_wiring_file "$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
@@ -4837,7 +4866,7 @@ EOF
     # has no trust gate, yet its cwd-only extension auto-discovery would load a
     # worktree-resident copy a SECOND time next to the explicit -e (verified,
     # omp 18.1.11). Lives in state/, cleaned by teardown.
-    cat >"$STATE/$ID.omp-ext.ts" <<EOF
+    write_wiring_file "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification for omp (Oh My
 // Pi); written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
@@ -4902,7 +4931,7 @@ EOF
     auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
     umask "$old_umask"
     printf '%s\n' "$TURNEND" >"$auth_file"
-    printf '%s\n' "${auth_file##*/}" >"$STATE/$ID.grok-turnend-token"
+    printf '%s\n' "${auth_file##*/}" | write_wiring_file "$STATE/$ID.grok-turnend-token"
     sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
     cat >"$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
 #!/usr/bin/env bash
@@ -4925,7 +4954,7 @@ EOF
     chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
     hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
     printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" >"$GROK_HOOKS_DIR/fm-turn-end.json"
-    printf 'token=%s\n' "${auth_file##*/}" >"$WT/.fm-grok-turnend"
+    printf 'token=%s\n' "${auth_file##*/}" | write_wiring_file "$WT/.fm-grok-turnend"
     exclude_path '.fm-grok-turnend'
     ;;
   muse*)
@@ -4954,7 +4983,7 @@ EOF
       done <<EOF
 $(fm_busy_muse_matching_logs "$MUSE_SESSIONS_ROOT" "$WT" || true)
 EOF
-    } >"$STATE/$ID.muse-session"
+    } | write_wiring_file "$STATE/$ID.muse-session"
     ;;
   cursor*)
     # Cursor's turn lifecycle is neither a hook nor a launch flag: it writes
@@ -4977,7 +5006,7 @@ EOF
           printf 'prior_conversation=%s\n' "$(basename -- "${CURSOR_PRIOR_DIR%/}")"
         done
       fi
-    } >"$STATE/$ID.cursor-session"
+    } | write_wiring_file "$STATE/$ID.cursor-session"
     ;;
   kimi*)
     # Kimi's Stop hook is global, but it is inert unless cwd contains this
@@ -4990,8 +5019,8 @@ EOF
     auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
     umask "$old_umask"
     printf '%s\n' "$TURNEND" >"$auth_file"
-    printf '%s\n' "${auth_file##*/}" >"$STATE/$ID.kimi-turnend-token"
-    printf 'token=%s\n' "${auth_file##*/}" >"$WT/.fm-kimi-turnend"
+    printf '%s\n' "${auth_file##*/}" | write_wiring_file "$STATE/$ID.kimi-turnend-token"
+    printf 'token=%s\n' "${auth_file##*/}" | write_wiring_file "$WT/.fm-kimi-turnend"
     exclude_path '.fm-kimi-turnend'
     ;;
   esac

@@ -288,6 +288,54 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+# A project may symlink its worktree's harness settings file into a folder that
+# several worktrees share. The spawn must replace the link with a real per-task
+# file rather than write through it, or every linked worktree would run this
+# task's hooks.
+test_claude_hooks_never_written_through_a_symlink() {
+  local rec id=busy-cl-link out settings shared before
+  rec=$(make_spawn_case claude-symlink claude "$id")
+  read_case_record "$rec"
+  shared="$CASE_DIR/shared/settings.local.json"
+  mkdir -p "$(dirname "$shared")" "$WT_DIR/.claude"
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls)"]}}' >"$shared"
+  before=$(cksum <"$shared")
+  settings="$WT_DIR/.claude/settings.local.json"
+  ln -s "$shared" "$settings"
+  # Projects that link this file keep it out of git, so the pooled worktree stays clean.
+  printf '%s\n' '.claude/settings.local.json' >>"$(git -C "$WT_DIR" rev-parse --git-path info/exclude)"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  [ "$(cksum <"$shared")" = "$before" ] || fail "spawn wrote through the symlink and changed the shared settings file"
+  [ -f "$settings" ] && [ ! -L "$settings" ] || fail "spawn left the worktree settings path a symlink instead of a real file"
+  for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "worktree settings lack the task's $ev hook"
+  done
+  assert_contains "$(cat "$settings")" "$id" "worktree settings do not carry this task's hooks"
+  pass "claude spawn replaces a symlinked settings file with its own and leaves the shared target byte-identical"
+}
+
+file_mode() {  # <path>
+  if [ "$(uname)" = Darwin ]; then /usr/bin/stat -f %Lp "$1"; else stat -c %a "$1"; fi
+}
+
+# Replacing the wiring file must not widen a restrictive existing file's mode.
+test_claude_hooks_keep_an_existing_settings_mode() {
+  local rec id=busy-cl-mode out settings
+  rec=$(make_spawn_case claude-mode claude "$id")
+  read_case_record "$rec"
+  settings="$WT_DIR/.claude/settings.local.json"
+  mkdir -p "$WT_DIR/.claude"
+  printf '%s\n' '{}' >"$settings"
+  chmod 600 "$settings"
+  printf '%s\n' '.claude/settings.local.json' >>"$(git -C "$WT_DIR" rev-parse --git-path info/exclude)"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  jq -e '.hooks.Stop' "$settings" >/dev/null || fail "worktree settings lack the task's Stop hook"
+  [ "$(file_mode "$settings")" = 600 ] || fail "spawn widened a 0600 settings file to $(file_mode "$settings")"
+  pass "claude spawn keeps an existing settings file's restrictive mode when it replaces the file"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -429,6 +477,8 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_hooks_never_written_through_a_symlink
+test_claude_hooks_keep_an_existing_settings_mode
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
