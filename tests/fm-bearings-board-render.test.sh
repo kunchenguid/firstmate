@@ -94,12 +94,12 @@ require_listener_reached_poll() {  # <home>
 
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
-render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [landed-json]
+  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} landed=${6:-[]} data="$1/payload.json"
   jq -n --argjson underway "$underway" --argjson charted "$charted" \
-    --argjson more "$more" --argjson warning_more "$warning_more" '{
+    --argjson more "$more" --argjson warning_more "$warning_more" --argjson landed "$landed" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:$underway, landed:[],
+    prs_live:false, captains_call:[], underway:$underway, landed:$landed,
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -107,7 +107,7 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
     LAVISH_AXI_STATE_DIR="$home/lavish-state" \
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
   require_listener_reached_poll "$home"
-  node "$HARNESS" "$home/.lavish/bearings-board.html" \
+  node "$HARNESS" "$home/.lavish/bearings-board.html" --pick-all \
     || fail "the built board could not be rendered"
 }
 
@@ -265,6 +265,47 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   ' >/dev/null || fail "undated charted rows did not keep a stable trailing order: $out"
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
+
+test_issue_rows_are_visible_and_never_pickable() {
+  local home out
+  home=$(make_home issue-rows)
+  out=$(render "$home" '[
+    {"id":"example-org/alpha#21","repo":"example-org/alpha","title":"Parent: partial outcome","reason":"13 children uncertain; merged design only","dispatchable":false,"kind":"issue","issue_url":"https://github.com/example-org/alpha/issues/21","issue_class":"uncertain"},
+    {"id":"example-org/beta#21","repo":"example-org/beta","title":"Same number, other project","reason":"Forge read incomplete","dispatchable":false,"kind":"issue","issue_url":"https://github.com/example-org/beta/issues/21","issue_class":"unmeasured"},
+    {"id":"filed-task","repo":"sample","title":"Admitted work","reason":"","dispatchable":true}
+  ]')
+  printf '%s' "$out" | jq -e '.error=="" and (.charted|length)==3
+    and all(.charted[:2][];.pickable==false)
+    and all(.charted[:2][];.link.target=="_blank" and .link.rel=="noopener")
+    and (.queuedPrompts|length)==1 and .queuedPrompts[0].data.answer=="filed-task"
+    and .charted[0].badges[0].text=="coverage uncertain"
+    and .charted[1].badges[0].text=="unmeasured"' >/dev/null || fail "issue rows failed rendering: $out"
+  [ "$(charted_next_count "$out")" = 1 ] || fail 'issues counted as admitted work'
+  pass 'uncertain and unmeasured issues render separately and cannot enter the dispatch picker'
+}
+
+test_empty_deck_removes_navigation_and_rows_expose_full_text() {
+  local home out
+  home=$(make_home empty-deck-full-text)
+  out=$(render_board "$home" '[
+    {"id":"active-scope","repo":"example-org/alpha","name":"A complete task title that remains readable even when a compact row clips the displayed text","kind":"ship","state":"working","doing":"A complete activity description that remains available when the compact detail line is clipped"}
+  ]' '[
+    {"id":"example-org/alpha#21","repo":"example-org/alpha","title":"A complete issue title that remains readable even when a compact row clips the displayed text","reason":"A complete issue coverage explanation that remains available when the compact detail line is clipped","dispatchable":false,"kind":"issue","issue_url":"https://github.com/example-org/alpha/issues/21","issue_class":"uncertain"},
+    {"id":"queued-scope","repo":"example-org/alpha","title":"A complete queued task title","reason":"A complete queued task detail","dispatchable":false}
+  ]' 0 0 '[
+    {"id":"landed-scope","repo":"example-org/alpha","what":"A complete landed outcome description that remains readable even when a compact row clips the displayed text","owner":"mate/alpha","pr_url":"https://github.com/example-org/alpha/pull/88"}
+  ]') || fail 'empty board could not render'
+  printf '%s' "$out" | jq -e '.error=="" and .stackNavRemoved
+    and all((.underway + .landed + .charted)[]; .titleTooltip==.title and .subTooltip==.sub)
+    and (.underway[0].title|length)>80
+    and (.landed[0].title|length)>80
+    and (.charted[0].title|length)>80' >/dev/null || fail "empty navigation or full-text exposure regressed: $out"
+  pass 'an empty deck removes navigation and compact rows expose complete title and detail text'
+}
+
+test_empty_deck_removes_navigation_and_rows_expose_full_text
+
+test_issue_rows_are_visible_and_never_pickable
 
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status

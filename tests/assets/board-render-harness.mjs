@@ -24,6 +24,7 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    this.listeners = {};
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
@@ -37,7 +38,12 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  remove() {
+    if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
+    this.parentNode = null;
+    this.removed = true;
+  }
+  addEventListener(name, fn) { this.listeners[name] = fn; }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -78,11 +84,14 @@ globalThis.document = {
     return byId.get(id);
   },
 };
-globalThis.window = {};
+const queuedPrompts = [];
+globalThis.window = { lavish: { queuePrompt: (text, options) => queuedPrompts.push({ text, ...options, element: undefined }) } };
 globalThis.TextEncoder = TextEncoder;
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
+const stackNavigation = byId.get("bb-stack-count")?.parentNode;
+const stackNavRemoved = stackNavigation?.removed === true;
 
 const badgesOf = (row) =>
   row.children
@@ -100,9 +109,15 @@ const rowsOf = (container) =>
     .filter((r) => r.className.split(/\s+/).includes("bb-row"))
     .map((row) => {
       const main = row.children.find((c) => c.className.includes("bb-row__main"));
+      const titleLink = main?.children
+        .find((c) => c.className.includes("bb-row__title"))
+        ?.children.find((c) => c.tagName === "a");
       return {
         title: main?.children.find((c) => c.className.includes("bb-row__title"))?.textContent ?? "",
+        link: titleLink ? { target: titleLink.target ?? "", rel: titleLink.rel ?? "" } : null,
         sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
+        titleTooltip: main?.children.find((c) => c.className.includes("bb-row__title"))?.title ?? "",
+        subTooltip: main?.children.find((c) => c.className.includes("bb-row__sub"))?.title ?? "",
         badges: badgesOf(row),
         pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
       };
@@ -110,9 +125,17 @@ const rowsOf = (container) =>
 
 const uw = byId.get("bb-underway") || new Node("div");
 const underway = rowsOf(uw);
+const landed = rowsOf(byId.get("bb-landed") || new Node("div"));
 
 const ch = byId.get("bb-charted") || new Node("div");
 const charted = rowsOf(ch);
+if (process.argv.includes("--pick-all")) {
+  for (const pick of ch.querySelectorAll(".bb-pick")) {
+    pick.checked = true;
+    pick.listeners.change?.();
+  }
+  byId.get("bb-dispatch-btn")?.listeners.click?.();
+}
 // A fail-closed render replaces the page body instead of the board sections, so
 // surface it rather than reporting an empty board as a successful render.
 const errorText = [...byId.entries()]
@@ -123,4 +146,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, underway, landed, charted, empty, more, queuedPrompts, stackNavRemoved, error: errorText }) + "\n");

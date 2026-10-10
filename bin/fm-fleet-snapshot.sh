@@ -18,6 +18,9 @@
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
+#     Structured rows expose issue_urls extracted from the row and its body,
+#     normalized to the bare issue URL (any #fragment or ?query stripped),
+#     so issue consumers never parse the backlog or its prose a second time.
 #     Structured rows preserve captain-hold metadata such as hold_kind,
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
@@ -46,6 +49,20 @@
 #     project it as a Charted Next gate stating why, and disclose it in
 #     omitted[]; --all-decisions reveals every captain hold available within the
 #     bounded snapshot.
+#   issue_sources: local-only registered GitHub project identities and bounded
+#     task issue links, also carried by home summaries. No forge reads or verdicts.
+#     projects records preserve unresolved origins as repo:null; complete=false
+#     discloses missing/unreadable/malformed registries and registry bounds.
+#     tasks records contain open task URLs, hold metadata and observed activity,
+#     never task bodies. FM_SNAPSHOT_ISSUE_TASKS (200) and
+#     FM_SNAPSHOT_ISSUE_LINKS (20 per task) bound this surface; omitted counts
+#     and complete=false disclose loss. Existing registry bounds apply to projects.
+#     A home summary that would exceed FM_SNAPSHOT_SECONDMATE_MAX_BYTES sheds
+#     its issue_sources records (disclosed incomplete, so the parent reports
+#     them unmeasured) instead of losing the whole summary to the parent's
+#     transport limit.
+#     Older home summaries without this optional field remain valid; consumers
+#     must treat their issue coverage as unmeasured.
 #   tasks[]: one row per task metadata record captured at snapshot start, sorted
 #     by id. A record removed before capture is omitted. If a captured task's
 #     generation changes while observations run, its selected metadata remains
@@ -171,6 +188,8 @@ FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT=${FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT:-2}
 FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
+FM_SNAPSHOT_ISSUE_TASKS=${FM_SNAPSHOT_ISSUE_TASKS:-200}
+FM_SNAPSHOT_ISSUE_LINKS=${FM_SNAPSHOT_ISSUE_LINKS:-20}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
@@ -203,6 +222,8 @@ validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT "$FM_SNAPSHOT_PARENT
 validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
+validate_positive_bound FM_SNAPSHOT_ISSUE_TASKS "$FM_SNAPSHOT_ISSUE_TASKS"
+validate_positive_bound FM_SNAPSHOT_ISSUE_LINKS "$FM_SNAPSHOT_ISSUE_LINKS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=${FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS:-14}
 case "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" in
@@ -543,6 +564,11 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
                   else cap(.body_lines[-1]; "^(?<v>local main)$")
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
+        else . end)
+    | .records |= map(if .structured then
+        .issue_urls = ([.raw, .body_lines[]?] | join("\n")
+          | [scan("https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+(?![A-Za-z0-9_/])(?:[#?][^[:space:])\\]]*)?")]
+          | map(split("#")[0] | split("?")[0]) | unique)
         else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
@@ -970,7 +996,8 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
 secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
-  jq -n \
+  local summary bytes
+  summary=$(jq -n \
     --arg generated "$SNAPSHOT_NOW" \
     --argjson generated_epoch "$SNAPSHOT_EPOCH" \
     --arg home "$FM_HOME" \
@@ -979,6 +1006,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
     --slurpfile backlog "$1" \
+    --slurpfile issue_sources "$ISSUE_SOURCES_JSON_FILE" \
     --slurpfile tasks "$2" --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" "$FM_LANDED_JQ_DEFS"'
     ($backlog[0]) as $backlog
     | ($tasks[0]) as $tasks
@@ -1104,6 +1132,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         schema:"fm-secondmate-home-summary.v1",
         hold_classifier_schema:"fm-captain-hold-buckets.v1",
         contributions:$contributions[0],
+        issue_sources:$issue_sources[0],
         generated:$generated,
         generated_epoch:$generated_epoch,
         home:$home,
@@ -1149,7 +1178,22 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
           (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
         ]
-      }'
+      }') || return 1
+  # issue_sources is the one summary surface whose default caps can outgrow the
+  # parent's whole-summary transport limit. Shed it, disclosed incomplete so the
+  # parent reports this home's issues unmeasured, rather than publish a summary
+  # the parent rejects outright, losing state, decisions and work.
+  bytes=$(printf '%s\n' "$summary" | LC_ALL=C wc -c | tr -d ' ')
+  if [ "$bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
+    summary=$(printf '%s\n' "$summary" | jq '
+      .issue_sources = {schema:"fm-issue-sources.v1",
+        reason:"issue sources trimmed: the full home summary exceeded the transport byte limit",
+        projects:{complete:false,known:.issue_sources.projects.known,
+          omitted:.issue_sources.projects.known,records:[]},
+        tasks:{complete:false,known:.issue_sources.tasks.known,
+          omitted:.issue_sources.tasks.known,records:[]}}') || return 1
+  fi
+  printf '%s\n' "$summary"
 }
 
 # Current registered-secondmate aggregation.
@@ -1891,6 +1935,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          contributions:($summary.contributions // null),
+         issue_sources:($summary.issue_sources // null),
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}' >> "$records_file" || return 1
@@ -1975,6 +2020,88 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+# Local facts for issue visibility. Read the registered table only, never discover
+# projects by scanning arbitrary directories. Unresolved origins stay disclosed.
+issue_sources_json() {
+  local registry="$DATA/projects.md" window names name origin repo reason start remaining top
+  local projects_file="$JSON_TRANSPORT_DIR/issue-projects.jsonl" complete=true known=0 omitted=0
+  : > "$projects_file"
+  start=$SECONDS
+  if [ ! -f "$registry" ] || [ ! -r "$registry" ]; then
+    complete=false
+    names='[]'
+  else
+    window=$(fm_run_timed "$FM_SNAPSHOT_REGISTRY_TIMEOUT" head -c "$((FM_SNAPSHOT_REGISTRY_BYTES + 1))" "$registry" && printf '\036') || window=
+    window=${window%$'\036'}
+    if [ -z "$window" ]; then complete=false; fi
+    if [ "$(printf '%s' "$window" | LC_ALL=C wc -c | tr -d ' ')" -gt "$FM_SNAPSHOT_REGISTRY_BYTES" ]; then
+      complete=false
+      # Never interpret a partially read last record as a valid project.
+      window=${window%$'\n'*}
+    fi
+    window=${window%$'\n'}
+    names=$(printf '%s\n' "$window" | jq -Rn --argjson cap "$FM_SNAPSHOT_REGISTRY_LINES" '
+      [inputs] as $rows
+      | {truncated:($rows|length > $cap), records:[$rows[:$cap][]
+          | select(startswith("- "))
+          | ([capture("^- (?<name>.+?)(?: \\[| - )")?][0].name // null)]}') || return 1
+    if printf '%s' "$names" | jq -e '.truncated or any(.records[]; . == null)' >/dev/null; then complete=false; fi
+    names=$(printf '%s' "$names" | jq '[.records[] | select(. != null)] | unique')
+  fi
+  known=$(printf '%s' "$names" | jq length)
+  if [ "$known" -gt "$FM_SNAPSHOT_REGISTRY_RECORDS" ]; then
+    omitted=$((known - FM_SNAPSHOT_REGISTRY_RECORDS)); complete=false
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    repo=; reason=
+    remaining=$((FM_SNAPSHOT_REGISTRY_TIMEOUT - SECONDS + start))
+    case "$name" in
+      */*|.|..) reason='invalid registered project name' ;;
+      *)
+        if [ "$remaining" -le 0 ]; then reason='project identity read budget exhausted'
+        elif [ ! -d "$PROJECTS/$name" ]; then reason='registered local copy unavailable'
+        else
+          top=$(fm_run_timed "$remaining" git -C "$PROJECTS/$name" rev-parse --show-toplevel 2>/dev/null) || top=
+          if [ "$top" != "$(cd "$PROJECTS/$name" && pwd -P)" ]; then
+            reason='registered path is not a repository root'
+            origin=
+          else
+            remaining=$((FM_SNAPSHOT_REGISTRY_TIMEOUT - SECONDS + start))
+            origin=
+            if [ "$remaining" -gt 0 ]; then
+              origin=$(fm_run_timed "$remaining" git -C "$PROJECTS/$name" remote get-url origin 2>/dev/null) || origin=
+            fi
+          fi
+          repo=$(printf '%s' "$origin" | sed -nE 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(\.git)?/?$#\2#p' | sed 's/\.git$//')
+          [ -n "$repo" ] || [ -n "$reason" ] || reason='GitHub origin unavailable or unsupported'
+        fi ;;
+    esac
+    [ -z "$reason" ] || complete=false
+    jq -nc --arg name "$name" --arg repo "$repo" --arg reason "$reason" \
+      '{name:$name,repo:($repo|if .=="" then null else . end),reason:($reason|if .=="" then null else . end)}' >> "$projects_file"
+  done <<EOF
+$(printf '%s' "$names" | jq -r --argjson cap "$FM_SNAPSHOT_REGISTRY_RECORDS" '.[:$cap][]')
+EOF
+  jq -n --slurpfile projects "$projects_file" --slurpfile backlog "$BACKLOG_JSON_FILE" \
+    --slurpfile tasks "$TASKS_JSON_FILE" --argjson complete "$complete" \
+    --argjson known "$known" --argjson omitted "$omitted" \
+    --argjson observed "$SNAPSHOT_EPOCH" --argjson task_cap "$FM_SNAPSHOT_ISSUE_TASKS" --argjson link_cap "$FM_SNAPSHOT_ISSUE_LINKS" '
+    [$backlog[0].records[] | select(.structured and .state != "done" and (.checked | not))
+      | . as $row
+      | .issue_urls as $urls
+      | select($urls|length > 0)
+      | {id,repo,state,hold_kind,hold_reason:(.hold_reason // null | if .==null then null else .[:160] end),hold_until,
+         last_activity:([$tasks[0][] | select(.id==$row.id) | (.paths.status_log.last_event.age_seconds // null) as $age
+           | if $age == null then empty else ($observed - $age | todateiso8601) end][0] // .since),
+         issue_urls:$urls[:$link_cap],omitted_links:(($urls|length) - ($urls[:$link_cap]|length))}] as $linked
+    | {schema:"fm-issue-sources.v1",
+       projects:{complete:$complete,known:$known,omitted:$omitted,records:$projects},
+       tasks:{complete:($backlog[0].present and all($backlog[0].records[]; .structured or .state=="done")
+                       and ($linked|length <= $task_cap) and all($linked[]; .omitted_links==0)),
+              known:($linked|length),omitted:([0,($linked|length)-$task_cap]|max),records:$linked[:$task_cap]}}'
+}
+
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 contribution_tasks_json() {
   local meta id merge_authority
@@ -2031,6 +2158,9 @@ FM_CONTRIBUTIONS_NOW="$SNAPSHOT_NOW" "$SCRIPT_DIR/fm-contributions.sh" snapshot 
   "$JSON_TRANSPORT_DIR/contribution-input.json" > "$CONTRIBUTIONS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: contribution coverage unavailable" >&2; exit 1; }
 
+ISSUE_SOURCES_JSON_FILE="$JSON_TRANSPORT_DIR/issue-sources.json"
+issue_sources_json > "$ISSUE_SOURCES_JSON_FILE" || { echo "fm-fleet-snapshot: issue source read failed" >&2; exit 1; }
+
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   secondmate_home_summary_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" \
     || { echo "fm-fleet-snapshot: secondmate home summary failed" >&2; exit 1; }
@@ -2058,6 +2188,7 @@ jq -n \
   --slurpfile tasks "$TASKS_JSON_FILE" \
   --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
   --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" \
+  --slurpfile issue_sources "$ISSUE_SOURCES_JSON_FILE" \
   --slurpfile scout_reports "$SCOUT_REPORTS_JSON_FILE" \
   --slurpfile secondmate_current "$SECONDMATE_CURRENT_JSON_FILE" \
   --slurpfile secondmate_landed "$SECONDMATE_LANDED_JSON_FILE" \
@@ -2079,6 +2210,7 @@ jq -n \
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
      contributions:$contributions[0],
+     issue_sources:$issue_sources[0],
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,

@@ -85,6 +85,12 @@
 # every `<` in the compact JSON as the \u003c string escape, so a payload string
 # containing "</script>" can never terminate the data block early.
 #
+# Issue visibility rows use kind:"issue", id:owner/repo#number, issue_url,
+# issue_class:uncertain|unmeasured, and dispatchable:false. Their repo-qualified
+# identity cannot be a decision key or dispatch task id. They count separately
+# from queued work and repair warnings; charted_issue_more counts omitted issues.
+# Optional issue_counts contains covered, parked, uncertain and unmeasured totals
+# from the bounded projection, never an admission or a stored verdict.
 # FM_BEARINGS_BOARD_TEMPLATE overrides the shipped template path (tests only).
 set -eu
 
@@ -178,12 +184,18 @@ validate_payload() {  # <data.json>
       and optional_https_url("pr_url")
       and optional_subject;
     def charted_item:
-      type == "object" and repo_marker and (.id | slug(128))
+      type == "object" and repo_marker
+      and (if .kind == "issue" then
+        (.id | type == "string" and test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+$"))
+        and .issue_url == ("https://github.com/" + (.id | sub("#"; "/issues/")))
+        and .repo == (.id | split("#")[0])
+        and (.issue_class=="uncertain" or .issue_class=="unmeasured")
+        else (.id | slug(128)) end)
       and (.title | nonempty_string) and (.reason | type == "string")
       and (.dispatchable | type == "boolean")
-      and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
+      and ((has("kind") | not) or (.kind == "queued" or .kind == "warning" or .kind == "issue"))
       and optional_filed
-      and (if .kind == "warning" then .dispatchable == false else true end);
+      and (if .kind == "warning" or .kind == "issue" then .dispatchable == false else true end);
     type == "object"
     and (.schema == $schema)
     and (.home | nonempty_string)
@@ -197,6 +209,11 @@ validate_payload() {  # <data.json>
       or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
     and ((has("charted_warning_more") | not)
       or ((.charted_warning_more | type == "number") and (.charted_warning_more >= 0) and (.charted_warning_more | floor == .)))
+    and ((has("charted_issue_more") | not)
+      or ((.charted_issue_more | type == "number") and (.charted_issue_more >= 0) and (.charted_issue_more | floor == .)))
+    and ((has("issue_counts") | not) or (.issue_counts | type=="object"
+      and (keys|sort)==["covered","parked","uncertain","unmeasured"]
+      and all(.[]; type=="number" and .>=0 and floor==.)))
     and ([.captains_call[] | call_item] | all)
     and ([.underway[] | underway_item] | all)
     and ([.landed[] | landed_item] | all)

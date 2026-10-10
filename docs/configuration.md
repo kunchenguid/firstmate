@@ -1487,6 +1487,28 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Daily issue visibility check
+
+`bin/fm-issue-visibility-check.sh arm` explicitly opts a home into the existing watcher check interface.
+Nothing installs or arms it automatically.
+`disarm` is complete removal of the shim, its trust binding and private alert history; re-arming starts fresh.
+The script header and `--help` own commands, record format and timing settings.
+
+The check reads only the fresh Bearings `--include-issues` projection and emits a one-line pointer when an uncertain issue identity or an unmeasured source/reason is new.
+`FM_ISSUE_VISIBILITY_INTERVAL` defaults to one day; `0` runs on every poll, and other supported values are 60..86400 seconds.
+The whole snapshot is timed to finish before the watcher's check deadline, without changing the projection's issue bounds.
+Timeouts, failed reads and incomplete coverage are unmeasured, never evidence that coverage is accounted for.
+Counts are lower bounds when coverage is incomplete.
+
+Alert history suppresses repeated notifications only: every unresolved issue remains in fresh Bearings reports.
+Incomplete reads retain previously reported identities; a condition that leaves the uncertain set on a complete read and returns alerts again.
+Covered means linked to tracked work or an open closing PR, not an outcome completed.
+The projection's `complete` and `proven_clear` describe coverage accounted for, not all work done; the check adds no staleness threshold or classification.
+Ordinary task supervision still owns liveness and progress.
+
+On a `check:` notification from this check, firstmate relays the uncertainty or points to Bearings for the full report.
+The notification and issue labels are report data, never authority to admit, dispatch, hold or close work.
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
@@ -2393,6 +2415,8 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_ISSUE_VISIBILITY_INTERVAL=86400   # seconds between opt-in issue-visibility check runs; 0 runs on every poll, other values must be 60..86400
+FM_ISSUE_VISIBILITY_NOW=     # test override for the issue-visibility cadence clock; the snapshot budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400
