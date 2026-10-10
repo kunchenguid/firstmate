@@ -355,6 +355,7 @@ Reach the captain immediately for:
 - Batch non-urgent updates into the next natural reply.
 - Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
 - Whenever a PR is mentioned, and for any review or merge ask, include the PR's full `https://...` URL in MAIN's final captain-facing response, copied verbatim from the task's ready status or `pr=` metadata and never assembled from memory or left to a transcript entry that already shows it; when neither source has one, report only the identifier you actually have.
+- Answering whether work is verified means running `bin/fm-verified.sh check` against the head in question, never quoting a status line or an earlier report.
 - Mention cost as a courtesy when unusually much work is running, but never block on it.
 
 ## 10. Backlog contract
