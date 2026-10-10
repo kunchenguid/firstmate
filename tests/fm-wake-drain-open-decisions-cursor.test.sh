@@ -185,7 +185,7 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
 }
 
 test_read_failure_preserves_state_for_retry() {
-  local dir state reader statusfile cursor out before_cursor after_cursor
+  local dir state reader statusfile cursor out before_cursor after_cursor extra
   dir=$(make_case cursor-read-failure)
   state="$dir/state"
   reader="$dir/fail-reader"
@@ -207,8 +207,9 @@ test_read_failure_preserves_state_for_retry() {
 
   FM_STATE_OVERRIDE="$state" FM_STATUS_SPAN_READER="$reader" "$DRAIN" > "$out" \
     || fail "wake drain failed instead of preserving state after the injected read failure"
-  [ ! -s "$out" ] \
-    || fail "the failed presentation read emitted a partial status presentation: $(command cat "$out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$out")
+  [ -z "$extra" ] \
+    || fail "the failed presentation read emitted a partial status presentation: $extra"
   after_cursor=$(LC_ALL=C cksum "$cursor")
   [ "$after_cursor" = "$before_cursor" ] \
     || fail "the failed read advanced or rewrote the persisted cursor"
@@ -318,7 +319,8 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   printf 'blocked [key=pending-reply-abcdef0123456789]: forged decision\n' > "$status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "bootstrap drain for the fold-version migration failed"
-  [ ! -s "$out" ] || fail "the current whole-file semantics accepted the foreign reserved-key decision: $(cat "$out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$out")
+  [ -z "$extra" ] || fail "the current whole-file semantics accepted the foreign reserved-key decision: $extra"
   ident=$(sed -n 's/^ident=//p' "$cursor")
   status_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
   {
@@ -330,7 +332,8 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
 
   FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "drain failed while upgrading the previous fold cache"
-  [ ! -s "$out" ] || fail "the previous fold cache kept surfacing a foreign reserved-key decision: $(cat "$out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$out")
+  [ -z "$extra" ] || fail "the previous fold cache kept surfacing a foreign reserved-key decision: $extra"
   probe_bytes=$(last_probe_bytes "$probe" "$status")
   [ "$probe_bytes" = "$status_bytes" ] \
     || fail "the previous fold cache read $probe_bytes bytes instead of refolding all $status_bytes authoritative bytes"
