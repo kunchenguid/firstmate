@@ -3,9 +3,10 @@
 #
 # Line 1 of state/.lock is the owning session's anchor pid, resolved by
 # fm_session_lock_anchor_pid in bin/fm-session-lock-lib.sh: the harness (agent)
-# process found by walking the shell's ancestry, which lives as long as the
-# firstmate session - unlike the transient subshell PID of any one tool call,
-# which is dead moments after it is written. For a Claude session that proves a
+# process for this session, which lives as long as the firstmate session -
+# unlike the transient subshell PID of any one tool call, which is dead moments
+# after it is written, and unlike the shared Codex app-server daemon, which
+# can outlive the session. For a Claude session that proves a
 # trusted session id the anchor is CLAUDE_PID, the model-loop process, so a
 # shared transient daemon or a front-end that outlives the session never keeps
 # a dead session's lock alive. Line 1 keeps its whole-line pid format because

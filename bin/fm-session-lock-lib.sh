@@ -6,11 +6,11 @@
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock and its
 # state/.lock-session sidecar; bin/fm-claude-stop-autoarm.sh uses it to prove a
 # Stop hook fires inside the lock-owning primary session before it may arm or
-# rewake. Two signals decide ownership, either one sufficient: the recorded pid
-# is a member of this process's contiguous harness ancestry, or the trusted
-# Claude session id below matches the id recorded beside a live lock. Neither
-# signal ever fails open: no id, no sidecar, an untrusted id, or a different
-# recorded id leaves the ancestry verdict exactly as it was.
+# rewake. Ownership accepts the recorded pid in this process's contiguous
+# harness ancestry, a trusted Claude session id matching the sidecar beside a
+# live lock, or the uniquely resolved Codex client pid for this home when the
+# current process runs under the shared app-server daemon. Without a unique
+# client match, that Codex fallback never grants ownership.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -34,6 +34,32 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
+
+# True when command name $1 and argument string $2 are the shared Codex
+# app-server daemon or the updater loop that parents it.
+# Both outlive every session and are shared by every client on the machine, so
+# a lock anchored on either pid never goes stale and the next session in that
+# home cannot take it. A client whose prompt merely mentions these words is
+# not this process: the check applies only when argv after argv0 starts with
+# the app-server command, which is how the installed daemon is launched
+# (`codex app-server --listen unix:// --managed-daemon`, and
+# `codex app-server daemon pid-update-loop`).
+fm_codex_shared_daemon_process() {  # <comm> <args>
+  local comm=$1 args=$2 base rest
+  base=$(basename -- "$comm")
+  [ "$base" = codex ] || return 1
+  case "$args" in
+    "$comm "*) rest=${args#"$comm "} ;;
+    */codex\ *) rest=${args#*/codex } ;;
+    codex\ *) rest=${args#codex } ;;
+    *) return 1 ;;
+  esac
+  case "$rest" in
+    'app-server daemon'*) return 0 ;;
+    'app-server '*'--managed-daemon'*) return 0 ;;
+  esac
+  return 1
+}
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -72,6 +98,14 @@ fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
+  # The unanchored "codex" pattern also matches codex-code-mode-host. That
+  # helper is not the session: a tool under it and a hook under the shared
+  # daemon would otherwise record two different pids for one session.
+  case "$base" in
+    codex-code-mode-host) return 1 ;;
+  esac
+  # The shared app-server daemon matches "codex" too. It is not a session.
+  fm_codex_shared_daemon_process "$comm" "$args" && return 1
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
@@ -121,7 +155,13 @@ fm_harness_ancestry_pids() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    # The shared daemon is not a session. Keep climbing so a harness above it
+    # is still visible, and so a hook whose only harness ancestor is the daemon
+    # reports no ancestry. Anchor resolution then looks up the client itself;
+    # that lookup cannot read a flag set here, because callers capture this
+    # function in a command substitution.
+    if ! fm_codex_shared_daemon_process "$comm" "$args" &&
+      fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -243,6 +283,144 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
   [ "$recorded" = "$trusted" ]
 }
 
+# Print env when process $1 has this home's FM_HOME, cwd when it has none,
+# or fail when its home differs or it carries a task id.
+fm_session_lock_codex_client_env() { # <pid> <home>
+  local pid=$1 home=$2 line
+  local env_home='' task_id=''
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/environ" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        FM_HOME=*) env_home=${line#FM_HOME=} ;;
+        FM_TASK_ID=*) task_id=${line#FM_TASK_ID=} ;;
+      esac
+    done < <(tr '\0' '\n' < "/proc/$pid/environ")
+    [ -z "$task_id" ] || return 1
+    if [ -n "$env_home" ]; then
+      [ "$env_home" = "$home" ] || return 1
+      printf '%s\n' env
+    else
+      printf '%s\n' cwd
+    fi
+    return 0
+  fi
+  python3 - "$pid" "$home" <<'PY'
+import ctypes
+import os
+import sys
+
+try:
+    if sys.platform != 'darwin':
+        sys.exit(1)
+    mib = (ctypes.c_int * 3)(1, 49, int(sys.argv[1]))
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint,
+                            ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                            ctypes.c_void_p, ctypes.c_size_t]
+    size = ctypes.c_size_t()
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        sys.exit(1)
+    buffer = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+        sys.exit(1)
+    raw = buffer.raw[:size.value]
+    argc = int.from_bytes(raw[:4], sys.byteorder, signed=True)
+    if argc < 1:
+        sys.exit(1)
+    pos = raw.index(0, 4) + 1
+    while raw[pos] == 0:
+        pos += 1
+    for _ in range(argc):
+        pos = raw.index(0, pos) + 1
+    values = []
+    for entry in raw[pos:].split(b'\0'):
+        if not entry:
+            break
+        values.append(entry)
+    homes = [entry[len(b'FM_HOME='):] for entry in values if entry.startswith(b'FM_HOME=')]
+    tasks = [entry[len(b'FM_TASK_ID='):] for entry in values if entry.startswith(b'FM_TASK_ID=')]
+    if len(homes) > 1 or any(tasks):
+        sys.exit(1)
+    if homes and homes[0]:
+        if homes[0] != os.fsencode(sys.argv[2]):
+            sys.exit(1)
+        print('env')
+    else:
+        print('cwd')
+except (IndexError, OSError, OverflowError, ValueError):
+    sys.exit(1)
+PY
+}
+
+# True when the shared Codex app-server daemon is an ancestor of this process.
+# Runs in the caller's shell. The ancestry walk cannot pass this fact back
+# through a command substitution.
+fm_session_lock_under_codex_daemon() {
+  local pid=$$ comm args parent
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    fm_codex_shared_daemon_process "$comm" "$args" && return 0
+    parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$parent" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$parent" -ge 1 ] || return 1
+    [ "$parent" != "$pid" ] || return 1
+    pid=$parent
+  done
+  return 1
+}
+
+# Print process $1's current directory, or return 1.
+# Linux uses /proc. Elsewhere lsof reports the cwd. A missing tool or an
+# unreadable cwd fails closed rather than guessing a client.
+fm_process_cwd() { # <pid>
+  local pid=$1 path
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -d "/proc/$pid/cwd" ]; then
+    path=$(readlink "/proc/$pid/cwd" 2>/dev/null) || return 1
+    [ -n "$path" ] || return 1
+    printf '%s\n' "$path"
+    return 0
+  fi
+  command -v lsof >/dev/null 2>&1 || return 1
+  path=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+  [ -n "$path" ] || return 1
+  printf '%s\n' "$path"
+}
+
+# Print the Codex client pid for this home when this process is under the
+# shared app-server daemon and the ancestry walk found no session process.
+# Hooks and tool shells spawned by that daemon are not descendants of the
+# client, so the client is not in their ancestry. It is the process whose own
+# environment carries this home's FM_HOME and that is not itself the daemon.
+# A primary started as plain `codex` has no FM_HOME; that client is the one
+# whose cwd is this home. A ship or scout client also carries FM_TASK_ID; the
+# primary session does not, and anchoring the home lock on a worker would let
+# that worker own the primary session. Zero matches and more than one match
+# both fail: guessing a client would record some other session's pid.
+fm_session_lock_codex_client_pid() {
+  local home=${FM_HOME:-} pid comm base args match cwd found=''
+  fm_session_lock_under_codex_daemon || return 1
+  [ -n "$home" ] || return 1
+  while read -r pid comm; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    base=$(basename -- "$comm")
+    [ "$base" = codex ] || continue
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || continue
+    fm_codex_shared_daemon_process "$comm" "$args" && continue
+    match=$(fm_session_lock_codex_client_env "$pid" "$home") || continue
+    if [ "$match" = cwd ]; then
+      cwd=$(fm_process_cwd "$pid" || true)
+      [ "$cwd" = "$home" ] || continue
+    fi
+    [ -z "$found" ] || return 1
+    found=$pid
+  done < <(ps -ax -o pid=,comm= 2>/dev/null)
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
 # Print the pid bin/fm-lock.sh records on lock line 1 for this session. For a
 # Claude session with a trusted id that is CLAUDE_PID, the model-loop process:
 # never the shared transient daemon and never a front-end that outlives the
@@ -250,15 +428,21 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
 # wedging a home behind a live daemon whose session died. A replaced background
 # helper leaves a dead pid that its own session's next hook reclaims, because
 # the sidecar still names that session. Every other session records the
-# outermost pid of its contiguous run, exactly as before.
+# outermost pid of its contiguous run, exactly as before. When that walk finds
+# only the shared Codex app-server daemon, the anchor is the client for this
+# home instead, which dies when the session does.
 fm_session_lock_anchor_pid() {
   local pids
-  pids=$(fm_harness_ancestry_pids) || return 1
-  if fm_session_lock_trusted_session_id "$pids" >/dev/null; then
-    printf '%s\n' "$CLAUDE_PID"
-    return 0
+  pids=$(fm_harness_ancestry_pids || true)
+  if [ -n "$pids" ]; then
+    if fm_session_lock_trusted_session_id "$pids" >/dev/null; then
+      printf '%s\n' "$CLAUDE_PID"
+      return 0
+    fi
+    _fm_harness_outermost_pid "$pids"
+    return
   fi
-  _fm_harness_outermost_pid "$pids"
+  fm_session_lock_codex_client_pid
 }
 
 # True when state dir $1 holds a session lock that this process's session owns:
@@ -274,17 +458,25 @@ fm_session_lock_anchor_pid() {
 # held by a harness outside this ancestry under another (or no) session id, or
 # an ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid anchor
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids || true)
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0
   done <<EOF
 $pids
 EOF
+  # A hook spawned by the shared Codex daemon is not a descendant of the
+  # client, so membership misses the pid this same session records. The
+  # resolved anchor is that client. An unresolved anchor leaves the verdict
+  # exactly where the ancestry walk put it.
+  if anchor=$(fm_session_lock_anchor_pid); then
+    [ "$anchor" = "$lock_pid" ] && return 0
+  fi
+  [ -n "$pids" ] || return 1
   fm_session_lock_same_session "$state" "$pids" || return 1
   fm_harness_pid_alive "$lock_pid"
 }
@@ -297,7 +489,7 @@ EOF
 # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
 FM_SESSION_LOCK_FOREIGN_OWNER_PID=
 fm_session_lock_foreign_owner_live() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid anchor
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
@@ -305,12 +497,22 @@ fm_session_lock_foreign_owner_live() {
     ''|*[!0-9]*) return 1 ;;
   esac
   fm_harness_pid_alive "$lock_pid" || return 1
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids || true)
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 1
   done <<EOF
 $pids
 EOF
+  anchor=
+  if anchor=$(fm_session_lock_anchor_pid); then
+    [ "$anchor" = "$lock_pid" ] && return 1
+  fi
+  # No ancestry and no resolved session of our own: the holder cannot be
+  # classified, which is the same uncertain result as a failed walk. A resolved
+  # anchor that is not this pid is a different live session.
+  if [ -z "$pids" ]; then
+    [ -n "$anchor" ] || return 1
+  fi
   fm_session_lock_same_session "$state" "$pids" && return 1
   # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=$lock_pid
