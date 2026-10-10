@@ -115,7 +115,31 @@ positive_or() {  # <value> <default>
 
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+# This checkpoint is the Codex home's arm owner, so it performs the same guarded
+# stale-owner reclaim the other arm owners perform before they park:
+# bin/fm-claude-stop-autoarm.sh and bin/fm-turnend-guard-cursor.sh both delegate
+# a lock whose recorded owner is not a live harness to bin/fm-lock.sh - the
+# single acquisition owner - before they touch supervision state. Without it a
+# replacement Codex session (a new harness pid recorded while the predecessor's
+# anchor pid is dead) can never reclaim the home: bin/fm-supervision-host.sh
+# refuses ownership before activation, starts no watcher cycle, and every later
+# checkpoint in that session repeats the refusal until a session start reclaims
+# the lock by hand. A live owner this session does not own, and a missing or
+# malformed lock, stay exactly as uncertain as before and are never touched.
+reclaim_dead_session_lock_owner() {
+  fm_session_lock_owned_by_self "$STATE" && return 0
+  fm_session_lock_inspect "$STATE"
+  [ "$FM_LOCK_INSPECT_STATE" = stale ] || return 0
+  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || true
+}
+
 if fm_supervision_host_enabled "$CONFIG" codex; then
+  # The host proves ownership before it activates; a provably dead recorded
+  # owner is reclaimed first so a replaced session keeps supervision.
+  reclaim_dead_session_lock_owner
   BOUND=$SECONDS_ARG
   if [ -f "$STATE/.afk-contract" ] \
     && [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]; then
