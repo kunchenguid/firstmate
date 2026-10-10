@@ -182,6 +182,7 @@ So a truncated digest does neither of these:
 
 - They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 - They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.
+- A validated secondmate home is not a primary session: both wrappers stand down before running or nudging the primary startup flow, and the Pi extension skips its primary session-start handler when launched with `FM_ROLE=secondmate`.
 
 A fresh clone has no gitignored state directory yet.
 When the root otherwise qualifies as primary, the run wrapper creates the state directory before the unchanged scope check, so the first session takes the helm without a manual `mkdir state`.
