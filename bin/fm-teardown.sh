@@ -3745,6 +3745,15 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Delete a simulator this task created, which the brief names fm-<id>; best effort.
+# A task id pool-<n> would name a persistent fm-pool-<n> simulator, so it is skipped.
+if [ "${ID#pool-}" = "$ID" ] && command -v xcrun >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  for sim_udid in $(xcrun simctl list devices -j 2>/dev/null |
+    jq -r --arg n "fm-$ID" '.devices[][]? | select(.name == $n) | .udid' 2>/dev/null); do
+    xcrun simctl shutdown "$sim_udid" >/dev/null 2>&1
+    xcrun simctl delete "$sim_udid" >/dev/null 2>&1 || echo "warning: could not delete simulator fm-$ID ($sim_udid)" >&2
+  done
+fi
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {

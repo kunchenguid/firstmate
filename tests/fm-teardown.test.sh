@@ -77,7 +77,7 @@ export REAL_LSOF_FOR_TEST
 #   $CASE/wt/           - a worktree of the project (the task worktree)
 # Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 id=${2:-task-x1} case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
@@ -185,7 +185,7 @@ SH
   git clone -q "$case_dir/origin.git" "$case_dir/project"
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
   # Add a worktree on a fresh task branch; that branch is where the crewmate commits.
-  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+  git -C "$case_dir/project" worktree add -q -b "fm/$id" "$case_dir/wt" main
 
   # Fresh watcher beacon so fm-guard stays quiet.
   touch "$case_dir/state/.last-watcher-beat"
@@ -193,17 +193,17 @@ SH
   printf '%s\n' "$case_dir"
 }
 
-# Write a meta file for the task. Args: case_dir mode kind
+# Write a meta file for the task. Args: case_dir mode kind [id]
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3
-  fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=firstmate:fm-task-x1" \
-    "endpoint_task_id=task-x1" \
+  local case_dir=$1 mode=$2 kind=$3 id=${4:-task-x1}
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode" \
-    "spawn_gen=teardown-test-task-x1"
+    "spawn_gen=teardown-test-$id"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -215,14 +215,14 @@ wt_commit() {
 
 # Add a fork bare repo and register it as a remote on the project, then push
 # the worktree's task branch to it and fetch into the project so the worktree
-# sees the remote-tracking ref. Args: case_dir
+# sees the remote-tracking ref. Args: case_dir [id]
 add_fork_with_pushed_branch() {
-  local case_dir=$1
+  local case_dir=$1 id=${2:-task-x1}
   git init -q --bare "$case_dir/fork.git"
   git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
   # Push the task branch from the worktree to the fork, then fetch into project
-  # so refs/remotes/fork/fm-task-x1 is visible from the worktree (shared object db).
-  git -C "$case_dir/wt" push -q fork fm/task-x1
+  # so refs/remotes/fork/fm-<id> is visible from the worktree (shared object db).
+  git -C "$case_dir/wt" push -q fork "fm/$id"
   git -C "$case_dir/project" fetch -q fork
 }
 
@@ -623,9 +623,15 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
-# Run teardown with PATH mocking. Args: case_dir [extra args...]
+# Run teardown for task-x1 with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
+  run_teardown_id "$case_dir" task-x1 "$@"
+}
+
+# Run teardown for an explicit task id with PATH mocking. Args: case_dir id [extra args...]
+run_teardown_id() {
+  local case_dir=$1 id=$2; shift 2
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
@@ -634,7 +640,7 @@ run_teardown() {
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
-    "$TEARDOWN" task-x1 "$@"
+    "$TEARDOWN" "$id" "$@"
 }
 
 # Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
@@ -667,6 +673,31 @@ make_path_without_lsof() {  # <case-dir>
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
+}
+
+# Drop an xcrun fake into the case's fakebin so teardown's simulator cleanup is
+# hermetic on every host. Every `simctl` invocation is appended to
+# FM_SIMCTL_LOG as `simctl <subcommand> <args>`; `simctl list devices -j`
+# answers with the JSON file named by FM_FAKE_SIMCTL_LIST_FILE (empty when
+# unset); a `simctl delete` exits 1 when FM_FAKE_SIMCTL_DELETE_FAIL=1.
+# Args: case_dir
+add_simctl_stub() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/xcrun" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = simctl ]; then
+  printf 'simctl %s\n' "${*:2}" >> "${FM_SIMCTL_LOG:-/dev/null}"
+fi
+if [ "${1:-} ${2:-} ${3:-}" = "simctl list devices" ]; then
+  cat "${FM_FAKE_SIMCTL_LIST_FILE:-/dev/null}"
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = "simctl delete" ] && [ "${FM_FAKE_SIMCTL_DELETE_FAIL:-0}" = 1 ]; then
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/xcrun"
 }
 
 test_local_only_fork_remote_allows() {
@@ -4637,6 +4668,95 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+test_teardown_deletes_only_the_task_owned_simulator() {
+  local case_dir rc
+  case_dir=$(make_case sim-task-cleanup)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "task work"
+  add_fork_with_pushed_branch "$case_dir"
+  add_simctl_stub "$case_dir"
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-TASK-X1","name":"fm-task-x1","state":"Shutdown"},{"udid":"SIM-UNRELATED","name":"fm-other-task","state":"Booted"},{"udid":"SIM-UNRELATED-2","name":"some-simulator","state":"Shutdown"}]}}' \
+    > "$case_dir/simctl-devices.json"
+
+  rc=0
+  FM_FAKE_SIMCTL_LIST_FILE="$case_dir/simctl-devices.json" FM_SIMCTL_LOG="$case_dir/simctl.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "sim-cleanup: teardown should succeed"
+  assert_grep "simctl shutdown SIM-TASK-X1" "$case_dir/simctl.log" \
+    "sim-cleanup: the task-owned simulator was not shut down"
+  assert_grep "simctl delete SIM-TASK-X1" "$case_dir/simctl.log" \
+    "sim-cleanup: the task-owned simulator was not deleted"
+  if grep -q 'SIM-UNRELATED' "$case_dir/simctl.log"; then
+    fail "sim-cleanup: teardown touched an unrelated simulator: $(cat "$case_dir/simctl.log")"
+  fi
+  pass "teardown shuts down and deletes only the task-owned fm-<id> simulator"
+}
+
+test_teardown_tolerates_absent_task_simulator() {
+  local case_dir rc
+  case_dir=$(make_case sim-absent)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "task work"
+  add_fork_with_pushed_branch "$case_dir"
+  add_simctl_stub "$case_dir"
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-UNRELATED","name":"fm-other-task","state":"Shutdown"}]}}' \
+    > "$case_dir/simctl-devices.json"
+
+  rc=0
+  FM_FAKE_SIMCTL_LIST_FILE="$case_dir/simctl-devices.json" FM_SIMCTL_LOG="$case_dir/simctl.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "sim-absent: teardown should succeed when no fm-<id> device exists"
+  assert_grep "simctl list devices" "$case_dir/simctl.log" \
+    "sim-absent: teardown never queried the simulator list"
+  if grep -qE 'simctl (shutdown|delete)' "$case_dir/simctl.log"; then
+    fail "sim-absent: teardown touched a simulator: $(cat "$case_dir/simctl.log")"
+  fi
+  pass "teardown leaves every simulator alone when no fm-<id> device exists"
+}
+
+test_teardown_simulator_delete_failure_only_warns() {
+  local case_dir rc
+  case_dir=$(make_case sim-delete-fails)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "task work"
+  add_fork_with_pushed_branch "$case_dir"
+  add_simctl_stub "$case_dir"
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-TASK-X1","name":"fm-task-x1","state":"Shutdown"}]}}' \
+    > "$case_dir/simctl-devices.json"
+
+  rc=0
+  FM_FAKE_SIMCTL_LIST_FILE="$case_dir/simctl-devices.json" FM_SIMCTL_LOG="$case_dir/simctl.log" \
+    FM_FAKE_SIMCTL_DELETE_FAIL=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "sim-delete-fails: a failed simulator delete must not fail teardown"
+  assert_grep "warning: could not delete simulator fm-task-x1 (SIM-TASK-X1)" "$case_dir/stderr" \
+    "sim-delete-fails: the delete failure did not surface as a warning"
+  pass "a failed simulator delete is a warning, not a teardown failure"
+}
+
+test_teardown_pool_task_id_never_queries_simctl() {
+  local case_dir rc
+  case_dir=$(make_case sim-pool pool-3)
+  write_meta "$case_dir" local-only ship pool-3
+  wt_commit "$case_dir" "pool work"
+  add_fork_with_pushed_branch "$case_dir" pool-3
+  add_simctl_stub "$case_dir"
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-POOL-3","name":"fm-pool-3","state":"Shutdown"}]}}' \
+    > "$case_dir/simctl-devices.json"
+
+  rc=0
+  FM_FAKE_SIMCTL_LIST_FILE="$case_dir/simctl-devices.json" FM_SIMCTL_LOG="$case_dir/simctl.log" \
+    run_teardown_id "$case_dir" pool-3 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "sim-pool: teardown should succeed"
+  [ ! -s "$case_dir/simctl.log" ] \
+    || fail "sim-pool: a pool-<n> teardown still touched simctl: $(cat "$case_dir/simctl.log")"
+  pass "a pool-<n> task id never triggers simulator cleanup"
+}
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -4748,3 +4868,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_teardown_deletes_only_the_task_owned_simulator
+test_teardown_tolerates_absent_task_simulator
+test_teardown_simulator_delete_failure_only_warns
+test_teardown_pool_task_id_never_queries_simctl
