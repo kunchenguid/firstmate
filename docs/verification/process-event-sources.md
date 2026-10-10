@@ -108,7 +108,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing |
 | canonical physical identity | a final-component symlink and its target produce the same Lavish source id |
 | isolated public start boundary | direct `start` establishes a new runner-led process group before claiming the source, so retirement cannot signal an unrelated process inherited from the caller's group |
-| guarded runner startup | the source command does not launch when the detached owner guard rejects an invalid lease configuration, proving the runner waits for positive guard readiness and fails closed when initialization fails |
+| guarded runner startup | the source command does not launch when the owner guard rejects an invalid lease configuration, or when the guard is killed before it reports, which the runner notices well inside its 60-second backstop, proving the runner waits for positive guard readiness and fails closed when initialization fails; a guard whose startup is delayed by seven seconds still reports ready, and the runner then captures normally |
 | attached owner continuity | a foreground `start` with a one-second lease remains alive beyond that lease while its caller stays attached, then captures normally when the blocking source completes |
 | owner-home lifetime and scope | a detached runner and its spawning descendant are observed reparented before an expired owner lease stops their whole process group and process churn; replacing the state directory at the same path cannot keep the old runner alive with a new lease because its recorded device/inode no longer matches, while an identical runner in an unchanged home whose reconcile cycle keeps its lease fresh remains alive |
 | launch pacing during owner-loss grace | an immediately returning source that attempts detached self-relaunches is held to the configured minimum interval between command launches and remains bounded until its expired owner lease stops the generation; replacement starts a fresh pacing generation, prunes prior pacing state, and prevents a superseded sleeping runner from recreating it |
@@ -207,10 +207,35 @@ They fail for opposite reasons, which is the point of keeping them apart.
 The crashed-leader cases separately pin refusal and claim preservation when a leader dies outside the stop's own signal, so successful escalation cannot be mistaken for closing that limit.
 Refresh the regressions with `bash tests/fm-procevent.test.sh`; the dated measurements above are recorded observations, not fixed timing thresholds.
 
+## Load evidence for the timing fixes
+
+Recorded from the runs already made on this branch; no new load runs were made for this table. Burners were time-bounded CPU loops, killed after each run. Counts that the earlier runs did not capture are marked unavailable rather than inferred.
+
+| Target | Load | Runs | Result |
+|---|---|---|---|
+| 666e95a^ (before the round-four and round-five fixes) | not recorded per run | 5 | 4 passed, 1 failed; the failure was an unrelated listener error |
+| HEAD | not recorded per run | 5 | 5 passed |
+| Earlier base runs in 5f862a87 (20 burners, load peaked near 63; 18-32 burners) | up to about 63 | 4 | 0 passed; one was a missing `setsid` executable on macOS, one was the two-second confirmation window, two were not captured with diagnostics |
+| 5f862a87 after the fix (20 burners, with a temporary Perl `setsid` shim) | about 30-54 | 2 | 2 passed |
+
+Per named failure:
+
+| Failure | Reproduced at the base | Failures at HEAD |
+|---|---|---|
+| `a repaired source did not confirm` | not reproduced under the load reached in the 5-run comparison; per-case counts unavailable | 0 of 5 |
+| `feedback after interrupted polls produced no wake` | not reproduced under the load reached in the 5-run comparison; per-case counts unavailable | 0 of 5 |
+| `did not reach the worker inbox` | not reproduced; per-case counts unavailable | 0 of 5 |
+| `exhaustion produced no captured result` | not reproduced; per-case counts unavailable | 0 of 5 |
+| owner-guard death (`cannot start the runner's owner guard`) | not reproduced under real load; no run slowed the guard's startup | not observed |
+
+The evidence runner for the 5-run comparison ended with an unbound-array error, so it did not print a per-run load range or per-case tallies. No targeted slow-guard run under real load was done; the slow-guard case in the suite uses a forced seven-second delay, which proves the readiness wait, not that load produces such a delay.
+
+The owner-guard readiness wait is therefore kept because the review-round-five intent asked for it, not because owner-guard death was demonstrated under load.
+
 ## Portability finding
 
 `setsid` is **not present on macOS**, so it cannot establish the runner's process group.
-Both direct `start` and `reconcile` use a Perl launcher that forks the runner, calls `setpgrp(0, 0)` in that child, marks the expected group leader, and then executes the private start path.
+Direct `start`, `reconcile`, and the runner's owner guard use a Perl launcher that forks the runner (the guard is instead launched as the shell's own background child), calls `setpgrp(0, 0)` in that process, marks the expected group leader, and then executes the private start path.
 The private path verifies that the runner PID is also its process-group id before it records a claim, so neither entry point can inherit and claim the caller's process group.
 Without this launcher, reconcile would silently fail to start a runner on macOS and direct start could make retirement signal unrelated caller-group processes.
 
