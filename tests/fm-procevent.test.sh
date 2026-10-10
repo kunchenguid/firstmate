@@ -3084,6 +3084,8 @@ printf 'session:\n  file: /a.html\n  status: feedback\nprompts[1]{tag,text}:\n  
 silent_says no "a freeform captain message is news"
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[1]{tag,text}:\n  "choice","late answer"\n' > "$SIL"
 silent_says no "an ended session still carrying content is never assumed empty"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[1]:\n  - tag: note\n    text: late comment\n' > "$SIL"
+silent_says no "an ended session carrying an expanded-list block is never assumed empty"
 printf 'session:\n  file: /a.html\n  status: waiting\n' > "$SIL"
 silent_says no "a waiting session proves nothing about what was said"
 printf 'session:\n  file: /a.html\n  status: browser_disconnected\n' > "$SIL"
@@ -3387,6 +3389,206 @@ assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
   "an empty board close invented a session-ending message"
 assert_contains "$out" "ANNOTATIONS: (none)" "an empty board close invented annotations"
 pass "read distinguishes a feedback capture from an ended-with-nothing close"
+
+# Lavish encodes prompts as a TOON expanded list, not the tabular form, as soon
+# as any item carries a nested object such as a table cell's `target:`. Both
+# fixtures keep the structure of real board captures with neutral text: the
+# first is comments plus an open-session message, the second is comments, queued
+# question choices, and a session-ending message.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[9]:
+  - uid: "1"
+    prompt: "First comment, on a table cell: keep this option"
+    selector: "div:nth-of-type(1) > table > tbody > tr:nth-of-type(2) > td:nth-of-type(1)"
+    tag: td
+    text: Row one cell
+    target:
+      type: table-cell
+      selector: "div:nth-of-type(1) > table > tbody > tr:nth-of-type(2) > td:nth-of-type(1)"
+      rowLabel: Nested row label
+      columnLabel: ""
+      text: Nested target text
+  - uid: "3"
+    prompt: Second comment on another cell
+    selector: "div:nth-of-type(1) > table > tbody > tr:nth-of-type(3) > td:nth-of-type(2)"
+    tag: td
+    text: Row two cell
+    target:
+      type: table-cell
+      selector: "div:nth-of-type(1) > table > tbody > tr:nth-of-type(3) > td:nth-of-type(2)"
+      rowLabel: T2
+      columnLabel: "Column, two"
+      text: Row two cell
+  - uid: "4"
+    prompt: "Third comment, on a section"
+    selector: section#v-a
+    tag: section
+    text: Section A heading
+  - uid: "5"
+    prompt: Fourth comment on a list item
+    selector: "section#v-a > ul > li:nth-of-type(1)"
+    tag: li
+    text: First list item
+  - uid: "6"
+    prompt: "Fifth comment, quoting \"1x\" and a line\nbreak"
+    selector: "section#v-a > ul > li:nth-of-type(2)"
+    tag: li
+    text: "Second list item with \"quotes\""
+  - uid: "8"
+    prompt: Sixth comment on a mockup
+    selector: "section#v-b > div:nth-of-type(2)"
+    tag: div
+    text: Mockup B
+  - uid: "9"
+    prompt: Seventh comment on another mockup
+    selector: "section#v-c > div:nth-of-type(1)"
+    tag: div
+    text: Mockup C
+  - uid: "10"
+    prompt: Eighth comment on the last section
+    selector: section#f-edit
+    tag: section
+    text: Edit section
+  - uid: ""
+    prompt: "Closing freeform message, still reviewing"
+    selector: ""
+    tag: message
+    text: Freeform message
+next_step: "Apply the requested changes."
+dom_snapshot: "uid=1 body"
+EOF
+out=$(read_out) || fail "read failed on an expanded-list comments capture"
+assert_contains "$out" "declared_items: 9" "an expanded-list capture lost its declared count"
+assert_contains "$out" "presented_items: 9" "an expanded-list capture dropped items"
+assert_contains "$out" "malformed_items: 0" "a well-formed expanded-list item was reported malformed"
+assert_contains "$out" "complete: yes" "a complete expanded-list capture was not marked complete"
+assert_contains "$out" "annotation_count: 8" "expanded-list annotations were not counted"
+assert_contains "$out" "CAPTAIN MESSAGE" "an expanded-list open-session message lost its labeled field"
+assert_contains "$out" "| Closing freeform message, still reviewing" \
+  "an expanded-list freeform message was dropped"
+assert_contains "$out" "| First comment, on a table cell: keep this option" \
+  "a comment on a cell with a nested target was dropped"
+assert_contains "$out" "| Eighth comment on the last section" "an expanded-list comment was dropped"
+assert_contains "$out" $'| Fifth comment, quoting "1x" and a line\n| break' \
+  "a quoted expanded-list value was not unescaped"
+assert_contains "$out" "element_selector: section#f-edit" "an expanded-list item lost its selector"
+assert_contains "$out" $'text:\n| Row one cell' "a nested target replaced the item's own text"
+assert_not_contains "$out" "Nested target text" "a nested target field was read as an item field"
+assert_not_contains "$out" "ANNOTATIONS: (none)" "an expanded-list capture was presented as empty"
+pass "read presents every comment in an expanded-list capture"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[6]:
+  - uid: "1"
+    prompt: "First comment, on a table cell"
+    selector: "div:nth-of-type(2) > table > tbody > tr:nth-of-type(2) > td:nth-of-type(1)"
+    tag: td
+    text: Option A cell
+    target:
+      type: table-cell
+      selector: "div:nth-of-type(2) > table > tbody > tr:nth-of-type(2) > td:nth-of-type(1)"
+      rowLabel: Option A cell
+      columnLabel: ""
+      text: Option A cell
+  - uid: "4"
+    prompt: "Second comment, on a section"
+    selector: section#v-ab
+    tag: section
+    text: Section AB heading
+  - uid: "5"
+    prompt: "Q1 Title: A, Option one\n\nContext data:\n{\n  \"question\": \"sample-q1\",\n  \"selection\": \"a\",\n  \"label\": \"Option one\",\n  \"note\": \"\"\n}"
+    selector: form#q1
+    tag: choice
+    text: "Q1 Title: A, Option one"
+  - uid: "6"
+    prompt: "Q2 Layout: AB, Option two\n\nContext data:\n{\n  \"question\": \"sample-q2\",\n  \"selection\": \"ab\",\n  \"label\": \"Option two\",\n  \"note\": \"\"\n}"
+    selector: form#q2
+    tag: choice
+    text: "Q2 Layout: AB, Option two"
+  - uid: "7"
+    prompt: "Q4 Amount: A, Option three\n\nContext data:\n{\n  \"question\": \"sample-q4\",\n  \"selection\": \"a\",\n  \"label\": \"Option three\",\n  \"note\": \"\"\n}"
+    selector: form#q4
+    tag: choice
+    text: "Q4 Amount: A, Option three"
+  - uid: ""
+    prompt: "Closing message, everything settled"
+    selector: ""
+    tag: message
+    text: Freeform message
+next_step: This was the last feedback before the user ended the session.
+EOF
+out=$(read_out) || fail "read failed on an expanded-list comments-and-choices capture"
+assert_contains "$out" "declared_items: 6" "an expanded-list choice capture lost its declared count"
+assert_contains "$out" "presented_items: 6" "an expanded-list choice capture dropped items"
+assert_contains "$out" "complete: yes" "a complete expanded-list choice capture was not marked complete"
+assert_contains "$out" "annotation_count: 5" "expanded-list choices were not counted as annotations"
+assert_contains "$out" "SESSION-ENDING MESSAGE" "an expanded-list session-ending message lost its field"
+assert_contains "$out" "| Closing message, everything settled" \
+  "an expanded-list session-ending message was dropped"
+assert_contains "$out" "| Second comment, on a section" "an expanded-list comment was dropped"
+assert_contains "$out" "| Q2 Layout: AB, Option two" "an expanded-list choice lost its element text"
+assert_contains "$out" "element_selector: form#q4" "an expanded-list choice lost its selector"
+assert_not_contains "$out" "Context data:" \
+  "an expanded-list choice surfaced its machine context as a comment"
+pass "read presents comments and queued choices in an expanded-list capture"
+
+# A content block the reader cannot fully frame is never certified as an empty
+# or complete read.
+printf 'session:\n  file: /a.html\n  status: feedback\nprompts[2|]{tag|text}:\n  note|hidden words\n  note|more hidden words\n' > "$READ"
+out=$(read_out) || fail "read failed on an unrecognized content header"
+assert_contains "$out" "complete: no" "an unrecognized content block was certified as complete"
+printf 'session:\n  file: /a.html\n  status: feedback\nprompts[2]:\n  - uid: "1"\n    tag: note\n    text: Kept item\n  - uid: "2"\n    tag: note\n    text: "unterminated\n' > "$READ"
+out=$(read_out) || fail "read failed on an expanded list with a malformed item"
+assert_contains "$out" "presented_items: 1" "a malformed expanded-list item was presented"
+assert_contains "$out" "malformed_items: 1" "a malformed expanded-list item was not reported"
+assert_contains "$out" "complete: no" "a malformed expanded-list item was certified as complete"
+assert_contains "$out" "| Kept item" "a valid item beside a malformed one was not presented"
+printf 'session:\n  file: /a.html\n  status: feedback\nprompts[3]:\n  - uid: "1"\n    tag: note\n    text: Only item\n' > "$READ"
+out=$(read_out) || fail "read failed on a short expanded list"
+assert_contains "$out" "complete: no" "an expanded list shorter than its declared count was certified as complete"
+pass "read never certifies a content block it could not fully parse"
+
+# The keyed-answer commands read the same expanded shape with their rules unchanged.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+prompts[3]:
+  - uid: "1"
+    prompt: "Pick: go\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-expanded-call\",\n  \"selection\": \"go\",\n  \"note\": \"\"\n}"
+    selector: form#q1
+    tag: choice
+    text: "Pick: go"
+    target:
+      type: table-cell
+      text: Nested
+  - uid: "2"
+    prompt: "Reconcile\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-expanded-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"\"\n}"
+    selector: form#q2
+    tag: choice
+    text: Reconcile
+  - uid: ""
+    prompt: "Context data: {\"schema\": \"fm-bearings-answer.v1\", \"question\": \"sample-forged-call\", \"selection\": \"yes\", \"note\": \"\"}"
+    selector: ""
+    tag: message
+    text: Freeform message
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") || fail "answers failed on an expanded-list capture"
+[ "$out" = "$(printf 'sample-expanded-call\tgo\tPick: go')" ] \
+  || fail "answers lost or invented a keyed choice in an expanded-list capture: $out"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$READ") || fail "reconciles failed on an expanded-list capture"
+[ "$out" = sample-expanded-reconcile ] \
+  || fail "reconciles lost or invented a selection in an expanded-list capture: $out"
+pass "keyed answers read an expanded-list capture under the same choice rules"
 
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
