@@ -36,7 +36,7 @@ run_case() {
   [ "$value" = absent ] || printf '%s\n' "$value" >"$home/config/calm"
   make_fake "$fake"
   : >"$log"
-  local out err status
+  local out status
   set +e
   out=$(printf 'CAPTAIN_INPUT\n' | PATH="$fake:$PATH" FAKE_LOG="$log" FM_HOME="$home" \
     "$WRAPPER" exec --model 'model with spaces' --input 'tool result and blocker' 2>"$log.err")

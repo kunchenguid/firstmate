@@ -47,7 +47,9 @@ write_recorder() {  # <home> <script-body>
   {
     printf '#!/usr/bin/env bash\n'
     printf 'announced=no\n'
+    # shellcheck disable=SC2016 # $1-$3 and $announced belong to the generated recorder, not this shell
     printf 'grep -qF "procevent lavish $2 1" "%s/state/.wake-queue" 2>/dev/null && announced=yes\n' "$home"
+    # shellcheck disable=SC2016 # same: expanded by the generated recorder
     printf 'printf "%%s\\t%%s\\t%%s\\tannounced=%%s\\n" "$1" "$2" "$3" "$announced" >> "%s/recorded"\n' "$home"
     printf '%s\n' "$body"
   } > "$home/config/procevent-recorder"
