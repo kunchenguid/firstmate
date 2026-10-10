@@ -623,9 +623,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
-   Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
-   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
-   copies that URL from your line rather than assembling one.
+   Name any PR you mention by its full https:// URL exactly as the forge printed it, never a bare number.
 $CREWMATE_PAUSE_INSTRUCTIONS
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
@@ -700,9 +698,8 @@ $RULE1
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
-   Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
-   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
-   copies that URL from your line rather than assembling one.
+   Name a PR by its full https:// URL exactly as the forge printed it, never a bare number; a \`done:\` reporting
+   completion with no URL, or with another project's, is refused rather than read as this task's delivery.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
 $CREWMATE_PAUSE_INSTRUCTIONS

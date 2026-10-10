@@ -114,6 +114,9 @@
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-done-url-lib.sh
+# shellcheck disable=SC1091
+. "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-done-url-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
   local state=$1 task_id=$2 root=$3
@@ -697,8 +700,15 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit note
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
+  # This branch is the completion claim - the gate above already declined the
+  # no-mistakes pre-validation handoff - so it must name the registered
+  # project's pull request, and a URL naming another project's is refused rather
+  # than read as this task's delivery. bin/fm-done-url-lib.sh owns that rule and
+  # the evidence for it; its one-line refusal is stdout for the caller's reason.
+  note=$(status_line_note "$line")
+  fm_done_url_status_refusal "$kind" "$mode" "$note" "$project" || return 1
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0

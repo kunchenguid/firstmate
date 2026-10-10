@@ -338,6 +338,7 @@ for _teardown_source in \
   fm-classify-lib.sh \
   fm-gate-refuse-lib.sh \
   fm-pr-lib.sh \
+  fm-done-url-lib.sh \
   fm-public-followup-lib.sh \
   fm-x-lib.sh \
   fm-env-lib.sh \
@@ -373,6 +374,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-done-url-lib.sh
+. "$SCRIPT_DIR/fm-done-url-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -1614,23 +1617,56 @@ work_is_landed() {
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
+#
+# This is the terminal record, written after landing is confirmed, so it is the
+# one place a Done row can mean landed rather than pushed. bin/fm-done-url-lib.sh
+# owns that rule: a ship in a pull-request publishing mode records the landed
+# pull request of its own registered project, a local-only ship needs no URL, and
+# a URL naming another project's pull request is refused rather than recorded as
+# this task's delivery. The landed proof is this script's own landed-work test
+# plus the merge marker the merge path already writes.
+#
+# The refusal is raised by teardown_done_claim_refused, not here, so it lands
+# after the legacy incarnation stamp and beside the marker write it protects: a
+# refused close leaves the same durable stamp a rejected one always has, and the
+# flag-less retry that stamp buys keeps working.
 BACKLOG_DONE_ARGS=()
+TEARDOWN_DONE_LANDED=0
+TEARDOWN_DONE_CLAIM_REASON=
+teardown_done_claim_refused() {
+  # The refusal prints one line naming what is missing; capture it so the error
+  # this script reports carries that same line rather than a paraphrase of it.
+  TEARDOWN_DONE_CLAIM_REASON=$(fm_done_url_backlog_refusal "$KIND" "$MODE" "$PR_URL" \
+    "$TEARDOWN_DONE_LANDED" "$PROJ" "$WT" "$STATE" "$ID") && return 1
+  return 0
+}
 backlog_done_args() {
-  local data_relative
+  local data_relative branch
   BACKLOG_DONE_ARGS=()
+  TEARDOWN_DONE_LANDED=0
   case "$KIND" in
     scout)
       data_relative=$(fm_backlog_data_relative "$DATA") || return 1
       BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
-      ;;
-    *)
-      if [ "$MODE" = local-only ]; then
-        BACKLOG_DONE_ARGS=(--note "local main")
-      elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
-      fi
+      return 0
       ;;
   esac
+  if [ "$MODE" != local-only ]; then
+    if [ -n "$PR_URL" ] && fm_done_url_landed_proven "$PR_URL" "$STATE" "$ID"; then
+      TEARDOWN_DONE_LANDED=1
+    else
+      branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+      if [ -z "$branch" ]; then
+        branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      fi
+      work_is_landed "$branch" && TEARDOWN_DONE_LANDED=1
+    fi
+  fi
+  if [ "$MODE" = local-only ]; then
+    BACKLOG_DONE_ARGS=(--note "local main")
+  elif [ -n "$PR_URL" ]; then
+    BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+  fi
 }
 
 # Closing the backlog item is this script's own last act on the record, not a
@@ -3521,9 +3557,20 @@ teardown_legacy_stamp_rollback() {
   fi
   BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
-  if ! fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+  # A completion that names no landed pull request of this task's own registered
+  # project is not recorded as one. It is raised here, after the legacy stamp,
+  # through the same path a refused marker write takes, so a refused close rolls
+  # that stamp back and leaves every durable task record exactly as it found them.
+  FM_BACKLOG_TRANSITION_ERROR=
+  if teardown_done_claim_refused; then
+    FM_BACKLOG_TRANSITION_ERROR=${TEARDOWN_DONE_CLAIM_REASON:-the completion record is not a landed delivery of the registered project}
+  else
+    fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
       "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
-      "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
+      "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" \
+      || FM_BACKLOG_TRANSITION_ERROR=${FM_BACKLOG_TRANSITION_ERROR:-$BACKLOG_TRANSITION could not be recorded}
+  fi
+  if [ -n "$FM_BACKLOG_TRANSITION_ERROR" ]; then
     if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ] \
        && teardown_legacy_stamp_rollback; then
       echo "error: the pending backlog $BACKLOG_TRANSITION for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); the accepted legacy incarnation was rolled back, retaining every durable task record" >&2
