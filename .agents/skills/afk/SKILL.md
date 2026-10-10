@@ -195,6 +195,7 @@ Classify each wake this way, applying the steering-inbox exception before status
   Status-read uncertainty follows the shared one-report-without-position-advance contract referenced under Dedupe below.
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 = immediate) and flushed as one single-line digest carrying pre-read status summaries and a recommended action.
+A buffered Lavish board answer flushes at once, a buffered process-event item is never added twice, and a board or other process-event item whose result is already handled is dropped before delivery and from the away-return catch-up evidence.
 The single-line format makes submission unambiguous across harnesses; the carrier described above distinguishes it from an ordinary captain message.
 
 ### Injection hardening
