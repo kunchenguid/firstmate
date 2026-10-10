@@ -63,12 +63,11 @@
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence; under daemon-backed afk an
-#                          external wait is instead handed to the daemon as this
-#                          plain reason once per declaration, while captain-held
-#                          work stays silent until return
-#                          (busy_turn_bound_check owns that split);
+#                          wait bound to that exact busy generation and sequence,
+#                          or a verified captain-held transfer, uses the long
+#                          pause recheck cadence; under daemon-backed afk a bound
+#                          external wait is absorbed before a wake, while
+#                          captain-held work stays silent until return;
 #                          every other pane goes through the same wedge timer,
 #                          the dead-record probe above included, and surfaces
 #                          with the identical "stale: ..." reason, escalation
@@ -76,9 +75,6 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
-#                          A paused append bound to the exact current validated
-#                          busy generation and sequence uses the long pause
-#                          cadence instead; unbound or stale pauses do not.
 #   stale: <window> (unread firstmate instruction: ...)
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
@@ -1661,12 +1657,13 @@ handle_paused_stale() {  # <window> <task> <hash>
 # 0 when the declared-pause cadence took the pane, 1 when the wedge timer did.
 #
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
-# foreground call can hide behind a busy signature. A `paused:` declaration or
-# verified captain-held transfer instead identifies that live foreground call as
-# the expected external wait. The caller has already confirmed liveness through
-# the busy verdict, so this exception does not suppress undeclared wedges or
-# alter the separate non-busy classification. handle_paused_stale keeps the
-# exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
+# foreground call can hide behind a busy signature. A `paused:` declaration
+# bound to the exact current validated busy generation and sequence, or a
+# verified captain-held transfer, instead identifies that live foreground call
+# as the expected external wait. The caller has already confirmed liveness
+# through the busy verdict, and the exact binding keeps an old or unbound pause
+# from suppressing a genuine wedge. handle_paused_stale keeps the exception
+# bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
 # A pane that declared nothing falls through to the shared wedge timer, which,
 # in a home that armed config/wedge-defer-parked-gate, applies the same rule to
 # the one wait a busy pane cannot declare: a validation gate of its own awaiting
@@ -1674,22 +1671,19 @@ handle_paused_stale() {  # <window> <task> <hash>
 # than the ladder, because who owes that answer does not depend on what the pane
 # is rendering, and the recheck names that supervisor and the action that clears
 # it. An unconfigured home keeps the unchanged ladder there.
-# Away mode remains daemon-owned and receives the undecorated wake identity for
-# its own classification, which is why the declaration is read before the afk
-# branch rather than after it.
+# Away mode remains daemon-owned. Current-generation busy pauses are normally
+# absorbed by handle_current_busy_pause before this fallback is reached; a
+# captain-held transfer still hands the daemon the undecorated wake identity.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared
   statusf="$STATE/$task.status"
   declared=$(status_declared_wait_line "$statusf")
   if status_is_captain_held "$declared" || current_busy_generation_is_paused "$task"; then
     if afk_present; then
-      # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
-      # and lets the daemon classify the declaration itself - the undecorated
-      # identity the rest of this function's contract promises. Running the wedge
-      # timer here instead would decorate the wake as a possible wedge, and that
-      # decoration overrides the daemon's own pause verdict for the pane: the
-      # ladder then climbs on every re-arm, escalating a crew that declared the
-      # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
+      # Away mode is daemon-owned, so the remaining captain-held path hands off
+      # the PLAIN wake identity and lets the daemon classify the declaration
+      # itself. A bound busy pause normally took handle_current_busy_pause before
+      # this function.
       # The one-shot is keyed on the DECLARATION (the status log's signature),
       # never on the pane hash: a busy pane's harness footer ticks on every
       # capture, so a hash-keyed one-shot would re-fire on every poll and the
