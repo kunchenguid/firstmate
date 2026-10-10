@@ -375,7 +375,8 @@ pr_for_task() { # <meta> [preferred-line]
   local meta=$1 preferred=${2:-} value note
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(meta_field "$meta" pr)
-  if [ -z "$value" ] && [ -n "$preferred" ]; then
+  if [ -z "$value" ] && [ -n "$preferred" ] \
+    && [ "$(status_line_verb "$preferred")" = "done" ]; then
     note=$(status_line_note "$preferred")
     value=$(printf '%s\n' "$note" \
       | sed -nE 's|^PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\1|p' \
