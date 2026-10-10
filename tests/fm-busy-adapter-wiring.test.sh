@@ -305,7 +305,7 @@ test_codex_unverified_until_a_semantic_source_exists() {
   pass "codex classifies unknown until a semantic source is verified, never idle or footer-matched"
 }
 
-# Gemini's hooks are PROJECT hooks in the worktree's own .gemini/settings.json,
+# Gemini's hooks live in Firstmate's per-task system settings file,
 # and gemini's hook contract requires each command to print a JSON object on
 # stdout and nothing else, so these drive the real command and check both the
 # classification and that stdout stays parseable JSON.
@@ -360,6 +360,34 @@ test_gemini_hooks_semantic_lifecycle() {
   out=$(classify gemini "$id" "$state")
   [ "$out" = "idle gemini-hook" ] || fail "a repeated SessionEnd must stay idle, got '$out'"
   pass "gemini hooks open on BeforeAgent and close on AfterAgent and a repeated SessionEnd"
+}
+
+test_gemini_shell_backend_platform_scope() {
+  local platform rec id out launch
+  for platform in Darwin Linux; do
+    id="gemini-shell-$platform"
+    rec=$(make_spawn_case "$id" gemini "$id")
+    read_case_record "$rec"
+    printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$platform" >"$FAKEBIN_DIR/uname"
+    chmod +x "$FAKEBIN_DIR/uname"
+    launch="$CASE_DIR/launch.sh"
+    out=$(FM_FAKE_LAUNCH_LOG="$launch" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 0 $? "$platform gemini spawn should succeed: $out"
+    # Execute the emitted launch with a harmless recorder as the agent binary.
+    cat >"$FAKEBIN_DIR/gemini" <<'SH'
+#!/bin/sh
+printf '%s\n' "${GEMINI_PTY_INFO-unset}"
+SH
+    out=$(env -u GEMINI_PTY_INFO PATH="$FAKEBIN_DIR:$PATH" bash "$launch")
+    expect_code 0 $? "generated $platform launch must execute"
+    if [ "$platform" = Darwin ]; then
+      [ "$out" = child_process ] || fail "Darwin launch must select pipe shell execution: $out"
+    else
+      [ "$out" = unset ] || fail "non-Darwin launch must preserve shell defaults: $out"
+    fi
+    assert_absent "$WT_DIR/.gemini/settings.json" "shell mitigation must not edit project settings"
+  done
+  pass "Gemini launch disables shell PTYs only on Darwin"
 }
 
 test_gemini_hooks_stale_incarnation_harmless() {
@@ -430,6 +458,7 @@ test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
+test_gemini_shell_backend_platform_scope
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate
