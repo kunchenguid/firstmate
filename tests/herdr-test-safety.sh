@@ -4,8 +4,27 @@
 # fleet-state tripwire contract is bin/fm-herdr-lab.sh.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/git-config-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
+# shellcheck source=tests/simctl-stub-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/simctl-stub-helpers.sh"
+
+# Herdr backend tests drive the real fm-spawn/fm-teardown but do not source
+# tests/lib.sh, so exempt them from the gate-lifecycle refusal here too (see
+# tests/lib.sh and bin/fm-gate-refuse-lib.sh for why firstmate's own suite,
+# which the no-mistakes gate runs from a gate worktree, must be exempt).
+export FM_GATE_REFUSE_BYPASS=1
+
+# Suites reaching this file drive the real bin/fm-teardown.sh, which deletes
+# the task-owned fm-<task-id> Simulator; install the shared fake xcrun on PATH
+# so a fixture run never touches the host's real Simulator set. A suite that
+# already sourced tests/lib.sh keeps that library's registry-cleaned install
+# instead of adding a second, unregistered one.
+if [ -z "${FM_TEST_SIMCTL_BIN:-}" ]; then
+  HERDR_TEST_SIMCTL_BIN=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-simctl.XXXXXX") || return 1
+  fm_test_fake_simctl "$HERDR_TEST_SIMCTL_BIN" || return 1
+  export PATH="$HERDR_TEST_SIMCTL_BIN:$PATH"
+fi
 
 HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null

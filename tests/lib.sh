@@ -38,6 +38,12 @@ umask 022
 # shellcheck source=tests/git-config-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
 
+# The shared fake-xcrun writer lives in its own helper so suites that cannot
+# take this library's reporters and traps (tests/herdr-test-safety.sh's
+# real-Herdr consumers, tests/remote-herdr-fixture.sh) install the same stub.
+# shellcheck source=tests/simctl-stub-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/simctl-stub-helpers.sh"
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
@@ -432,31 +438,8 @@ fm_live_gate() {
 # uses to crash the process under test deterministically. fm_fake_version_tool
 # drops a stub for a tool whose installed version bootstrap gates, so a fixture
 # cannot be reported as an unparseable build simply for answering `--version`
-# with nothing.
-
-fm_test_fake_simctl() {
-  local fakebin=$1
-  cat > "$fakebin/xcrun" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = simctl ]; then
-  printf 'simctl %s\n' "${*:2}" >> "${FM_SIMCTL_LOG:-/dev/null}"
-fi
-if [ "${1:-} ${2:-} ${3:-}" = "simctl list devices" ]; then
-  cat "${FM_FAKE_SIMCTL_LIST_FILE:-/dev/null}"
-  exit 0
-fi
-if [ "${1:-} ${2:-}" = "simctl shutdown" ] &&
-  jq -e --arg udid "${3:-}" '.devices[][]? | select(.udid == $udid and .state == "Shutdown")' \
-    "${FM_FAKE_SIMCTL_LIST_FILE:-/dev/null}" >/dev/null 2>&1; then
-  exit 1
-fi
-if [ "${1:-} ${2:-}" = "simctl delete" ] && [ "${FM_FAKE_SIMCTL_DELETE_FAIL:-0}" = 1 ]; then
-  exit 1
-fi
-exit 0
-SH
-  chmod +x "$fakebin/xcrun"
-}
+# with nothing. The fake `xcrun` every fakebin carries comes from
+# fm_test_fake_simctl in tests/simctl-stub-helpers.sh.
 
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
