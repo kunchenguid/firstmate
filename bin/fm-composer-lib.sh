@@ -238,6 +238,9 @@ fm_composer_normalize_trim_var() {  # <varname>
 # plain, non-ghost text on stdout, dropping:
 #   - dim/faint runs (SGR 2): how claude and codex render ghost/suggestion text.
 #     A reset (SGR 0) or normal-intensity (SGR 22) ends a dim run.
+#   - Claude's focused suggestion cursor: one inverse-video character (SGR 7),
+#     immediately after its `❯` prompt and whitespace, followed by an inverse
+#     reset (SGR 0/27) and a dim remainder. Other inverse runs remain real text.
 #   - dark/muted TRUECOLOR foreground runs (SGR 38;2;r;g;b or the colon form
 #     38:2::r:g:b) whose perceived luminance (0.299R + 0.587G + 0.114B) is below
 #     FM_COMPOSER_GHOST_LUMA_MAX (default 128): how grok renders its placeholder
@@ -292,8 +295,20 @@ fm_composer_strip_ghost() {
       r = a[p + 2] + 0; g = a[p + 3] + 0; b = a[p + 4] + 0
       return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
     }
+    # Match only the Claude empty-input position, including its real NBSP.
+    # Use the unstripped prefix so prior dim text cannot manufacture a match.
+    function claude_prompt_prefix(s) {
+      gsub(/\302\240/, " ", s)
+      return s ~ /^[ \t]*❯[ \t]+$/
+    }
+    # awk walks bytes under C: require ONE complete UTF-8 character rather
+    # than a short byte run (two ASCII letters are still two typed cells).
+    function one_cursor_char(s) {
+      return s ~ /^([!-~]|[\302-\337][\200-\277]|[\340-\357][\200-\277][\200-\277]|[\360-\364][\200-\277][\200-\277][\200-\277])$/
+    }
     {
-      line = $0; out = ""; dim = 0; darkfg = 0; n = length(line); i = 1
+      line = $0; out = ""; plain = ""; dim = 0; darkfg = 0; inverse = 0
+      cell = ""; closed = 0; cursor_position = 0; n = length(line); i = 1
       while (i <= n) {
         c = substr(line, i, 1)
         if (c == "\033") {            # ESC: consume a CSI ... final-byte sequence
@@ -316,7 +331,18 @@ fm_composer_strip_ghost() {
                 } else if (code == "48" || code == "58") {
                   p = skip_color_payload(a, p, k)
                 } else if (code == "2") dim = 1
-                else if (code == "0") { dim = 0; darkfg = 0 }
+                else if (code == "7") {
+                  if (!inverse) cursor_position = claude_prompt_prefix(plain)
+                  inverse = 1
+                }
+                else if (code == "27") {
+                  inverse = 0; cursor_position = 0
+                  if (cell != "") closed = 1
+                }
+                else if (code == "0") {
+                  dim = 0; darkfg = 0; inverse = 0; cursor_position = 0
+                  if (cell != "") closed = 1
+                }
                 else if (code == "22") dim = 0
                 else if (code == "39") darkfg = 0
                 else if (code + 0 >= 30 && code + 0 <= 37) darkfg = 0
@@ -327,10 +353,23 @@ fm_composer_strip_ghost() {
           }
           i = i + 1; continue          # lone/other ESC: drop the ESC byte only
         }
-        if (dim == 0 && darkfg == 0) out = out c   # keep only non-de-emphasised bytes
+        if (closed) {
+          if (!dim || inverse || !one_cursor_char(cell)) out = out cell
+          cell = ""; closed = 0
+        }
+        # De-emphasis inside the inverse run is not the focused suggestion
+        # shape: its cursor style must close before the dim remainder begins.
+        if (inverse && (dim || darkfg) && cell != "") {
+          out = out cell; cell = ""; cursor_position = 0
+        }
+        if (dim == 0 && darkfg == 0) {
+          if (inverse && cursor_position) cell = cell c
+          else out = out c
+        }
+        plain = plain c
         i++
       }
-      print out
+      print out cell   # no dim follower: retain the cursor character as input
     }
   '
 }

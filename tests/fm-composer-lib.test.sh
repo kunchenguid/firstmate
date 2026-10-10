@@ -189,6 +189,71 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+# Replay of the Claude 2.1.289 capture from the 2026-10-10 diagnosis:
+# retain the grey glyph, NBSP, separator rules, and permission footer; vary
+# only the content after the glyph as in the diagnosis's byte-level replay.
+claude_suggestion_capture() {  # <styled-content>
+  printf '%s\n' 'rule' "${ESC}[38;2;136;136;136m────────${ESC}[0m" \
+    "${ESC}[0m${ESC}[38;2;153;153;153m❯${NBSP} ${ESC}[0m$1" \
+    "${ESC}[38;2;136;136;136m────────${ESC}[0m" \
+    "  ${ESC}[38;2;255;107;128mbypass permissions on${ESC}[0m"
+}
+
+assert_claude_screen() {
+  assert_screen "$@" 2 "$(printf 'claude\tidle')"
+}
+
+test_matrix_claude_focused_suggestion_cursor() {
+  local focused screen out caps typed
+  focused="${ESC}[7mh${ESC}[0m${ESC}[2mola ya volví, cómo va todo${ESC}[0m"
+  screen=$(claude_suggestion_capture "$focused")
+  for caps in "$CAPS_TMUX" "$CAPS_STYLED" "$CAPS_STYLED_NOID"; do
+    assert_claude_screen "focused Claude suggestion" empty "$caps" "$screen"
+    assert_claude_screen "Claude empty cursor cell" empty "$caps" \
+      "$(claude_suggestion_capture "${ESC}[7m ${ESC}[0m")"
+    assert_claude_screen "unfocused Claude dim suggestion" empty "$caps" \
+      "$(claude_suggestion_capture "${ESC}[2mhola ya volví, cómo va todo${ESC}[0m")"
+    assert_claude_screen "Claude typed text and cursor space" pending "$caps" \
+      "$(claude_suggestion_capture "hola${ESC}[7m ${ESC}[0m")"
+  done
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ -z "$out" ] || fail "focused suggestion leaked into selected content: '$out'"
+
+  # A single UTF-8 character is one cursor cell, regardless of byte length.
+  for typed in '¿' 'é' '→' '😀'; do
+    assert_claude_screen "multibyte Claude suggestion cursor" empty "$CAPS_STYLED" \
+      "$(claude_suggestion_capture "${ESC}[0;7m${typed}${ESC}[27m${ESC}[2mnext suggestion${ESC}[0m")"
+  done
+  # These are not the empty-input suggestion shape. Keep real input even
+  # when adjacent dim UI would otherwise hide the rest of the row.
+  for typed in \
+    "x${ESC}[2m hint${ESC}[0m" \
+    "typed${ESC}[7mx${ESC}[0m${ESC}[2m hint${ESC}[0m" \
+    "${ESC}[7mab${ESC}[0m${ESC}[2m hint${ESC}[0m" \
+    "${ESC}[7mabcd${ESC}[0m${ESC}[2m hint${ESC}[0m" \
+    "${ESC}[7méé${ESC}[0m${ESC}[2m hint${ESC}[0m" \
+    "${ESC}[7mx${ESC}[0m" \
+    "${ESC}[7mx${ESC}[0mnormal" \
+    "${ESC}[7mx${ESC}[2m hint${ESC}[0m" \
+    "${ESC}[7mx${ESC}[2m hint${ESC}[0;2m more hint${ESC}[0m" \
+    "${ESC}[7mx${ESC}[0m${ESC}[38;2;50;47;70m hint${ESC}[0m" \
+    "${focused}typed"; do
+    assert_claude_screen "Claude typed content survives suggestion detection" pending "$CAPS_STYLED" \
+      "$(claude_suggestion_capture "$typed")"
+  done
+  assert_claude_screen "focused suggestion with real continuation" pending "$CAPS_STYLED" \
+    $'❯ '"$focused"$'\nreal wrapped input'
+  assert_claude_screen "wrapped focused suggestion" empty "$CAPS_STYLED" \
+    $'❯ '"$focused"$'\n'"${ESC}[2mwrapped suggestion${ESC}[0m"
+  assert_claude_screen "unstyled focused suggestion remains unknown" unknown "$CAPS_PLAIN" \
+    $'❯ hola ya volví, cómo va todo'
+  out=$(printf '%s\n' "${ESC}[7mx${ESC}[0m${ESC}[2m hint${ESC}[0m" | fm_composer_strip_ghost)
+  [ "$out" = x ] || fail "inverse run outside a Claude glyph row changed: '$out'"
+  out=$(printf '%s\n' "${ESC}[7m❯ x${ESC}[0m${ESC}[2m hint${ESC}[0m" | fm_composer_strip_ghost)
+  [ "$out" = '❯ x' ] || fail "an inverse run spanning the prompt was mistaken for a cursor cell: '$out'"
+  pass "matrix: focused Claude suggestion is empty; typed input and unstyled verdicts survive"
+}
+
 test_matrix_claude_arrow_statusline_footer() {
   # Real claude 2.x on herdr (captured live 2026-09-20, herdr 0.8.0): the
   # composer is a bare `❯`+U+00A0 row between two solid rules, and the harness
@@ -1021,6 +1086,7 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_focused_suggestion_cursor
 test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
