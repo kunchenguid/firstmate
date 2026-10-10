@@ -91,8 +91,17 @@
 # session-start sweep could still close, while a journal bound to any other pane
 # - or a version 1 attempt whose workspace is still present or unreadable - may
 # name a live quarantined space and is retained for that sweep.
-# data/<id>/ is deliberately left in place: a successor spawn reads brief.md
-# from it.
+# data/<id>/ stays. A landed ship or scout close removes generated launch inputs
+# there: brief.md, launch-brief.md, ship-instructions.md, and their in-progress
+# render temps. Teardown takes the spawn lock before the meta lock and holds it
+# through cleanup and record removal; contention or unverifiable ownership refuses
+# before destructive cleanup, preserving the inputs and task record for retry.
+# Enumeration or removal failure preserves the task record for retry. report.md and every other durable record, including
+# contributions.json, stay. A --force discard and a captain-held retain leave
+# the briefs, because a successor spawn of that same id still reads brief.md.
+# A manual backlog never records that retain, so the same question is asked
+# again at removal time: briefs stay unless the read proves the item is not
+# held, and a failed read keeps them too.
 # Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
@@ -181,7 +190,8 @@
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, and discards secondmate child work for kind=secondmate. Only use it
+#   checks, and discards secondmate child work for kind=secondmate. It also
+#   leaves generated launch briefs in place for a successor spawn. Only use it
 #   when the captain has explicitly said to discard the work.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
@@ -460,8 +470,23 @@ DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
+LAUNCH_INPUT_LOCK_HELD=0
+LAUNCH_INPUT_MANIFEST=
+release_launch_input_cleanup() {
+  local cleanup_status=0
+  if [ -n "$LAUNCH_INPUT_MANIFEST" ]; then
+    if rm -f -- "$LAUNCH_INPUT_MANIFEST"; then
+      LAUNCH_INPUT_MANIFEST=
+    else
+      echo "warning: cannot remove generated launch input manifest for $ID; retaining task record for retry" >&2
+      cleanup_status=1
+    fi
+  fi
+  return "$cleanup_status"
+}
 teardown_release_locks() {
   local status=$? i
+  release_launch_input_cleanup || true
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
@@ -484,6 +509,10 @@ teardown_release_locks() {
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
+  fi
+  if [ "$LAUNCH_INPUT_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$STATE/.spawn-$ID.lock" || true
+    LAUNCH_INPUT_LOCK_HELD=0
   fi
   if [ -n "${SM_LIVENESS_LOCK:-}" ]; then
     fm_lock_release "$SM_LIVENESS_LOCK" || true
@@ -515,6 +544,16 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+# Match spawn's lock order and exclude same-ID launch readers and renderers.
+if ! fm_lock_try_acquire "$STATE/.spawn-$ID.lock"; then
+  if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
+    echo "error: teardown refused: a spawn is in progress for $ID (pid $FM_LOCK_HELD_PID); preserving task record and launch inputs for retry" >&2
+  else
+    echo "error: teardown refused: spawn lock ownership/acquisition could not be verified for $ID; preserving task record and launch inputs for retry" >&2
+  fi
+  exit 1
+fi
+LAUNCH_INPUT_LOCK_HELD=1
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
@@ -1419,6 +1458,86 @@ retire_busy_state() {
   elif [ -f "$state_dir/$id.busy-gen" ]; then
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --current-gen
   fi
+}
+
+# Drop generated launch inputs after a landed ship or scout close. The task
+# directory itself stays, and so does every file this function does not name:
+# report.md is the scout deliverable, and contributions.json is the durable
+# observation record. A symlink or other non-regular input is left in place
+# rather than followed. A --force discard and a captain-held retain skip this
+# entirely so a successor spawn can still read brief.md. A manual backlog
+# skips that retain, so this asks the same open question and keeps the briefs
+# unless the read proves the item is not held.
+# A busy spawn preserves inputs without blocking record cleanup. Enumerate render
+# temps successfully before deleting anything; a failed sweep retains the task
+# record for retry. The EXIT cleanup also releases an interrupted spawn-lock hold.
+remove_landed_launch_briefs() {
+  local dir path name open_status
+  [ "$KIND" = ship ] || [ "$KIND" = scout ] || return 0
+  [ "$FORCE" != --force ] || return 0
+  [ "${BACKLOG_TRANSITION:-close}" != retain ] || return 0
+  dir=$DATA/$ID
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    release_launch_input_cleanup
+    return 0
+  fi
+  if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+    echo "warning: leaving generated launch inputs for $ID; $dir is not a real directory" >&2
+    release_launch_input_cleanup
+    return 0
+  fi
+  if [ "${TEARDOWN_BACKLOG_APPLIES:-0}" != 1 ] && fm_backlog_backend_manual "$CONFIG"; then
+    open_status=0
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" >/dev/null 2>&1 || open_status=$?
+    if [ "$open_status" != 1 ]; then
+      if [ "$open_status" != 0 ]; then
+        echo "warning: leaving generated launch inputs for $ID; whether its backlog item is still held for the captain could not be read" >&2
+      fi
+      return 0
+    fi
+  fi
+  if ! LAUNCH_INPUT_MANIFEST=$(mktemp "$STATE/.launch-inputs-$ID.XXXXXX"); then
+    echo "warning: cannot create generated launch input manifest for $ID; retaining task record for retry" >&2
+    release_launch_input_cleanup
+    return 1
+  fi
+  if ! find "$dir" -mindepth 1 -maxdepth 1 \( \
+      -name '.launch-brief.md.*' -o \
+      -name '.ship-instructions.md.*' -o \
+      -name '.brief.md.promote.*' -o \
+      -name '.brief.md.scout.*' \
+    \) -print0 > "$LAUNCH_INPUT_MANIFEST"; then
+    echo "warning: cannot enumerate generated launch inputs for $ID; retaining task record for retry" >&2
+    release_launch_input_cleanup
+    return 1
+  fi
+  for name in brief.md launch-brief.md ship-instructions.md; do
+    path=$dir/$name
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    if [ -L "$path" ] || [ ! -f "$path" ]; then
+      echo "warning: leaving $path; landed teardown removes only a regular generated launch input" >&2
+      continue
+    fi
+    if ! rm -f -- "$path"; then
+      echo "warning: cannot remove generated launch input $path; retaining task record for retry" >&2
+      release_launch_input_cleanup
+      return 1
+    fi
+  done
+  while IFS= read -r -d '' path; do
+    if [ -L "$path" ] || [ ! -f "$path" ]; then
+      echo "warning: leaving $path; landed teardown removes only a regular generated launch input" >&2
+      continue
+    fi
+    if ! rm -f -- "$path"; then
+      echo "warning: cannot remove generated launch input $path; retaining task record for retry" >&2
+      release_launch_input_cleanup
+      return 1
+    fi
+  done < "$LAUNCH_INPUT_MANIFEST"
+  release_launch_input_cleanup
 }
 
 validate_pr_poll_cleanup() {
@@ -3802,6 +3921,10 @@ if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ];
     echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
   fi
 fi
+# Generated launch briefs are not the deliverable. Remove them only after the
+# endpoint is gone and every earlier refusal has already kept the task intact,
+# and before the record itself goes, so a failed removal can still be retried.
+remove_landed_launch_briefs || exit 1
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held

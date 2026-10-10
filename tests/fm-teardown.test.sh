@@ -777,6 +777,466 @@ SH
   pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
 }
 
+# Files a landed task actually leaves under data/<id>/. The symlink matches a
+# render-temp name so cleanup must leave it unfollowed.
+seed_generated_launch_inputs() {
+  local case_dir=$1 dir="$1/data/task-x1"
+  mkdir -p "$dir"
+  printf 'brief\n' > "$dir/brief.md"
+  printf 'launch\n' > "$dir/launch-brief.md"
+  printf 'instructions\n' > "$dir/ship-instructions.md"
+  printf 'temp\n' > "$dir/.launch-brief.md.4242"
+  printf 'promote temp\n' > "$dir/.brief.md.promote.4242"
+  printf 'scout temp\n' > "$dir/.brief.md.scout.4242"
+  printf 'ship temp\n' > "$dir/.ship-instructions.md.4242"
+  printf 'report body\n' > "$dir/report.md"
+  printf '{}\n' > "$dir/contributions.json"
+  printf 'operator note\n' > "$dir/notes.md"
+  printf 'outside\n' > "$case_dir/brief-target"
+  ln -s "$case_dir/brief-target" "$dir/.launch-brief.md.linked"
+}
+
+assert_generated_launch_inputs_removed() {
+  local dir=$1/data/task-x1
+  assert_absent "$dir/brief.md" "landed teardown left brief.md"
+  assert_absent "$dir/launch-brief.md" "landed teardown left launch-brief.md"
+  assert_absent "$dir/ship-instructions.md" "landed teardown left ship-instructions.md"
+  assert_absent "$dir/.launch-brief.md.4242" "landed teardown left a launch-brief render temp"
+  assert_absent "$dir/.brief.md.promote.4242" "landed teardown left a promote brief temp"
+  assert_absent "$dir/.brief.md.scout.4242" "landed teardown left a scout brief temp"
+  assert_absent "$dir/.ship-instructions.md.4242" "landed teardown left a ship-instructions render temp"
+  assert_present "$dir/report.md" "landed teardown removed report.md"
+  assert_present "$dir/contributions.json" "landed teardown removed contributions.json"
+  assert_present "$dir/notes.md" "landed teardown removed an unrelated task file"
+  assert_present "$dir/.launch-brief.md.linked" "landed teardown removed a non-regular launch input"
+  [ "$(cat "$1/brief-target")" = "outside" ] \
+    || fail "landed teardown followed a launch-input symlink"
+}
+
+assert_generated_launch_inputs_kept() {
+  local dir=$1/data/task-x1
+  assert_present "$dir/brief.md" "teardown removed brief.md"
+  assert_present "$dir/launch-brief.md" "teardown removed launch-brief.md"
+  assert_present "$dir/ship-instructions.md" "teardown removed ship-instructions.md"
+  assert_present "$dir/.launch-brief.md.4242" "teardown removed a launch-brief render temp"
+  assert_present "$dir/.brief.md.promote.4242" "teardown removed promote temp"
+  assert_present "$dir/.brief.md.scout.4242" "teardown removed scout temp"
+  assert_present "$dir/.ship-instructions.md.4242" "teardown removed instructions temp"
+  assert_present "$dir/.launch-brief.md.linked" "teardown removed symlink"
+  [ "$(cat "$1/brief-target")" = outside ] || fail "teardown modified symlink target"
+  assert_present "$dir/report.md" "teardown removed report.md"
+  assert_present "$dir/contributions.json" "teardown removed contributions.json"
+  assert_present "$dir/notes.md" "teardown removed an unrelated task file"
+}
+
+test_landed_teardown_removes_generated_briefs_and_keeps_the_report() {
+  local case_dir rc
+  case_dir=$(make_case landed-brief-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  seed_generated_launch_inputs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landed-brief-cleanup: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "landed-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_removed "$case_dir"
+  assert_launch_cleanup_released "$case_dir"
+  assert_grep "leaving $case_dir/data/task-x1/.launch-brief.md.linked" "$case_dir/stderr" \
+    "landed teardown did not say it left the non-regular launch input"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "landed-brief-cleanup: backlog item was not closed"
+  pass "landed teardown removes generated briefs and keeps the report"
+}
+
+# Exercise the public teardown path with a live spawn owner and failing tools.
+assert_launch_cleanup_released() {
+  local case_dir=$1 path
+  assert_absent "$case_dir/state/.spawn-task-x1.lock" "teardown left its spawn lock"
+  for path in "$case_dir/state"/.launch-inputs-task-x1.*; do
+    assert_absent "$path" "teardown left its cleanup manifest"
+  done
+}
+
+test_busy_spawn_preserves_generated_inputs() {
+  local case_dir rc holder_pid i ready=0 claim
+  case_dir=$(make_case busy-spawn-brief-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  seed_generated_launch_inputs "$case_dir"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    lock="$2/state/.spawn-task-x1.lock"
+    fm_lock_try_acquire "$lock" || exit 1
+    release_holder() { fm_lock_release "$lock"; }
+    trap release_holder EXIT
+    : > "$2/holder-ready"
+    for ((i=0; i<200; i++)); do
+      [ ! -f "$2/holder-release" ] || exit 0
+      sleep 0.05
+    done
+    exit 1
+  ' _ "$ROOT" "$case_dir" > "$case_dir/holder.out" 2>&1 &
+  holder_pid=$!
+  for ((i=0; i<100; i++)); do
+    if [ -f "$case_dir/holder-ready" ]; then ready=1; break; fi
+    sleep 0.1
+  done
+  if [ "$ready" != 1 ]; then
+    : > "$case_dir/holder-release"
+    wait "$holder_pid" || true
+    fail "spawn holder did not acquire lock"
+  fi
+  claim=$(readlink "$case_dir/state/.spawn-task-x1.lock")
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  # Release and reap the explicit owner even if an assertion fails below.
+  [ "$(readlink "$case_dir/state/.spawn-task-x1.lock")" = "$claim" ] || rc=99
+  : > "$case_dir/holder-release"
+  wait "$holder_pid" || fail "spawn holder failed to release its lock"
+  expect_code 1 "$rc" "busy spawn teardown should refuse without changing holder lock"
+  assert_present "$case_dir/state/task-x1.meta" "busy spawn removed old metadata"
+  assert_generated_launch_inputs_kept "$case_dir"
+  assert_grep 'a spawn is in progress for task-x1' "$case_dir/stderr" "busy spawn warning missing"
+  run_teardown "$case_dir" > "$case_dir/retry.out" 2> "$case_dir/retry.err" || fail "busy spawn retry failed"
+  assert_absent "$case_dir/state/task-x1.meta" "busy spawn retry retained metadata"
+  assert_generated_launch_inputs_removed "$case_dir"
+  pass "busy spawn refuses cleanup, preserves holder ownership, and permits retry"
+}
+
+# Fixture the launch critical section with the same public locks/order as spawn.
+# Barriers bound every background wait, and callers reap before assertions.
+start_same_id_spawn() {
+  local case_dir=$1
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    lock="$2/state/.spawn-task-x1.lock"
+    held=0
+    trap '\''[ "$held" != 1 ] || fm_lock_release "$lock"'\'' EXIT
+    for ((i=0; i<200; i++)); do
+      if fm_lock_try_acquire "$lock"; then held=1; break; fi
+      : > "$2/spawn-blocked"
+      sleep 0.05
+    done
+    [ "$held" = 1 ] || exit 1
+    meta_lock=$(fm_meta_lock_path "$2/state/task-x1.meta") || exit 1
+    fm_lock_try_acquire "$meta_lock" || exit 1
+    if [ ! -f "$2/state/task-x1.meta" ]; then : > "$2/spawn-saw-retired"; fi
+    fm_lock_release "$meta_lock" || exit 1
+    printf "new brief\n" > "$2/data/task-x1/brief.md"
+    printf "new temp\n" > "$2/data/task-x1/.launch-brief.md.new"
+    : > "$2/spawn-ready"
+    for ((i=0; i<200; i++)); do
+      [ ! -f "$2/spawn-release" ] || exit 0
+      sleep 0.05
+    done
+    exit 1
+  ' _ "$ROOT" "$case_dir" > "$case_dir/spawn.out" 2>&1 &
+  SAME_ID_SPAWN_PID=$!
+}
+
+wait_launch_barrier() {
+  local path=$1 i
+  for ((i=0; i<100; i++)); do
+    [ ! -f "$path" ] || return 0
+    sleep 0.05
+  done
+  return 1
+}
+
+test_same_id_spawn_exclusion() {
+  local case_dir kind order spawn_pid teardown_pid rc barrier_ok
+  for kind in ship scout; do
+    for order in spawn-first teardown-first; do
+      case_dir=$(make_case "same-id-$kind-$order")
+      write_meta "$case_dir" no-mistakes "$kind"
+      printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+      seed_generated_launch_inputs "$case_dir"
+      barrier_ok=1
+      if [ "$order" = teardown-first ]; then
+        cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_RACE_DIR/teardown-ready"
+for ((i=0; i<200; i++)); do
+  [ ! -f "$FM_RACE_DIR/teardown-release" ] || exit 0
+  sleep 0.05
+done
+exit 1
+SH
+        chmod +x "$case_dir/fakebin/treehouse"
+        FM_RACE_DIR="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" &
+        teardown_pid=$!
+        wait_launch_barrier "$case_dir/teardown-ready" || barrier_ok=0
+        start_same_id_spawn "$case_dir"
+        spawn_pid=$SAME_ID_SPAWN_PID
+        wait_launch_barrier "$case_dir/spawn-blocked" || barrier_ok=0
+        [ ! -f "$case_dir/spawn-ready" ] || barrier_ok=0
+        : > "$case_dir/teardown-release"
+        rc=0
+        wait "$teardown_pid" || rc=$?
+        wait_launch_barrier "$case_dir/spawn-ready" || barrier_ok=0
+      else
+        start_same_id_spawn "$case_dir"
+        spawn_pid=$SAME_ID_SPAWN_PID
+        wait_launch_barrier "$case_dir/spawn-ready" || barrier_ok=0
+        rc=0
+        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      fi
+      : > "$case_dir/spawn-release"
+      wait "$spawn_pid" || barrier_ok=0
+      [ "$barrier_ok" = 1 ] || fail "$kind $order: launch barrier failed"
+      [ "$(cat "$case_dir/data/task-x1/brief.md")" = 'new brief' ] || fail "$kind $order: newer brief removed"
+      [ "$(cat "$case_dir/data/task-x1/.launch-brief.md.new")" = 'new temp' ] || fail "$kind $order: newer render temp removed"
+      if [ "$order" = spawn-first ]; then
+        expect_code 1 "$rc" "$kind spawn-first must refuse"
+        assert_present "$case_dir/state/task-x1.meta" "spawn-first removed metadata"
+      else
+        expect_code 0 "$rc" "$kind teardown-first must complete: $(cat "$case_dir/stderr")"
+        assert_present "$case_dir/spawn-saw-retired" "spawn entered before task record removal"
+        assert_absent "$case_dir/state/task-x1.meta" "teardown-first retained metadata"
+      fi
+    done
+  done
+  pass "same-ID ship and scout launches exclude teardown in both lock orders"
+}
+
+test_spawn_lock_read_failure_preserves_record() {
+  local case_dir spawn_pid rc real_cat claim barrier_ok=1
+  case_dir=$(make_case spawn-lock-read-failure)
+  write_meta "$case_dir" no-mistakes ship
+  seed_generated_launch_inputs "$case_dir"
+  start_same_id_spawn "$case_dir"
+  spawn_pid=$SAME_ID_SPAWN_PID
+  wait_launch_barrier "$case_dir/spawn-ready" || barrier_ok=0
+  claim=$(readlink "$case_dir/state/.spawn-task-x1.lock")
+  real_cat=$(command -v cat)
+  cat > "$case_dir/fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != "$FM_FAIL_LOCK/pid" ] || exit 1
+exec "$FM_REAL_CAT" "$@"
+SH
+  chmod +x "$case_dir/fakebin/cat"
+  rc=0
+  FM_FAIL_LOCK="$case_dir/state/.spawn-task-x1.lock" FM_REAL_CAT="$real_cat" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$(readlink "$case_dir/state/.spawn-task-x1.lock")" = "$claim" ] || barrier_ok=0
+  : > "$case_dir/spawn-release"
+  wait "$spawn_pid" || barrier_ok=0
+  [ "$barrier_ok" = 1 ] || fail "read failure changed holder or fixture failed"
+  expect_code 1 "$rc" "lock read failure must refuse"
+  assert_grep 'spawn lock ownership/acquisition could not be verified' "$case_dir/stderr" "ownership error missing"
+  assert_present "$case_dir/state/task-x1.meta" "read failure removed metadata"
+  [ "$(cat "$case_dir/data/task-x1/brief.md")" = "new brief" ] || fail "read failure changed newer brief"
+  assert_present "$case_dir/data/task-x1/.launch-brief.md.new" "read failure removed newer temp"
+  assert_generated_launch_inputs_kept "$case_dir"
+  rm "$case_dir/fakebin/cat"
+  run_teardown "$case_dir" > "$case_dir/retry.out" 2> "$case_dir/retry.err" || fail "read failure retry failed"
+  assert_absent "$case_dir/state/task-x1.meta" "read failure retry retained metadata"
+  assert_generated_launch_inputs_removed "$case_dir"
+  pass "unreadable spawn ownership refuses cleanup and allows repaired retry"
+}
+
+test_launch_input_cleanup_failures_retain_metadata() {
+  local case_dir tool rc real_tool
+  for tool in find find-empty rm; do
+    case_dir=$(make_case "brief-cleanup-failed-$tool")
+    write_meta "$case_dir" no-mistakes ship
+    seed_generated_launch_inputs "$case_dir"
+    real_tool=$(command -v "${tool%-empty}")
+    cat > "$case_dir/fakebin/${tool%-empty}" <<'SH'
+#!/usr/bin/env bash
+if [ "$FM_FAIL_TOOL" = find-empty ] && [ "$1" = "$FM_FAIL_DIR" ] && [ "${2:-}" = -mindepth ]; then
+  exit 1
+fi
+if [ "$FM_FAIL_TOOL" = find ] && [ "$1" = "$FM_FAIL_DIR" ] && [ "${2:-}" = -mindepth ]; then
+  printf '%s\0' "$FM_FAIL_DIR/.launch-brief.md.4242"
+  exit 1
+fi
+if [ "$FM_FAIL_TOOL" = rm ]; then
+  for arg in "$@"; do
+    [ "$arg" != "$FM_FAIL_DIR/brief.md" ] || exit 1
+  done
+fi
+exec "$FM_REAL_TOOL" "$@"
+SH
+    chmod +x "$case_dir/fakebin/${tool%-empty}"
+    set +e
+    FM_FAIL_TOOL="$tool" FM_FAIL_DIR="$case_dir/data/task-x1" FM_REAL_TOOL="$real_tool" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "failed $tool cleanup should refuse"
+    assert_present "$case_dir/state/task-x1.meta" "failed cleanup removed metadata"
+    assert_generated_launch_inputs_kept "$case_dir"
+    assert_grep 'retaining task record for retry' "$case_dir/stderr" "failed cleanup warning missing"
+    assert_launch_cleanup_released "$case_dir"
+  done
+  pass "failed enumeration and removal retain inputs and metadata and release cleanup resources"
+}
+
+test_refused_teardown_keeps_generated_briefs() {
+  local case_dir rc
+  case_dir=$(make_case refused-brief-cleanup)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  seed_generated_launch_inputs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "refused-brief-cleanup: teardown should refuse unlanded work"
+  assert_present "$case_dir/state/task-x1.meta" "refused-brief-cleanup: refusal removed the task record"
+  assert_generated_launch_inputs_kept "$case_dir"
+  pass "a refused teardown leaves generated briefs in place"
+}
+
+test_forced_teardown_keeps_generated_briefs() {
+  local case_dir rc
+  case_dir=$(make_case forced-brief-cleanup)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  seed_generated_launch_inputs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forced-brief-cleanup: --force should tear the task down: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "forced-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_kept "$case_dir"
+  pass "a forced teardown leaves generated briefs for a successor spawn"
+}
+
+test_captain_held_teardown_keeps_generated_briefs() {
+  local case_dir rc
+  case_dir=$(make_case retained-brief-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  seed_generated_launch_inputs "$case_dir"
+  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold task-x1 --reason "captain must decide" \
+    >/dev/null \
+    || fail "retained-brief-cleanup: could not hold the task"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "retained-brief-cleanup: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "retained-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_kept "$case_dir"
+  pass "a captain-held teardown leaves generated briefs for a successor spawn"
+}
+
+test_manual_backend_captain_hold_keeps_generated_briefs() {
+  local case_dir rc
+  case_dir=$(make_case manual-held-brief-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  seed_generated_launch_inputs "$case_dir"
+  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold task-x1 --reason "captain must decide" \
+    >/dev/null \
+    || fail "manual-held-brief-cleanup: could not hold the task"
+  printf '%s\n' manual > "$case_dir/config/backlog-backend"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "manual-held-brief-cleanup: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "manual-held-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_kept "$case_dir"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "manual-held-brief-cleanup: manual backlog was closed"
+  pass "a captain-held task on a manual backlog keeps generated briefs"
+}
+
+test_manual_backend_without_task_directory_skips_tasks_axi() {
+  local case_dir rc
+  case_dir=$(make_case manual-no-directory-brief-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' manual > "$case_dir/config/backlog-backend"
+  assert_absent "$case_dir/data/task-x1" "fixture unexpectedly has a task directory"
+  : > "$case_dir/tasks-axi.calls"
+  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TASKS_AXI_CALLS"
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  set +e
+  FM_TASKS_AXI_CALLS="$case_dir/tasks-axi.calls" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "manual-no-directory-brief-cleanup: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "manual-no-directory-brief-cleanup: task record still present"
+  [ ! -s "$case_dir/tasks-axi.calls" ] \
+    || fail "manual teardown without a task directory invoked tasks-axi: $(cat "$case_dir/tasks-axi.calls")"
+  pass "a manual backlog without a task directory does not invoke tasks-axi"
+}
+
+test_manual_backend_without_hold_removes_generated_briefs() {
+  local case_dir rc
+  case_dir=$(make_case manual-unheld-brief-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' manual > "$case_dir/config/backlog-backend"
+  seed_backlog_in_flight "$case_dir"
+  seed_generated_launch_inputs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "manual-unheld-brief-cleanup: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "manual-unheld-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_removed "$case_dir"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "manual-unheld-brief-cleanup: manual backlog was closed"
+  pass "a manual backlog without a captain hold still removes generated briefs"
+}
+
+test_landed_scout_teardown_removes_briefs_and_keeps_the_report() {
+  local case_dir rc dir
+  case_dir=$(make_case scout-brief-cleanup)
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  seed_generated_launch_inputs "$case_dir"
+  dir="$case_dir/data/task-x1"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-brief-cleanup: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "scout-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_removed "$case_dir"
+  assert_launch_cleanup_released "$case_dir"
+  [ "$(cat "$dir/report.md")" = "report body" ] \
+    || fail "scout-brief-cleanup: report.md contents changed"
+  pass "landed scout teardown removes generated briefs and keeps the report"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -4646,7 +5106,19 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
+test_landed_teardown_removes_generated_briefs_and_keeps_the_report
+test_busy_spawn_preserves_generated_inputs
+test_same_id_spawn_exclusion
+test_spawn_lock_read_failure_preserves_record
+test_launch_input_cleanup_failures_retain_metadata
+test_refused_teardown_keeps_generated_briefs
+test_forced_teardown_keeps_generated_briefs
+test_captain_held_teardown_keeps_generated_briefs
+test_landed_scout_teardown_removes_briefs_and_keeps_the_report
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
+test_manual_backend_captain_hold_keeps_generated_briefs
+test_manual_backend_without_task_directory_skips_tasks_axi
+test_manual_backend_without_hold_removes_generated_briefs
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
