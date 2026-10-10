@@ -33,8 +33,7 @@
 # the very work item a question gates and cleanup must never retire the
 # captain's own question.
 # NOTE: this uses `open`'s silent default and depends only on its unchanged
-# 0/1/2 exit-code contract. The optional `--identity` output that bin/fm-watch.sh
-# asks for prints only on an exit 0 and changes nothing read here.
+# 0/1/2 exit-code contract.
 # The same pending-close record carries that intent as
 # `mode=retain`, so an interrupted cleanup replays the retention rather than a
 # close. "Cannot tell" refuses before any destructive step, --force does not
