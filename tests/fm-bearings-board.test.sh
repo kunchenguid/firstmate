@@ -131,6 +131,14 @@ run_decisions() {  # <home> <command args...>
     "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
+run_captain() {  # <home> <command args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" "$@"
+}
+
 # A realistic payload: a cross-origin full-identity decision key past the old
 # 64-char cap, a merge card, a dispatchable charted row, and a string that
 # tries to terminate the data block early.
@@ -145,6 +153,7 @@ write_valid_payload() {  # <path>
     {
       "key": "sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice",
       "type": "decision",
+      "close": "done",
       "repo": "sample",
       "title": "Perishable-first admission",
       "about": "A payload string that tries to break out: </script><b>x</b>",
@@ -211,6 +220,11 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a wrong-schema payload was accepted"
   assert_contains "$out" "fm-bearings-board.v1" "the schema refusal did not name the contract: $out"
+
+  write_valid_payload "$data"
+  jq 'del(.captains_call[0].close)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a decision card without an explicit completion mode was accepted"
 
   write_valid_payload "$data"
   jq '.captains_call[0].key = (reduce range(129) as $i (""; . + "x"))' "$data" > "$data.tmp" \
@@ -352,12 +366,13 @@ test_build_injects_binds_then_arms() {
 }
 
 test_registration_cannot_consume_before_any_origin_binding() {
-  local home data origin key hold board sid show
+  local home data origin key hold work board sid show
   home=$(make_home order-proof)
   data="$home/payload.json"
   origin=order-proof-review
   key=captain-choice
   hold="$origin-decision-$key"
+  work=order-proof-gated-work
   board="$home/.lavish/bearings-board.html"
 
   cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
@@ -372,9 +387,19 @@ EOF
   run_decisions "$home" hold "$origin" "$key" \
     --title "Choose the order proof" --reason "captain choice pending" --repo sample >/dev/null \
     || fail "could not create the order-proof captain hold"
+  (cd "$home" && tasks-axi add "$work" "Gated sample work" --kind ship --repo sample \
+    --body 'Gated work plan.' >/dev/null) || fail "could not create the held work item"
+  run_captain "$home" hold "$work" --reason "captain go needed" >/dev/null \
+    || fail "could not hold the work item"
 
   write_valid_payload "$data"
-  jq --arg hold "$hold" '.captains_call[0].key = $hold' "$data" > "$data.tmp" \
+  jq --arg hold "$hold" --arg work "$work" '
+    .captains_call[0].key = $hold
+    | .captains_call += [{
+        key: $work, type: "decision", close: "release", repo: "sample",
+        title: "Gated sample work", options: [{value: "go", label: "Go"}]
+      }]
+  ' "$data" > "$data.tmp" \
     && mv "$data.tmp" "$data"
 
   cat > "$home/fakebin/lavish-axi" <<'SH'
@@ -395,18 +420,29 @@ if [ "${1:-}" != poll ]; then
   printf 'session:\n  status: opened\n'
   exit 0
 fi
+# The work item's answer is what the board page itself queues when its card
+# is answered, so a board that drops the card's close mode cannot release it.
+work_prompt=$(node "$BOARD_RENDER_HARNESS" "$(cat "$FM_HOME/order-open")" \
+  | jq -r --arg key "$ORDER_PROOF_WORK" '
+      .answers[] | select(.key == $key)
+      | (.prompt + "\n\nContext data:\n" + (.data | tojson)) | @json')
 cat <<EOF
 session:
   status: feedback
   session_ended: false
-prompts[1]{uid,prompt,selector,tag,text}:
+prompts[2]{uid,prompt,selector,tag,text}:
   "2","Order proof: yes\\n\\nContext data:\\n{\\n  \\"schema\\": \\"fm-bearings-answer.v1\\",\\n  \\"question\\": \\"$ORDER_PROOF_HOLD\\",\\n  \\"selection\\": \\"yes\\",\\n  \\"note\\": \\"\\"\\n}","form",choice,"Order proof: yes"
+  "3",$work_prompt,"form",choice,"Gated work"
 EOF
 SH
   chmod +x "$home/fakebin/lavish-axi"
 
-  ORDER_PROOF_HOLD="$hold" run_board "$home" build "$data" >/dev/null \
+  BOARD_RENDER_HARNESS="$ROOT/tests/assets/board-render-harness.mjs" \
+    ORDER_PROOF_HOLD="$hold" ORDER_PROOF_WORK="$work" run_board "$home" build "$data" >/dev/null \
     || fail "the order-proof board build failed"
+  extract_payload "$board" | jq -e --arg work "$work" '
+    [.captains_call[] | select(.key == $work) | .close] == ["release"]
+  ' >/dev/null || fail "the published held-work card lost its release mode"
 
   # Arm starts the listener, which captures the answer and closes the hold on
   # its own schedule after build returns.
@@ -420,10 +456,22 @@ SH
     "registration consumed its answer before the any-origin binding existed"
   assert_contains "$show" "Resolution mode: answered" \
     "the answer was not closed through the real keyed-answer intake"
+  for _ in $(seq 1 100); do
+    show=$(cd "$home" && tasks-axi show "$work" --full) \
+      || fail "the held work item disappeared"
+    if [[ "$show" == *"Resolution mode: released"* && "$show" == *"held: no"* ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+  assert_contains "$show" "state: queued" "the board answer completed the held work item"
+  assert_contains "$show" "held: no" "the board answer did not lift the work item hold"
+  assert_contains "$show" "Resolution mode: released" \
+    "the board answer did not record a release"
   sid=$(run_lavish_source_id "$home" "$board")
   [ "$(run_decisions "$home" binding "$sid")" = "(any)" ] \
     || fail "the order-proof source did not retain its any-origin binding"
-  pass "registration can consume answers only after any-origin binding exists"
+  pass "registration binds before answers and releases held work with an explicit mode"
 }
 
 test_build_does_not_bind_or_arm_when_session_start_fails() {
@@ -626,15 +674,15 @@ test_build_drops_decision_cards_whose_subject_already_landed() {
   board="$home/.lavish/bearings-board.html"
   write_valid_payload "$data"
   jq '.captains_call = [
-        {"key":"landed-by-task","type":"decision","repo":"sample","title":"Already shipped",
+        {"key":"landed-by-task","type":"decision","close":"done","repo":"sample","title":"Already shipped",
          "options":[{"value":"yes","label":"Yes"}]},
-        {"key":"timeout-reattach","type":"decision","repo":"sample","title":"Already merged",
+        {"key":"timeout-reattach","type":"decision","close":"done","repo":"sample","title":"Already merged",
          "pr_url":"https://github.com/sample/sample/pull/7",
          "options":[{"value":"yes","label":"Yes"}]},
-        {"key":"quota-version","type":"decision","repo":"sample","title":"Old quota release",
+        {"key":"quota-version","type":"decision","close":"done","repo":"sample","title":"Old quota release",
          "subject":{"artifact":"quota-axi","version":"0.1.37"},
          "options":[{"value":"yes","label":"Yes"}]},
-        {"key":"still-open","type":"decision","repo":"sample","title":"Genuinely open",
+        {"key":"still-open","type":"decision","close":"done","repo":"sample","title":"Genuinely open",
          "subject":{"artifact":"quota-axi","version":"0.2.0"},
          "options":[{"value":"yes","label":"Yes"}]}
       ]
@@ -674,7 +722,7 @@ test_build_keeps_a_decision_absent_from_the_main_backlog() {
 EOF
   write_valid_payload "$data"
   jq '.captains_call = [{
-        "key":"remote-mate-call","type":"decision","repo":"sample",
+        "key":"remote-mate-call","type":"decision","close":"done","repo":"sample",
         "title":"Remote secondmate decision",
         "options":[{"value":"yes","label":"Yes"}]
       }]
