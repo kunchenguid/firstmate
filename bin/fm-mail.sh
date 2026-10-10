@@ -312,10 +312,11 @@ mail_rollback_wake_locked() {
   # Queue row: remove it (required) so nothing ackable survives without a
   # durable record.
   tmp=$(mktemp "$FM_WAKE_QUEUE.rollback.XXXXXX") || return 1
-  if ! awk -F '\t' -v key="$clean_key" '
+  # shellcheck disable=SC2016  # The awk program runs through _fm_wake_queue_pipe.
+  if ! _fm_wake_queue_pipe "$FM_WAKE_QUEUE" awk -F '\t' -v key="$clean_key" '
     NF >= 5 && $3 == "check" && $4 == key { next }
     { print }
-  ' "$FM_WAKE_QUEUE" > "$tmp"; then
+  ' > "$tmp"; then
     rm -f -- "$tmp"
     return 1
   fi

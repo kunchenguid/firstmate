@@ -372,7 +372,7 @@ function spanIsDecisionOwned(
 export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false, attendedHost = false): UnreadWakeScope {
   let queue = "";
   try {
-    queue = readFileSync(`${state}/.wake-queue`, "utf8");
+    queue = readFileSync(`${state}/wake/queue`, "utf8");
   } catch {
     return UNSAFE_SCOPE;
   }
@@ -653,8 +653,8 @@ async function runGrantScript(
     env: {
       ...process.env,
       FM_STATE_OVERRIDE: state,
-      FM_WAKE_QUEUE: `${state}/.wake-queue`,
-      FM_WAKE_QUEUE_LOCK: `${state}/.wake-queue.lock`,
+      FM_WAKE_QUEUE: `${state}/wake/queue`,
+      FM_WAKE_QUEUE_LOCK: `${state}/wake/queue.lock`,
     },
   });
   return result.status;

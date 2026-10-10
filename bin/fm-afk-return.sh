@@ -327,14 +327,14 @@ return_guard() {
 health_snapshot() {  # <evidence-file>
   local evidence=$1 beat_age state lines="" note=""
   beat_age=$(fm_path_age "$STATE/.last-watcher-beat")
-  if [ -e "$STATE/.watcher-down" ]; then
+  if [ -e "$FM_WATCHER_DOWN" ]; then
     # The marker survives past its episode in an acked:* state
     # (fm-wake-lib.sh _fm_recovery_marker_ack). An open handling episode is
     # the ordinary state of a wake being handled at return
     # (docs/watcher-continuity.md "Recovery episode acknowledgement"), so
     # only an open downtime episode is a gap. A marker this read cannot
     # parse is treated as a gap, conservatively.
-    if fm_recovery_marker_snapshot "$STATE/.watcher-down"; then
+    if fm_recovery_marker_snapshot "$FM_WATCHER_DOWN"; then
       state=${FM_RECOVERY_MARKER_TOKEN%:*}
       case "$FM_RECOVERY_MARKER_TOKEN" in
         acked:*) : ;;

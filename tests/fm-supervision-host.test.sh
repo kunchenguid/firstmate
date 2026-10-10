@@ -288,7 +288,7 @@ marker_kind() {  # <home>
     fm_recovery_marker_read "$2" || exit 1
     kind=${FM_RECOVERY_MARKER_TOKEN#*:}
     printf "%s\n" "${kind%%:*}"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1/state/.watcher-down"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1/state/wake/watcher-down"
 }
 engine_calls() { find "$1" -maxdepth 1 -name 'engine-call.*' 2>/dev/null | wc -l | tr -d ' '; }
 handled_count() { local n; n=$(grep -c '	handled	' "$1/state/.supervision-host.log" 2>/dev/null); printf '%s\n' "${n:-0}"; }
@@ -332,14 +332,14 @@ test_report_surface_enforces_actor_turn_and_scope() {
   [ "$(cat "$state/.supervision-host-receipts")" = "$(printf 't1\t1\tcaptain\talpha')" ] \
     || fail "the host receipt was not written: $(cat "$state/.supervision-host-receipts")"
   local wake_queue_before
-  wake_queue_before=$(cat "$state/.wake-queue" 2>/dev/null || true)
+  wake_queue_before=$(cat "$state/wake/queue" 2>/dev/null || true)
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
     --task alpha --verdict routine --summary 'still busy, nothing new, no action taken' --silent true 2>&1); rc=$?
   expect_code 0 "$rc" "a task-level routine no-change outcome may be silent"
   assert_contains "$out" "silent outcome remains in the outcome store" "silent task outcome response lost its durability note"
   assert_grep '"task":"alpha","wake":"signal: alpha.status","verdict":"routine","summary":"still busy, nothing new, no action taken","silent":true' \
     "$state/branch-outcomes.jsonl" "the silent task outcome was not stored"
-  [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$wake_queue_before" ] \
+  [ "$(cat "$state/wake/queue" 2>/dev/null || true)" = "$wake_queue_before" ] \
     || fail "a silent task outcome queued a captain notification"
 
   printf 'turn=t2\nrows=5\ntasks=\nunscoped=1\nwake=heartbeat\n' > "$state/.supervision-host-turn"
@@ -362,7 +362,7 @@ test_report_after_the_return_is_queued_for_main() {
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" --task alpha --verdict routine --summary 'steered while away' 2>&1); rc=$?
   expect_code 0 "$rc" "a report during the away window must be recorded"
   assert_contains "$out" "it waits in the outcome store for MAIN" "a report during the away window waits for the return brief"
-  ! grep -qs 'supervision-host-return' "$state/.wake-queue" || fail "a report during the away window must not be queued for main"
+  ! grep -qs 'supervision-host-return' "$state/wake/queue" || fail "a report during the away window must not be queued for main"
 
   FM_HOME="$home" "$CONTRACT" archive >/dev/null 2>&1 || fail "fixture: could not archive the away posture"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" --task alpha --verdict captain --summary 'PR ready for review' 2>&1); rc=$?
@@ -370,15 +370,15 @@ test_report_after_the_return_is_queued_for_main() {
   assert_contains "$out" "recorded seq 2 [captain]; the captain has returned, so it is queued for MAIN to relay" \
     "a report after the return must say it is queued for main"
   assert_re $'\tcheck\tsupervision-host-return:2\tcheck: supervision-host outcome 2 for alpha \\[captain\\] was recorded after the captain returned.*relay it to the captain: PR ready for review$' \
-    "$state/.wake-queue" "the late outcome must be a durable check wake for main"
-  queue_before=$(cat "$state/.wake-queue")
+    "$state/wake/queue" "the late outcome must be a durable check wake for main"
+  queue_before=$(cat "$state/wake/queue")
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
     --task alpha --verdict routine --summary 'still building; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
   expect_code 0 "$rc" "a silent report after the return must be recorded"
   assert_contains "$out" "silent outcome remains in the outcome store" "the post-return silent report lost its durability note"
   assert_grep '"task":"alpha","wake":"signal: alpha.status","verdict":"routine","summary":"still building; nothing new has happened; no action was taken","silent":true' \
     "$state/branch-outcomes.jsonl" "the post-return silent outcome was not retained"
-  [ "$(cat "$state/.wake-queue")" = "$queue_before" ] || fail "a silent report after the return queued another check wake"
+  [ "$(cat "$state/wake/queue")" = "$queue_before" ] || fail "a silent report after the return queued another check wake"
   drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1)
   assert_contains "$drained" "supervision-host outcome 2 for alpha [captain] was recorded after the captain returned" \
     "main's drain must present the late outcome"
@@ -885,8 +885,8 @@ test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main() {
   assert_re '^(arg=)?FIRSTMATE SUPERVISION WAKE: signal: ' "$first" "the attended wake must carry the close"
   assert_re '	handled	turn=[^	]*	posture=attended	' "$home/state/.supervision-host.log" "the ledger must record the attended turn"
   assert_grep '"verdict":"routine"' "$home/state/branch-outcomes.jsonl" "the engine's routine report did not reach the store"
-  assert_no_grep 'demo.status' "$home/state/.wake-queue" "the engine's acknowledgement did not consume the wake"
-  assert_no_grep 'supervision-host-return' "$home/state/.wake-queue" "an attended report must queue no return wake for main"
+  assert_no_grep 'demo.status' "$home/state/wake/queue" "the engine's acknowledgement did not consume the wake"
+  assert_no_grep 'supervision-host-return' "$home/state/wake/queue" "an attended report must queue no return wake for main"
   assert_grep 'it waits in the outcome store for MAIN' "$home/engine-report.log" "an attended routine report must say it stays in the store"
   [ ! -s "$home/host.rc" ] || fail "a routine attended outcome reached main: $(cat "$home/host.out")"
   [ "$(grep -cv '^watcher: started pid=' "$home/host.out")" -eq 0 ] \
@@ -915,8 +915,8 @@ test_attended_captain_outcome_reaches_main_through_branch_outcomes() {
     "the exit must name the captain outcome's store row and send main to its drain"
   assert_no_re '^signal:' "$home/host.out" "the close the engine handled must not reach main as a wake"
   assert_grep 'MAIN processes it from its next drain' "$home/engine-report.log" "an attended captain report must say main processes it"
-  assert_no_grep 'demo.status' "$home/state/.wake-queue" "the handled wake must stay acknowledged"
-  assert_no_grep 'supervision-host-return' "$home/state/.wake-queue" "an attended captain report must queue no return wake"
+  assert_no_grep 'demo.status' "$home/state/wake/queue" "the handled wake must stay acknowledged"
+  assert_no_grep 'supervision-host-return' "$home/state/wake/queue" "an attended captain report must queue no return wake"
   watcher_live "$home" && fail "the host left its successor cycle running when it woke main"
 
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
@@ -997,7 +997,7 @@ test_attended_main_only_close_passes_straight_to_main() {
   assert_re '^signal: .*demo.status' "$home/host.out" "the close must carry the watcher's reason line"
   assert_no_re '^supervision-host' "$home/host.out" "a main-only close must reach main exactly as the arm printed it"
   [ "$(engine_calls "$home")" -eq 0 ] || fail "main-only: the engine ran for a decision close"
-  assert_grep 'demo.status' "$home/state/.wake-queue" "the decision wake must stay queued for main"
+  assert_grep 'demo.status' "$home/state/wake/queue" "the decision wake must stay queued for main"
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
   pass "host: an attended decision close stays main's exactly as the plain arm delivers it"
 }
@@ -1040,7 +1040,7 @@ test_main_only_pass_through_leaves_the_successor_watcher_running() {
   [ "$(engine_calls "$home")" -eq 0 ] || fail "successor: the engine ran for a decision close"
   watcher_live "$home" || fail "successor: the pass-through left no live watcher: $(cat "$home/state/.supervision-host.log")"
   [ "$(marker_kind "$home")" = downtime ] \
-    || fail "successor: the pass-through claimed the close was being handled, so main's re-arm owner would not deliver it: $(cat "$home/state/.watcher-down")"
+    || fail "successor: the pass-through claimed the close was being handled, so main's re-arm owner would not deliver it: $(cat "$home/state/wake/watcher-down")"
   pid=$(cat "$home/state/.watch.lock/pid")
   sleep 2
   kill -0 "$pid" 2>/dev/null || fail "successor: the watcher exited after the pass-through (pid $pid)"
@@ -1072,7 +1072,7 @@ test_attended_close_with_unidentified_main_session_passes_to_main() {
   assert_re '^signal: .*demo.status' "$home/host.out" "the close must carry the watcher's reason line"
   assert_no_re '^supervision-host' "$home/host.out" "the close must reach main exactly as the arm printed it"
   [ "$(engine_calls "$home")" -eq 0 ] || fail "unidentified: the engine ran without a main-session key"
-  assert_grep 'demo.status' "$home/state/.wake-queue" "the wake must stay queued for main"
+  assert_grep 'demo.status' "$home/state/wake/queue" "the wake must stay queued for main"
   assert_re '	pass-through	attended	the main session could not be identified	signal:' "$home/state/.supervision-host.log" \
     "the ledger must record why the close went to main"
   pass "host: an attended close whose main session cannot be identified reaches main and runs no engine turn"
@@ -1121,7 +1121,7 @@ test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
   assert_re '^signal: .*demo.status' "$home/host.out" "the close must carry the watcher's reason line"
   assert_no_re '^supervision-host' "$home/host.out" "the close must reach main exactly as the arm printed it"
   [ "$(engine_calls "$home")" -eq 0 ] || fail "turns-main-only: the engine ran on a stale offer"
-  assert_grep 'demo.status' "$home/state/.wake-queue" "the wake must stay queued for main"
+  assert_grep 'demo.status' "$home/state/wake/queue" "the wake must stay queued for main"
   local pi_offer
   pi_offer=$(node --input-type=module -e '
     const dispatch = await import(process.argv[1]);
@@ -1196,7 +1196,7 @@ main_drain() {  # <home>; prints the drain and sets MAIN_ACK
 }
 
 assert_rewoke_main() {  # <home> <label>
-  expect_code 2 "$(cat "$1/hook.rc")" "$2: the Stop hook must rewake main: $(cat "$1/hook.err"; cat "$1/state/.watcher-down" 2>/dev/null)"
+  expect_code 2 "$(cat "$1/hook.rc")" "$2: the Stop hook must rewake main: $(cat "$1/hook.err"; cat "$1/state/wake/watcher-down" 2>/dev/null)"
   assert_grep 'firstmate watcher wake - one supervision event needs a handling turn now.' "$1/hook.err" "$2: the rewake banner is missing"
   assert_re '^epoch=[0-9]+ owner_pid=[0-9]+ outcome=rewake ' "$1/state/.claude-autoarm-epoch" "$2: the auto-arm ledger must record the rewake"
 }
@@ -1234,7 +1234,7 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
   wait_until 250 hook_exited "$home" || fail "closed successor: the Stop hook did not finish: $(cat "$home/state/.supervision-host.log")"
   assert_re '^supervision-host: branch-outcome: ' "$home/hook.err" "the host must hand its captain outcome to main"
   expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must rewake main after the successor closed"
-  assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
+  assert_re '^(pending|announced):downtime:' "$home/state/wake/watcher-down" \
     "the closed handling successor must leave a deliverable downtime episode"
   pass "host+hook: a successor closed before exit_to_main does not suppress the branch-outcome rewake"
 }
@@ -1249,7 +1249,7 @@ assert_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails() 
   cat > "$home/fakebin/mktemp" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *'/.watcher-down.tmp.'*) [ ! -e "\$FM_HOME/fail-downtime-write" ] || exit 1 ;;
+  *'/wake/watcher-down.tmp.'*) [ ! -e "\$FM_HOME/fail-downtime-write" ] || exit 1 ;;
 esac
 exec "$real_mktemp" "\$@"
 SH
@@ -1264,14 +1264,14 @@ SH
   wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" \
     || fail "restore failure: its watcher did not close during the engine turn"
   FM_HOME="$home" bash -c '. "$1"; fm_recovery_marker_begin_handling "$2"' _ \
-    "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down" \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/wake/watcher-down" \
     || fail "fixture: could not model the queued successor wake entering handling"
   if [ "$status" = announced ]; then
     FM_HOME="$home" bash -c '. "$1"; fm_recovery_marker_read "$2" && _fm_recovery_marker_write_locked "$2" handling "${FM_RECOVERY_MARKER_TOKEN##*:}" announced' _ \
-      "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down" \
+      "$ROOT/bin/fm-wake-lib.sh" "$home/state/wake/watcher-down" \
       || fail "fixture: could not model the handling episode as announced"
   fi
-  assert_re "^$status:handling:" "$home/state/.watcher-down" \
+  assert_re "^$status:handling:" "$home/state/wake/watcher-down" \
     "fixture: the closed handling successor must leave the marker in handling before the host hands back"
   : > "$home/fail-downtime-write"
   printf 'continue\n' > "$home/stub-release"
@@ -1308,9 +1308,9 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn() {
   wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" \
     || fail "closed successor: its watcher did not close during the engine turn"
   FM_HOME="$home" bash -c '. "$1"; fm_recovery_marker_begin_handling "$2"' _ \
-    "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down" \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/wake/watcher-down" \
     || fail "fixture: could not model the queued successor wake entering handling"
-  assert_re '^pending:handling:' "$home/state/.watcher-down" \
+  assert_re '^pending:handling:' "$home/state/wake/watcher-down" \
     "fixture: the closed handling successor must leave the marker in handling before the host hands back"
   printf 'continue\n' > "$home/stub-release"
   wait_until 250 hook_exited "$home" || fail "closed successor: the Stop hook did not finish: $(cat "$home/state/.supervision-host.log")"
@@ -1318,7 +1318,7 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn() {
   expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must rewake main after the successor closed"
   assert_re '^epoch=[0-9]+ owner_pid=[0-9]+ outcome=rewake ' "$home/state/.claude-autoarm-epoch" \
     "the hand-back must commit the rewake"
-  assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
+  assert_re '^(pending|announced):downtime:' "$home/state/wake/watcher-down" \
     "the closed handling successor must leave a deliverable downtime episode"
   pass "host+hook: a successor that closes during a held engine turn does not suppress the branch-outcome rewake"
 }
@@ -1441,7 +1441,7 @@ test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails() {
   cat > "$home/fakebin/mktemp" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *'/state/.watcher-down.tmp.'*)
+  *'/state/wake/watcher-down.tmp.'*)
     [ "\$(cat "\$FM_HOME/offer-count" 2>/dev/null)" != 2 ] || exit 1 ;;
 esac
 exec "$real_mktemp" "\$@"
@@ -1454,7 +1454,7 @@ SH
   wait_until 250 hook_exited "$home" || fail "hook write failure: the Stop hook did not finish"
   [ "$(cat "$home/offer-count" 2>/dev/null)" -ge 2 ] || fail "fixture: the close did not turn main-only at its turn"
   assert_re 'pass-through[[:space:]]+downtime-unrestored' "$home/state/.supervision-host.log" "fixture: downtime publication did not fail"
-  assert_re '^(pending|announced):handling:' "$home/state/.watcher-down" "fixture: the marker unexpectedly became downtime"
+  assert_re '^(pending|announced):handling:' "$home/state/wake/watcher-down" "fixture: the marker unexpectedly became downtime"
   expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must notify main instead of dropping the close"
   assert_grep 'firstmate watcher auto-arm FAILED' "$home/hook.err" "main must receive the failure notification"
   assert_re 'outcome=failed ' "$home/state/.claude-autoarm-epoch" "the failure must be committed"
@@ -1592,7 +1592,7 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   sleep 2
   ! hook_exited "$home" || fail "takeover: the takeover woke main: $(cat "$home/hook.err")"
   host_owns_the_only_cycle "$home" || fail "takeover: the park did not keep the cycle it took over"
-  assert_re '^acked:' "$home/state/.watcher-down" "takeover: the takeover opened a downtime episode"
+  assert_re '^acked:' "$home/state/wake/watcher-down" "takeover: the takeover opened a downtime episode"
   assert_no_re 'rearm-resurface' "$home/state/.supervision-host.log" "takeover: the takeover resurfaced a recovery to main"
   append_status "$home" 'which region?' needs-decision
   wait_until 250 hook_exited "$home" || fail "takeover: the owned cycle did not deliver the next close: $(cat "$home/state/.supervision-host.log")"
@@ -1615,7 +1615,7 @@ test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park() {
     : > "$3"
     while [ ! -e "$4" ]; do sleep 0.1; done
     fm_lock_release "$2"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down.lock" "$home/marker-lock-held" "$home/marker-lock-release" &
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/wake/watcher-down.lock" "$home/marker-lock-held" "$home/marker-lock-release" &
   holder=$!
   wait_until 100 test -e "$home/marker-lock-held" || fail "fixture: could not hold the recovery-marker lock"
   turn_end "$home"
@@ -1696,7 +1696,7 @@ SH
   assert_re '^signal: .*demo.status' "$home/host.out" "the close must carry the watcher's reason line"
   assert_no_re '^supervision-host' "$home/host.out" "the close must reach main exactly as the arm printed it"
   [ "$(engine_calls "$home")" -eq 0 ] || fail "away-then-attended: the engine ran for a decision close"
-  assert_grep 'demo.status' "$home/state/.wake-queue" "the decision wake must stay queued for main"
+  assert_grep 'demo.status' "$home/state/wake/queue" "the decision wake must stay queued for main"
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
   assert_no_re '	no-op	' "$home/state/.supervision-host.log" "the close must not be treated as handled"
   watcher_live "$home" || fail "the pass-through left no successor watcher"
@@ -1817,13 +1817,13 @@ quiet_pass_through_successor() {  # <home>
     done
     kill -0 "$pid" 2>/dev/null && fail "fixture: the pass-through successor did not stop"
   fi
-  gen=$(cat "$home/state/.watcher-down" 2>/dev/null || true)
+  gen=$(cat "$home/state/wake/watcher-down" 2>/dev/null || true)
   gen=${gen##*:}
   [ -n "$gen" ] || return 0
   FM_HOME="$home" bash -c '
     . "$1"
     fm_recovery_marker_ack "$2" "$3"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down" "$gen" \
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/wake/watcher-down" "$gen" \
     || fail "fixture: could not acknowledge the successor downtime"
 }
 
@@ -2077,7 +2077,7 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   assert_absent "$home/state/.host-mirror-cursor" "a handled away wake must leave the mirror cursor where it was"
   assert_absent "$home/state/.host-mirror-cursor.next" "an away wake must stage no mirror cursor"
   assert_grep '"task":"demo"' "$home/state/branch-outcomes.jsonl" "the engine's report did not reach the outcome store"
-  assert_no_grep 'demo.status' "$home/state/.wake-queue" "the engine's acknowledgement did not consume the wake"
+  assert_no_grep 'demo.status' "$home/state/wake/queue" "the engine's acknowledgement did not consume the wake"
   if FM_HOME="$home" "$LEASE" check demo >/dev/null 2>&1; then
     fail "the host did not release the lease the engine left held: $(FM_HOME="$home" "$LEASE" check demo)"
   fi
@@ -2118,9 +2118,9 @@ test_away_turn_without_a_report_hands_the_wake_to_main() {
   expect_code 0 "$(cat "$home/host.rc")" "a handed-back wake must exit 0 for the owner to deliver"
   assert_re '^signal: .*demo.status' "$home/host.out" "the handed-back close must carry the reason line"
   assert_re '^supervision-host: .*recorded no outcome for its wake; this wake is yours$' "$home/host.out" "the handback must say why"
-  assert_grep 'demo.status' "$home/state/.wake-queue" "the unhandled wake must stay durable for main"
+  assert_grep 'demo.status' "$home/state/wake/queue" "the unhandled wake must stay durable for main"
   watcher_live "$home" && fail "the host left its successor cycle running when it handed the wake to main"
-  token=$(cat "$home/state/.watcher-down")
+  token=$(cat "$home/state/wake/watcher-down")
   case "$token" in
     pending:downtime:*|announced:downtime:*) ;;
     *) fail "a handback must leave the recovery marker in downtime for the owner's rewake, got: $token" ;;
@@ -2145,7 +2145,7 @@ test_return_during_an_engine_turn_hands_its_outcomes_to_main() {
   assert_re '^supervision-host: outcome 1 for demo \[routine\]: stub handled demo$' "$home/host.out" \
     "the handoff must carry the turn's outcome for main to relay"
   assert_re '	handled	turn=' "$home/state/.supervision-host.log" "the turn itself was handled"
-  assert_no_grep 'demo.status' "$home/state/.wake-queue" "the handled wake must stay acknowledged"
+  assert_no_grep 'demo.status' "$home/state/wake/queue" "the handled wake must stay acknowledged"
   watcher_live "$home" && fail "the host left its successor cycle running when it handed the outcome to main"
   pass "host: a captain return during an engine turn hands that turn's outcomes to main"
 }
@@ -2225,7 +2225,7 @@ test_outcome_after_the_return_survives_a_host_killed_at_the_turn_end() {
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "return-first: the host never started a watcher cycle"
   append_status "$home" 'finishing while the captain comes back'
-  wait_until 250 grep -qs 'supervision-host-return:1' "$home/state/.wake-queue" \
+  wait_until 250 grep -qs 'supervision-host-return:1' "$home/state/wake/queue" \
     || fail "return-first: the late outcome was never queued: $(cat "$home/engine-report.log" 2>/dev/null)"
   host=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
   kill -TERM "$host"
@@ -2236,7 +2236,7 @@ test_outcome_after_the_return_survives_a_host_killed_at_the_turn_end() {
   for f in "$home"/state/.supervision-host-result.* "$home"/state/.supervision-host-errors.*; do
     [ -e "$f" ] && fail "a host stopped mid-turn left its turn file behind: $f"
   done
-  assert_grep 'supervision-host-return:1' "$home/state/.wake-queue" "the late outcome must stay queued after its host died"
+  assert_grep 'supervision-host-return:1' "$home/state/wake/queue" "the late outcome must stay queued after its host died"
 
   rm -f "$home/host.rc"
   start_host "$home"
@@ -2258,7 +2258,7 @@ test_next_host_clears_a_turn_its_killed_predecessor_left() {
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "killed: the host never started a watcher cycle"
   append_status "$home" 'mid-turn when its host is killed'
-  wait_until 250 grep -qs 'supervision-host-return:1' "$home/state/.wake-queue" || fail "killed: the turn never reported"
+  wait_until 250 grep -qs 'supervision-host-return:1' "$home/state/wake/queue" || fail "killed: the turn never reported"
   host=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
   engine=$(cut -f1 "$home/state/.supervision-host.engine-pid")
   kill -KILL "$host"
@@ -2291,7 +2291,7 @@ test_report_without_acknowledgement_hands_the_wake_to_main() {
   assert_re '^signal: .*demo.status' "$home/host.out" "the handed-back close must carry the reason line"
   assert_re '^supervision-host: .*the engine turn left its granted wake rows [0-9]+( [0-9]+)* unacknowledged; this wake is yours$' "$home/host.out" \
     "the handback must name the rows the turn left unacknowledged"
-  assert_grep 'demo.status' "$home/state/.wake-queue" "the unacknowledged wake must stay durable for main"
+  assert_grep 'demo.status' "$home/state/wake/queue" "the unacknowledged wake must stay durable for main"
   assert_re '	failed	turn=.*	unacked=[0-9]' "$home/state/.supervision-host.log" "the ledger must record the turn as failed"
   assert_absent "$home/state/.supervision-host-engine" "a turn that did not handle its wake must not keep its conversation"
   watcher_live "$home" && fail "the host left its successor cycle running when it handed the wake to main"
@@ -2407,7 +2407,7 @@ test_park_boundary_ends_the_park_before_the_hook_timeout() {
   wait_until 150 host_exited "$home" || fail "boundary: the host did not end its park"
   assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the park boundary must reach main as a host line"
   watcher_live "$home" && fail "the park boundary left the watcher running"
-  token=$(cat "$home/state/.watcher-down")
+  token=$(cat "$home/state/wake/watcher-down")
   case "$token" in
     pending:downtime:*|announced:downtime:*) ;;
     *) fail "the park boundary must publish downtime for the owner's rewake, got: $token" ;;
@@ -2453,7 +2453,7 @@ test_park_boundary_holds_under_back_to_back_closes() {
   assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the park boundary must reach main as a host line"
   [ "$(tail -n 1 "$home/host.out")" = "$(grep '^supervision-host: cycle boundary - ' "$home/host.out")" ] \
     || fail "a close read at the boundary must be printed ahead of the boundary line: $(cat "$home/host.out")"
-  assert_grep 'demo.status' "$home/state/.wake-queue" "a close waiting at the boundary must stay queued for main"
+  assert_grep 'demo.status' "$home/state/wake/queue" "a close waiting at the boundary must stay queued for main"
   watcher_live "$home" && fail "the park boundary left the watcher running"
   pass "host: waiting closes cannot carry the park past its boundary"
 }
@@ -2498,7 +2498,7 @@ SH
     || fail "the close must be printed ahead of the boundary line: $(cat "$home/host.out")"
   ! ls "$home"/engine-call.* >/dev/null 2>&1 || fail "an engine turn started that could run past the boundary"
   assert_no_re '	(handled|failed)	turn=' "$home/state/.supervision-host.log" "no engine turn may be logged"
-  assert_grep 'demo.status' "$home/state/.wake-queue" "a close refused at the boundary must stay queued for main"
+  assert_grep 'demo.status' "$home/state/wake/queue" "a close refused at the boundary must stay queued for main"
   while IFS= read -r pid; do
     kill -0 "$pid" 2>/dev/null && fail "the boundary left the successor arm $pid running"
   done < <(awk -F '\t' '$1 == "arm" { print $2 }' "$home/host-record-at-render")
@@ -2636,8 +2636,8 @@ test_first_cycle_status_streams_and_owner_options_reach_it() {
   # That close left an unacknowledged downtime episode; a host the owner starts
   # as the closed arm's successor takes it over as a handling successor
   # instead of re-announcing it.
-  generation=$(sed -n 's/^[a-z]*:[a-z]*://p' "$home/state/.watcher-down")
-  [ -n "$generation" ] || fail "fixture: the close left no downtime episode: $(cat "$home/state/.watcher-down")"
+  generation=$(sed -n 's/^[a-z]*:[a-z]*://p' "$home/state/wake/watcher-down")
+  [ -n "$generation" ] || fail "fixture: the close left no downtime episode: $(cat "$home/state/wake/watcher-down")"
   predecessor=$(sed -n '1p' "$home/claude-pids")
   rm -f "$home/host.out" "$home/host.rc"
   FM_WATCH_PREDECESSOR_ARM_PID=$predecessor start_host "$home" --restart
@@ -2740,7 +2740,7 @@ test_latch_trips_after_two_engine_errors_then_probes_and_recovers() {
   assert_re '^supervision-host: the away session is paused after repeated engine errors until .*; this wake is yours$' \
     "$home/host.out" "a close inside the cooldown must say why main has it"
   [ "$(engine_calls "$home")" -eq 2 ] || fail "the engine ran inside the cooldown"
-  assert_grep 'demo.status' "$home/state/.wake-queue" "a close inside the cooldown must stay durable for main"
+  assert_grep 'demo.status' "$home/state/wake/queue" "a close inside the cooldown must stay durable for main"
   main_drain_and_ack "$home"
 
   end_cooldown "$home"
@@ -2826,7 +2826,7 @@ captain_rows() {  # <home>
 }
 captain_rows_at_least() { [ "$(captain_rows "$1")" -ge "$2" ]; }
 flood_signal() {  # <home>
-  captain_rows_at_least "$1" 2 || grep -qs '	inactive-outcome:' "$1/state/.wake-queue"
+  captain_rows_at_least "$1" 2 || grep -qs '	inactive-outcome:' "$1/state/wake/queue"
 }
 
 test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
@@ -2855,7 +2855,7 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
     || fail "held: the first cadence never escalated the held outcome: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
   assert_grep 'child=held' "$home/state/branch-outcomes.jsonl" "held: the escalation did not name the held task's outcome: $(cat "$home"/engine-drain.* "$home/state/.supervision-host.log")"
   wait_until 150 handled_at_least "$home" 1 || fail "held: the escalating turn never finished"
-  assert_no_grep '	inactive-outcome:' "$home/state/.wake-queue" "held: the branch acknowledgement left the presentation row queued"
+  assert_no_grep '	inactive-outcome:' "$home/state/wake/queue" "held: the branch acknowledgement left the presentation row queued"
 
   for cycle in 1 2 3 4; do
     old=$(( $(date +%s) - 120 ))

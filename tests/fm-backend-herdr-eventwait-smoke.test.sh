@@ -5,7 +5,7 @@
 # It drives a real idle->blocked transition in an ISOLATED, never-default herdr
 # lab session and asserts the subscriber returns that transition sub-second and
 # that the watcher's handle_push_transition lands a stale record in a scratch
-# state/.wake-queue. Skips cleanly when herdr, jq, or python3 is missing.
+# state/wake/queue. Skips cleanly when herdr, jq, or python3 is missing.
 #
 # Safety (2026-07-02 incident, tests/herdr-test-safety.sh): cleanup uses ONLY
 # herdr_safe_stop_and_delete on a private fm-lab-* session, never a bare/ambient
@@ -126,10 +126,10 @@ export FM_ROOT_OVERRIDE="$ROOT"
 . "$ROOT/bin/fm-push-transition-lib.sh"
 wake() { return 0; }
 handle_push_transition herdr "$SESSION" "$REC"
-[ -e "$STATE/.wake-queue" ] || fail "handle_push_transition did not create the wake queue"
-grep -q 'stale' "$STATE/.wake-queue" || fail "the wake queue must carry a stale record: $(cat "$STATE/.wake-queue")"
-grep -q "$TARGET" "$STATE/.wake-queue" || fail "the stale record must name the task window $TARGET"
-grep -q 'herdr: agent blocked' "$STATE/.wake-queue" || fail "the stale payload must name the herdr-blocked cause"
+[ -e "$STATE/wake/queue" ] || fail "handle_push_transition did not create the wake queue"
+grep -q 'stale' "$STATE/wake/queue" || fail "the wake queue must carry a stale record: $(cat "$STATE/wake/queue")"
+grep -q "$TARGET" "$STATE/wake/queue" || fail "the stale record must name the task window $TARGET"
+grep -q 'herdr: agent blocked' "$STATE/wake/queue" || fail "the stale payload must name the herdr-blocked cause"
 pass "real herdr: the watcher fast-path enqueues a stale wake naming the task window from the live blocked transition"
 
 cleanup_all

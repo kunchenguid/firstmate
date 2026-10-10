@@ -69,7 +69,7 @@ test_unacknowledged_recovery_is_announced_once_per_generation() {
   repo="$TMP_ROOT/t1-root"
   home="$TMP_ROOT/t1-home"
   fakebin="$TMP_ROOT/t1-fakebin"
-  mkdir -p "$repo/bin" "$home/state" "$home/config" "$fakebin"
+  mkdir -p "$repo/bin" "$home/state/wake" "$home/config" "$fakebin"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$fakebin/tmux" <<'SH'
@@ -88,9 +88,9 @@ exec "$ROOT/bin/fm-watch-arm.sh" "\$@"
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   : > "$home/state/seed.meta"
-  printf 'pending:downtime:seed.1.aaa\n' > "$home/state/.watcher-down"
-  chmod 600 "$home/state/.watcher-down"
-  printf '%s\t1\tcheck\tseed\tcheck: seed recovery\n' "$(date +%s)" > "$home/state/.wake-queue"
+  printf 'pending:downtime:seed.1.aaa\n' > "$home/state/wake/watcher-down"
+  chmod 600 "$home/state/wake/watcher-down"
+  printf '%s\t1\tcheck\tseed\tcheck: seed recovery\n' "$(date +%s)" > "$home/state/wake/queue"
   out=$(
     PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
       FM_STATE_OVERRIDE="$home/state" PATH="$fakebin:$PATH" \
@@ -140,7 +140,7 @@ try {
 } catch {
   throw new Error(`successor watcher ${lockPid} is not alive`);
 }
-const marker = readFileSync(`${process.env.FM_HOME}/state/.watcher-down`, "utf8").trim();
+const marker = readFileSync(`${process.env.FM_HOME}/state/wake/watcher-down`, "utf8").trim();
 if (!marker.startsWith("announced:") && !marker.startsWith("pending:")) {
   throw new Error(`successor did not keep a live recovery episode: ${marker}`);
 }
@@ -176,8 +176,8 @@ test_handling_successor_does_not_go_blind() {
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
   : > "$state/crew.meta"
-  printf 'pending:downtime:gap.1.aaa\n' > "$state/.watcher-down"
-  chmod 600 "$state/.watcher-down"
+  printf 'pending:downtime:gap.1.aaa\n' > "$state/wake/watcher-down"
+  chmod 600 "$state/wake/watcher-down"
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
@@ -209,13 +209,13 @@ test_handling_successor_does_not_go_blind() {
   fi
   grep -F 'crew.status' "$out" >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not name the crew status file: $(cat "$out")"; }
-  grep "$(printf '\tsignal\tcrew.status\t')" "$state/.wake-queue" >/dev/null \
+  grep "$(printf '\tsignal\tcrew.status\t')" "$state/wake/queue" >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not enqueue a durable row for the crew event"; }
   ! grep -F 'check: rearm-resurface' "$out" >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor emitted synthetic recovery instead of supervising: $(cat "$out")"; }
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf 'T2_WATCH_OUTPUT=%s\n' "$(tr '\n' ' ' < "$out")"
-    printf 'T2_QUEUE_ROW=%s\n' "$(grep "$(printf '\tsignal\tcrew.status\t')" "$state/.wake-queue" | tail -1)"
+    printf 'T2_QUEUE_ROW=%s\n' "$(grep "$(printf '\tsignal\tcrew.status\t')" "$state/wake/queue" | tail -1)"
   fi
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true

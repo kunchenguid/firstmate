@@ -181,7 +181,7 @@ poll_has_publication_evidence() {
   then
     return 0
   fi
-  if [ -s "$STATE/.wake-queue" ] && grep -q $'\tcheck\tmail:' "$STATE/.wake-queue"; then
+  if [ -s "$STATE/wake/queue" ] && grep -q $'\tcheck\tmail:' "$STATE/wake/queue"; then
     return 0
   fi
   if [ -f "$STATE/.mail-woken" ]; then

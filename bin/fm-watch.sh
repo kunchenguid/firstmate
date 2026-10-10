@@ -237,7 +237,7 @@ WATCH_HOME_EXISTED=0
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
-WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
+WATCHER_DOWNTIME_MARKER="$FM_WATCHER_DOWN"
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -834,25 +834,41 @@ recorded_windows() {
 # pause cadence already owns that bounded visibility, and blocked waits remain
 # actionable because they do not carry this declaration. This is a read-only
 # observation: the receiving home owns acknowledgement and this parent never
-# changes the row or the foreign queue.
-secondmate_oldest_queue_row() {  # <queue-path>
-  local queue=$1
-  [ -f "$queue" ] && [ ! -L "$queue" ] || return 0
+# changes the row or the foreign queue. Each queue file is ordered by its own
+# sequence; across several files the earliest such row wins, and the first file
+# wins a tie.
+secondmate_oldest_queue_row() {  # <queue-path>...
+  local n=$# queue
+  for queue in "$@"; do
+    if [ -f "$queue" ] && [ ! -L "$queue" ]; then set -- "$@" "$queue"; fi
+  done
+  shift "$n"
+  [ "$#" -gt 0 ] || return 0
   awk -F '\t' '
     function declared_external_pause(kind, payload) {
       return kind == "stale" \
         && payload ~ /^stale: .*\(paused [0-9]+s, awaiting external - declared (pause,|paused\))/
     }
+    FNR == 1 { file++ }
     NF >= 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ \
       && !declared_external_pause($3, $5) {
-      if (!found || $2 < seq) {
-        found = 1
-        seq = $2
-        row = $0
+      if (!(file in seq) || $2 < seq[file]) {
+        seq[file] = $2
+        epoch[file] = $1
+        row[file] = $0
       }
     }
-    END { if (found) print row }
-  ' "$queue" 2>/dev/null || true
+    END {
+      for (f = 1; f <= file; f++) {
+        if ((f in seq) && (!found || epoch[f] < best)) {
+          found = 1
+          best = epoch[f]
+          out = row[f]
+        }
+      }
+      if (found) print out
+    }
+  ' "$@" 2>/dev/null || true
 }
 
 # 0 iff <task> is demonstrably inside an active turn, through the watcher's own
@@ -953,7 +969,7 @@ secondmate_ring_to_drain() {  # <task> <window>
 # foreign queue.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker progress_marker ring_marker progress observed_at observed_key
+  local meta task kind remote_host home row epoch seq row_key marker progress_marker ring_marker progress observed_at observed_key
   local receipt receipt_dir notify_key queued idle reason episode_alerted already_rung w
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -969,8 +985,11 @@ secondmate_wake_stall_tick() {
     [ -n "$home" ] || continue
     [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || continue
     [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] || continue
-    queue="$home/state/.wake-queue"
-    row=$(secondmate_oldest_queue_row "$queue")
+    # An older process in a mate mid-update still appends to the legacy
+    # state/.wake-queue, and a fold in progress holds rows in legacy-fold
+    # claims, so all are read; only the mate's own code moves rows between them.
+    row=$(secondmate_oldest_queue_row "$home/state/wake/queue" "$home/state/.wake-queue" \
+      "$home"/state/wake/legacy-fold.*)
     marker="$STATE/.secondmate-wake-stall-$task"
     progress_marker="$STATE/.secondmate-wake-progress-$task"
     ring_marker="$STATE/.secondmate-wake-ring-$task"
@@ -2015,6 +2034,37 @@ scan_signals() {
   return 0
 }
 
+# Announce each pending captain-inbox note saved with `fm-inbox.sh note
+# --no-announce`: its sandboxed caller holds only state/inbox, so the wake is
+# appended here through `fm-inbox.sh announce`, the one owner of the wake row
+# and its announcement marker. A note without announce_marker=1 predates the
+# marker and already woke firstmate. Every read of an importer-written note is
+# time-bounded, and a timeout ends this poll's scan. Prints the announced ids.
+inbox_announce_pending() {
+  local note id rc header announced="$STATE/inbox/.announced"
+  if [ -e "$announced" ] || [ -L "$announced" ]; then
+    [ -d "$announced" ] && [ ! -L "$announced" ] || return 0
+  fi
+  for note in "$STATE"/inbox/*.note; do
+    [ -f "$note" ] && [ ! -L "$note" ] || continue
+    id=${note##*/}
+    id=${id%.note}
+    case "$id" in ''|-*|*[!A-Za-z0-9._-]*) continue ;; esac
+    [ ! -e "$announced/$id" ] && [ ! -L "$announced/$id" ] || continue
+    _fm_wake_require_timeout || return 0
+    rc=0
+    header=$(fm_run_timed 5 sed -n '/^--$/q;/^announce_marker=1$/p' "$note" 2>/dev/null) || rc=$?
+    ! fm_timed_out "$rc" || return 0
+    [ -n "$header" ] || continue
+    rc=0
+    fm_run_timed 5 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-inbox.sh" announce "$id" >/dev/null 2>&1 || rc=$?
+    ! fm_timed_out "$rc" || return 0
+    [ "$rc" -ne 0 ] || printf ' %s' "$id"
+  done
+  return 0
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -2781,6 +2831,9 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+
+  inbox_announced=$(inbox_announce_pending)
+  [ -z "$inbox_announced" ] || wake "check: captain inbox note announced:$inbox_announced"
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
