@@ -3,7 +3,8 @@
 # Usage: fm-config-push.sh [--help]
 #
 # Mid-session convergence for inherited local material such as
-# config/crew-dispatch.json, config/backend, or data/captain-shared.md updates.
+# config/crew-dispatch.json, config/worker-writing-style.md, config/backend, or
+# data/captain-shared.md updates.
 # This discovers live secondmate homes from state/*.meta, backfills
 # home= from data/secondmates.md for older meta records, and reuses the same
 # propagation machinery as bootstrap, but deliberately does not

@@ -107,6 +107,11 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Read worker-writing-style.md from ${FM_CONFIG_OVERRIDE:-$FM_HOME/config}.
+# With non-blank content, each new scaffold includes that content under one
+# Worker writing style heading; see docs/configuration.md "Worker writing style"
+# for scope. An absent file and one with no non-blank content both stay silent,
+# so the scaffold keeps its pre-writing-style bytes.
 # Ship tasks include a project-memory section bounding crewmate edits to a
 # project's AGENTS.md/CLAUDE.md: only corrections of factually wrong
 # information, including wrong information the task itself introduced - never
@@ -387,6 +392,22 @@ if [ -e "$CONFIG/wait-no-turns" ]; then
 fi
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+WRITING_STYLE_SECTION=
+WRITING_STYLE_FILE="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/worker-writing-style.md"
+if [ -f "$WRITING_STYLE_FILE" ] && grep -q '[^[:space:]]' "$WRITING_STYLE_FILE"; then
+  WRITING_STYLE_CONTENT=$(cat "$WRITING_STYLE_FILE")
+  IFS= read -r -d '' WRITING_STYLE_SECTION <<EOF || true
+# Worker writing style
+$WRITING_STYLE_CONTENT
+EOF
+  if [ "$KIND" = secondmate ]; then
+    WRITING_STYLE_SECTION="$WRITING_STYLE_SECTION
+
+At every intake, read \`\$FM_HOME/config/worker-writing-style.md\` and apply its current contents. If the file is absent, use the embedded rules above as the fallback."
+  fi
+  WRITING_STYLE_SECTION=${WRITING_STYLE_SECTION%$'\n'}
+fi
+
 # How a crewmate or scout waits. Every model turn resends the whole context, so
 # a wait must cost no turns: a decision wait ends the turn, and an external
 # wait sleeps in one bounded blocking shell command sized to the harness.
@@ -434,7 +455,10 @@ fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
 
-# Charter
+${WRITING_STYLE_SECTION:+$WRITING_STYLE_SECTION
+
+
+}# Charter
 $SECONDMATE_CHARTER
 
 # Routing scope
@@ -602,7 +626,10 @@ fi
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-$TASK_SECTION
+${WRITING_STYLE_SECTION:+$WRITING_STYLE_SECTION
+
+
+}$TASK_SECTION
 
 $HERDR_SECTION
 
@@ -673,7 +700,10 @@ DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-$TASK_SECTION
+${WRITING_STYLE_SECTION:+$WRITING_STYLE_SECTION
+
+
+}$TASK_SECTION
 
 $HERDR_SECTION
 
