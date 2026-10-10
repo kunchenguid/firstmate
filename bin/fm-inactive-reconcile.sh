@@ -804,7 +804,7 @@ handoff_write_cursor() {
 handoff_one() {
   local id=$1 meta=$2 timeout=$3 status kind mode incarnation line verb fingerprint observed record known ordinal=0
   local line_clean matching_fp matching_count candidate_claimed collision
-  local -a open_fps=() stored_fps=() claimed_fps=()
+  local -a open_fps=() stored_fps=() claimed_fps=() matching_fps=()
   local now age key alerted last_alert state_line state_rc path item fp
   local clearer_epoch marker proof='' reason='' evidence_rc=0
   status="$STATE/$id.status"
@@ -841,6 +841,7 @@ handoff_one() {
           line_clean=$(clean_field "$line")
           matching_fp=''
           matching_count=0
+          matching_fps=()
           for item in "${stored_fps[@]+"${stored_fps[@]}"}"; do
             fp=${item%%|*}
             known=0
@@ -851,10 +852,21 @@ handoff_one() {
             [ "$(handoff_value "$(handoff_record_path "$fp")" completion_line)" = "$line_clean" ] || continue
             matching_fp=$fp
             matching_count=$((matching_count + 1))
+            matching_fps+=("$item")
           done
           if [ "$matching_count" -eq 1 ]; then
             fingerprint=$matching_fp
           elif [ "$matching_count" -gt 1 ]; then
+            for item in "${matching_fps[@]}"; do
+              fp=${item%%|*}
+              observed=${item#*|}
+              claimed_fps+=("$fp")
+              known=0
+              for record in "${open_fps[@]+"${open_fps[@]}"}"; do
+                [ "${record%%|*}" = "$fp" ] && known=1
+              done
+              [ "$known" -eq 1 ] || open_fps+=("$fp|$observed")
+            done
             continue
           elif [ "$candidate_claimed" -eq 1 ]; then
             collision=1
@@ -1029,7 +1041,7 @@ scan() {
   if [ "$handoff_rc" -eq 0 ]; then
     handoff_write_cursor '' || return 1
   elif [ "$handoff_rc" -eq 3 ]; then
-    return 0
+    :
   else
     return "$handoff_rc"
   fi
