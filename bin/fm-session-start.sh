@@ -58,7 +58,9 @@
 #                       (FM_SESSION_START_ENDPOINT_TIMEOUT, default 10s) and
 #                       can itself reach the digest's runtime bound.
 #   7. network checks - the result of the deferred network stage started back at
-#                       step 1, harvested WITHOUT waiting for it.
+#                       step 1, harvested WITHOUT waiting for it. If start failed,
+#                       an explicit diagnostic precedes the harvest: an earlier
+#                       report does not confirm a fresh sweep.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
@@ -684,6 +686,7 @@ LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
 LOCK_RC=$?
 printf '%s\n' "$LOCK_OUT"
 READ_ONLY=0
+NETWORK_STAGE_FAILED=0
 if [ "$LOCK_RC" -ne 0 ]; then
   READ_ONLY=1
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
@@ -726,7 +729,7 @@ if [ "$READ_ONLY" -eq 0 ]; then
   NETWORK_STAGE_LOCKED=1
   [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
   "$SCRIPT_DIR/fm-startup-network.sh" start \
-    --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
+    --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || NETWORK_STAGE_FAILED=1
 fi
 
 # --- 2. bootstrap --------------------------------------------------------
@@ -1002,6 +1005,9 @@ if [ "$READ_ONLY" -eq 1 ]; then
   printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
   printf 'has no action they would gate. The session holding the lock runs them.\n'
 else
+  if [ "$NETWORK_STAGE_FAILED" -eq 1 ]; then
+    printf 'NETWORK_CHECKS: fresh startup network checks could not start; the report below does not confirm a fresh sweep. Retry at a later startup.\n'
+  fi
   "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true
 fi
 
