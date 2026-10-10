@@ -2740,6 +2740,12 @@ model_flag_for_harness() {
 write_opencode_worktree_model() {  # <model>
   local model=$1 target
   [ -n "$model" ] && [ "$model" != default ] || return 0
+  # `opencode run --model` documents a provider/model#variant spelling, but the
+  # config's model key is the bare provider/model pair. The variant is a
+  # separate firstmate axis that effort_flag_for_harness already maps onto the
+  # build agent, so the suffix is dropped rather than written into the config,
+  # where opencode would not resolve it.
+  model=${model%%#*}
   # Only a <provider>/<id> pair is a pin; anything else is not a model this can
   # name, and silently writing it would produce a config opencode cannot use.
   case "$model" in
