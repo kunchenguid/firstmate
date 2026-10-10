@@ -305,7 +305,7 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 ### Cleanup endpoint identity
 
-The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every backend supported at that time.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -328,7 +328,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+`fm_backend_validate_task_endpoint` in `bin/fm-backend.sh` owns the current metadata-only validation before backend dispatch; `tests/fm-backend-t3code.test.sh` covers T3 thread bindings.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ### Endpoint close
@@ -352,7 +352,7 @@ ok - fm-teardown: an already-exited endpoint, and a server that is already gone,
 ok - fm_backend_orca_kill: a close its missing CLI never attempted reports the failure instead of a success
 ```
 
-An endpoint that is already legitimately gone returns 0 silently on every arm, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited.
+An endpoint that is already legitimately gone returns 0 silently on every arm covered by this entry, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited.
 The refusal is reached only through a close that could not do its job, and each arm reports only what it can prove:
 
 | Backend | already gone | a close that failed |
@@ -371,10 +371,11 @@ Any other read failure - a momentarily unresponsive server, or a teardown PATH w
 
 Two bounds of the refusal are known and deliberately not closed here.
 
-`--force` overrides it at exactly one site, the generic non-Herdr/non-Orca close.
+`--force` overrides it at exactly one site, the generic close for backends other than Herdr, Orca, and T3 Code.
 That is the only close where continuing is actually reachable: the worktree is already returned by then and nothing after it needs the backend that could not close, so `--force` - the operator's existing authority to discard a task's records - can mean something there.
 A forced run still prints the full diagnosis naming the backend, the target, and that the close failed, so what may survive is never silent.
 It states what `--force` authorizes rather than what will have happened, because a later refusal in the same run - the Herdr confirmed-gone gate, or the inactive-reconcile delivery gate - can still stop it with every record retained.
+T3 Code uses the [native cleanup path](../t3code-backend.md#current-lifecycle-and-safety) instead.
 
 The Orca close refuses under `--force` too.
 The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
@@ -1981,6 +1982,183 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
+
+## T3 Code
+
+### Orchestrator V2 transport
+
+The `/mcp` transport was verified live on 2026-10-08 against `t3 v0.0.46-nightly.20261008.2833` (npm launcher plus native `@t3code/t3-darwin-arm64`), run as a loopback lab server with `T3CODE_TELEMETRY_ENABLED=false`, with Claude Code 2.1.295, codex-cli 0.160.1, node 26.8.2, and treehouse 2.3.0 on macOS arm64.
+That run drove `bin/fm-t3-mcp.mjs` through an earlier standalone wiring of the same helper in a scratch Firstmate home, scratch project, and private Treehouse pool root.
+T3 stable 0.0.45 lacks the `t3_thread_*` tools, and 0.0.46 nightly answers 404 for the pre-V2 `POST /api/orchestration/dispatch` route.
+
+```sh
+bin/fm-t3-mcp.mjs login --url http://127.0.0.1:<port> --access full-access --t3 <t3> --base-dir <t3-base-dir>
+bin/fm-t3-mcp.mjs status
+t3 auth session revoke <id> --base-dir <t3-base-dir>
+```
+
+```text
+{"ok":true,...,"environmentId":"<id>","serverVersion":"0.0.46-nightly.20261008.2833",...,"telemetry":"off"}
+{"ok":true,...,"exists":true,"archived":true,"status":"interrupted","activeRunId":null,...}
+{"ok":false,"error":{"code":"unauthorized",...}}
+```
+
+Measured on that run:
+
+| Step | Result |
+| --- | --- |
+| Spawn, including the Treehouse lease and idle-thread launch | 18.3 s |
+| Spawn return to a Claude scout's `done` line, report, and captain-hold gate | 20.7 s |
+| Inbox steer send to the worker's `handled/` acknowledgement | 8.2 s |
+| Interrupt of a running `python3` tool call, confirmed by `t3_thread_wait` | 3.2 s; the child was gone 2 s later |
+| Teardown, including the archive read-back and slot return | 12.5 s; the slot read `available` afterwards |
+| A Codex `gpt-5.6-luna` scout from spawn to `done` | 43 s; teardown completed |
+
+Live facts the backend relies on:
+
+- `t3_thread_launch` without a message creates an idle thread whose `worktreePath`, `providerInstanceId`, and `runtimeMode` read back exactly as requested, under a T3-assigned `mcp:<uuid>` id.
+- A launch on a path that is not one of the project's git worktrees is refused with `invalid_request`, and no thread is created.
+- `t3_thread_send` with a repeated `clientRequestId` returns the same run instead of a second turn.
+- `t3_thread_interrupt` on an idle thread returns `no_active_run`; on a running turn, `t3_thread_wait` then reports `interrupted`.
+- `t3_thread_organize archive` reads back `archived:true` with `activeRunId:null`, and a later send is refused with `thread_not_sendable`.
+- T3's Claude reads the worktree's `.claude/settings.local.json`: Firstmate's busy and turn-end hooks fired, and a lab commit carried no agent co-author trailer.
+- The listening server's process environment showed `T3CODE_TELEMETRY_ENABLED=false`, so status reported `telemetry: off`.
+- After `t3 auth session revoke`, `t3 auth session list` reported no active sessions and the next helper call was refused as unauthorized.
+- The 0.0.46 nightly binary's schemas offer the `root`, `existing_worktree`, and `worktree` launch workspace strategies, `t3_thread_list` filtered by status per project, and no session-stop tool, which is why a secondmate launches at `root` and `fm-control.sh exit` refuses.
+
+### Adapter wiring on Linux
+
+This backend's own wiring was verified live on 2026-10-10 against `t3 v0.0.46-nightly.20261010.2935` running as the service-managed server on Linux x86_64 (kernel 7.0.0), with Claude Code 2.1.296, codex-cli 0.162.1, node v24.21.0, and treehouse 2.1.0.
+The server ran with telemetry on, so every verb printed the telemetry warning.
+The run used a scratch Firstmate home (`config/backend` `t3code`, a fresh `login` credential, and `config/t3code-instances`), a scratch project with a bare origin, and the default Treehouse pool root.
+
+```sh
+bin/fm-t3-mcp.mjs login --access full-access
+bin/fm-brief.sh lab-scout-1 lab --scout
+bin/fm-spawn.sh lab-scout-1 <home>/projects/lab --scout --model claude-haiku-5-5 --effort low
+bin/fm-send.sh lab-scout-1 "<steer>"
+bin/fm-control.sh lab-scout-3 interrupt
+bin/fm-teardown.sh lab-scout-1
+bin/fm-spawn.sh lab-scout-2 <home>/projects/lab --scout --harness codex --model gpt-6-luna --effort low
+```
+
+| Step | Result |
+| --- | --- |
+| Spawn of a Claude scout, including the Treehouse lease and the launch turn | 2.2 s |
+| Claude scout from spawn to its report | under 30 s |
+| Inbox steer during a running turn | delivered as `steered`; the worker moved `001.msg` to `handled/` and applied it before its `done` line |
+| `fm-control.sh interrupt` during a running `python3` tool call | `interrupt-delivered lab-scout-3 harness=claude backend=t3code verified=agent-alive cancel=confirmed`; the child process was gone 2 s later |
+| Teardown | 2.1 s; the thread read `archived:true` with no active run and the slot read `available` |
+| Codex `gpt-6-luna` scout from spawn to `done` | about 30 s; teardown completed |
+
+Live facts this run added:
+
+- Threads created before the V2 switch keep their plain UUID ids and read through `t3_thread_read` as ordinary idle threads, so a task recorded before the switch keeps a readable endpoint.
+- `t3_thread_read` pages the activity view oldest first from `afterPosition`, and `thread.itemCount` is the visible item count, which is how `capture` reads the tail.
+- `thread-for-root` on the Firstmate home resolved the captain's own T3 thread, whose id is a plain UUID.
+- On Linux the listener's environment is NUL-separated `/proc/<pid>/environ`, which the telemetry probe parses.
+- T3 detaches the provider session after the archive asynchronously, so its Claude or Codex process can still be running in the slot when the archive reads back; teardown's worktree-process reaper ended it for both harnesses before the slot returned.
+
+### Run identity, pending requests, and secondmate retirement
+
+The behavior added after the Orchestrator V2 review was verified live on 2026-10-10 against the same `t3 v0.0.46-nightly.20261010.2935` service-managed server on Linux x86_64, with Claude Code 2.1.296, node v24.21.0, and treehouse 2.1.0.
+It used a fresh scratch `login` credential, a scratch Firstmate home with `config/backend` `t3code`, a scratch project with a bare origin, and a scratch standalone secondmate home; every scratch thread was archived afterwards.
+
+```sh
+bin/fm-t3-mcp.mjs login --access full-access --label fm-review-fixes-scratch
+bin/fm-spawn.sh lab-v2-scout-1 <home>/projects/lab --scout --harness claude --model claude-haiku-5-5 --effort low
+bin/fm-t3-answer.sh lab-v2-scout-1
+bin/fm-t3-answer.sh lab-v2-scout-1 <request-id> '{"Which label should the report use?":"beta"}'
+bin/fm-send.sh lab-v2-scout-1 "<steer starting a 240 s python3 tool call>"
+bin/fm-control.sh lab-v2-scout-1 interrupt
+bin/fm-teardown.sh lab-v2-scout-1
+bin/fm-spawn.sh lab-v2-sm <sm-home> claude --model claude-haiku-5-5 --effort low --backend t3code --secondmate
+bin/fm-teardown.sh lab-v2-sm
+```
+
+The watcher's event wait ran from a scratch script that sources the real watcher for the scratch home and calls `event_wait_or_sleep` with a 10 s interval.
+
+| Step | Result |
+| --- | --- |
+| Spawn of a Claude scout, including the catalog-resolved selection and the `t3_thread_configuration` read-back | 5.6 s; the worktree's `CLAUDE.local.md` carried no pull-request-tool clause |
+| The scout's question through Claude's question tool | the first event-wait cycle returned in 1 s with `stale: <thread> (t3code: agent blocked - waiting on human: T3 question <request-id> pending - read and answer with bin/fm-t3-answer.sh, ...)` |
+| `fm-t3-answer.sh` list, then answer | `pendingRequestCount:1`, `approvals:0`, the question and its `alpha`/`beta` options; the answer landed, the escalation marker cleared, and the next cycle raised no wake |
+| The scout's report | `Report label chosen: beta.` and `done` |
+| Inbox steer starting a 240 s `python3` tool call | sent in 3.7 s; the tool call started |
+| `fm-control.sh interrupt` | `interrupt-delivered lab-v2-scout-1 harness=claude backend=t3code verified=agent-alive cancel=confirmed` in 3.8 s, confirmed on the interrupted run itself; the child was gone 2 s later |
+| Scout teardown | 13.4 s; the reaper ended the late-detaching provider process, the thread read `archived:true` with no active run, and the slot read `available` |
+| Secondmate spawn in a standalone home, charter turn | 4.8 s; the charter turn completed, and an idle Claude provider process stayed rooted in the home |
+| Secondmate retirement | 8.2 s; `teardown: reaping leaked secondmate home process(es) for lab-v2-sm: <pid>` ran after the proven archive and before the home was removed; the provider process was gone and the thread read `archived:true` |
+
+Live facts this run added:
+
+- Claude's question tool in a T3 thread is a `user_input` runtime request: it raises `pendingRequestCount` and is listed, read, and answered through the `t3_pending_request_*` tools, keyed by question text.
+- Every tool in the capability gate, including `orchestrator_capabilities`, `t3_thread_configuration`, and the pending-request tools, is offered to an OAuth `mcp-client`, and the catalog reports `driverKind` per instance (`claudeAgent`, `codex`).
+- A launch's `t3_thread_configuration` reads back the requested instance, model, and options.
+- The provider process of an idle secondmate thread stays running in its home until after the archive reads back.
+
+### Claude pull-request tools
+
+T3's `link_pull_request`, `list_thread_pull_requests`, and `unlink_pull_request` tools crashed a Claude session on a pre-V2 T3 build, so Claude workers were told not to call them.
+On 2026-10-10, against `t3 v0.0.46-nightly.20261010.2935` with Claude Code 2.1.296, a scratch Claude thread (`claudeAgent`, `claude-haiku-5-5`) called all three, linking and unlinking the merged `https://github.com/kunchenguid/firstmate/pull/1`, and its run completed with every call answered.
+That build is `FM_BACKEND_T3CODE_PR_TOOLS_VERIFIED_FROM` in `bin/backends/t3code.sh`; Claude workers on an older or unreadable server keep the clause.
+The opt-in guard repeats the check and fails naming both versions:
+
+```sh
+FM_T3CODE_PR_TOOLS_LIVE=1 FM_CONFIG_OVERRIDE=<home>/config bin/fm-test-run.sh tests/fm-backend-t3code-pr-tools-live-e2e.test.sh
+```
+
+```text
+ok - t3code live: T3 0.0.46-nightly.20261010.2935 with 2.1.296 (Claude Code) (claudeAgent claude-haiku-5-5) ran link_pull_request, list_thread_pull_requests, and unlink_pull_request in a Claude thread without a crash
+```
+
+### Live transport guard
+
+The token-free guard checks the gate, the project catalog, a typed missing-thread read, and the supervisor lookup against the server the configured credential names, and changes nothing there.
+
+```sh
+FM_CONFIG_OVERRIDE=<home>/config bin/fm-test-run.sh tests/fm-backend-t3code-live-e2e.test.sh
+```
+
+```text
+ok - t3 live transport: T3 0.0.46-nightly.20261008.2833 environment <id> passes the gate (telemetry=off)
+```
+
+That result is from the standalone guard of the 2026-10-08 run, which made the same gate and missing-thread checks; refresh it with the command above after signing in.
+
+### Portable regression coverage
+
+```sh
+tests/fm-t3-mcp.test.sh
+tests/fm-backend-t3code.test.sh
+tests/fm-backend.test.sh
+tests/fm-daemon.test.sh
+```
+
+The fake models the T3 protocol facts that hide defects when simplified: cursor paging, the read cap of 100, a wait on the exact run or else the latest by ordinal, an interrupt and an archive whose run ends asynchronously, a send committed before a reply that can be lost, and a pending-request count that includes approvals the question tools cannot see.
+`tests/fm-t3-mcp.test.sh` drives the helper against `tests/t3-fake-server.mjs`: the PKCE sign-in, origin defaults, every gate and credential refusal, real-path project matching, catalog-resolved selection, launch binding and configuration read-back with their uncertain and refused outcomes, send idempotency and the lost-reply verdict, capture and its read cap, exact-run interrupt claims, pending questions, the bounded event wait, the proven archive, and paged supervisor lookup.
+`tests/fm-backend-t3code.test.sh` drives the adapter, spawn, control, watcher, away daemon, and teardown against the same fake: model selection, the status table, kill ordering, per-directory environment, the Claude pull-request-tool version boundary, worker and secondmate spawn, the secondmate credential link, launch-setting refusals, abort and uncertain-launch lease retention, tracked Codex configuration preservation, the exit and relaunch refusals, lost-reply resends through `fm-send.sh`, the push escalation of pending questions and `bin/fm-t3-answer.sh`, failed-run secondmate resume, the secondmate home shutdown barrier for pooled and standalone homes, the wedge and dead-agent paths, and stale-alert retention and re-arming under unknown busy state.
+`tests/fm-backend-t3code.test.sh` also covers the refusal to replace a T3 secondmate whose thread cannot be proven closed, and `tests/fm-secondmate-liveness.test.sh` pins the unchanged best-effort close on tmux.
+`tests/fm-daemon.test.sh` covers discovery precedence and native busy state.
+
+The tracked Codex configuration guard is independent of the transport and passed on 2026-09-15 with `codex-cli 0.154.0` and Python 3.14.7.
+It proves the project model survives, `FM_TASK_ID` reaches `command/exec`, ordinary staging and commits retain the original configuration blob, and teardown restores the original CRLF bytes and Git flag.
+It capability-skips when Codex is absent and fails on absence when explicitly requested:
+
+```sh
+FM_T3_CODEX_CONFIG_LIVE=1 bin/fm-test-run.sh tests/fm-backend-t3code.test.sh
+```
+
+```text
+ok - codex-cli 0.154.0: project config retained; shell FM_TASK_ID=t3codextrk2
+```
+
+### Per-directory environment evidence
+
+Adapter smokes on 2026-09-15, through the pre-V2 transport, established the transport-independent facts this backend still relies on.
+Claude and Codex both received per-directory environment through their native project configuration.
+Claude required the task-worker statement in the worktree's git-excluded `CLAUDE.local.md` to accept the encoded launch brief.
+A Codex mid-turn steer joined the running turn.
 
 ## Codex App host tools
 

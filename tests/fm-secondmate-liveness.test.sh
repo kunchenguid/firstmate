@@ -297,6 +297,7 @@ case "${1:-}" in
     ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    [ "${FM_TEST_FAIL_KILL:-0}" = 1 ] && [ "${1:-}" = kill-window ] && exit 1
     [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
     [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && [ "${1:-}" = new-window ] && exit 1
     [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
@@ -374,6 +375,25 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
     "the shared library did not leave the durable per-mate relaunch record"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+# The T3-only close refusal (fm_secondmate_liveness_relaunch) must leave every
+# other backend on its existing best-effort kill: a tmux close that fails is
+# still followed by the guarded spawn, exactly as before.
+test_sweep_keeps_tmux_best_effort_kill_when_close_fails() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-dead-close-fails)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_TEST_FAIL_KILL=1)
+
+  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" "the close is attempted"
+  assert_not_contains "$out" "could not prove the old" "a non-T3 close failure must not take the T3-only refusal path"
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after confirmed agent absence on existing endpoint" \
+    "the guarded spawn still runs after a failed tmux close, as before"
+  pass "sweep: a tmux secondmate whose close fails keeps the existing best-effort kill and guarded spawn"
 }
 
 test_sweep_skips_mate_whose_liveness_lock_is_held() {
@@ -707,6 +727,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_keeps_tmux_best_effort_kill_when_close_fails
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

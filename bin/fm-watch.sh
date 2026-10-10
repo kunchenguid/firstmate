@@ -76,6 +76,10 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#                          At escalation time a T3 Code thread whose shared
+#                          classification still reads running resets the timer
+#                          while its latest turn boundary is under
+#                          BUSY_TURN_MAX_SECS old (wedge_defer_t3code_running).
 #   stale: <window> (unread firstmate instruction: ...)
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
@@ -387,7 +391,7 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
 # 5c trigger 3: proven-unreliable-at-runtime). A watcher restart re-probes
-# capability, so a transient herdr hiccup self-heals on the next cycle chain.
+# capability, so a transient backend hiccup self-heals on the next cycle chain.
 EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 # Per-process memo for the push-capability probe (fm_backend_events_capable runs
 # a ~220KB `herdr api schema` read, too heavy to repeat every poll). Keyed by
@@ -423,9 +427,8 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-# window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
-# the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
-# verdict returns 0: idle, unknown, and dead all return 1, so a converted
+# window_is_busy: 0 when the semantic busy-state contract (bin/fm-busy-lib.sh)
+# reports busy. Idle, unknown, and dead return 1, so a converted
 # adapter whose semantic state is missing, malformed, stale, or unverified is
 # treated as not-provably-working and surfaces rather than being absorbed.
 # <tail40> is the same bounded capture already read for hashing and is passed
@@ -442,7 +445,10 @@ window_is_busy() {  # <window> <tail40>
     verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
       "${task:-unknown}" "$STATE" "$tail40")
   fi
-  [ "${verdict%% *}" = busy ]
+  case "$verdict" in
+    busy\ *) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 window_kind() {
@@ -514,6 +520,19 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   wake "$reason"
 }
 
+# inbox_steer_busy: the steering-inbox delivery guard. Every backend keeps the
+# recorded task's busy verdict (window_is_busy). T3 Code alone also treats its
+# native uncertainty as busy (fm_busy_is_busy), so a doorbell waits for proven
+# idle; pane staleness elsewhere still needs busy proof.
+inbox_steer_busy() {  # <window> <backend> <task> <tail40>
+  local w=$1 backend=$2 task=$3 tail40=$4
+  if [ "$backend" = t3code ]; then
+    fm_busy_is_busy t3code "$w" "$(window_harness "$w")" "$task" "$STATE" "$tail40"
+  else
+    window_is_busy "$w" "$tail40"
+  fi
+}
+
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
 # bin/fm-task-inbox-lib.sh owns delivery, busy-deferral, retry, and escalation policy.
 # Endpoint and busy checks precede delivery so recovery never types into a busy,
@@ -551,7 +570,7 @@ inbox_steer_check() {  # <window> <task>
   esac
   watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
   tail40=$WATCHER_CAPTURE
-  if window_is_busy "$w" "$tail40"; then
+  if inbox_steer_busy "$w" "$backend" "$task" "$tail40"; then
     [ "$verb" != retry ] || return 0
     if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
       [ -f "$rec" ] || return 0
@@ -1518,7 +1537,10 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # account for its own quiet has nothing to prove through its worktree. The dead-record probe
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would
-# otherwise alarm pays for a backend read.
+# otherwise alarm pays for a backend read. A T3 Code window gets one more
+# consult after those (wedge_defer_t3code_running): its transcript can stay
+# byte-identical through a long tool call, so the shared thread classification
+# is rechecked before active work is reported as a wedge.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1545,6 +1567,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
+        if wedge_defer_t3code_running "$win" "$since_file" "$label" "$age"; then
+          return 0
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
@@ -1558,6 +1583,31 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fi
       ;;
   esac
+}
+
+# wedge_defer_t3code_running: the T3 Code consult of the wedge ladder. A T3
+# window's capture is the thread's messages plus a session line, so it stays
+# byte-identical through a long tool call where a pane would keep repainting;
+# a still-running session is therefore read from the server itself before the
+# quiet transcript is reported. Only the adapter's `running` word defers,
+# covering V2's running turn and waiting post-turn drain. Starting, settled,
+# failed, missing, and unreadable threads keep the unchanged escalation.
+# The deferral is itself bounded by BUSY_TURN_MAX_SECS, measured from the latest
+# run boundary T3 records: a turn or post-turn drain that has lasted that long
+# without a newer boundary escalates like any
+# busy pane past the bound, and a missing turn timestamp never defers.
+# Returns 0 when it has handled the window, 1 to escalate on the unchanged path.
+wedge_defer_t3code_running() {  # <window> <since-file> <triage-label> <idle-age>
+  local win=$1 since_file=$2 label=$3 age=$4 turn_age
+  [ "$(window_backend "$win")" = t3code ] || return 1
+  fm_backend_source t3code || return 1
+  [ "$(fm_backend_t3code_probe "$win")" = running ] || return 1
+  turn_age=$(fm_backend_t3code_turn_age "$win") || return 1
+  [ "$turn_age" -lt "$BUSY_TURN_MAX_SECS" ] || return 1
+  clear_write_tracking "$(window_key "$win")"
+  date +%s > "$since_file"
+  triage_log "absorbed $label (T3 session still running, turn ${turn_age}s, idle ${age}s), timer reset: $win"
+  return 0
 }
 
 # busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
@@ -2349,7 +2399,7 @@ heartbeat_scan_finds_actionable() {
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
-  local windows=()
+  local windows=() t3_windows=()
   while IFS= read -r w; do
     b=$(window_backend "$w")
     fm_backend_has_push "$b" || continue
@@ -2358,7 +2408,13 @@ event_wait_or_sleep() {
     # they are excluded from the fast escalation exactly as the stale loop skips
     # them.
     [ "$(window_kind "$w")" = secondmate ] && continue
-    session=${w%%:*}
+    # T3 Code's bounded wait runs only when no other push backend is recorded,
+    # so adding a T3 task to a herdr home never takes herdr's fast path away.
+    if [ "$b" = t3code ]; then
+      t3_windows+=("$w")
+      continue
+    fi
+    session=$(fm_backend_event_session "$b" "$w")
     if [ -z "$first_backend" ]; then first_backend=$b; first_session=$session; fi
     # One socket connection covers one backend+session; a home normally has a
     # single herdr session. A window in a different backend/session stays on the
@@ -2368,6 +2424,11 @@ event_wait_or_sleep() {
     fi
     windows+=("$w")
   done < <(recorded_windows)
+  if [ "${#windows[@]}" -eq 0 ] && [ "${#t3_windows[@]}" -gt 0 ]; then
+    first_backend=t3code
+    first_session=$(fm_backend_event_session t3code "${t3_windows[0]}")
+    windows=("${t3_windows[@]}")
+  fi
 
   if [ "${#windows[@]}" -eq 0 ]; then
     sleep "$POLL"

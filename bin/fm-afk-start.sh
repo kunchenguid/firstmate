@@ -60,7 +60,21 @@ fm_afk_start_usage() {
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
-  local state=$1
+  local state=$1 line win key
+  # Unknown-state warnings suppress repeats even after delivery. Re-arm only
+  # warnings still in the buffer being discarded, preserving delivered ones.
+  if [ -s "$state/.subsuper-escalations" ]; then
+    _fm_wake_require_classify || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        stale\ persisted\ *s\ \(possible\ wedge\):\ *)
+          win=${line#* (possible wedge): }
+          key=$(window_to_task "$win" "$state" | tr ':/.' '___')
+          rm -f "$state/.subsuper-reported-stale-$key" || return 1
+          ;;
+      esac
+    done < "$state/.subsuper-escalations"
+  fi
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
         "$state/.subsuper-inject-wedged" \

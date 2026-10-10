@@ -816,6 +816,8 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
   esac
+  # T3's synthetic transcript cannot resolve native busy uncertainty.
+  [ "$backend" != t3code ] || { printf 'unknown'; return 0; }
   tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
