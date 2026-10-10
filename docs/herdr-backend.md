@@ -698,6 +698,28 @@ The first agent or shell sample in that window decides.
 No registered status outranks the process view, because an agent killed mid-turn leaves `working` behind just as a quit one leaves `idle`.
 The native busy verdict is verified the same way, so a shell-only pane never reads busy.
 
+### Clearing a stuck registration
+
+A stale registration over a shell-only pane has no sanctioned repair through Herdr's own CLI: the CLI exposes no stop or release subcommand, and `pane release-agent` is dropped outright for an official source/agent pair such as `herdr:pi` with `pi` (Herdr's `HookAgentReleased` handler ignores that pair), so once the registration sticks nothing hand-runnable can clear it.
+
+The socket API's `pane.clear_agent_authority` is the one escape hatch, and `bin/fm-control.sh <task-id> clear-registration` is its only sanctioned caller.
+That verb proves an agent-less shell from the pane's own process view immediately before the request - the same process-level proof the classifier above uses - issues the narrow clear over the recorded session's socket, and reports only the follow-up `agent get` read: a server that accepts and ignores the request reports failure, never success.
+A pane holding a live agent, a foreground command, an editor, or an unreadable process view is refused, in the same direction as the rule above: authority is never stripped from a registration status alone.
+Already-clear is idempotent success.
+The clear only drops hook authority: Herdr's own process-detection record (the one `agent explain` answers for) has no API that drops it, and a nested shell keeps it until that shell exits (measured on 0.9.3 with a real Pi `/quit` under `bash -i`).
+When that record survives, the verb reports `cleared-authority ... detection-record=held` and exits 0, because the pane was just proven an agent-less shell and the classifier above already reads it dead, so `exit` and `relaunch` proceed.
+A follow-up read that fails or is unreadable never reports success: the verb reports the clear unverified and exits nonzero.
+The shell proof cannot stop someone starting an agent in the pane between the proof and the request, so a follow-up read that finds the registration over a live agent is described from fresh reads of the registration and the pane, never from the old agent's session.
+A registration still holding the session it held before the clear means the clear did not land, and the verb reports failure without recovery advice.
+A registration holding a different session is the racing agent's own binding, made after the clear and never cleared, so it needs no recovery.
+A registration holding no readable session reports the session ref unknown, because a plain `relaunch` after a dropped binding starts a fresh session and loses that conversation.
+An unreadable or ambiguous state is reported as unverified, pointing at `herdr agent get`, `herdr pane process-info`, and `herdr agent explain` rather than at any resume command.
+
+The clear drops the pane's hook authority and its bound session record; it changes no process, no pane, no tab, no workspace, and no task record, so teardown, closing, and discard still stay with `bin/fm-teardown.sh` and their own guards.
+Dropping the bound session record costs session continuity: a later relaunch of a Pi-family task has no bound reference to hand the replacement as `--session`, so it starts a fresh Pi session instead of resuming the previous conversation.
+Exact flags, verdicts, and refusal wording live in `bin/fm-control.sh`'s header and `bin/backends/herdr.sh`'s `fm_backend_herdr_clear_agent_registration`; `bin/backends/herdr-clear-agent-authority.py` owns the wire request, guarded by the server's own `api schema` read (`fm_backend_herdr_clear_agent_authority_capable`).
+The portable halves are pinned by `tests/fm-backend-herdr.test.sh` (the classifier and the guard, against a canned CLI) and `tests/fm-control-herdr-stuck-registration.test.sh` (both verbs end to end against canned fixtures).
+
 ### Process-view version support
 
 The `pane process-info` subcommand that this process-level proof depends on is present in every supported release client from the 0.7.1 floor upward (measured 2026-09-10 on the pinned 0.7.1, 0.7.3, 0.7.4, and 0.7.5 release clients - [verification](verification/runtime-backends.md) "Stale agent registration").
