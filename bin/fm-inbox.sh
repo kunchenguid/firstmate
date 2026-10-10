@@ -47,8 +47,8 @@
 # the duplicate wake this contract exists to remove. Notes written from here on
 # carry `announce_marker=1`, which is what makes a missing marker mean "not
 # announced" rather than "not known". Receipts report that state as null.
-# A note body is text, not options: only the flags above are parsed, an unknown
-# option starting with `--` is refused, and `--` ends option parsing.
+# A note body is text, not options: only the flags above are parsed, anything
+# else starting with `--` begins the body, and `--` ends option parsing.
 # Human `note`/`list`/`drain` output and exit conventions stay as they were when
 # those flags are omitted: a saved note whose wake fails still exits 1. With
 # --request-id or --json, a saved-but-unannounced note exits 3 so a caller can
@@ -483,8 +483,6 @@ cmd_note() {
         ;;
       --) shift; break ;;
       -h|--help) die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)" ;;
-      ---*) break ;;
-      --*) die "unknown option for note: $1" ;;
       *) break ;;
     esac
   done
