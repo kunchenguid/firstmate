@@ -877,6 +877,20 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+# Closure proof for launch rollback, stricter than the idempotent fm_backend_kill:
+# tmux requires the kill acknowledgement, Herdr also confirms endpoint absence,
+# and unsupported or unproven closure fails so ownership can be retained.
+fm_backend_kill_confirmed() {
+  local backend=$1 target=$2
+  [ -n "$target" ] || return 1
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_kill "$target" --require-ack ;;
+    herdr) fm_backend_herdr_kill "$target" && fm_backend_herdr_endpoint_confirmed_gone "$target" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift
@@ -1019,6 +1033,26 @@ fm_backend_agent_state() {  # <backend> <target>
     herdr) fm_backend_herdr_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
+}
+
+# Startup/spend view, separate from recovery-grade harness attribution.
+# A Herdr agent_not_found verdict can hide an unregistered raw worker; consult
+# pane process evidence before treating it as dead, keeping unattributed running
+# processes ambiguous and unreadable process evidence conservative.
+fm_backend_worker_state() {
+  local backend=$1 target=$2 state
+  state=$(fm_backend_agent_state "$backend" "$target") || state=unreadable
+  if [ "$backend" = herdr ] && [ "$state" = dead ]; then
+    fm_backend_source "$backend" || { printf 'unreadable'; return 0; }
+    fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
+    case "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+      agent) state=alive ;;
+      other) state=ambiguous ;;
+      shell) state=dead ;;
+      *) state=unreadable ;;
+    esac
+  fi
+  printf '%s' "$state"
 }
 
 # Backward-compatible three-state view for existing callers. An
