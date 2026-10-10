@@ -76,8 +76,10 @@
 # arm would, and otherwise this arm owns a fresh cycle as a plain arm does.
 # Recovery restoration follows docs/watcher-continuity.md "Generation reuse";
 # an unconfirmed stop leaves downtime for the fresh cycle's recovery check.
-# Any other watcher, or one that outlives the stop,
-# is attached to exactly as a plain arm attaches.
+# A watcher whose shell holds the TERM past a five-second wait is followed,
+# with the attached line, until it exits or its beacon reaches the stall bound.
+# Any other watcher, or one still alive at that bound, is handled exactly as a
+# plain arm handles it.
 #
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
 # its own supervision cycle on purpose (the supervision host's park boundary,
@@ -548,6 +550,16 @@ if [ "$mode" = stop ]; then
   exit 0
 fi
 
+# Wait up to five seconds for <pid> to exit; fails while it is still alive.
+wait_for_stopped_watcher() {  # <watcher-pid>
+  local i=0
+  while [ "$i" -lt 50 ] && fm_pid_alive "$1"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! fm_pid_alive "$1"
+}
+
 # Stop the watcher the named arm owns, by its locked identity, and wait for it
 # to exit (header, --take-over). Returns 3 after printing the reason that cycle
 # delivered before the stop landed, 0 once it stopped without delivering, and
@@ -560,13 +572,16 @@ take_over_cycle() {  # <watcher-pid> <identity>
   if attached_holder_live "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
   fi
-  i=0
-  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if fm_pid_alive "$pid"; then
-    return 1
+  if ! wait_for_stopped_watcher "$pid"; then
+    # A shell can hold the TERM past that wait (stock macOS bash 3.2 holds it
+    # until a running command substitution exits), and the watcher still dies
+    # of it. Follow the stopped cycle as an attached arm follows a slow holder,
+    # so that stop is restored below rather than left as downtime.
+    report_attached
+    while attached_holder_live "$pid" && [ "$(fm_path_age "$BEAT")" -lt "$STALL_BOUND" ]; do
+      sleep "$ATTACH_POLL"
+    done
+    wait_for_stopped_watcher "$pid" || return 1
   fi
   if cycle_delivered_reason; then
     cycle_log_append unknown unknown taken-over-delivered-wake none

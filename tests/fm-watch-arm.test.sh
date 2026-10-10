@@ -1264,6 +1264,86 @@ test_take_over_preserves_downtime_from_watcher_self_exit() {
   pass "watch-arm: takeover preserves self-exit downtime and surfaces a recovery wake"
 }
 
+# A shell can hold the take-over's TERM past the arm's first wait (stock macOS
+# bash 3.2 holds it until a running command substitution exits). SIGSTOP holds
+# delivery the same way on every platform: the arm reports the cycle it follows,
+# and the TERM lands only on SIGCONT. That stop must still be restored, or the
+# next fresh cycle resurfaces an empty recovery on every turn end. A watcher
+# that dies of anything else while held is a genuine outage and still resurfaces.
+wait_for_arm_line() {  # <arm-out> <fixed-text>
+  local i=0
+  while [ "$i" -lt 300 ]; do
+    grep -qF "$2" "$1" 2>/dev/null && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_take_over_restores_a_stop_whose_term_lands_late() {
+  local dir state fakebin armout owner status
+  dir=$(make_case take-over-late-term)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  start_rearm_arm "$dir" "$state" "$fakebin" "$dir/owner.out" "$$"
+  owner=$ARM_PID
+  SEED_PID=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal take-over "signal: fixture handled by main"
+  ack_wakes "$state" >/dev/null || fail "fixture: main could not acknowledge the handled wake"
+  case "$(cat "$state/.watcher-down" 2>/dev/null)" in acked:*) ;; *) fail "fixture: the episode was not acknowledged" ;; esac
+  kill -STOP "$SEED_PID"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" "$WATCH_ARM" --take-over "$owner" > "$armout" &
+  ARM_PID=$!
+  if ! wait_for_arm_line "$armout" "watcher: attached pid=$SEED_PID"; then
+    kill -CONT "$SEED_PID" 2>/dev/null || true
+    fail "the take-over did not follow a watcher still holding its TERM: $(cat "$armout")"
+  fi
+  kill -CONT "$SEED_PID"
+  wait_for_arm_line "$armout" 'watcher: started pid=' \
+    || fail "the take-over did not own a fresh cycle once the held TERM landed: $(cat "$armout")"
+  ! is_live_non_zombie "$SEED_PID" || fail "the take-over left the watcher it stopped running"
+  grep -q "arm_pid=$owner	watcher_pid=$SEED_PID	.*signal=TERM" "$state/.watch-cycle-exits.log" \
+    || fail "fixture: the held TERM did not end the watcher: $(cat "$state/.watch-cycle-exits.log")"
+  sleep 3
+  is_live_non_zombie "$ARM_PID" || fail "the late take-over resurfaced an empty recovery: $(cat "$armout")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null)" in
+    acked:*) ;;
+    *) fail "the late take-over left downtime: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  grep -q "arm_pid=$ARM_PID	watcher_pid=$SEED_PID	.*reason=taken-over	.*successor=started:" "$state/.watch-cycle-exits.log" \
+    || fail "the ledger does not record the late stop as taken over: $(cat "$state/.watch-cycle-exits.log")"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+
+  # The held watcher dies of something other than the take-over's TERM. Its
+  # owner's shell reports that kill on stderr, which is not under test.
+  start_rearm_arm "$dir" "$state" "$fakebin" "$dir/owner2.out" "$$" 2>/dev/null
+  owner=$ARM_PID
+  SEED_PID=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal take-over "signal: fixture handled by main"
+  ack_wakes "$state" >/dev/null || fail "fixture: main could not acknowledge the second wake"
+  kill -STOP "$SEED_PID"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" "$WATCH_ARM" --take-over "$owner" > "$armout" &
+  ARM_PID=$!
+  if ! wait_for_arm_line "$armout" "watcher: attached pid=$SEED_PID"; then
+    kill -KILL "$SEED_PID" 2>/dev/null || true
+    fail "the take-over did not follow the second held watcher: $(cat "$armout")"
+  fi
+  kill -KILL "$SEED_PID"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+  status=$?
+  expect_code 0 "$status" "a held watcher killed by another signal must resurface cleanly"
+  grep -q '^check: rearm-resurface' "$armout" \
+    || fail "a held watcher killed by another signal did not resurface: $(cat "$armout")"
+  pass "watch-arm: --take-over restores a stop whose TERM lands late and still resurfaces a genuine outage"
+}
+
 test_downtime_marker_does_not_follow_symlink() {
   local dir home state fakebin armout watcher_pid sentinel
   dir=$(make_case downtime-marker-symlink)
@@ -1743,4 +1823,5 @@ test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
+test_take_over_restores_a_stop_whose_term_lands_late
 test_opencode_arm_plugin_decides_with_the_shared_predicate
