@@ -21,6 +21,27 @@ write_merge_marker() {  # <state> <id> <provider> <host> <path> <number>
   chmod 600 "$1/$2.pr-poll-merge-notified"
 }
 
+# The emitted Definition of done is the shared worker interface for briefs and
+# scout promotion, independent of the primary harness or runtime backend.
+test_no_mistakes_worker_starts_validation() {
+  local forge output
+  for forge in none gerrit; do
+    output=$(fm_dod_block no-mistakes self-validate fm/self-validate "$forge") \
+      || fail "$forge: no-mistakes contract failed to render"
+    assert_contains "$output" 'Once your work is committed and your own checks pass, run /no-mistakes yourself' \
+      "$forge: worker must start validation after its own checks"
+    assert_contains "$output" 'Do not report done or stop before validation' \
+      "$forge: worker must continue through validation"
+    assert_not_contains "$output" 'Firstmate will then instruct you' \
+      "$forge: worker must not wait for a validation nudge"
+    assert_contains "$output" 'ask-user findings are never yours to answer' \
+      "$forge: self-start must preserve decision authority"
+    assert_contains "$output" "NEVER pass \`--yes\` (or \`-y\`)" \
+      "$forge: self-start must preserve the unattended-gate ban"
+  done
+  pass "no-mistakes worker starts validation without an early done handoff"
+}
+
 test_scout_done_is_not_gated() {
   local repo wt
   repo="$TMP_ROOT/scout-repo"
@@ -424,6 +445,7 @@ EOF
   pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
 }
 
+test_no_mistakes_worker_starts_validation
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated

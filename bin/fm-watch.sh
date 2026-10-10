@@ -25,7 +25,7 @@
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
+#                          its no-mistakes validation starts. A declared
 #                          external-wait pause or verified captain-held transfer is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
@@ -3110,7 +3110,7 @@ EOF
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's latest status event is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
-          # new entry once firstmate hands it to a no-mistakes validation
+          # new entry once its no-mistakes validation starts
           # (AGENTS.md's sparse status-reporting contract), so the log can
           # keep showing a "done:"/needs-decision/blocked leftover from
           # BEFORE that validation started for the run's entire (possibly
