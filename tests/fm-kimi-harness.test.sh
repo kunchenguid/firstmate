@@ -105,8 +105,20 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows)
+    if [ "${FM_FAKE_KILL_SURVIVES:-no}" = yes ] && [ -f "$FM_FAKE_KILL_ATTEMPTED" ]; then
+      printf '%s\n' "$FM_FAKE_WINDOW_NAME"
+    fi
+    exit 0
+    ;;
+  has-session|new-session|new-window) exit 0 ;;
+  kill-window)
+    if [ "${FM_FAKE_KILL_SURVIVES:-no}" = yes ]; then
+      : > "$FM_FAKE_KILL_ATTEMPTED"
+      exit 1
+    fi
+    exit 0
+    ;;
   send-keys)
     prev=
     literal=
@@ -274,6 +286,9 @@ run_spawn() {
     FM_FAKE_TMUX_VISIBLE_FAILS="${FM_FAKE_TMUX_VISIBLE_FAILS:-no}" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
+    FM_FAKE_KILL_SURVIVES="${FM_FAKE_KILL_SURVIVES:-no}" \
+    FM_FAKE_KILL_ATTEMPTED="$case_dir/kill.attempted" \
+    FM_FAKE_WINDOW_NAME="fm-$id" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
@@ -347,6 +362,8 @@ test_kimi_launch_then_send_is_verified() {
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
+  assert_no_grep 'kill-window' "$CASE_DIR/tmux-calls.log" \
+    "a confirmed kimi spawn closed the worker it just verified"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
 }
 
@@ -718,7 +735,190 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
     "unconfirmed kimi delivery lacked a loud diagnostic"
   assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
+  assert_grep "kill-window -t =firstmate:=fm-$id" "$CASE_DIR/tmux-calls.log" \
+    "unconfirmed kimi delivery left the launched worker running without a task record"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "a proven close kept the failed spawn's provisional record, blocking redispatch"
   pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
+}
+
+test_kimi_gate_failure_keeps_the_record_when_the_close_is_unproven() {
+  local id rec out rc
+  id=kimi-kill-survives-z9
+  rec=$(make_spawn_case killsurvive "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no FM_FAKE_KILL_SURVIVES=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail even when its close is unproven"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "the unproven-close failure lost the gate's own diagnostic"
+  assert_contains "$out" "could not be proven closed" \
+    "the unproven close did not surface its own warning"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "an unproven close let the rollback erase the surviving worker's task record"
+  assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
+    "the kept record lost the supervisor-visible failure"
+  pass "fm-spawn: a gate failure whose close is unproven keeps the surviving worker's record"
+}
+
+# spawn_gate_endpoint_cleanup lives inside the fm-spawn.sh script, so these
+# pins extract it verbatim from the current source and drive it with stubbed
+# seams: fm_backend_kill reports only what the adapter's own contract says
+# each arm can report (fm-backend.sh), fm_backend_herdr_endpoint_confirmed_gone
+# stands in for herdr's structural proof, and spawn_commit_backlog_transition
+# records the backlog In-flight move (its own behavior is pinned by the
+# backlog-transition and success-commit coverage, and FAKE_REAL_DISPATCH=yes
+# runs the real one against a stubbed fm_backlog_atomic_transition instead).
+make_gate_cleanup_case() {  # <name> -> echoes the case dir holding the extracted functions
+  local dir="$TMP_ROOT/$1"
+  mkdir -p "$dir"
+  sed -n '/^spawn_gate_endpoint_cleanup() {/,/^}/p' "$SPAWN" > "$dir/cleanup.sh"
+  sed -n '/^spawn_commit_backlog_transition() {/,/^}/p' "$SPAWN" >> "$dir/cleanup.sh"
+  grep -q '^spawn_gate_endpoint_cleanup() {' "$dir/cleanup.sh" \
+    || fail "could not extract spawn_gate_endpoint_cleanup from $SPAWN"
+  grep -q '^spawn_commit_backlog_transition() {' "$dir/cleanup.sh" \
+    || fail "could not extract spawn_commit_backlog_transition from $SPAWN"
+  printf '%s\n' "$dir"
+}
+
+run_gate_cleanup() {  # <dir> <backend> -> "closed=N pending=N dispatch=N"; warnings in <dir>/warnings
+  local dir=$1 backend=$2
+  (
+    set -u
+    # Exported because the extracted functions sourced below consume them.
+    export BACKEND=$backend T='fakeses:1' ID=gateunit ZELLIJ_TAB_ID=7
+    export RELAUNCH="${FAKE_RELAUNCH:-0}" BACKLOG_TRANSITION="${FAKE_BACKLOG_TRANSITION:-1}"
+    export FM_BACKLOG_TRANSITION_ERROR='fake dispatch refusal'
+    export STATE=$dir DATA=$dir
+    if [ -n "${FAKE_TASKS_AXI_TIMEOUT:-}" ]; then
+      export FM_TASKS_AXI_TIMEOUT=$FAKE_TASKS_AXI_TIMEOUT
+    else
+      unset FM_TASKS_AXI_TIMEOUT
+    fi
+    SPAWN_ENDPOINT_CLOSED=0
+    SPAWN_FRESH_COMMIT_PENDING=1
+    dispatch=0
+    # shellcheck disable=SC1091 # extracted from the current bin/fm-spawn.sh by make_gate_cleanup_case.
+    . "$dir/cleanup.sh"
+    # Stubs override after the source so the real spawn_commit_backlog_transition
+    # stays available to FAKE_REAL_DISPATCH=yes runs.
+    # shellcheck disable=SC2329 # invoked by the extracted function sourced above.
+    fm_backend_kill() {
+      printf '%s\n' "$*" >> "$dir/kill.calls"
+      return "${FAKE_KILL_STATUS:-0}"
+    }
+    # shellcheck disable=SC2329 # invoked by the extracted function sourced above.
+    fm_backend_herdr_endpoint_confirmed_gone() { return "${FAKE_GONE_STATUS:-1}"; }
+    if [ "${FAKE_REAL_DISPATCH:-no}" = yes ]; then
+      # shellcheck disable=SC2329 # invoked by the extracted function sourced above.
+      fm_backlog_atomic_transition() {
+        printf '%s\n' "$1 timeout=${FM_TASKS_AXI_TIMEOUT:-unset}" >> "$dir/transition.calls"
+        return "${FAKE_DISPATCH_STATUS:-0}"
+      }
+    else
+      # shellcheck disable=SC2329 # invoked by the extracted function sourced above.
+      spawn_commit_backlog_transition() { dispatch=$((dispatch + 1)); return "${FAKE_DISPATCH_STATUS:-0}"; }
+    fi
+    spawn_gate_endpoint_cleanup 2> "$dir/warnings"
+    printf 'closed=%s pending=%s dispatch=%s\n' "$SPAWN_ENDPOINT_CLOSED" "$SPAWN_FRESH_COMMIT_PENDING" "$dispatch"
+  )
+}
+
+test_gate_cleanup_unprovable_close_status_keeps_the_record() {
+  local dir backend result zellij_args
+  dir=$(make_gate_cleanup_case gatematrix)
+  # cmux, zellij, and orca still report 0 for a close command that failed
+  # after being accepted (fm-backend.sh's fm_backend_kill contract), and orca
+  # reports failure only for a close its missing CLI never attempted, so no
+  # status of theirs may mark the endpoint closed: the close stays unproven
+  # and the provisional record is kept, exactly as herdr's unproven arm does.
+  for backend in cmux zellij orca; do
+    : > "$dir/kill.calls"
+    result=$(FAKE_KILL_STATUS=0 run_gate_cleanup "$dir" "$backend")
+    assert_contains "$result" "closed=0" "a $backend close-status 0 marked an unproven close proven"
+    assert_contains "$result" "pending=0" "a $backend unproven close left the rollback armed"
+    assert_contains "$result" "dispatch=1" "a $backend kept record left its backlog item Queued"
+    assert_contains "$(cat "$dir/warnings")" "could not be proven closed" \
+      "a $backend unproven close did not surface its warning"
+    [ -s "$dir/kill.calls" ] || fail "a $backend gate failure never attempted the close"
+    [ "$backend" != zellij ] || zellij_args=$(cat "$dir/kill.calls")
+  done
+  assert_equals 'zellij fakeses:1 7 fm-gateunit' "$zellij_args" \
+    "the zellij close lost its recorded tab id or task label"
+  pass "fm-spawn: a close status that cannot prove the endpoint gone keeps the record on cmux, zellij, and orca"
+}
+
+test_gate_cleanup_proven_close_reports_still_trusted() {
+  local dir result
+  dir=$(make_gate_cleanup_case gateproven)
+  # tmux resolves its own close against the window's exact recorded identity,
+  # so its 0 still proves the endpoint gone and the rollback proceeds.
+  result=$(FAKE_KILL_STATUS=0 run_gate_cleanup "$dir" tmux)
+  assert_contains "$result" "closed=1" "a proven tmux close no longer marks the endpoint closed"
+  assert_contains "$result" "pending=1" "a proven tmux close disarmed the rollback"
+  assert_contains "$result" "dispatch=0" "a proven tmux close touched the backlog row"
+  # herdr's best-effort kill is proven structurally: a confirmed-gone read
+  # closes the endpoint, and a surviving pane keeps the record.
+  result=$(FAKE_KILL_STATUS=0 FAKE_GONE_STATUS=0 run_gate_cleanup "$dir" herdr)
+  assert_contains "$result" "closed=1" "a confirmed-gone herdr close no longer marks the endpoint closed"
+  assert_contains "$result" "dispatch=0" "a confirmed-gone herdr close touched the backlog row"
+  result=$(FAKE_KILL_STATUS=0 FAKE_GONE_STATUS=1 run_gate_cleanup "$dir" herdr)
+  assert_contains "$result" "closed=0" "a surviving herdr pane was reported closed"
+  assert_contains "$result" "dispatch=1" "a surviving herdr pane left its backlog item Queued"
+  # tmux's meaningful 1 takes the same kept-record path.
+  result=$(FAKE_KILL_STATUS=1 run_gate_cleanup "$dir" tmux)
+  assert_contains "$result" "closed=0" "a failed tmux close was reported proven"
+  assert_contains "$result" "dispatch=1" "a failed tmux close left its backlog item Queued"
+  pass "fm-spawn: only a proven close report rolls a failed spawn's record back"
+}
+
+test_gate_cleanup_kept_record_moves_the_backlog_row() {
+  local dir result
+  dir=$(make_gate_cleanup_case gaterow)
+  # A kept record pairs with an In-flight row (the invariant
+  # spawn_report_preserved_state verifies), so a later teardown's close never
+  # moves a row that was never dispatched.
+  result=$(FAKE_KILL_STATUS=1 run_gate_cleanup "$dir" tmux)
+  assert_contains "$result" "dispatch=1" "a fresh spawn's kept record never moved its backlog item to In flight"
+  assert_not_contains "$(cat "$dir/warnings")" "could not be moved to In flight" \
+    "a successful In-flight move was reported as failed"
+  # A row that cannot be moved is named in its own warning, never silently
+  # left disagreeing with the kept record.
+  result=$(FAKE_KILL_STATUS=1 FAKE_DISPATCH_STATUS=1 run_gate_cleanup "$dir" tmux)
+  assert_contains "$result" "pending=0" "a failed In-flight move let the rollback erase the kept record"
+  assert_contains "$(cat "$dir/warnings")" "could not be moved to In flight (fake dispatch refusal)" \
+    "a failed In-flight move did not name the Queued row it left behind"
+  # A relaunch's row is already In flight from the original dispatch, and a
+  # home without the automatic transition gate has no row to move: neither
+  # touches the backlog here.
+  result=$(FAKE_KILL_STATUS=1 FAKE_RELAUNCH=1 run_gate_cleanup "$dir" tmux)
+  assert_contains "$result" "dispatch=0" "a relaunch's kept record re-dispatched its backlog item"
+  assert_not_contains "$(cat "$dir/warnings")" "could not be moved to In flight" \
+    "a relaunch's already-In-flight row was reported as unmoved"
+  result=$(FAKE_KILL_STATUS=1 FAKE_BACKLOG_TRANSITION=0 run_gate_cleanup "$dir" tmux)
+  assert_contains "$result" "dispatch=0" "a manual-backend home's kept record touched its backlog"
+  assert_not_contains "$(cat "$dir/warnings")" "could not be moved to In flight" \
+    "a manual-backend home was warned about a row it does not have"
+  pass "fm-spawn: a kept record's backlog item moves to In flight, or the mismatch is named"
+}
+
+test_gate_cleanup_bounds_the_row_move_like_the_commit_point() {
+  local dir result
+  dir=$(make_gate_cleanup_case gatetimeout)
+  # The kept-record path holds the same meta lock as the success commit
+  # point, so its tasks-axi call carries the same bound by construction: the
+  # default lives in the shared commit helper, not at one call site.
+  : > "$dir/transition.calls"
+  result=$(FAKE_KILL_STATUS=1 FAKE_REAL_DISPATCH=yes run_gate_cleanup "$dir" tmux)
+  assert_grep 'dispatch timeout=30' "$dir/transition.calls" \
+    "the kept-record path's backlog move ran without the commit point's tasks-axi bound"
+  assert_contains "$result" "pending=0" "a bounded backlog move let the rollback erase the kept record"
+  : > "$dir/transition.calls"
+  result=$(FAKE_KILL_STATUS=1 FAKE_REAL_DISPATCH=yes FAKE_TASKS_AXI_TIMEOUT=99 run_gate_cleanup "$dir" tmux)
+  assert_grep 'dispatch timeout=99' "$dir/transition.calls" \
+    "an operator's own tasks-axi bound was overridden"
+  pass "fm-spawn: the kept-record path's backlog move carries the commit point's tasks-axi bound"
 }
 
 test_kimi_readiness_gate_precedes_pointer() {
@@ -733,6 +933,8 @@ test_kimi_readiness_gate_precedes_pointer() {
   assert_contains "$out" "kimi did not show a verified ready signal" \
     "kimi readiness failure lacked a loud diagnostic"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent before readiness"
+  assert_grep "kill-window -t =firstmate:=fm-$id" "$CASE_DIR/tmux-calls.log" \
+    "a kimi readiness failure left the launched worker running without a task record"
   jq -e --arg id "$id" 'any(.endpoints[]; .id == $id)' \
     "$HOME_DIR/state/home-summary.json" >/dev/null \
     || fail "kimi readiness failure omitted its durable endpoint from the home summary"
@@ -1139,6 +1341,11 @@ test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
+test_kimi_gate_failure_keeps_the_record_when_the_close_is_unproven
+test_gate_cleanup_unprovable_close_status_keeps_the_record
+test_gate_cleanup_proven_close_reports_still_trusted
+test_gate_cleanup_kept_record_moves_the_backlog_row
+test_gate_cleanup_bounds_the_row_move_like_the_commit_point
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_fresh_worktree_trust_is_answered_and_verified
 test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears

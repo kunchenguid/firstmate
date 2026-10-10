@@ -108,6 +108,11 @@
 # bounded further by a blank row, and an envelope that closed over no glyph row
 # (codex's `permissions: YOLO mode` startup banner) proves nothing and demotes
 # nothing.
+# The Kimi sibling of this rule: Kimi 2.1.1's shell-glyph box never proves a
+# zone, but it pins its status bar and context cell directly below itself, so
+# the staleness probe owns that footer separately through the pair proof at
+# FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT, under the same every-row-demonstrably-
+# furniture standard.
 #
 # COVERAGE: this is exercised for the bordered box and the pi separator pair,
 # the two shapes claude 2.x renders. The opencode left bar is wired in for the
@@ -501,6 +506,28 @@ FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
 # a middle dot. It is consulted only as the boundary BELOW a bare composer,
 # never on the composer row itself.
 FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+# Kimi 2.1.1 pins a two-row status bar DIRECTLY below its bordered composer
+# (2.0.0 left the rows below the box blank): a status row
+# (` Never Ask  K3 thinking: max  …/path  fm/branch`; 2.0.0 drew
+# `auto  K2.7 Coding thinking  /some/path`) and a right-aligned context-usage
+# row (`context: 4% (37.4k/1M)`). Every cell survives ghost stripping (verified
+# live through Herdr on Kimi Code CLI 2.1.1: 38;2;232;168;56 tier,
+# 38;2;224;224;224 model/context, 38;2;136;136;136 path/branch - all at or
+# above the 128 luminance ceiling), so the run reaches the cursorless
+# staleness probe as contiguous unclaimed activity and an idle Kimi composer
+# classified `unknown`, which broke Kimi spawn readiness and brief-delivery
+# confirmation fleet-wide on the cursorless backends (fm-spawn.sh's
+# launch-then-confirm gates take their composer half from this owner).
+# The anchored context cell is the proof; the status row is whatever Kimi
+# draws directly above it (tier, model, effort, path, branch - all
+# version-variable), so the PAIR is the shape, never either row alone: a
+# context cell directly below the box, and a status row with nothing Kimi
+# above it, both stay unclaimed and keep the probe's refusal.
+# Consulted only as the boundary BELOW a selected bordered or left-bar
+# envelope, exactly as the mode hint above: typed text lives inside the box,
+# so rows pinned below it are the harness's own footer or the envelope is
+# stale, and the probe's rejection resumes at the first unclaimed row.
+FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT='^[[:space:]]*context:[[:space:]]*[0-9]+(\.[0-9]+)?%[[:space:]]*\([0-9]+(\.[0-9]+)?[kKmM]?/[0-9]+(\.[0-9]+)?[kKmM]?\)[[:space:]]*$'
 # Pi's footer stats row opens at column 0 with the session cost when every
 # token counter is zero (`$0.000 (sub) 5.4%/272k (auto)` on pi 0.85.1).
 # That leading `$` is a cost cell, not a dead-shell prompt, only when a digit
@@ -1233,6 +1260,35 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_kimi_context: 0 when the trimmed row is Kimi's pinned
+# context-usage cell and nothing else (FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT).
+_fm_composer_row_is_kimi_context() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_KIMI_CONTEXT_RE:-$FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT}" sensitive
+}
+
+# _fm_composer_kimi_footer_pair_at: 0 when rows <n> and <n>+1 of
+# <plain-screen> are Kimi 2.1.1's pinned footer pair below its bordered
+# composer: the status row directly above the anchored context cell (the
+# proof at FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT). The status row's own content
+# is never matched - tier, model, effort, path, branch, and hints are all
+# version-variable - but it must be non-blank, carry no structural edge, and
+# lead with no prompt glyph. Requiring the whole pair is what confines the
+# rule to verified Kimi frames: either row alone below an envelope stays
+# unclaimed activity. Consulted only by the cursorless staleness probe below
+# a selected envelope, where it can only move the probe PAST rows the harness
+# itself pins there; the first unclaimed row keeps the probe's rejection.
+_fm_composer_kimi_footer_pair_at() {  # <plain-screen> <row>
+  local plain=$1 row=$2 trimmed below glyph
+  trimmed=$(_fm_composer_screen_row "$row" "$plain")
+  fm_composer_normalize_trim_var trimmed
+  [ -n "$trimmed" ] || return 1
+  if fm_composer_row_has_edge "$trimmed"; then return 1; fi
+  if fm_composer_leading_prompt_glyph_var glyph "$trimmed"; then return 1; fi
+  below=$(_fm_composer_screen_row "$((row + 1))" "$plain")
+  fm_composer_normalize_trim_var below
+  _fm_composer_row_is_kimi_context "$below"
+}
+
 # _fm_composer_row_is_pi_status: 0 when the trimmed row is Pi's dollar-first
 # footer stats row (FM_COMPOSER_PI_STATUS_RE_DEFAULT above). Furniture below
 # the separated pair; a `$` cost cell must not count as a dead-shell prompt.
@@ -1584,6 +1640,14 @@ _fm_composer_select_cursorless() {
     if [ "$footer" = 1 ] && [ "$FM_COMPOSER_FOOTER_AFTER" = "$boundary" ]; then
       next=$((FM_COMPOSER_FOOTER_LAST + 1))
     fi
+    # Kimi 2.1.1 pins its status bar and context cell DIRECTLY below its
+    # bordered composer - the same harness-owned footer the zone above owns
+    # for glyph-proven envelopes, under a box whose shell-glyph content never
+    # locates one. The walk skips only the whole declared pair; the first
+    # unclaimed row keeps the rejection below.
+    while _fm_composer_kimi_footer_pair_at "$plain" "$next"; do
+      next=$((next + 2))
+    done
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed

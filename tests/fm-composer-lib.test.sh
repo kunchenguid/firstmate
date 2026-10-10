@@ -797,6 +797,56 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
+test_matrix_kimi_status_bar_below_box() {
+  # Kimi 2.1.1's real frames, captured live through Herdr
+  # (`pane read --source visible [--format ansi]`, Kimi Code CLI 2.1.1, herdr
+  # 0.8.2): a two-row status bar pinned DIRECTLY below the bordered composer -
+  # a status row and a right-aligned context-usage row - where 2.0.0 left the
+  # rows below the box blank. That contiguous run failed the cursorless
+  # staleness probe as unclaimed lower activity, so an idle Kimi composer
+  # classified `unknown` on every cursorless backend and fm-spawn.sh's
+  # readiness and brief-delivery gates never confirmed a real delivery
+  # (three failed spawns, 2026-10-02). The plain rows are the captured pane
+  # text verbatim (box rows carry the full 92-column geometry); the styled
+  # frame is the same capture's ANSI bytes, whose dark truecolor borders
+  # (38;2;90;90;90) strip as ghosts while every status-bar cell survives
+  # (38;2;232;168;56 tier, 38;2;224;224;224 model/context, 38;2;136;136;136
+  # path/branch). The typed frame proves a genuinely unsubmitted pointer
+  # still reads pending, never empty.
+  local ready ready_ansi typed delivered box status ctx
+  ready=$'\n ╭──────────────────────────────────────────────────────────────────────────────────────────╮\n │ >                                                                                        │\n ╰──────────────────────────────────────────────────────────────────────────────────────────╯\n Never Ask  K3 thinking: max  …/scratchpad/kimi-repro/kimi-cwd  fm/firstmate-kimi-launcher\n                                                                           context: 0% (0/1M)'
+  ready_ansi=$' \033[0m\033[38;2;90;90;90m╭──────────────────────────────────────────────────────────────────────────────────────────╮\033[0m\n \033[0m\033[38;2;90;90;90m│\033[0m > \033[0m\033[7m \033[0m                                                                                      \033[0m\033[38;2;90;90;90m│\033[0m\n \033[0m\033[38;2;90;90;90m╰──────────────────────────────────────────────────────────────────────────────────────────╯\033[0m\n \033[0m\033[1m\033[38;2;232;168;56mNever Ask\033[0m  \033[0m\033[38;2;224;224;224mK3 thinking: max\033[0m  \033[0m\033[38;2;136;136;136m…/scratchpad/kimi-repro/kimi-cwd\033[0m  \033[0m\033[38;2;136;136;136mfm/firstmate-kimi-launcher\033[0m\n                                                                           \033[0m\033[38;2;224;224;224mcontext: 0% (0/1M)\033[0m'
+  typed=$'\n ╭──────────────────────────────────────────────────────────────────────────────────────────╮\n │ > Read the brief at                                                                      │\n │   /Users/eduardopicazo/.treehouse/firstmate-8bf1b0/1/firstmate/scratchpad/kimi-repro/f   │\n │   ake-brief.md and follow it exactly.                                                    │\n ╰──────────────────────────────────────────────────────────────────────────────────────────╯\n Never Ask  K3 thinking: max  …/scratchpad/kimi-repro/kimi-cwd  fm/firstmate-kimi-launcher\n                                                                           context: 0% (0/1M)'
+  delivered=$'  🌑 · Tip: /goal for multi-step work with a clear finish line\n ╭──────────────────────────────────────────────────────────────────────────────────────────╮\n │ >                                                                                        │\n ╰──────────────────────────────────────────────────────────────────────────────────────────╯\n Never Ask  K3 thinking: max  …/scratchpad/kimi-repro/kimi-cwd  fm/firstmate-kimi-launcher\n                                                                           context: 0% (0/1M)'
+  assert_screen "kimi 2.1.1 idle on herdr" empty "$CAPS_STYLED" "$ready"
+  assert_screen "kimi 2.1.1 idle on zellij" empty "$CAPS_STYLED_NOID" "$ready"
+  assert_screen "kimi 2.1.1 idle on cmux/orca" empty "$CAPS_PLAIN" "$ready"
+  assert_screen "kimi 2.1.1 idle on tmux" empty "$CAPS_TMUX" "$ready" 2
+  assert_screen "kimi 2.1.1 idle ANSI bytes on herdr" empty "$CAPS_STYLED" "$ready_ansi"
+  assert_screen "kimi 2.1.1 typed pointer on herdr" pending "$CAPS_STYLED" "$typed"
+  assert_screen "kimi 2.1.1 typed pointer on zellij" pending "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "kimi 2.1.1 typed pointer on cmux/orca" pending "$CAPS_PLAIN" "$typed"
+  assert_screen "kimi 2.1.1 typed pointer on tmux" pending "$CAPS_TMUX" "$typed" 4
+  assert_screen "kimi 2.1.1 delivered spinner frame on herdr" empty "$CAPS_STYLED" "$delivered"
+  assert_screen "kimi 2.1.1 delivered spinner frame on cmux/orca" empty "$CAPS_PLAIN" "$delivered"
+  # Divergence pins: the anchored context cell is the pair's proof, so losing
+  # it, swapping the pair, or anything below the pair keeps the refusal -
+  # while a varying status row (2.0.0's own shape) still completes the pair.
+  box=$' ╭──────────────────────────────────────────────────────────────────────────────────────────╮\n │ >                                                                                        │\n ╰──────────────────────────────────────────────────────────────────────────────────────────╯'
+  status=' Never Ask  K3 thinking: max  …/scratchpad/kimi-repro/kimi-cwd  fm/firstmate-kimi-launcher'
+  ctx='                                                                           context: 0% (0/1M)'
+  assert_screen "kimi 2.0.0 status row completes the pair" empty "$CAPS_STYLED" "$box"$'\n''auto  K2.7 Coding thinking  /some/path'$'\n'"$ctx"
+  assert_screen "kimi status row without its context anchor" unknown "$CAPS_STYLED" "$box"$'\n'"$status"
+  assert_screen "kimi status row without its context anchor on plain backends" unknown "$CAPS_PLAIN" "$box"$'\n'"$status"
+  assert_screen "kimi context cell alone below the box" unknown "$CAPS_STYLED" "$box"$'\n'"$ctx"
+  assert_screen "kimi context cell alone below the box on plain backends" unknown "$CAPS_PLAIN" "$box"$'\n'"$ctx"
+  assert_screen "kimi footer rows swapped" unknown "$CAPS_STYLED" "$box"$'\n'"$ctx"$'\n'"$status"
+  assert_screen "kimi footer above a dead shell" unknown "$CAPS_STYLED" "$box"$'\n'"$status"$'\n'"$ctx"$'\n''$ '
+  assert_screen "kimi footer above a dead shell on plain backends" unknown "$CAPS_PLAIN" "$box"$'\n'"$status"$'\n'"$ctx"$'\n''$ '
+  assert_screen "unclaimed activity without the anchor stays refused" unknown "$CAPS_STYLED" "$box"$'\n''Working on request...'
+  pass "matrix: kimi 2.1.1's pinned status bar below the box classifies from the captured frames"
+}
+
 test_matrix_claude_inside_zellij_ansi_dump() {
   # Real claude captured through `zellij action dump-screen --ansi`
   # (capability established by the audit): `ESC[m` `❯` U+00A0.
@@ -1037,6 +1087,7 @@ test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
 test_matrix_kimi_bordered_shell_glyph_box
+test_matrix_kimi_status_bar_below_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies

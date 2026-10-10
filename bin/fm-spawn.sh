@@ -4237,6 +4237,7 @@ kimi_wait_for_delivery() {
 kimi_spawn_fail() { # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
+  spawn_gate_endpoint_cleanup
 }
 
 # rovo mirrors kimi's launch-then-send shape exactly: a positional brief is
@@ -4305,24 +4306,63 @@ rovo_wait_for_delivery() {
 rovo_spawn_fail() { # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  spawn_gate_endpoint_cleanup
 }
 
-# The launch-then-confirm gates run after the task record is published, when
-# ORCA_ABORT_CLEANUP is already cleared and neither the abort trap nor a
-# teardown owns this endpoint yet, so a gate failure must close the launched
-# process here or it keeps running as an orphaned autonomous agent outside
-# task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
-# the exact terminal is closed: that stops the CLI while its worktree stays
-# for the record's own teardown, which owns worktree deletion.
-rovo_endpoint_cleanup() {
-  if [ "$BACKEND" = orca ]; then
-    fm_backend_kill orca "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
-    return 0
-  fi
-  local tab_id=
+# kimi, rovo, and agy's launch-then-confirm gates run after the task record
+# is published, when ORCA_ABORT_CLEANUP is already cleared and neither the
+# abort trap nor a teardown owns this endpoint yet, so a gate failure must
+# close the launched process here or it keeps running as an orphaned
+# autonomous agent outside task control: the rollback that follows a failed
+# spawn removes the only durable record that names it. Mirrors
+# fm-teardown.sh's own generic kill call. On orca only the exact terminal is
+# closed: that stops the CLI while its worktree stays for the record's own
+# teardown, which owns worktree deletion.
+# What a backend can prove about the close differs (fm-backend.sh's
+# fm_backend_kill contract): tmux resolves a failed close against the
+# window's exact recorded identity, so its status already proves the outcome,
+# and herdr's best-effort kill is proven structurally through
+# fm_backend_herdr_endpoint_confirmed_gone. The remaining arms still report 0
+# for a close command that failed after being accepted, and orca reports
+# failure only for a close its missing CLI never attempted, so no status of
+# theirs can prove the endpoint gone: their close stays unproven either way.
+# When the close stays unproven the rollback must NOT run: keeping the
+# provisional task record keeps the possibly surviving worker named for
+# recovery, the same accountability the orca abort path keeps through its
+# retained cleanup_recovery record. A kept record must not leave its backlog
+# item Queued either: a fresh spawn's row moves to In flight here exactly as
+# the success commit point moves it, so record and row stay paired the way
+# spawn_report_preserved_state verifies, a later teardown's close never moves
+# a row that was never dispatched, and the possibly surviving worker blocks a
+# duplicate dispatch of the same item. A row that cannot be moved is named in
+# its own warning rather than silently left disagreeing with its record.
+spawn_gate_endpoint_cleanup() {
+  local tab_id='' kill_unproven=0
   [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
-  fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+  case "$BACKEND" in
+    tmux)
+      fm_backend_kill tmux "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || kill_unproven=1
+      ;;
+    herdr)
+      fm_backend_kill herdr "$T" 2>/dev/null || true
+      if fm_backend_herdr_endpoint_confirmed_gone "$T" 2>/dev/null; then
+        SPAWN_ENDPOINT_CLOSED=1
+      else
+        kill_unproven=1
+      fi
+      ;;
+    *)
+      fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
+      kill_unproven=1
+      ;;
+  esac
+  [ "$kill_unproven" -eq 0 ] && return 0
+  SPAWN_FRESH_COMMIT_PENDING=0
+  if [ "$RELAUNCH" -eq 0 ] && [ "$BACKLOG_TRANSITION" = 1 ] &&
+    ! spawn_commit_backlog_transition; then
+    echo "warning: the kept record's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), so its row still reads Queued while its record stays - reconcile the record and its backlog item by hand" >&2
+  fi
+  echo "warning: the endpoint $T of this failed spawn could not be proven closed; keeping its provisional task record so a possibly surviving worker stays named for recovery" >&2
 }
 
 # agy carries its brief on the launch command, so it needs no delivery gate,
@@ -4378,7 +4418,7 @@ agy_wait_for_working() {
 agy_spawn_fail() {  # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  spawn_gate_endpoint_cleanup
 }
 
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
@@ -5156,6 +5196,12 @@ fi
 # point below so every earlier launch-delivery failure remains unwindable.
 spawn_commit_backlog_transition() {
   [ "$BACKLOG_TRANSITION" = 1 ] || return 0
+  # Every caller - the success commit point and the gate-failure kept-record
+  # path alike - holds the task's meta lock across this call, so the bound
+  # lives here rather than at one call site: a hung tasks-axi fails through
+  # the ordinary error plumbing (bin/fm-backlog-transition-lib.sh's
+  # fm_tasks_axi) instead of holding that lock open ended.
+  FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
   fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
 }
 

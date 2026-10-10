@@ -733,6 +733,41 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### 2026-10-04 Kimi Code CLI 2.1.1 status bar through Herdr
+
+Verified on 2026-10-04 on macOS arm64 against Kimi Code CLI 2.1.1 (`kimi --version` prints `2.1.1`; the welcome box draws `Model: K3` and `Version: 2.1.1`) running in an isolated Herdr 0.8.2 lab session, read through Herdr's viewport capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`).
+Kimi 2.1.1 changed the frame below the composer: 2.0.0 left the rows below the bordered `│ > │` box blank, while 2.1.1 pins a two-row status bar directly below it - a status row (` Never Ask  K3 thinking: max  …/path  fm/branch`; the last cell varies, a `ctrl+o expand` hint was observed in another live frame) and a right-aligned `context: N% (used/total)` row (`context: 0% (0/1M)` idle, `context: 4% (37.4k/1M)` mid-turn).
+The box borders are dark truecolor `38;2;90;90;90` (luminance 90, ghost-stripped), while every status-bar cell survives ghost stripping (tier `38;2;232;168;56`, model/context `38;2;224;224;224`, path/branch `38;2;136;136;136`), so the run reaches the cursorless staleness probe as contiguous unclaimed activity.
+
+The failure this closed: three `--harness kimi --backend herdr` spawns on 2026-10-02 failed with `kimi brief pointer delivery was not confirmed` while Kimi had actually received and run the brief (echoed `✨` pointer, context rising to 4%/9%).
+The two-row status bar failed the shared classifier's cursorless staleness probe below the selected box, so the composer classified `unknown` at every stage and `kimi_composer_is_empty` was never true; each failed spawn then also left the launched Kimi pane running without its task record.
+Stage captures (read-only `pane read --source visible [--format ansi]` against the lab pane) through the descriptor above:
+
+```text
+ready / typed / delivered / delivered-late, before the fix:  unknown unknown unknown unknown
+same captures, after the fix:                                empty   pending  empty    empty
+```
+
+The typed stage reading `pending` is the counterweight that keeps a genuinely unsubmitted pointer a failed delivery.
+The fix is the Kimi footer pair rule (`FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT` in `bin/fm-composer-lib.sh`): the anchored context cell is the proof, the status row directly above it is furniture with it, and the box/left-bar staleness probe skips only that whole declared pair before its rejection resumes - the status row's own content is never load-bearing, which the observed `ctrl+o expand` cell variation already justifies, and either row alone below the box stays unclaimed so the exception cannot read another harness's lower activity as Kimi's footer.
+A readiness, submit, or delivery gate failure now also closes the launched endpoint (`spawn_gate_endpoint_cleanup` in `bin/fm-spawn.sh`, shared with rovo and agy), so a failed spawn cannot leave an unsupervised worker behind.
+What the cleanup may trust follows the `fm_backend_kill` contract exactly: tmux resolves its own close against the window's exact recorded identity, so its status proves the outcome, and herdr's best-effort kill is verified structurally through `fm_backend_herdr_endpoint_confirmed_gone`; cmux, zellij, and orca still report 0 for a close command that failed after being accepted (orca reports failure only for a close its missing CLI never attempted), so no status of theirs can prove the endpoint gone and their close stays unproven either way.
+When the close is unproven the spawn keeps the provisional task record instead of rolling it back, so a possibly surviving worker stays named for recovery, and a fresh spawn's backlog item moves to In flight at the same point - the record/row pairing `spawn_report_preserved_state` verifies - so a later teardown's close never moves a row that was never dispatched, and the possibly surviving worker blocks a duplicate dispatch of the same item; a row that cannot be moved is named in its own warning, and the move carries the same `FM_TASKS_AXI_TIMEOUT` bound as the success commit point - the default lives in `spawn_commit_backlog_transition` itself, so every caller under the task's meta lock gets it - so a hung tasks-axi fails through the ordinary error plumbing instead of holding that lock open ended.
+
+The end-to-end proof ran one real spawn against this same install: `bin/fm-spawn.sh <id> <scratch-git-project> --harness kimi --backend herdr --mode local-only --yolo off` with a scratch `FM_HOME` inside the isolated lab session reported `spawned <id> harness=kimi` after the trust dialog was answered and the pointer delivery confirmed, and `bin/fm-teardown.sh <id>` removed the task and its pane.
+A second live run forced the readiness gate to fail after launch (`FM_KIMI_READY_POLLS=1 FM_KIMI_POLL_INTERVAL=0`): the spawn failed with `kimi did not show a verified ready signal before brief delivery`, the cleanup closed the launched lab pane (proven through `fm_backend_herdr_endpoint_confirmed_gone`), and the provisional record rolled back - no surviving worker and no surviving record.
+The live composer-matrix guard's kimi arm passes both reads on this install (`FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh`), before and after the pair rule was confined to the whole pair:
+
+```text
+ok - kimi (2.1.1): real idle composer classifies empty
+ok - kimi (2.1.1): the same idle pane read cursorless is not pending (verdict: empty)
+```
+
+Those guard runs' claude, codex, opencode, and grok arms failed on machine-local launch states unrelated to this change (a broken SessionStart hook dyld and claude's own statusLine, boot frames that never rendered, and a folder-trust dialog the guard correctly refuses; codex's arm passed both reads once its pane booted); every pinned shape for those harnesses still passes in the portable suite.
+`test_matrix_kimi_status_bar_below_box` in `tests/fm-composer-lib.test.sh` carries the captured 2.1.1 frames verbatim (plain and ANSI bytes) and pins the divergences: a varying status row (including 2.0.0's own shape) completes the pair, while the status row or the context cell alone below the box, the swapped pair, a dead shell below the footer, and unclaimed activity without the anchor all stay refused.
+`tests/fm-kimi-harness.test.sh` pins the failure-path cleanup: the unconfirmed-delivery and readiness failures close the launched window and roll the provisional record back, an unproven close keeps that record so the surviving worker stays named, and the verified spawn closes nothing.
+The same suite drives the extracted cleanup across the backend matrix: a cmux, zellij, or orca close status can never mark the endpoint closed (their kept records warn and move the backlog item to In flight), only tmux's meaningful status and herdr's confirmed-gone read roll a failed spawn's record back, a kept record's row moves to In flight or the mismatch is named, a relaunch's already-In-flight row is never re-dispatched, and the row move carries the commit point's tasks-axi bound while an operator's own bound is preserved.
+
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
 
 Verified on 2026-09-20 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.236 running as Firstmate workers in Herdr 0.8.0 panes, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
