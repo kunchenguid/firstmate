@@ -108,6 +108,9 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: due-review <task> <date>
+#                          existing captain hold date reached; delivery stays in
+#                          the wake queue until ordinary acknowledgement
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
@@ -2780,6 +2783,26 @@ while :; do
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
+  fi
+
+  # Dated captain calls may have no worker or status log. Read the backlog only
+  # at the base heartbeat cadence, persisted across restarts, and before signal
+  # exits so a chatty worker cannot starve an independent review. This is a
+  # notification scan only; captain-hold owns date selection and queue receipts.
+  if [ "$(age_of "$STATE/.last-due-review-scan")" -ge "$HEARTBEAT" ]; then
+    touch "$STATE/.last-due-review-scan" || exit 1
+    if due_reviews=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-captain-hold.sh" due-reviews); then
+      [ -z "$due_reviews" ] || wake "$due_reviews"
+    else
+      due_review_status=$?
+      if [ "$due_review_status" = 3 ]; then
+        triage_log "due-review projection unavailable for configured backend"
+      else
+        echo "watcher: due-review scan failed" >&2
+        exit 1
+      fi
+    fi
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).

@@ -335,7 +335,7 @@ Under the away-posture record the exclusion lifts and a check row is offered to 
 `fm-wake-drain.sh` never reclassifies a row itself.
 It filters the queue to the current actor's opaque claim before same-key deduplication, then presents and acknowledges only that actor-local view.
 A missing or empty branch snapshot is refused loudly rather than read as "nothing eligible", because reaching the drain without the non-empty handoff promised by the extension is a wiring bug.
-A branch acknowledgement retires the check-row receipts - inactive-outcome, inactive-reconcile notice, and secondmate stall - of exactly the granted sequences it consumes, so a branch-consumed check is never re-queued by its producer.
+A branch acknowledgement retires the check-row receipts - inactive-outcome, inactive-reconcile notice, secondmate stall, and due-review publication - of exactly the granted sequences it consumes, so a branch-consumed check is never re-queued by its producer.
 Attended, a grant names no check row and each scan finds nothing.
 
 ### Per-actor regression tests

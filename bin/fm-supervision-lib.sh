@@ -38,7 +38,10 @@ fm_sup_stat_mtime() {
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata),
-#                         or a registered custom check
+#                         a registered custom check, or an unhandled dated
+#                         captain review (including future/blocked reviews)
+#   FM_SUP_DATED_REVIEW   true/false - dated reviews need monitoring, or their
+#                         projection cannot be read safely
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -46,8 +49,11 @@ fm_sup_stat_mtime() {
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id beat m age
+  local home data review_status owner
+  owner="${BASH_SOURCE[0]%/*}/fm-captain-hold.sh"
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
+  FM_SUP_DATED_REVIEW=false
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
@@ -77,6 +83,28 @@ fm_supervision_status() {
     || [ "$FM_SUP_SOURCES" -gt 0 ] \
     || [ "$FM_SUP_CHECKS" -gt 0 ]; then
     FM_SUP_NEEDED=true
+  fi
+
+  # Only the otherwise-idle path needs a backlog read. This predicate runs at
+  # startup/turn-end/recovery, never on the watcher's ordinary poll hot path.
+  # Resolve the home from the requested state directory so state-only fixtures
+  # and a sibling-home probe cannot accidentally read the caller's backlog.
+  if [ "$FM_SUP_NEEDED" = false ] && [ -x "$owner" ]; then
+    home=${state%/state}
+    if [ "$home" != "$state" ]; then
+      data="$home/data"
+      [ "${FM_HOME:-}" != "$home" ] || data=${FM_DATA_OVERRIDE:-$data}
+      review_status=0
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+        "$owner" due-reviews --needs-monitoring >/dev/null || review_status=$?
+      # An unreadable backlog must retain supervision so its scan reports the
+      # concrete failure, not silently abandon a potentially dated review.
+      # A known unsupported backend (3) is not evidence of a dated review.
+      if [ "$review_status" != 1 ] && [ "$review_status" != 3 ]; then
+        FM_SUP_NEEDED=true
+        FM_SUP_DATED_REVIEW=true
+      fi
+    fi
   fi
 
   beat="$state/.last-watcher-beat"

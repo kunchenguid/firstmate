@@ -249,6 +249,8 @@ elif [ "$watcher_healthy" = false ]; then
         printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
       elif [ "$checks" -gt 0 ]; then
         printf '●  %s registered custom check(s), but %s.\n' "$checks" "$watcher_cause"
+      elif [ "$FM_SUP_DATED_REVIEW" = true ]; then
+        printf '●  Dated review monitoring is needed, but %s.\n' "$watcher_cause"
       else
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
       fi

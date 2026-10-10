@@ -2300,6 +2300,46 @@ fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff> [<rows-file>]
   ' "$FM_WAKE_QUEUE" 2>/dev/null)
 }
 
+# A due-review receipt records publication, never task completion. Both the
+# publisher and acknowledgement call this under the queue lock: if the publisher
+# died between enqueue and receipt, acknowledgement must save the receipt before
+# removing that row or the next date scan would enqueue it again.
+fm_wake_due_review_receipt_write() { # <due-review:task:date>
+  local key=$1 rest task until root receipt tmp
+  case "$key" in due-review:*) ;; *) return 1 ;; esac
+  rest=${key#due-review:}; task=${rest%:*}; until=${rest##*:}
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$until" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
+  root="$STATE/.due-review-announced"
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  else
+    mkdir -m 700 "$root" || return 1
+  fi
+  receipt="$root/$task.$until"
+  [ ! -L "$receipt" ] || return 1
+  if [ -e "$receipt" ]; then
+    [ -f "$receipt" ] && [ "$(cat "$receipt")" = "$key" ]
+    return "$?"
+  fi
+  tmp=$(mktemp "$root/.receipt.XXXXXX") || return 1
+  if ! printf '%s\n' "$key" > "$tmp" || ! _fm_atomic_replace "$tmp" "$receipt"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fm_wake_commit_due_review_receipts_through() { # <cutoff> <rows-file>
+  local cutoff=$1 rows=$2 key
+  while IFS= read -r key; do
+    fm_wake_due_review_receipt_write "$key" || return 1
+  done < <(awk -F '\t' -v cutoff="$cutoff" -v rows="$rows" '
+    BEGIN { while ((getline line < rows) > 0) owned[line]=1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff && ($2 in owned) \
+      && $3 == "check" && $4 ~ /^due-review:/ { print $4 }
+  ' "$FM_WAKE_QUEUE")
+}
+
 fm_wake_restore_queue() {
   local drained=$1 restore
   restore="$STATE/.wake-queue.restore.$(fm_current_pid)"

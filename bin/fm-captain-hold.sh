@@ -32,6 +32,7 @@
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh diverged
+#   fm-captain-hold.sh due-reviews [--needs-monitoring]
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
 #   fm-captain-hold.sh reconcile note <task-id> --note-file <path>
@@ -56,6 +57,22 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+#
+# `due-reviews` reads existing structured hold dates and queues a check wake for
+# each open captain-held task whose UTC date has arrived. The watcher invokes it
+# at heartbeat cadence, outside ordinary poll reads. Publication receipts under
+# state/.due-review-announced suppress repeat task/date pairs; the existing wake
+# queue retains each unhandled announcement through restart until its ordinary
+# acknowledgement. A new hold date gets its own announcement. This command never
+# changes a task, a hold, or dependency eligibility. Unresolved blockers, as
+# classified by the canonical fleet snapshot, take precedence over the date. `--needs-monitoring` is
+# read-only: exit 0 means an unannounced dated call or a queued due-review wake
+# needs native supervision, 1 means none, and 2 means the read failed. Both
+# forms return 3 for a known unsupported backend, reporting unavailability
+# without changing supervision need. The probe bounds its queue-lock wait with
+# FM_STATUS_PRESENTATION_LOCK_TIMEOUT (default 10 seconds), like wake
+# presentation. It includes future and blocked dates so an otherwise idle home
+# keeps its native watcher.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -2038,6 +2055,97 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+# One notification per task/date, with enqueue-before-receipt ordering under the
+# queue lock. A crash before the receipt retries against the still-queued key;
+# the drain cannot acknowledge between the enqueue and receipt. The queue alone
+# owns pending delivery and acknowledgement, including after a restart.
+announce_due_review() (
+  local id=$1 until=$2 key reason receipts receipt
+  key="due-review:$id:$until"
+  reason="check: due-review $id $until"
+  receipts="$STATE/.due-review-announced"
+  receipt="$receipts/$id.$until"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  trap 'fm_lock_release "$FM_WAKE_QUEUE_LOCK"' EXIT
+  [ ! -L "$receipts" ] && [ ! -L "$receipt" ] || return 1
+  if [ -e "$receipt" ]; then
+    [ -f "$receipt" ] && [ "$(cat "$receipt")" = "$key" ] || return 1
+    return 0
+  fi
+  if ! awk -F '\t' -v key="$key" '$3 == "check" && $4 == key {found=1} END {exit !found}' \
+      "$FM_WAKE_QUEUE" 2>/dev/null; then
+    fm_wake_append_locked check "$key" "$reason" || return 1
+  fi
+  fm_wake_due_review_receipt_write "$key" || return 1
+  printf '%s\n' "$reason"
+)
+
+command_due_reviews() {
+  local data root backend file listing due today id until monitoring=0 queued lock_timeout
+  if [ "${1:-}" = --needs-monitoring ]; then monitoring=1; shift; fi
+  [ "$#" -eq 0 ] || { usage >&2; return 2; }
+  if [ "$monitoring" = 1 ]; then
+    lock_timeout=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
+    case "$lock_timeout" in ''|*[!0-9]*|0) lock_timeout=10 ;; esac
+    queued=$(
+      fm_lock_acquire_wait_bounded "$FM_WAKE_QUEUE_LOCK" "$lock_timeout" || {
+        printf 'fm-captain-hold: due-review queue read exceeded its lock bound\n' >&2
+        exit 2
+      }
+      trap 'fm_lock_release "$FM_WAKE_QUEUE_LOCK"' EXIT
+      fm_wake_queued_keys_locked check
+    ) || return 2
+    case "$queued" in *due-review:*) return 0 ;; esac
+  fi
+  if [ ! -e "$DATA" ] && [ ! -L "$DATA" ]; then
+    [ "$monitoring" = 0 ]; return "$?"
+  fi
+  data=$(fm_backlog_data_absolute "$DATA") || return 2
+  root=$(fm_backlog_root "$data") || return 2
+  backend=$(fm_tasks_axi_backend_resolve "$root") || return 2
+  if [ "$backend" != markdown ]; then
+    printf 'fm-captain-hold: due-review projection unavailable for backend %s\n' "$backend" >&2
+    return 3
+  fi
+  file=$(fm_backlog_file "$data") || return 2
+  # A state-only home has no backlog to announce, and must stay cheap.
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    [ "$monitoring" = 0 ]; return "$?"
+  fi
+  today=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+  today=${today%%T*}
+  case "$today" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *) printf 'fm-captain-hold: invalid review scan date\n' >&2; return 2 ;;
+  esac
+  # Reuse the canonical blocked-before-dated classifier, including missing
+  # blockers. Do not rely on tasks-axi list `blocked`: it can report a dangling
+  # edge as clear. This projection observes no worker, PR, or other home.
+  listing=$(FM_SNAPSHOT_NOW="${today}T00:00:00Z" fm_run_timed 10 \
+    "$SCRIPT_DIR/fm-fleet-snapshot.sh" --backlog-json) \
+    || { printf 'fm-captain-hold: due-review backlog read failed\n' >&2; return 2; }
+  due=$(printf '%s\n' "$listing" | jq -er --argjson monitoring "$monitoring" '
+    if type != "object" or .present != true or (.records | type) != "array" then
+      error("incomplete backlog projection")
+    else [.records[]
+      | select(.structured and .state != "done" and .hold_kind == "captain" and .hold_until != null)
+      | if (.id | test("^[A-Za-z0-9._-]+$")) and (.hold_until | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) then .
+        else error("invalid dated review identity") end
+      | select($monitoring == 1 or .hold_bucket == "live")
+      | [.id,.hold_until] | @tsv] | join("\n")
+    end
+  ') || { printf 'fm-captain-hold: incomplete or unsupported due-review projection\n' >&2; return 2; }
+  while IFS=$'\t' read -r id until; do
+    [ -n "$id" ] || continue
+    if [ "$monitoring" = 1 ]; then
+      [ "$(cat "$STATE/.due-review-announced/$id.$until" 2>/dev/null || true)" = "due-review:$id:$until" ] || return 0
+    else
+      announce_due_review "$id" "$until" || return 2
+    fi
+  done <<< "$due"
+  [ "$monitoring" = 0 ]
+}
+
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
@@ -2050,6 +2158,7 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
   diverged) shift; command_diverged "$@" ;;
+  due-reviews) shift; command_due_reviews "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
