@@ -1149,8 +1149,13 @@ cmd_start() {
       fi
       CLAIM_REG_IDENTITY=$current
     fi
+    # Pin the adopted registration before the lock lets anyone replace it (see
+    # the launch below for why the pin must outlive every poll).
+    exec 7<"$registration" || {
+      fm_procevent_source_lock_release "$id"
+      return 1
+    }
     fm_procevent_source_lock_release "$id" || return 1
-    exec 7<"$registration" || return 1
     return 0
   }
   # The inherited marker keeps the runner and its ordinary children from
@@ -1221,7 +1226,11 @@ cmd_start() {
     2) [ "$extension_owner" -eq 1 ] || rm -f -- "$runner"; exit 0 ;;
     *) die "cannot enforce the source launch floor: $id" ;;
   esac
-  exec 7<&-
+  # Descriptor 7 stays open across the poll and is withheld only from the
+  # source child. Holding the claimed registration open keeps its inode from
+  # being recycled while a concurrent re-arm replaces it, so a later
+  # registration can never take on the identity retire_owned_terminal_source
+  # matches and be deleted as if it were the claimed one.
   if [ "$extension_owner" -eq 1 ]; then
     launch_ready=".$id.$CLAIM_TOKEN.launch-ready"
     launch_reply="$REG/.$id.$CLAIM_TOKEN.launch-reply"
@@ -1235,7 +1244,7 @@ cmd_start() {
       "$FM_PROCEVENT_EXTENSION_VERSION" "$FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION" \
       "$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST" "$FM_PROCEVENT_EXTENSION_BINDING_DIGEST" \
       "$CLAIM_TOKEN" "$runner" "$out" "$$" "$(fm_pid_identity "$$")" "$MAX_OUTPUT_BYTES" \
-      "$launch_ready" -- "${ARGV[@]}" > "$launch_reply" &
+      "$launch_ready" -- "${ARGV[@]}" > "$launch_reply" 7<&- &
     launch_pid=$!
     while [ ! -s "$REG/$launch_ready" ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
     fm_procevent_source_lock_release "$id" \
@@ -1289,7 +1298,7 @@ EOF
       fm_procevent_source_lock_release "$id"
       die "cannot retain the source output boundary: $id"
     }
-    "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
+    "${ARGV[@]}" >&5 5>&- 4<&- 7<&- 2>/dev/null &
     launch_pid=$!
     exec 5>&-
     rm -f -- "$launch_ready"
