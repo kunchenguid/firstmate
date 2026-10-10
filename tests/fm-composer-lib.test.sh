@@ -323,6 +323,102 @@ test_composer_footer_zone_refuses_rather_than_allows() {
   pass "fm_composer_classify_screen: the footer zone only ever refuses, never allows"
 }
 
+# Claude Code 2.1.291 marks the selected row of its slash-command popup with the
+# same `❯` its composer uses, where 2.1.289 drew that row unmarked. The popup
+# renders below the composer's closing rule, so the marked row became a second
+# bare composer and the typed command's own read-back was the whole popup list.
+# The screens are real captures (Herdr 0.8.2, Claude Code 2.1.291 on Haiku 4.5),
+# reduced to the composer, its rules, and the first popup rows with their SGR
+# bytes intact. `slash-only` is the case where the selected row is NOT the typed
+# text, `truncated-name` the one where the row opens with `…` instead of `/`,
+# and `exit-typed-with-notice` carries the notification row Claude draws between
+# the rule and the popup when it runs inside another Claude session.
+test_claude_slash_popup_marked_row_is_not_a_second_composer() {
+  local dir=$ROOT/tests/captures/claude-2.1.291-slash-popup pair name want screen out
+  local claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  for pair in \
+    'exit-typed:/exit' \
+    'exit-typed-with-notice:/exit' \
+    'no-mistakes-typed:/no-mistakes' \
+    'slash-only:/' \
+    'truncated-name:/claude-md-management:claude-md-improver'
+  do
+    name=${pair%%:*}
+    want=${pair#*:}
+    screen=$(cat "$dir/$name.ansi")
+    out=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" = "$want" ] || fail "$name: the composer content must be '$want', not the popup list, got '$out'"
+    out=$(LC_ALL=C FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" = "$want" ] || fail "$name under LC_ALL=C: the composer content must be '$want', got '$out'"
+    assert_screen "$name typed on herdr" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+    assert_screen "$name typed on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  done
+  screen=$(cat "$dir/idle.ansi")
+  assert_screen "an idle composer with no popup stays empty" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  pass "fm_composer_extract_selected_content: Claude 2.1.291's marked popup row is not read as the composer"
+}
+
+test_claude_slash_popup_demotion_only_ever_refuses() {
+  # The popup demotion falls back to the envelope above the marked row, so it
+  # may only fire when that envelope holds typed `/` text and the row has the
+  # popup shape (`/name` or a truncated `…name`, a gap, then a description).
+  # Anything else keeps the old reading, and none of these may ever read empty.
+  local screen out style claude_idle original
+  local rule='────────────────────────'
+  local dir=$ROOT/tests/captures/claude-2.1.291-slash-popup
+  local typed=$'\e[38;2;177;185;249m/exit\e[0m'
+  claude_idle=$(printf 'claude\tidle')
+  original=$(cat "$dir/exit-typed.ansi")
+  # 1. An EMPTY composer with a popup-shaped row below it: a popup cannot be
+  #    open over an empty composer, so the row is not demoted to the empty
+  #    envelope above it.
+  screen=$rule$'\n❯'"$NBSP"$'\n'"$rule"$'\n  ❯ /exit    Exit the CLI\n    /context    Visualize context'
+  assert_screen "an empty composer above a popup-shaped row" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  case "$out" in
+    '/exit Exit the CLI'*) ;;
+    *) fail "the lower row must stay the composer read when the envelope is empty, got '$out'" ;;
+  esac
+  # 2. A numbered-choice dialog row has neither the `/` opening nor the gap.
+  screen=$rule$'\n❯'"$NBSP"$'/exit\n'"$rule"$'\n  ❯ 1. Yes\n    2. No'
+  assert_screen "a numbered choice below a typed command" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  case "$out" in
+    '1. Yes'*) ;;
+    *) fail "a numbered-choice row must stay a bare candidate, got '$out'" ;;
+  esac
+  # 3. A single-spaced `/draft` row has no description gap: a live draft.
+  screen=$rule$'\n❯'"$NBSP"$'/exit\n'"$rule"$'\n  ❯ /draft'
+  assert_screen "a one-word slash draft below a typed command" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = '/draft' ] || fail "a one-word slash draft must stay the composer read, got '$out'"
+  # 4. The envelope's typed text must itself open with `/`.
+  screen=$rule$'\n❯ fix the login bug\n'"$rule"$'\n  ❯ /exit    Exit the CLI'
+  assert_screen "typed prose above a popup-shaped row" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  case "$out" in
+    '/exit Exit the CLI'*) ;;
+    *) fail "typed prose must not license the popup demotion, got '$out'" ;;
+  esac
+  # 5. The envelope's `/` must survive the ghost strip the verdict reads. The
+  #    real 2.1.291 capture with its typed `/exit` restyled dark grey (the
+  #    112;112;112 Claude 2.1.283 drew it in) or SGR 2 dim strips to a bare
+  #    `❯`, so that envelope is no fallback and the marked row keeps its read.
+  for style in $'\e[38;2;112;112;112m' $'\e[2m'; do
+    screen=${original/"$typed"/"$style/exit"$'\e[0m'}
+    [ "$screen" != "$original" ] || fail "the capture's typed /exit was not restyled"
+    assert_screen "a ghost-styled typed command on herdr" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+    assert_screen "a ghost-styled typed command on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  done
+  # 6. A bordered box is no borderless row to fall back to, so a marked row
+  #    directly below one still reads pending.
+  screen=$'transcript line\n╭───────────────────────────╮\n│ ❯ /exit                   │\n╰───────────────────────────╯\n  ❯ /exit    Exit the CLI\n    /context    Visualize context'
+  assert_screen "a typed command in a box above a marked row on herdr" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "a typed command in a box above a marked row on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  pass "fm_composer_classify_screen: the popup demotion needs typed slash text and the popup row shape, and never reads empty"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -1025,6 +1121,8 @@ test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
+test_claude_slash_popup_marked_row_is_not_a_second_composer
+test_claude_slash_popup_demotion_only_ever_refuses
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant

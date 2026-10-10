@@ -4902,7 +4902,9 @@ herdr_wrapped_composer() {  # <text> <width> <drop>
 # sits inside a solid-rule pair (rule above, rule below), exactly as live
 # Claude draws it, with the menu rows below the closing rule; the rules are
 # structural edge rows, so the composer's content block ends there and the
-# menu rows never read as typed text.
+# unmarked menu rows never read as typed text. Claude Code 2.1.291 marks the
+# popup's selected row with a `❯` of its own, which is a different shape; the
+# real captures under tests/captures/claude-2.1.291-slash-popup cover it.
 herdr_popup_composer_screen() {  # <typed-text>
   local i typed=$1 rule
   rule=$(printf '%0.s\xe2\x94\x80' $(seq 1 60))
@@ -5145,6 +5147,98 @@ test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted(
     || fail "the payload proof must use the visible viewport"
   [ "$(grep -c $'\x1f''--lines' "$log")" -eq 0 ] || fail "no composer read may be a bounded --lines tail"
   pass "fm_backend_herdr_send_text_submit: a typed slash command hidden behind its popup is still proven and submitted"
+}
+
+# Claude Code 2.1.291 draws the selected row of its slash-command popup with the
+# same `❯` marker as its composer, so that row was read as a second composer and
+# the popup list as the typed command: fm-control exit and every slash command
+# sent through fm-send judged the payload unsent, cleared it, and reported
+# send-failed. The screens are real captures (Herdr 0.8.2, Haiku 4.5).
+herdr_popup_capture() {  # <name>
+  cat "$ROOT/tests/captures/claude-2.1.291-slash-popup/$1.ansi"
+}
+
+# herdr_popup_capture_with_composer: the real capture <name> with its composer
+# row replaced by <composer-text>, the popup rows below it left exactly as
+# captured. Used for the refusals that must hold while a popup is on screen.
+herdr_popup_capture_with_composer() {  # <name> <composer-text>
+  local name=$1 text=$2
+  {
+    herdr_popup_capture "$name" | sed -n 1p
+    printf '\xe2\x9d\xaf\xc2\xa0%s\n' "$text"
+    herdr_popup_capture "$name" | sed -n '3,$p'
+  }
+}
+
+test_composer_content_claude_2_1_291_marked_popup_row_is_not_the_composer() {
+  local dir log resp fb out pair name want
+  for pair in exit-typed:/exit exit-typed-with-notice:/exit no-mistakes-typed:/no-mistakes; do
+    name=${pair%%:*}
+    want=${pair#*:}
+    dir="$TMP_ROOT/composer-claude-2-1-291-popup-$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    herdr_popup_capture "$name" > "$resp/1.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_content default:w1:p2' "$ROOT" )
+    [ "$out" = "$want" ] || fail "$name: the composer read must be '$want', not the popup list, got '$out'"
+    printf '%s\n' "$out" | grep -F 'Exit the CLI' >/dev/null && fail "$name: the popup list leaked into the composer read"
+    dir="$TMP_ROOT/composer-state-claude-2-1-291-popup-$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    herdr_popup_capture "$name" > "$resp/1.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = pending ] || fail "$name: a typed command above its popup must read pending, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_content: Claude 2.1.291's marked popup row is not read as the typed command"
+}
+
+test_send_text_submit_claude_2_1_291_marked_popup_row_is_proven_and_submitted() {
+  local dir log resp fb out enter_count pair name text
+  for pair in exit-typed:/exit exit-typed-with-notice:/exit no-mistakes-typed:/no-mistakes; do
+    name=${pair%%:*}
+    text=${pair#*:}
+    dir="$TMP_ROOT/submit-claude-2-1-291-popup-$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    herdr_submit_claude_prefix "$resp" "$text"
+    printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+    herdr_popup_capture "$name" > "$resp/4.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+    [ "$out" = empty ] || fail "$name: a typed $text proven above its marked popup row must be submitted, got '$out'"
+    enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+    [ "$enter_count" -eq 1 ] || fail "$name: the proven typed command should be submitted once, sent $enter_count Enter(s)"
+    [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "$name: a proven composer must not be cleared"
+  done
+  pass "fm_backend_herdr_send_text_submit: a slash command behind Claude 2.1.291's marked popup row is proven and submitted"
+}
+
+# The marked popup row must not weaken the head-truncation protection: a
+# composer holding only a suffix, a paste placeholder followed by a literal
+# remainder, or only a prefix of the payload is still refused and cleared while
+# the same popup is on screen.
+test_send_text_submit_claude_2_1_291_popup_still_refuses_a_partial_payload() {
+  local dir log resp fb out enter_count name capture text composer
+  while IFS='|' read -r name capture text composer; do
+    dir="$TMP_ROOT/submit-claude-2-1-291-popup-refuse-$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    herdr_submit_claude_prefix "$resp" "$text"
+    herdr_popup_capture_with_composer "$capture" "$composer" > "$resp/4.out"
+    printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+    [ "$out" = send-failed ] || fail "$name: a partial payload ('$composer') under the popup must report send-failed, got '$out'"
+    enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+    [ "$enter_count" -eq 0 ] || fail "$name: a partial payload must not be submitted, sent $enter_count Enter(s)"
+    [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "$name: the refused partial payload should be cleared with one Ctrl+U"
+  done <<'EOF'
+suffix|no-mistakes-typed|/no-mistakes|mistakes
+placeholder-remainder|no-mistakes-typed|/no-mistakes|[Pasted text #1] mistakes
+prefix|no-mistakes-typed|/no-mistakes now|/no-mistakes
+popup-suffix|exit-typed|/exit|xit
+EOF
+  pass "fm_backend_herdr_send_text_submit: with Claude 2.1.291's popup on screen a suffix, a placeholder plus remainder, or a prefix is still refused and cleared"
 }
 
 # Live Claude Code 2.1.283 draws a recognized typed slash command in muted
@@ -6086,6 +6180,9 @@ test_send_text_submit_accepts_marked_payloads_whose_read_back_drops_u2063
 test_send_text_submit_refuses_marked_digest_missing_its_head
 test_composer_state_claude_slash_popup_pushes_composer_above_tail_window
 test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted
+test_composer_content_claude_2_1_291_marked_popup_row_is_not_the_composer
+test_send_text_submit_claude_2_1_291_marked_popup_row_is_proven_and_submitted
+test_send_text_submit_claude_2_1_291_popup_still_refuses_a_partial_payload
 test_send_text_submit_claude_grey_slash_command_is_proven_and_submitted
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
