@@ -777,6 +777,27 @@ SH
   pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
 }
 
+test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note() {
+  local case_dir out gitlab_url=https://gitlab.com/group/sub/project/-/merge_requests/1663
+  case_dir=$(make_case tasks-axi-close-gitlab)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$gitlab_url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  # Reuse the Gerrit case's pinned refusal of any --pr link that is not a
+  # canonical GitHub pull request.
+  cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitLab task failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left a landed GitLab task's backlog item at $(backlog_row_state "$case_dir"): $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"GitLab merge request $gitlab_url\"" >/dev/null \
+    || fail "closed GitLab backlog item did not record its merge request URL as a note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a landed GitLab close left its pending-close record behind"
+  pass "teardown closes a landed GitLab task with its merge request URL as a note"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -4646,6 +4667,7 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
+test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

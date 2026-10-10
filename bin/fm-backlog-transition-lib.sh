@@ -78,9 +78,9 @@ FM_BACKLOG_CLOSE_REPLAY_RESULT=
 # library does not source fm-tasks-axi-lib.sh does not apply.
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
-# fm-pr-lib.sh owns which URL is a Gerrit change. It is functions and empty
-# globals only, so it is sourced once rather than re-initialising a caller's
-# parsed identity.
+# fm-pr-lib.sh owns which URL is a Gerrit change or a GitLab merge request. It
+# is functions and empty globals only, so it is sourced once rather than
+# re-initialising a caller's parsed identity.
 if ! declare -F fm_pr_url_parse >/dev/null 2>&1; then
   # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
   . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
@@ -517,21 +517,27 @@ fm_backlog_start() {  # <data-dir> <id>
 }
 
 # tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
-# and refuses anything else, so a Gerrit change URL is recorded on the row as a
-# note instead. The subshell keeps the parse from overwriting a caller's
-# FM_PR_* identity.
-fm_backlog_pr_is_gerrit_change() {  # <url>
-  ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
+# and refuses anything else, so a Gerrit change or GitLab merge request URL is
+# recorded on the row as a note instead. Succeeds and prints the note's label
+# for such a URL, fails silently for any other. The subshell keeps the parse
+# from overwriting a caller's FM_PR_* identity.
+fm_backlog_pr_note_label() {  # <url>
+  ( fm_pr_url_parse "$1" || exit 1
+    case "$FM_PR_PROVIDER" in
+      gerrit) printf 'Gerrit change\n' ;;
+      gitlab) printf 'GitLab merge request\n' ;;
+      *) exit 1 ;;
+    esac )
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2 arg previous_arg=''
+  local data=$1 id=$2 arg previous_arg='' label
   local -a done_args=()
   shift 2
   for arg in "$@"; do
-    if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
+    if [ "$previous_arg" = --pr ] && label=$(fm_backlog_pr_note_label "$arg"); then
       done_args[${#done_args[@]}-1]=--note
-      done_args+=("Gerrit change $arg")
+      done_args+=("$label $arg")
     else
       done_args+=("$arg")
     fi
@@ -543,7 +549,7 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
-    --pr) ! fm_backlog_pr_is_gerrit_change "$value" ;;
+    --pr) ! fm_backlog_pr_note_label "$value" >/dev/null ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -558,7 +564,7 @@ fm_backlog_row_artifact_supported() {
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
-  local arg deliverable='' line body new_body tmp
+  local arg deliverable='' line body new_body tmp label
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
@@ -575,11 +581,11 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         fi
         ;;
       --pr)
-        if fm_backlog_row_artifact_supported "$id" --pr "$arg"; then
+        if label=$(fm_backlog_pr_note_label "$arg"); then
+          deliverable="${deliverable:+$deliverable; }$label $arg"
+        else
           deliverable="${deliverable:+$deliverable; }PR $arg"
           row_args=(--pr "$arg")
-        else
-          deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
         fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
