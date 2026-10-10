@@ -16,7 +16,7 @@
 # touches a lane's inbox, its messages, its status log, its metadata, or any
 # other lane state. It writes only its own three records, all under this home's
 # own state directory: the heartbeat, the per-lane error-class and drain
-# journal, and the reported-verdict record that suppresses repeats. It contains
+# journal, and the reported-verdict record that paces repeats. It contains
 # no model call of any kind; every verdict is deterministic.
 #
 # It runs CENTRALLY, in the home that supervises the lanes, and never inside a
