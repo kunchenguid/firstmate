@@ -273,6 +273,60 @@ EOF
   pass "home seed validation rejects nested home routes"
 }
 
+test_home_seed_refuses_held_project_lock() {
+  local home acquired fakebin log lease lock holder rc=0 alive=0 out err i
+  home="$TMP_ROOT/locked-seed-home"
+  acquired="$TMP_ROOT/locked-seed-acquired"
+  mkdir -p "$home/data" "$home/state" "$home/projects"
+  mark_firstmate_home "$acquired"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/locked-seed-fake")
+  log="$TMP_ROOT/locked-seed-fake/tmux.log"
+  lease="$TMP_ROOT/locked-seed-fake/lease"
+  err="$TMP_ROOT/locked-seed.err"
+  lock=$(FM_HOME="$home" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_treehouse_project_lock_path "$1"' _ "$ROOT") \
+    || fail 'could not derive the shared cleanup lock'
+  FM_HOME="$home" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$2" || exit 1
+    trap '\''fm_lock_release "$2"'\'' EXIT
+    touch "$3/ready"
+    while [ ! -f "$3/release" ]; do sleep 0.1; done
+  ' _ "$ROOT" "$lock" "$TMP_ROOT/locked-seed-fake" &
+  holder=$!
+  for i in {1..100}; do
+    [ ! -f "$TMP_ROOT/locked-seed-fake/ready" ] || break
+    sleep 0.1
+  done
+  if [ ! -f "$TMP_ROOT/locked-seed-fake/ready" ]; then
+    touch "$TMP_ROOT/locked-seed-fake/release"
+    wait "$holder" || true
+    fail 'cleanup lock holder did not become ready'
+  fi
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" FM_SECONDMATE_CHARTER='isolated operations' FM_SECONDMATE_SCOPE='isolated operations' \
+    bash "$ROOT/bin/fm-home-seed.sh" locked-seed - --no-projects > "$TMP_ROOT/locked-seed.out" 2> "$err" || rc=$?
+  kill -0 "$holder" 2>/dev/null && alive=1
+  touch "$TMP_ROOT/locked-seed-fake/release"
+  wait "$holder" || fail 'cleanup lock holder failed'
+  [ "$alive" -eq 1 ] || fail 'cleanup lock holder expired before acquisition'
+  [ "$rc" -ne 0 ] || fail 'home seeding acquired during a held cleanup project lock'
+  assert_no_grep 'treehouse get' "$log" 'contended home seeding invoked the allocator'
+  assert_absent "$lease" 'contended home seeding published a lease'
+  assert_absent "$acquired/.fm-secondmate-home" 'contended home seeding assigned the copy'
+  assert_absent "$home/data/secondmates.md" 'contended home seeding published a route'
+  assert_grep 'refusing home acquisition' "$err" 'home acquisition did not explain project contention'
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail 'cleanup project lock was not released'
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" FM_SECONDMATE_CHARTER='isolated operations' FM_SECONDMATE_SCOPE='isolated operations' \
+    bash "$ROOT/bin/fm-home-seed.sh" locked-seed - --no-projects) \
+    || fail 'home seeding failed after cleanup released the project lock'
+  assert_grep "home=$acquired" <(printf '%s\n' "$out") 'successful acquisition did not report its home'
+  assert_equals locked-seed "$(cat "$lease")" 'successful acquisition did not retain its durable lease'
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail 'successful acquisition retained the project lock'
+  pass 'home seeding refuses a held cleanup lock and acquires after its release'
+}
+
 test_home_seed_uses_treehouse_acquired_home() {
   local home acquired acquired_abs fakebin log lease out
   home="$TMP_ROOT/dash-home"
@@ -3031,6 +3085,7 @@ test_home_seed_refuses_unreadable_registry
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
+test_home_seed_refuses_held_project_lock
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_warns_when_acquired_home_return_fails

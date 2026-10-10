@@ -7,7 +7,10 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
+#       "treehouse return". Acquisition takes the shared project allocation/return
+#       lock and refuses contention before requesting a lease, so a new home
+#       cannot lease a slot between cleanup's unleased check and return.
+#       Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
@@ -387,8 +390,19 @@ seeded_origin_url() {
   normalize_origin_url "$dst" "$url"
 }
 
-acquire_treehouse_home() {
-  local id=$1 home
+acquire_treehouse_home() (
+  local id=$1 home lock
+  lock=$(fm_treehouse_project_lock_path "$FM_ROOT") || {
+    echo "error: cannot resolve the shared Treehouse project lock for $FM_ROOT" >&2
+    return 1
+  }
+  fm_lock_try_acquire "$lock" || {
+    echo "error: another Treehouse slot allocation or return is in progress for $FM_ROOT; refusing home acquisition" >&2
+    return 1
+  }
+  trap 'fm_lock_release "$lock"' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
   # Durably lease a firstmate worktree from the pool. The lease persists with no
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
@@ -399,7 +413,7 @@ acquire_treehouse_home() {
   }
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
   printf '%s\n' "$home"
-}
+)
 
 ensure_home() {
   local id=$1 requested=$2 home

@@ -1559,6 +1559,16 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
+# Pool evidence also survives a missing state or mismatched Git common directory,
+# so cleanup can refuse those cases instead of treating them as unmanaged copies.
+fm_treehouse_pool_evidence() {  # <worktree>
+  local slot pool
+  slot=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || return 1
+  pool=$(dirname "$(dirname "$slot")")
+  [ -e "$pool/treehouse-state.json" ] || [ -L "$pool/treehouse-state.json" ] \
+    || [ -e "$(dirname "$slot")/.fm-slot-owner" ] || [ -L "$(dirname "$slot")/.fm-slot-owner" ]
+}
+
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
 # Require both its pool state and the same Git common directory as the recorded
 # project; an ordinary linked worktree is not evidence that Treehouse owns it.
@@ -1576,11 +1586,88 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
+# Print the unique registered spelling of this exact Git worktree. The caller
+# holds the project/task locks and proves task custody before cleanup effects;
+# zero matches, duplicate registrations and unsafe identities refuse.
+# Read state directly: allocator list/status commands may themselves recover slots.
+# Durable leases are outside ordinary task-slot cleanup authority.
+fm_treehouse_registered_path() {  # <project-dir> <worktree>
+  local project=$1 worktree=$2 slot pool state entries path leased resolved top match='' count=0
+  fm_treehouse_pool_slot "$project" "$worktree" || return 1
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  top=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$top" = "$slot" ] && [ -f "$slot/.git" ] && [ ! -L "$slot/.git" ] || return 1
+  pool=$(dirname "$(dirname "$slot")")
+  state="$pool/treehouse-state.json"
+  entries=$(perl -MJSON::PP -e '
+    binmode STDOUT, ":encoding(UTF-8)";
+    local $/;
+    open my $fh, "<", $ARGV[0] or die "cannot read pool state";
+    my $state = JSON::PP->new->utf8->allow_bignum->decode(<$fh>);
+    ref($state) eq "HASH" && ref($state->{worktrees}) eq "ARRAY" or die "invalid pool state";
+    for my $entry (@{$state->{worktrees}}) {
+      ref($entry) eq "HASH" or die "invalid registration";
+      my $path = $entry->{path};
+      defined($path) && !ref($path) && $path =~ m{^/} && $path !~ /[\x00-\x1f\x7f]/
+        or die "unsafe registered path";
+      !exists($entry->{leased}) || JSON::PP::is_bool($entry->{leased}) or die "invalid lease state";
+      for my $field (qw(name lease_id lease_holder)) {
+        next unless defined($entry->{$field});
+        !ref($entry->{$field}) && encode_json($entry->{$field}) =~ /\A"/
+          or die "invalid string field";
+      }
+      !defined($entry->{destroying}) || JSON::PP::is_bool($entry->{destroying})
+        or die "invalid destruction state";
+      for my $field (qw(owner_pid owner_started_at)) {
+        next unless defined($entry->{$field});
+        !ref($entry->{$field}) or die "invalid owner field";
+        my $number = encode_json($entry->{$field});
+        my ($min, $max) = $field eq "owner_pid"
+          ? (-2147483648, 2147483647) : (-9223372036854775808, 9223372036854775807);
+        $number =~ /\A-?(?:0|[1-9][0-9]*)\z/ && $number >= $min && $number <= $max
+          or die "invalid owner field";
+      }
+      for my $field (qw(created_at leased_at)) {
+        next unless defined($entry->{$field});
+        my $time = $entry->{$field};
+        !ref($time) && encode_json($time) =~ /\A"/
+          && $time =~ /\A([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:[.,][0-9]+)?(?:Z|[+-]([0-9]{2}):([0-9]{2}))\z/
+          or die "invalid timestamp";
+        my ($year, $month, $day, $hour, $minute, $second, $zone_hour, $zone_minute) = ($1, $2, $3, $4, $5, $6, $7, $8);
+        my @days = (0, 31, 28 + ($year % 4 == 0 && ($year % 100 != 0 || $year % 400 == 0)), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31);
+        $month >= 1 && $month <= 12 && $day >= 1 && $day <= $days[$month]
+          && $hour <= 23 && $minute <= 59 && $second <= 59
+          && (!defined($zone_hour) || ($zone_hour <= 24 && $zone_minute <= 60))
+          or die "invalid timestamp";
+      }
+      my $holder = $entry->{lease_holder};
+      my $leased = $entry->{leased} || (defined($holder) && $holder ne "");
+      print $path, "\t", ($leased ? "true" : "false"), "\n";
+    }
+  ' "$state" 2>/dev/null) || return 1
+  while IFS=$'\t' read -r path leased; do
+    [ -n "$path" ] || continue
+    case "$path" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
+    resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || continue
+    [ "$resolved" = "$slot" ] || continue
+    [ "$path" -ef "$slot" ] && [ "$leased" = false ] || return 1
+    # A registered alias must preserve the allocator's slot layout as well as
+    # reach the same directory; a symlink directly to the repo is insufficient.
+    resolved=$(CDPATH='' cd -- "$(dirname "$(dirname "$path")")" 2>/dev/null && pwd -P) || return 1
+    [ "$resolved" = "$pool" ] || return 1
+    count=$((count + 1))
+    match=$path
+  done <<< "$entries"
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$match"
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
 # reserves a slot under a label until `treehouse return --if-lease-holder`
-# releases it, and Firstmate uses exactly that for secondmate homes
+# releases it, and Firstmate uses that durable acquisition for secondmate homes
 # (bin/fm-home-seed.sh). Crewmate spawns do not take that path: they acquire
 # their slot through the interactive pane-driven `treehouse get`, whose state
 # entry is a live process lease (owner_pid plus owner_started_at, and `treehouse
@@ -1605,9 +1692,11 @@ fm_treehouse_slot_owner_marker() {  # <worktree>
 }
 
 # Claim a pool slot for a task, replacing whatever the previous holder left.
+# New spawns include the metadata's spawn_gen; relaunch updates it under the
+# same project lock. Legacy claims remain readable without that field.
 # The rename is atomic, so a reader either sees the old claim or the new one.
-fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
-  local worktree=$1 id=$2 home=$3 marker tmp
+fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home> [spawn-gen]
+  local worktree=$1 id=$2 home=$3 gen=${4:-} marker tmp
   [ -n "$id" ] || return 1
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 1
   # Only a plain claim file may be replaced: renaming onto a directory would
@@ -1621,24 +1710,32 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   {
     printf 'task=%s\n' "$id"
     printf 'home=%s\n' "$home"
+    [ -z "$gen" ] || printf 'spawn_gen=%s\n' "$gen"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
 # Read the claim on a pool slot and compare it with a task id.
+# A claim requires exactly one task= line and one nonempty home= line.
+# The optional spawn_gen= and required task= values use task-ID token syntax.
+# Duplicate, unknown or malformed fields are unsafe, including empty tokens.
+# Claims without spawn_gen remain compatible.
 # Sets FM_TREEHOUSE_SLOT_OWNER to one of:
 #   mine   - the claim names this task
 #   other  - the claim names a different task, so the slot was reassigned
 #   absent - no claim: the slot was taken before claims existed, or returned since
 #   unsafe - a claim file exists but cannot be read as a claim
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
-# claimant as evidence. The home is reported, never matched: a home that moved
-# must not turn a task's own slot into a refusal.
+# claimant as evidence, and FM_TREEHOUSE_SLOT_OWNER_GEN carries spawn_gen.
+# This reader reports evidence only; bin/fm-teardown.sh's header owns cleanup
+# custody rules, and bin/fm-spawn.sh's header owns relaunch requirements.
 fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+  local worktree=$1 id=$2 marker line owner_id='' owner_home='' owner_gen='' task_count=0 home_count=0 gen_count=0
+  local LC_ALL=C
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
+  FM_TREEHOUSE_SLOT_OWNER_GEN=
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     FM_TREEHOUSE_SLOT_OWNER=absent
@@ -1647,15 +1744,23 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      task=*) owner_id=${line#task=} ;;
-      home=*) owner_home=${line#home=} ;;
+      task=*) owner_id=${line#task=}; task_count=$((task_count + 1)) ;;
+      home=*) owner_home=${line#home=}; home_count=$((home_count + 1)) ;;
+      spawn_gen=*) owner_gen=${line#spawn_gen=}; gen_count=$((gen_count + 1)) ;;
+      *) return 0 ;;
     esac
   done < "$marker" || return 0
-  [ -n "$owner_id" ] || return 0
+  [ "$task_count" -eq 1 ] && [ "$home_count" -eq 1 ] && [ -n "$owner_home" ] && [ "$gen_count" -le 1 ] || return 0
+  case "$owner_id" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  if [ "$gen_count" -eq 1 ]; then
+    case "$owner_gen" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  fi
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+  FM_TREEHOUSE_SLOT_OWNER_GEN=$owner_gen
   if [ "$owner_id" = "$id" ]; then
     FM_TREEHOUSE_SLOT_OWNER=mine
   else

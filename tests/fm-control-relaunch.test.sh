@@ -12,8 +12,7 @@
 #   3. The progress note is required where the replacement needs it, lands in
 #      the instructions the replacement reads, and never rewrites a charter.
 #   4. A refusal before the agent is stopped changes nothing.
-#   5. A launch failure after the agent is stopped keeps the prior record,
-#      reports the concrete state, and preserves the work.
+#   5. Launch failures cover the rollback contract in docs/agent-control.md.
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
@@ -388,6 +387,147 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "cd -- '$dir/wt'" "$dir/fake/keys" "the replacement launch must enter the recorded worktree"
   assert_grep "Firstmate operational input waiting: read" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+make_managed_slot() {
+  local dir=$1 id=$2 kind=${3:-modern} wt
+  mkdir -p "$dir/pool/1"
+  wt="$dir/pool/1/proj"
+  git -C "$dir/proj" worktree move "$dir/wt" "$wt"
+  sed "s|^worktree=.*|worktree=$wt|" "$dir/home/state/$id.meta" > "$dir/meta"
+  mv "$dir/meta" "$dir/home/state/$id.meta"
+  printf 'spawn_gen=prior-generation\n' >> "$dir/home/state/$id.meta"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$wt" > "$dir/pool/treehouse-state.json"
+  {
+    printf 'home=%s\ntask=%s' "$dir/home" "$id"
+    [ "$kind" = legacy ] || printf '\nspawn_gen=prior-generation'
+  } > "$dir/pool/1/.fm-slot-owner"
+  printf '%s' "$wt" > "$dir/fake/cwd"
+}
+
+test_managed_slot_relaunch_rebinds_the_claim_incarnation() {
+  local dir out rc wt gen variant claim_gen claim_home
+  dir=$(new_case managed-claim rl-managed)
+  add_ship_task "$dir" rl-managed claude
+  make_managed_slot "$dir" rl-managed
+  wt="$dir/pool/1/proj"
+  out=$(run_control "$dir" rl-managed relaunch --note 'continue in the owned slot'); rc=$?
+  expect_code 0 "$rc" "managed-slot relaunch should succeed"$'\n'"$out"
+  gen=$(meta_field "$dir" rl-managed spawn_gen)
+  [ -n "$gen" ] && [ "$gen" != prior-generation ] || fail 'managed relaunch did not publish a new incarnation'
+  assert_grep "spawn_gen=$gen" "$dir/pool/1/.fm-slot-owner" 'managed relaunch left a predecessor custody claim'
+  assert_equals "$wt" "$(meta_field "$dir" rl-managed worktree)" 'managed relaunch reallocated its slot'
+  pass 'fm-control relaunch: a managed slot claim binds the replacement metadata incarnation'
+
+  for variant in generation home reassigned; do
+    dir=$(new_case "managed-$variant" rl-managed)
+    add_ship_task "$dir" rl-managed claude
+    make_managed_slot "$dir" rl-managed
+    wt="$dir/pool/1/proj"
+    claim_gen=prior-generation
+    claim_home=$dir/home
+    case "$variant" in
+      generation) claim_gen=successor-generation ;;
+      home) claim_home=$dir/proj ;;
+    esac
+    printf 'task=rl-managed\nhome=%s\nspawn_gen=%s\n' "$claim_home" "$claim_gen" > "$dir/pool/1/.fm-slot-owner"
+    if [ "$variant" = reassigned ]; then
+      printf 'task=successor\nhome=%s\nspawn_gen=successor-generation\n' "$dir/home" > "$dir/pool/1/.fm-slot-owner"
+    fi
+    cp "$dir/pool/1/.fm-slot-owner" "$dir/claim-before"
+    cp "$dir/home/state/rl-managed.meta" "$dir/meta-before"
+    printf '%s' "$wt" > "$dir/fake/cwd"
+    out=$(run_control "$dir" rl-managed relaunch --note 'preserve current custody'); rc=$?
+    expect_code 1 "$rc" "managed $variant claim must refuse relaunch"$'\n'"$out"
+    cmp -s "$dir/claim-before" "$dir/pool/1/.fm-slot-owner" || fail "managed $variant relaunch rewrote custody"
+    cmp -s "$dir/meta-before" "$dir/home/state/rl-managed.meta" || fail "managed $variant relaunch rewrote metadata"
+    assert_absent "$dir/fake/created-windows" "managed $variant relaunch created an endpoint"
+    assert_no_grep 'FIRSTMATE_OP:' "$dir/fake/literal" "managed $variant relaunch launched a worker"
+  done
+  pass 'fm-control relaunch: stale generations, foreign homes and reassigned claims preserve custody before launch'
+}
+
+test_managed_prepublication_abort_restores_exact_custody() {
+  local dir kind out rc meta real_mv gen
+  real_mv=$(command -v mv)
+  for kind in legacy modern; do
+    dir=$(new_case "managed-abort-$kind" rl-custody)
+    add_ship_task "$dir" rl-custody claude
+    make_managed_slot "$dir" rl-custody "$kind"
+    meta="$dir/home/state/rl-custody.meta"
+    cp "$meta" "$dir/meta-before"
+    cp "$dir/pool/1/.fm-slot-owner" "$dir/claim-before"
+    make_mv_failure_stub "$dir"
+    out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+      run_control "$dir" rl-custody relaunch --note 'preserve the predecessor claim'); rc=$?
+    expect_code 1 "$rc" "$kind managed publication failure must refuse"$'\n'"$out"
+    cmp -s "$dir/meta-before" "$meta" || fail "$kind publication failure changed predecessor metadata"
+    cmp -s "$dir/claim-before" "$dir/pool/1/.fm-slot-owner" || fail "$kind publication failure changed predecessor custody bytes"
+    assert_no_grep 'Firstmate operational input waiting: read' "$dir/fake/literal" 'unpublished replacement launched a worker'
+    out=$(FM_REAL_MV="$real_mv" run_control "$dir" rl-custody relaunch --note 'retry the preserved task'); rc=$?
+    expect_code 0 "$rc" "$kind restored custody must permit relaunch retry"$'\n'"$out"
+    gen=$(meta_field "$dir" rl-custody spawn_gen)
+    assert_grep "spawn_gen=$gen" "$dir/pool/1/.fm-slot-owner" 'retry did not bind replacement custody'
+  done
+  pass 'managed prepublication failures restore exact legacy and modern claims and permit retry'
+}
+
+test_managed_published_failure_keeps_replacement_custody() {
+  local dir out rc gen
+  dir=$(new_case managed-published-failure rl-published)
+  add_ship_task "$dir" rl-published claude
+  make_managed_slot "$dir" rl-published
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
+    run_control "$dir" rl-published relaunch --harness codex --note 'retain published custody'); rc=$?
+  expect_code 1 "$rc" 'postpublication managed launch failure must report failure'$'\n'"$out"
+  gen=$(meta_field "$dir" rl-published spawn_gen)
+  [ -n "$gen" ] && [ "$gen" != prior-generation ] || fail 'published failure reverted its metadata incarnation'
+  assert_grep "spawn_gen=$gen" "$dir/pool/1/.fm-slot-owner" 'published failure restored predecessor custody'
+  pass 'managed postpublication failure retains the replacement claim and metadata incarnation'
+}
+
+test_relaunch_locks_only_managed_slots() {
+  local dir kind lock holder ready release out rc i
+  for kind in linked managed; do
+    dir=$(new_case "project-lock-$kind" rl-project-lock)
+    add_ship_task "$dir" rl-project-lock claude
+    [ "$kind" != managed ] || make_managed_slot "$dir" rl-project-lock
+    lock=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" bash -c \
+      '. "$1/bin/fm-wake-lib.sh"; fm_treehouse_project_lock_path "$2"' _ "$ROOT" "$dir/proj") \
+      || fail 'project lock fixture could not resolve its shared lock'
+    ready="$dir/lock-ready"
+    release="$dir/lock-release"
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" bash -c \
+      '. "$1/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$2" || exit 1; touch "$3"; while [ ! -e "$4" ]; do /bin/sleep 0.01; done; fm_lock_release "$2"' \
+      _ "$ROOT" "$lock" "$ready" "$release" &
+    holder=$!
+    for ((i=0; i<500; i++)); do
+      [ ! -e "$ready" ] || break
+      /bin/sleep 0.01
+    done
+    if [ ! -e "$ready" ]; then
+      kill "$holder" 2>/dev/null || true
+      wait "$holder" 2>/dev/null || true
+      fail 'project lock fixture did not acquire its lock'
+    fi
+    out=$(run_control "$dir" rl-project-lock relaunch --note 'reuse this linked copy'); rc=$?
+    if ! kill -0 "$holder" 2>/dev/null; then
+      fail 'project lock fixture expired before the relaunch completed'
+    fi
+    touch "$release"
+    wait "$holder" || fail 'project lock holder failed to release its lock'
+    if [ "$kind" = linked ]; then
+      expect_code 0 "$rc" 'plain linked relaunch must ignore allocator contention'$'\n'"$out"
+      assert_equals "$dir/wt" "$(meta_field "$dir" rl-project-lock worktree)" 'plain relaunch replaced its worktree'
+    else
+      expect_code 1 "$rc" 'managed relaunch must refuse allocator contention'$'\n'"$out"
+      assert_contains "$out" 'another Treehouse slot allocation or return is in progress' 'managed relaunch did not explain contention'
+      assert_grep 'spawn_gen=prior-generation' "$dir/pool/1/.fm-slot-owner" 'contended relaunch changed custody'
+      assert_no_grep 'Firstmate operational input waiting: read' "$dir/fake/literal" 'contended managed relaunch launched a worker'
+    fi
+  done
+  pass 'plain linked relaunch succeeds under a held project lock while managed relaunch refuses'
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -1367,7 +1507,9 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
+  # Allow loaded subprocesses time to reach the checkpoint while keeping the
+  # fixture wait bounded.
+  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 2000 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -2489,6 +2631,10 @@ SH
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_managed_slot_relaunch_rebinds_the_claim_incarnation
+test_managed_prepublication_abort_restores_exact_custody
+test_managed_published_failure_keeps_replacement_custody
+test_relaunch_locks_only_managed_slots
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

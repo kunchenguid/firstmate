@@ -80,6 +80,15 @@
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
+#   A Treehouse-managed relaunch also holds the shared project allocation/return
+#   lock and requires the prior slot claim to name this task and owning home.
+#   A claim with spawn_gen must match the prior metadata incarnation; legacy
+#   claims without it remain accepted. Relaunch binds the claim to the replacement
+#   incarnation before publishing metadata. A prepublication failure restores
+#   the exact predecessor claim, while a published replacement keeps its claim
+#   even if launch later fails. Plain linked worktrees skip these pool checks.
+#   bin/fm-wake-lib.sh owns the claim format; tests/fm-control-relaunch.test.sh
+#   covers custody, publication failures and project-lock contention.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
@@ -174,7 +183,7 @@
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
-#   could later be released out from under its successor. A spawn that aborts
+#   could later be released out from under its successor. A fresh spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
 #   the next spawn's claim replaces it.
@@ -1272,6 +1281,9 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR=
+SPAWN_RELAUNCH_SLOT_CLAIM_MARKER=
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1318,6 +1330,19 @@ spawn_abort_cleanup() {
     [ ! -e "$SPAWN_META_TMP" ] &&
     [ ! -L "$SPAWN_META_TMP" ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
+  fi
+  if [ -n "$SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR" ]; then
+    if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ] &&
+      { [ "$SPAWN_META_PUBLISH_STARTED" != 1 ] ||
+        [ -e "$SPAWN_META_TMP" ] || [ -L "$SPAWN_META_TMP" ]; }; then
+      if ! mv -f "$SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR" "$SPAWN_RELAUNCH_SLOT_CLAIM_MARKER"; then
+        echo "error: could not restore task $ID's predecessor slot claim from $SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR" >&2
+        status=1
+      fi
+    else
+      rm -f "$SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR" || true
+    fi
+    SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR=
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
@@ -3136,8 +3161,24 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   SPAWN_PROJECT_CAPACITY=$FM_PROJECT_CAPACITY
   SPAWN_PROJECT_CAPACITY_ANY=$FM_PROJECT_CAPACITY_ANY
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
-  { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
+spawn_require_relaunch_slot_claim() {  # <worktree>
+  local worktree=$1
+  fm_treehouse_slot_owner_state "$worktree" "$ID"
+  if [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ] \
+    || [ ! "$FM_HOME" -ef "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] \
+    || { [ -n "$FM_TREEHOUSE_SLOT_OWNER_GEN" ] && {
+      ! fm_backlog_meta_spawn_gen "$RELAUNCH_META" "$STATE" \
+        || [ "$FM_TREEHOUSE_SLOT_OWNER_GEN" != "$FM_BACKLOG_META_SPAWN_GEN" ]
+    }; }; then
+    echo "error: task $ID's current Treehouse slot claim does not match its prior metadata incarnation and home; refusing relaunch" >&2
+    return 1
+  fi
+}
+
+if [ "$KIND" != secondmate ] && {
+  { [ "$RELAUNCH" -eq 0 ] && { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; } ||
+    { [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" != orca ] && fm_treehouse_pool_evidence "$RELAUNCH_WT"; }
+}; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -3151,6 +3192,9 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
     exit 1
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+  if [ "$RELAUNCH" -eq 1 ]; then
+    spawn_require_relaunch_slot_claim "$RELAUNCH_WT" || exit 1
+  fi
 fi
 if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
   if ! fm_project_capacity_occupants "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE" "$ID"; then
@@ -4491,7 +4535,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" "$SPAWN_GEN"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
       exit 1
     fi
@@ -5060,7 +5104,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -5198,12 +5241,29 @@ spawn_report_preserved_state() {
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
+  if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && fm_treehouse_pool_evidence "$WT"; then
+    spawn_require_relaunch_slot_claim "$WT" || exit 1
+    SPAWN_RELAUNCH_SLOT_CLAIM_MARKER=$(fm_treehouse_slot_owner_marker "$WT") || exit 1
+    prior_claim=$(mktemp "$SPAWN_RELAUNCH_SLOT_CLAIM_MARKER.relaunch.XXXXXX") || exit 1
+    if ! cp -p "$SPAWN_RELAUNCH_SLOT_CLAIM_MARKER" "$prior_claim"; then
+      rm -f "$prior_claim"
+      echo "error: could not preserve task $ID's predecessor slot claim" >&2
+      exit 1
+    fi
+    SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR=$prior_claim
+    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" "$SPAWN_GEN"; then
+      echo "error: cannot bind relaunched task $ID to its current Treehouse slot claim" >&2
+      exit 1
+    fi
+  fi
   SPAWN_META_PUBLISH_STARTED=1
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
   RELAUNCH_REPLACEMENT_PENDING=0
+  [ -z "$SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR" ] || rm -f "$SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR"
+  SPAWN_RELAUNCH_SLOT_CLAIM_PRIOR=
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
 fi

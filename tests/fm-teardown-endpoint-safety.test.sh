@@ -590,6 +590,7 @@ test_sole_slot_record_still_tears_down() {
 
   dir=$(make_case slot-sole)
   mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$id"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
@@ -618,6 +619,7 @@ test_recorded_endpoint_that_changed_directory_still_tears_down() {
 
   dir=$(make_case slot-endpoint-moved)
   mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$id"
   mkdir -p "$dir/other-directory"
   # The exact recorded worker may legitimately cd outside its worktree. Its
   # endpoint identity still owns the lifecycle; cwd alone must not brick it.
@@ -748,6 +750,7 @@ test_remote_seeded_home_returns_its_uncontested_slot() {
   local dir id=remote-task rc
   dir=$(make_case remote-home-teardown)
   mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$id"
   write_remote_parent_record "$dir/home"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
@@ -1020,8 +1023,8 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
 }
 
-# The two states that must never become a false refusal: the task's own claim,
-# and no claim at all (a slot taken before claims existed, or already returned).
+# An alias needs its task's own claim; an exact registered path also supports
+# older slots taken before claims existed.
 test_own_and_absent_slot_claims_still_tear_down() {
   local dir id=owned-task
 
@@ -1043,7 +1046,7 @@ test_own_and_absent_slot_claims_still_tear_down() {
   mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=scout"
 
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "teardown of an unclaimed slot failed: $(cat "$dir/stderr")"

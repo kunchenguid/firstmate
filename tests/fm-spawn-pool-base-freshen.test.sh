@@ -710,6 +710,8 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
     || fail "the slot claim does not name the spawned task: $(cat "$SLOT_CLAIM")"
   grep -Fxq -- "home=$HOME_DIR" "$SLOT_CLAIM" \
     || fail "the slot claim does not name the spawning home: $(cat "$SLOT_CLAIM")"
+  grep -Fxq -- "$(sed -n '/^spawn_gen=/p' "$HOME_DIR/state/$id.meta")" "$SLOT_CLAIM" \
+    || fail "the slot claim does not bind the published task incarnation"
 
   id='pool-slot-unclaimable-r1'
   rec=$(make_case slot-unclaimable "$id")
@@ -874,8 +876,46 @@ test_scout_base_branch_refused_on_gerrit_forge() {
   pass "a based scout on a forge=gerrit project is refused at spawn"
 }
 
+test_pool_slot_allocation_refuses_project_lock_contention() {
+  local rec id lock ready release holder i out status
+  id='pool-slot-contended-r1'
+  rec=$(make_case slot-contended "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  lock=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_treehouse_project_lock_path "$2"' _ "$ROOT" "$PROJECT_DIR") \
+    || fail 'fresh allocation could not resolve its project lock'
+  ready="$CASE_DIR/lock-ready"
+  release="$CASE_DIR/lock-release"
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$2" || exit 1; touch "$3"; while [ ! -e "$4" ]; do /bin/sleep 0.01; done; fm_lock_release "$2"' \
+    _ "$ROOT" "$lock" "$ready" "$release" &
+  holder=$!
+  for ((i=0; i<500; i++)); do
+    [ ! -e "$ready" ] || break
+    /bin/sleep 0.01
+  done
+  if [ ! -e "$ready" ]; then
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail 'fresh allocation lock fixture did not acquire its lock'
+  fi
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off); status=$?
+  if ! kill -0 "$holder" 2>/dev/null; then
+    fail 'fresh allocation lock fixture expired before spawn completed'
+  fi
+  touch "$release"
+  wait "$holder" || fail 'fresh allocation lock fixture failed to release its lock'
+  expect_code 1 "$status" 'fresh allocation must refuse project lock contention'$'\n'"$out"
+  assert_contains "$out" 'another Treehouse slot allocation or return is in progress' 'fresh allocation did not explain contention'
+  assert_absent "$HOME_DIR/state/$id.meta" 'contended allocation published metadata'
+  assert_absent "$SLOT_CLAIM" 'contended allocation claimed a slot'
+  pass 'fresh allocation refuses an explicitly held shared project lock before publication'
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_pool_slot_allocation_refuses_project_lock_contention
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_named_base_branch_starts_from_that_branch

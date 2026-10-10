@@ -6,6 +6,46 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Registered Treehouse task-slot identity
+
+Verified on 2026-10-07 on Linux with installed Treehouse v2.3.0, using separate contained Git repositories and pool roots.
+The binary SHA-256 was `7d8cc756bfac58f918f360fc1d2cb7ddc8cf7e16cf496c43ac734208c7ee70c0`.
+The failing Firstmate teardown invoked the physical path and exited 1 with `Worktree is not managed by treehouse`; the repaired interface invoked the same directory's unique registered symlink spelling and exited 0.
+Both fixtures retained their HEAD and ignored sentinel, with clean Git status before and after.
+This proves clean available-slot identity, not cleanup of a busy or durably leased native slot.
+Lease, custody and unsafe-identity refusals are exercised through synthetic teardown fixtures.
+Portable public-resolver cases also preserve exact ASCII, accented and Chinese registered spellings.
+
+Refresh the installed-binary proof and portable refusal matrix with:
+
+```sh
+FM_TREEHOUSE_IDENTITY_REAL=1 bash bin/fm-test-run.sh tests/fm-treehouse-identity.test.sh
+```
+
+The installed-binary case creates its own remote-free repository, pool and no-op shell, and runs Treehouse with an explicit fixture root and isolated configuration/cache paths without inheriting `HOME`.
+It performs real allocator operations only within that fixture and removes its synthetic resources on exit.
+The successful assertions on the verified version include:
+
+```text
+ok - registered ASCII, accented and Chinese path spellings remain exact
+ok - installed Treehouse v2.3.0: protected legacy physical-path teardown uses the registered alias
+```
+
+[`bin/fm-wake-lib.sh`](../../bin/fm-wake-lib.sh) owns registration resolution and the slot claim format.
+[`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header owns preflight ordering, exact-spelling custody rules, legacy compatibility limits, and revalidation before return or stale-lock removal.
+The fixture evidence does not authorize live cleanup.
+
+| Integration boundary | Applicability |
+| --- | --- |
+| tmux, Herdr, zellij, cmux task slots | All use the shared Treehouse resolver before task-slot cleanup; portable fixtures exercise endpoint validation separately. |
+| Worker harnesses | The resolver reads allocator/Git identity and claims, without interpreting vendor output or launching a harness. |
+| Forced descendant task cleanup | The same resolver runs under the descendant task/project locks before child cleanup. |
+| Secondmate home lease and seed rollback | Separate home-removal authority and durable-lease boundary; ordinary task-slot alias conversion does not apply. |
+| Orca | Uses its own composite worktree ID and backend removal API, rather than Treehouse return. |
+| Codex App | Not a selectable backend; see [the supported boundary](../codex-app-backend.md). |
+
+This verification does not drive a live Herdr lifecycle or inspect an existing shared pool.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
