@@ -337,6 +337,283 @@ fm_test_run_spawn() {
     "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
 }
 
+# make_seeded_secondmate_home <home> <id>
+# The minimal marked home a --secondmate spawn launches into.
+make_seeded_secondmate_home() {
+  local home=$1 id=$2
+  mkdir -p "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$home/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  git -C "$home" init -q -b main
+}
+
+# fm_test_capture_codex_launch <case-dir> [--secondmate[=<home>]] <extra fm-spawn args...>
+# Capture the generated launch through the public spawn interface. The task is
+# codex-live in <case-dir>/home; --secondmate launches it into a seeded
+# <case-dir>/secondmate-home instead of a project worktree. --secondmate=<home>
+# launches into that already-marked home instead, skipping the inheritance and
+# fast-forward steps so the spawn writes nothing there beyond its state/ dir.
+fm_test_capture_codex_launch() {
+  local case_dir=$1 home proj wt fakebin launchlog target skip=0
+  shift
+  case "${1:-}" in
+    --secondmate=*)
+      target=${1#--secondmate=}
+      shift
+      set -- --secondmate "$@"
+      skip=1
+      ;;
+  esac
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  launchlog="$case_dir/launch.log"
+  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
+  fm_test_spawn_home "$home" codex
+  fm_test_spawn_brief "$home" codex-live
+  fm_git_worktree "$proj" "$wt" codex-live
+  if [ "$skip" -eq 0 ]; then
+    target=$proj
+    if [ "${1:-}" = --secondmate ]; then
+      target="$case_dir/secondmate-home"
+      make_seeded_secondmate_home "$target" codex-live
+    fi
+  fi
+  : > "$launchlog"
+  FM_SKIP_SECONDMATE_INHERIT=$skip FM_SKIP_SECONDMATE_SYNC=$skip FM_FAKE_LAUNCH_LOG="$launchlog" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" codex-live "$target" "$@" >/dev/null 2>&1 ||
+    fail "fm-spawn could not build a codex launch"
+  cat "$launchlog"
+}
+
+# --- dedicated live secondmate fixture -------------------------------------
+#
+# The live doorbell guard's secondmate variant runs only in an operator-supplied
+# standalone clone (FM_SEND_INBOX_LIVE_SECONDMATE_HOME). The guard never creates
+# the consent sentinel and owns only the literal paths prepare writes.
+
+# fm_live_sm_fixture_check <dir> <root>
+# Echoes the canonical fixture; with no <dir>, prints the untested report and
+# returns 2; otherwise prints the refusal reason and returns 1.
+fm_live_sm_fixture_check() {
+  local dir=$1 root=$2 abs tmp other sentinel p
+  [ -n "$dir" ] || { printf 'untested: no dedicated fixture supplied\n'; return 2; }
+  case "$dir" in
+    /*) ;;
+    *) printf 'not an absolute path: %s\n' "$dir"; return 1 ;;
+  esac
+  [ ! -L "$dir" ] || { printf 'is a symlink: %s\n' "$dir"; return 1; }
+  [ -d "$dir" ] || { printf 'not an existing directory: %s\n' "$dir"; return 1; }
+  abs=$(cd "$dir" && pwd -P)
+  [ "$abs" = "$dir" ] || { printf 'not canonical (resolves to %s): %s\n' "$abs" "$dir"; return 1; }
+  tmp=$(cd "${TMPDIR:-/tmp}" && pwd -P)
+  case "$abs" in
+    "$tmp"/*) ;;
+    *) printf 'not under %s: %s\n' "$tmp" "$abs"; return 1 ;;
+  esac
+  if [ -L "$abs/.git" ] || [ ! -d "$abs/.git" ] ||
+    [ "$(git -C "$abs" rev-parse --show-toplevel 2>/dev/null)" != "$abs" ] ||
+    [ "$(git -C "$abs" rev-parse --git-common-dir 2>/dev/null)" != .git ]; then
+    printf 'not a standalone clone (linked worktree or not its own git top level): %s\n' "$abs"
+    return 1
+  fi
+  sentinel=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$abs/.git/fm-live-secondmate-fixture" 2>/dev/null) || sentinel=''
+  [ "$sentinel" = "$abs" ] || {
+    printf 'no consent sentinel naming this fixture: %s/.git/fm-live-secondmate-fixture\n' "$abs"
+    return 1
+  }
+  root=$(cd "$root" && pwd -P)
+  for other in "${FM_HOME:-}" "$root" "${HOME:-}"; do
+    [ -n "$other" ] && [ -d "$other" ] || continue
+    other=$(cd "$other" && pwd -P)
+    [ "$abs" = "$root" ] && [ "$other" = "$root" ] && continue
+    case "$abs/" in
+      "$other"/*) printf 'equal to or inside %s: %s\n' "$other" "$abs"; return 1 ;;
+    esac
+    case "$other/" in
+      "$abs"/*) printf 'contains %s: %s\n' "$other" "$abs"; return 1 ;;
+    esac
+  done
+  for p in .fm-secondmate-home .fm-secondmate-parent projects; do
+    if [ -e "$abs/$p" ] || [ -L "$abs/$p" ]; then
+      printf 'stale fixture state; remove manually: %s\n' "$abs/$p"
+      return 1
+    fi
+  done
+  for p in state data; do
+    if [ -L "$abs/$p" ] || { [ -e "$abs/$p" ] && [ ! -d "$abs/$p" ]; } ||
+      [ -n "$(ls -A "$abs/$p" 2>/dev/null)" ]; then
+      printf 'stale fixture state; remove manually: %s\n' "$abs/$p"
+      return 1
+    fi
+  done
+  if ! p=$(git -C "$abs" status --porcelain 2>&1) || [ -n "$p" ]; then
+    printf 'work tree is not clean: %s\n' "$abs"
+    return 1
+  fi
+  [ "$(git -C "$abs" rev-parse HEAD 2>/dev/null)" = "$(git -C "$root" rev-parse HEAD 2>/dev/null)" ] ||
+    { printf 'HEAD differs from %s: %s\n' "$root" "$abs"; return 1; }
+  if [ ! -f "$abs/.codex/hooks.json" ] || ! cmp -s "$abs/.codex/hooks.json" "$root/.codex/hooks.json"; then
+    printf '.codex/hooks.json is missing or differs from %s: %s\n' "$root" "$abs"
+    return 1
+  fi
+  printf '%s\n' "$abs"
+}
+
+FM_LIVE_SM_FIXTURE=''
+FM_LIVE_SM_MADE_DATA=0
+FM_LIVE_SM_MADE_STATE=0
+# What the secondmate's own startup and hooks were observed to leave in the
+# fixture's state/ (plus an empty terminal-outcomes/). Cleanup removes only
+# these literal names; anything else stops it.
+FM_LIVE_SM_STATE_FILES='.inactive-outcome-reconcile .lock .session-start-agents-baseline .session-start-complete .startup-network.delivered .startup-network.report .startup-network.status .startup-network.timings .trace-context-effective .wake-queue home-summary.json'
+
+# fm_live_sm_fixture_prepare <checked-fixture> <id>
+# Marks the fixture as <id>'s secondmate home. The charter is only the input
+# fm-spawn needs to build the launch; the replayed launch delivers no brief.
+# Records which of data/ and state/ (the spawn creates state/) did not exist,
+# so cleanup removes only those.
+fm_live_sm_fixture_prepare() {
+  local abs=$1 id=$2
+  FM_LIVE_SM_FIXTURE=$abs
+  [ -d "$abs/data" ] || FM_LIVE_SM_MADE_DATA=1
+  [ -d "$abs/state" ] || FM_LIVE_SM_MADE_STATE=1
+  mkdir -p "$abs/data" &&
+    printf '%s\n' "$id" > "$abs/.fm-secondmate-home" &&
+    printf 'charter for %s\n' "$id" > "$abs/data/charter.md"
+}
+
+# fm_live_sm_fixture_cleanup
+# Call only once the fixture's Codex processes have exited. Removes exactly
+# what prepare (and the spawn's state/ mkdir) created plus the documented
+# FM_LIVE_SM_STATE_FILES. Any other state/ entry makes it remove nothing,
+# print the unexpected paths, and return 1.
+fm_live_sm_fixture_cleanup() {
+  local abs=$FM_LIVE_SM_FIXTURE name extra='' known k
+  [ -n "$abs" ] || return 0
+  if [ -d "$abs/state" ]; then
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      known=0
+      for k in $FM_LIVE_SM_STATE_FILES; do
+        [ "$name" != "$k" ] || [ -d "$abs/state/$name" ] || known=1
+      done
+      if [ "$name" = terminal-outcomes ] && [ -d "$abs/state/$name" ] && [ ! -L "$abs/state/$name" ] &&
+        [ -z "$(ls -A "$abs/state/$name")" ]; then
+        known=1
+      fi
+      [ "$known" -eq 1 ] || extra="$extra $abs/state/$name"
+    done <<EOF
+$(ls -A "$abs/state")
+EOF
+  fi
+  if [ -n "$extra" ]; then
+    printf 'unexpected fixture state, nothing removed; remove manually:%s\n' "$extra"
+    return 1
+  fi
+  for name in $FM_LIVE_SM_STATE_FILES; do
+    rm -f "$abs/state/$name"
+  done
+  [ ! -d "$abs/state/terminal-outcomes" ] || rmdir "$abs/state/terminal-outcomes"
+  rm -f "$abs/.fm-secondmate-home" "$abs/data/charter.md"
+  [ "$FM_LIVE_SM_MADE_DATA" -eq 0 ] || rmdir "$abs/data" 2>/dev/null || true
+  [ "$FM_LIVE_SM_MADE_STATE" -eq 0 ] || rmdir "$abs/state" 2>/dev/null || true
+  FM_LIVE_SM_FIXTURE=''
+  FM_LIVE_SM_MADE_DATA=0
+  FM_LIVE_SM_MADE_STATE=0
+}
+
+# fm_test_codex_turn_state <sessions-dir> <cwd> <since: UTC YYYY-MM-DDTHH:MM:SS>
+# Codex's own rollout record is the turn evidence: each
+# <sessions-dir>/YYYY/MM/DD/rollout-*.jsonl opens with a session_meta line
+# (payload.cwd, payload.timestamp) and logs event_msg task_started and
+# task_complete per turn. Over sessions at <cwd> started at or after <since>,
+# prints active if any has a task_started without a later task_complete,
+# completed if one finished a turn, none if no turn started (no such session,
+# or none in it), and invalid if the evidence cannot be read or parsed.
+fm_test_codex_turn_state() {
+  local dir=$1 cwd=$2 since=$3 f last state=none
+  [ -e "$dir" ] || { printf 'none\n'; return 0; }
+  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || { printf 'invalid\n'; return 0; }
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    head -1 "$f" 2>/dev/null | jq -e 'type == "object"' >/dev/null 2>&1 || { printf 'invalid\n'; return 0; }
+    head -1 "$f" | jq -e --arg cwd "$cwd" --arg since "$since" \
+      '.type == "session_meta" and .payload.cwd == $cwd and
+       ((.payload.timestamp // .timestamp // "")[0:19] >= $since)' >/dev/null 2>&1 || continue
+    last=$(jq -r 'select(.type == "event_msg" and
+      (.payload.type == "task_started" or .payload.type == "task_complete")) | .payload.type' "$f" 2>/dev/null) ||
+      { printf 'invalid\n'; return 0; }
+    case "$(printf '%s\n' "$last" | tail -1)" in
+      task_started) printf 'active\n'; return 0 ;;
+      task_complete) state=completed ;;
+    esac
+  done <<EOF
+$(find "$dir" -type f -name 'rollout-*.jsonl' -mtime -2 2>/dev/null)
+EOF
+  printf '%s\n' "$state"
+}
+
+# fm_test_wait_codex_idle <timeout-seconds> <quiet-polls> <probe> [args...]
+# Read-only readiness: polls <probe>, which prints "<composer-state>
+# <turn-state>", about once a second. Prints the verified state and returns 0
+# once the composer reads empty and the turn none or completed for
+# <quiet-polls> consecutive polls; otherwise prints the last inconclusive
+# reason and returns 1 when <timeout-seconds> expires. It sends nothing.
+fm_test_wait_codex_idle() {
+  local budget=$1 quiet=$2 i=0 run=0 obs composer turn why
+  shift 2
+  while :; do
+    obs=$("$@")
+    composer=${obs%% *}
+    turn=${obs#* }
+    case "$composer:$turn" in
+      empty:none|empty:completed)
+        run=$((run + 1))
+        why="inconclusive: not quiet for $quiet consecutive polls"
+        ;;
+      *)
+        run=0
+        case "$turn" in
+          active) why='inconclusive: turn active' ;;
+          none|completed) why="inconclusive: composer not readable or not empty (${composer:-unknown})" ;;
+          *) why='inconclusive: turn evidence unreadable or invalid' ;;
+        esac
+        ;;
+    esac
+    if [ "$run" -ge "$quiet" ]; then
+      if [ "$turn" = none ]; then
+        printf 'verified idle: no turn started\n'
+      else
+        printf 'verified idle: initial turn completed\n'
+      fi
+      return 0
+    fi
+    [ "$i" -lt "$budget" ] || { printf '%s\n' "$why"; return 1; }
+    sleep 1
+    i=$((i + 1))
+  done
+}
+
+# fm_test_codex_secondmate_cmd <launch command> [<daemon option + space>]
+# What the live guard executes for a secondmate: the generated environment
+# prefix (it points the hooks at the fixture home), codex, and the generated
+# global flags, with no positional launch brief.
+fm_test_codex_secondmate_cmd() {
+  printf '%s' "unset CODEX_THREAD_ID; ${1%%codex *}codex ${2:-}$(fm_test_codex_global_flags "$1")"
+}
+
+# fm_test_codex_global_flags <launch command>
+# The generated flags before the positional encoded brief.
+fm_test_codex_global_flags() {
+  local launch=$1 flags
+  flags=${launch#*codex }
+  flags=${flags%%\"\$(*}
+  printf '%s' "$flags"
+}
+
 # --- send-world stubs -------------------------------------------------------
 
 # make_stubs <dir>

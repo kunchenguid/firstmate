@@ -79,16 +79,6 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
-make_seeded_secondmate_home() {
-  local home=$1 id=$2
-  mkdir -p "$home/bin" "$home/data"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
-  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
-  printf 'charter for %s\n' "$id" > "$home/data/charter.md"
-  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
-  git -C "$home" init -q -b main
-}
-
 task_inbox_export() {  # <home> <id>
   local state
   state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
@@ -593,6 +583,8 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "--disable hooks" \
     "codex crewmate launch did not disable the hook layer that blocks it on a trust modal"
+  assert_contains "$launch" "-c disable_paste_burst=true" \
+    "codex crewmate launch can swallow queued Enter as paste content when its TUI reader is backlogged"
   # The opposite posture: this flag RUNS the untrusted hooks instead of
   # disabling them, so a launch must never reach for it.
   assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
@@ -618,6 +610,8 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--disable hooks" \
     "codex secondmate launch disabled the project hooks its own primary supervision depends on"
+  assert_contains "$launch" "-c disable_paste_burst=true" \
+    "managed codex secondmate launch left its automated steering input subject to paste-burst detection"
   pass "a codex secondmate keeps the project hook layer its primary session runs on"
 }
 
