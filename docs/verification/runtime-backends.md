@@ -1223,11 +1223,20 @@ Refresh the live Claude proof with:
 FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 ```
 
-Observed 2026-08-19:
+The guard waits for Claude to be ready before its first steer by requiring native `idle` or `done` plus an `empty` verdict from `fm_backend_herdr_composer_state`, and it never reads the permission-mode footer.
+Measured 2026-10-07 against Herdr 0.9.3 and Claude Code 2.1.293 on a host whose managed Claude settings set `permissions.disableBypassPermissionsMode` to `disable`: `--dangerously-skip-permissions`, `--permission-mode auto`, and no permission flag all rendered `⏵⏵ auto mode on (shift+tab to cycle)`, the first with `Bypass permissions mode was disabled by settings` beside it.
+A wait keyed on the `bypass permissions on` footer timed out on that idle, empty composer and failed with `never rendered an idle composer in the lab pane`.
+In the same lab, Claude's folder-trust prompt read `pending` while Herdr reported the agent `unknown` and then `blocked`, and a mid-turn pane read `empty` with native `working`, so neither passes the ready wait.
+
+Observed 2026-10-07 for the first two scenarios only:
 
 ```text
-ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
+ok - live Herdr submit confirm: Claude Code (2.1.293 (Claude Code)) on herdr 0.9.3 reports empty and renders the requested reply in isolated session fm-lab-herdr-submit-con-3893118-16076
+ok - live Herdr submit confirm: Claude Code (2.1.293 (Claude Code)) on herdr 0.9.3 submits a U+2063 away-supervisor payload whose read-back drops the mark
 ```
+
+These results establish readiness and submit confirmation, not a pass of the full guard.
+On Claude Code 2.1.293, the final `/exit` scenario is expected to fail until the separate recognizer fix in [PR #6813](https://github.com/kunchenguid/firstmate/pull/6813) lands; the footer-independent readiness change does not alter composer classification.
 
 ### Claude exit behind the slash-command popup
 
