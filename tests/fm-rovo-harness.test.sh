@@ -170,6 +170,10 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
+  case " $* " in
+    *" --scout "*) ;;
+    *) set -- --mode no-mistakes --yolo off "$@" ;;
+  esac
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -183,7 +187,40 @@ run_spawn() {
     FM_FAKE_ROVO_DELIVERY="${FM_FAKE_ROVO_DELIVERY:-yes}" \
     FM_ROVO_READY_POLLS=3 FM_ROVO_DELIVERY_POLLS=3 FM_ROVO_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness rovo --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness rovo "$@" 2>&1
+}
+
+# Execute the emitted command and parse the JSON delivered to the harness.
+# The grant is a serialized permission contract, not an implementation snapshot.
+assert_rovo_task_temp_grant() {  # <task-id> <expected-effort>
+  local id=$1 effort=$2 received task_tmp temp_real data_real state_real
+  cat > "$FAKEBIN_DIR/rovo" <<'SH'
+#!/bin/sh
+count=0
+config='{}'
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config-override) count=$((count + 1)); config=$2; shift ;;
+  esac
+  shift
+done
+jq -n --argjson config "$config" --argjson count "$count" \
+  --arg temp "${FM_TASK_TMP-unset}" '{config:$config,count:$count,temp:$temp}'
+SH
+  chmod +x "$FAKEBIN_DIR/rovo"
+  received=$(env -i HOME="$HOME_DIR" PATH="$FAKEBIN_DIR:$PATH" FM_TASK_TMP=wrong-root \
+    /bin/sh -c "$(cat "$CASE_DIR/launch.log")") \
+    || fail "rovo: emitted launch could not execute the permission probe"
+  task_tmp=$(awk -F= '$1 == "tasktmp" {print substr($0, 9)}' "$HOME_DIR/state/$id.meta")
+  temp_real=$(cd "$task_tmp" && pwd -P) || fail "rovo: task temp root does not exist"
+  data_real=$(cd "$HOME_DIR/data/$id" && pwd -P)
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  printf '%s\n' "$received" | jq -e --arg root "$task_tmp" --arg temp "$temp_real" --arg data "$data_real" \
+    --arg inbox "$state_real/$id.inbox" --arg status "$state_real/$id.status" --arg effort "$effort" '
+    .count == 1 and .temp == $root and
+    (.config.toolPermissions.allowedExternalPaths | sort) == ([$data, $inbox, $status, $temp] | sort) and
+    (.config.agent.efficiencyLevel // "") == $effort
+  ' >/dev/null || fail "rovo must receive its temp root and exactly the four task-scoped grants in one merged override: $received"
 }
 
 test_rovo_launch_then_send_is_verified() {
@@ -236,7 +273,21 @@ test_rovo_launch_then_send_is_verified() {
     "rovo launch's allowedExternalPaths grant omitted the steering inbox directory"
   assert_contains "$launch" "$state_real/$id.status" \
     "rovo launch's allowedExternalPaths grant omitted the status file"
+  assert_rovo_task_temp_grant "$id" high
   pass "fm-spawn: rovo launches bare, waits for readiness, and delivers its brief pointer"
+}
+
+test_rovo_scout_receives_task_temp_root() {
+  local id rec out rc
+  id="rovo-scout-temp-$$"
+  rec=$(make_spawn_case scout-temp "$id")
+  read_spawn_record "$rec"
+  : > "$HOME_DIR/config/launch-env-allowlist"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --scout)
+  rc=$?
+  expect_code 0 "$rc" "rovo scout spawn should succeed: $out"
+  assert_rovo_task_temp_grant "$id" ''
+  pass "fm-spawn: rovo scouts receive their temp root and only the task-scoped grants under env -i"
 }
 
 test_rovo_effort_xhigh_is_recorded_but_omitted() {
@@ -256,6 +307,7 @@ test_rovo_effort_xhigh_is_recorded_but_omitted() {
   assert_contains "$launch" "allowedExternalPaths" "rovo launch dropped its allowedExternalPaths grant when effort was unsupported"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'effort=xhigh' "$meta" "rovo meta did not retain the unsupported effort axis"
+  assert_rovo_task_temp_grant "$id" ''
   pass "fm-spawn: rovo omits efficiencyLevel for xhigh but keeps its allowedExternalPaths grant, recording xhigh in task metadata"
 }
 
@@ -475,6 +527,7 @@ tool output line $i"
 }
 
 test_rovo_launch_then_send_is_verified
+test_rovo_scout_receives_task_temp_root
 test_rovo_effort_xhigh_is_recorded_but_omitted
 test_rovo_effort_high_sets_config_override
 test_rovo_readiness_gate_precedes_pointer

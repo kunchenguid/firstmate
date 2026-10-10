@@ -951,6 +951,30 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds declare a validation-round pause once, then hold it"
 }
 
+# Concurrent workers share /tmp, so every ship (all modes) and scout brief must
+# send scratch files and the no-mistakes intent file to the task's own temp root.
+test_scaffolds_name_task_temp_root_for_scratch() {
+  local home kind id brief
+  home="$TMP_ROOT/task-temp-root-home"
+  mkdir -p "$home/data" "$home/config"
+  for kind in ship:no-mistakes ship:direct-PR ship:local-only scout; do
+    id="brief-task-tmp-${kind/:/-}"
+    case "$kind" in
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "${kind#ship:}" >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep "your task temp root (the directory named by \`\$FM_TASK_TMP\`)" "$brief" \
+      "$kind brief did not name the task temp root"
+    assert_grep 'never write scratch to a fixed path in shared /tmp' "$brief" \
+      "$kind brief did not forbid fixed shared /tmp scratch paths"
+  done
+  assert_grep "If you pass \`--intent\` through a file, write it under your task temp root" \
+    "$home/data/brief-task-tmp-ship-no-mistakes/brief.md" \
+    "no-mistakes brief did not place the --intent file under the task temp root"
+  pass "fm-brief.sh: ship and scout scaffolds keep scratch and --intent files in the task temp root"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -1488,6 +1512,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_scaffolds_name_task_temp_root_for_scratch
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
