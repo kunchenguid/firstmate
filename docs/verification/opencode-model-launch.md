@@ -151,4 +151,4 @@ The busy-state and turn-end plugin contract is separate evidence owned by [super
 Only 2.0.26 on this host was measured.
 `opencode run` was used to read a session's recorded model cheaply; the guarantee claimed here is for the interactive launch, which was exercised directly.
 
-A project that ships its own committed `.opencode/opencode.json` keeps it: Firstmate never overwrites a tracked file, so such a project is pinned by its own configuration instead.
+A project that ships its own committed `.opencode/opencode.json` keeps it byte-identical. Firstmate refuses that OpenCode launch with a diagnostic naming the conflicting file, because the higher-precedence tracked model would defeat a worktree-root override and OpenCode v2 provides no verified interactive model flag or environment override. Measurements on 2.0.26 confirmed that `./opencode.json` is lower precedence than `.opencode/opencode.json`, `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` are ignored, and `.opencode/opencode.jsonc` is not read. No alternate config path was found that can override the tracked file without changing it.

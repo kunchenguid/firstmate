@@ -802,7 +802,7 @@ test_opencode_pins_model_in_worktree_config() {
 # A project that ships its own committed .opencode/opencode.json owns that
 # file. Overwriting it would clobber the project's tracked configuration, which
 # is not a pin.
-test_opencode_never_clobbers_a_tracked_project_config() {
+test_opencode_refuses_a_tracked_project_config() {
   local case_dir home proj wt fakebin launchlog id out status cfg existing
   id=profile-opencode-tracked-z7f
   case_dir="$TMP_ROOT/profile-opencode-tracked"
@@ -830,13 +830,15 @@ test_opencode_never_clobbers_a_tracked_project_config() {
     || fail "fixture error: the project's config is not tracked in the worktree"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model opencode/space-bunny-free)
+    --model opencode/space-bunny-free 2>&1)
   status=$?
-  expect_code 0 "$status" "opencode spawn beside a tracked project config should still succeed"
+  [ "$status" -ne 0 ] || fail "opencode spawn beside tracked config must refuse to launch"
+  assert_contains "$out" "cannot select OpenCode model opencode/space-bunny-free: tracked project config $wt/.opencode/opencode.json takes precedence" \
+    "tracked-config refusal must identify the model and conflicting file"
   cfg=$(cat "$wt/.opencode/opencode.json")
   [ "$cfg" = "$existing" ] || fail "opencode overwrote the project's tracked config"$'\n'"before: $existing"$'\n'"after:  $cfg"
-  assert_not_contains "$(cat "$LAUNCH_LOG")" "--model" "opencode must still not pass --model beside a tracked config"
-  pass "opencode leaves a project's committed .opencode/opencode.json untouched"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode" "refused launch must not start OpenCode"
+  pass "opencode refuses rather than selecting a tracked project model"
 }
 
 # The default model axis records itself in metadata and pins nothing: there is
@@ -2313,7 +2315,7 @@ test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_effort_variant
 test_opencode_pins_model_in_worktree_config
-test_opencode_never_clobbers_a_tracked_project_config
+test_opencode_refuses_a_tracked_project_config
 test_opencode_default_model_writes_no_worktree_config
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort

@@ -2754,10 +2754,11 @@ write_opencode_worktree_model() {  # <model>
   esac
   target="$WT/.opencode/opencode.json"
   # A project that ships its own committed .opencode/opencode.json owns that
-  # file. Never overwrite it: clobbering a project's tracked configuration is
-  # not a pin. The launch still runs, on the host's own default model.
+  # file. Never overwrite it or launch on an unverified model instead.
   if [ -e "$target" ] && git -C "$WT" ls-files --error-unmatch .opencode/opencode.json >/dev/null 2>&1; then
-    return 0
+    printf 'fm-spawn: cannot select OpenCode model %s: tracked project config %s takes precedence and must not be modified\n' \
+      "$model" "$target" >&2
+    return 1
   fi
   mkdir -p "$WT/.opencode"
   printf '{"model":"%s"}\n' "$(json_escape "$model")" > "$target"
@@ -4938,7 +4939,7 @@ EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'
     # opencode v2 has no --model on the interactive launch, so the resolved
     # model axis lands here instead. See write_opencode_worktree_model.
-    write_opencode_worktree_model "$MODEL"
+    write_opencode_worktree_model "$MODEL" || exit 1
     ;;
   pi | pi-signed)
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
