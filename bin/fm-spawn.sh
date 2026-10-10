@@ -172,12 +172,36 @@
 #   returning a slot, so allocation cannot reuse a slot before its owner record
 #   is published. Under that same lock it writes the slot's owner claim, which is
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
-#   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
-#   cannot be claimed refuses the spawn rather than launching a worker whose slot
-#   could later be released out from under its successor. A spawn that aborts
-#   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   owns the claim and bin/fm-teardown.sh owns what it protects.
+#   NO TWO WORKERS ARE EVER GIVEN THE SAME WORKING COPY. Treehouse offers no slot
+#   that holds a running process and none it has leased, but a crewmate slot is
+#   held by a TASK: a task whose worker is dead or between incarnations leaves its
+#   work in a slot with nothing running in it, which Treehouse reads as available,
+#   and at pool exhaustion that slot is the only one it has left to offer. So a
+#   spawn accepts an allocated slot only when it is proved free - no live task's
+#   claim on it, and nothing already running in it when the allocation went out -
+#   and refuses otherwise rather than launching a second worker into somebody
+#   else's copy. bin/fm-wake-lib.sh's fm_treehouse_slot_claimable owns which
+#   existing claim may be replaced; only an ORPHAN may, its home still present and
+#   the state directory the claim records holding no record for the task it
+#   names, which is what an aborted spawn leaves.
+#   A spawn that aborts while it still holds the allocation lock drops its own
+#   claim; an abort after metadata publication has released that lock leaves the
+#   claim for the next spawn to read as the orphan it is.
+#   A refusal closes this spawn's own endpoint, from the abort trap, because its
+#   shell followed the allocation into the refused slot: left open, it would be a
+#   live process parked in another task's copy, the very occupancy it refused.
+#   Both allocation-deadline exits close it too, giving up that window for
+#   inspection, because the shell may sit unseen in a slot another task holds.
+#   EXIT CODES tell the two pool failures apart, because they need opposite
+#   responses and were previously one indistinguishable refusal: 75 means the pool
+#   is exhausted - it is at max_trees with no slot this task could be granted and
+#   no unclaimed slot holding this spawn's own allocation, or the slot refused
+#   was the only one it had to offer and asking again would be handed it straight
+#   back - so work must be landed and retrying cannot help; 76 means this slot
+#   must not be used while another may be. Treehouse offers the same slot again
+#   until its holder returns it, so a 76 is not a cue to retry either: its holder
+#   must land or tear down its work. Every other refusal keeps exit 1.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -1272,6 +1296,16 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_SLOT_REFUSED=0
+# The boundary that tells this spawn's own processes from a slot's prior
+# occupants (fm_treehouse_slot_foreign_pids). It is THIS SPAWN'S OWN START, not
+# the moment `treehouse get` is sent: the endpoint and its shell are created in
+# between, and their working directory follows the allocation into the slot, so
+# a later boundary would read the spawn's own pane as somebody else's occupant.
+# Nothing this spawn creates can predate it, and a slot occupied any earlier is
+# genuinely not ours. An occupant that arrives between this instant and the
+# allocation is Treehouse's to refuse, which it does.
+SPAWN_STARTED_EPOCH=$(date +%s)
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1312,6 +1346,10 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$SPAWN_SLOT_REFUSED" = 1 ]; then
+    SPAWN_SLOT_REFUSED=0
+    rovo_endpoint_cleanup
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1411,9 +1449,10 @@ spawn_abort_cleanup() {
   # must not leave a claim naming a task no record describes. The release is a
   # read-then-remove, so it runs only while the project lock that wrote the
   # claim is still held (aborts before metadata publication); a later abort has
-  # already released that lock and leaves the claim for the next spawn's
-  # atomic replacement rather than racing it. The release itself never removes
-  # another task's claim.
+  # already released that lock and leaves the claim in place rather than racing
+  # it; the next spawn offered that slot reads the claim as the orphan it is,
+  # because this home holds no record for the task it names, and replaces it.
+  # The release itself never removes another task's claim.
   if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
     fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
@@ -4381,6 +4420,38 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# Refuse a pool slot and exit. This spawn's shell is already in the slot, so the
+# abort trap closes the endpoint rather than park a live process in a working
+# copy that is not ours.
+spawn_refuse_slot() {  # <exit-code> <message>
+  SPAWN_SLOT_REFUSED=1
+  echo "error: $2" >&2
+  exit "$1"
+}
+
+# Refuse the slot the pool just allocated, reporting exhaustion when the pool
+# has no other slot this task could be granted: asking again would be handed
+# this same one, or another that is refused just the same.
+spawn_refuse_allocated_slot() {  # <reason>
+  local free=0
+  fm_treehouse_pool_has_free_slot "$PROJ_ABS" "$ID" "$FM_HOME" "$WT" || free=$?
+  if [ "$free" = 1 ]; then
+    spawn_refuse_slot "$FM_POOL_EXHAUSTED_EXIT" "the Treehouse pool for '$PROJ_ABS' is exhausted: the only slot it could offer task $ID was $WT, but $1, and no other slot is available, so asking again would be handed that same slot. Land or tear down work to return a slot; retrying now cannot succeed. Window $T is closed so its shell cannot stay in the slot"
+  fi
+  spawn_refuse_slot "$FM_POOL_BAD_SLOT_EXIT" "the Treehouse pool offered task $ID the slot $WT, but $1; refusing to put a second worker into a working copy that is not free. Treehouse offers this same slot again until its holder returns it, so retrying will not reach another slot; the answer is for that holder to land or tear down its work, not to retry. Window $T is closed so its shell cannot stay in the slot"
+}
+
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ] &&
+  fm_treehouse_pool_slot "$PROJ_ABS" "$WT" && ! fm_treehouse_slot_claimable "$WT" "$ID" "$FM_HOME"; then
+  # A relaunch reuses the copy this task's record names, and that record can be
+  # older than the pool's memory of the slot: once the slot went back and was
+  # handed to somebody else, relaunching into it would put a second worker in
+  # another task's working copy just as surely as a fresh allocation would.
+  # Only the recorded task's own claim, or a slot taken before claims existed,
+  # may be relaunched into.
+  spawn_refuse_slot "$FM_POOL_BAD_SLOT_EXIT" "task $ID's recorded worktree $WT is no longer its own: $FM_TREEHOUSE_SLOT_BUSY; refusing to relaunch a worker into a working copy that is not free, and closing window $T so its shell does not stay in it"
+fi
+
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
@@ -4472,7 +4543,36 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    # Two different failures reach this deadline and they need opposite
+    # responses: an exhausted pool has nothing to give and asking again cannot
+    # help, while anything else may well succeed on the next attempt. Both used
+    # to arrive as one generic refusal, so a supervisor could only guess - and
+    # the guess it makes when the fleet is busiest is to retry. Read the pool's
+    # own state to tell them apart, and carry the answer in the exit code as
+    # well as the message.
+    # Nothing available is not enough on its own: on hosts where the pane's
+    # path never follows `treehouse get`, the slot Treehouse just created reads
+    # in-use under this spawn's own shell, so only a pool at max_trees is one
+    # that may create no more - and not even that when a slot holds a process
+    # started since this spawn did, because that slot is this spawn's own.
+    # Both exits close the endpoint, from the abort trap, and that gives up the
+    # window an operator could otherwise inspect here. That is a decision, not a
+    # tidy-up: the shell may have followed `treehouse get` into a slot another
+    # task holds without the poll ever seeing it, and a window parked in
+    # somebody else's working copy is a misleading diagnostic surface - it shows
+    # their checkout, not this spawn's failure - while it keeps that copy
+    # occupied. A slot its rightful owner can use is worth more.
+    SPAWN_SLOT_REFUSED=1
+    SPAWN_POOL_FREE=0
+    fm_treehouse_pool_has_free_slot "$PROJ_ABS" "$ID" "$FM_HOME" || SPAWN_POOL_FREE=$?
+    SPAWN_POOL_NEW_PROCESS=0
+    fm_treehouse_pool_holds_new_process "$PROJ_ABS" "$SPAWN_STARTED_EPOCH" || SPAWN_POOL_NEW_PROCESS=$?
+    if [ "$SPAWN_POOL_FREE" = 1 ] && [ "$SPAWN_POOL_NEW_PROCESS" = 1 ] &&
+      fm_treehouse_pool_at_limit "$PROJ_ABS"; then
+      echo "error: the Treehouse pool for '$PROJ_ABS' is exhausted: every slot is in use or leased and the pool is at max_trees, so task $ID could not be given a working copy. Land or tear down work to return a slot, or raise max_trees in the project's treehouse.toml; retrying now cannot succeed. Window $T is closed so its shell cannot stay in the pool" >&2
+      exit "$FM_POOL_EXHAUSTED_EXIT"
+    fi
+    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); window $T is closed so its shell cannot stay in the pool" >&2
     exit 1
   fi
 
@@ -4491,7 +4591,30 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+    # The pool offered this slot because nothing was running in it and its tree
+    # was clean. That is Treehouse's whole notion of free, and it is weaker than
+    # this one: a slot still belongs to the task whose work and records are in
+    # it even when that task's worker is dead or between incarnations, and at
+    # pool exhaustion a processless slot like that is the only one Treehouse has
+    # left to offer. Refuse it here, before a second worker is ever launched
+    # into another task's working copy, and say with the exit code whether the
+    # pool has another slot to ask for.
+    if ! fm_treehouse_slot_claimable "$WT" "$ID" "$FM_HOME"; then
+      spawn_refuse_allocated_slot "$FM_TREEHOUSE_SLOT_BUSY"
+    fi
+    # Belt to that claim's braces, and the one guard that needs no Firstmate
+    # record to fire: anything already running in the slot when this spawn
+    # started was there before the slot was ours, whoever put it there.
+    # This one deliberately steps aside when it cannot run - no `treehouse`, no
+    # `jq`, an unreadable pool - rather than refusing, because it is the
+    # redundant guard and its inputs are optional tools. The claim gate above is
+    # the one that must never be skipped, and it refuses whenever it cannot
+    # prove the slot free.
+    if SPAWN_FOREIGN_PIDS=$(fm_treehouse_slot_foreign_pids "$PROJ_ABS" "$WT" "$SPAWN_STARTED_EPOCH") &&
+      [ -n "$SPAWN_FOREIGN_PIDS" ]; then
+      spawn_refuse_allocated_slot "it already held process ids $(printf '%s' "$SPAWN_FOREIGN_PIDS" | tr '\n' ' ' | sed 's/ $//') before this spawn started"
+    fi
+    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" "$STATE"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
       exit 1
     fi

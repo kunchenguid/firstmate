@@ -1604,11 +1604,21 @@ fm_treehouse_slot_owner_marker() {  # <worktree>
   printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
 }
 
-# Claim a pool slot for a task, replacing whatever the previous holder left.
+# Claim a pool slot for a task, but never over a slot another task still holds.
 # The rename is atomic, so a reader either sees the old claim or the new one.
-fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
-  local worktree=$1 id=$2 home=$3 marker tmp
+# fm_treehouse_slot_claimable owns which existing claim may be replaced; a
+# refusal leaves the previous claim exactly as it was and sets
+# FM_TREEHOUSE_SLOT_BUSY to the reason, so the caller can report it.
+# The claim records the task's resolved state directory beside its home,
+# because a home may keep its task records outside <home>/state
+# (FM_STATE_OVERRIDE, as secondmate homes do), and a reader that looked only
+# under <home>/state would find no record for a live task and take its claim
+# for an orphan.
+fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home> <state-dir>
+  local worktree=$1 id=$2 home=$3 state=$4 marker tmp
   [ -n "$id" ] || return 1
+  state=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P) || return 1
+  fm_treehouse_slot_claimable "$worktree" "$id" "$home" || return 1
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 1
   # Only a plain claim file may be replaced: renaming onto a directory would
   # move the new claim inside it and leave the slot reading as unclaimable.
@@ -1621,6 +1631,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   {
     printf 'task=%s\n' "$id"
     printf 'home=%s\n' "$home"
+    printf 'state=%s\n' "$state"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
@@ -1631,14 +1642,21 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
 #   other  - the claim names a different task, so the slot was reassigned
 #   absent - no claim: the slot was taken before claims existed, or returned since
 #   unsafe - a claim file exists but cannot be read as a claim
-# FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
-# claimant as evidence. The home is reported, never matched: a home that moved
-# must not turn a task's own slot into a refusal.
+# FM_TREEHOUSE_SLOT_OWNER_ID, FM_TREEHOUSE_SLOT_OWNER_HOME and
+# FM_TREEHOUSE_SLOT_OWNER_STATE carry the recorded claimant as evidence; the
+# state directory is empty on a claim written before claims recorded it. The
+# home is reported, never matched here, so teardown's release still recognizes a
+# moved home's own claim. Deciding whether a slot may
+# be HANDED to a task is stricter: task ids are unique only within one home and
+# several homes share one pool, so fm_treehouse_slot_claimable also requires the
+# claim's home to be the caller's, because sharing a working copy is worse than
+# refusing one.
 fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+  local worktree=$1 id=$2 marker line owner_id='' owner_home='' owner_state=''
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
+  FM_TREEHOUSE_SLOT_OWNER_STATE=
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     FM_TREEHOUSE_SLOT_OWNER=absent
@@ -1649,6 +1667,7 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
     case "$line" in
       task=*) owner_id=${line#task=} ;;
       home=*) owner_home=${line#home=} ;;
+      state=*) owner_state=${line#state=} ;;
     esac
   done < "$marker" || return 0
   [ -n "$owner_id" ] || return 0
@@ -1656,6 +1675,8 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
+  # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+  FM_TREEHOUSE_SLOT_OWNER_STATE=$owner_state
   if [ "$owner_id" = "$id" ]; then
     FM_TREEHOUSE_SLOT_OWNER=mine
   else
@@ -1672,6 +1693,266 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true
+}
+
+# --- Pool-slot occupancy ------------------------------------------------------
+# No two workers may ever be given the same working copy. Treehouse enforces
+# that for everything it can see: it hands out no slot that holds a running
+# process and no slot it has leased. Its notion of free is nevertheless weaker
+# than Firstmate's, because a crewmate slot is held by a TASK, not by a process.
+# A task whose worker endpoint has died, or is between incarnations, leaves its
+# work and its records in the slot with nothing running in it, and Treehouse
+# then reads that slot as available. Below the pool's size limit that costs
+# nothing, because Treehouse creates a fresh slot rather than reusing anything;
+# AT the limit the processless slot is the only one it can offer, which is why
+# handing out an occupied working copy is a failure that appears only when the
+# pool is exhausted and the fleet is busiest.
+#
+# Firstmate closes that gap with the claim it already writes. These helpers are
+# the claim's read side, plus the two pool facts a caller needs to tell the two
+# allocation failures apart.
+
+# Distinct exit codes for the two ways a pool allocation fails, because they
+# need opposite responses and were previously one indistinguishable refusal:
+# an exhausted pool cannot be helped by asking again, while a slot this home
+# must not use usually can.
+# shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+FM_POOL_EXHAUSTED_EXIT=75
+# shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+FM_POOL_BAD_SLOT_EXIT=76
+
+# True when <worktree> may be handed to <task-id> of <home>.
+#
+# Claimable means positively proved free, never merely not-proved-busy: an
+# unreadable claim, a claim naming no home, and a claim whose home cannot be
+# inspected all refuse. A claim is this task's own only when it names both this
+# task id AND this home, compared physically: ids are unique only within one
+# home, and several homes share one pool. The one claim that may be replaced is
+# an ORPHAN - its home is still here and the state directory the claim records
+# holds no record for the task it names - which is exactly what a spawn that
+# aborted after claiming its slot leaves. A claim that records no state
+# directory predates that field and can never be proved stale: its owner's
+# actual state directory is unknown, and a slot with nothing running in it
+# proves nothing, because a task whose worker endpoint died leaves its work
+# there with nothing running. So another task's such claim always refuses - as
+# held when a record sits under <home>/state, as unprovable otherwise - and is
+# cleared by its owner's teardown or by an operator, never by a competing
+# spawn. The asymmetry decides it: a refused slot costs an operator one
+# command, while two workers in one live copy cost work, and the work is
+# someone else's. Every claim written now records its state directory and is
+# provable, so the unprovable ones are a closed set that shrinks as tasks tear
+# down.
+# FM_TREEHOUSE_SLOT_BUSY carries the refusal reason, including the claim's own
+# path, so the caller can name the file an operator would inspect; a claim that
+# names this task id from another home names both homes, so a home that moved
+# reads as that rather than as a mystery.
+fm_treehouse_slot_claimable() {  # <worktree> <task-id> <home>
+  local worktree=$1 id=$2 home=$3 owner_home owner_state owner_real home_real marker home_note=''
+  FM_TREEHOUSE_SLOT_BUSY=
+  fm_treehouse_slot_owner_state "$worktree" "$id"
+  marker=$(fm_treehouse_slot_owner_marker "$worktree" 2>/dev/null || true)
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    absent) return 0 ;;
+    unsafe)
+      FM_TREEHOUSE_SLOT_BUSY="its ownership record ${marker:-.fm-slot-owner} cannot be read as a claim"
+      return 1
+      ;;
+  esac
+  owner_home=$FM_TREEHOUSE_SLOT_OWNER_HOME
+  home_real=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || home_real=$home
+  if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then
+    home_note=" (the claim names this task id, but from ${owner_home:-no home}, not this home $home_real)"
+  fi
+  if [ -z "$owner_home" ]; then
+    FM_TREEHOUSE_SLOT_BUSY="task $FM_TREEHOUSE_SLOT_OWNER_ID holds it and ${marker:-its claim} names no home to check$home_note"
+    return 1
+  fi
+  if [ ! -d "$owner_home" ]; then
+    FM_TREEHOUSE_SLOT_BUSY="task $FM_TREEHOUSE_SLOT_OWNER_ID holds it and its home $owner_home is not here to prove the claim stale$home_note"
+    return 1
+  fi
+  owner_real=$(CDPATH='' cd -- "$owner_home" 2>/dev/null && pwd -P) || owner_real=$owner_home
+  if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] && [ "$owner_real" = "$home_real" ]; then
+    return 0
+  fi
+  owner_state=${FM_TREEHOUSE_SLOT_OWNER_STATE:-$owner_home/state}
+  if [ -e "$owner_state/$FM_TREEHOUSE_SLOT_OWNER_ID.meta" ] ||
+    [ -L "$owner_state/$FM_TREEHOUSE_SLOT_OWNER_ID.meta" ]; then
+    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+    FM_TREEHOUSE_SLOT_BUSY="task $FM_TREEHOUSE_SLOT_OWNER_ID of $owner_home still holds it$home_note"
+    return 1
+  fi
+  if [ -z "$FM_TREEHOUSE_SLOT_OWNER_STATE" ]; then
+    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+    FM_TREEHOUSE_SLOT_BUSY="task $FM_TREEHOUSE_SLOT_OWNER_ID of $owner_home holds it through ${marker:-its claim}, which predates claims recording their owner's state directory, so whether that task is finished cannot be proved. Confirm task $FM_TREEHOUSE_SLOT_OWNER_ID of $owner_home is finished - landed or torn down - then remove ${marker:-that claim}$home_note"
+    return 1
+  fi
+  if [ ! -d "$owner_state" ]; then
+    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+    FM_TREEHOUSE_SLOT_BUSY="task $FM_TREEHOUSE_SLOT_OWNER_ID of $owner_home holds it and its state directory $owner_state is not here to prove the claim stale$home_note"
+    return 1
+  fi
+  return 0
+}
+
+# `treehouse status --json` for the pool serving <project-dir>, or non-zero
+# when it cannot be read: no `treehouse`, no `jq`, or no project.
+fm_treehouse_pool_status() {  # <project-dir>
+  local project=$1
+  command -v treehouse >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -d "$project" ] || return 1
+  (CDPATH='' cd -- "$project" && treehouse status --json) 2>/dev/null
+}
+
+# Pids Treehouse reports running inside <worktree>, one per line.
+# Treehouse's own scan is the source, so Firstmate never grows a second,
+# divergent answer to "what is running in this slot". An unreadable pool, an
+# absent `treehouse`, or a slot the pool does not list prints nothing and
+# returns non-zero, which every caller must treat as "could not tell".
+fm_treehouse_slot_pids() {  # <project-dir> <worktree>
+  local project=$1 worktree=$2 slot status
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  status=$(fm_treehouse_pool_status "$project") || return 1
+  printf '%s' "$status" |
+    jq -r --arg slot "$slot" '.[]? | select(.path == $slot) | .processes[]?.pid' 2>/dev/null || return 1
+}
+
+# Seconds since <pid> started, from `ps -o etime=`'s portable [[DD-]HH:]MM:SS.
+# Prints nothing and returns non-zero when the age cannot be read at all.
+fm_process_age_seconds() {  # <pid>
+  local pid=$1 etime days rest secs
+  [ -n "$pid" ] || return 1
+  etime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
+  [ -n "$etime" ] || return 1
+  days=0
+  rest=$etime
+  case "$rest" in
+    *-*)
+      days=${rest%%-*}
+      rest=${rest#*-}
+      ;;
+  esac
+  case "$rest" in
+    *:*:*) secs=$(( 10#${rest%%:*} * 3600 + 10#$(printf '%s' "$rest" | cut -d: -f2) * 60 + 10#$(printf '%s' "$rest" | cut -d: -f3) )) ;;
+    *:*) secs=$(( 10#${rest%%:*} * 60 + 10#${rest#*:} )) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$(( 10#$days * 86400 + secs ))"
+}
+
+# Pids inside <worktree> that were already running <epoch> seconds into the
+# epoch, one per line: the processes that were in the slot BEFORE this caller
+# asked the pool for it, and therefore belong to somebody else.
+#
+# Returns 0 when the slot could be inspected, whether or not it found anything,
+# and non-zero when it could not be inspected at all, which callers treat as
+# "no answer" rather than as "occupied": this is the redundant guard over
+# fm_treehouse_slot_claimable, and its inputs (`treehouse`, `jq`) are optional
+# tools that must not be able to wedge dispatch by being absent. A pid whose age cannot be
+# read is reported, because an unreadable occupant is not an absent one.
+# The comparison keeps a two-second margin in the caller's favour so a process
+# this very allocation started can never be misread as a foreign occupant;
+# anything genuinely left over is older than that by orders of magnitude.
+fm_treehouse_slot_foreign_pids() {  # <project-dir> <worktree> <epoch>
+  local project=$1 worktree=$2 epoch=$3 pids pid
+  pids=$(fm_treehouse_slot_pids "$project" "$worktree") || return 1
+  for pid in $pids; do
+    fm_process_predates "$pid" "$epoch" || continue
+    printf '%s\n' "$pid"
+  done
+  return 0
+}
+
+# True when <pid> was already running <epoch> seconds into the epoch, with
+# fm_treehouse_slot_foreign_pids' two-second margin, or when its age cannot be
+# read at all: an unreadable process is never taken for the caller's own.
+fm_process_predates() {  # <pid> <epoch>
+  local pid=$1 epoch=$2 age now
+  age=$(fm_process_age_seconds "$pid") || return 0
+  now=$(date +%s) || return 0
+  [ "$((now - age))" -lt $((epoch - 2)) ]
+}
+
+# True when an UNCLAIMED slot of the pool serving <project-dir> holds a process
+# started since <epoch>: a caller's own allocation, which proves the pool gave
+# it a slot even when the caller never saw where. Only a slot with no
+# .fm-slot-owner claim counts, because every other Firstmate worker's slot is
+# claimed and its own tool calls are just as young. Returns 0 when one does, 1
+# when none does, and 2 when the pool could not be read.
+fm_treehouse_pool_holds_new_process() {  # <project-dir> <epoch>
+  local project=$1 epoch=$2 status rows path pid
+  status=$(fm_treehouse_pool_status "$project") || return 2
+  rows=$(printf '%s' "$status" |
+    jq -r '.[]? | .path as $path | .processes[]? | "\($path)\t\(.pid)"' 2>/dev/null) || return 2
+  while IFS=$'\t' read -r path pid; do
+    [ -n "$pid" ] || continue
+    fm_treehouse_slot_owner_state "$path" ''
+    [ "$FM_TREEHOUSE_SLOT_OWNER" = absent ] || continue
+    fm_process_predates "$pid" "$epoch" || return 0
+  done <<EOF
+$rows
+EOF
+  return 1
+}
+
+# True when the pool serving <project-dir> has a slot <task-id> of <home> could
+# be granted: reported available AND claimable by that task, since a slot
+# another live task holds is exactly what Treehouse reports as available.
+# <except-worktree>, when given, is the slot the caller was just handed and
+# refused, which the pool would hand straight back to anyone who asked again.
+# Returns 0 when such a slot exists, 1 when none does, and 2 when the pool
+# could not be read, which is not evidence either way.
+fm_treehouse_pool_has_free_slot() {  # <project-dir> <task-id> <home> [<except-worktree>]
+  local project=$1 id=$2 home=$3 except='' status paths path
+  if [ -n "${4:-}" ]; then
+    except=$(CDPATH='' cd -- "$4" 2>/dev/null && pwd -P) || except=$4
+  fi
+  status=$(fm_treehouse_pool_status "$project") || return 2
+  paths=$(printf '%s' "$status" |
+    jq -r --arg except "$except" '.[]? | select(.status == "available" and .path != $except) | .path' 2>/dev/null) || return 2
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    fm_treehouse_slot_claimable "$path" "$id" "$home" && return 0
+  done <<EOF
+$paths
+EOF
+  return 1
+}
+
+# True when the pool serving <project-dir> already holds as many slots as its
+# max_trees allows, so Treehouse may create no more. Nothing available is not
+# exhaustion on its own: a slot Treehouse just created for the caller reads
+# in-use once the caller's own shell is in it. The limit is the top-level
+# max_trees of the repository's treehouse.toml, and Treehouse's own default of
+# 16 when that file or key is absent (docs/verification/treehouse-pool-slots.md).
+# Returns 0 at the limit, 1 below it, and 2 when either side cannot be read.
+fm_treehouse_pool_at_limit() {  # <project-dir>
+  local project=$1 top config limit=16 value status count
+  status=$(fm_treehouse_pool_status "$project") || return 2
+  top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 2
+  config="$top/treehouse.toml"
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    [ -f "$config" ] && [ -r "$config" ] || return 2
+    value=$(awk '/^[[:space:]]*\[/ { exit }
+      /^[[:space:]]*max_trees[[:space:]]*=/ {
+        sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*(#.*)?$/, ""); print "=" $0; exit
+      }' "$config" 2>/dev/null) || return 2
+    case "$value" in
+      '') ;;
+      =[0-9]*)
+        limit=${value#=}
+        case "$limit" in *[!0-9]*) return 2 ;; esac
+        ;;
+      *) return 2 ;;
+    esac
+  fi
+  count=$(printf '%s' "$status" | jq -r 'length' 2>/dev/null) || return 2
+  case "$count" in
+    '' | *[!0-9]*) return 2 ;;
+  esac
+  [ "$count" -ge "$limit" ] || return 1
+  return 0
 }
 
 fm_failure_episode_reset() {

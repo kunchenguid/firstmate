@@ -203,6 +203,11 @@ Fill the task subsections according to section 11.
 
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
+A refused pooled spawn is not a cue to retry: an exhausted pool needs work landed or torn down first, and a copy refused because another task holds it must be resolved at its holder - have that task land or tear down its work - because the pool offers that same held copy again until its holder returns it; `bin/fm-spawn.sh`'s header owns the exit codes that tell those apart.
+This is observed, not theoretical: the pool offered a secondmate the same wrong-owner copy repeatedly, its launcher refused every time, and only removing that copy from the pool - resolving its holder - cleared it, so retrying would have looped indefinitely.
+A claim written before claims recorded their owner's state directory can never be proved stale - an idle slot proves nothing, since a task whose worker died leaves its work there with nothing running - so it is always refused, and retrying meets the same refusal forever.
+Clear it by confirming the task it names is finished (landed or torn down) and then removing the claim file the refusal names, `<pool>/<slot>/.fm-slot-owner`; a refused slot costs that one command, while guessing wrong would put two workers in someone else's live copy.
+Every claim written now records its state directory and is provable, so these unprovable claims are a closed set that shrinks as tasks tear down.
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
 After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
