@@ -413,6 +413,32 @@ wait "$OTHER_PID" 2>/dev/null || true
 OTHER_PID=
 pass "stale ownership is reclaimed without signaling a reused pid"
 
+SUPERSEDED_SERVE_PID=$(cat "$STATE_ROOT/worker.pid")
+SUPERSEDED_PGID=$(fm_remote_job_process_pgid "$SUPERSEDED_SERVE_PID") \
+  || fail "the takeover fixture could not resolve the serving worker group"
+sleep 20 &
+OTHER_PID=$!
+printf '%s\n' "$OTHER_PID" > "$STATE_ROOT/worker.lock/pid"
+for _ in $(seq 1 100); do
+  kill -0 "$SUPERSEDED_SERVE_PID" 2>/dev/null || break
+  sleep 0.1
+done
+! kill -0 "$SUPERSEDED_SERVE_PID" 2>/dev/null \
+  || fail "a worker kept serving after another process took over its ownership lock"
+! kill -0 -- "-$SUPERSEDED_PGID" 2>/dev/null \
+  || fail "the superseded worker left its restart supervisor running"
+assert_present "$STATE_ROOT/worker.lock" "a superseded worker removed the lock its replacement owns"
+[ "$(cat "$STATE_ROOT/worker.lock/pid")" = "$OTHER_PID" ] \
+  || fail "a superseded worker rewrote the lock its replacement owns"
+kill "$OTHER_PID" 2>/dev/null || true
+wait "$OTHER_PID" 2>/dev/null || true
+OTHER_PID=
+touch -t 200001010000 "$STATE_ROOT/worker.ready" "$STATE_ROOT/worker.lock"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "$FM_REMOTE_JOB_ERROR"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+pass "a worker stops serving once another process owns its lock"
+
 FM_REMOTE_JOB_TIMEOUT=1
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
@@ -865,7 +891,8 @@ done
 ! ( FM_REMOTE_JOB_STATE_ROOT="$LOST_STATE"; fm_remote_job_probe "$LOST_HOME" ) \
   || fail "a worker without its ownership lock kept readiness fresh"
 assert_absent "$LOST_STATE/worker.lock" "the ownership lock reappeared before TERM"
-kill -TERM "$LOST_TERM_PID"
+# The serving loop may already have stopped itself on the lost lock.
+kill -TERM "$LOST_TERM_PID" 2>/dev/null || true
 for _ in $(seq 1 100); do
   kill -0 "$LOST_TERM_PID" 2>/dev/null || break
   sleep 0.05
