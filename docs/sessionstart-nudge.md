@@ -311,7 +311,7 @@ The `.opencode/plugins/fm-primary-sessionstart-nudge.js` plugin does three thing
 
 - It listens for `session.created`.
 - It runs once per session id.
-- It calls `client.session.promptAsync` only when the wrapper prints a nudge.
+- It calls the session prompt only when the wrapper prints a nudge: `client.session.promptAsync` on the v1 hook API and `ctx.session.prompt` on the v2 plugin API.
 
 Interactive TUI delivery is supported.
 Headless `opencode run` is intentionally fail-open, because the process can exit before the queued turn.

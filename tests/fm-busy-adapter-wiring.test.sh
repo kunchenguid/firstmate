@@ -171,6 +171,33 @@ for (const arg of process.argv.slice(2)) {
 EOF
 }
 
+# drive_oc_plugin_v2 <plugin-path> <events-json-lines...>: load the generated
+# plugin and drive the OpenCode v2 default export through ctx.event.subscribe,
+# the entry the v2 plugin loader actually wires.
+drive_oc_plugin_v2() {
+  local plugin=$1
+  shift
+  PLUGIN_PATH="$plugin" node --input-type=module - "$@" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href);
+// Each arg is a v2.0.18 envelope `{type, data}`; add the envelope id/created.
+const events = process.argv.slice(2).map((arg, i) => ({ id: `evt_${i}`, created: 0, ...JSON.parse(arg) }));
+const ctx = {
+  event: {
+    subscribe: async function* () {
+      for (const event of events) yield event;
+    },
+  },
+};
+await mod.default.setup(ctx);
+await new Promise((resolve) => setTimeout(resolve, 250));
+EOF
+}
+
+oc_v2_execution() {  # <sessionID> <started|succeeded|failed|interrupted>
+  printf '{"type":"session.execution.%s","data":{"sessionID":"%s"}}' "$2" "$1"
+}
+
 oc_status() {  # <sessionID> <type>
   printf '{"type":"session.status","properties":{"sessionID":"%s","status":{"type":"%s"}}}' "$1" "$2"
 }
@@ -225,6 +252,23 @@ test_opencode_plugin_semantic_lifecycle() {
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy opencode-plugin" ] || fail "another session's idle must not clear the latched busy, got '$out'"
   pass "opencode plugin classifies from session.status, scoped to the latched worker session"
+
+  # v2.0.18 publishes no session.status/session.idle; a turn is bracketed by
+  # session.execution.started and a terminal session.execution.* event.
+  local terminal
+  for terminal in succeeded failed interrupted; do
+    rm -f "$state/$id.turn-ended"
+    out=$(drive_oc_plugin_v2 "$plugin" "$(oc_v2_execution ses_v2 started)") \
+      || fail "v2 default-export drive failed: $out"
+    out=$(classify opencode "$id" "$state")
+    [ "$out" = "busy opencode-plugin" ] || fail "v2 session.execution.started did not classify busy, got '$out'"
+    out=$(drive_oc_plugin_v2 "$plugin" "$(oc_v2_execution ses_v2 started)" "$(oc_v2_execution ses_v2 "$terminal")") \
+      || fail "v2 default-export drive failed: $out"
+    [ -f "$state/$id.turn-ended" ] || fail "v2 session.execution.$terminal did not touch the notification marker"
+    out=$(classify opencode "$id" "$state")
+    [ "$out" = "idle opencode-plugin" ] || fail "v2 session.execution.$terminal did not classify idle, got '$out'"
+  done
+  pass "opencode v2 default export maps session.execution.* onto the busy/idle lifecycle"
 }
 
 run_claude_hook() {  # <settings.json> <hook-event>
