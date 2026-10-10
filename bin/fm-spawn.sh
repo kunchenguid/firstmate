@@ -340,7 +340,9 @@
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment, including the
 #   FM_TASK_INBOX export every launch carries (the absolute state/<id>.inbox
-#   path the steering doorbell names). Raw commands must
+#   path the steering doorbell names). Before launch, spawn creates that inbox
+#   and its handled/ directory for every harness and worker kind, including
+#   relaunches; a creation failure refuses the launch. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
@@ -2890,8 +2892,8 @@ rovo_config_override_flag() {
 # task-channel directories. The skills grant is that directory, not the
 # checkout root, so the grant does not open the whole checkout. Paths resolve
 # the way rovo_config_override_flag resolves them
-# (real paths under the task's home). The state channel dirs are created
-# lazily by their first record, so they are made here: an --add-dir naming a
+# (real paths under the task's home). The steering inbox is created in the
+# common pre-launch path; the other channel dirs are made here: an --add-dir naming a
 # directory that does not exist at launch would leave the channel created
 # later outside the grant. The grant never covers the whole state/ (watcher
 # internals live there) or anything wider.
@@ -2902,14 +2904,13 @@ claude_add_dirs_flag() {  # <kind> <state-dir> <data-dir> <code-root> <task-id>
   state_real=$(cd "$state_dir" && pwd -P) || return 1
   case "$kind" in
   secondmate)
-    mkdir -p "$state_real/$id.inbox/handled" || return 1
     dirs=("$state_real/$id.inbox")
     ;;
   *)
     data_real=$(cd "$data_dir" && pwd -P) || return 1
     root_real=$(cd "$code_root" && pwd -P) || return 1
     [ -d "$root_real/.agents/skills" ] || return 1
-    mkdir -p "$state_real/operational-inbox" "$state_real/$id.inbox/handled" "$data_real/$id" || return 1
+    mkdir -p "$state_real/operational-inbox" "$data_real/$id" || return 1
     dirs=("$state_real/operational-inbox" "$state_real/$id.inbox" "$data_real/$id" "$root_real/.agents/skills")
     ;;
   esac
@@ -4584,6 +4585,12 @@ mkdir -p "$TASK_TMP/gotmp"
 # check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
+# Every harness and worker kind needs its steering channel before launch,
+# including a remote secondmate reaching this path on its own host.
+mkdir -p "$STATE_REAL/$ID.inbox/handled" || {
+  echo "error: could not create the steering inbox for $ID" >&2
+  exit 1
+}
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL

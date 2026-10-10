@@ -194,15 +194,39 @@ test_secondmate_launch() {
 # launch must hand its agent the absolute path of the task's own inbox. For a
 # secondmate that inbox lives in the launching home's state, not its own. The
 # cleared allowlist environment is where an ambient forward would be lost.
-test_launch_exports_task_inbox() {
-  local kind rec id sm out status seen want
-  for kind in ship secondmate; do
+test_launch_prepares_task_inbox() {
+  local pair harness kind rec id sm out status seen want
+  for pair in 'codex ship' 'codex scout' 'codex secondmate' \
+    'claude ship' 'claude scout' 'claude secondmate'; do
+    read -r harness kind <<EOF
+$pair
+EOF
     id="inbox-$kind-a1"
-    rec=$(make_case "inbox-$kind" codex "$id")
+    rec=$(make_case "inbox-$harness-$kind" "$harness" "$id")
     read_case "$rec"
     : > "$HOME_DIR/config/launch-env-allowlist"
+    want="$(cd "$HOME_DIR/state" && pwd -P)/$id.inbox"
+    # Observe the directories when spawn delivers the launch to the pane,
+    # before replaying it with the probe agent below.
+    mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux-spawn"
+    cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/bin/sh
+for arg in "\$@"; do
+  if [ "\$arg" = -l ]; then
+    if [ -d '$want' ] && [ -d '$want/handled' ]; then
+      printf 'ready\n' > '$CASE_DIR/inbox-at-launch'
+    else
+      printf 'missing\n' > '$CASE_DIR/inbox-at-launch'
+    fi
+  fi
+done
+exec '$FAKEBIN_DIR/tmux-spawn' "\$@"
+SH
+    chmod +x "$FAKEBIN_DIR/tmux"
     if [ "$kind" = ship ]; then
       out=$(run_case_spawn "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+    elif [ "$kind" = scout ]; then
+      out=$(run_case_spawn "$id" "$PROJ_DIR" --scout)
     else
       sm="$CASE_DIR/secondmate-home"
       mkdir -p "$sm/bin" "$sm/data"
@@ -214,15 +238,16 @@ test_launch_exports_task_inbox() {
       out=$(run_case_spawn "$id" "$sm" --secondmate)
     fi
     status=$?
-    expect_code 0 "$status" "$kind spawn should succeed: $out"
-    install_env_probe "$FAKEBIN_DIR" codex FM_TASK_INBOX
+    expect_code 0 "$status" "$harness $kind spawn should succeed: $out"
+    assert_equals ready "$(cat "$CASE_DIR/inbox-at-launch")" \
+      "$harness $kind must have its inbox and handled directory before launch delivery"
+    install_env_probe "$FAKEBIN_DIR" "$harness" FM_TASK_INBOX
     seen=$(emitted_launch_env "$FAKEBIN_DIR" "$LAUNCH_LOG" "$PANE_LOG") \
       || fail "$kind: the emitted launch failed to run"
-    want="$(cd "$HOME_DIR/state" && pwd -P)/$id.inbox"
     assert_equals "$want" "$seen" \
-      "a $kind agent must start with FM_TASK_INBOX set to its absolute steering inbox"
+      "a $harness $kind agent must start with FM_TASK_INBOX set to its absolute steering inbox"
   done
-  pass "ship and secondmate launches export their absolute steering inbox as FM_TASK_INBOX"
+  pass "Claude and non-Claude ship, scout and secondmate launches have their steering inbox before the agent starts"
 }
 
 # --- relaunch ---------------------------------------------------------------
@@ -386,6 +411,6 @@ test_ship_allowlist_absent
 test_ship_allowlist_enabled
 test_launch_command_carries_the_switch_without_the_pane_export
 test_secondmate_launch
-test_launch_exports_task_inbox
+test_launch_prepares_task_inbox
 test_relaunch_rebuilds_the_switch
 test_raw_compound_launch_command_carries_the_switch
