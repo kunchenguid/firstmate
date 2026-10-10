@@ -2498,6 +2498,8 @@ EOF
     || fail "the drain section does not say how to record the captain's answer: $drain"
   printf '%s\n' "$drain" | grep -F 're-open the status decision' >/dev/null \
     || fail "the drain section does not offer the re-open direction: $drain"
+  printf '%s\n' "$drain" | grep -Fx 'load: captain-hold-lifecycle' >/dev/null \
+    || fail "the drain section does not name the skill to load: $drain"
   pass "a status resolution over a still-open captain-held task is signalled, not closed"
 }
 

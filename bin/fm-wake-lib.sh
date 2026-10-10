@@ -2757,6 +2757,43 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
   fm_wake_unread_events "$1" "$2" 0
 }
 
+# Print the "load: <skill>" hint the drain shows beside a presented wake: the
+# agent-only skill AGENTS.md (or that skill's own description) says to load
+# before acting on it. This table is the single owner of that mapping in
+# drain output; it names a skill only where those sources make the mapping
+# explicit, and prints nothing for any other wake.
+fm_wake_skill_hint() {  # row <kind> <key> <payload> | status <state> <status-key> <line> | divergence
+  local skills='' verb
+  case "$1" in
+    row)
+      case "$2:$3" in
+        stale:*) skills=stuck-crewmate-recovery ;;
+        check:procevent:*) skills=process-event-sources ;;
+        check:*/x-watch.check.sh) skills=fmx-respond ;;
+        check:contribution-*) skills=bearings ;;
+      esac
+      ;;
+    status)
+      _fm_wake_require_classify || return 0
+      status_line_verb "$4" verb
+      case "$verb:$4" in
+        needs-decision:*'ask-user findings='*) skills="ask-user-authority, validation-supervision" ;;
+        done:*)
+          if grep -qx 'kind=scout' "$2/${3%.status}.meta" 2>/dev/null; then
+            skills=scout-completion
+          else
+            case "$4" in
+              *'PR https://'*|*'ready in branch '*) skills=ship-landing ;;
+            esac
+          fi
+          ;;
+      esac
+      ;;
+    divergence) skills=captain-hold-lifecycle ;;
+  esac
+  [ -z "$skills" ] || printf 'load: %s\n' "$skills"
+}
+
 # Print supplemental drain-time context only after the caller has committed the
 # raw queue consumption and released the append lock.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
@@ -2836,6 +2873,7 @@ EOF
       fi
       line="$prefix: $status_key: $event_line"
       printf '%s\n' "$line" || return 1
+      fm_wake_skill_hint status "$STATE" "$status_key" "$event_line" || return 1
     done <<EOF
 $FM_WAKE_UNREAD_LINES
 EOF
