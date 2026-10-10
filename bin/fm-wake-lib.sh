@@ -2759,11 +2759,16 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 
 # Print supplemental drain-time context only after the caller has committed the
 # raw queue consumption and released the append lock.
+# FM_WAKE_ANNOTATED_TASKS lists each task id whose unread status lines were
+# actually printed this call. Skipped tasks are omitted. fm-classify-lib.sh
+# owns how this presentation result advances the cursor.
+FM_WAKE_ANNOTATED_TASKS=
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
   local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
-  local LC_ALL=C
+  local LC_ALL=C printed=0
 
+  FM_WAKE_ANNOTATED_TASKS=
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
     {
       key = $1
@@ -2806,8 +2811,8 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     fi
     offset=$(fm_wake_status_cursor_offset "$path") || return 1
     endpoint=
+    task=${status_key%.status}
     if [ -n "$snapshot" ]; then
-      task=${status_key%.status}
       while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident; do
         if [ "$snapshot_task" = "$task" ]; then endpoint=$snapshot_endpoint; break; fi
       done <<EOF
@@ -2824,6 +2829,7 @@ EOF
       continue
     fi
     last_event=$FM_WAKE_EVENT_LINE
+    printed=0
     while IFS= read -r event_line || [ -n "$event_line" ]; do
       [ -n "$event_line" ] || continue
       event_line=$(printf '%s' "$event_line" | LC_ALL=C tr '\t\r' '  ')
@@ -2836,9 +2842,14 @@ EOF
       fi
       line="$prefix: $status_key: $event_line"
       printf '%s\n' "$line" || return 1
+      printed=1
     done <<EOF
 $FM_WAKE_UNREAD_LINES
 EOF
+    if [ "$printed" -eq 1 ]; then
+      FM_WAKE_ANNOTATED_TASKS="$FM_WAKE_ANNOTATED_TASKS$task
+"
+    fi
   done <<EOF
 $manifest
 EOF
