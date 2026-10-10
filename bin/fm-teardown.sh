@@ -55,14 +55,13 @@
 # Otherwise base_branch= (bin/fm-spawn.sh) selects origin's copy of that named
 # base, or the default branch when no base is recorded. A missing named target
 # refuses rather than guessing another branch; metadata is never rewritten.
-# docs/architecture.md owns that provider boundary.
-# Squash merges collapse the branch's commits, so per-commit patch ids against main
+# Squash merges collapse the branch's commits, so per-commit patch ids against the target
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
 # cherry, and merge-tree containment each fail to prove content landed without also
 # accepting unlanded edits to the same paths. Teardown still accepts a merged PR
 # whose head contains the current local work (ancestor or equivalent patch ids),
-# or a clean content-in-default tree match. Anything else refuses.
+# or a clean content-in-target tree match. Anything else refuses.
 # The review is resolved from the task's recorded pr= when present. GitLab uses
 # fm-pr-lib.sh's proof reader and origin-identity check; an absent source-head
 # object is recovered only through its exact-SHA task-private MR head fetch.
