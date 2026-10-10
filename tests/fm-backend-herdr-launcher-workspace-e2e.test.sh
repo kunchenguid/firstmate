@@ -466,27 +466,31 @@ git -C "$SM3_HOME" init -q -b main
 printf 'trivial secondmate charter brief: nothing to do.\n' > "$ENV_HOME/data/$SM3_ID/brief.md"
 ENV_TRACEPARENT=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
-# shellcheck disable=SC2016
-ENV_PROBE='sh -c '\''echo "envprobe task=${FM_TASK_ID:-unset} gotmp=${GOTMPDIR:+set} cad=${COMPACT_ADVISER_DISABLE:-unset} tp=${TRACEPARENT:-unset}"'\'
+# The probe reports into a fixture-owned file rather than the pane screen: a
+# full trace carrier is wider than the visible pane, so a screen read can see a
+# wrapped prefix. Each report is renamed into place, so it is complete once seen.
+ENV_PROBE_SCRIPT="$TMP_ROOT/envprobe.sh"
+cat > "$ENV_PROBE_SCRIPT" <<'SH'
+printf 'envprobe task=%s gotmp=%s cad=%s tp=%s\n' "${FM_TASK_ID:-unset}" "${GOTMPDIR:+set}" \
+  "${COMPACT_ADVISER_DISABLE:-unset}" "${TRACEPARENT:-unset}" > "$1.tmp" && mv "$1.tmp" "$1"
+SH
 spawn_env_probe() {  # <task-id> <project> [extra fm-spawn args...]
   local id=$1 proj=$2
   shift 2
   env HERDR_ENV=1 HERDR_PANE_ID="$LAUNCH_PRIMARY_PANE" HERDR_SESSION="$HERDR_LAB_SESSION" \
     HERDR_SOCKET_PATH="$LAB_SOCKET" \
     FM_SPAWN_NO_GUARD=1 FM_HOME="$ENV_HOME" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "$ENV_PROBE" --backend herdr "$@" \
-    >"$TMP_ROOT/$id.out" 2>"$TMP_ROOT/$id.err"
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "sh '$ENV_PROBE_SCRIPT' '$TMP_ROOT/$id.probe'" \
+    --backend herdr "$@" >"$TMP_ROOT/$id.out" 2>"$TMP_ROOT/$id.err"
 }
-wait_pane_line() {  # <pane> <needle> -> prints the matching line
-  local i=0 capture line
+wait_probe_file() {  # <file> <pane> -> prints the report, or the pane on timeout
+  local i=0
   while [ "$i" -lt 40 ]; do
-    capture=$(lab pane read "$1" --source recent --lines 80 2>/dev/null)
-    line=$(printf '%s\n' "$capture" | grep -F "$2" | grep -v 'echo' | tail -1)
-    [ -z "$line" ] || { printf '%s' "$line"; return 0; }
+    [ -s "$1" ] && { cat "$1"; return 0; }
     sleep 0.25
     i=$((i + 1))
   done
-  printf '%s' "$capture"
+  lab pane read "$2" --source recent --lines 80 2>/dev/null
   return 1
 }
 
@@ -496,27 +500,26 @@ ENVA_META="$ENV_HOME/state/envA.meta"
 record_worktree "$ENVA_META"
 ENVA_PANE=$(grep '^herdr_pane_id=' "$ENVA_META" | cut -d= -f2-)
 [ -n "$ENVA_PANE" ] || fail "envA meta is missing herdr_pane_id"
-ENVA_LINE=$(wait_pane_line "$ENVA_PANE" 'envprobe task=') \
+ENVA_LINE=$(wait_probe_file "$TMP_ROOT/envA.probe" "$ENVA_PANE") \
   || fail "the empty-allowlist worker command never executed"$'\n'"$ENVA_LINE"
-assert_contains_local "$ENVA_LINE" "envprobe task=envA gotmp=set cad=1 tp=unset" \
-  "an empty allowlist must still forward the pane's task marker, GOTMPDIR, and compact-adviser switch"
-# shellcheck disable=SC2016
-lab pane run "$ENVA_PANE" 'printf "after%s task=%s\n" -exit "${FM_TASK_ID:-unset}"' >/dev/null 2>&1 \
+[ "$ENVA_LINE" = "envprobe task=envA gotmp=set cad=1 tp=unset" ] \
+  || fail "an empty allowlist must still forward the pane's task marker, GOTMPDIR, and compact-adviser switch"$'\n'"--- got ---"$'\n'"$ENVA_LINE"
+lab pane run "$ENVA_PANE" "printf 'task=%s\\n' \"\${FM_TASK_ID:-unset}\" > '$TMP_ROOT/envA.after.tmp' && mv '$TMP_ROOT/envA.after.tmp' '$TMP_ROOT/envA.after'" >/dev/null 2>&1 \
   || fail "could not probe envA's pane shell after the worker exited"
-ENVA_AFTER=$(wait_pane_line "$ENVA_PANE" 'after-exit task=') \
+ENVA_AFTER=$(wait_probe_file "$TMP_ROOT/envA.after" "$ENVA_PANE") \
   || fail "envA's pane shell did not answer the post-exit probe"$'\n'"$ENVA_AFTER"
-assert_contains_local "$ENVA_AFTER" "after-exit task=envA" \
-  "the task marker must remain set in the pane shell after the worker exits"
+[ "$ENVA_AFTER" = "task=envA" ] \
+  || fail "the task marker must remain set in the pane shell after the worker exits"$'\n'"--- got ---"$'\n'"$ENVA_AFTER"
 pass "real herdr E2E: with an empty launch-env allowlist the worker sees its pane setup, and the task marker persists in the pane shell after exit"
 
 spawn_env_probe "$SM3_ID" "$SM3_HOME" --secondmate --traceparent "$ENV_TRACEPARENT" \
   || fail "the empty-allowlist traced secondmate spawn failed"$'\n'"$(cat "$TMP_ROOT/$SM3_ID.err")"
 SM3_PANE=$(grep '^herdr_pane_id=' "$ENV_HOME/state/$SM3_ID.meta" | cut -d= -f2-)
 [ -n "$SM3_PANE" ] || fail "$SM3_ID meta is missing herdr_pane_id"
-SM3_LINE=$(wait_pane_line "$SM3_PANE" 'envprobe task=') \
+SM3_LINE=$(wait_probe_file "$TMP_ROOT/$SM3_ID.probe" "$SM3_PANE") \
   || fail "the traced secondmate command never executed"$'\n'"$SM3_LINE"
-assert_contains_local "$SM3_LINE" "gotmp=set cad=1 tp=$ENV_TRACEPARENT" \
-  "a traced secondmate under an empty allowlist must receive its pane setup and the trace export"
+[ "$SM3_LINE" = "envprobe task=unset gotmp=set cad=1 tp=$ENV_TRACEPARENT" ] \
+  || fail "a traced secondmate under an empty allowlist must receive its pane setup and the trace export"$'\n'"--- got ---"$'\n'"$SM3_LINE"
 grep -qx "traceparent=$ENV_TRACEPARENT" "$ENV_HOME/state/$SM3_ID.meta" \
   || fail "the delivered trace carrier was not recorded in the secondmate's task record"
 pass "real herdr E2E: a traced secondmate under an empty allowlist receives and records its trace carrier"
