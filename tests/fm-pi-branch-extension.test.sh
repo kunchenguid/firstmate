@@ -2592,6 +2592,62 @@ EOF
   pass "fm_branch_report refuses a task the wake did not name, fleet included, while a heartbeat is unscoped"
 }
 
+test_pi_routine_report_preserves_an_open_handoff() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-open-handoff-root"
+  home="$TMP_ROOT/pi-open-handoff-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, settle, defaultSessionCtx }; })()`);
+const { dispatch, fire, home, settle, defaultSessionCtx } = globalThis.__t;
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/branch-driver.status`, "working: validation remains pending\n");
+mkdirSync(`${home}/state/handoff-continuations`, { recursive: true });
+writeFileSync(`${home}/state/handoff-continuations/branch-driver.open`, "handoff-fingerprint\n");
+await fire("session_start", {}, defaultSessionCtx);
+let finish;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finish = resolve; });
+if (!dispatch("signal: branch-driver working").accepted) throw new Error("branch refused the routine signal");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "routine branch prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+const held = await report.execute(
+  "open-handoff",
+  { task: "branch-driver", verdict: "routine", summary: "ordinary progress", silent: true },
+  undefined,
+  undefined,
+  {},
+);
+if (held.isError || !held.content[0].text.includes("[captain]")) {
+  throw new Error(`the open handoff was not upgraded for main: ${JSON.stringify(held)}`);
+}
+writeFileSync(`${home}/state/branch-driver.status`, "needs-decision [key=hold]: explicit hold\n");
+const continued = await report.execute(
+  "continued-handoff",
+  { task: "branch-driver", verdict: "routine", summary: "held for the captain", silent: true },
+  undefined,
+  undefined,
+  {},
+);
+if (continued.isError || !continued.content[0].text.includes("[routine] into main")) {
+  throw new Error(`continuation evidence did not permit a routine report: ${JSON.stringify(continued)}`);
+}
+finish();
+const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+if (rows.length !== 2 || rows[0].verdict !== "captain" || rows[0].silent !== false || rows[1].verdict !== "routine" || rows[1].silent !== true) {
+  throw new Error(`Pi did not preserve the handoff verdict boundary: ${JSON.stringify(rows)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "Pi must preserve an open handoff before recording a routine report: $out"
+  pass "Pi upgrades a routine report while a handoff remains open"
+}
+
 # The non-heartbeat half of the same recheck: a check-kind row that arrives
 # after a signal/stale offer is accepted must stay main-owned WITHOUT bouncing
 # the branch's own eligible row back to main
@@ -6039,6 +6095,7 @@ test_away_only_wake_rejects_when_record_is_archived_before_drain
 test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_report_refuses_a_task_the_wake_did_not_name
+test_pi_routine_report_preserves_an_open_handoff
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible
 test_settled_branch_prompt_releases_unacknowledged_grant

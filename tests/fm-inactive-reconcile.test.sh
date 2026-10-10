@@ -1408,6 +1408,79 @@ test_handoff_idle_records_repeated_identical_completions() {
   pass "each identical completion occurrence retains its own handoff"
 }
 
+test_handoff_idle_reconciles_a_compacted_completion() {
+  local home completion record fp8 key
+  make_world handoff-compacted-completion
+  install_handoff_fakes
+  home=$MAIN
+  completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  write_child "$home" intake $'working [at=1699999999]: preparing validation\n'"$completion" inc-compacted-1
+  scan_handoff "$home"
+  record=$(one_record "$home" intake) || fail "the original compactable handoff was not recorded"
+  fp8=$(basename "$record" .record)
+  key="handoff-idle-intake-${fp8:0:8}"
+  printf '%s\n' "$completion" > "$home/state/intake.status"
+  scan_handoff "$home"
+  [ "$(records_for_count "$home" intake)" = 1 ] \
+    || fail "compaction created a duplicate handoff record"
+  [ -f "$record" ] || fail "compaction replaced the original handoff record"
+  grep -Fxq "$fp8" "$home/state/handoff-continuations/intake.open" \
+    || fail "compaction changed the open handoff marker"
+  [ "$(handoff_wake_count "$home")" = 1 ] \
+    || fail "compaction created a second idle handoff check"
+  grep -Fq "$key" "$home/state/.wake-queue" \
+    || fail "compaction retired the original idle handoff check"
+  pass "a compacted completion keeps one durable handoff episode"
+}
+
+test_handoff_idle_cursor_reaches_later_tasks_after_budget_exhaustion() {
+  local home real_date record fp8 id
+  make_world handoff-cursor
+  install_handoff_fakes
+  home=$MAIN
+  for id in a b c; do
+    write_child "$home" "$id" "needs-validation [at=$HANDOFF_OLD]: committed $id" "inc-$id-1"
+  done
+  real_date=$(command -v date)
+  printf '100\n' > "$WORLD/handoff-clock"
+  cat > "$WORLD/fakebin/date" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  cat "\${FM_HANDOFF_CLOCK:?}"
+else
+  exec "$real_date" "\$@"
+fi
+EOF
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "${FM_HANDOFF_CREW_LOG:?}"
+case "$1" in
+  a|b)
+    now=$(cat "${FM_HANDOFF_CLOCK:?}")
+    printf '%s\n' "$((now + 5))" > "${FM_HANDOFF_CLOCK:?}"
+    ;;
+esac
+printf 'state: working · source: fake\n'
+EOF
+  chmod +x "$WORLD/fakebin/date" "$WORLD/fakebin/fm-crew-state.sh"
+  : > "$WORLD/handoff-crew.log"
+  FM_HANDOFF_CLOCK="$WORLD/handoff-clock" FM_HANDOFF_CREW_LOG="$WORLD/handoff-crew.log" \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=10 scan_handoff "$home"
+  [ "$(records_for_count "$home" c)" = 0 ] \
+    || fail "the later handoff was reached before the simulated budget was exhausted"
+  [ "$(handoff_field "$home/state/handoff-continuations/.cursor" cursor)" = b ] \
+    || fail "the exhausted handoff pass did not persist the last visited task"
+  FM_HANDOFF_CLOCK="$WORLD/handoff-clock" FM_HANDOFF_CREW_LOG="$WORLD/handoff-crew.log" \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=10 scan_handoff "$home"
+  record=$(one_record "$home" c) || fail "the later handoff was starved after a bounded scan"
+  fp8=$(basename "$record" .record)
+  grep -Fq "handoff-idle-c-${fp8:0:8}" "$home/state/.wake-queue" \
+    || fail "the later handoff did not receive its idle check"
+  [ -z "$(handoff_field "$home/state/handoff-continuations/.cursor" cursor)" ] \
+    || fail "the handoff cursor remained after a complete traversal"
+  pass "a bounded handoff scan resumes after its durable cursor"
+}
+
 test_handoff_idle_clears_only_on_continuation() {
   local home record before after verb uncleared
   local completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
@@ -1795,6 +1868,8 @@ test_handoff_idle_generic_line_does_not_read_the_predicate
 test_handoff_idle_survives_a_replaced_status_log
 test_handoff_idle_replay_keeps_later_completion_open
 test_handoff_idle_records_repeated_identical_completions
+test_handoff_idle_reconciles_a_compacted_completion
+test_handoff_idle_cursor_reaches_later_tasks_after_budget_exhaustion
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan
 test_handoff_idle_bound_refuses_out_of_range

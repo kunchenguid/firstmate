@@ -76,7 +76,7 @@
 // its deliberate limits.
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Pi exposes pi-ai to extensions as a first-class module in both its Node
@@ -118,6 +118,7 @@ import {
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
+  presentedTaskCompletion,
   scopeForUnreadWake,
   wakeTriggerOwnsCompletion,
   writeEligibleRowsSnapshot,
@@ -1217,7 +1218,7 @@ export default function (pi: ExtensionAPI) {
         const verdictRaw = String((params as { verdict: unknown }).verdict || "");
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
-        const silent = (params as { silent?: unknown }).silent === true;
+        let silent = (params as { silent?: unknown }).silent === true;
         if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
@@ -1232,10 +1233,30 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        const verdict = verdictRaw as Verdict;
+        let verdict = verdictRaw as Verdict;
         const scopeRefusal = wakeScopeRefusal(task);
         if (scopeRefusal) {
           return { content: [{ type: "text", text: scopeRefusal }], details: undefined, isError: true };
+        }
+        if (verdict === "routine" && task !== "fleet") {
+          let completion = "unreadable";
+          try {
+            completion = presentedTaskCompletion(state, task);
+          } catch {
+            completion = "unreadable";
+          }
+          let handoffMarked = false;
+          if (completion !== "continued" && /^[A-Za-z0-9._-]+$/.test(task)) {
+            try {
+              handoffMarked = lstatSync(join(state, "handoff-continuations", `${task}.open`)).isFile();
+            } catch {
+              handoffMarked = false;
+            }
+          }
+          if (completion === "owned" || completion === "unreadable" || handoffMarked) {
+            verdict = "captain";
+            silent = false;
+          }
         }
         const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
         if (wake) appendArgs.push("--wake", wake);

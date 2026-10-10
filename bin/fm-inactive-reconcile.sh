@@ -167,6 +167,7 @@ if [ "$FM_HANDOFF_IDLE_SECS" -lt 1 ] || [ "$FM_HANDOFF_IDLE_SECS" -gt 1800 ]; th
   exit 2
 fi
 HANDOFF_DIR="$STATE/handoff-continuations"
+HANDOFF_CURSOR="$HANDOFF_DIR/.cursor"
 
 if [ "$(uname)" = Darwin ]; then
   file_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }
@@ -787,9 +788,23 @@ handoff_marker_write() { # <task> <fingerprint>
   mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
 }
 
-handoff_one() { # <id> <meta>
-  local id=$1 meta=$2 status kind mode incarnation line verb fingerprint observed record known ordinal=0
-  local -a open_fps=() stored_fps=()
+handoff_cursor() {
+  [ -f "$HANDOFF_CURSOR" ] && [ ! -L "$HANDOFF_CURSOR" ] || return 0
+  grep '^cursor=' "$HANDOFF_CURSOR" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+handoff_write_cursor() {
+  local cursor=$1 tmp
+  tmp=$(mktemp "$HANDOFF_DIR/.cursor.XXXXXX") || return 1
+  printf 'cursor=%s\n' "$cursor" > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$HANDOFF_CURSOR" || { rm -f "$tmp"; return 1; }
+}
+
+handoff_one() {
+  local id=$1 meta=$2 timeout=$3 status kind mode incarnation line verb fingerprint observed record known ordinal=0
+  local line_clean matching_fp matching_count candidate_claimed collision
+  local -a open_fps=() stored_fps=() claimed_fps=()
   local now age key alerted last_alert state_line state_rc path item fp
   local clearer_epoch marker proof='' reason='' evidence_rc=0
   status="$STATE/$id.status"
@@ -818,6 +833,37 @@ handoff_one() { # <id> <meta>
       ordinal=$((ordinal + 1))
       if handoff_is_completion "$verb" "$line" "$kind" "$mode" "$id" "$meta"; then
         fingerprint=$(sha256_text "$incarnation|$id|$ordinal|$line")
+        candidate_claimed=0
+        for item in "${claimed_fps[@]+"${claimed_fps[@]}"}"; do
+          [ "$item" = "$fingerprint" ] && candidate_claimed=1
+        done
+        if [ "$candidate_claimed" -eq 1 ] || [ ! -f "$(handoff_record_path "$fingerprint")" ]; then
+          line_clean=$(clean_field "$line")
+          matching_fp=''
+          matching_count=0
+          for item in "${stored_fps[@]+"${stored_fps[@]}"}"; do
+            fp=${item%%|*}
+            known=0
+            for record in "${claimed_fps[@]+"${claimed_fps[@]}"}"; do
+              [ "$record" = "$fp" ] && known=1
+            done
+            [ "$known" -eq 0 ] || continue
+            [ "$(handoff_value "$(handoff_record_path "$fp")" completion_line)" = "$line_clean" ] || continue
+            matching_fp=$fp
+            matching_count=$((matching_count + 1))
+          done
+          if [ "$matching_count" -eq 1 ]; then
+            fingerprint=$matching_fp
+          elif [ "$matching_count" -gt 1 ]; then
+            continue
+          elif [ "$candidate_claimed" -eq 1 ]; then
+            collision=1
+            while [ -e "$(handoff_record_path "$fingerprint")" ] || [ -L "$(handoff_record_path "$fingerprint")" ]; do
+              fingerprint=$(sha256_text "$incarnation|$id|$ordinal|$line|$collision")
+              collision=$((collision + 1))
+            done
+          fi
+        fi
         observed=$(handoff_line_epoch "$line")
         case "$observed" in
           ''|*[!0-9]*) observed=$(handoff_value "$(handoff_record_path "$fingerprint")" observed_epoch) ;;
@@ -826,6 +872,7 @@ handoff_one() { # <id> <meta>
           ''|*[!0-9]*) observed=$(reconcile_now) ;;
         esac
         handoff_ensure "$fingerprint" "$id" "$incarnation" "$line" "$ordinal" "$observed" || return 1
+        claimed_fps+=("$fingerprint")
         if [ -z "$(handoff_value "$(handoff_record_path "$fingerprint")" cleared_epoch)" ]; then
           known=0
           for item in "${open_fps[@]+"${open_fps[@]}"}"; do
@@ -867,7 +914,7 @@ handoff_one() { # <id> <meta>
   proof=
   state_rc=0
   if [ "$state_rc" -eq 0 ]; then
-    state_line=$(fm_run_timed 5 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+    state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
       "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
     case "$state_line" in
       *'source: run-step'*)
@@ -926,7 +973,7 @@ handoff_one() { # <id> <meta>
 # home runs this same pass on its own children. Parent publication is a
 # different path and does not clear these records.
 handoff_pass() {
-  local meta id lock rc
+  local cursor=$1 range=$2 deadline=$3 meta id lock rc remaining first
   [ ! -L "$HANDOFF_DIR" ] || return 1
   mkdir -p "$HANDOFF_DIR" || return 1
   [ ! -L "$HANDOFF_DIR" ] || return 1
@@ -934,12 +981,31 @@ handoff_pass() {
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     id=$(basename "$meta" .meta)
     valid_id "$id" || continue
+    case "$range" in
+      after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
+      through) [ -n "$cursor" ] && [[ "$id" > "$cursor" ]] && continue ;;
+    esac
     [ "$(meta_field "$meta" kind)" != secondmate ] || continue
+    first=0
+    if [ "${HANDOFF_FIRST_VISIT_PENDING:-0}" -eq 1 ]; then
+      first=1
+      HANDOFF_FIRST_VISIT_PENDING=0
+    fi
+    if [ "$first" -eq 0 ]; then
+      [ "$(date +%s)" -lt "$deadline" ] || return 3
+    fi
+    handoff_write_cursor "$id" || return 1
+    remaining=$((deadline - $(date +%s)))
+    if [ "$first" -eq 1 ] && [ "$remaining" -lt 1 ]; then
+      remaining=1
+    fi
+    [ "$remaining" -gt 0 ] || return 3
+    [ "$remaining" -le 5 ] || remaining=5
     lock=$(fm_meta_lock_path "$meta") || continue
     fm_lock_try_acquire "$lock" || continue
     rc=0
     if [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(meta_field "$meta" kind)" != secondmate ]; then
-      handoff_one "$id" "$meta" || rc=$?
+      handoff_one "$id" "$meta" "$remaining" || rc=$?
     fi
     fm_lock_release "$lock"
     [ "$rc" -eq 0 ] || return "$rc"
@@ -947,12 +1013,26 @@ handoff_pass() {
 }
 
 scan() {
-  local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
+  local startup=${1:-0} self='' cursor handoff_cursor deadline rc=0 handoff_rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
+  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   # Before the cadence gate, so a 180-second handoff bound is not stuck
   # behind the 900-second terminal scan.
-  handoff_pass || return 1
+  handoff_cursor=$(handoff_cursor)
+  valid_id "$handoff_cursor" || handoff_cursor=''
+  HANDOFF_FIRST_VISIT_PENDING=1
+  handoff_pass "$handoff_cursor" after "$deadline" || handoff_rc=$?
+  if [ "$handoff_rc" -eq 0 ] && [ -n "$handoff_cursor" ]; then
+    handoff_pass "$handoff_cursor" through "$deadline" || handoff_rc=$?
+  fi
+  if [ "$handoff_rc" -eq 0 ]; then
+    handoff_write_cursor '' || return 1
+  elif [ "$handoff_rc" -eq 3 ]; then
+    return 0
+  else
+    return "$handoff_rc"
+  fi
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
     ledger_pass
@@ -971,7 +1051,6 @@ scan() {
       "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
     return 0
   fi
-  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   SCAN_FIRST_VISIT_PENDING=1
   scan_pass "$cursor" after "$deadline" "$self" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then
