@@ -2348,7 +2348,7 @@ heartbeat_scan_finds_actionable() {
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
-  local w b session first_backend="" first_session="" rec rc
+  local w b session first_backend="" first_session="" rec rc wait_started wait_waited
   local windows=()
   while IFS= read -r w; do
     b=$(window_backend "$w")
@@ -2390,6 +2390,7 @@ event_wait_or_sleep() {
     return
   fi
 
+  wait_started=$SECONDS
   rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
   rc=$?
   case "$rc" in
@@ -2406,9 +2407,15 @@ event_wait_or_sleep() {
       sleep "$POLL"
       ;;
     *)
-      # 1: a clean full-budget wait with no actionable edge - the reader already
-      # blocked ~POLL, so just continue; the next cycle re-scans.
+      # 1: no actionable edge. The wait has "effectively already slept" only
+      # when it really consumed the budget; an event stream that came back
+      # empty or closed returns at once, and starting the next cycle with no
+      # delay tight-loops and forks a reader per pass (the fork storm). Sleep
+      # the rest of the budget - always at least one second here - so every
+      # no-hit cycle spans the poll budget whatever the backend did.
       _event_cap_fails=0
+      wait_waited=$((SECONDS - wait_started))
+      [ "$wait_waited" -ge "$POLL" ] || sleep "$((POLL - wait_waited))"
       ;;
   esac
 }
