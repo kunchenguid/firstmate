@@ -340,7 +340,9 @@
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment, including the
 #   FM_TASK_INBOX export every launch carries (the absolute state/<id>.inbox
-#   path the steering doorbell names). Raw commands must
+#   path the steering doorbell names). Before launch, spawn creates that inbox
+#   and its handled/ directory for every harness and worker kind, including
+#   relaunches; a creation failure refuses the launch. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
