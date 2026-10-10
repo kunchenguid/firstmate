@@ -1260,7 +1260,7 @@ test_handoff_idle_fails_closed_when_continuation_predicate_is_unreadable() {
   make_world handoff-unreadable-continuation
   install_handoff_fakes
   home=$MAIN
-  write_child "$home" intake $'needs-validation [at=1700000000]: committed c118078, 706 tests\nworking [at=1700000160]: validation started' inc-unreadable-1
+  write_child "$home" intake $'needs-validation [at=1700000000]: committed c118078, 706 tests\nworking [at=1700000160]: validation started\nneeds-decision [at=1700000161]: held for a decision' inc-unreadable-1
   cat > "$WORLD/fakebin/node" <<'EOF'
 #!/usr/bin/env bash
 exit 98
@@ -1278,6 +1278,29 @@ EOF
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" \
     || fail "the failed continuation read left the task lock held"
   pass "an unreadable continuation predicate fails the scan after releasing its task lock"
+}
+
+test_handoff_idle_generic_line_does_not_read_the_predicate() {
+  local home record rc fp
+  make_world handoff-generic-no-predicate
+  install_handoff_fakes
+  home=$MAIN
+  write_child "$home" intake $'needs-validation [at=1700000000]: committed c118078, 706 tests\nworking [at=1700000160]: validation started\npaused [at=1700000161]: still waiting' inc-generic-1
+  cat > "$WORLD/fakebin/node" <<'EOF'
+#!/usr/bin/env bash
+exit 98
+EOF
+  chmod +x "$WORLD/fakebin/node"
+  rc=0
+  scan_handoff "$home" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a generic status line required the continuation predicate: rc=$rc"
+  record=$(one_record "$home" intake) || fail "the handoff was not recorded"
+  [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+    || fail "a generic status line cleared the handoff"
+  fp=$(basename "$record" .record)
+  grep -Fxq "$fp" "$home/state/handoff-continuations/intake.open" \
+    || fail "a generic status line retired the open handoff marker"
+  pass "a generic working or paused line leaves the handoff open without reading the continuation predicate"
 }
 
 test_handoff_idle_survives_a_replaced_status_log() {
@@ -1729,6 +1752,7 @@ test_handoff_idle_rejects_an_unverified_green_followup
 test_handoff_idle_uses_only_positional_status_timestamps
 test_handoff_ignores_an_unterminated_completion_line
 test_handoff_idle_fails_closed_when_continuation_predicate_is_unreadable
+test_handoff_idle_generic_line_does_not_read_the_predicate
 test_handoff_idle_survives_a_replaced_status_log
 test_handoff_idle_replay_keeps_later_completion_open
 test_parent_publication_does_not_clear_local_continuation

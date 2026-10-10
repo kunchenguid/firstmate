@@ -95,6 +95,9 @@
 # handoff still publishes when the named-head gate accepts it, and the local
 # continuation record stays until continuationEvidence is true.
 # A generic working or paused line is not that evidence.
+# That answer does not depend on the line, so the scan does not start the predicate for it.
+# Hold, verified delivery, an attributed run, and a started review still ask the predicate.
+# A predicate that cannot be read still fails the scan.
 # The predicate lives in .pi/extensions/lib/fm-branch-dispatch.ts.
 # A ship done note that already names a PR stays on that terminal path.
 # Kind and mode are required either way, so a missing PR is not itself the test.
@@ -664,8 +667,13 @@ handoff_is_completion() { # <verb> <line> <kind> <mode> <task-id> <meta>
 # 2 when the shared predicate cannot be read. A generic working or paused
 # line carries no proof. An explicit hold and a done that is not itself a
 # handoff (verified final delivery) do.
+# Proof none does not read the line, so it returns 1 without starting the
+# predicate. The other proofs still ask it.
 handoff_continuation_evidence() { # <line> <proof>
   local rc=0
+  if [ "$2" = none ]; then
+    return 1
+  fi
   printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" continuation-evidence --proof "$2" >/dev/null || rc=$?
   case "$rc" in
     0) return 0 ;;
