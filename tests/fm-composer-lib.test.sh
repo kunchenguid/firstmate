@@ -219,6 +219,42 @@ test_matrix_claude_arrow_statusline_footer() {
   pass "matrix: claude's arrow statusline is footer furniture, not a composer holding text"
 }
 
+test_matrix_claude_titled_top_rule() {
+  # Real claude on herdr (captured from a live remote secondmate pane,
+  # 2026-10-01): with a session mode on, claude writes the mode name into its
+  # composer's TOP rule (`──…── ultracode ─`) and leaves the bottom rule solid.
+  # Read as a non-rule, that label left the solid bottom rule as a lone
+  # separator below the `❯` row, so the composer read refused and every
+  # doorbell to that pane bailed before typing ("doorbell did not reach").
+  local rule pair screen typed claude_idle out rc
+  claude_idle=$(printf 'claude\tidle')
+  rule='────────────────────────────────────────────────────────────'
+  pair="transcript line"$'\n'"$rule ultracode ─"$'\n'"❯$NBSP"$'\n'"$rule"
+  screen="$pair"$'\n''  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt'
+  assert_screen "claude idle under a titled top rule on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "claude idle under a titled top rule on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude idle under a titled top rule on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen") && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] \
+    || fail "an idle titled-rule composer should extract as empty content, got rc=$rc '$out'"
+  # Typed text in that composer is still pending and still extracted whole.
+  typed="transcript line"$'\n'"$rule ultracode ─"$'\n''❯ fix the login bug'$'\n'"$rule"
+  assert_screen "claude typed under a titled top rule" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed") \
+    || fail "a typed titled-rule composer should be extractable"
+  [ "$out" = 'fix the login bug' ] || fail "titled-rule composer extracted '$out', not the typed text"
+  # The reading is quarantined to that exact Claude shape: the same titled rule
+  # over another harness's prompt glyph, or an unpinned title over `❯`, keeps
+  # refusing rather than proving an empty composer.
+  screen="transcript line"$'\n'"$rule ultracode ─"$'\n'"›$NBSP"$'\n'"$rule"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$(printf 'codex\tidle')")
+  [ "$out" != empty ] || fail "a titled rule over a non-claude glyph must not read empty"
+  screen="transcript line"$'\n'"$rule plan ─"$'\n'"❯$NBSP"$'\n'"$rule"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$claude_idle")
+  [ "$out" != empty ] || fail "an unpinned rule title must not read empty"
+  pass "matrix: claude's titled top composer rule bounds its composer like a solid rule"
+}
+
 test_composer_footer_demotion_needs_a_proven_pair() {
   # The demotion is bounded in three directions, and each bound is a case
   # where a lower glyph row IS the live composer.
@@ -1022,6 +1058,7 @@ test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_claude_arrow_statusline_footer
+test_matrix_claude_titled_top_rule
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
