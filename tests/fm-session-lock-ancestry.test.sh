@@ -1099,6 +1099,313 @@ test_verified_reclaim_keeps_new_sidecar() {
   pass "session-lock: a verified reclaim keeps the new sidecar beside the new pid"
 }
 
+# --- naming the lock holder: fm-lock.sh refusal and status ---------------------
+# The holder is a real fake-harness process (a bash symlink named claude, or
+# codex) that stays alive until the case ends. `claude agents --json` is a stub
+# on PATH ahead of everything else that logs each call and answers from a
+# per-case JSON file, or fails, hangs, or prints garbage on request. The
+# session asking runs inside a second fake harness, so its ancestry walk stops
+# inside the fixture whatever session runs this suite.
+
+HOLDER_PID=
+start_holder() {  # <harness-path>
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    "$1" -c 'trap "kill \$child 2>/dev/null; exit 0" TERM; sleep 300 & child=$!; wait "$child"' >/dev/null 2>&1 </dev/null &
+  HOLDER_PID=$!
+}
+
+stop_holder() {
+  [ -n "$HOLDER_PID" ] || return 0
+  kill "$HOLDER_PID" 2>/dev/null || true
+  wait "$HOLDER_PID" 2>/dev/null || true
+  HOLDER_PID=
+}
+
+make_agents_stub() {  # <dir>; prints the stub bin dir
+  local bin="$1/agents-bin"
+  mkdir -p "$bin"
+  cat > "$bin/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_AGENTS_LOG"
+case "${FM_TEST_AGENTS_MODE:-json}" in
+  fail) exit 1 ;;
+  hang) sleep 30; exit 0 ;;
+  garbage) printf 'not json at all\n'; exit 0 ;;
+esac
+[ "$*" = "agents --json" ] || exit 64
+cat "$FM_TEST_AGENTS_JSON"
+SH
+  chmod +x "$bin/claude"
+  printf '%s\n' "$bin"
+}
+
+# Run fm-lock.sh [args] from inside a second fake Claude session with the stub
+# first on PATH. Prints combined output, then a final RC=<status> line.
+lock_from_other_session() {  # <home> <stub-bin> [fm-lock args...]
+  local home=$1 bin=$2
+  shift 2
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$home" FM_LOCK="$ROOT/bin/fm-lock.sh" PATH="$bin:$PATH" \
+    FM_TEST_AGENTS_LOG="$home/agents.log" FM_TEST_AGENTS_JSON="$home/agents.json" \
+    "$NAMED_CLAUDE" -c '"$FM_LOCK" "$@" 2>&1; printf "RC=%s\n" "$?"' _ "$@"
+}
+
+# Sets HOLDER_HOME. Not for $(...): the holder must be this shell's child, and
+# a command substitution would wait on its open stdout.
+HOLDER_HOME=
+holder_world() {  # <name> <harness-path> [<recorded-session-id>]
+  HOLDER_HOME="$TMP_ROOT/holder-$1"
+  mkdir -p "$HOLDER_HOME/state"
+  start_holder "$2"
+  printf '%s\n' "$HOLDER_PID" > "$HOLDER_HOME/state/.lock"
+  [ -z "${3:-}" ] || printf '%s\n' "$3" > "$HOLDER_HOME/state/.lock-session"
+  : > "$HOLDER_HOME/agents.log"
+}
+
+test_refusal_names_a_background_holder_and_its_stop_command() {
+  local dir bin out
+  holder_world background "$NAMED_CLAUDE" SID-HOLDER; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  cat > "$dir/agents.json" <<EOF
+[{"pid":1,"kind":"interactive","sessionId":"other","name":"Unrelated","status":"busy"},
+ {"pid":$HOLDER_PID,"id":"ab12cd34","kind":"background","sessionId":"SID-HOLDER","name":"Leftover background run","status":"idle","state":"done"}]
+EOF
+  out=$(lock_from_other_session "$dir" "$bin")
+  stop_holder
+  assert_contains "$out" "RC=1" "a live holder must still refuse the lock"
+  assert_contains "$out" "error: another live firstmate session holds the lock (pid $(cat "$dir/state/.lock"), session SID-HOLDER); operate read-only until resolved" \
+    "the existing refusal line must stay exactly as before"
+  assert_contains "$out" 'lock holder: Claude Code background session "Leftover background run" (id ab12cd34, status idle, state done)' \
+    "the refusal did not name the background holder"
+  assert_contains "$out" "lock holder: to end that session and free the lock, run: claude stop ab12cd34" \
+    "the refusal did not give the exact stop command"
+  assert_not_contains "$out" "kill" "the refusal must never suggest signalling a pid"
+  assert_not_contains "$out" "matched by the recorded session id" "a pid match must not be reported as a session-id match"
+  assert_contains "$(cat "$dir/agents.log")" "agents --json" "the holder lookup did not use claude agents --json"
+  pass "lock refusal: a Claude background holder is named with its state and exact claude stop command"
+}
+
+test_refusal_matches_the_recorded_session_id_when_the_pid_differs() {
+  local dir bin out
+  holder_world by-session "$NAMED_CLAUDE" SID-FORKED; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  printf '%s\n' '[{"pid":424242,"id":"fe98dc76","kind":"background","sessionId":"SID-FORKED","name":"Forked copy","status":"idle","state":"blocked"}]' \
+    > "$dir/agents.json"
+  out=$(lock_from_other_session "$dir" "$bin")
+  stop_holder
+  assert_contains "$out" 'lock holder: Claude Code background session "Forked copy" (id fe98dc76, status idle, state blocked)' \
+    "a session-id match did not name the session"
+  assert_contains "$out" "lock holder: matched by the recorded session id SID-FORKED; that session is listed under pid 424242, not the lock pid" \
+    "a session-id-only match must say so instead of implying the pid matched"
+  assert_contains "$out" "lock holder: stopping or exiting that session may not free the lock, because the lock pid $(cat "$dir/state/.lock") is not its listed process; the lock still counts as held" \
+    "a session-id-only match must say ending that session may not free the lock"
+  assert_not_contains "$out" "free the lock, run: claude stop" "a session-id-only match must not promise that claude stop frees the lock"
+  assert_not_contains "$out" "kill" "a session-id-only match must never suggest killing a pid"
+  pass "lock refusal: a holder listed under another pid is matched by the recorded session id and does not promise the lock frees"
+}
+
+test_refusal_never_offers_stop_for_a_session_that_conflicts_with_the_recorded_id() {
+  local dir bin out lock_pid
+  holder_world pid-reused "$NAMED_CLAUDE" SID-RECORDED; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  printf '[{"pid":%s,"id":"aa11bb22","kind":"background","sessionId":"SID-NEWCOMER","name":"Unrelated newcomer","status":"idle","state":"done"}]\n' "$HOLDER_PID" \
+    > "$dir/agents.json"
+  lock_pid=$(cat "$dir/state/.lock")
+  out=$(lock_from_other_session "$dir" "$bin")
+  stop_holder
+  assert_contains "$out" "RC=1" "a live holder must still refuse the lock"
+  assert_contains "$out" "lock holder: the lock pid $lock_pid now belongs to a different session, Claude Code background session \"Unrelated newcomer\" (id aa11bb22, status idle, state done), not the session SID-RECORDED recorded beside the lock" \
+    "a pid-matched row with a conflicting session id must be named as a different session"
+  assert_not_contains "$out" "claude stop" "a session that conflicts with the recorded id must never be offered claude stop"
+  assert_not_contains "$out" "exit that interactive session" "a session that conflicts with the recorded id must never be offered an exit"
+  assert_not_contains "$out" "kill" "the refusal must never suggest signalling a pid"
+  pass "lock refusal: a lock pid now owned by a different session is named without a stop command"
+}
+
+test_refusal_names_both_the_recorded_session_and_the_lock_pid_session() {
+  local dir bin out lock_pid
+  holder_world both-rows "$NAMED_CLAUDE" SID-OWNER; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  cat > "$dir/agents.json" <<EOF
+[{"pid":$HOLDER_PID,"id":"cc33dd44","kind":"background","sessionId":"SID-NEWCOMER","name":"Unrelated newcomer","status":"idle","state":"done"},
+ {"pid":424242,"id":"ee55ff66","kind":"background","sessionId":"SID-OWNER","name":"Recorded owner","status":"idle","state":"blocked"}]
+EOF
+  lock_pid=$(cat "$dir/state/.lock")
+  out=$(lock_from_other_session "$dir" "$bin")
+  stop_holder
+  assert_contains "$out" "RC=1" "a live holder must still refuse the lock"
+  assert_contains "$out" 'lock holder: Claude Code background session "Recorded owner" (id ee55ff66, status idle, state blocked)' \
+    "the session recorded beside the lock must be named"
+  assert_contains "$out" "lock holder: matched by the recorded session id SID-OWNER; that session is listed under pid 424242, not the lock pid $lock_pid" \
+    "the recorded session must be reported as listed under a different pid"
+  assert_contains "$out" "lock holder: the lock pid $lock_pid now belongs to a different session, Claude Code background session \"Unrelated newcomer\" (id cc33dd44, status idle, state done), not the session SID-OWNER recorded beside the lock" \
+    "the session running at the live lock pid must be named too"
+  assert_not_contains "$out" "claude stop" "neither row may be offered claude stop as a way to free the lock"
+  assert_not_contains "$out" "kill" "the refusal must never suggest signalling a pid"
+  pass "lock refusal: the recorded session and the session at the lock pid are both named, with no stop promise"
+}
+
+test_refusal_for_an_interactive_holder_never_offers_claude_stop() {
+  local dir bin out
+  holder_world interactive "$NAMED_CLAUDE"; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  printf '[{"pid":%s,"kind":"interactive","sessionId":"SID-I","name":"firstmate-7","status":"busy"}]\n' "$HOLDER_PID" \
+    > "$dir/agents.json"
+  out=$(lock_from_other_session "$dir" "$bin")
+  stop_holder
+  assert_contains "$out" 'lock holder: Claude Code interactive session "firstmate-7" (status busy)' \
+    "the refusal did not name the interactive holder"
+  assert_contains "$out" "exit that interactive session from its own terminal" "an interactive holder needs its own way out"
+  assert_not_contains "$out" "claude stop" "claude stop addresses background sessions only"
+  pass "lock refusal: an interactive holder is named without a background-only stop command"
+}
+
+test_refusal_says_plainly_when_no_session_lists_the_live_pid() {
+  local dir bin out status_out
+  holder_world unlisted "$NAMED_CLAUDE" SID-GONE; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  printf '%s\n' '[{"pid":1,"id":"aaaa1111","kind":"background","sessionId":"someone-else","name":"Other","status":"idle","state":"done"}]' \
+    > "$dir/agents.json"
+  out=$(lock_from_other_session "$dir" "$bin")
+  status_out=$(lock_from_other_session "$dir" "$bin" status)
+  stop_holder
+  assert_contains "$out" "RC=1" "an unlisted live holder must still refuse: the lookup never changes liveness"
+  assert_contains "$out" "lock holder: pid $(cat "$dir/state/.lock") is a live Claude Code process, but claude agents lists no session with that pid or the recorded session id" \
+    "an unlisted live holder was not reported plainly"
+  assert_contains "$out" "the lock still counts as held" "the unlisted-holder line must not imply the lock is free"
+  assert_not_contains "$out" "claude stop" "no stop command can be offered for an unlisted pid"
+  assert_not_contains "$out" "kill" "the refusal must never suggest signalling a pid"
+  assert_contains "$status_out" "lock: held by live harness pid" "status must still classify the unlisted holder as held"
+  pass "lock refusal: a live Claude pid in no claude agents row is reported plainly and still held"
+}
+
+test_refusal_without_a_usable_lookup_is_exactly_todays_diagnostic() {
+  local dir bin out expected mode started elapsed bare
+  holder_world lookup-fails "$NAMED_CLAUDE" SID-X; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  expected="error: another live firstmate session holds the lock (pid $(cat "$dir/state/.lock"), session SID-X); operate read-only until resolved"
+  printf '%s\n' '{"not":"an array"}' > "$dir/agents.json"
+  for mode in fail garbage json hang; do
+    started=$(date +%s)
+    out=$(FM_TEST_AGENTS_MODE=$mode FM_LOCK_HOLDER_LOOKUP_TIMEOUT=1 lock_from_other_session "$dir" "$bin")
+    elapsed=$(( $(date +%s) - started ))
+    [ "$out" = "$expected"$'\n'"RC=1" ] || fail "lookup mode $mode changed the refusal: $out"
+    [ "$elapsed" -lt 10 ] || fail "lookup mode $mode was not bounded: took ${elapsed}s"
+  done
+  # Absent claude: a PATH holding the system tools but no claude at all.
+  bare=/usr/bin:/bin
+  if PATH=$bare command -v claude >/dev/null 2>&1; then
+    printf 'note: this host has claude in %s; the absent-claude sub-case is covered by the failing stub only\n' "$bare"
+  else
+    out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" PATH="$bare" \
+      "$NAMED_CLAUDE" -c '"$FM_LOCK" 2>&1; printf "RC=%s\n" "$?"')
+    [ "$out" = "$expected"$'\n'"RC=1" ] || fail "an absent claude changed the refusal: $out"
+  fi
+  stop_holder
+  pass "lock refusal: a failed, hung, malformed, non-array, or absent claude agents lookup prints exactly today's diagnostic"
+}
+
+test_refusal_for_a_non_claude_holder_skips_the_lookup() {
+  local dir bin out codex
+  codex="$TMP_ROOT/codex-bin/codex"
+  mkdir -p "${codex%/*}"
+  ln -sf /bin/bash "$codex"
+  holder_world codex "$codex"; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  printf '[{"pid":%s,"id":"cc00dd11","kind":"background","sessionId":"x","name":"Should not appear","status":"idle"}]\n' "$HOLDER_PID" \
+    > "$dir/agents.json"
+  out=$(lock_from_other_session "$dir" "$bin")
+  stop_holder
+  [ "$out" = "error: another live firstmate session holds the lock (pid $(cat "$dir/state/.lock")); operate read-only until resolved"$'\n'"RC=1" ] \
+    || fail "a non-Claude holder changed the refusal: $out"
+  [ ! -s "$dir/agents.log" ] || fail "claude agents was consulted for a non-Claude holder: $(cat "$dir/agents.log")"
+  pass "lock refusal: a non-Claude holder never consults claude agents"
+}
+
+test_refusal_strips_control_characters_from_vendor_strings() {
+  local dir bin out lines
+  holder_world hostile "$NAMED_CLAUDE"; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  printf '[{"pid":%s,"id":"ab12; rm -rf x","kind":"background","sessionId":"s","name":"two\\nlines\\u001b[31m","status":"idle","state":"done"}]\n' "$HOLDER_PID" \
+    > "$dir/agents.json"
+  out=$(lock_from_other_session "$dir" "$bin")
+  stop_holder
+  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  [ "$lines" -eq 3 ] || fail "a hostile name must stay on one line (expected error, holder, RC): $out"
+  assert_contains "$out" 'session "two lines [31m"' "control characters were not replaced"
+  assert_not_contains "$out" "claude stop" "an id that is not a plain token must never become a command"
+  pass "lock refusal: vendor strings lose control characters and an unsafe id never becomes a command"
+}
+
+test_status_says_whether_the_lock_is_this_session() {
+  local dir bin out
+  dir="$TMP_ROOT/status-self"
+  mkdir -p "$dir/state"
+  bin=$(make_agents_stub "$dir")
+  : > "$dir/agents.log"
+  printf '[]\n' > "$dir/agents.json"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" PATH="$bin:$PATH" \
+    FM_TEST_AGENTS_LOG="$dir/agents.log" FM_TEST_AGENTS_JSON="$dir/agents.json" \
+    "$NAMED_CLAUDE" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "SID-SELF\n" > "$FM_HOME/state/.lock-session"
+      "$FM_LOCK" status 2>&1
+      :')
+  [ "$out" = "lock: held by live harness pid $(cat "$dir/state/.lock") (this session; session SID-SELF)" ] \
+    || fail "status did not say the lock is this session's: $out"
+  [ ! -s "$dir/agents.log" ] || fail "status looked up a holder for this session's own lock"
+
+  holder_world status-other "$NAMED_CLAUDE" SID-OTHER; dir=$HOLDER_HOME
+  bin=$(make_agents_stub "$dir")
+  printf '[{"pid":%s,"id":"0a1b2c3d","kind":"background","sessionId":"SID-OTHER","name":"Night shift","status":"idle","state":"blocked"}]\n' "$HOLDER_PID" \
+    > "$dir/agents.json"
+  out=$(lock_from_other_session "$dir" "$bin" status)
+  stop_holder
+  assert_contains "$out" "lock: held by live harness pid $(cat "$dir/state/.lock") (another session; session SID-OTHER)" \
+    "status did not say the lock is another session's"
+  assert_contains "$out" 'lock holder: Claude Code background session "Night shift"' "status did not name the other session"
+  assert_contains "$out" "RC=0" "status must always exit 0"
+  pass "lock status: a held lock says whether it is this session or another named session"
+}
+
+# The "owner unknown" verdict needs a caller with no harness in its ancestry,
+# which a suite running under a harness cannot produce for real, so it is
+# pinned behind the deterministic process table.
+test_inspect_owner_is_unknown_without_a_harness_session() {
+  local dir fakebin got
+  dir="$TMP_ROOT/inspect-owner"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=|700:args=) printf '%s\n' claude ;;
+  700:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' "${FM_TEST_CALLER_COMM:-bash}" ;;
+  *:args=) printf '%s\n' "${FM_TEST_CALLER_COMM:-bash}" ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '700\n' > "$dir/state/.lock"
+  printf 'SID-700\n' > "$dir/state/.lock-session"
+  got=$(lib_eval "$fakebin" "fm_session_lock_inspect_owner '$dir/state'; printf '%s %s' \"\$FM_LOCK_INSPECT_OWNER\" \"\$FM_LOCK_INSPECT_SESSION\"")
+  [ "$got" = "unknown SID-700" ] || fail "a caller with no harness ancestry got '$got', expected 'unknown SID-700'"
+  got=$(FM_TEST_CALLER_COMM=codex lib_eval "$fakebin" "fm_session_lock_inspect_owner '$dir/state'; printf '%s' \"\$FM_LOCK_INSPECT_OWNER\"")
+  [ "$got" = other ] || fail "a different harness session got '$got', expected other"
+  pass "lock status: ownership is unknown, not another session, when no harness session is asking"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
@@ -1115,3 +1422,14 @@ test_same_session_confirmation_does_not_steal_after_wait
 test_failed_lock_write_restores_previous_sidecar
 test_failed_lock_write_removes_new_sidecar_when_none_existed
 test_verified_reclaim_keeps_new_sidecar
+test_refusal_names_a_background_holder_and_its_stop_command
+test_refusal_matches_the_recorded_session_id_when_the_pid_differs
+test_refusal_never_offers_stop_for_a_session_that_conflicts_with_the_recorded_id
+test_refusal_names_both_the_recorded_session_and_the_lock_pid_session
+test_refusal_for_an_interactive_holder_never_offers_claude_stop
+test_refusal_says_plainly_when_no_session_lists_the_live_pid
+test_refusal_without_a_usable_lookup_is_exactly_todays_diagnostic
+test_refusal_for_a_non_claude_holder_skips_the_lookup
+test_refusal_strips_control_characters_from_vendor_strings
+test_status_says_whether_the_lock_is_this_session
+test_inspect_owner_is_unknown_without_a_harness_session

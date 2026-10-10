@@ -25,6 +25,14 @@
 #                             A held lock is not proof the holder is consuming
 #                             wakes. Machine-readable lock fields live on
 #                             fm-inbox.sh ready, from the same inspect helper.
+#
+# A held lock's status line keeps its "lock: held by live harness pid <pid>"
+# prefix and adds whose it is: "this session", "another session", or "owner
+# unknown" when no harness session is in the caller's ancestry, plus the
+# session id recorded beside the lock. A refusal, and a status naming another
+# or unknown owner, adds "lock holder:" lines naming a Claude-shaped holder from
+# claude agents (fm_session_lock_holder_lines owns that bounded, read-only
+# lookup and its silent fallback).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +57,21 @@ if [ "${1:-}" = "status" ]; then
   case "$FM_LOCK_INSPECT_STATE" in
     free) echo "lock: free" ;;
     unreadable) echo "lock: unreadable" ;;
-    held) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
+    held)
+      fm_session_lock_inspect_owner "$STATE"
+      session_note=${FM_LOCK_INSPECT_SESSION:+; session $FM_LOCK_INSPECT_SESSION}
+      case "$FM_LOCK_INSPECT_OWNER" in
+        self) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID (this session$session_note)" ;;
+        other)
+          echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID (another session$session_note)"
+          fm_session_lock_holder_lines "$FM_LOCK_INSPECT_PID" "$FM_LOCK_INSPECT_SESSION"
+          ;;
+        *)
+          echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID (owner unknown: no harness session in this process ancestry$session_note)"
+          fm_session_lock_holder_lines "$FM_LOCK_INSPECT_PID" "$FM_LOCK_INSPECT_SESSION"
+          ;;
+      esac
+      ;;
     *) echo "lock: stale (pid $FM_LOCK_INSPECT_PID dead or not a harness)" ;;
   esac
   exit 0
@@ -180,12 +202,24 @@ confirm_own_lock() {  # <recorded-pid>
 }
 
 refuse_live_owner() {  # <recorded-pid>
-  local recorded
-  if recorded=$(fm_session_lock_recorded_session_id "$STATE"); then
+  local recorded=
+  # Snapshot the holder's session id beside pid $1 first: under the claim lock
+  # no acquirer can replace either, and without it the id is kept only while
+  # line 1 still names $1, so the refusal never pairs two holders.
+  if recorded=$(fm_session_lock_recorded_session_id "$STATE") \
+    && [ "$(sed -n '1p' "$LOCK" 2>/dev/null)" != "$1" ]; then
+    recorded=
+  fi
+  # The holder lookup below may take seconds; nothing is published yet, so
+  # stop serializing other acquirers before it runs.
+  [ "$LOCK_SESSION_PHASE" -ne 0 ] || release_claim_lock
+  if [ -n "$recorded" ]; then
     echo "error: another live firstmate session holds the lock (pid $1, session $recorded); operate read-only until resolved" >&2
   else
+    recorded=
     echo "error: another live firstmate session holds the lock (pid $1); operate read-only until resolved" >&2
   fi
+  fm_session_lock_holder_lines "$1" "$recorded" >&2
   exit 1
 }
 
