@@ -1445,6 +1445,32 @@ test_housekeeping_stale_marker_transitions_to_pause() {
   pass "housekeeping moves an existing stale marker to pause before wedge escalation"
 }
 
+test_unbound_busy_pause_preserves_daemon_wedge_detection() {
+  local dir state win key gen reason
+  dir=$(make_supercase stale-unbound-busy-pause)
+  state="$dir/state"; win="sess:fm-held-w14-busy"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$win" > "$state/held-w14-busy.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" held-w14-busy)
+  [ -n "$gen" ] || fail "could not arm the busy lifecycle"
+  printf 'paused: stale declaration from an older generation\n' > "$state/held-w14-busy.status"
+  key=$(printf '%s' "held-w14-busy" | tr ':/.' '___')
+  reason="stale: $win (idle 250s, possible wedge, escalation 3)"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "an unbound busy pause suppressed the daemon's wedge diagnostic"
+  [ ! -e "$state/.subsuper-paused-$key" ] \
+    || fail "an unbound busy pause entered long-cadence tracking"
+  : > "$state/.subsuper-escalations"
+  "$ROOT/bin/fm-status-append.sh" "$state" held-w14-busy \
+    'paused: current generation deliberately parked on an external wait'
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a current-generation busy pause was escalated as a wedge"
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "a current-generation busy pause missed long-cadence tracking"
+  pass "only a current-generation busy pause suppresses away-mode wedge detection"
+}
+
 # The quieting half for a captain hold. A finished task marked captain-held is idle by
 # design, so an already-aged wedge marker converts to pause tracking on the next sweep
 # instead of firing the possible-wedge escalation.
@@ -3262,6 +3288,7 @@ test_housekeeping_declared_time_controls_pause_recheck
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
 test_housekeeping_stale_marker_transitions_to_pause
+test_unbound_busy_pause_preserves_daemon_wedge_detection
 test_housekeeping_captain_held_stale_marker_transitions_to_pause
 test_housekeeping_pause_marker_transitions_to_clear
 test_housekeeping_herdr_persistent_stale_resolves_meta

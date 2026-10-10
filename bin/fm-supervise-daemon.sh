@@ -55,9 +55,11 @@
 #     paused: external wait or a verified captain-held transfer, per
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
-#     reads idle or busy; only a status append that stops declaring the wait
-#     ends that routing. A captain-held transfer is not rechecked at all while
-#     an away record (state/.afk-contract, never quiet mode's) exists: nobody
+#     reads idle or busy. On a trusted busy lifecycle, only a pause bound to its
+#     exact generation and sequence qualifies. A status append that stops
+#     declaring the wait ends that routing. A captain-held transfer is not
+#     rechecked at all while an away record (state/.afk-contract, never quiet
+#     mode's) exists: nobody
 #     is there to answer it, and the return brief lists it.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
@@ -443,7 +445,7 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     return
   fi
   declared=$(status_declared_wait_line "$state/$task.status")
-  if [ -n "$declared" ] && status_is_paused_or_captain_held "$declared"; then
+  if [ -n "$declared" ] && { status_is_captain_held "$declared" || fm_busy_declared_pause_valid "$state" "$task"; }; then
     # A DECLARED external-wait pause or a verified captain-held transfer
     # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
     # EXPECTED, so this is not a wedge. The caller records a pause marker (long
@@ -579,7 +581,7 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
-  if status_is_paused_or_captain_held "$last"; then
+  if status_is_captain_held "$last" || fm_busy_declared_pause_valid "$state" "$task"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
@@ -1235,7 +1237,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(status_declared_wait_line "$state/$task.status")
-    if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+    if [ -n "$last" ] && { status_is_captain_held "$last" || fm_busy_declared_pause_valid "$state" "$task"; }; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1609,7 +1611,7 @@ handle_wake() {  # <reason> <state>
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
                        last=$(status_declared_wait_line "$state/$task.status")
-                       status_is_paused_or_captain_held "$last" \
+                       { status_is_captain_held "$last" || fm_busy_declared_pause_valid "$state" "$task"; } \
                          || decision="escalate|${reason#stale: }"
                        ;;
                    esac ;;

@@ -1571,34 +1571,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # change semantic busy state. Before either marker exists, age the spawn record.
 # The caller checks busy state and routes a crossed bound through inspection.
 current_busy_generation_is_paused() {  # <task>
-  local task=$1 meta statusf harness before after status_sig_before status_sig_after last pause_gen pause_seq
-  local busy_state busy_source busy_event busy_seq busy_ts busy_gen
-  meta="$STATE/$task.meta"
-  statusf="$STATE/$task.status"
-  [ -f "$meta" ] && [ -f "$statusf" ] || return 1
-  harness=$(grep '^harness=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  [ -n "$harness" ] || return 1
-  before=$(fm_busy_record_read "$STATE" "$task" snapshot) || return 1
-  read -r busy_state busy_source busy_event busy_seq busy_ts busy_gen <<EOF
-$before
-EOF
-  [ "$busy_state" = busy ] || return 1
-  fm_busy_source_trusted "$harness" "$busy_source" || return 1
-  fm_busy_token_valid "$busy_event" || return 1
-  fm_busy_token_valid "$busy_gen" || return 1
-  case "$busy_seq" in ''|*[!0-9]*) return 1 ;; esac
-  case "$busy_ts" in ''|*[!0-9]*) return 1 ;; esac
-  status_sig_before=$(status_observed_signature "$statusf") || return 1
-  last=$(last_status_line "$statusf")
-  status_is_paused "$last" || return 1
-  pause_gen=$(printf '%s\n' "${last%%:*}" | sed -n 's/.*\[busy-gen=\([^]]*\)\].*/\1/p')
-  pause_seq=$(printf '%s\n' "${last%%:*}" | sed -n 's/.*\[busy-seq=\([^]]*\)\].*/\1/p')
-  [ "$pause_gen" = "$busy_gen" ] || return 1
-  [ "$pause_seq" = "$busy_seq" ] || return 1
-  status_sig_after=$(status_observed_signature "$statusf") || return 1
-  [ "$status_sig_before" = "$status_sig_after" ] || return 1
-  after=$(fm_busy_record_read "$STATE" "$task" snapshot) || return 1
-  [ "$before" = "$after" ]
+  fm_busy_declared_pause_valid "$STATE" "$1" || return 1
+  fm_busy_record_read "$STATE" "$1" snapshot 2>/dev/null | grep -q '^busy '
 }
 
 handle_current_busy_pause() {  # <window> <task> <hash> <since-file> <escalation-file>

@@ -1219,3 +1219,40 @@ fm_busy_is_busy() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   verdict=$(fm_busy_classify "$@")
   [ "${verdict%% *}" = busy ]
 }
+
+# fm_busy_declared_pause_valid: a paused declaration is authoritative unless a
+# trusted busy lifecycle is current, in which case it must name that exact
+# generation and sequence. Requires fm-classify-lib.sh for status helpers.
+fm_busy_declared_pause_valid() {  # <state-dir> <id>
+  local state=$1 id=$2 meta statusf harness before after status_sig_before status_sig_after last
+  local pause_gen pause_seq busy_state busy_source busy_event busy_seq busy_ts busy_gen
+  meta="$state/$id.meta"
+  statusf="$state/$id.status"
+  [ -f "$statusf" ] || return 1
+  last=$(last_status_line "$statusf")
+  status_is_paused "$last" || return 1
+  [ -f "$meta" ] || return 0
+  harness=$(grep '^harness=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$harness" ] || return 0
+  [ -e "$state/$id.busy-state" ] || return 0
+  before=$(fm_busy_record_read "$state" "$id" snapshot) || return 1
+  read -r busy_state busy_source busy_event busy_seq busy_ts busy_gen <<EOF
+$before
+EOF
+  if [ "$busy_state" != busy ] || ! fm_busy_source_trusted "$harness" "$busy_source"; then
+    return 0
+  fi
+  fm_busy_token_valid "$busy_event" || return 1
+  fm_busy_token_valid "$busy_gen" || return 1
+  case "$busy_seq" in ''|*[!0-9]*) return 1 ;; esac
+  case "$busy_ts" in ''|*[!0-9]*) return 1 ;; esac
+  status_sig_before=$(status_observed_signature "$statusf") || return 1
+  pause_gen=$(printf '%s\n' "${last%%:*}" | sed -n 's/.*\[busy-gen=\([^]]*\)\].*/\1/p')
+  pause_seq=$(printf '%s\n' "${last%%:*}" | sed -n 's/.*\[busy-seq=\([^]]*\)\].*/\1/p')
+  [ "$pause_gen" = "$busy_gen" ] || return 1
+  [ "$pause_seq" = "$busy_seq" ] || return 1
+  status_sig_after=$(status_observed_signature "$statusf") || return 1
+  [ "$status_sig_before" = "$status_sig_after" ] || return 1
+  after=$(fm_busy_record_read "$state" "$id" snapshot) || return 1
+  [ "$before" = "$after" ]
+}
