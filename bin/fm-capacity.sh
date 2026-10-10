@@ -29,6 +29,9 @@
 #   memory  free-memory percentage < 10
 #   disk    free space on the filesystem holding FM_HOME < 5120 MB
 # Otherwise reason is ok when free_lanes > 0 and full when it is 0.
+# The human "Constrained" hold line is printed only when config/lane-capacity
+# exists; without it the report is counts and host figures only, with no
+# dispatch advice.
 #
 # Probes degrade gracefully: an unavailable probe prints unknown and its
 # constraint is not evaluated. Darwin reads sysctl (vm.loadavg,
@@ -154,7 +157,7 @@ esac
 mem_text="${mem_free_pct}%"; [ "$mem_free_pct" != unknown ] || mem_text=unknown
 disk_text="$disk_free_mb MB"; [ "$disk_free_mb" != unknown ] || disk_text=unknown
 echo "Host: load $load1 on $cores cores, memory free $mem_text, disk free $disk_text."
-[ -z "$constraints" ] || echo "Constrained: $constraints - hold new dispatch until it clears."
+[ "$target" = none ] || [ -z "$constraints" ] || echo "Constrained: $constraints - hold new dispatch until it clears."
 
 if [ -n "$target_error" ]; then
   echo "fm-capacity: $target_error" >&2

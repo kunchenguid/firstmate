@@ -590,7 +590,7 @@ An existing ledger is left untouched while recording is disabled.
 
 The optional local, gitignored `config/lane-capacity` file holds one non-negative integer: how many ship and scout lanes this home should run at once.
 `bin/fm-capacity.sh` reads it to report how many lanes are open for queued work, alongside running lanes, 1-minute load against logical cores, free memory, and free disk.
-With the file absent the report prints counts only and never invents a target; a malformed value is reported as invalid rather than guessed.
+With the file absent the report prints counts and host figures only, never invents a target, and never advises holding dispatch; a malformed value is reported as invalid rather than guessed.
 Persistent secondmates hold no lane.
 The file is a per-machine choice and is not inherited by secondmate homes.
 The script's header owns the output line, the host-constraint thresholds, and the probe fallbacks.
