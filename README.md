@@ -60,6 +60,8 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, or Cursor Agent CLI.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
+- Node.js with built-in TypeScript type stripping: 22.18 or later on the 22 line, or 23.6 or later.
+  Some distribution packages, such as Ubuntu's Node 22.22.1, are built without it, so use an official Node.js build.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects and offers to install supported missing tools after you approve.

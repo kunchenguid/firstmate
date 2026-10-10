@@ -855,10 +855,12 @@ handle_wake() {  # <reason-lines>
   else
     set --
     case "$first" in heartbeat*) set -- --heartbeat ;; esac
-    if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" --afk 2>/dev/null); then
-      HANDLE_WHY="branch eligibility could not be computed"
+    errors=$(mktemp "$STATE/.supervision-host-errors.XXXXXX") || errors=/dev/null
+    if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" --afk 2>"$errors"); then
+      HANDLE_WHY="branch eligibility could not be computed$(dispatch_cause "$errors")"
       return 1
     fi
+    [ "$errors" = /dev/null ] || rm -f "$errors"
   fi
   status=$(printf '%s\n' "$scope" | sed -n 's/^status=//p')
   corrupted=$(printf '%s\n' "$scope" | sed -n 's/^corrupted=//p')
@@ -1024,11 +1026,28 @@ turn_captain_seqs() {  # <turn>
   awk -F '\t' -v turn="$1" '$1 == turn && $3 == "captain" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
 }
 
+# The cause a failed bin/fm-branch-dispatch.mjs call wrote to <stderr-file>,
+# as ": <cause>" for the end of a hand-back reason, or nothing when it wrote
+# none. The cause is its first error header (a Node runtime without
+# TypeScript type stripping fails its .ts import there, not in the script),
+# else its first nonblank line, flattened and bounded to one log field.
+# Removes the file.
+dispatch_cause() {  # <stderr-file>
+  local line=
+  [ "$1" != /dev/null ] || return 0
+  line=$(grep -E -m 1 '^[[:alpha:]]*Error( \[[A-Z0-9_]+\])?: ' "$1" 2>/dev/null) \
+    || line=$(grep -m 1 '[^[:space:]]' "$1" 2>/dev/null) || line=
+  rm -f "$1"
+  line=$(printf '%s' "$line" | LC_ALL=C tr '\t' ' ' | LC_ALL=C tr -d '\000-\037\177' | head -c 240)
+  [ -z "$line" ] || printf ': %s' "$line"
+}
+
 # Why an attended close stays with main exactly as the plain arm delivers it,
 # or nothing when the supervision session may take it. Sets ATTENDED_WHY, and
 # ATTENDED_OFFER to the offer's verdict and the scope it judged.
 attended_acceptor() {  # <first-reason-line>
-  local offer=
+  local offer='' errors
+  errors=$(mktemp "$STATE/.supervision-host-errors.XXXXXX") || errors=/dev/null
   ATTENDED_WHY=
   ATTENDED_OFFER=
   if ! fm_supervision_host_attended_ready "$CONFIG" "$PRIMARY"; then
@@ -1037,11 +1056,12 @@ attended_acceptor() {  # <first-reason-line>
     ATTENDED_WHY="the main session could not be identified"
   elif health_cooling; then
     ATTENDED_WHY="the supervision session is cooling down after engine errors"
-  elif ! offer=$(printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer 2>/dev/null); then
-    ATTENDED_WHY="branch eligibility could not be computed"
+  elif ! offer=$(printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer 2>"$errors"); then
+    ATTENDED_WHY="branch eligibility could not be computed$(dispatch_cause "$errors")"
   elif [ "$(printf '%s\n' "$offer" | sed -n 's/^eligible=//p')" != 1 ]; then
     ATTENDED_WHY="main-only"
   fi
+  [ "$errors" = /dev/null ] || rm -f "$errors"
   ATTENDED_OFFER=$offer
   [ -z "$ATTENDED_WHY" ]
 }
