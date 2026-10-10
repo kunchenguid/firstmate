@@ -22,6 +22,10 @@
 #   - moving only `## Queued` items, refusing `## In flight` and historical
 #     `## Done` records, which must stay with their home for pruning or
 #     archiving;
+#   - refusing, before anything moves, an item whose `repo:` names a project
+#     this home registers as `local-only` when the destination is a remote
+#     home or a local home that holds no clone of it at projects/<repo> (a
+#     symlinked projects/<repo> entry does not count as a clone);
 #   - the multi-key classification and idempotent per-key reporting: a key
 #     already present in the secondmate backlog is reported and skipped, and if
 #     any key matches neither backlog nothing is moved;
@@ -297,6 +301,56 @@ backlog_key_section() {
     }
     END { exit found ? 0 : 1 }
   ' "$file"
+}
+
+# Print the `repo:` metadata of a key's header line, or nothing when the header
+# carries none. Like backlog_key_section, this reads only item header lines.
+backlog_key_repo() {
+  local file=$1 key=$2
+  awk -v key="$key" '
+    /^- \[[ x]\] / {
+      rest = $0
+      sub(/^- \[[ x]\] +/, "", rest)
+      id = rest
+      sub(/[ \t].*/, "", id)
+      if (id != key) next
+      if (match(rest, /(\(|,[ \t]*)repo:[ \t]*[^,)]*/)) {
+        repo = substr(rest, RSTART, RLENGTH)
+        sub(/^.*repo:[ \t]*/, "", repo)
+        sub(/[ \t]+$/, "", repo)
+        print repo
+      }
+      exit
+    }
+  ' "$file"
+}
+
+# A local-only project has no forge to clone from at dispatch, so its work can
+# run only in a home that already holds that project's clone, which a remote
+# home never can. Report every such key and fail if any was found. A symlinked
+# projects/<repo> entry is refused, because retirement skips it and would never
+# check the work landed there. Git reports the clone's physical toplevel, so it
+# is compared with the physical path of projects/<repo>, whose projects/
+# directory seeding allows to sit behind a symlink inside the home.
+local_only_items_routable() { # <secondmate-id> <home, empty for a remote route> <keys...>
+  local id=$1 home=$2 key repo mode_line clone rc=0
+  shift 2
+  for key in "$@"; do
+    repo=$(backlog_key_repo "$MAIN_BACKLOG" "$key")
+    [ -n "$repo" ] || continue
+    mode_line=$("$SCRIPT_DIR/fm-project-mode.sh" "$repo" 2>/dev/null) || continue
+    [ "${mode_line%% *}" = local-only ] || continue
+    if [ -z "$home" ]; then
+      echo "error: refusing to hand off $key: local-only project $repo cannot be cloned into remote secondmate $id; route it to a local secondmate holding its clone or keep the work in this home" >&2
+      rc=1
+    elif [ -L "$home/projects/$repo" ] \
+      || ! clone=$(cd "$home/projects/$repo" 2>/dev/null && pwd -P) \
+      || [ "$(git -C "$clone" rev-parse --show-toplevel 2>/dev/null || true)" != "$clone" ]; then
+      echo "error: refusing to hand off $key: local-only project $repo has no clone at $home/projects/$repo; seed it into secondmate $id first (bin/fm-home-seed.sh) or keep the work in this home" >&2
+      rc=1
+    fi
+  done
+  return "$rc"
 }
 
 backlog_key_noncanonical_body_lines() {
@@ -810,6 +864,10 @@ remote_handoff() { # <secondmate-id> <keys...>
       return 1
     done < <(backlog_key_noncanonical_body_lines "$MAIN_BACKLOG" "$key")
   done
+  if ! local_only_items_routable "$id" "" "${to_move[@]+"${to_move[@]}"}"; then
+    echo "       nothing new was staged." >&2
+    return 1
+  fi
   # Do not append a fresh handoff to an older recovery batch. In particular, a
   # confirmed wake can survive when outbox cleanup fails; if new work were
   # staged into that outbox, the old confirmation would suppress the wake for
@@ -991,6 +1049,11 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
   FAILED=1
 fi
 if [ "$FAILED" -ne 0 ]; then
+  echo "       nothing was moved." >&2
+  exit 1
+fi
+
+if ! local_only_items_routable "$ID" "$SUB_HOME" "${TO_MOVE[@]+"${TO_MOVE[@]}"}"; then
   echo "       nothing was moved." >&2
   exit 1
 fi

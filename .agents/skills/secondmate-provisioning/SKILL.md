@@ -13,7 +13,7 @@ metadata:
 
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
-Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, a `local-only` project routes by scope only to a local secondmate whose home holds its clone and never to a remote one, and secondmates are idle by default.
 
 ## Routing table
 
@@ -159,8 +159,9 @@ Run `bin/fm-home-seed.sh validate` when checking registry integrity; its header 
 Seeding is transactional.
 If validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 
-Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
-`local-only` projects stay with the main firstmate.
+A local secondmate's project list may include `no-mistakes`, `direct-PR`, and `local-only` projects; a remote route still refuses `local-only` because its host cannot hold that clone.
+A `local-only` project lands inside the secondmate home through `bin/fm-merge-local.sh` under the configured merge authority.
+Seeding clones a `local-only` project, with or without a remote, from the main home's clone rather than from an origin, because that local default branch is the project's source of truth and its origin falls behind every landing; the `bin/fm-home-seed.sh` header owns the default-branch pinning and the refusals for a source clone or an existing seeded clone.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
 ## Record intake for an existing or inherited domain
@@ -211,7 +212,7 @@ It is idempotent; an item already in the secondmate backlog is skipped.
 After a successful move it warns for any moved key that still owes a public relay reply bound to `main/<key>`, because that binding no longer names the home owning the work; rebind the commitment to `secondmate:<id>` through the `fmx-respond` promised-final procedure, which owns those commands.
 That same rule governs routing generally: a Relay-linked request whose work goes to a secondmate cannot use the home-local mention link at all and needs a promised-final commitment bound to that secondmate's home.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
-Do not hand off `local-only` items.
+Hand off a `local-only` item only to a secondmate whose home holds that project's clone.
 
 ## Recovery
 
@@ -248,6 +249,8 @@ Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or mai
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
+Non-forced retirement also refuses while a `local-only` clone in that home has commits on its default branch that the parent home's clone does not have, because nothing pushes landed `local-only` work anywhere else and fleet sync skips those clones; the refusal names the branch and commit count and prints a `git bundle` carry-back into the parent clone to run before retiring.
+Non-forced retirement refuses the same way for a clone whose delivery posture does not resolve in that home's `data/projects.md`, because that clone may be `local-only`.
 Non-forced retirement also refuses while any parent pending-reply for that id is still unresolved.
 A remote route delegates the in-flight guard to its configured host and additionally refuses while the primary has a pending handoff outbox.
 SSH exit 255 preserves the route and local records because remote completion is unknown.

@@ -163,7 +163,13 @@
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
-# teardown refuses while their home has in-flight crewmate meta files; --force
+# teardown refuses while their home has in-flight crewmate meta files, and
+# while a local-only project clone in that home holds default-branch commits
+# the parent home's clone does not have: nothing pushes landed local-only work
+# and fleet sync skips those clones, so that home may hold the only copy. The
+# refusal names each branch and commit count and prints a git bundle carry-back
+# into the parent clone. A project clone whose registered delivery posture
+# does not resolve in that home's registry is refused the same way. --force
 # is the approved discard path that prevalidates child removal targets, locks each
 # descendant home's task set before enumeration, and holds those locks through
 # child cleanup. Contention refuses the complete forced teardown before child
@@ -999,6 +1005,76 @@ secondmate_unresolved_pending_replies_refuse() {
   return 0
 }
 
+secondmate_landed_local_only_work_refuse() {  # <home>
+  local home=$1 parent_projects clone project mode_err mode_line mode default tip parent_clone objects count bundle where carry refused=0
+  parent_projects="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+  for clone in "$home"/projects/*/; do
+    clone=${clone%/}
+    [ -d "$clone" ] && [ ! -L "$clone" ] || continue
+    [ "$(git -C "$clone" rev-parse --show-toplevel 2>/dev/null || true)" = "$(cd "$clone" && pwd -P)" ] || continue
+    project=$(basename "$clone")
+    # The parser falls back to "no-mistakes off" with a "defaulting" warning for
+    # a missing registry, a missing entry, or an unknown mode. Skipping on that
+    # fallback could discard a local-only clone, so it refuses like a parser refusal.
+    mode_err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-teardown-mode.XXXXXX") || return 1
+    mode_line=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$SCRIPT_DIR/fm-project-mode.sh" "$project" 2>"$mode_err") || mode_line=
+    cat "$mode_err" >&2
+    if grep -qF '; defaulting ' "$mode_err"; then
+      mode_line=
+    fi
+    rm -f -- "$mode_err"
+    [ -n "$mode_line" ] || {
+      echo "REFUSED: project $project in secondmate home $home does not resolve to a registered delivery posture (see the parser message above); correct $home/data/projects.md or explicitly discard with --force." >&2
+      return 1
+    }
+    read -r mode _ <<EOF
+$mode_line
+EOF
+    [ "$mode" = local-only ] || continue
+    default=$(default_branch "$clone") || {
+      echo "REFUSED: cannot determine default branch for local-only project $project at $clone; expected origin/HEAD, main, or master." >&2
+      return 1
+    }
+    tip=$(git -C "$clone" rev-parse --verify --quiet "refs/heads/$default^{commit}") || {
+      echo "REFUSED: cannot inspect $default of local-only project $project at $clone." >&2
+      return 1
+    }
+    parent_clone="$parent_projects/$project"
+    bundle="${TMPDIR:-/tmp}/fm-secondmate-$ID-$project.bundle"
+    if git -C "$parent_clone" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      objects=$(cd "$clone" && cd "$(git rev-parse --git-common-dir)" && pwd -P) || {
+        echo "REFUSED: cannot inspect the object store of local-only project $project at $clone." >&2
+        return 1
+      }
+      count=$(GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects/objects" git -C "$parent_clone" rev-list --count "$tip" --not --all 2>/dev/null) || {
+        echo "REFUSED: cannot compare $default of local-only project $project at $clone against the parent clone $parent_clone." >&2
+        return 1
+      }
+      where="are absent from the parent clone $parent_clone"
+      carry=$(printf 'git -C %q bundle create %q %q && git -C %q fetch %q %q' \
+        "$clone" "$bundle" "$default" "$parent_clone" "$bundle" "$default:refs/heads/secondmate/$ID/$default")
+    else
+      count=$(git -C "$clone" rev-list --count "$tip" 2>/dev/null) || {
+        echo "REFUSED: cannot inspect $default of local-only project $project at $clone." >&2
+        return 1
+      }
+      where="have no parent clone at $parent_clone"
+      carry=$(printf 'git -C %q bundle create %q %q && git clone %q %q' \
+        "$clone" "$bundle" "$default" "$bundle" "$parent_clone")
+    fi
+    [ "$count" -gt 0 ] || continue
+    [ "$refused" -eq 1 ] || echo "REFUSED: secondmate $ID still holds landed local-only work that the parent home $FM_HOME does not have." >&2
+    refused=1
+    echo "project $project: $count commit(s) on $default in $clone $where" >&2
+    echo "Carry them back first: $carry" >&2
+  done
+  [ "$refused" -eq 0 ] || {
+    echo "Land that work in the parent home's clone, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  }
+  return 0
+}
+
 remote_outbox_cleanup() {
   [ "$REMOTE_OUTBOX_PRESENT" -eq 1 ] || return 0
   (
@@ -1340,15 +1416,15 @@ elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
   PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
 fi
 
-default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+default_branch() {  # [<repo>]
+  local repo=${1:-$PROJ} ref branch
+  ref=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
     return 0
   fi
   for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"
       return 0
     fi
@@ -3361,6 +3437,7 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
       exit 1
     done
   fi
+  secondmate_landed_local_only_work_refuse "$HOME_PATH" || exit 1
   secondmate_unresolved_pending_replies_refuse || exit 1
 fi
 
