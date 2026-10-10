@@ -3176,7 +3176,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     exit 1
   fi
   if ADDRESS_LINE=$(fm_brief_intent_address_line "$BRIEF"); then
-    echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before spawn, since the heading already records provenance" >&2
+    echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the requirement in neutral words without a Captain label or address before spawn, since the heading already records provenance" >&2
     exit 1
   fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then

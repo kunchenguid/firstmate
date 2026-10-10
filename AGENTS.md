@@ -214,7 +214,7 @@ When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--reso
 Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
-When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
+When the captain adds or changes an ask mid-task, keep the captain's exact words in the private task note or captain-hold record, append the changed requirement in neutral words to that brief's `## Captain's intent`, and relay that text to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
 Supervise all live work under section 8.
 
 ### Selected delivery path and merge authority
@@ -380,9 +380,9 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 ## 11. Crewmate briefs
 
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
-Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask and any boundary the captain stated, plus the context needed to read it, including the substance of any report, decision, or PR the ask refers to; never widen the ask there into a general goal or an enumerated coverage list, because the reviewer treats that subsection as acceptance criteria.
+Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's ask and any boundary the captain stated as a neutral, self-sufficient requirement, including the substance of any report, decision, or PR the ask refers to; never widen the ask there into a general goal or an enumerated coverage list, because the reviewer treats that subsection as acceptance criteria.
 Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions that ask requires, naming what stays out of scope when the ask is narrow; a generalization, consistency sweep, or extra hardening the captain did not ask for is follow-up work to note, not scope to add.
-`bin/fm-dod-lib.sh` owns intent authoring without added speaker labels or direct address, its provenance markers, what a no-mistakes worker may pass as `--intent`, and the string's self-sufficiency rule.
+`bin/fm-dod-lib.sh` owns the neutral authoring rule for that published text, its provenance markers, what a no-mistakes worker may pass as `--intent`, and the string's self-sufficiency rule.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.

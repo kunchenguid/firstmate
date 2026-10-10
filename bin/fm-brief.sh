@@ -3,10 +3,10 @@
 # data/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
 # filled in. Ship and scout `# Task` sections have two subsections Firstmate
-# fills before dispatch: `{TASK}` under `## Captain's intent` (the captain's
-# own ask plus the context needed to read it, including the substance of any
-# report, decision, or PR the ask refers to, without added speaker labels or
-# direct address) and `{FIRSTMATE_SPEC}`
+# fills before dispatch: `{TASK}` under `## Captain's intent` (the requested
+# outcome as a neutral, self-sufficient requirement, including the substance of
+# any report, decision, or PR it refers to, authored under bin/fm-dod-lib.sh's
+# rule because it is published in the pull request) and `{FIRSTMATE_SPEC}`
 # under `## Firstmate spec` (build instructions, which are never the captain's
 # intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
 # subsections feed; bin/fm-spawn.sh refuses leftover placeholders and a

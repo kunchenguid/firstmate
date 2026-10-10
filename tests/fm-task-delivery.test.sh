@@ -644,7 +644,7 @@ EOF
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not override its stale intent instruction"
-  assert_grep "plus any later words the captain actually supplied" \
+  assert_grep "plus any later intent additions Firstmate relays" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy launch contract excluded later captain clarifications"
   authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
@@ -678,7 +678,7 @@ EOF
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract did not supersede its stale mixed-Task DoD"
-  assert_grep "plus any later words the captain actually supplied" \
+  assert_grep "plus any later intent additions Firstmate relays" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract excluded later captain clarifications"
   assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
@@ -930,7 +930,7 @@ EOF
     [ "$status" -ne 0 ] || fail "$marker: addressed intent should be refused"
     assert_contains "$out" "operator-address line:   $marker preserve its provenance." \
       "$marker: refusal did not name the offending line"
-    assert_contains "$out" "write the captain's actual words without a Captain label or address" \
+    assert_contains "$out" "write the requirement in neutral words without a Captain label or address" \
       "$marker: refusal did not say what to write instead"
     assert_absent "$home/data/$id/launch-brief.md" "$marker: addressed intent was serialized"
     assert_absent "$home/state/$id.meta" "$marker: addressed intent spawn wrote task metadata"

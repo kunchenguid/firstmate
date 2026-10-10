@@ -68,16 +68,20 @@
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
 # monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
-# brief's `## Captain's intent` subsection plus later captain words, never
-# `## Firstmate spec` and never the worker's own tradeoffs.
-# Author the subsection body and later relays as the actual words, without
-# adding speaker labels or direct address: the heading supplies provenance and
-# is not part of --intent. A legacy mixed Task instead marks each captain line
-# with `[captain] `; the selector returns its words, not that metadata prefix.
+# brief's `## Captain's intent` subsection plus later intent additions Firstmate
+# relays, never `## Firstmate spec` and never the worker's own tradeoffs.
+# That text is published as the pull request's Intent section, so author the
+# subsection body and every later addition as a neutral requirement in plain
+# words: no quoted chat messages, no dates, no decision history, no mention of
+# the requester, and no speaker labels or direct address. The requester's exact
+# words stay only in private home records (the task note or the captain-hold
+# record). The heading supplies provenance and is not part of --intent. A
+# legacy mixed Task instead marks each captain line with `[captain] `; the
+# selector returns its words, not that metadata prefix.
 # That selector skips fenced blocks and indented examples like the heading
 # reader, so a quoted `Captain:` sample is never authorized intent.
 # Previously stored speaker labels remain readable for compatibility only.
-# Never scrub literal examples or other content the captain actually supplied.
+# Never scrub literal examples or other content of the authored intent.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
 # roughly the same specification - so a report, decision, or PR the intent
 # refers to is written into it as substance, never left as a pointer.
@@ -269,9 +273,9 @@ fm_brief_intent_overlay() {  # <captain-intent>
   cat <<'EOF'
 
 # Current no-mistakes intent contract
-This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Use everything under `## Captain intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
-Preserve those words without adding speaker labels or direct address.
+This section supersedes every earlier brief instruction about constructing `--intent`, but not later intent additions Firstmate relays.
+Use everything under `## Captain intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later intent additions Firstmate relays as `--intent`; never include Firstmate specification or other mixed Task content.
+Pass that text as written, without adding speaker labels, direct address, quoted chat messages, dates, decision history, or any mention of the requester.
 Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
 The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent below refers to into its substance rather than passing the pointer.
 
@@ -355,13 +359,13 @@ ${pr_return_line}Whenever a drive call returns without a gate or an outcome - it
   cat <<EOF
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later words the captain actually said.
-Preserve the actual words without adding speaker labels or direct address; the subsection heading supplies provenance outside the pipeline input.
+When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later intent additions Firstmate relays.
+That text is published as the pull request's Intent section: pass it as written, without adding speaker labels, direct address, quoted chat messages, dates, decision history, or any mention of the requester; the subsection heading supplies provenance outside the pipeline input.
 For a legacy brief with no such subsection, include only words on lines marked \`[captain] \`, excluding that metadata prefix; never copy its mixed \`# Task\` wholesale.
-If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
+If it has no provenance-marked intent, stop and ask firstmate instead of starting no-mistakes.
 Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
 The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
-When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
+When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` as neutral requirement text, not only the pointer; that substance is the intent by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
