@@ -478,6 +478,11 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Bounded and successor-linked lifecycle rows.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 
+The same suite pins how a lock's steal mutex - the mutex serializing that lock's own recovery - is itself recovered.
+A stale or self-abandoned one is reclaimed in place within a bounded number of attempts instead of descending into a nested `.steal` mutex.
+A recycled holder PID counts the holder gone for that mutex alone and never for a primary lock, and the legacy auto-arm reclaim refuses once the mutex has changed hands.
+`bin/fm-wake-lib.sh`'s `fm_lock_try_acquire_steal_mutex` owns that procedure and the residual it leaves.
+
 ### Claude auto-arm and turn-end guard
 
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
