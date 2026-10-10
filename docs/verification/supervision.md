@@ -263,7 +263,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | --- | --- | --- | --- |
 | Claude | 2.1.278 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session received the full session-start digest through the tracked `SessionStart` hook, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
-| OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
+| OpenCode | 2.0.23 | Passive V2 execution completion events | Completion events are passive and cannot block; `ctx.session.prompt({ delivery: "queue" })` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | omp | 18.1.11 | Blocking `session_stop` hook returning `{ continue: true, additionalContext }` | In the isolated rpc lab (2026-09-05), the successor watcher was frozen with `SIGSTOP` until its beacon passed the lab `FM_GUARD_GRACE` of 20s while its arm child stayed attached (a killed watcher closes its arm child and the extension re-arms before the guard can fire); the next turn end raised the guard, the guard spy recorded `rc=2` followed by a stop carrying `stop_hook_active: true`, omp compelled a continuation carrying the `turn-end-guard` operational text, the `fm_watch_arm_omp` invocation count then rose to at least two, and a live watcher held the home lock after the thaw; the flagged stop was allowed, so exactly one continuation ran. `session_stop` never fired for an interrupted turn. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
@@ -508,13 +508,13 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 
 ## Watcher continuity
 
-The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.
+The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21 and OpenCode's V2 migration, all against isolated project and home state.
 No credential material was copied into a fixture.
 
 ```text
 Claude Code 2.1.278
 codex-cli 0.144.4
-OpenCode 1.17.18
+OpenCode 2.0.23
 Pi 0.80.10
 grok 0.2.103 (89c3d36fb6f1) [stable]
 ```
