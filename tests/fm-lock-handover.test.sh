@@ -63,7 +63,7 @@ make_home() {
 new_harness() {
   local home=$1 pid
   # Detached from the caller's command substitution, or $(...) would wait on it.
-  sleep 600 >/dev/null 2>&1 </dev/null &
+  sleep 600 >/dev/null 2>&1 &
   pid=$!
   printf '%s\n' "$pid" >> "$HARNESS_PIDS"
   : > "$home/harness/harness-$pid"
