@@ -1249,7 +1249,8 @@ fm_busy_declared_pause_valid() {  # <state-dir> <id> [require-bound]
 $before
 EOF
   if [ "$busy_state" != busy ] || ! fm_busy_source_trusted "$harness" "$busy_source"; then
-    return 0
+    [ "$mode" != require-bound ]
+    return
   fi
   fm_busy_token_valid "$busy_event" || return 1
   fm_busy_token_valid "$busy_gen" || return 1

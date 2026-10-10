@@ -1478,7 +1478,15 @@ test_unbound_busy_pause_preserves_daemon_wedge_detection() {
     || fail "a current-generation busy pause was escalated as a wedge"
   [ -e "$state/.subsuper-paused-$key" ] \
     || fail "a current-generation busy pause missed long-cadence tracking"
-  pass "only a current-generation busy pause suppresses away-mode wedge detection"
+  : > "$state/.subsuper-escalations"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" held-w14-busy idle --gen "$gen" \
+    --source claude-hook --event stop
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a pause suppressed an already-issued wedge after its busy lifecycle advanced"
+  [ ! -e "$state/.subsuper-paused-$key" ] \
+    || fail "a pause stayed authoritative after its bound busy lifecycle advanced"
+  pass "only an unchanged current busy snapshot suppresses away-mode wedge detection"
 }
 
 test_unbound_pause_without_busy_record_preserves_daemon_wedge_detection() {

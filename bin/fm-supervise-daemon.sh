@@ -1549,7 +1549,7 @@ is_wake_reason() {  # <reason>
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
   local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest sig marker
-  local kind="" arg="" classification_failed=0 span_failure_repeat=0
+  local kind="" arg="" classification_failed=0 span_failure_repeat=0 pause_binding_rejected=0
   : > "$capture" || return 1
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -1611,14 +1611,14 @@ handle_wake() {  # <reason> <state>
                 pause) case "$stale_detail" in
                          idle\ *s,\ possible\ wedge,\ escalation\ *)
                            fm_busy_declared_pause_valid "$state" "$task" require-bound \
-                             || decision="escalate|${reason#stale: }"
+                             || { pause_binding_rejected=1; decision="escalate|${reason#stale: }"; }
                            ;;
                        esac ;;
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
                        last=$(status_declared_wait_line "$state/$task.status")
                        { status_is_captain_held "$last" || fm_busy_declared_pause_valid "$state" "$task" require-bound; } \
-                         || decision="escalate|${reason#stale: }"
+                         || { pause_binding_rejected=1; decision="escalate|${reason#stale: }"; }
                        ;;
                    esac ;;
               esac ;;
@@ -1632,7 +1632,11 @@ handle_wake() {  # <reason> <state>
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")
     last=$(status_declared_wait_line "$state/$task.status")
-    reconcile_pause_tracking "$arg" "$state" "$last"
+    if [ "$pause_binding_rejected" -eq 1 ]; then
+      pause_marker_remove "$arg" "$state"
+    else
+      reconcile_pause_tracking "$arg" "$state" "$last"
+    fi
   fi
   case "$action" in
     escalate)
