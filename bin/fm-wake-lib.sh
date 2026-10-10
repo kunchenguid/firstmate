@@ -1712,8 +1712,9 @@ fm_failure_episode_reset() {
 }
 
 # --- Claude Stop auto-arm generation claims -----------------------------------
-# Both Stop-event participants (bin/fm-claude-stop-autoarm.sh and
-# bin/fm-turnend-guard.sh --claude) coordinate through the epoch ledger
+# The Stop-event participants (bin/fm-claude-stop-autoarm.sh,
+# bin/fm-codex-stop-autoarm.sh, and the cooperative bin/fm-turnend-guard.sh
+# --claude/--codex) coordinate through the epoch ledger
 # state/.claude-autoarm-epoch, whose monotonic epoch sequence IS the claim
 # generation. This is an optimistic, generation-based single-flight design:
 #

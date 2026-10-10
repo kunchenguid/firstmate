@@ -2283,3 +2283,195 @@ test_hook_away_daemon_allows_beacon_within_poll_derived_grace
 test_hook_away_daemon_blocks_dead_daemon_despite_poll_derived_grace
 test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace
 test_hook_no_afk_ignores_poll_derived_grace
+
+# --- --codex cooperative mode -------------------------------------------------
+# The tracked Codex Stop hook passes --codex, which selects the same
+# cooperative machinery as --claude: ignore stop_hook_active (Codex marks
+# blocked-stop continuations true), cooperate with the Codex Stop-owned
+# auto-arm through the shared epoch ledger, and bound re-blocks before the
+# one attended fail-open. These cases pin the flag equivalence at the points
+# the Codex handover depends on.
+
+run_hook_codex() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s,"session_id":"sess-codex-mode"}' "$stop_active" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --codex 2>&1
+}
+
+test_hook_codex_mode_reblocks_stop_hook_active_when_unhealthy() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-reblock")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_codex "$dir" true); status=$?
+  expect_code 2 "$status" "--codex mode must re-block a stop_hook_active=true stop while unhealthy with no auto-arm claim"
+  assert_contains "$out" "TURN WOULD END BLIND" "--codex re-block must carry the blind-turn banner"
+  assert_contains "$out" "Stop-owned auto-arm did not claim" "--codex re-block must explain the missing auto-arm claim"
+  pass "fm-turnend-guard --codex: re-blocks a loop-guarded stop while unhealthy and unclaimed (handover regression)"
+}
+
+test_hook_codex_mode_allows_on_open_generation_claim() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-open-claim")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  rm -f "$dir/state/.claude-autoarm-epoch"
+  # Record the claim through the real ledger writer shape: epoch + identity.
+  printf 'epoch=7 owner_pid=%s outcome=arming updated_at=%s\n' "$pid" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2" >> "$3"' _ "$dir/bin/fm-wake-lib.sh" "$pid" "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_codex "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--codex mode must allow the stop while the auto-arm claim is open and alive"
+  [ -z "$out" ] || fail "--codex open-claim allow produced output: $out"
+  pass "fm-turnend-guard --codex: a live arming generation owns the stop without a continuation"
+}
+
+test_hook_codex_mode_allows_on_fresh_rewake_epoch() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-fresh-rewake")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=3 owner_pid=999 outcome=rewake updated_at=%s\n' "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  out=$(run_hook_codex "$dir" true); status=$?
+  expect_code 0 "$status" "--codex mode must allow the stop whose queued rewake the auto-arm already owns"
+  [ -z "$out" ] || fail "--codex rewake-epoch allow produced output: $out"
+  pass "fm-turnend-guard --codex: fresh rewake epoch prevents a duplicate continuation for the same event"
+}
+
+test_hook_codex_mode_blocks_on_stale_rewake_epoch() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-stale-rewake")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=3 owner_pid=999 outcome=rewake updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_codex "$dir" true); status=$?
+  expect_code 2 "$status" "--codex mode must block when the only proof is a stale rewake epoch"
+  assert_contains "$out" "TURN WOULD END BLIND" "the stale-epoch block must carry the blind-turn banner"
+  pass "fm-turnend-guard --codex: a stale rewake epoch never implies the event was handled"
+}
+
+install_integrated_codex_autoarm() {
+  local dir=$1
+  cp "$ROOT/bin/fm-codex-stop-autoarm.sh" "$dir/bin/fm-codex-stop-autoarm.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
+  cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
+  chmod +x "$dir/bin/fm-codex-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
+  ln -s /bin/bash "$dir/fake-codex"
+  cat > "$dir/bin/stub-queue" <<'SH'
+#!/usr/bin/env bash
+printf 'thread=%s\n' "$1" >> "$FM_HOME/state/queue-ran"
+exit 0
+SH
+  chmod +x "$dir/bin/stub-queue"
+}
+
+run_integrated_codex_autoarm() {
+  local dir=$1 home
+  home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # the fake harness expands FM_HOME inside its child shell.
+  printf '{"session_id":"sess-codex-mode","stop_hook_active":false}\n' \
+    | FM_HOME="$home" FM_CODEX_QUEUE_BIN="$dir/bin/stub-queue" "$dir/fake-codex" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-codex-stop-autoarm.sh"
+      ' 2>&1
+}
+
+run_integrated_codex_autoarm_unowned() {
+  local dir=$1 home
+  home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # the fake harness expands FM_HOME inside its child shell.
+  printf '{"session_id":"sess-codex-mode","stop_hook_active":false}\n' \
+    | FM_HOME="$home" FM_CODEX_QUEUE_BIN="$dir/bin/stub-queue" "$dir/fake-codex" -c '"$FM_HOME/bin/fm-codex-stop-autoarm.sh"' 2>&1
+}
+
+test_hook_codex_mode_budget_reaches_attended_fail_open() {
+  local dir out status guard_out guard_status i epoch_line
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-fail-open")
+  : > "$dir/state/task1.meta"
+  install_integrated_codex_autoarm "$dir"
+  write_integrated_failed_arm "$dir"
+
+  out=$(run_integrated_codex_autoarm "$dir"); status=$?
+  expect_code 0 "$status" "the exhausted auto-arm cycle exits 0 after emitting its one failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "the real codex arm must create the episode notice"
+  [ "$(wc -l < "$dir/state/queue-ran" 2>/dev/null | tr -d ' ')" = 1 ] \
+    || fail "the failure notice must be delivered exactly once"
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_codex "$dir" true); guard_status=$?
+  expect_code 0 "$guard_status" "the first failed epoch must own its Stop handoff"
+  epoch_line=$(sed -n '1p' "$dir/state/.claude-autoarm-epoch")
+
+  # Remove the dead lock left by the fixture arm so this case isolates the
+  # frozen-ledger accounting path rather than the live foreign-owner escape.
+  rm -f "$dir/state/.lock"
+  for i in 1 2 3 4; do
+    out=$(run_integrated_codex_autoarm_unowned "$dir"); status=$?
+    expect_code 0 "$status" "an auto-arm outside the lock owner's ancestry must stay inert at stop $i"
+    [ -z "$out" ] || fail "inert auto-arm produced output at stop $i: $out"
+    [ "$(sed -n '1p' "$dir/state/.claude-autoarm-epoch")" = "$epoch_line" ] \
+      || fail "the ledger epoch advanced at stop $i, so this case no longer drives a frozen epoch"
+    guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_codex "$dir" true); guard_status=$?
+    if [ "$i" -lt 4 ]; then
+      expect_code 2 "$guard_status" "frozen-epoch stop $i must still re-block within the budget"
+      assert_contains "$guard_out" "TURN WOULD END BLIND" "frozen-epoch re-block $i lost the blind-turn banner"
+      assert_not_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "fail-open fired before the frozen-epoch budget was spent"
+      assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "frozen-epoch re-block $i consumed the attended alarm early"
+    else
+      expect_code 0 "$guard_status" "the frozen-epoch progression must reach the attended fail-open"
+      assert_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the frozen-epoch fail-open alarm is missing"
+      assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the frozen-epoch fail-open did not consume its episode alarm"
+    fi
+  done
+
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_codex "$dir" true); guard_status=$?
+  expect_code 2 "$guard_status" "a later unhealthy stop after the frozen-epoch alarm must remain attended"
+  assert_not_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the attended alarm repeated against the frozen epoch"
+  pass "fm-turnend-guard --codex: a frozen failed epoch reaches one loud attended fail-open, not an endless repair loop"
+}
+
+test_hook_codex_mode_delivery_miss_blocks_bounded() {
+  # A queue delivery that failed rewrites the epoch to plain failed without a
+  # notice marker; with the handling successor also gone the guard must block
+  # (giving the model one recovery turn that drains the durable event) but
+  # never alarm, because the mechanism itself is not broken.
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-delivery-miss")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=3 owner_pid=999 outcome=failed updated_at=%s\n' "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "fixture precondition: no notice marker"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_codex "$dir" true); status=$?
+  expect_code 2 "$status" "a delivery miss with no live watcher must block into one recovery turn"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "a delivery miss must not consume the attended alarm"
+  pass "fm-turnend-guard --codex: a delivery-miss epoch blocks bounded without claiming the event was handled"
+}
+
+test_codex_registration_pins_guard_and_autoarm() {
+  local settings guard_cmd arm_cmd arm_timeout arm_async
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  guard_cmd=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  arm_cmd=$(jq -r '.hooks.Stop[0].hooks[1].command // empty' "$settings")
+  arm_timeout=$(jq -r '.hooks.Stop[0].hooks[1].timeout // empty' "$settings")
+  arm_async=$(jq -r '.hooks.Stop[0].hooks[1].async // empty' "$settings")
+  assert_contains "$guard_cmd" 'fm-turnend-guard.sh" --codex' "the guard entry must run the cooperative --codex mode"
+  assert_contains "$guard_cmd" "fm-turnend-guard.sh\"" "the guard entry must keep its self-verifying hooks.json check"
+  assert_contains "$arm_cmd" "fm-codex-stop-autoarm.sh\"" "the auto-arm entry must keep its self-verifying hooks.json check"
+  [ "$arm_async" = true ] || fail "the auto-arm entry must be async so it never blocks the turn"
+  [ "$arm_timeout" = 28800 ] || fail "the auto-arm entry must carry the multi-hour park timeout, got $arm_timeout"
+  pass ".codex/hooks.json: Stop carries the cooperative guard and the async Codex auto-arm registration"
+}
+test_hook_codex_mode_reblocks_stop_hook_active_when_unhealthy
+test_hook_codex_mode_allows_on_open_generation_claim
+test_hook_codex_mode_allows_on_fresh_rewake_epoch
+test_hook_codex_mode_blocks_on_stale_rewake_epoch
+test_hook_codex_mode_budget_reaches_attended_fail_open
+test_hook_codex_mode_delivery_miss_blocks_bounded
+test_codex_registration_pins_guard_and_autoarm

@@ -12,8 +12,9 @@ test_selected_harness_block_only() {
   local out
   out=$("$RENDER" --harness codex)
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" "codex heading missing"
-  assert_contains "$out" "Mode: Codex foreground checkpoint." "codex snippet missing"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex checkpoint helper missing"
+  assert_contains "$out" "Mode: Codex Stop-owned auto-arm (bin/fm-codex-stop-autoarm.sh)." "codex snippet missing"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex checkpoint repair helper missing"
+  assert_contains "$out" "the Stop-owned auto-arm (bin/fm-codex-stop-autoarm.sh) already owns watcher continuity" "codex ordinary-wake line missing"
   assert_not_contains "$out" "Mode: Claude Stop-hook-owned supervision." "renderer printed the claude snippet too"
   assert_not_contains "$out" "Mode: Pi extension background wake." "renderer printed the pi snippet too"
   pass "renderer prints exactly the selected harness block"
@@ -121,7 +122,7 @@ test_conditional_stanzas() {
   assert_contains "$out" "- Away mode: active" "afk stanza missing"
   assert_contains "$out" "- X mode: active" "x-mode stanza missing"
   assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
-  assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
+  assert_contains "$out" 'Mode: Codex Stop-owned auto-arm (bin/fm-codex-stop-autoarm.sh).' "codex snippet missing"
   assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
   pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
 }
@@ -236,8 +237,8 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
 
   out=$("$RENDER" --harness codex)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$ordinary" "next foreground" "codex ordinary-wake line lost its foreground checkpoint"
-  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "codex ordinary-wake line lost the checkpoint command"
+  assert_contains "$ordinary" "Stop-owned auto-arm" "codex ordinary-wake line lost its automatic continuity owner"
+  assert_contains "$ordinary" "bin/fm-codex-stop-autoarm.sh" "codex ordinary-wake line lost the auto-arm command"
   assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "codex ordinary-wake line incorrectly uses a background arm"
   out=$("$RENDER" --harness codex --repair-line)
   assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
