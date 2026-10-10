@@ -3381,7 +3381,9 @@ fm_backend_herdr_proof_lines() {  # <text>
 # slash-command popup is the verified shape (2.1.283) - pushes the composer
 # above a tail window, so the pre-Enter payload proof would read empty, judge
 # the typed command unsent, and clear it (the fm-control exit breakage). The
-# viewport is the one bound that always contains the composer.
+# viewport is the one bound that always contains the composer. Claude 2.1.293
+# marks that popup's selected entry with the composer's own glyph; the shared
+# classifier recognizes the popup so its rows never join the payload proof.
 # Styled capture is preferred. An empty or failed styled read falls through to
 # the plain capture so a missing ANSI format does not look like an empty draft.
 # This read serves only the Claude payload proof, so the grok-tuned

@@ -92,8 +92,9 @@ i=0
 while [ "$i" -lt 60 ]; do
   screen=$(lab pane read "$PANE" --source visible 2>/dev/null || true)
   case "$screen" in
-    *'bypass permissions on'*)
-      # The composer footer means Claude is past any folder-trust prompt. Herdr
+    *'bypass permissions on'*|*'auto mode on'*)
+      # The composer footer means Claude is past any folder-trust prompt; a
+      # user settings default mode can replace the bypass footer. Herdr
       # can report the agent idle while that prompt is still up, so the wait
       # keys off the rendered composer rather than the native status alone.
       st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
@@ -183,7 +184,9 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER submits a 
 # bottom, which pushed the composer above the old bounded proof read - the
 # typed command was judged unsent, cleared, and never submitted. The viewport
 # capture must prove the typed /exit and submit it; Claude must actually
-# exit. This scenario runs last because it ends the lab's Claude process.
+# exit. Claude Code 2.1.293 also marks the popup's selected entry with the
+# composer's own glyph, which the proof must not read as typed text.
+# This scenario runs last because it ends the lab's Claude process.
 i=0
 while [ "$i" -lt 45 ]; do
   st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')

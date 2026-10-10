@@ -323,6 +323,71 @@ test_composer_footer_zone_refuses_rather_than_allows() {
   pass "fm_composer_classify_screen: the footer zone only ever refuses, never allows"
 }
 
+# claude_popup_extract <screen>: the selected composer content under every
+# cursorless capability set and locale, failing on any divergence.
+claude_popup_extract() {  # <screen>
+  local first='' caps out
+  for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN"; do
+    for out in "$(fm_composer_extract_selected_content "$caps" "$1")" \
+               "$(LC_ALL=C fm_composer_extract_selected_content "$caps" "$1")"; do
+      [ -z "$first" ] && first=$out
+      [ "$out" = "$first" ] || fail "popup extraction diverged across capabilities or locale: '$first' vs '$out'"
+    done
+  done
+  printf '%s' "$first"
+}
+
+test_claude_2_1_293_slash_popup_is_not_composer_content() {
+  # Real Claude Code 2.1.293 capture (Herdr 0.9.3, typed /exit): the popup's
+  # selected entry leads with the composer's own `❯` directly under the
+  # composer's closing rule. Recognized as one popup, it is furniture of the
+  # envelope above it, so only the composer's own row is extracted.
+  local screen plain out
+  screen=$(cat "$ROOT/tests/captures/claude-code-v2.1.293/slash-popup-exit.ansi")
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  # The divergence this pins: without popup recognition the selected entry is
+  # the bottom-most bare composer candidate and the popup rows join it.
+  case "$(printf '%s\n' "$plain" | sed -n 5p)" in
+    '  ❯ /exit  '*) ;;
+    *) fail "fixture drift: the popup's selected entry must lead with the composer glyph" ;;
+  esac
+  out=$(claude_popup_extract "$screen")
+  [ "$out" = '/exit' ] || fail "the popup must not join the composer content, got '$out'"
+  # Verdicts are unchanged: the recognized popup only narrows the content.
+  assert_screen "a typed slash command above its popup on herdr" pending "$CAPS_STYLED" "$screen" '' "$(printf 'claude\tidle')"
+  assert_screen "a typed slash command above its popup on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "a typed slash command above its popup on cmux/orca" unknown "$CAPS_PLAIN" "$screen"
+  # A partial command keeps its own text even though the popup selects /exit.
+  out=$(claude_popup_extract "$(printf '%s\n' "$screen" | sed '3s#/exit#/exi#')")
+  [ "$out" = '/exi' ] || fail "a partial command must be read from the composer, not the popup, got '$out'"
+  pass "fm_composer_extract_selected_content: Claude 2.1.293's glyph-marked slash popup is not composer content"
+}
+
+test_claude_slash_popup_recognition_refuses_unproven_shapes() {
+  # Anything short of a positively recognized popup keeps the old reading: the
+  # lower same-glyph row stays the live composer, so its rows join the content
+  # and a strict payload proof still refuses.
+  local screen out mutated
+  screen=$(cat "$ROOT/tests/captures/claude-code-v2.1.293/slash-popup-exit.ansi")
+  # A continuation row off the description column.
+  mutated=$(printf '%s\n' "$screen" | fm_composer_strip_ansi | sed '8s/^  /      /')
+  out=$(claude_popup_extract "$mutated")
+  case "$out" in *'Visualize current context'*) ;; *) fail "a misaligned popup must not be recognized, got '$out'" ;; esac
+  # A second selected entry.
+  mutated=$(printf '%s\n' "$screen" | fm_composer_strip_ansi | sed '6s/^    \//  ❯ \//')
+  out=$(claude_popup_extract "$mutated")
+  case "$out" in *'Visualize current context'*) ;; *) fail "a popup with two selected entries must not be recognized, got '$out'" ;; esac
+  # An unclaimed row after the table.
+  mutated="$(printf '%s\n' "$screen" | fm_composer_strip_ansi)"$'\nWorking on request...'
+  out=$(claude_popup_extract "$mutated")
+  case "$out" in *'Visualize current context'*) ;; *) fail "a popup followed by activity must not be recognized, got '$out'" ;; esac
+  # A composer that holds no slash draft cannot own a slash popup.
+  mutated=$(printf '%s\n' "$screen" | fm_composer_strip_ansi | sed '3s#/exit#exit#')
+  out=$(claude_popup_extract "$mutated")
+  case "$out" in *'Visualize current context'*) ;; *) fail "a popup under a non-slash draft must not be recognized, got '$out'" ;; esac
+  pass "fm_composer_extract_selected_content: an unrecognized popup shape still refuses"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -1025,6 +1090,8 @@ test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
+test_claude_2_1_293_slash_popup_is_not_composer_content
+test_claude_slash_popup_recognition_refuses_unproven_shapes
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant

@@ -5178,6 +5178,54 @@ test_send_text_submit_claude_grey_slash_command_is_proven_and_submitted() {
   pass "fm_backend_herdr_send_text_submit: a typed slash command Claude draws in muted truecolor grey is proven and submitted"
 }
 
+# Live Claude Code 2.1.293 marks the popup's selected command with the
+# composer's own `❯` glyph, directly below the composer's closing rule. The
+# capture is a real `herdr pane read --format ansi` of a typed /exit. Before the
+# composer library recognized that popup, the payload proof read every popup
+# row as typed text, refused the /exit, and cleared it (fm-control exit and
+# relaunch of every Claude worker failed).
+HERDR_CLAUDE_2_1_293_POPUP="$ROOT/tests/captures/claude-code-v2.1.293/slash-popup-exit.ansi"
+
+test_send_text_submit_claude_2_1_293_glyph_marked_popup_is_proven_and_submitted() {
+  local dir log resp fb out enter_count text
+  dir="$TMP_ROOT/submit-claude-2-1-293-popup"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text='/exit'
+  herdr_submit_claude_prefix "$resp" "$text"
+  cp "$HERDR_CLAUDE_2_1_293_POPUP" "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a typed /exit above Claude 2.1.293's glyph-marked popup must be proven and submitted, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "the proven /exit should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven /exit must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: a typed /exit above Claude 2.1.293's glyph-marked command popup is proven and submitted"
+}
+
+# The popup's selected entry can name a command the composer does not hold: a
+# partial /exi still highlights /exit. The proof must read the composer's own
+# row, so the partial command is refused and cleared, never submitted.
+test_send_text_submit_claude_2_1_293_popup_partial_command_is_refused() {
+  local dir log resp fb out enter_count text
+  dir="$TMP_ROOT/submit-claude-2-1-293-popup-partial"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text='/exit'
+  herdr_submit_claude_prefix "$resp" "$text"
+  sed '3s#/exit#/exi#' "$HERDR_CLAUDE_2_1_293_POPUP" > "$resp/4.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  assert_contains "$(sed -n 5p "$resp/4.out" | sed $'s/\x1b\\[[0-9;]*m//g')" '❯ /exit' "fixture drift: the popup must still select /exit over the partial draft"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "a partial /exi under a popup selecting /exit must be refused, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "a partial command must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused partial command should be cleared"
+  pass "fm_backend_herdr_send_text_submit: a partial command under Claude 2.1.293's popup is refused and cleared, not borrowed from the popup's selection"
+}
+
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload() {
   local dir log resp fb out enter_count text
   dir="$TMP_ROOT/submit-paste-placeholder"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6087,6 +6135,8 @@ test_send_text_submit_refuses_marked_digest_missing_its_head
 test_composer_state_claude_slash_popup_pushes_composer_above_tail_window
 test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted
 test_send_text_submit_claude_grey_slash_command_is_proven_and_submitted
+test_send_text_submit_claude_2_1_293_glyph_marked_popup_is_proven_and_submitted
+test_send_text_submit_claude_2_1_293_popup_partial_command_is_refused
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder
