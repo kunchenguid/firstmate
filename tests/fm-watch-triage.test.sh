@@ -119,6 +119,32 @@ wait_numeric_file() {
   return 1
 }
 
+# Wait up to <limit> 0.1s ticks for <file> to exist. The watcher's first poll
+# can take longer than a fixed wait_live window (it runs the bootstrap scans and
+# a full fleet pass before the pane branch), so an absorb assertion must wait for
+# the marker it expects rather than racing a fixed tick budget.
+wait_file_exists() {  # <file> [limit]
+  local file=$1 limit=${2:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Wait up to <limit> 0.1s ticks for <file> to be removed, for the same reason:
+# a retirement assertion must observe the watcher's poll, not a fixed budget.
+wait_file_gone() {  # <file> [limit]
+  local file=$1 limit=${2:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
 # fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
 file_mtime() {
@@ -4797,9 +4823,11 @@ test_current_busy_generation_pause_uses_long_cadence() {
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_live "$pid" 30 || { reap "$pid"; fail "a current-generation pause used wedge cadence"; }
+  wait_file_exists "$state/.paused-$key" 150 \
+    || { reap "$pid"; fail "a current-generation pause missed long-cadence tracking: $(cat "$out")"; }
+  kill -0 "$pid" 2>/dev/null \
+    || { reap "$pid"; fail "a current-generation pause used wedge cadence: $(cat "$out")"; }
   [ ! -s "$out" ] || { reap "$pid"; fail "a current-generation pause printed a wake"; }
-  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "a current-generation pause missed long-cadence tracking"; }
   reap "$pid"
   pass "a pause newer than the current busy generation uses long-cadence tracking"
 }
@@ -6341,6 +6369,44 @@ test_afk_present_reverts_watcher_to_one_shot() {
   pass "with .afk present the watcher reverts to one-shot so the daemon owns triage (no double-triage)"
 }
 
+test_afk_current_busy_generation_pause_leaves_long_cadence_to_daemon() {
+  local dir state fakebin out capture_file window key pane_hash sig pid busy_ts
+  dir=$(make_case afk-busy-current-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-afk-busy-current-pause"
+  printf 'Working... current paused generation\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/afk-current-pause.meta"
+  record_pi_busy "$state" afk-current-pause
+  busy_ts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state/afk-current-pause.busy-state")
+  [ -n "$busy_ts" ] || fail "could not read the away-mode busy event timestamp"
+  printf 'paused: foreground keeper deliberately parked for an external review\n' > "$state/afk-current-pause.status"
+  set_mtime $((busy_ts + 1)) "$state/afk-current-pause.status"
+  sig=$(seen_sig "$state/afk-current-pause.status"); printf '%s' "$sig" > "$state/.seen-afk-current-pause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working... current paused generation")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  set_mtime $(( $(date +%s) - 500 )) "$state/afk-current-pause.turn-ended"
+  prime_turnend_seen "$state/afk-current-pause.turn-ended"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '10\n' > "$state/.wedge-escalations-$key"
+  date +%s > "$state/.afk"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_file_gone "$state/.wedge-escalations-$key" 150 \
+    || { reap "$pid"; fail "an away-mode current-generation pause retained its escalation counter: $(cat "$out")"; }
+  kill -0 "$pid" 2>/dev/null \
+    || { reap "$pid"; fail "an away-mode current-generation pause emitted a watcher wedge: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "an away-mode current-generation pause printed a wake"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "an away-mode current-generation pause queued an enriched wedge"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "an away-mode current-generation pause retained its wedge timer"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "the away-mode watcher took ownership of daemon pause tracking"; }
+  reap "$pid"
+  pass "away mode retires a current-generation pause's short timer and leaves long-cadence ownership to the daemon"
+}
+
 # A paused pane can first appear as a changed hash. In AFK mode that initial path
 # must still hand off the plain window identity to the daemon, rather than running
 # the normal-mode pause re-surface and decorating the stale identity.
@@ -6805,6 +6871,7 @@ test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
+test_afk_current_busy_generation_pause_leaves_long_cadence_to_daemon
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_captain_held_never_rechecked_while_away_record_exists
 test_live_captain_held_first_sight_silenced_by_away_record
