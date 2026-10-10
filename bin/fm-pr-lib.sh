@@ -358,6 +358,11 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# Other metadata writers legitimately land their keys after the pr=/pr_head=
+# lines fm-pr-check.sh writes last (captain-call completion, relaunch, trace
+# context, Relay, legacy teardown stamps), so any later key=value line is
+# accepted. A later line that is not key=value, or an invalid pr_head, still
+# refuses the record, because nothing legitimate writes one.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
@@ -388,10 +393,10 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
       *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        if [ "$seen_pr" -eq 1 ] && ! [[ "$line" =~ ^[a-z][a-z0-9_]*= ]]; then
+          post_pr_invalid=1
+        fi
         ;;
     esac
   done < "$file"
