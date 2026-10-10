@@ -685,6 +685,205 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
+
+# Declared mechanical verification of a ship done:, executed by the orchestrator.
+# state/<id>.verify is a firstmate-written declaration read at the same ready
+# decision as the named-head gate; the worker that reports done: never evaluates
+# it. One check per line, `#` comments and blank lines ignored:
+#   run: <command>                                  passes on exit status 0
+#   http: <url> <status> [<required-substring>]      passes when the fetched
+#                                                    status matches and the body
+#                                                    contains the substring
+#   file: <path> [<required-substring>]              passes when the path is a
+#                                                    file containing it
+# The named-head gate proves a commit left the worker copy; it cannot prove the
+# change works. A correct-looking diff whose live URL is dead satisfies every
+# structural test, which is the failure this declaration exists to catch.
+# An absent declaration is no gate, so every task that declares nothing behaves
+# exactly as before. A declaration that is present but is not a firstmate-private
+# regular file, names an unknown verb, or carries no target is refused rather
+# than skipped. The bounds that govern a declaration and its idempotency contract live in docs/configuration.md.
+# A target is the rest of the line up to the first space, so a path or URL
+# containing a space needs `run: test -f "/a b/c"` instead of `file:`. A `run:`
+# command inherits the orchestrator's environment and working directory, so it
+# names its own absolute paths.
+# FM_DOD_SKIP_DECLARED_VERIFICATION=1, set by the caller only around
+# fm_dod_accept_ship_done, applies the named-head gate while skipping declared
+# verification; bin/fm-pr-check.sh sets it after its own direct check, and
+# bin/fm-inactive-reconcile.sh's per-poll ledger publish always sets it.
+FM_VERIFY_PASS_TIMEOUT=${FM_VERIFY_PASS_TIMEOUT:-5}
+case $FM_VERIFY_PASS_TIMEOUT in '' | 0* | *[!0-9]*) FM_VERIFY_PASS_TIMEOUT=5 ;; esac
+# The pass runs inside bin/fm-fleet-snapshot.sh's crew-state read (default 10s),
+# so a pass bound above half that budget is refused rather than run: a slow
+# check then still reports its refusal there instead of being killed and folded
+# to state unknown.
+# ponytail: fixed ceiling tied to the snapshot default; raise both together.
+FM_VERIFY_PASS_TIMEOUT_MAX=5
+# ponytail: fixed cap, not a knob; a real declaration is a handful of lines.
+FM_VERIFY_MAX_BYTES=65536
+
+# Run <command> under <bound> seconds. Captures nothing; only the status matters.
+fm_dod_verify_run() {  # <bound> <command>
+  fm_run_timed "$1" bash -c "$2" </dev/null >/dev/null 2>&1
+}
+
+# Run a file: check under <bound> seconds: 0 = present with the required
+# substring, 2 = not a file, 3 = the substring is missing, 4 = the file could
+# not be read.
+fm_dod_verify_file_check() {  # <bound> <path> <required-substring>
+  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+  fm_run_timed "$1" bash -c '
+    [ -f "$1" ] || exit 2
+    [ -z "$2" ] && exit 0
+    grep -qF -- "$2" "$1"
+    case $? in 0) exit 0 ;; 1) exit 3 ;; *) exit 4 ;; esac
+  ' _ "$2" "$3" </dev/null >/dev/null 2>&1
+}
+
+# 0 when every check declared for <id> passes. 1 when one fails or the
+# declaration itself cannot be trusted; stdout then holds a one-line reason.
+fm_dod_verify_declared_checks_pass() {  # <state> <id>
+  local state=$1 id=$2 spec device content size
+  [ -n "$state" ] && [ -n "$id" ] || return 0
+  spec="$state/$id.verify"
+  [ -e "$spec" ] || [ -L "$spec" ] || return 0
+  [ "$FM_VERIFY_PASS_TIMEOUT" -le "$FM_VERIFY_PASS_TIMEOUT_MAX" ] || {
+    printf '%s\n' "declared verification refused: FM_VERIFY_PASS_TIMEOUT=${FM_VERIFY_PASS_TIMEOUT}s exceeds the ${FM_VERIFY_PASS_TIMEOUT_MAX}s maximum, half of bin/fm-fleet-snapshot.sh's default 10s FM_SNAPSHOT_CREW_STATE_TIMEOUT crew-state read budget"
+    return 1
+  }
+  device=$(fm_pr_file_device "$state") || {
+    printf '%s\n' "declared verification cannot be read: $state is not readable"
+    return 1
+  }
+  fm_pr_private_file_valid "$spec" 600 "$device" || {
+    printf '%s\n' "declared verification is not a firstmate-private file: $spec"
+    return 1
+  }
+  # One bounded read both sizes and loads the declaration, so a file that grows
+  # after the size check can never be loaded whole.
+  content=$(head -c $((FM_VERIFY_MAX_BYTES + 1)) "$spec" && printf x) || {
+    printf '%s\n' "declared verification cannot be read: $spec"
+    return 1
+  }
+  content=${content%x}
+  # The size is counted on the file's bytes, not the loaded text: command
+  # substitution drops NUL bytes, so NUL padding cannot slip past the cap.
+  size=$(head -c $((FM_VERIFY_MAX_BYTES + 1)) "$spec" | wc -c)
+  [ "$size" -le "$FM_VERIFY_MAX_BYTES" ] || {
+    printf '%s\n' "declared verification is larger than $FM_VERIFY_MAX_BYTES bytes: $spec"
+    return 1
+  }
+  [ "$(printf '%s' "$content" | wc -c)" -eq "$size" ] || {
+    printf '%s\n' "declared verification contains NUL bytes or changed while read: $spec"
+    return 1
+  }
+  fm_dod_verify_spec_checks "$content"
+}
+
+fm_dod_verify_spec_checks() {  # <declaration-content>
+  local line verb rest target want body code
+  local deadline check_bound started bound_name rc
+  deadline=$(( $(date +%s) + FM_VERIFY_PASS_TIMEOUT ))
+  bound_name="the FM_VERIFY_PASS_TIMEOUT pass bound (${FM_VERIFY_PASS_TIMEOUT}s)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case ${line#"${line%%[![:space:]]*}"} in '' | '#'*) continue ;; esac
+    verb=${line%%:*}
+    verb=${verb#"${verb%%[![:space:]]*}"}
+    rest=${line#*:}
+    rest=${rest#"${rest%%[![:space:]]*}"}
+    [ -n "$rest" ] || {
+      printf '%s\n' "declared verification line names no target: $line"
+      return 1
+    }
+    check_bound=$(( deadline - $(date +%s) ))
+    [ "$check_bound" -gt 0 ] || {
+      printf '%s\n' "declared verification failed: $bound_name expired"
+      return 1
+    }
+    case $verb in
+      run)
+        started=$(date +%s)
+        rc=0
+        fm_dod_verify_run "$check_bound" "$rest" || rc=$?
+        [ "$rc" -eq 0 ] || {
+          if fm_timed_out "$rc" && [ "$(( $(date +%s) - started ))" -ge "$check_bound" ]; then
+            printf '%s\n' "declared verification failed: run: $rest hit $bound_name"
+          else
+            printf '%s\n' "declared verification failed: run: $rest exited nonzero"
+          fi
+          return 1
+        }
+        ;;
+      http)
+        target=${rest%% *}
+        want=${rest#"$target"}
+        want=${want#"${want%%[![:space:]]*}"}
+        code=${want%% *}
+        [ -n "$code" ] || {
+          printf '%s\n' "declared verification line names no expected status: $line"
+          return 1
+        }
+        rc=0
+        body=$(curl -sS -L --max-time "$check_bound" --max-filesize "$FM_VERIFY_MAX_BYTES" -w '\n%{http_code}' "$target" 2>/dev/null) || rc=$?
+        [ "$rc" -eq 0 ] || {
+          if [ "$rc" -eq 28 ]; then
+            printf '%s\n' "declared verification failed: http: $target hit $bound_name"
+          elif [ "$rc" -eq 63 ]; then
+            printf '%s\n' "declared verification failed: http: $target answered more than $FM_VERIFY_MAX_BYTES bytes"
+          else
+            printf '%s\n' "declared verification failed: http: $target could not be fetched"
+          fi
+          return 1
+        }
+        [ "${body##*$'\n'}" = "$code" ] || {
+          printf '%s\n' "declared verification failed: http: $target answered ${body##*$'\n'}, not $code"
+          return 1
+        }
+        want=${want#"$code"}
+        want=${want#"${want%%[![:space:]]*}"}
+        [ -z "$want" ] || case ${body%$'\n'*} in
+          *"$want"*) ;;
+          *)
+            printf '%s\n' "declared verification failed: http: $target answered $code without $want"
+            return 1
+            ;;
+        esac
+        ;;
+      file)
+        target=${rest%% *}
+        want=${rest#"$target"}
+        want=${want#"${want%%[![:space:]]*}"}
+        started=$(date +%s)
+        rc=0
+        fm_dod_verify_file_check "$check_bound" "$target" "$want" || rc=$?
+        [ "$rc" -eq 0 ] || {
+          if fm_timed_out "$rc" && [ "$(( $(date +%s) - started ))" -ge "$check_bound" ]; then
+            printf '%s\n' "declared verification failed: file: $target hit $bound_name"
+          elif [ "$rc" -eq 2 ]; then
+            printf '%s\n' "declared verification failed: file: $target is not a file"
+          elif [ "$rc" -eq 4 ]; then
+            printf '%s\n' "declared verification failed: file: $target could not be read"
+          else
+            printf '%s\n' "declared verification failed: file: $target does not contain $want"
+          fi
+          return 1
+        }
+        ;;
+      *)
+        printf '%s\n' "declared verification names an unknown check: $verb"
+        return 1
+        ;;
+    esac
+  done <<<"$1"
+  [ "$(date +%s)" -le "$deadline" ] || {
+    printf '%s\n' "declared verification failed: $bound_name expired"
+    return 1
+  }
+}
+# Every gated ship done: first passes the task's declared mechanical verification
+# (fm_dod_verify_declared_checks_pass) unless the caller set
+# FM_DOD_SKIP_DECLARED_VERIFICATION=1, so a structurally perfect claim whose
+# declared check fails is still refused.
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
 # PR whose head the forge holds, when it names a Gerrit change whose current
 # patch set carries the worker copy's HEAD tree, or otherwise when its named
@@ -699,6 +898,9 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
+  if [ "${FM_DOD_SKIP_DECLARED_VERIFICATION:-}" != 1 ]; then
+    fm_dod_verify_declared_checks_pass "$state" "$id" || return 1
+  fi
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0

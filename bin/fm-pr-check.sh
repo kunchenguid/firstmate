@@ -144,11 +144,29 @@ case "$PROVIDER:$MODE" in
   *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
 esac
+# The merge-time re-record is not a ready decision: with FM_PR_CHECK_MERGE=1
+# this path already skips the draft refusal above and skips the fleet-ledger
+# write below because a re-record is not a new review-ready PR.
+# Declared verification is therefore skipped there by the condition on this
+# direct call.
+# Declared verification is measured at the ready decision, not continuously, so
+# gating the captain's merge would turn a readiness gate into a continuous
+# availability gate on a third party's action.
+# The named-head gate below never re-runs declared verification: this direct
+# call already decided it, so it is skipped there through the
+# FM_DOD_SKIP_DECLARED_VERIFICATION variable bin/fm-dod-lib.sh documents.
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] \
+  && ! VERIFY_REASON=$(fm_dod_verify_declared_checks_pass "$STATE" "$ID"); then
+  echo "error: $VERIFY_REASON" >&2
+  exit 1
+fi
+FM_DOD_SKIP_DECLARED_VERIFICATION=1
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2
   exit 1
 fi
+FM_DOD_SKIP_DECLARED_VERIFICATION=
 
 META_TMP=
 META_LOCK=

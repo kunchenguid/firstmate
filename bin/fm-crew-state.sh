@@ -1222,6 +1222,10 @@ if [ "$HAVE_RUN" = 1 ]; then
   esac
 
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
+  if [ "$RUN_STATE" = "done" ] && [ "$KIND" = ship ] \
+    && ! VERIFY_REFUSAL=$(fm_dod_verify_declared_checks_pass "$STATE" "$ID"); then
+    emit blocked run-step "$RUN_DETAIL${SEP}$VERIFY_REFUSAL"
+  fi
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 

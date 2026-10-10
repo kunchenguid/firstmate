@@ -2386,6 +2386,7 @@ FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may 
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_TASK_INBOX_BUSY_MAX=2      # consecutive busy-deferred due polls before a stuck-busy stale wake; 1..999999999, at most 9 decimal digits, otherwise 2; policy: bin/fm-task-inbox-lib.sh
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_VERIFY_PASS_TIMEOUT=5   # seconds allowed for a whole declared-verification pass (state/<id>.verify, bin/fm-dod-lib.sh), shared by its checks: run: bounded by bin/fm-timeout-lib.sh, http: by curl --max-time; hitting it refuses the claim; invalid or non-positive values use 5; the maximum is 5, half of the default 10s FM_SNAPSHOT_CREW_STATE_TIMEOUT crew-state read budget in bin/fm-fleet-snapshot.sh that the pass runs inside; a value above 5 is not reduced, it refuses every declared verification with both numbers named
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
 FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
 FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid or non-positive values become 20
@@ -2517,6 +2518,11 @@ FM_INBOX_STT_MODEL=     # overrides config/inbox-stt-model for fm-inbox.sh say
 FM_INBOX_ASK_MODEL=     # overrides config/inbox-ask-model for fm-inbox.sh ask
 FM_INBOX_PROFILE=       # overrides config/inbox-profile; explicitly empty forces ambient credentials
 ```
+
+A declared check in `state/<id>.verify` must be idempotent and must finish well inside its bounds, because `bin/fm-dod-lib.sh` re-evaluates the pass on every read of a ship task's state.
+`FM_VERIFY_PASS_TIMEOUT` bounds the whole pass, at most 5 seconds, and each check gets only the time left in it; a pass that hits the bound refuses the `done:` claim rather than passing it, and a configured value above 5 refuses every declared verification.
+The declaration file itself must be a firstmate-private regular file at mode 600 and at most 65536 bytes, and a `state/<id>.verify` at any other mode or size is refused rather than read.
+An `http:` check reads at most 65536 bytes of the response, and a larger response refuses the `done:` claim.
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
 `FM_TREEHOUSE_RETURN_LOCK_RETRIES` accepts a nonnegative integer, and an unset, blank, or invalid value uses the default of 3.
