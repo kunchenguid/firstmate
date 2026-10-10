@@ -2136,7 +2136,11 @@ test_return_during_an_engine_turn_hands_its_outcomes_to_main() {
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "return: the host never started a watcher cycle"
   append_status "$home" 'mid-task'
-  wait_until 250 host_exited "$home" || fail "return: the host did not hand the late outcome to main: $(cat "$home/state/.supervision-host.log")"
+  # The successor-ready budget is 25s, and this wait was that same 25s, so a
+  # slow confirm left no time for the turn or for stopping the successor.
+  # The branch acknowledgement rechecks completion ownership before exit.
+  # Cover the ready budget and that stop: 500 polls of 0.1s is 50s.
+  wait_until 500 host_exited "$home" || fail "return: the host did not hand the late outcome to main: $(cat "$home/state/.supervision-host.log")"
   expect_code 0 "$(cat "$home/host.rc")" "a late-outcome handoff must exit 0 for the owner to deliver"
   assert_absent "$home/state/.afk-contract" "fixture: the stub's return did not archive the record"
   assert_re '^signal: .*demo.status' "$home/host.out" "the handoff must carry the close"
