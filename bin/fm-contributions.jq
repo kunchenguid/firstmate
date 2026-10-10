@@ -23,6 +23,7 @@ def valid_record:
       and all(.checks[]; (.name | type == "string" and length > 0)
         and (.status | type == "string") and (.conclusion == null or (.conclusion | type == "string")))
       and (if $kind == "pr" then (.head | sha) and (.draft | type == "boolean")
+        and ((.review_requests // []) | type == "array" and all(.[]; type == "string"))
         and (.mergeable | IN("mergeable","conflicting","unknown")) and (.can_merge | type == "boolean")
         and (.review_decision | IN("","APPROVED","CHANGES_REQUESTED","REVIEW_REQUIRED"))
         else (.ready | type == "boolean") end))))) catch false;
@@ -36,6 +37,27 @@ def known($input; $saved):
   # A retired record ends that task's ownership even while a backlog link remains.
   | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
   | map(select(. as $pair | any($retired[]; . == $pair) | not));
+# Pull-request movement between two observations of one URL: a replaced head,
+# leaving draft, and each newly requested reviewer. Without a comparable prior
+# field - a first observation, or one stored before review requests were
+# recorded - the current value is the baseline, never inferred movement.
+# The observation time keeps a repeated transition from reusing a token.
+# Settlement is not movement: a merged or closed observation has no separate
+# wake, so a head, draft, or reviewer signal there would be a follow-up after
+# no action remains.
+def movement($prev; $o; $url; $now):
+  if ($prev.head | sha) and ($o.head | sha) and $o.state == "open" then
+    (if $prev.head != $o.head then
+       [{token:("head:" + $o.head + ":" + $now),type:"head",source:$url,head:$o.head,
+         body:("head moved from " + $prev.head + " to " + $o.head)}] else [] end)
+    + (if $prev.draft == true and $o.draft == false then
+       [{token:("ready-for-review:" + $o.head + ":" + $now),type:"ready-for-review",source:$url,
+         head:$o.head,body:"pull request left draft"}] else [] end)
+    + (if ($prev.review_requests | type) == "array" then
+       [($o.review_requests // []) - $prev.review_requests | .[]
+        | {token:("review-requested:" + . + ":" + $now),type:"review-requested",source:$url,
+           head:$o.head,body:("review requested from " + .)}] else [] end)
+  else [] end;
 def latest_checks:
   group_by(.name) | map(sort_by([(.started_at // ""),(.id // 0)]) | last);
 def projected($input; $saved; $now; $max_age):
@@ -77,7 +99,7 @@ def projected($input; $saved; $now; $max_age):
        elif $hold != null then {actor:"captain",reason:$hold.hold_reason,hold:$hold.id}
        elif $fresh | not then {actor:"fleet",reason:($record.error // "contribution not recently checked")}
        elif $stale then {actor:"fleet",reason:"STALE maintainer verdict; reassess the current head"}
-       elif ($record.pending | length) > 0 then {actor:"fleet",reason:"incoming maintainer signal needs triage"}
+       elif ($record.pending | length) > 0 then {actor:"fleet",reason:"incoming forge signal needs triage"}
        elif $record.kind == "issue" then
          if $o.ready then {actor:"fleet",reason:"filed issue is ready-for-pr"}
          else {actor:"maintainer",reason:"awaiting issue triage"} end
