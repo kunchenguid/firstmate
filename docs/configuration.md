@@ -978,6 +978,21 @@ The text is static and never executed or expanded; secondmate charters never tak
 
 `bin/fm-brief.sh`'s header owns the placement rule and its safety argument.
 
+## Disk hygiene (config/min-free-disk-gib, config/reclaim-build-output)
+
+A pooled work copy keeps gitignored files when it returns to the pool, so a finished task's dependencies and build output would otherwise pile up until the disk fills and every worker's tests fail at once.
+Two optional local, gitignored files tune the guards against that.
+
+`config/min-free-disk-gib` holds one integer floor in GiB, 5 when absent and 0 to disable.
+A new spawn refuses before it acquires a work copy when the disk that will hold the copy (the Treehouse pool, or a secondmate home) has less free space than the floor, and firstmate runs the same check before starting a validation run.
+
+`config/reclaim-build-output` lists directory names, one per line, that cleanup deletes from a task's own work copy just before returning it to the pool.
+When absent the list is `node_modules`, `.next`, and `.turbo`; a file with no names disables the deletion.
+A listed directory is deleted only when git reports it ignored and it holds no tracked file and no nested repository, so the list cannot reach source or tracked content.
+
+Both files are local to each home and not inherited by secondmate homes.
+`bin/fm-disk.sh`'s header owns the exact checks and the command for running either guard by hand.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
