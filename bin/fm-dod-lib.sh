@@ -84,6 +84,8 @@
 # The worker starts the run with `--no-publish-intent`: the intent carries the
 # requester's actual words for handover and must not be printed in the public
 # pull request description; every step except PR drafting still receives it.
+# The flag needs no-mistakes 1.80.0 or newer, the floor bin/fm-bootstrap.sh
+# enforces as NO_MISTAKES_MIN.
 # bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
 # and a `## Captain's intent` line opening with a Captain label or address
