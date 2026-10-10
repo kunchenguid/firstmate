@@ -4153,13 +4153,14 @@ printf 'home=%s root=%s\n' "${FM_HOME:-}" "${FM_ROOT_OVERRIDE:-}" >> "${FM_ARM_L
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4203,13 +4204,14 @@ printf 'poll=%s\n' "${FM_POLL:-missing}" >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4253,13 +4255,14 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4315,13 +4318,14 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
-await mod.FmPrimaryWatchArm({
+await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4375,9 +4379,10 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
@@ -4397,7 +4402,7 @@ const client = {
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4491,14 +4496,15 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" RECORD_KIND="$kind" node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" RECORD_KIND="$kind" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
 const client = { session: { promptAsync: async (request) => { prompts.push(request.body.parts[0].text); } } };
-const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const hooks = await invokeV1Plugin(mod.default, { client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
 for (let i = 0; i < 400 && prompts.length < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -4566,9 +4572,10 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_PRE_READY_RELEASE_FILE="$release" FM_PRE_READY_RETIRED_FILE="$retired" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_PRE_READY_RELEASE_FILE="$release" FM_PRE_READY_RETIRED_FILE="$retired" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
@@ -4579,7 +4586,7 @@ const client = {
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4640,9 +4647,10 @@ trap 'exit 0' TERM INT
 while :; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
@@ -4657,7 +4665,7 @@ const client = {
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4717,9 +4725,10 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
@@ -4734,7 +4743,7 @@ const client = {
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4798,9 +4807,10 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
-    out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_UNRETIRED_READY_FILE="$ready" FM_UNRETIRED_RETIRE_FILE="$retired" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" FM_LATE_KIND="$kind" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+    out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_UNRETIRED_READY_FILE="$ready" FM_UNRETIRED_RETIRE_FILE="$retired" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" FM_LATE_KIND="$kind" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
@@ -4821,7 +4831,7 @@ async function waitFor(predicate, message) {
   }
   throw new Error(message);
 }
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4883,9 +4893,10 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
@@ -4896,7 +4907,7 @@ const client = {
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4940,9 +4951,10 @@ printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 exit 0
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
@@ -4953,7 +4965,7 @@ const client = {
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -4995,10 +5007,11 @@ while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
 printf 'signal: lock handoff\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" node 2>&1 <<'EOF'
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
@@ -5009,7 +5022,7 @@ const client = {
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
+const hooks = await invokeV1Plugin(mod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -5067,9 +5080,10 @@ printf 'guard should not run\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
 const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
@@ -5081,12 +5095,12 @@ const client = {
     },
   },
 };
-await armMod.FmPrimaryWatchArm({
+await invokeV1Plugin(armMod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-const guardHooks = await guardMod.FmPrimaryTurnendGuard({
+const guardHooks = await invokeV1Plugin(guardMod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -5141,9 +5155,10 @@ printf 'guard ran after external healthy watcher\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(V1_ADAPTER="$ROOT/tests/assets/fm-opencode-v1-plugin-adapter.mjs" ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { invokeV1Plugin } = await import(pathToFileURL(process.env.V1_ADAPTER).href);
 
 const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
 const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
@@ -5155,19 +5170,19 @@ const client = {
     },
   },
 };
-await armMod.FmPrimaryWatchArm({
+await invokeV1Plugin(armMod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-const guardHooks = await guardMod.FmPrimaryTurnendGuard({
+const guardHooks = await invokeV1Plugin(guardMod.default, {
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 250 && !existsSync(process.env.FM_GUARD_LOG); i += 1) {
+for (let i = 0; i < 250 && (!existsSync(process.env.FM_GUARD_LOG) || !promptBody); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_ARM_LOG)) {

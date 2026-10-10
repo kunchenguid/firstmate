@@ -2134,7 +2134,11 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # OpenCode V2's interactive `opencode --prompt` launch has no --model flag and
+  # hosts plugins in the server process, so the model and permissions ride the
+  # per-launch OPENCODE_CONFIG_CONTENT JSON (V2 schema) and the launch passes
+  # --standalone so a private server inherits this launch's environment and PID.
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permissions":[{"action":"*","resource":"*","effect":"allow"}]__OPENCODEMODEL____EFFORTFLAG__}'\'' opencode --standalone --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIEXCLUDE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2676,7 +2680,10 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  # opencode is absent deliberately: its interactive `opencode --prompt` launch
+  # has no --model flag on V2, so the model is written into the launch's
+  # OPENCODE_CONFIG_CONTENT JSON through __OPENCODEMODEL__ instead of a flag.
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2749,12 +2756,12 @@ effort_flag_for_harness() {
     # model's own variant list. Those lists are per-provider (anthropic/* expose
     # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
     # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
-    # permission-only launch and omits the variant (record-and-omit, as codex
-    # and grok do). Without a resolved model the variant has nothing to key to
-    # and is likewise omitted. The fragment lands inside the launch's
-    # single-quoted assignment, so a literal quote in the model id must close and
-    # reopen that quoting.
+    # other provider, or an effort outside its family's list, omits the variant
+    # and leaves the launch with only its permission grant and resolved model
+    # (record-and-omit, as codex and grok do). Without a resolved model the
+    # variant has nothing to key to and is likewise omitted. The fragment lands
+    # inside the launch's single-quoted assignment, so a literal quote in the
+    # model id must close and reopen that quoting.
     [ -n "$model" ] && [ "$model" != default ] || return 0
     case "${model%%/*}:$effort" in
     anthropic:high | anthropic:max) ;;
@@ -4721,13 +4728,22 @@ EOF
     cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state comes from OpenCode's session.status events: busy and retry
-// are active, idle is inactive. Scoping latches the first session that
-// reports activity (the worker's main session - a subagent child session can
-// only start while the main session is already busy) and ignores other
-// sessions' status until the latched session settles, so a child's idle can
-// never clear the worker's busy state. The session.idle touch stays the
-// watcher's wake NOTIFICATION, never current-state truth.
+// OpenCode V2 plugin shape: a default export carrying a stable id and a setup
+// function that registers an event subscription through ctx and returns its
+// cleanup. The V1 named-export-with-hooks-object shape is rejected by the V2
+// loader ("Plugin must export a default definition with an id and an effect or
+// setup function").
+// Semantic state comes from OpenCode V2's session.execution.* lifecycle:
+// started is active, and succeeded/failed/interrupted are the terminal,
+// inactive events, so a cancelled turn still clears busy. Scoping latches the
+// first session that reports activity (the worker's main session - a subagent
+// child session can only start while the main session is already busy) and
+// ignores other sessions' events until the latched session settles, so a
+// child's terminal event can never clear the worker's busy state. Each
+// terminal event also touches the turn-end marker, the watcher's wake
+// NOTIFICATION, never current-state truth. (session.idle and session.status
+// are deprecated in the V2 schema, and OpenCode's own app derives busy/idle
+// from session.execution.* instead.)
 import { execFile } from "node:child_process";
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
@@ -4736,35 +4752,41 @@ const busyEvent = (state, event) =>
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
   });
-export const FmBusyState = async () => {
-  let activeSession = null;
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.status") {
-        const sessionID = event.properties.sessionID;
-        const statusType = event.properties.status && event.properties.status.type;
-        if (statusType === "busy" || statusType === "retry") {
-          if (activeSession === null) activeSession = sessionID;
-          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
-          return;
+export default {
+  id: "fm-busy-state",
+  async setup(ctx) {
+    let activeSession = null;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event.type === "session.execution.started") {
+            const sessionID = event.data?.sessionID;
+            if (activeSession === null) activeSession = sessionID;
+            if (sessionID === activeSession) await busyEvent("busy", "session-execution-started");
+            continue;
+          }
+          if (
+            event.type === "session.execution.succeeded" ||
+            event.type === "session.execution.failed" ||
+            event.type === "session.execution.interrupted"
+          ) {
+            const sessionID = event.data?.sessionID;
+            if (sessionID === activeSession) {
+              activeSession = null;
+              await busyEvent("idle", "session-execution-ended");
+            }
+            await new Promise((resolve) => {
+              execFile("touch", ["$TURNEND"], () => resolve());
+            });
+          }
         }
-        if (statusType === "idle" && sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-status-idle");
-        }
-        return;
+      } catch {
+        // The subscription ends when the abort signal fires at plugin teardown.
       }
-      if (event.type === "session.idle") {
-        if (event.properties.sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-idle");
-        }
-        await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
-        });
-      }
-    },
-  };
+    })();
+    return () => controller.abort();
+  },
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'
@@ -5242,6 +5264,18 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+# OpenCode's model cannot ride a flag on V2, so it is written into the
+# OPENCODE_CONFIG_CONTENT JSON the launch already carries. The fragment is a
+# leading comma plus a JSON model key, injected inside that single-quoted JSON
+# literal, so a literal quote in the model id must close and reopen that
+# quoting (the same shape the opencode effort fragment uses).
+oc_model_frag=
+if [ "$HARNESS" = opencode ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+  oc_model_json=$(json_escape "$MODEL")
+  oc_model_json=${oc_model_json//\'/\'\\\'\'}
+  oc_model_frag=",\"model\":\"$oc_model_json\""
+fi
+LAUNCH=${LAUNCH//__OPENCODEMODEL__/$oc_model_frag}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.

@@ -175,26 +175,46 @@ test_opencode_plugin_delivers_exact_nudge_once() {
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
+// OpenCode v2 default-export shape: setup(ctx) subscribes through
+// ctx.event.subscribe (an async iterable of { type, data }) and injects
+// follow-ups through ctx.session.prompt (verified 2026-09-27 against the
+// installed OpenCode 2.0.18).
 const prompts = [];
-const client = {
+const queue = [];
+const waiters = [];
+function pushEvent(event) {
+  if (waiters.length) waiters.shift()(event);
+  else queue.push(event);
+}
+const bus = {
+  [Symbol.asyncIterator]() {
+    return {
+      next() {
+        return new Promise((resolve) => {
+          if (queue.length) { resolve({ done: false, value: queue.shift() }); return; }
+          waiters.push((event) => resolve({ done: false, value: event }));
+        });
+      },
+    };
+  },
+};
+const ctx = {
+  location: { directory: process.env.WORKTREE },
+  event: { subscribe: () => bus },
   session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
+    prompt: async (request) => {
+      prompts.push(request.text);
     },
   },
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const hooks = await mod.FmPrimarySessionstartNudge({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
-const event = {
-  type: "session.created",
-  properties: { sessionID: "session-nudge-test", info: { id: "session-nudge-test" } },
-};
-await hooks.event({ event });
-await hooks.event({ event });
+await mod.default.setup(ctx);
+const event = { type: "session.created", data: { sessionID: "session-nudge-test" } };
+pushEvent(event);
+pushEvent(event);
+for (let i = 0; i < 250 && prompts.length < 1; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
 if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.length}`);
 if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
 EOF
