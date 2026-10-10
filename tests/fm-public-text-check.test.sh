@@ -14,6 +14,7 @@ unsafe=(
   '`/home/example/proof.txt`'
   'Evidence at /private/var/folders/example/report.md'
   'Evidence: /tmp/example/proof.md'
+  'Evidence: /workspace/firstmate/data/task/report.md'
   'Evidence: file:///Users/example/proof.md'
   'Evidence: ~/private/report.md'
   'Evidence: C:\Users\example\proof.md'
@@ -43,6 +44,7 @@ Source: tests/benchmark.test.sh; state/parser.go; data/schema/report.md.
 Public proof: https://github.com/example/repo/actions/runs/123
 Public URL paths stay intact: https://example.org/home/example/report.md
 Intended system examples: /usr/bin/env, /etc/hosts and /dev/null.
+Web route example: /api/v1/users.
 EOF
 "$CHECK" "$TMP_ROOT/public" || fail 'valid public explanation rejected'
 "$CHECK" - < "$TMP_ROOT/public" || fail 'stdin public explanation rejected'

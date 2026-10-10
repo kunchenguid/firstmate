@@ -38,7 +38,7 @@ awk '
   unsafe = text ~ /https?:\/\/(localhost|127\.[0-9.]+|\[::1\]|[^\/[:space:]]+\.local)([:\/[:space:]]|$)/
   gsub(/https?:\/\/[^[:space:]<>"`]+/, "", text)
   if (text ~ /file:\/\// ||
-      text ~ /(^|[^[:alnum:]_.-])\/(users|home|root|tmp|private|volumes|mnt|media)\// ||
+      text ~ /(^|[^[:alnum:]_.-])\/(users|home|root|tmp|private|volumes|mnt|media|workspace|srv|opt)\// ||
       text ~ /(^|[^[:alnum:]_.-])\/var\/(folders|tmp)\// ||
       text ~ /(^|[^[:alnum:]_.-])~\// ||
       text ~ /(^|[^[:alnum:]_.-])[a-z]:[\\\/]/ ||
