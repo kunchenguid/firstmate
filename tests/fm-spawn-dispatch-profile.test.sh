@@ -962,8 +962,13 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
     "opencode launch without effort must keep the permission-only config byte-identical"
   assert_not_contains "$launch" "--model" "opencode v2 interactive launch must not pass --model"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
-  assert_contains "$(cat "$WT_DIR/.opencode/opencode.json")" '"model":"anthropic/claude-sonnet-4-5"' \
-    "the resolved model must still be pinned in the worktree config"
+  perl -MJSON::PP -e '
+    open my $fh, "<:raw", $ARGV[0] or die $!;
+    local $/;
+    my $config = decode_json(<$fh>);
+    exit 1 unless ref($config) eq "HASH" && $config->{model} eq "anthropic/claude-sonnet-4-5";
+  ' "$WT_DIR/.opencode/opencode.json" \
+    || fail "the resolved model must still be pinned in the worktree config"
   pass "opencode without an effort keeps its launch config unchanged"
 }
 

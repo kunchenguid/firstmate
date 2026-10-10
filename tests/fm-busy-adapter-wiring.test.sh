@@ -230,6 +230,21 @@ test_opencode_plugin_semantic_lifecycle() {
 
   out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
     "$(oc_step_started ses_main "$WT_DIR")" \
+    "$(oc_step_started ses_child "$WT_DIR")" \
+    "$(oc_turn_end ses_main "$WT_DIR")") || fail "overlapping-session drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "one session ending must leave another active session busy, got '$out'"
+
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses_main "$WT_DIR")" \
+    "$(oc_step_started ses_child "$WT_DIR")" \
+    "$(oc_turn_end ses_main "$WT_DIR")" \
+    "$(oc_turn_end ses_child "$WT_DIR")") || fail "last-session drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "the final active session's turn end must classify idle, got '$out'"
+
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses_main "$WT_DIR")" \
     "$(oc_turn_end ses_main "$WT_DIR")") || fail "turn-end drive failed: $out"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "idle opencode-plugin" ] || fail "the latched session's turn end must classify idle, got '$out'"
@@ -261,7 +276,7 @@ test_opencode_plugin_semantic_lifecycle() {
   [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every session's turn end"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy opencode-plugin" ] || fail "another session's turn end must not clear the latched busy, got '$out'"
-  pass "opencode plugin classifies from v2 step events, scoped to the latched worker session"
+  pass "opencode plugin waits for every active session before classifying idle"
 }
 
 run_claude_hook() {  # <settings.json> <hook-event>

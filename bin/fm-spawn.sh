@@ -4997,11 +4997,7 @@ EOF
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state comes from OpenCode's step events: a step starting is active
 // work, and a step ending without asking for further tools is the turn ending.
-// Scoping latches the first session that reports activity (the worker's main
-// session - a subagent child session can only start while the main session is
-// already busy) and ignores other sessions until the latched session settles,
-// so a child's turn end can never clear the worker's busy state. The turn-end
-// touch stays the watcher's wake NOTIFICATION, never current-state truth.
+// The turn-end touch stays the watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
 const notifyTurnEnd = $busy_notify_turnend;
 import { subscribeOwnEvents, turnEndedSessionID } from "$FM_ROOT/.opencode/plugins/lib/fm-opencode-contract.js";
@@ -5015,18 +5011,17 @@ const busyEvent = (state, event) =>
 export default {
   id: "firstmate.busy-state",
   setup(ctx) {
-    let activeSession = null;
+    const activeSessions = new Set();
     return subscribeOwnEvents(ctx, async (event) => {
       if (event.type === "session.step.started") {
         const sessionID = event.data.sessionID;
-        if (activeSession === null) activeSession = sessionID;
-        if (sessionID === activeSession) await busyEvent("busy", "session-step-started");
+        activeSessions.add(sessionID);
+        await busyEvent("busy", "session-step-started");
         return;
       }
       const ended = turnEndedSessionID(event);
       if (!ended) return;
-      if (ended === activeSession) {
-        activeSession = null;
+      if (activeSessions.delete(ended) && activeSessions.size === 0) {
         await busyEvent("idle", "session-step-ended");
       }
       if (notifyTurnEnd) {
