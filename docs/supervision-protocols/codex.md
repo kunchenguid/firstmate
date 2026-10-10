@@ -14,3 +14,8 @@ When this session owns supervision and away mode is not active:
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
+When that turn is allowed to end, `bin/fm-codex-idle-continuity.sh` keeps process-event reconciliation running and queues an actionable close back into the same thread.
+Only the session that owns `state/.lock` starts that supervisor, so a read-only second session never takes over the owner's idle supervision.
+The next checkpoint from that same session stops that idle supervisor before it starts its own watcher, so each turn's checkpoint owns supervision until the turn ends again.
+A checkpoint from any other session leaves the owner's supervisor running.
+Homes that opted into `config/supervision-host` are not covered by idle continuity yet ([#5899](https://github.com/kunchenguid/firstmate/issues/5899)); they keep only the in-turn checkpoint.
