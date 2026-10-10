@@ -19,6 +19,12 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+_FM_PR_LIB_DIR=${BASH_SOURCE[0]%/*}
+[ "$_FM_PR_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_PR_LIB_DIR=.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "${_FM_PR_LIB_DIR:-/}/fm-session-lock-lib.sh"
+unset _FM_PR_LIB_DIR
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -339,7 +345,11 @@ fm_pr_sha256() {
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  # Windows (captain-approved): noacl mounts report fixed modes and ignore
+  # chmod, so the mode is not checked there (see bin/backends/herdr.sh).
+  if ! fm_win_host; then
+    [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  fi
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }
