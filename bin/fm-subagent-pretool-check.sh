@@ -38,11 +38,12 @@
 # CLI mode is for adapters that already hold the tool name (OpenCode, Pi).
 #
 # Exit/output contract (identical shape to bin/fm-cd-pretool-check.sh):
-#   ALLOW - exit 0 and no output.
+#   ALLOW - exit 0 and no output, except `{}` on stdout for a Cursor payload
+#           under a Pi host (bin/fm-hook-host-lib.sh owns why).
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
 #          deny object on stdout unless --claude was supplied.
 #   INERT - not a genuine primary home (a crewmate/scout task worktree or a
-#           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
+#           non-firstmate repo): exit 0 and output exactly like ALLOW.
 #   ESCAPE - FM_ALLOW_SUBAGENT=1 in the environment allows deliberately.
 #   FAIL OPEN - malformed or empty stdin, or missing jq for stdin transport.
 #
@@ -137,6 +138,10 @@ if [ "$TOOL_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
+  # shellcheck source=bin/fm-hook-host-lib.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
+  # A Pi-hosted Cursor SDK needs a JSON reply even on ALLOW; the lib owns why.
+  fm_hook_cursor_sdk_reply_arm "$PAYLOAD"
   TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
 fi
 
