@@ -143,6 +143,7 @@ Each home atomically publishes that bounded home summary with freshness epoch me
 The fleet snapshot and Bearings paths use the concurrent remote-ledger collection, cache, unreadable-home disclosure, and remote-liveness boundary owned by `bin/fm-fleet-snapshot.sh`'s header.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
+`bin/fm-resident-agents.sh` is the report-only answer to "what is holding this machine's memory": it lists this home's resident direct-report agent sessions by memory, with the reconciled `bin/fm-crew-state.sh` state, flags delivered work as safe to release, and never flags a failed run safe because no retry decision is recorded; it never stops anything, and releasing stays a deliberate `bin/fm-control.sh` act.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.
 The branch handles those rows, stores the outcome durably, and merges it back into main.
