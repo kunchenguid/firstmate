@@ -153,6 +153,36 @@ delta_cadence_case default '' 0.5
 delta_cadence_case override 0.07 0.07
 
 ADAPTER="$ROOT/bin/fm-procevent-remote-reply.sh"
+# A valid window longer than the former fixed 90s transport bound must close
+# as an idle read (75) and publish its caught-up watermark, not time out as
+# unreachable (255). The fake timeout records the real transport deadline and
+# forwards the command so this test does not spend 120 seconds idling.
+long_wait="$TMP_ROOT/long-wait"
+mkdir -p "$long_wait/data" "$long_wait/state" "$long_wait/fakebin"
+cp "$PARENT/data/secondmates.md" "$long_wait/data/secondmates.md"
+cat > "$long_wait/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = -k ] || exit 91
+shift 2
+printf '%s\n' "$1" > "$FM_TIMEOUT_CAPTURE"
+shift
+exec "$@"
+SH
+cat > "$long_wait/fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+exit 75
+SH
+chmod +x "$long_wait/fakebin/timeout" "$long_wait/fakebin/ssh"
+long_wait_rc=0
+FM_HOME="$long_wait" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$long_wait/fakebin/ssh" \
+  FM_REMOTE_REPLY_WAIT_SECONDS=120 FM_TIMEOUT_CAPTURE="$long_wait/deadline" \
+  PATH="$long_wait/fakebin:$PATH" bash "$ADAPTER" source ios >/dev/null 2>&1 || long_wait_rc=$?
+[ "$long_wait_rc" -eq 75 ] || fail "a 120s healthy idle reply window ended as $long_wait_rc instead of 75"
+[ "$(cat "$long_wait/deadline")" -gt 120 ] \
+  || fail "the SSH deadline did not exceed the valid 120s remote reply window"
+[ -s "$long_wait/state/remote-replies/ios.caught-up" ] \
+  || fail "closing a valid long reply window did not publish its caught-up watermark"
+pass "a 120s reply window keeps a longer transport deadline and caught-up watermark"
 SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
 assert_contains "$out" "armed: $SID offset=0" "remote reply source was not armed at the empty cursor"

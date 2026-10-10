@@ -278,9 +278,11 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # unreachable host or unreadable endpoint is reported as unknown-remote -
 # explicitly NOT proof of death - so a transport blip never reads as a torn
 # down or dead mate; only the remote host's own dead/missing verdict may say
-# the endpoint is actually gone.
+# the endpoint is actually gone. The read carries the watcher's fixed 20s
+# in-cycle SSH deadline, so an overloaded host reads as unreachable instead of
+# stalling the watcher's signal triage or any other caller.
 if [ -n "$REMOTE_HOST" ]; then
-  if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$ID" \
+  if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" FM_SSH_DEADLINE_SECONDS=20 "$SCRIPT_DIR/fm-on.sh" "$ID" \
     fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>/dev/null); then
     REMOTE_STATE=
   fi
