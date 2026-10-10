@@ -1595,6 +1595,51 @@ ok - forced secondmate teardown retains Herdr child identity until exact pane di
 ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
 ```
 
+### Repo worktree groups
+
+Projected tasks are attached to a per-repository parent workspace through Herdr's native worktree groups ([`herdr-backend.md`](../herdr-backend.md) "Presentation spaces").
+The following facts were measured on 2026-09-24 against Herdr 0.9.1 (client and server protocol 22) and Treehouse v2.0.1 through the guarded lab helper, on macOS aarch64:
+
+- The client API schema lists `worktree.list` and `worktree.open`, with `WorktreeOpenParams` carrying `workspace_id`, `path`, and `focus` and `WorktreeListParams` carrying `cwd`, which is the capability gate the adapter reads.
+- `worktree open --workspace <parent> --path <worktree> --no-focus` on a path Herdr already reports open in exactly that workspace answers `result.type` `worktree_opened` with `already_open` true, the same `workspace_id`, and `worktree.is_linked_worktree` true, and the sidebar then shows the task indented under the parent; the same command on an unopened path creates a new workspace, and on a path open in a foreign workspace it nests that workspace, which is why the attach runs only after a same-id `open_workspace_id` pre-check.
+- Herdr decides which workspace a worktree is open in from the pane's root shell working directory (`pane get` reports it as `cwd`), never from `foreground_cwd`, and it ignores OSC 7: a `cd` inside a subshell or an interactive `treehouse get` left `cwd` at the clone on every read, while a root-shell `cd` moved it on the next read.
+  The first suite run under the interactive spawn shape therefore refused every attach with `herdr reports worktree ... open in no workspace rather than this task's space w3; leaving this task's space flat`, and the durable-lease root-shell `cd` spawn shape is what made the attach land.
+- A parent created with `workspace create --cwd <clone> --label <repo> --no-focus` carries no `worktree` provenance until its first attach; afterwards it reports `worktree.is_linked_worktree` false with the repository name, `worktree list --workspace <parent>` names the parent as its own `source_workspace_id`, and both survive a lab server stop and restart together with each child's linked-worktree provenance.
+  `worktree list --cwd <clone>` keeps electing the oldest workspace at the clone root as `source_workspace_id`, so the flat home workspace created for the same project remains that source while the attach still names the exact parent it was given.
+- Treehouse `get --lease --lease-holder fm-<task-id>` prints only the leased path on stdout with its banners on stderr, `status` reports the slot as `leased ... (held by fm-<task-id>)`, `return --force` releases the lease and terminates the processes still inside the slot, and both the leased and the interactive shapes leave the slot at the same detached `HEAD`.
+  A returned slot that still holds a live process reads `in-use` in `status`, and the next `get --lease` hands out a different slot, so a foreign shell parked in a pool slot never receives a task lease.
+  A lease also outlives a lab server `stop` and `provision`, so the slot stays `leased ... (held by fm-<task-id>)` while that task's pane is dead: a same-id resume re-enters exactly the slot its surviving record names and takes no second lease, while the same probe against the interactive shape saw the resumed task's `treehouse get` hand out the slot of a still-recorded sibling task whose pane the restart had ended, so cleanup refused both tasks as sharing one recorded worktree.
+  An attempt that ends without a record naming the slot it leased returns that slot itself: with a record naming a copy that is gone, the respawn leases a fresh slot and its abort returns it, leaving `status` with no slot held by that task.
+  A leased slot whose checkout is removed from disk, by `git worktree remove` or by deleting the directory, loses its lease on Treehouse's next `get --lease` or `status`, which drops the entry from its persistent state so that slot's capacity returns to the pool, while `return` on that missing path fails with `failed to detach worktree HEAD: chdir ...: no such file or directory` and releases nothing (re-measured on 2026-09-28 against Treehouse v2.0.1 in a scratch pool).
+
+Refresh the record with:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-backend-herdr-presentation-e2e.test.sh
+tests/fm-backend-herdr.test.sh
+```
+
+Observed output on 2026-09-24 (grouping and lease lines only):
+
+```text
+ok - real Herdr lab: the first projected task on a repository creates its home's repo parent and attaches as a linked-worktree child
+ok - real Herdr lab: the repo parent persists with root provenance after its only child is cleaned up
+ok - real Herdr lab: a later projected task adopts the existing repo parent without creating, renaming, or focusing anything
+ok - real Herdr lab: two concurrent tasks on one repository attach as linked children of the same single repo parent
+ok - real Herdr lab: Treehouse commands and metadata shape are byte-identical except for endpoint IDs and spawn incarnation
+ok - real Herdr lab: a foreign workspace reported open in the task worktree makes the attach skip with one warning and zero worktree open calls
+ok - real Herdr lab: each secondmate home groups its tasks under its own home-qualified repo parent while the primary keeps its own
+ok - real Herdr lab: concurrent primary/A/B spawns preserve parent order and exact focus
+ok - real Herdr lab: linked-worktree children and their repo parent keep their provenance across stop and provision, and reclaim leaves both untouched
+ok - real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent
+ok - real Herdr lab: an aborted respawn returns the slot it leased even though an older record survives
+```
+
+On the macOS host that produced this record the full suite passed its first 26 cases and then stopped at the concurrent cross-home recovery case with `herdr presentation recovery could not acquire its session lock; refusing a concurrent resume`, because one uncontended same-identity resume there held the presentation session lock for about nine seconds at a load average between ten and fifteen, while a second concurrent resume waits five seconds before refusing.
+An unmodified `main` checkout run on the same host the same day stopped at that same case with the same refusal, and a run with only that case removed passed every remaining case, so the margin belongs to the recovery lock wait rather than to the grouping or the leased spawn shape; the required CI lane keeps running the unmodified suite.
+
+The unit suite's repo worktree group cases (`test_worktree_group_capable_gates_on_protocol_and_schema` through `test_live_binding_accepts_repo_parent_between_home_and_child`) passed in a 2026-10-06 run on macOS, with the whole file reporting 237 `ok` lines and no `not ok` line.
+
 ### Composer and operational input
 
 Real captures verified these active distinctions:
@@ -1727,7 +1772,7 @@ The Herdr refusal when a shell accepts the command but does not move is not exer
 
 Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) and Pi 0.85.1 in an isolated `fm-lab-` session (upstream issue #4115, duplicates #3639, #3487, #2908, #3545).
 
-Herdr keeps a Pi registration after the Pi process has exited to a shell when a nested interactive shell sits under the pane's top shell, which is the crew shape `treehouse get` leaves behind; a plain `/quit` directly under the top shell, and a `kill -9` of Pi, both released it on this version.
+Herdr keeps a Pi registration after the Pi process has exited to a shell when a nested interactive shell sits under the pane's top shell, which is the shape an interactive `treehouse get` leaves behind; a plain `/quit` directly under the top shell, and a `kill -9` of Pi, both released it on this version.
 Reproduced in the lab with a nested `zsh` under the pane shell, then `pi` with no prompt, then `/quit`:
 
 ```sh

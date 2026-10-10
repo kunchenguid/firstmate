@@ -84,9 +84,12 @@ make_case() {
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
+  # `treehouse return --force <wt>`: succeed silently, and record the invocation
+  # when the case sets FM_FAKE_TREEHOUSE_LOG, so a test can prove whether the
+  # worktree was returned to the pool at all.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -2993,16 +2996,21 @@ set -u
 printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
 case "${1:-} ${2:-}" in
   "workspace list")
-    if [ -e "${FM_FAKE_HERDR_RESTORED:?}" ]; then
+    if [ "${FM_FAKE_HERDR_VIEWING_TASK:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 \u00b7 p:AbCdEfGhIjKlMnOpQrStUv","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
+    elif [ -e "${FM_FAKE_HERDR_RESTORED:?}" ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     elif [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":true}]}}'
+    elif [ "${FM_FAKE_HERDR_WORKSPACE_GONE:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     else
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     fi
     ;;
   "tab list")
     case "$*" in
+      *"--workspace w1"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","focused":true}]}}' ;;
       *"--workspace w2"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' ;;
       *"--workspace w3"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' ;;
       *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
@@ -3018,7 +3026,17 @@ case "${1:-} ${2:-}" in
     if [ "${FM_FAKE_HERDR_CLOSE_FAIL:-0}" = 1 ]; then
       exit 1
     fi
+    if [ -n "${FM_FAKE_HERDR_SHELL_PID:-}" ]; then
+      {
+        if kill -0 "$FM_FAKE_HERDR_SHELL_PID" 2>/dev/null; then echo shell=alive; else echo shell=dead; fi
+        if kill -0 "${FM_FAKE_HERDR_HARNESS_PID:?}" 2>/dev/null; then echo harness=alive; else echo harness=dead; fi
+      } > "${FM_FAKE_HERDR_CLOSED:?}.procs"
+    fi
     : > "${FM_FAKE_HERDR_CLOSED:?}"
+    ;;
+  "pane process-info")
+    [ -n "${FM_FAKE_HERDR_SHELL_PID:-}" ] || exit 1
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s}}}\n' "$FM_FAKE_HERDR_SHELL_PID"
     ;;
   "pane get")
     if [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
@@ -3045,28 +3063,71 @@ case "${1:-} ${2:-}" in
     printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
     exit 1
     ;;
+  "terminal title")
+    # Answered only in the viewing case; every other case leaves the reason
+    # unreadable, which is the unknown-viewer reading they already exercised.
+    if [ "${FM_FAKE_HERDR_VIEWING_TASK:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"reason":"cleared"}}'
+    fi
+    ;;
 esac
 SH
   chmod +x "$case_dir/fakebin/herdr"
 }
 
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
-  local case_dir log closed restored
+  local case_dir log closed restored treehouse_log
   case_dir=$(make_case herdr-projection-confirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  treehouse_log="$case_dir/treehouse.log"; : > "$treehouse_log"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_TREEHOUSE_LOG="$treehouse_log" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-confirmed-close: forced teardown failed"
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "confirmed exact-pane close did not retire the presentation journal"
+  # The counterpart of the refused-close case below: once the close is
+  # confirmed, cleanup goes on to return the worktree to its pool.
+  assert_contains "$(cat "$treehouse_log")" "return --force" \
+    "confirmed exact-pane close did not go on to return the task's worktree"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "projected teardown must never call workspace close"
   assert_contains "$(cat "$log")" "tab focus w2:t2" \
     "projected teardown did not restore the exact pre-close active tab"
   pass "herdr projection teardown retires its journal only after confirming the exact recorded pane is gone"
+}
+
+test_herdr_projection_teardown_refuses_viewed_task_tab_before_touching_the_worktree() {
+  local case_dir log closed restored treehouse_log rc=0
+  case_dir=$(make_case herdr-projection-viewed-tab)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  treehouse_log="$case_dir/treehouse.log"; : > "$treehouse_log"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_HERDR_VIEWING_TASK=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-projection-viewed-tab: teardown reported success after refusing the viewed task tab"
+  [ ! -e "$closed" ] \
+    || fail "herdr-projection-viewed-tab: the tab a live viewer is watching was closed anyway"
+  assert_grep "refusing a close that cannot preserve focus" "$case_dir/stderr" \
+    "a viewed task tab did not refuse the focus-unsafe close"
+  assert_grep "not confirmed gone" "$case_dir/stderr" \
+    "the refused close did not explain why every record was retained"
+  assert_not_contains "$(cat "$treehouse_log")" "return" \
+    "the refused close returned the task's worktree to its pool anyway"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "fm/task-x1" ] \
+    || fail "the refused close detached or deleted the task branch in its isolated copy"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "the refused close erased the durable endpoint metadata"
+  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "the refused close retired the presentation journal"
+  pass "herdr projection teardown refuses a viewed task tab before its worktree, branch, or records are touched"
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
@@ -3094,6 +3155,88 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   assert_not_contains "$(cat "$log")" "workspace close" \
     "unconfirmed projected close must not escalate to workspace cleanup"
   pass "herdr projection teardown retains every record when post-close presence is unknown"
+}
+
+test_herdr_projection_teardown_sweeps_journal_when_pane_already_gone() {
+  local case_dir log closed restored
+  case_dir=$(make_case herdr-projection-already-gone)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  # The exact pane and its token-bearing workspace were already gone before
+  # teardown started, so the close cannot correlate the journal and the orphan
+  # sweep retires it once the token-bearing workspace is confirmed gone.
+  : > "$closed"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-projection-already-gone: teardown failed: $(cat "$case_dir/stderr")"
+  assert_grep "was not retired by its close" "$case_dir/stderr" \
+    "herdr-projection-already-gone: teardown did not report that the close left the journal"
+  assert_absent "$case_dir/state/task-x1.herdr-presentation" \
+    "herdr-projection-already-gone: the orphan sweep did not retire the journal of a gone workspace"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "herdr-projection-already-gone: teardown retained the metadata of a confirmed-gone endpoint"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "herdr-projection-already-gone: teardown must never call workspace close"
+  pass "herdr projection teardown sweeps the journal when the exact pane was already gone before teardown"
+}
+
+test_herdr_projection_teardown_sweeps_journal_when_token_workspace_is_gone_but_pane_lives() {
+  local case_dir log closed restored
+  case_dir=$(make_case herdr-projection-token-gone-pane-live)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+
+  # No workspace carries the token while the recorded pane is still present:
+  # the ordinary close removes the pane without retiring the journal, and the
+  # orphan sweep then retires it because its token-bearing workspace is gone.
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_WORKSPACE_GONE=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-projection-token-gone-pane-live: teardown failed: $(cat "$case_dir/stderr")"
+  [ -e "$closed" ] \
+    || fail "herdr-projection-token-gone-pane-live: teardown did not close the still-present pane"
+  assert_grep "was not retired by its close" "$case_dir/stderr" \
+    "herdr-projection-token-gone-pane-live: teardown did not report that the close left the journal"
+  assert_absent "$case_dir/state/task-x1.herdr-presentation" \
+    "herdr-projection-token-gone-pane-live: the orphan sweep did not retire the journal of a gone workspace"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "herdr-projection-token-gone-pane-live: teardown must never call workspace close"
+  pass "herdr projection teardown sweeps the journal when its token is gone and the exact pane is closed"
+}
+
+test_herdr_teardown_stops_task_processes_but_spares_root_shell_before_close() {
+  local case_dir log closed restored shell_pid harness_pid
+  case_dir=$(make_case herdr-stop-harness-before-close)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  # The pane's root shell and the worker harness both sit in the leased slot.
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  shell_pid=$!
+  disown
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  harness_pid=$!
+  disown
+  sleep 0.3
+  if ! kill -0 "$shell_pid" 2>/dev/null || ! kill -0 "$harness_pid" 2>/dev/null; then
+    fail "herdr-stop-harness-before-close: setup processes did not start"
+  fi
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_SHELL_PID="$shell_pid" FM_FAKE_HERDR_HARNESS_PID="$harness_pid" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || { kill -KILL "$shell_pid" "$harness_pid" 2>/dev/null || true
+         fail "herdr-stop-harness-before-close: teardown failed: $(cat "$case_dir/stderr")"; }
+  if kill -0 "$shell_pid" 2>/dev/null || kill -0 "$harness_pid" 2>/dev/null; then
+    kill -KILL "$shell_pid" "$harness_pid" 2>/dev/null || true
+    fail "herdr-stop-harness-before-close: a task process survived teardown"
+  fi
+  assert_equals "$(printf '%s\n' shell=alive harness=dead)" "$(cat "$closed.procs" 2>/dev/null)" \
+    "herdr-stop-harness-before-close: the close did not find the harness stopped and the root shell left alive"
+  pass "herdr teardown stops every task process except the pane's root shell before the exact-pane close"
 }
 
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup() {
@@ -4033,6 +4176,36 @@ EOF
   pass "teardown refuses before reap or removal when a task-owned run remains parked"
 }
 
+test_herdr_parked_own_run_refuses_before_closing_the_task_pane() {
+  local case_dir rc head log closed restored
+  case_dir=$(make_case herdr-parked-run-abort-unconfirmed)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_FAKE_NM_ABORT_NOOP=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "herdr-parked-run-abort-unconfirmed: teardown should refuse"
+  assert_grep "REFUSED: no-mistakes run for task-x1 is still parked after axi abort" "$case_dir/stderr" \
+    "herdr-parked-run-abort-unconfirmed: teardown did not explain the parked-run refusal"
+  [ ! -e "$closed" ] \
+    || fail "herdr-parked-run-abort-unconfirmed: the worker pane was closed before the parked-run refusal"
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "herdr-parked-run-abort-unconfirmed: teardown issued a pane close before the parked-run refusal"
+  assert_present "$case_dir/state/task-x1.herdr-presentation" \
+    "herdr-parked-run-abort-unconfirmed: teardown retired the presentation journal before the parked-run refusal"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "herdr-parked-run-abort-unconfirmed: teardown removed task metadata after refusing"
+  pass "herdr teardown refuses a still-parked own run before closing the worker pane"
+}
+
 test_another_branchs_parked_run_is_never_touched() {
   local case_dir rc
   case_dir=$(make_case parked-run-not-ours)
@@ -4665,7 +4838,11 @@ test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
+test_herdr_projection_teardown_refuses_viewed_task_tab_before_touching_the_worktree
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
+test_herdr_projection_teardown_sweeps_journal_when_pane_already_gone
+test_herdr_projection_teardown_sweeps_journal_when_token_workspace_is_gone_but_pane_lives
+test_herdr_teardown_stops_task_processes_but_spares_root_shell_before_close
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_teardown_retires_task_watcher_markers_and_orphan_journal
 test_teardown_retains_journal_bound_to_another_pane
@@ -4733,6 +4910,7 @@ test_parked_run_behind_diverged_newer_row_is_never_aborted
 test_parked_advanced_run_ambiguous_rows_are_never_aborted
 test_ledger_proven_continuation_never_aborts_active_run
 test_parked_own_run_refuses_when_abort_is_unconfirmed
+test_herdr_parked_own_run_refuses_before_closing_the_task_pane
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
