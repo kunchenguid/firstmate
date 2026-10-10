@@ -67,7 +67,7 @@ pass 'Droid elapsed-time footer preserves box delivery without hiding shell or a
 
 # Droid 0.237.0 leaves the terminal cursor below its composer after Stop.
 # Render that placement with a real named process in a private tmux server.
-test_droid_parked_cursor() (
+test_droid_parked_cursor() {
   command -v tmux >/dev/null 2>&1 || { echo 'skip: tmux not found for Droid composer regression'; exit 0; }
   real_tmux=$(command -v tmux)
   socket="fm-droid-composer-$$"
@@ -161,8 +161,8 @@ SH
   verdict=$(PATH="$lab/shim:$PATH" FM_DROID_MASK_COMMAND=1 fm_tmux_composer_state background)
   [ "$verdict" = unknown ] || fail "background Droid authorized stale composer as $verdict"
   pass 'Droid parked cursor uses composer structure without relaxing other process or input guards'
-)
-test_droid_parked_cursor || exit 1
+}
+(test_droid_parked_cursor) || exit 1
 
 fm_git_worktree "$TMP_ROOT/project" "$TMP_ROOT/task" droid-trust
 mkdir -p "$TMP_ROOT/user/.factory"
@@ -255,7 +255,7 @@ ln -s "$store" "$TMP_ROOT/alias-user/.factory/settings.json"
 for i in 1 2 3 4; do
   git -C "$TMP_ROOT/project" worktree add -q "$TMP_ROOT/concurrent-$i" -b "concurrent-$i"
 done
-for round in 1 2 3; do
+for _ in 1 2 3; do
   pids=()
   for i in 1 2 3 4; do
     user="$TMP_ROOT/user"
