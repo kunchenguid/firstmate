@@ -98,6 +98,26 @@ The delivery mode is the same on most ship briefs and says nothing about difficu
 These live runs cover the scout line, the free-form whole-brief fallback, the ship-brief package, the top-tier floor turning the pick `ambiguous`, and the fallback to a runner-up.
 The remaining behavior is covered only by the offline tests below: a fenced heading inside a section, the boundaries of the global 0.6 confidence check with no declared floors, the probability-based floor examples, the tie case, and rejection of an out-of-range `min_confidence`.
 
+## Quota scope naming
+
+Verified 2026-09-30 against quota-axi 0.1.55, from its provider source and one live snapshot.
+The Claude provider names a model window `model:<id>` from the vendor's scoped limit, and that id is the model family (`fable`), not a release id such as `claude-fable-5-1`.
+Antigravity publishes no account-wide scope; its windows form a `gemini` group and a `claude_gpt` group.
+Codex names a model window by the vendor's metered feature, and `base_model_inference` has no published relation to a model id, so `quota_model_scopes` leaves it unmatched rather than guessing.
+
+```console
+$ quota-axi --json | jq -c '.providers[] | select(.provider == "agy" or .provider == "codex") | [.provider, [.quotaSemantics.effectiveAvailability[].scope]]'
+["codex",["all_models","model:base_model_inference"]]
+["agy",["gemini","claude_gpt"]]
+```
+
+Illustrative incident snapshot, not a live result: the scope names quota-axi publishes for Claude.
+At capture the live Claude row was unmeasured (status unknown, no percentages), so the `model:fable` family naming is established from the quota-axi 0.1.55 provider source rather than from a measured live Claude row.
+
+```text
+["claude",["all_models","model:fable"]]
+```
+
 ## Offline behavior
 
 `tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
@@ -108,7 +128,7 @@ It proves the documented starter configuration resolves its Pi default through t
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
 It proves the request uses the fixed endpoint and model, carries only the project, the brief's task sections read by the shared brief-heading parser with a scout line only for a scout brief and never a ship brief's delivery mode (or the whole brief when it has neither section), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
 It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor on confidence unchanged.
-It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, schema-6 account-row binding with schema-5 compatibility, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
+It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, a pinned Claude id bounded by its quota-axi family window and Antigravity models by their group window, schema-6 account-row binding with schema-5 compatibility, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
 `tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
 
 ```console
