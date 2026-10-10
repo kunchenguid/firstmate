@@ -49,10 +49,11 @@
 # handover, not a failure. A later `attached watcher ... stalled` line is a
 # failure even when an earlier line said `watcher: attached`.
 #
-# When the recorded Codex owner exits, the supervisor stops a watcher only
-# when this supervisor's own arm printed `watcher: started`. An arm that only
-# attached is following a watcher someone else started, and a home-wide
-# `--stop` would take that watcher down with the owner.
+# When the recorded Codex owner exits, or this supervisor receives TERM or
+# INT, it stops a watcher only when this supervisor's own arm printed
+# `watcher: started`. An arm that only attached is following a watcher
+# someone else started, and a home-wide `--stop` would take that watcher
+# down with the supervisor.
 #
 # The arm after a queued close is a handling successor
 # (FM_WATCH_PREDECESSOR_ARM_PID, as bin/fm-claude-stop-autoarm.sh passes): the
@@ -264,7 +265,7 @@ attached_only() {
   ! grep -q '^watcher: started ' "$LOCK/arm.out"
 }
 
-owner_left() {
+stop_our_watcher() {
   if ! attached_only; then
     "$ARM" --stop >/dev/null 2>&1 || true
   fi
@@ -273,16 +274,16 @@ owner_left() {
     wait "$arm_pid" 2>/dev/null || true
     arm_pid=
   fi
+}
+
+owner_left() {
+  stop_our_watcher
   rm -rf "$LOCK"
   exit 0
 }
 
 end_supervision() {
-  if [ -n "${arm_pid:-}" ]; then
-    kill -TERM "$arm_pid" 2>/dev/null || true
-    wait "$arm_pid" 2>/dev/null || true
-  fi
-  "$ARM" --stop >/dev/null 2>&1 || true
+  stop_our_watcher
   rm -rf "$LOCK"
   exit 0
 }

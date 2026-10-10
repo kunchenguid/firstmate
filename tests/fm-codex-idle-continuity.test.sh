@@ -270,6 +270,7 @@ case "\$(cat '$STUB/mode')" in
   stall) printf 'watcher: attached pid=1 (beacon 0s)\nwatcher: FAILED - attached watcher pid=1 stalled (beacon 9s at or past hard bound 8s)\n' ;;
   started-fail) printf 'watcher: started pid=1 (beacon fresh)\nwatcher: FAILED - cycle ended without an actionable reason\n' ;;
   hold) printf 'watcher: attached pid=1 (beacon 0s)\n'; exec sleep 600 ;;
+  hold-started) printf 'watcher: started pid=1 (beacon fresh)\n'; exec sleep 600 ;;
   broken) printf 'watcher: FAILED - no live watcher with a fresh beacon\n' ;;
 esac
 exit 1
@@ -479,3 +480,29 @@ wait_until 50 test ! -d "$SLOCK" || fail "the supervisor survived its Codex owne
 [ ! -s "$STUB/stops" ] || fail "owner exit stopped a watcher the supervisor had only attached to"
 wait "$owner" 2>/dev/null || true
 printf 'ok - owner exit does not stop a watcher the supervisor only attached to\n'
+
+sleep 600 &
+owner=$!
+rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
+printf 'hold\n' > "$STUB/mode"
+: > "$STUB/arms"
+: > "$STUB/stops"
+: > "$STUB/queue"
+stub_stop
+wait_until 75 grep -q '^watcher: attached ' "$SLOCK/arm.out" \
+  || fail "the held arm never reported attached before TERM: $(cat "$SLOCK/arm.out" 2>/dev/null)"
+kill -TERM "$(cat "$SLOCK/pid")" 2>/dev/null || true
+wait_until 50 test ! -d "$SLOCK" || fail "the supervisor survived TERM while only attached"
+[ ! -s "$STUB/stops" ] || fail "TERM stopped a watcher the supervisor had only attached to"
+printf 'hold-started\n' > "$STUB/mode"
+: > "$STUB/arms"
+: > "$STUB/stops"
+stub_stop
+wait_until 75 grep -q '^watcher: started ' "$SLOCK/arm.out" \
+  || fail "the held arm never reported started before TERM: $(cat "$SLOCK/arm.out" 2>/dev/null)"
+kill -TERM "$(cat "$SLOCK/pid")" 2>/dev/null || true
+wait_until 50 test ! -d "$SLOCK" || fail "the supervisor survived TERM after it started the watcher"
+[ -s "$STUB/stops" ] || fail "TERM left running a watcher the supervisor had started"
+kill "$owner" 2>/dev/null || true
+wait "$owner" 2>/dev/null || true
+printf 'ok - TERM stops a watcher only when this supervisor started it\n'
