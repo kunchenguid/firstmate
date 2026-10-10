@@ -791,6 +791,54 @@ test_signed_out_worker_account_pin_refuses_before_stop() {
   pass "fm-control relaunch: a signed-out worker account pin refuses before the old agent stops"
 }
 
+test_claude_permission_mode_refuses_before_stop() {
+  local dir out rc mode id=rl-permission-refuse diagnostic
+  for mode in bogus directory; do
+    dir=$(new_case "permission-$mode" "$id")
+    add_ship_task "$dir" "$id" claude
+    mkdir -p "$dir/home/config"
+    if [ "$mode" = directory ]; then
+      mkdir "$dir/home/config/claude-permission-mode"
+      diagnostic="error: config/claude-permission-mode must be a readable regular file holding one of: bypass, auto"
+    else
+      printf '%s\n' "$mode" > "$dir/home/config/claude-permission-mode"
+      diagnostic="error: config/claude-permission-mode holds 'bogus'; accepted values are: bypass (--dangerously-skip-permissions, the default when the file is absent), auto (--permission-mode auto)"
+    fi
+    cp "$dir/home/state/$id.meta" "$dir/meta-before"
+    out=$(run_control "$dir" "$id" relaunch --note "invalid permission mode"); rc=$?
+    expect_code 1 "$rc" "invalid Claude permission mode must refuse"
+    assert_contains "$out" "$diagnostic" "permission-mode refusal diagnostic missing"
+    [ "$(cat "$dir/fake/command")" = claude ] || fail "invalid permission mode stopped the old agent"
+    [ ! -s "$dir/fake/literal" ] || fail "invalid permission mode sent lifecycle input"
+    [ ! -s "$dir/fake/keys" ] || fail "invalid permission mode sent lifecycle keys"
+    cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "permission-mode refusal changed the task record"
+  done
+  pass "fm-control relaunch: invalid Claude permission modes refuse before stopping the old agent"
+}
+
+test_claude_permission_mode_follows_the_relaunch() {
+  local dir out rc mode flag id=rl-permission
+  for mode in bypass auto; do
+    dir=$(new_case "permission-$mode" "$id")
+    add_ship_task "$dir" "$id" claude
+    mkdir -p "$dir/home/config"
+    printf '  %s\n' "$mode" > "$dir/home/config/claude-permission-mode"
+    out=$(run_control "$dir" "$id" relaunch --note "valid permission mode"); rc=$?
+    expect_code 0 "$rc" "valid Claude permission mode should relaunch"$'\n'"$out"
+    [ "$(meta_field "$dir" "$id" harness)" = claude ] || fail "replacement should record Claude"
+    [ "$(cat "$dir/fake/command")" = claude ] || fail "Claude replacement did not launch"
+    case "$mode" in
+      bypass) flag=--dangerously-skip-permissions ;;
+      auto) flag='--permission-mode auto' ;;
+    esac
+    assert_contains "$(cat "$dir/fake/literal")" "$flag" "replacement permission flag missing"
+    if [ "$mode" = auto ]; then
+      assert_not_contains "$(cat "$dir/fake/literal")" --dangerously-skip-permissions "auto must not request bypass"
+    fi
+  done
+  pass "fm-control relaunch: valid Claude permission modes reach the replacement"
+}
+
 test_worker_account_pin_follows_the_relaunch() {
   local dir out rc id=rl-acct
   dir=$(new_case acct "$id")
@@ -2504,6 +2552,8 @@ test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
+test_claude_permission_mode_refuses_before_stop
+test_claude_permission_mode_follows_the_relaunch
 test_worker_account_pin_follows_the_relaunch
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops

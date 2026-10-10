@@ -596,23 +596,8 @@ fi
 # config/claude-permission-mode (header above): resolved once per spawn or
 # relaunch, before any mutation, so a malformed file refuses instead of
 # launching a worker on a permission posture the captain did not choose.
-if ! CLAUDE_PERM_PRESENT=$(fm_config_source_present "$CONFIG/claude-permission-mode"); then
+if ! CLAUDE_PERMISSION_MODE=$(fm_claude_permission_mode_resolve "$CONFIG"); then
   exit 1
-fi
-CLAUDE_PERMISSION_MODE=bypass
-if [ "$CLAUDE_PERM_PRESENT" = 1 ]; then
-  if [ ! -f "$CONFIG/claude-permission-mode" ] || [ ! -r "$CONFIG/claude-permission-mode" ]; then
-    echo "error: config/claude-permission-mode must be a readable regular file holding one of: bypass, auto" >&2
-    exit 1
-  fi
-  CLAUDE_PERMISSION_MODE=$(tr -d '[:space:]' <"$CONFIG/claude-permission-mode" || true)
-  case "$CLAUDE_PERMISSION_MODE" in
-  bypass | auto) ;;
-  *)
-    echo "error: config/claude-permission-mode holds '$CLAUDE_PERMISSION_MODE'; accepted values are: bypass (--dangerously-skip-permissions, the default when the file is absent), auto (--permission-mode auto)" >&2
-    exit 1
-    ;;
-  esac
 fi
 case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;

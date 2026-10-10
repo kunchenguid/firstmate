@@ -120,6 +120,30 @@ fm_config_source_present() {
   ' -- "$1"
 }
 
+# Resolve the launch permission posture; absence keeps the default bypass mode.
+fm_claude_permission_mode_resolve() {  # <config-dir>
+  local config_dir=$1 present mode
+  if ! present=$(fm_config_source_present "$config_dir/claude-permission-mode"); then
+    return 1
+  fi
+  mode=bypass
+  if [ "$present" = 1 ]; then
+    if [ ! -f "$config_dir/claude-permission-mode" ] || [ ! -r "$config_dir/claude-permission-mode" ]; then
+      echo "error: config/claude-permission-mode must be a readable regular file holding one of: bypass, auto" >&2
+      return 1
+    fi
+    mode=$(tr -d '[:space:]' <"$config_dir/claude-permission-mode" || true)
+    case "$mode" in
+    bypass | auto) ;;
+    *)
+      echo "error: config/claude-permission-mode holds '$mode'; accepted values are: bypass (--dangerously-skip-permissions, the default when the file is absent), auto (--permission-mode auto)" >&2
+      return 1
+      ;;
+    esac
+  fi
+  printf '%s\n' "$mode"
+}
+
 fm_inherit_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     /usr/bin/stat -f %Lp "$1" 2>/dev/null
