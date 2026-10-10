@@ -28,6 +28,16 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
+#   1b. handover      - read-only and always run: `fm-lock.sh handover show
+#                       --digest` (the swap-over record a previous session left
+#                       for this one, or a pending request that this
+#                       lock-holding session must answer) and every
+#                       unacknowledged captain inbox note from
+#                       `fm-inbox.sh list`, bounded. A note's wake fires once,
+#                       so a note whose wake was drained without its own
+#                       acknowledgement would otherwise surface nowhere; this
+#                       sits right after the lock so a tail-truncated digest
+#                       never drops it.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's six MUTATING sweeps
@@ -66,7 +76,7 @@
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
-# Those nine names are also the runtime-bound stage list below, so a truncated
+# Those names (1b as `handover`) are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran - and the parent banners
 # EVERY nonzero child exit, not only the bound: a child that dies or is killed
 # mid-stage must never truncate the digest silently.
@@ -275,7 +285,7 @@ done
 # The ordered stage list is the contract behind the truncation banner: the child
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
-SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+SESSION_START_STAGES='lock handover bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -697,6 +707,9 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
+    printf '●  If the captain moved control to this session, run\n'
+    printf '●  bin/fm-lock.sh handover request: the live session writes a handover\n'
+    printf '●  record and passes the lock here, then the full startup reruns.\n'
     printf '%s\n' "$BAR"
   }
 fi
@@ -727,6 +740,19 @@ if [ "$READ_ONLY" -eq 0 ]; then
   [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
   "$SCRIPT_DIR/fm-startup-network.sh" start \
     --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
+fi
+
+# --- 1b. handover and captain inbox -----------------------------------------
+# Read-only on every path, composed from the real owners' output.
+stage handover
+subsection "HANDOVER"
+"$SCRIPT_DIR/fm-lock.sh" handover show --digest 2>&1 || true
+subsection "CAPTAIN INBOX - UNACKNOWLEDGED NOTES"
+INBOX_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-inbox.sh" list --max-notes 20 --max-lines 12 2>&1) || true
+printf '%s\n' "$INBOX_OUT"
+if [ -n "$INBOX_OUT" ] && [ "$INBOX_OUT" != '(inbox empty)' ]; then
+  printf 'Each note above is a captain ask still owed: handle it, then fm-inbox.sh drain --ack <id>.\n'
 fi
 
 # --- 2. bootstrap --------------------------------------------------------

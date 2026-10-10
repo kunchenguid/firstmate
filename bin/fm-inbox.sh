@@ -29,7 +29,7 @@
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
-#   fm-inbox.sh list
+#   fm-inbox.sh list [--ids] [--max-notes <n>] [--max-lines <n>]
 #   fm-inbox.sh drain [--ack <id>...]
 #
 # `note --request-id` is the idempotent capture path: a repeat of the same
@@ -62,6 +62,13 @@
 # Each reply is stamped with a durable per-home sequence, so the receipts cursor
 # is a strict total order and two replies recorded in the same second are both
 # readable. One reply per note: a second one is refused.
+# `list` prints every pending (unacknowledged) note with its body in id order,
+# which is capture-second order.
+# `--ids` prints only the pending ids, one per line, for a caller that must
+# account for each note. `--max-notes` and `--max-lines` bound the human view
+# for the session-start digest: notes past the bound are still named by id and
+# a cut body says how many lines it omitted, so a bounded listing never hides
+# that a note exists.
 # `ready` is the read-only primary-readiness projection (lock, wake-consumer
 # health, away posture, observation time). It never acquires the session lock
 # and never infers liveness from a lock file, a session, or a pane.
@@ -1102,15 +1109,43 @@ PY
 # ---------------------------------------------------------------- list / drain
 
 cmd_list() {
-  [ -d "$INBOX" ] || { printf '(inbox empty)\n'; return 0; }
-  local any=0
-  for f in "$INBOX"/*.note; do
-    [ -e "$f" ] || break
-    any=1
-    printf '%s\n' "$(basename "$f" .note)"
-    sed -n '/^--$/,$p' "$f" | tail -n +2 | sed 's/^/    /'
+  local ids_only=0 max_notes=0 max_lines=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --ids) ids_only=1; shift ;;
+      --max-notes|--max-lines)
+        case "${2:-}" in
+          ''|*[!0-9]*) die "usage: fm-inbox.sh list [--ids] [--max-notes <n>] [--max-lines <n>]" ;;
+        esac
+        if [ "$1" = --max-notes ]; then max_notes=$2; else max_lines=$2; fi
+        shift 2
+        ;;
+      *) die "usage: fm-inbox.sh list [--ids] [--max-notes <n>] [--max-lines <n>]" ;;
+    esac
   done
-  [ "$any" -eq 1 ] || printf '(inbox empty)\n'
+  local any=0 shown=0 f id
+  if [ -d "$INBOX" ]; then
+    for f in "$INBOX"/*.note; do
+      [ -e "$f" ] || break
+      any=1
+      id=$(basename "$f" .note)
+      if [ "$ids_only" -eq 1 ]; then
+        printf '%s\n' "$id"
+        continue
+      fi
+      if [ "$max_notes" -gt 0 ] && [ "$shown" -ge "$max_notes" ]; then
+        printf '%s    (body omitted by --max-notes; see fm-inbox.sh list)\n' "$id"
+        continue
+      fi
+      shown=$((shown + 1))
+      printf '%s\n' "$id"
+      sed -n '/^--$/,$p' "$f" | tail -n +2 | awk -v max="$max_lines" '
+        max > 0 && NR > max { cut++; next }
+        { print "    " $0 }
+        END { if (cut) printf "    (%d more line(s) omitted; see fm-inbox.sh list)\n", cut }'
+    done
+  fi
+  [ "$any" -eq 1 ] || [ "$ids_only" -eq 1 ] || printf '(inbox empty)\n'
 }
 
 cmd_drain() {
@@ -1144,7 +1179,7 @@ case "${1:-}" in
   say)      shift; cmd_say "$@" ;;
   status)   shift; cmd_status ;;
   ask)      shift; cmd_ask "$@" ;;
-  list)     shift; cmd_list ;;
+  list)     shift; cmd_list "$@" ;;
   drain)    shift; cmd_drain "$@" ;;
   ''|-h|--help|help)
     # The whole header block, found rather than counted: everything after the
