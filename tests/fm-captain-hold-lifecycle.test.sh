@@ -4156,6 +4156,104 @@ test_retained_body_keeps_its_utf8_bytes() {
   pass "cleanup preserves every byte of a retained body's non-ASCII characters"
 }
 
+test_hold_writes_a_raise_time_decision_card() {
+  local home store mode
+  home=$(make_home raise-time-card)
+  store="$home/state/decision-cards/sample-card-call.json"
+  run_captain "$home" hold sample-card-call --title "Decide the sample route" \
+    --reason "captain route choice" --repo sample --card-title "Pick the sample route" \
+    --about "two viable routes" --option "route-a:Route A:reversible" \
+    --option "route-b:Route B" --recommend route-a --close release \
+    --decide "choose one" >/dev/null \
+    || fail "hold did not accept the card flags"
+  jq -e '.schema == "fm-decision-card.v1"
+         and (.card.key == "sample-card-call")
+         and (.card.title == "Pick the sample route")
+         and (.card.repo == "sample")
+         and (.card.decide == "choose one")
+         and (.card.about == "two viable routes")
+         and ([.card.options[].value] == ["route-a", "route-b"])
+         and (.card.recommend_value == "route-a")
+         and (.card.close == "release")
+         and (any(.card.options[]; .value == "reconcile") | not)' "$store" >/dev/null \
+    || fail "the raise-time card is not a valid authored fm-decision-card.v1 record"
+  mode=$(stat -c %a "$store" 2>/dev/null || stat -f %Lp "$store")
+  [ "$mode" = "600" ] || fail "the raise-time card is not 0600: $mode"
+  pass "hold writes the raise-time decision card into the durable store"
+}
+
+test_hold_refuses_an_invalid_card_before_any_mutation() {
+  local home
+  home=$(make_home card-refusal)
+  if run_captain "$home" hold sample-bad-card --title "Bad card" --reason "captain choice" \
+      --card-title "Bad card" --option "a:Option A" --recommend nowhere \
+      > "$home/out" 2> "$home/err"; then
+    fail "hold accepted a card whose recommendation names no option"
+  fi
+  assert_contains "$(cat "$home/err")" "recommend_value" "the refusal does not name the broken field"
+  assert_absent "$home/state/decision-cards/sample-bad-card.json" "a refused card was still stored"
+  if grep -q "sample-bad-card" "$home/data/backlog.md"; then
+    fail "a refused card still created the task"
+  fi
+  if run_captain "$home" hold sample-reserved-card --title "Reserved" --reason "captain choice" \
+      --card-title "Reserved" --option "reconcile:Reconcile it" > "$home/out" 2> "$home/err"; then
+    fail "hold accepted the reserved reconcile option value"
+  fi
+  assert_contains "$(cat "$home/err")" "reconcile is reserved" \
+    "the refusal does not name the reserved value"
+  pass "hold refuses an invalid card before any mutation"
+}
+
+test_card_rewrites_an_open_call_and_a_rehold_preserves_it() {
+  local home store
+  home=$(make_home card-update)
+  store="$home/state/decision-cards/sample-card-call.json"
+  run_captain "$home" hold sample-card-call --title "Decide the sample route" \
+    --reason "captain route choice" --repo sample --card-title "First copy" \
+    --option "a:Option A" >/dev/null || fail "hold with a card failed"
+  run_captain "$home" card sample-card-call --card-title "Second copy" \
+    --option "a:Option A" --option "b:Option B" >/dev/null \
+    || fail "card did not rewrite an open call"
+  jq -e '.card.title == "Second copy" and ([.card.options[].value] == ["a", "b"])' "$store" >/dev/null \
+    || fail "the rewritten card is not the stored record"
+  run_captain "$home" hold sample-card-call --reason "captain route choice" >/dev/null \
+    || fail "re-holding an active call failed"
+  jq -e '.card.title == "Second copy"' "$store" >/dev/null \
+    || fail "a re-hold without card flags clobbered the stored card"
+  if run_captain "$home" card sample-absent-call --card-title "Absent" --option "a:A" \
+      > "$home/out" 2> "$home/err"; then
+    fail "card accepted a task that is not an open captain call"
+  fi
+  assert_absent "$home/state/decision-cards/sample-absent-call.json" \
+    "a card was written for a task that is not an open call"
+  pass "card rewrites an open call and a re-hold preserves the stored copy"
+}
+
+# A card belongs to a live call: once the call is answered, `card` refuses and
+# the stored record the captain was shown stays untouched.
+test_card_refuses_a_closed_call() {
+  local home store out rc
+  home=$(make_home card-closed)
+  store="$home/state/decision-cards/sample-closed-card.json"
+  run_captain "$home" hold sample-closed-card --title "Decide the closed route" \
+    --reason "captain closed-route choice" --repo sample --card-title "Shown copy" \
+    --option "a:Option A" >/dev/null || fail "hold with a card failed"
+  printf 'Go with A.\n' > "$home/go.txt"
+  run_captain "$home" answer sample-closed-card --decision-file "$home/go.txt" >/dev/null \
+    || fail "answer failed on the card fixture"
+  set +e
+  out=$(run_captain "$home" card sample-closed-card --card-title "Late copy" \
+    --option "b:Option B" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "card accepted a call that is no longer open"
+  assert_contains "$out" "not an open captain call" \
+    "the closed-call refusal did not name the reason: $out"
+  jq -e '.card.title == "Shown copy"' "$store" >/dev/null \
+    || fail "the refused card overwrote the stored record"
+  pass "card refuses a closed call and leaves the stored record untouched"
+}
+
 # A refused hold must never read as a recorded one. The gate used to accept the
 # origin as its own inventory whenever the origin row looked durable, so a hold
 # that failed just before `complete <origin> <origin>` left a satisfied gate
@@ -4690,3 +4788,7 @@ test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
+test_hold_writes_a_raise_time_decision_card
+test_hold_refuses_an_invalid_card_before_any_mutation
+test_card_rewrites_an_open_call_and_a_rehold_preserves_it
+test_card_refuses_a_closed_call

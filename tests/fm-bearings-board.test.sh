@@ -183,6 +183,49 @@ EOF
 }
 
 # Extract the injected payload back out of a built board page.
+write_snapshot_stub() {  # <home>; a canonical-snapshot shape for the refresh tests
+  local home=$1
+  local stub="$home/fakebin/snapshot-stub"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{
+  "schema": "fm-bearings.v1",
+  "home": "test-home",
+  "generated": "2026-08-19T00:00:00Z",
+  "in_flight": [
+    { "id": "sample-live-task", "kind": "ship", "state": "validating",
+      "repo": "sample", "name": "Sample live task", "doing": "validating" }
+  ],
+  "decisions_open": [
+    { "id": "sample-open-call", "key": "sample-open-call", "verb": "needs-decision",
+      "summary": "Sample open call", "owner": "(main)" }
+  ],
+  "landed": [
+    { "id": "sample-landed-task", "what": "Land the sample change",
+      "artifact": "https://github.com/example/sample/pull/7", "owner": "(main)" }
+  ],
+  "gates": [
+    { "id": "sample-gate", "title": "Dispatched sample gate", "blocked_by": "-",
+      "reason": "Waiting for worker capacity", "owner": "(main)", "filed": "2026-08-18" },
+    { "id": "(sample-inventory)", "title": "Sample inventory warning", "blocked_by": "-",
+      "reason": "inventory mismatch", "owner": "(main)", "filed": null }
+  ]
+}
+JSON
+SH
+  chmod +x "$stub"
+}
+
+stash_store_card() {  # <home> <key>; a raise-time record shape for one key
+  local home=$1 key=$2
+  mkdir -p "$home/state/decision-cards"
+  jq -n --arg key "$key" '{schema:"fm-decision-card.v1", generated:"2026-08-18T00:00:00Z",
+    card:{key:$key, type:"decision", repo:"sample", title:"Raise-time storage choice",
+      options:[{value:"keep", label:"Keep it"}], allow_freeform:true}}' \
+    > "$home/state/decision-cards/$key.json"
+}
+
 extract_payload() {  # <board-path>
   sed -n '/<script id="bearings-data" type="application\/json">/,/<\/script>/p' "$1" \
     | sed '1d;$d'
@@ -769,7 +812,176 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+test_build_persists_decision_cards_durably() {
+  local home data store key
+  home=$(make_home durable-cards)
+  data="$home/payload.json"
+  store="$home/state/decision-cards"
+  key=sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice
+  write_valid_payload "$data"
+
+  run_board "$home" build "$data" >/dev/null || fail "a valid payload did not build"
+  assert_present "$store/$key.json" "build did not persist the effective decision card"
+  [ "$(jq -r '.card.title' "$store/$key.json")" = "Perishable-first admission" ] \
+    || fail "the persisted card does not carry the composed title"
+  jq -e '.schema == "fm-decision-card.v1"
+         and (any(.card.options[]; .value == "reconcile"))' "$store/$key.json" >/dev/null \
+    || fail "the persisted card must be the effective card, reconcile choice included"
+
+  # A rebuild that no longer cards the key keeps the record: an absent or
+  # unestablished task must not hide the options a later reader needs.
+  jq --arg key "$key" '.captains_call = [.captains_call[] | select(.key != $key)]' \
+    "$data" > "$data.next" && mv "$data.next" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a rebuild without the card did not build"
+  assert_present "$store/$key.json" "a rebuild without the card pruned a call that may still be open"
+  pass "build persists the effective decision cards for later readers"
+}
+
+test_build_merges_the_durable_card_store_first() {
+  local home data store key
+  home=$(make_home store-first)
+  data="$home/payload.json"
+  store="$home/state/decision-cards"
+  key=sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a valid payload did not build"
+
+  # The raise-time writer (bin/fm-captain-hold.sh) lands this record shape.
+  jq -n --arg key "$key" '{schema:"fm-decision-card.v1", generated:"2026-08-19T00:00:00Z",
+    card:{key:$key, type:"decision", repo:"sample", title:"Raise-time card",
+      about:"written where the question was raised", close:"release",
+      options:[{value:"ship", label:"Ship it"},{value:"wait", label:"Wait"}],
+      allow_freeform:true}}' > "$store/$key.json"
+  run_board "$home" build "$data" >/dev/null || fail "a rebuild with a stored card did not build"
+
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e --arg key "$key" '
+    (.captains_call[] | select(.key == $key) | .title) == "Raise-time card"
+    and ((.captains_call[] | select(.key == $key)
+      | [.options[] | select(.value == "reconcile")] | length) == 1)
+    and ((.captains_call[] | select(.key == $key) | .close) == "release")' "$home/served.json" >/dev/null \
+    || fail "the board did not serve the stored copy with one injected reconcile choice"
+  jq -e --arg key "$key" '.card.title == "Raise-time card"' "$store/$key.json" >/dev/null \
+    || fail "the persisted effective card is not the stored copy"
+  pass "build merges the durable card store first for its key"
+}
+
+test_build_ignores_a_malformed_store_card_without_failing() {
+  local home data store key out
+  home=$(make_home store-malformed)
+  data="$home/payload.json"
+  store="$home/state/decision-cards"
+  key=sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a valid payload did not build"
+  jq -n --arg key "$key" '{schema:"fm-decision-card.v1", generated:"2026-08-19T00:00:00Z",
+    card:{key:$key, type:"decision", repo:"sample", options:[]}}' > "$store/$key.json"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "a malformed stored card failed the build"
+  assert_contains "$out" "ignored-store-card: $key" "the build did not name the ignored record"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e --arg key "$key" '(.captains_call[] | select(.key == $key) | .title) == "Perishable-first admission"' \
+    "$home/served.json" >/dev/null \
+    || fail "the payload copy was not used when the stored record was malformed"
+  pass "build ignores a malformed store card and keeps the payload copy"
+}
+
+test_refresh_composes_from_the_snapshot_and_merges_the_store_card() {
+  local home stub key
+  home=$(make_home refresh)
+  key=sample-open-call
+  write_snapshot_stub "$home"
+  stub="$home/fakebin/snapshot-stub"
+  stash_store_card "$home" "$key"
+  FM_BEARINGS_BOARD_SNAPSHOT="$stub" run_board "$home" refresh >/dev/null \
+    || fail "refresh did not build the board from the snapshot"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e --arg key "$key" '
+    (.captains_call[] | select(.key == $key) | .title) == "Raise-time storage choice"
+    and ((.captains_call[] | select(.key == $key)
+      | [.options[] | select(.value == "reconcile")] | length) == 1)
+    and ([.underway[].id] == ["sample-live-task"])
+    and ([.landed[].id] == ["sample-landed-task"])
+    and ([.charted[].id] == ["sample-gate", "sample-inventory"])
+    and ((.charted[] | select(.id == "sample-inventory") | .kind) == "warning")
+    and ((.underway[] | select(.id == "sample-live-task") | .repo) == "sample")
+    and ([.charted[] | select(.dispatchable != false)] | length == 0)' "$home/served.json" >/dev/null \
+    || fail "the refreshed board did not carry the snapshot rows and the stored card copy"
+  pass "refresh composes the snapshot rows and merges the stored decision card"
+}
+
+# A stored record the shared contract rejects is named and skipped, not merged
+# into the payload where the validator would fail the whole refresh.
+test_refresh_ignores_a_malformed_store_card() {
+  local home stub out rc
+  home=$(make_home refresh-malformed-store)
+  write_snapshot_stub "$home"
+  stub="$home/fakebin/snapshot-stub"
+  mkdir -p "$home/state/decision-cards"
+  jq -n --arg key "merge.sample-open-call" '{
+    schema:"fm-decision-card.v1", generated:"2026-08-18T00:00:00Z",
+    card:{key:$key, type:"merge", repo:"sample", title:"", risk:"low", options:[]}
+  }' > "$home/state/decision-cards/merge.sample-open-call.json"
+  set +e
+  out=$(FM_BEARINGS_BOARD_SNAPSHOT="$stub" run_board "$home" refresh 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a malformed stored card failed the whole refresh: $out"
+  assert_contains "$out" "ignored-store-card: merge.sample-open-call" \
+    "the malformed stored card was not named and skipped: $out"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e '([.captains_call[].key] | index("merge.sample-open-call")) == null' "$home/served.json" >/dev/null \
+    || fail "the malformed stored card still reached the board payload"
+  pass "refresh skips a malformed stored card and keeps the board current"
+}
+
+# A stored card for a hold the snapshot does not list as live - blocked, dated,
+# reconciling, or aged - stays in the durable store and out of Captain's Call,
+# where the call belongs to a disclosed Charted Next gate instead.
+test_refresh_keeps_a_deferred_hold_out_of_captains_call() {
+  local home stub key
+  home=$(make_home refresh-deferred-card)
+  key=sample-deferred-call
+  write_snapshot_stub "$home"
+  stub="$home/fakebin/snapshot-stub"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-deferred-call - Decide the deferred sample (repo: sample) (kind: captain) (hold: pick a route) (hold-kind: captain)
+
+## Done
+EOF
+  stash_store_card "$home" "merge.$key"
+  FM_BEARINGS_BOARD_SNAPSHOT="$stub" run_board "$home" refresh >/dev/null \
+    || fail "refresh failed with a deferred hold's stored card present"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e '[.captains_call[].key] | index("merge.sample-deferred-call") == null' "$home/served.json" >/dev/null \
+    || fail "a refresh resurrected a deferred hold as a live decision card"
+  assert_present "$home/state/decision-cards/merge.$key.json" \
+    "the deferred hold lost its durable card record"
+  pass "refresh keeps a deferred hold's card out of Captain's Call"
+}
+
+test_refresh_refuses_a_broken_snapshot_before_touching_the_board() {
+  local home stub rc out
+  home=$(make_home refresh-refusal)
+  write_snapshot_stub "$home"
+  stub="$home/fakebin/snapshot-stub"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$stub"
+  chmod +x "$stub"
+  set +e
+  out=$(FM_BEARINGS_BOARD_SNAPSHOT="$stub" run_board "$home" refresh 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "refresh accepted a snapshot that failed"
+  assert_absent "$home/.lavish/bearings-board.html" "a broken snapshot still published a board"
+  assert_contains "$out" "snapshot failed" "the refusal does not name the failing snapshot"
+  pass "refresh refuses a broken snapshot before touching the board"
+}
+
 test_path_is_stable_and_home_scoped
+test_build_persists_decision_cards_durably
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
@@ -787,3 +999,9 @@ test_build_fails_when_reconcile_cannot_establish_a_listener
 test_every_decision_card_carries_the_reconcile_choice
 test_build_refuses_a_payload_that_occupies_the_reconcile_value
 test_build_refuses_a_nondecision_reconcile_value
+test_build_merges_the_durable_card_store_first
+test_build_ignores_a_malformed_store_card_without_failing
+test_refresh_composes_from_the_snapshot_and_merges_the_store_card
+test_refresh_ignores_a_malformed_store_card
+test_refresh_keeps_a_deferred_hold_out_of_captains_call
+test_refresh_refuses_a_broken_snapshot_before_touching_the_board
