@@ -420,7 +420,8 @@ classify_signal() {  # <reason-after-colon> <state>
   fi
 }
 
-# classify_stale decides the WAKE itself (one-shot per distinct hash). On a
+# classify_stale decides the WAKE itself (the watcher hands over one per distinct
+# hash, or one per declaration for a declared pause). On a
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state> [<span-record> <span-status>]

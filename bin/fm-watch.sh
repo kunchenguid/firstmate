@@ -3096,15 +3096,21 @@ EOF
             *)      clear_pause_tracking "$key" ;;
           esac
         elif afk_present; then
-          # Daemon owns triage: one-shot per distinct stale hash, as before,
-          # except that a captain-held pane is never handed over while the
-          # away-posture record exists (captain_held_silenced).
+          # Daemon owns triage. A declared pause is handed over once per
+          # declaration, like the busy-turn bound, rather than once per display
+          # hash. The daemon owns its long recheck cadence; idle pane churn must
+          # not keep waking it for the same wait. Undeclared panes retain their
+          # hash-scoped first sight, and captain-held panes remain silenced.
+          stale_identity=$h
+          if status_is_paused "$last"; then
+            stale_identity=$(stale_wait_declaration "$task")
+          fi
           if captain_held_silenced "$last"; then
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
-          elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+          elif [ "$(cat "$sf" 2>/dev/null || true)" != "$stale_identity" ]; then
             fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
+            printf '%s' "$stale_identity" > "$sf"
             wake "stale: $w"
           fi
         elif stale_is_terminal "$w" "$STATE"; then

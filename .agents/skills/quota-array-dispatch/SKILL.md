@@ -13,9 +13,9 @@ metadata:
 # quota-array-dispatch
 
 This skill is the single owner of the completion-aware profile-array selection procedure.
-`AGENTS.md` section 4 owns the always-loaded intake boundary, load trigger, malformed-config refusal, every-candidate accounting, and strongest-reasoning/tie safety rules.
+[`task-intake`](../task-intake/SKILL.md) owns dispatch-profile routing; Firstmate alone resolves a matched profile array here, never omitting a candidate, guessing, or falling back silently.
 `harness-adapters` owns harness verification, model/provider discovery, and effort fallback.
-`quota-axi` remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
+`quota-axi` owns how model or product windows relate to bounding account windows and remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
 The [worker helper](../../../bin/fm-quota-choose.sh) and [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) own their deterministic mapping boundaries.
 
@@ -29,7 +29,7 @@ An `exhausted_now` runway vetoes the candidate.
 The helper selects a candidate only when its applicable quota has a known `effectivePercentRemaining` greater than zero.
 This is an optional narrow helper with a known limitation: it maps each harness to one primary provider family only, so a candidate whose established provider differs from that primary family is checked against the wrong quota row.
 omp has no primary family, so the helper keys an `omp:` candidate on its model prefix, mapping only `openai-codex/` and `claude-bridge/` and refusing every other prefix; the helper's header owns that mapping.
-Authoritative multi-provider routing - including provider discovery from the harness catalog and quota matching by that explicit provider - stays owned by this skill's intake procedure above and AGENTS.md section 4, not by the helper.
+Authoritative multi-provider routing - including provider discovery from the harness catalog and quota matching by that explicit provider - stays owned by this skill's intake procedure, not by the helper.
 Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
@@ -63,7 +63,7 @@ It cannot override a hard-gate failure, and it is never hidden inside a new comp
 
 ### 1. Eligibility
 
-Outside those documented mappings, deterministic shell must not infer a provider family or credential store from a harness, model, or source name.
+Outside the helper's documented mappings, never infer a provider family, credential store, or quota mapping from a harness, model, or source name.
 You establish the remaining relations yourself, in the open, from the candidate's own authoritative catalog (`harness-adapters` owns the per-harness discovery surface) plus the one intake snapshot.
 
 Confirm the catalog lists the candidate's model and record the provider family it reports.
@@ -92,7 +92,7 @@ It takes no harness, model, or provider and returns a fact, not a route: only `a
 Never launch a vendor CLI yourself, and never probe a credential store the candidate does not use.
 Grok prepaid `credits` are unrelated to paid-window headroom; never read them as exhaustion.
 
-Malformed configuration is an actionable error, not a candidate to rank around.
+[`task-intake`](../task-intake/SKILL.md) owns malformed dispatch-configuration refusal.
 
 ### 2. Reasoning-class fit
 
@@ -131,4 +131,4 @@ Report duplicate concrete profiles as a configuration error.
 
 Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, `spendPriority`, and runway-versus-horizon result.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
-Never conclude with an unexplained "best quota" label.
+Never conclude with an unexplained "best quota" label or call the result quota-informed without the every-candidate evidence above.

@@ -39,7 +39,7 @@
 #   identify this repo. Briefs made without it carry a loud declaration so an
 #   omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
-# resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
+# resolves it per task at intake (task-intake skill); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
@@ -94,7 +94,7 @@
 # scout's deliverable is a report rather than a merge, and a charter is not a
 # delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
-# a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# a spawn-time and firstmate-side input only (task-intake skill).
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known wait expected to clear on its own, including
@@ -243,7 +243,7 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 
-# Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
+# Ship delivery mode is an explicit per-task decision (task-intake skill). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
 if [ "$KIND" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {
@@ -447,6 +447,7 @@ $PROJECT_CLONES_BODY
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
 $PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
+Load \`task-intake\` from this home's \`.agents/skills/\` before every routed task intake, brief authoring or revision, delivery resolution, and scout promotion; it loads the quota-array owner before matched-array selection.
 Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
