@@ -164,7 +164,7 @@ handoff_physical_dir() {  # <existing-directory>
 handoff_retirement_check_locked() {  # <target-task>
   local target=$1 record record_target handoff_id handoff_state_value status_file
   local inbox_root inbox_record relative base handled recorded_handoff target_generation inbox_generation
-  local recorded_inbox_root recorded_physical inbox_physical
+  local recorded_inbox_root recorded_parent recorded_physical inbox_physical
   [ ! -e "$HANDOFF_RECORDS" ] && [ ! -L "$HANDOFF_RECORDS" ] && return 0
   [ -d "$HANDOFF_RECORDS" ] && [ ! -L "$HANDOFF_RECORDS" ] || {
     echo "REFUSED: task handoff records are unsafe; preserving task $target state" >&2
@@ -203,7 +203,16 @@ handoff_retirement_check_locked() {  # <target-task>
       "$inbox_root/"*) relative=${inbox_record#"$inbox_root/"} ;;
       *)
         case "$inbox_record" in
-          /*/*) recorded_inbox_root=${inbox_record%/*}; relative=${inbox_record##*/} ;;
+          /*/*)
+            recorded_parent=${inbox_record%/*}
+            if [ "${recorded_parent##*/}" = handled ]; then
+              recorded_inbox_root=${recorded_parent%/*}
+              relative=handled/${inbox_record##*/}
+            else
+              recorded_inbox_root=$recorded_parent
+              relative=${inbox_record##*/}
+            fi
+            ;;
           *) recorded_inbox_root=; relative= ;;
         esac
         recorded_physical=$(handoff_physical_dir "$recorded_inbox_root" 2>/dev/null || true)

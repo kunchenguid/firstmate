@@ -109,6 +109,18 @@ test_retirement_accepts_only_equivalent_handled_delivery_identity() {
   after=$(retirement_fixture_digest "$home")
   [ "$after" = "$before" ] || fail "successful retirement proof rewrote historical handoff evidence"
 
+  rm "$status"
+  PATH="$dir/fakebin:$PATH" PI_CODING_AGENT=true FM_HOME="$alias" FM_SUPERVISION_ACTOR=main \
+    "$HANDOFF" retry retirement-handoff >/dev/null \
+    || fail "handled delivery status repair failed"
+  assert_contains "$(sed -n 's/^inbox_record=//p' "$status")" "$alias/state/target.inbox/handled/001.msg" \
+    "fixture did not exercise the handled-path status repair"
+  before=$(retirement_fixture_digest "$home")
+  FM_HOME="$home" "$HANDOFF" retirement-check target \
+    || fail "equivalent physical home spelling did not pass repaired handled-path retirement"
+  after=$(retirement_fixture_digest "$home")
+  [ "$after" = "$before" ] || fail "handled-path retirement proof rewrote historical handoff evidence"
+
   dir="$TMP_ROOT/retirement-foreign-home"
   mkdir -p "$dir/foreign/state/target.inbox"
   home=$(make_handled_handoff "$dir" "$dir/home")
