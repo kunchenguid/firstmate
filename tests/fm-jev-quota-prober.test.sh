@@ -64,6 +64,15 @@ test_inverted_codex_verdict_quota_axi_wins() {
   pass "inverted codex verdict: quota-axi 89% wins"
 }
 
+test_stale_zero_window_is_unknown() {
+  snapshot "$TMP/stale-zero.json" "$(row codex stale:0)" "$(row opencode-go 90)"
+  probe "$TMP/stale-zero.json" --harness codex --model gpt-5.6-luna --auto-divert
+  expect_code 0 "$RC" "stale codex reading of 0%"
+  assert_equals "unknown codex gpt-5.6-luna" "$OUT" "a stale 0% reading is unknown, not exhausted or diverted"
+  assert_contains "$ERR" "quota-axi verdict unavailable for codex:gpt-5.6-luna: " "the unknown verdict is named"
+  pass "a stale 0% reading launches as requested"
+}
+
 test_inverted_opencode_go_verdict_quota_axi_wins() {
   # The old prober had no opencode-go check and called it alive at 0%.
   snapshot "$TMP/og.json" "$(row opencode-go 0)"
@@ -153,6 +162,7 @@ test_unmetered_harness_launches_as_requested() {
 }
 
 test_inverted_codex_verdict_quota_axi_wins
+test_stale_zero_window_is_unknown
 test_inverted_opencode_go_verdict_quota_axi_wins
 test_exhausted_divert_target_never_selected
 test_unknown_is_permissive_and_loud
