@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Token-free live Pi composer guard: the dollar-first subscription footer must
 # not turn an empty composer into unknown, and real drafts must remain pending.
-# Runs by default with Pi + tmux; FM_COMPOSER_PI_IDLE_LIVE=1 forces the guard
-# and =0 disables it. No prompt, provider request, or real credential is used.
+# Runs by default with tmux and either pi or pi-signed.
+# FM_COMPOSER_PI_IDLE_LIVE=1 forces the guard and =0 disables it.
+# No prompt, provider request, or real credential is used.
 # Refresh docs/verification/runtime-backends.md after a Pi upgrade.
 set -u
 
@@ -76,6 +77,9 @@ check_drafts() {  # <executable> <version> <identity>
 
 check_pi() {  # <executable>
   local binary=$1 version help screen='' identity='' anchored='' cursorless='' i out
+  # Pi can migrate configuration before handling --help, so metadata probes
+  # must share the TUI's disposable home, agent directory, cwd, offline mode,
+  # disabled resource discovery, and cleared Herdr identities.
   local -a pi_command=(
     env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SESSION
     HOME="$LAB_HOME" PI_CODING_AGENT_DIR="$LAB/pi"

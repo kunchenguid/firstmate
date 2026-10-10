@@ -844,7 +844,8 @@ ok - pi (0.99.1): real drafts including glyph-only and cost-like text remain pen
 ok - Pi composer live guard verified 1 installed harness(es) without a provider request
 ```
 
-The guard checks Pi and pi-signed when installed and reports an absent signed wrapper explicitly.
+See the [guard header](../../tests/fm-composer-pi-idle-live-e2e.test.sh) for availability and run controls.
+`tests/fm-live-gate.test.sh` covers metadata-probe and TUI isolation plus plain-only and signed-only availability through executable fixtures.
 `tests/fm-composer-lib.test.sh` pins the same footer and draft boundaries portably, including blocked and unknown native identities and both locale modes.
 
 ## Steering-inbox doorbell
