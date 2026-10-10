@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin droid
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -91,6 +91,7 @@ fm_control_harness_family() {  # <recorded-harness>
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
     devin) printf 'devin' ;;
+    droid) printf 'droid' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -114,7 +115,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy|devin) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|devin|droid) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -131,7 +132,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # through Herdr).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|droid) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -142,7 +143,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|droid) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -161,7 +162,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|droid) ;;
     *) return 1 ;;
   esac
 }
@@ -172,7 +173,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '0.2' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|droid) printf '0.2' ;;
     *) return 1 ;;
   esac
 }
@@ -185,7 +186,7 @@ fm_control_interrupt_press_gap() {  # <harness>
 fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|droid) ;;
     *) return 1 ;;
   esac
 }
@@ -205,7 +206,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 # above.
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
-    muse) printf 'C-u' ;;
+    muse|droid) printf 'C-u' ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) ;;
     *) return 1 ;;
   esac
@@ -221,7 +222,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|droid) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -229,7 +230,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
+    claude|opencode|grok|kimi|cursor|muse|rovo|droid) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini|agy|devin) printf '/quit' ;;
     *) return 1 ;;
   esac
@@ -272,18 +273,20 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
   return 0
 }
 
-# Which named keys a backend adapter can deliver. Every session provider
-# normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
-# exposes only an interrupt and an Enter, so it can deliver neither Escape nor
-# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key).
-fm_control_backend_supports_key() {  # <backend> <key>
+# Which named keys a backend adapter can deliver. Orca accepts raw
+# Escape and Ctrl+U bytes, verified against Droid; keep that capability scoped
+# to Droid until another harness's response is proven live.
+fm_control_backend_supports_key() {  # <backend> <key> [harness]
   local backend=${1-} key=${2-}
   case "$backend" in
     tmux|herdr|zellij|cmux)
       case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
     orca)
-      case "$key" in Enter|C-c) return 0 ;; esac
+      case "$key" in
+        Enter|C-c) return 0 ;;
+        Escape|C-u) [ "${3:-}" = droid ] && return 0 ;;
+      esac
       ;;
   esac
   return 1
@@ -404,7 +407,40 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     devin) printf '%s\n' "$state/$id.devin-config.json" ;;
+    droid) printf '%s\n' "$state/$id.droid-settings.json" "$state/$id.droid-session-end" ;;
   esac
+}
+
+# Droid's SessionEnd hook writes the armed busy generation when the current
+# generation closes a session with reason "other". Droid also closes sessions
+# that way without exiting (after /clear, on a session reload, or for a Task
+# subagent), so the marker is only a session-close signal. It is the shared
+# stop proof used by Orca control and replacement spawn only together with an
+# lsof scan showing no droid process whose working directory is inside the
+# task worktree. A marker from a prior incarnation, a missing worktree, a
+# missing lsof, or an lsof error all fail closed.
+fm_control_droid_session_ended() {  # <state-dir> <id> <meta-file>
+  local state=$1 id=$2 meta=$3 gen ended path wt out status line
+  gen=$(fm_meta_get "$meta" busy_gen)
+  [ -n "$gen" ] || return 1
+  path="$state/$id.droid-session-end"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  IFS= read -r ended <"$path" 2>/dev/null || ended=
+  [ "$ended" = "$gen" ] || return 1
+  wt=$(fm_meta_get "$meta" worktree)
+  [ -n "$wt" ] && wt=$(cd "$wt" 2>/dev/null && pwd -P) || return 1
+  command -v lsof >/dev/null 2>&1 || return 1
+  out=$(lsof -w -a -c droid -d cwd -Fn 2>&1) && status=0 || status=$?
+  case "$status" in
+    0) ;;
+    1) [ -z "$out" ]; return ;;
+    *) return 1 ;;
+  esac
+  while IFS= read -r line; do
+    case "$line" in "n$wt"|"n$wt"/*) return 1 ;; esac
+  done <<EOF
+$out
+EOF
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

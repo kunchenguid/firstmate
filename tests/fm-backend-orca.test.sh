@@ -5,6 +5,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
 # A claude spawn writes workspace trust into the launching user's own store,
@@ -42,6 +44,28 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+if [ -n "${FM_ORCA_DROID_EVENT_STATE:-}" ] && [ "${1:-}" = terminal ] && [ "${2:-}" = send ]; then
+  for arg in "$@"; do
+    if [ "$arg" = --enter ]; then
+      if [ "${FM_ORCA_DROID_EVENT_ONCE:-0}" != 1 ] || [ ! -e "$RESP/.event-fired" ]; then
+        if [ -n "${FM_ORCA_DROID_PROMPT_HOOK_BIN:-}" ]; then
+          jq -cn --arg prompt "${FM_ORCA_DROID_HOOK_PROMPT:-}" \
+            '{hook_event_name:"UserPromptSubmit",prompt:$prompt}' \
+            | "$FM_ORCA_DROID_PROMPT_HOOK_BIN" "$FM_ORCA_DROID_EVENT_STATE" \
+                "$FM_ORCA_DROID_EVENT_ID" "$FM_ORCA_DROID_EVENT_GEN" >/dev/null
+        else
+          event=${FM_ORCA_DROID_EVENT_NAME:-user-prompt-submit}
+          state=busy
+          [ "$event" != stop ] || state=idle
+          "$FM_ORCA_DROID_EVENT_BIN" apply "$FM_ORCA_DROID_EVENT_STATE" "$FM_ORCA_DROID_EVENT_ID" "$state" \
+            --gen "$FM_ORCA_DROID_EVENT_GEN" --source droid-hook --event "$event" >/dev/null
+        fi
+        touch "$RESP/.event-fired"
+      fi
+      break
+    fi
+  done
+fi
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
@@ -126,6 +150,203 @@ test_capture_fails_on_orca_error_json() {
   [ "$status" -ne 0 ] || fail "capture should fail on Orca ok:false read JSON"
   assert_contains "$out" "terminal handle stale" "capture should surface the Orca read error message"
   pass "fm_backend_orca_capture: fails closed on Orca read error JSON"
+}
+
+test_visible_capture_requires_a_real_screen() {
+  local home state out rc
+  home="$TMP_ROOT/droid-viewport-home"; state="$home/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/droid1.meta" 'harness=droid' 'terminal=term-123'
+  orca_case viewport
+  printf '{"ok":true,"result":{"terminal":{"source":"screen","tail":["Droid TUI","firstmate"]}}}\n' >"$RESP/1.out"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_visible_capture term-123 fm-droid1' "$ROOT")
+  [ "$out" = $'Droid TUI\nfirstmate' ] || fail "Orca viewport read lost the rendered rows: $out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-123'$'\x1f''--screen'$'\x1f''--json' \
+    "viewport read did not request Orca's rendered screen"
+  orca_case viewport-unavailable
+  printf '{"ok":true,"result":{"terminal":{"source":"screen-unavailable","tail":["stale trust dialog"]}}}\n' >"$RESP/1.out"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_visible_capture term-123 fm-droid1' "$ROOT" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "Orca must not return history when a screen is unavailable"
+  assert_contains "$out" 'screen-unavailable' "Orca viewport refusal lacked its source"
+  orca_case viewport-missing-tail
+  printf '{"ok":true,"result":{"terminal":{"source":"screen","text":"stale trust dialog"}}}\n' >"$RESP/1.out"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_visible_capture term-123 fm-droid1' "$ROOT" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "Orca must not accept screen metadata without rendered rows"
+  assert_contains "$out" 'no rendered tail' "Orca malformed screen refusal lacked its cause"
+  pass "Orca trusts only source=screen for viewport decisions"
+}
+
+test_visible_capture_is_scoped_to_the_recorded_droid_terminal() {
+  local home state out rc
+  orca_case viewport-scope
+  home="$CASE_DIR/home"; state="$home/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/droid1.meta" 'harness=droid' 'terminal=term-123'
+  fm_write_meta "$state/kimi1.meta" 'harness=kimi' 'terminal=term-123'
+  printf '{"ok":true,"result":{"terminal":{"source":"screen","tail":["Droid TUI"]}}}\n' >"$RESP/1.out"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_visible_capture_supported orca' "$ROOT" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "Orca must not become a shared viewport capability"
+  for label in '' fm-kimi1 fm-droid2; do
+    out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_visible_capture orca term-123 "$1"' "$ROOT" "$label" 2>&1) && rc=0 || rc=$?
+    [ "$rc" -ne 0 ] || fail "Orca viewport accepted an unrecorded or non-Droid task label '$label'"
+  done
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_visible_capture orca term-other fm-droid1' "$ROOT" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "Orca viewport accepted a terminal outside the recorded Droid task"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_visible_capture term-123' "$ROOT" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "direct Orca viewport capture bypassed the recorded Droid task check"
+  [ ! -s "$LOG" ] || fail "a refused Orca viewport read reached the CLI"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_visible_capture orca term-123 fm-droid1' "$ROOT")
+  [ "$out" = 'Droid TUI' ] || fail "recorded Droid task lost its Orca viewport: $out"
+  assert_contains "$(cat "$LOG")" $'--screen\x1f--json' "Droid viewport read did not use Orca's current screen"
+  pass "Orca viewport reads only the exact recorded Droid terminal"
+}
+
+test_orca_droid_keys_are_raw_controls() {
+  local home state out
+  orca_case droid-keys
+  home="$CASE_DIR/home"; state="$home/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/droid1.meta" 'harness=droid' 'terminal=term-123'
+  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' >"$RESP/1.out"
+  cp "$RESP/1.out" "$RESP/2.out"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_send_key term-123 Escape fm-droid1; fm_backend_orca_send_key term-123 C-u fm-droid1' "$ROOT")
+  assert_contains "$(cat "$LOG")" $'--text\x1f\033' "Orca Escape did not send the verified control byte"
+  assert_contains "$(cat "$LOG")" $'--text\x1f\025' "Orca Ctrl+U did not send the verified control byte"
+  pass "Orca sends a recorded Droid task Escape and Ctrl+U as exact PTY bytes"
+}
+
+test_orca_non_droid_keys_still_refuse() {
+  local home state key out rc
+  orca_case non-droid-keys
+  home="$CASE_DIR/home"; state="$home/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/claude1.meta" 'harness=claude' 'terminal=term-123'
+  fm_write_meta "$state/droid1.meta" 'harness=droid' 'terminal=term-other'
+  for key in Escape C-u; do
+    rc=0
+    out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_send_key term-123 "$1" fm-claude1' "$ROOT" "$key" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "Orca $key must refuse a recorded non-Droid task"
+    assert_contains "$out" "unsupported Orca key '$key'" "Orca $key refusal changed for non-Droid tasks"
+    rc=0
+    out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_send_key term-123 "$1" fm-droid1' "$ROOT" "$key" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "Orca $key must refuse a Droid record bound to another terminal"
+  done
+  [ ! -s "$LOG" ] || fail "refused Orca keys must not reach the terminal API"
+  pass "Orca Escape and Ctrl+U stay unavailable to non-Droid or mismatched tasks"
+}
+
+test_orca_droid_composer_requires_exact_task_binding() {
+  local home state out
+  orca_case droid-composer
+  home="$CASE_DIR/home"; state="$home/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/droid1.meta" 'harness=droid' 'terminal=term-123'
+  jq -Rn '{ok:true,result:{terminal:{source:"screen",tail:[inputs]}}}' \
+    <"$ROOT/tests/fixtures/droid/idle-orca-0.230.0.txt" >"$RESP/1.out"
+  cp "$RESP/1.out" "$RESP/2.out"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state orca term-123 fm-droid1' "$ROOT")
+  [ "$out" = empty ] || fail "recorded Droid Orca composer should read empty, got '$out'"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state orca term-123 fm-other' "$ROOT")
+  [ "$out" = unknown ] || fail "an unbound Orca target must not borrow Droid's composer proof"
+  pass "Orca Droid composer proof requires an exact task and terminal binding"
+}
+
+test_orca_droid_typed_send_ignores_a_concurrent_doorbell() {
+  local home state gen out n
+  orca_case droid-typed-doorbell
+  home="$CASE_DIR/home"; state="$home/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/droid1.meta" 'harness=droid' 'terminal=term-123'
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" droid1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" droid1 idle --gen "$gen" --source droid-hook --event stop >/dev/null
+  # A matching receipt from before this send is stale; the new hook carries
+  # only the unrelated inbox doorbell payload.
+  printf '{"hook_event_name":"UserPromptSubmit","prompt":"hello"}\n' \
+    | "$ROOT/bin/fm-droid-prompt-hook.sh" "$state" droid1 "$gen" >/dev/null
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" droid1 idle --gen "$gen" --source droid-hook --event stop >/dev/null
+  # Every Orca response reads accepted and shows the typed text still in the
+  # composer, while each Enter also lands an unrelated task-wide
+  # UserPromptSubmit, as a concurrent inbox doorbell would.
+  sed 's/│ >      /│ > hello/' "$ROOT/tests/fixtures/droid/idle-orca-0.230.0.txt" \
+    | jq -Rn '{ok:true,result:{send:{accepted:true},terminal:{source:"screen",tail:[inputs]}}}' >"$RESP/1.out"
+  for n in $(seq 2 20); do cp "$RESP/1.out" "$RESP/$n.out"; done
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ORCA_DROID_EVENT_STATE="$state" FM_ORCA_DROID_EVENT_ID=droid1 \
+    FM_ORCA_DROID_EVENT_GEN="$gen" FM_ORCA_DROID_EVENT_ONCE=1 \
+    FM_ORCA_DROID_PROMPT_HOOK_BIN="$ROOT/bin/fm-droid-prompt-hook.sh" \
+    FM_ORCA_DROID_HOOK_PROMPT='Firstmate instruction waiting: read the inbox' \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_send_text_submit term-123 hello 3 0.1 0 fm-droid1' "$ROOT")
+  case "$(fm_busy_record_read "$state" droid1)" in
+    'busy droid-hook user-prompt-submit '*) ;;
+    *) fail "fake doorbell did not land a task-wide UserPromptSubmit" ;;
+  esac
+  [ "$out" != empty ] || fail "an unrelated UserPromptSubmit confirmed a typed send whose text is still pending"
+  [ "$out" = pending ] || fail "a still-pending Droid composer must stay unconfirmed, got '$out'"
+  pass "Orca Droid typed send is never confirmed by a concurrent doorbell's UserPromptSubmit"
+}
+
+test_orca_droid_typed_send_confirms_its_own_prompt_receipt() {
+  local home state gen out n
+  orca_case droid-typed-matching-prompt
+  home="$CASE_DIR/home"; state="$home/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/droid1.meta" 'harness=droid' 'terminal=term-123'
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" droid1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" droid1 idle --gen "$gen" --source droid-hook --event stop >/dev/null
+  # The viewport still shows the old typed text during the worker's turn.
+  # Only Droid's new hook payload can prove that this exact text submitted.
+  sed 's/│ >      /│ > hello/' "$ROOT/tests/fixtures/droid/idle-orca-0.230.0.txt" \
+    | jq -Rn '{ok:true,result:{send:{accepted:true},terminal:{source:"screen",tail:[inputs]}}}' >"$RESP/1.out"
+  for n in $(seq 2 20); do cp "$RESP/1.out" "$RESP/$n.out"; done
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ORCA_DROID_EVENT_STATE="$state" FM_ORCA_DROID_EVENT_ID=droid1 \
+    FM_ORCA_DROID_EVENT_GEN="$gen" FM_ORCA_DROID_EVENT_ONCE=1 \
+    FM_ORCA_DROID_PROMPT_HOOK_BIN="$ROOT/bin/fm-droid-prompt-hook.sh" \
+    FM_ORCA_DROID_HOOK_PROMPT=hello \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_send_text_submit term-123 hello 3 0.1 0 fm-droid1' "$ROOT")
+  [ "$out" = empty ] || fail "the matching post-Enter prompt was not confirmed, got '$out'"
+  pass "Orca Droid confirms a typed send only when its own prompt hook matches"
+}
+
+test_orca_droid_typed_send_ignores_a_late_stop() {
+  local home state gen out
+  orca_case droid-typed-late-stop
+  home="$CASE_DIR/home"; state="$home/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/droid1.meta" 'harness=droid' 'terminal=term-123'
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" droid1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" droid1 idle --gen "$gen" --source droid-hook --event idle-prompt >/dev/null
+  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' >"$RESP/1.out"
+  cp "$RESP/1.out" "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"source":"screen","tail":["transient repaint"]}}}\n' >"$RESP/3.out"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ORCA_DROID_EVENT_STATE="$state" FM_ORCA_DROID_EVENT_ID=droid1 \
+    FM_ORCA_DROID_EVENT_GEN="$gen" FM_ORCA_DROID_EVENT_BIN="$ROOT/bin/fm-busy-event.sh" \
+    FM_ORCA_DROID_EVENT_NAME=stop \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_send_text_submit term-123 hello 1 0.1 0 fm-droid1' "$ROOT")
+  [ "$out" = unknown ] || fail "a late Stop without a new UserPromptSubmit must not confirm typed delivery, got '$out'"
+  pass "Orca Droid typed send ignores an unrelated late Stop event"
 }
 
 test_runtime_check_accepts_ready_orca_status() {
@@ -338,18 +559,6 @@ test_send_key_refuses_unknown_key() {
   [ "$status" -ne 0 ] || fail "send_key should refuse unsupported Orca keys"
   assert_contains "$out" "unsupported Orca key 'F12'" "send_key did not name the unsupported key"
   pass "fm_backend_orca_send_key: refuses unsupported keys loudly"
-}
-
-test_send_key_refuses_escape_until_supported() {
-  local out status
-  orca_case send-key-escape
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_key term-123 Escape' "$ROOT" 2>&1 )
-  status=$?
-  [ "$status" -ne 0 ] || fail "send_key should refuse Escape until Orca exposes a real Escape primitive"
-  assert_contains "$out" "unsupported Orca key 'Escape'" "send_key did not name Escape as unsupported"
-  [ ! -s "$LOG" ] || fail "unsupported Escape should not call orca terminal send"
-  pass "fm_backend_orca_send_key: refuses Escape instead of mapping it to interrupt"
 }
 
 test_kill_is_best_effort_close() {
@@ -760,7 +969,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
 }
 
 test_peek_send_and_crew_state_route_through_orca_meta() {
-  local wt state id out neutral record body
+  local wt state id out neutral record body key rc
   id="orcaiopathz2"
   wt="$TMP_ROOT/io-wt"
   fm_git_init_commit "$wt"
@@ -781,6 +990,17 @@ test_peek_send_and_crew_state_route_through_orca_meta() {
   PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-send.sh" "fm-$id" "hello orca"
+  for key in Escape C-u; do
+    rc=0
+    out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
+      "$ROOT/bin/fm-send.sh" "fm-$id" --key "$key" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "fm-send --key $key must refuse a non-Droid Orca task"
+    assert_contains "$out" "unsupported Orca key '$key'" \
+      "fm-send --key $key changed Orca's non-Droid refusal"
+  done
+  assert_not_contains "$(cat "$LOG")" $'--text\x1f\033' "refused fm-send Escape reached Orca"
+  assert_not_contains "$(cat "$LOG")" $'--text\x1f\025' "refused fm-send C-u reached Orca"
   printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/5.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
@@ -1352,6 +1572,14 @@ test_dispatcher_sources_orca_and_routes_primitives() {
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
+test_visible_capture_requires_a_real_screen
+test_visible_capture_is_scoped_to_the_recorded_droid_terminal
+test_orca_droid_keys_are_raw_controls
+test_orca_non_droid_keys_still_refuse
+test_orca_droid_composer_requires_exact_task_binding
+test_orca_droid_typed_send_ignores_a_concurrent_doorbell
+test_orca_droid_typed_send_confirms_its_own_prompt_receipt
+test_orca_droid_typed_send_ignores_a_late_stop
 test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
 test_send_text_submit_verifies_empty_composer_after_enter
@@ -1366,7 +1594,6 @@ test_send_text_submit_reports_send_failed
 test_send_helpers_reject_orca_error_json
 test_send_key_enter_and_interrupt
 test_send_key_refuses_unknown_key
-test_send_key_refuses_escape_until_supported
 test_kill_is_best_effort_close
 test_kill_refuses_when_the_orca_cli_is_absent
 test_remove_worktree_refuses_empty_id

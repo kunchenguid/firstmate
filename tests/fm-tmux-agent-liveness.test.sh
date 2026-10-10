@@ -66,6 +66,9 @@ ln -s "$STANDIN_BIN" "$LAB/bin/notaharness"
 ln -s "$STANDIN_BIN" "$LAB/bin/omp"
 ln -s "$STANDIN_BIN" "$LAB/bin/ompd"
 ln -s "$STANDIN_BIN" "$LAB/bin/comp"
+ln -s "$STANDIN_BIN" "$LAB/bin/droid"
+ln -s "$STANDIN_BIN" "$LAB/bin/droid-helper"
+ln -s "$STANDIN_BIN" "$LAB/bin/notdroid"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -208,6 +211,18 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+# Droid is a native single binary named exactly `droid`; fragments must not
+# claim an agent pane, even when the real process is live under tmux.
+new_window droid "$LAB/bin/droid" 900
+wait_for_state "$SESSION:droid" alive \
+  || fail "Droid's bare binary name must classify alive"
+for decoy in droid-helper notdroid; do
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
+    || fail "'$decoy' must not claim Droid's process identity"
+done
+pass "tmux liveness: real Droid-shaped process is alive and fragments stay ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that

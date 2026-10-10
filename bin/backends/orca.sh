@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # bin/backends/orca.sh - the Orca terminal session-provider adapter.
 #
-# Orca owns both the task worktree and the terminal endpoint. Escape key support
-# remains unsupported until Orca exposes a terminal-send primitive for it.
+# Orca owns both the task worktree and the terminal endpoint. The recorded
+# Droid task alone uses its verified raw Escape and Ctrl+U bytes.
 #
 # Target string shape: the Orca terminal id accepted by `orca terminal ...`.
 
@@ -11,6 +11,8 @@
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-busy-lib.sh"
 
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
@@ -203,7 +205,22 @@ fm_backend_orca_capture() {  # <terminal-id> <lines>
   fm_backend_orca_json_text "$out"
 }
 
-fm_backend_orca_json_text() {  # <json>
+# Orca exposes a rendered current frame with no history through
+# --screen. Never accept its documented screen-unavailable stream fallback for
+# trust or other viewport decisions.
+fm_backend_orca_visible_capture() {  # <terminal-id> [expected-label]
+  local terminal=$1 label=${2:-} out
+  fm_backend_orca_recorded_droid "$terminal" "$label" || {
+    echo "error: Orca screen capture requires this terminal's recorded Droid task" >&2
+    return 1
+  }
+  fm_backend_orca_tool_check || return 1
+  out=$(orca terminal read --terminal "$terminal" --screen --json) || return 1
+  fm_backend_orca_json_text "$out" screen
+}
+
+fm_backend_orca_json_text() {  # <json> [required-source]
+  # shellcheck disable=SC2016 # JavaScript template expressions belong to Node.
   printf '%s' "$1" | node -e '
 const fs = require("fs");
 const data = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -213,6 +230,16 @@ if (data.ok === false) {
   process.exit(2);
 }
 const r = data.result || {};
+const terminal = r.terminal || r;
+const required = process.argv[1] || "";
+if (required && terminal.source !== required) {
+  console.error(`Orca terminal read returned ${terminal.source || "no source"}, expected ${required}`);
+  process.exit(2);
+}
+if (required && !Array.isArray(terminal.tail)) {
+  console.error("Orca screen response has no rendered tail");
+  process.exit(2);
+}
 if (r.terminal && Array.isArray(r.terminal.tail)) {
   process.stdout.write(r.terminal.tail.join("\n"));
 } else if (Array.isArray(r.tail)) {
@@ -220,7 +247,21 @@ if (r.terminal && Array.isArray(r.terminal.tail)) {
 } else {
   process.stdout.write(r.text || r.output || r.content || r.preview || "");
 }
-'
+' "${2:-}"
+}
+
+# A Droid composer proof applies only to this home's exact recorded terminal.
+# An explicit backend target with no task identity keeps the generic unknown
+# verdict, so a screen resembling Droid cannot authorize input into a shell.
+fm_backend_orca_recorded_droid() {  # <terminal-id> <expected-label>
+  local terminal=$1 label=${2:-} id meta harness recorded
+  case "$label" in fm-*) id=${label#fm-} ;; *) return 1 ;; esac
+  command -v fm_backend_meta_exact_value >/dev/null 2>&1 || return 1
+  meta="${FM_STATE_OVERRIDE:-$FM_HOME/state}/$id.meta"
+  [ -f "$meta" ] || return 1
+  harness=$(fm_backend_meta_exact_value "$meta" harness) || return 1
+  recorded=$(fm_backend_meta_exact_value "$meta" terminal) || return 1
+  [ "$harness" = droid ] && [ "$recorded" = "$terminal" ]
 }
 
 # fm_backend_orca_composer_capture: the orca composer screen - one bounded
@@ -233,10 +274,8 @@ fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
 }
 
 # fm_backend_orca_composer_caps: static capability facts, not logic (see the
-# capability model in bin/fm-composer-lib.sh). Orca's `terminal read` returns
-# plain text; whether it can emit ANSI is unverified (orca is not installed
-# on the verification machine), so styled stays 0 - the conservative
-# degradation - until a live capture proves otherwise.
+# capability model in bin/fm-composer-lib.sh). Orca's live terminal
+# read returned plain text, so styled stays 0 - the conservative degradation.
 fm_backend_orca_composer_caps() {
   printf 'styled=0\ncursor=0\nidentity=0\nrows=%s\n' "$FM_COMPOSER_CAPTURE_LINES"
 }
@@ -247,14 +286,19 @@ fm_backend_orca_composer_caps() {
 # unconfirmed) lives in bin/fm-composer-lib.sh.
 fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pending|pending-unproven|unknown
   local cap verdict
+  if fm_backend_orca_recorded_droid "$1" "${2:-}"; then
+    cap=$(fm_backend_orca_visible_capture "$1" "${2:-}") || { printf 'unknown'; return 0; }
+    fm_composer_droid_state "$cap" orca
+    return 0
+  fi
   cap=$(fm_backend_orca_composer_capture "$1") || { printf 'unknown'; return 0; }
   verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"
 }
 
-fm_backend_orca_send_key() {  # <terminal-id> <key>
-  local terminal=$1 key=$2
+fm_backend_orca_send_key() {  # <terminal-id> <key> [expected-label]
+  local terminal=$1 key=$2 label=${3:-} byte
   fm_backend_orca_tool_check || return 1
   case "$key" in
     C-c|ctrl+c|Ctrl-c|Ctrl-C)
@@ -262,6 +306,14 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
       ;;
     Enter|enter)
       fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "" --enter --json
+      ;;
+    Escape|C-u)
+      fm_backend_orca_recorded_droid "$terminal" "$label" || {
+        echo "error: unsupported Orca key '$key'" >&2
+        return 1
+      }
+      case "$key" in Escape) byte=$'\033' ;; C-u) byte=$'\025' ;; esac
+      fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$byte" --json
       ;;
     *)
       echo "error: unsupported Orca key '$key'" >&2
@@ -275,13 +327,30 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 # fm_composer_submit_retry_core) against the shared composer verdict, so a
 # slash-command popup placeholder fill gets the required second Enter without
 # duplicating text.
-fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
-  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle> [expected-label]
+  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-}
+  local state_dir='' id='' gen='' baseline='' baseline_seq='' prompt_hash='' verdict
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
-    "$terminal" "$retries" "$sleep_s"
+  if [ -n "$expected_label" ] && fm_backend_orca_recorded_droid "$terminal" "$expected_label"; then
+    id=${expected_label#fm-}
+    state_dir=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+    baseline=$(fm_busy_record_read "$state_dir" "$id" 2>/dev/null) || baseline=
+    if [ -n "$baseline" ]; then
+      baseline_seq=${baseline##* }
+      gen=$(fm_busy_current_gen "$state_dir" "$id" 2>/dev/null) || gen=
+      prompt_hash=$(printf '%s' "$text" | fm_busy_prompt_sha256) || prompt_hash=
+    fi
+  fi
+  verdict=$(fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
+    "$terminal" "$retries" "$sleep_s" "$expected_label")
+  if [ "$verdict" != empty ] && [ -n "$gen" ] && [ -n "$prompt_hash" ] \
+    && fm_busy_prompt_receipt_after "$state_dir" "$id" "$gen" "$baseline_seq" "$prompt_hash"; then
+    printf 'empty'
+  else
+    printf '%s' "$verdict"
+  fi
 }
 
 # fm_backend_orca_kill: close one recorded task terminal. A missing CLI is a

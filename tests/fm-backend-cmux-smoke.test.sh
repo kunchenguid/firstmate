@@ -128,7 +128,7 @@ sleep 0.3
 # --- key names: Escape and Ctrl-C, verified names --------------------------
 
 fm_backend_cmux_send_key "$TARGET" Escape || fail "send_key Escape failed"
-pass "real cmux: send_key Escape (natively supported, unlike Orca) succeeds"
+pass "real cmux: send_key Escape succeeds"
 
 fm_backend_cmux_send_key "$TARGET" C-c || fail "send_key C-c (normalized to 'ctrl-c') failed"
 pass "real cmux: send_key C-c (normalized to the verified 'ctrl-c' name) succeeds"

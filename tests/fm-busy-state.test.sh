@@ -56,6 +56,37 @@ test_apply_advances_seq_and_source() {
   pass "apply advances seq under the armed gen and attributes the writing source"
 }
 
+test_droid_prompt_receipt_matches_payload_and_submission_sequence() {
+  local state gen replacement digest
+  state=$(new_state_dir droid-prompt-receipt)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source droid-hook --event stop \
+    || fail "Droid idle setup failed"
+  digest=2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+  printf '{"hook_event_name":"UserPromptSubmit","prompt":"hello"}\n' \
+    | "$ROOT/bin/fm-droid-prompt-hook.sh" "$state" t1 "$gen" \
+    || fail "Droid prompt hook failed"
+  fm_busy_prompt_receipt_after "$state" t1 "$gen" 2 "$digest" \
+    || fail "matching post-baseline Droid prompt was not receipted"
+  if fm_busy_prompt_receipt_after "$state" t1 "$gen" 3 "$digest"; then
+    fail "a receipt at the baseline sequence must not confirm another send"
+  fi
+  if fm_busy_prompt_receipt_after "$state" t1 "$gen" 2 \
+      0000000000000000000000000000000000000000000000000000000000000000; then
+    fail "an unrelated prompt payload must not confirm a typed send"
+  fi
+  replacement=$("$EV" arm "$state" t1)
+  if fm_busy_prompt_receipt_after "$state" t1 "$gen" 2 "$digest"; then
+    fail "a prior Droid incarnation's receipt must not confirm a new send"
+  fi
+  [ ! -e "$(fm_busy_prompt_receipts_path "$state" t1)" ] \
+    || fail "rearming left a prior incarnation's prompt receipts"
+  "$EV" retire "$state" t1 --gen "$replacement" || fail "Droid receipt retirement failed"
+  [ ! -e "$(fm_busy_prompt_receipts_path "$state" t1)" ] \
+    || fail "retirement left task prompt receipts"
+  pass "Droid prompt receipts require exact payload, later sequence, and current generation"
+}
+
 test_apply_current_gen_reset() {
   local state out
   state=$(new_state_dir apply-current)
@@ -597,6 +628,7 @@ test_progress_is_generation_bound_and_not_semantic_state
 
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
+test_droid_prompt_receipt_matches_payload_and_submission_sequence
 test_apply_current_gen_reset
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen

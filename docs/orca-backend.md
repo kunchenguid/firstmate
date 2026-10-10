@@ -24,7 +24,9 @@ No manual repository registration is required.
 
 Open the Orca app to watch a task's terminal.
 Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
-Enter and Ctrl-C are supported; Escape is not.
+Enter and Ctrl-C are supported for every harness.
+Escape and Ctrl+U are verified for Droid on Orca 1.4.217 and 1.4.218 through raw terminal bytes; other harnesses do not inherit that lifecycle control capability.
+The `--screen` viewport read is limited to the exact terminal recorded for a Droid task; other harnesses retain the shared backend's existing capture capability boundary.
 
 ## Task shape and metadata
 
@@ -52,6 +54,7 @@ Exact command flags and response parsing are owned by `bin/backends/orca.sh` and
 `fm-peek.sh` reads with `orca terminal read`.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
+For a recorded Droid task, a matching post-Enter `UserPromptSubmit` receipt also confirms a typed send when the composer is temporarily unreadable during Droid's turn; the receipt binds the prompt digest and event sequence to the current task generation.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
@@ -72,7 +75,7 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 - Orca is macOS-only and explicit-only.
 - The app must be running and report ready.
 - Secondmate spawns are unsupported.
-- Escape is unsupported.
+- Escape and Ctrl+U are verified for Droid only.
 - Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Orca's worktree shape is unverified against the spawn-time Claude workspace-trust check in `bin/fm-claude-trust.sh`, which refuses any path that is not a linked git worktree sharing the project's git common dir, so a claude spawn on Orca fails loudly at that check rather than launching if Orca clones instead of linking.

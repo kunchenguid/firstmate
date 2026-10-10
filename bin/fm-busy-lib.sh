@@ -16,6 +16,12 @@
 #
 #   v1 gen=<token> seq=<uint> state=<busy|idle|unknown> source=<token> event=<token> ts=<epoch>
 #
+# Droid prompt receipts: state/<id>.droid-submit-receipts records only the
+# generation, busy-event sequence, and SHA-256 of each UserPromptSubmit
+# payload. The busy writer appends under the same lock as the state record;
+# typed Orca sends accept only an exact payload hash after their pre-Enter
+# sequence. Arm and retire remove the private receipt file.
+#
 # Gen sidecar: state/<id>.busy-gen - one token minted when the task's busy
 # wiring is armed (fm-spawn, or a documented recovery re-arm). Every event
 # must present the current gen; an event or record carrying any other gen is
@@ -231,6 +237,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
+    droid) adapter=droid-hook ;;
     devin) adapter=devin-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
@@ -305,6 +312,51 @@ fm_busy_record_read() {  # <state-dir> <id>
     return 1
   fi
   printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+}
+
+fm_busy_prompt_receipts_path() {  # <state-dir> <id>
+  printf '%s/%s.droid-submit-receipts' "$1" "$2"
+}
+
+fm_busy_prompt_hash_valid() {  # <lowercase SHA-256>
+  [ "${#1}" -eq 64 ] || return 1
+  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+fm_busy_prompt_sha256() {  # hash stdin without writing the prompt to disk
+  local digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256 | awk '{print $1}') || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum | awk '{print $1}') || return 1
+  else
+    return 1
+  fi
+  fm_busy_prompt_hash_valid "$digest" || return 1
+  printf '%s' "$digest"
+}
+
+fm_busy_prompt_receipt_after() {  # <state-dir> <id> <gen> <baseline-seq> <sha256>
+  local state=$1 id=$2 gen=$3 baseline=$4 digest=$5 file current
+  local ver receipt_gen receipt_seq receipt_digest extra seq
+  case "$baseline" in ''|*[!0-9]*) return 1 ;; esac
+  fm_busy_prompt_hash_valid "$digest" || return 1
+  current=$(fm_busy_current_gen "$state" "$id") || return 1
+  [ "$current" = "$gen" ] || return 1
+  file=$(fm_busy_prompt_receipts_path "$state" "$id")
+  [ -f "$file" ] || return 1
+  while IFS=' ' read -r ver receipt_gen receipt_seq receipt_digest extra; do
+    [ "$ver" = v1 ] && [ "$receipt_gen" = "gen=$gen" ] && [ -z "$extra" ] || continue
+    [ "$receipt_digest" = "sha256=$digest" ] || continue
+    case "$receipt_seq" in seq=*) seq=${receipt_seq#seq=} ;; *) continue ;; esac
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    if [ "$seq" -gt "$baseline" ]; then
+      current=$(fm_busy_current_gen "$state" "$id") || return 1
+      [ "$current" = "$gen" ]
+      return
+    fi
+  done < "$file"
+  return 1
 }
 
 # ---------------------------------------------------------------------------

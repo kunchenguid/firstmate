@@ -14,9 +14,11 @@
 #       the old gen are rejected as stale from then on.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
-#         --source S --event E
+#         --source S --event E [--prompt-sha256 HEX]
 #       Append one lifecycle event: validate the gen against the armed
 #       sidecar, advance seq under the lock, atomically replace the record.
+#       A Droid UserPromptSubmit may also append its prompt digest and exact
+#       event sequence to the task's private receipt file under that lock.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
 #       hook that outlives its incarnation fails closed here. The legacy
 #       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
@@ -44,7 +46,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
-  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E [--prompt-sha256 HEX]
   fm-busy-event.sh progress <state-dir> <id> --gen G
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
@@ -74,6 +76,7 @@ GEN=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
+PROMPT_SHA256=
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -89,6 +92,7 @@ while [ $# -gt 0 ]; do
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
+    --prompt-sha256) PROMPT_SHA256=${2:-}; shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -96,6 +100,13 @@ if [ "$CMD" = apply ] || [ "$CMD" = arm ]; then
   case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
   fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+fi
+if [ -n "$PROMPT_SHA256" ]; then
+  if [ "$CMD" != apply ] || [ "$NEW_STATE" != busy ] \
+    || [ "$SOURCE" != droid-hook ] || [ "$EVENT" != user-prompt-submit ]; then
+    usage
+  fi
+  fm_busy_prompt_hash_valid "$PROMPT_SHA256" || usage
 fi
 
 [ "$CMD" != progress ] || [ "$USE_CURRENT_GEN" = 0 ] || usage
@@ -160,7 +171,8 @@ if [ "$CMD" = arm ]; then
   lock_acquire || exit 1
   {
     printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
-      && write_record "$GEN" 1 && rm -f "$STATE/$ID.progress"
+      && write_record "$GEN" 1 \
+      && rm -f "$STATE/$ID.progress" "$(fm_busy_prompt_receipts_path "$STATE" "$ID")"
   } || { lock_release; umask "$old_umask"; echo "error: arm failed for $ID" >&2; exit 1; }
   lock_release
   umask "$old_umask"
@@ -183,7 +195,7 @@ fi
 lock_acquire || { umask "$old_umask"; exit 1; }
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
   if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
-    rm -f "$REC" "$STATE/$ID.progress" || {
+    rm -f "$REC" "$STATE/$ID.progress" "$(fm_busy_prompt_receipts_path "$STATE" "$ID")" || {
       lock_release
       umask "$old_umask"
       echo "error: busy-state retirement failed for $ID" >&2
@@ -208,7 +220,7 @@ if [ "$GEN" != "$CURRENT" ]; then
   exit 1
 fi
 if [ "$CMD" = retire ]; then
-  rm -f "$GEN_FILE" "$REC" "$STATE/$ID.progress" || {
+  rm -f "$GEN_FILE" "$REC" "$STATE/$ID.progress" "$(fm_busy_prompt_receipts_path "$STATE" "$ID")" || {
     lock_release
     umask "$old_umask"
     echo "error: busy-state retirement failed for $ID" >&2
@@ -238,12 +250,22 @@ if [ -f "$REC" ]; then
       ;;
   esac
 fi
-write_record "$GEN" $((OLD_SEQ + 1)) || {
+NEXT_SEQ=$((OLD_SEQ + 1))
+write_record "$GEN" "$NEXT_SEQ" || {
   lock_release
   umask "$old_umask"
   echo "error: record write failed for $ID" >&2
   exit 1
 }
+if [ -n "$PROMPT_SHA256" ]; then
+  printf 'v1 gen=%s seq=%s sha256=%s\n' "$GEN" "$NEXT_SEQ" "$PROMPT_SHA256" \
+    >> "$(fm_busy_prompt_receipts_path "$STATE" "$ID")" || {
+      lock_release
+      umask "$old_umask"
+      echo "error: prompt receipt write failed for $ID" >&2
+      exit 1
+    }
+fi
 lock_release
 umask "$old_umask"
 exit 0

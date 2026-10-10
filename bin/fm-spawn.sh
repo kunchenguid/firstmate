@@ -202,7 +202,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|droid)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -431,7 +431,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, devin, and droid are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1803,13 +1803,27 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
-  fm_control_backend_state_verified "$BACKEND" || {
-    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
-    exit 1
-  }
+  # A relaunch must prove the previous agent is gone before it launches
+  # another into the same endpoint. Orca Droid has a generation-bound
+  # SessionEnd hook; other Orca harnesses retain the generic refusal.
+  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  if [ "$BACKEND" = orca ] && [ "$RELAUNCH_PRIOR_HARNESS" = droid ]; then
+    fm_control_droid_session_ended "$STATE" "$ID" "$RELAUNCH_META" || {
+      echo "error: Orca Droid relaunch has no current-generation SessionEnd proof with its process gone; refusing a duplicate agent" >&2
+      exit 1
+    }
+    fm_backend_target_exists orca "$RELAUNCH_TARGET" "fm-$ID" || {
+      echo "error: Orca Droid's recorded terminal cannot be re-read after SessionEnd; refusing to guess whether it can be adopted" >&2
+      exit 1
+    }
+    RELAUNCH_STATE=dead
+  else
+    fm_control_backend_state_verified "$BACKEND" || {
+      echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
+      exit 1
+    }
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  fi
   # Two states are agent-free, and both license a relaunch:
   #   dead    - the endpoint exists and confidently holds no agent. The
   #             endpoint is ADOPTED, so the task keeps its exact address.
@@ -1839,7 +1853,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # owns that vocabulary). The proof itself lives in one place for the whole
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   if [ "$RELAUNCH_STATE" = missing ]; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
@@ -1860,7 +1873,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
       ;;
   esac
-  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   # A secondmate whose endpoint is gone already has ONE owner for that
@@ -1923,7 +1935,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | droid)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2041,6 +2053,35 @@ agy_model_validate() {  # <agy-bin> <model>
   fi
   echo "error: agy model '$model' is not listed by 'agy models'; choose a listed id or omit --model" >&2
   return 1
+}
+
+# Droid's exec help is its model-specific effort catalog. Interactive Droid
+# accepts neither --model nor --reasoning-effort, so the selected values are
+# carried by per-task settings below. Keep an unsupported effort recorded in
+# metadata but omit it from those settings, matching the common adapter policy.
+# Without an explicit model Droid runs the operator's own default, whose
+# catalog entry is unknown here, so the effort is omitted too.
+droid_catalog_efforts() {  # <model-id>, help text on stdin
+  awk -v wanted="$1" '
+    /^Available Models:/ { section="models"; next }
+    /^Model details:/ { section="details"; next }
+    section=="models" && /^  [^[:space:]]+[[:space:]]+/ {
+      id=$1; label=$0
+      sub(/^  [^[:space:]]+[[:space:]]+/, "", label)
+      sub(/ [(]default[)]$/, "", label)
+      if (id==wanted) selected=label
+    }
+    section=="details" && selected!="" && index($0, "  - " selected ": supports reasoning:")==1 {
+      supported=$0
+      sub(/^.*supported: \[/, "", supported)
+      sub(/\].*$/, "", supported)
+      gsub(/, /, " ", supported)
+      print supported
+      found=1
+      exit
+    }
+    END { if (!found) exit 1 }
+  '
 }
 
 # The verified launch command per adapter. The knowledge half of each adapter
@@ -2187,6 +2228,11 @@ launch_template() {
   # agy exposes no hook surface, so busy state is a rendered-tail fallback
   # (bin/fm-busy-lib.sh) and nothing is armed below.
   agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
+  # Interactive Droid has no --model or --reasoning-effort flags. A private
+  # --settings file selects both and installs this task's lifecycle hooks.
+  # --auto high is paired with sessionDefaultSettings.autonomyLevel=high in
+  # that file: the 0.230.0 TUI observed --auto high alone ending at Auto (Off).
+  droid) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FACTORY_DROID_AUTO_UPDATE_ENABLED=false __DROIDBIN__ --settings __DROIDSETTINGS__ --auto high "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -2371,7 +2417,7 @@ esac
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = droid ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2393,6 +2439,58 @@ if [ "$KIND" != secondmate ]; then
 fi
 
 case "$HARNESS" in
+droid)
+  if [ "$RAW_LAUNCH" -eq 0 ]; then
+    case "$BACKEND" in
+      tmux|orca) ;;
+      *)
+        echo "error: Droid on backend '$BACKEND' has no verified composer and lifecycle control; use tmux or Orca" >&2
+        exit 1
+        ;;
+    esac
+    DROID_BIN=$(command -v droid) || {
+      echo "error: droid executable not found on PATH" >&2
+      exit 1
+    }
+    if [ "$BACKEND" != orca ]; then
+      fm_backend_visible_capture_supported "$BACKEND" || {
+        echo "error: refusing Droid spawn because backend '$BACKEND' has no verified viewport capture for its folder-trust dialog" >&2
+        exit 1
+      }
+    fi
+    if [ "$BACKEND" = orca ] && ! orca terminal read --help 2>/dev/null | grep -Fq -- '--screen'; then
+      echo "error: Droid on Orca requires 'orca terminal read --screen' for its folder-trust viewport; update Orca before spawning" >&2
+      exit 1
+    fi
+    if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+      droid_probe_rc=0
+      FACTORY_DROID_AUTO_UPDATE_ENABLED=false fm_run_timed 20 "$DROID_BIN" exec --model "$MODEL" --list-tools >/dev/null </dev/null \
+        || droid_probe_rc=$?
+      if fm_timed_out "$droid_probe_rc"; then
+        echo "error: Droid did not answer the model check for '$MODEL' within 20s; check its network and sign-in, then retry or omit --model" >&2
+        exit 1
+      elif [ "$droid_probe_rc" -ne 0 ]; then
+        echo "error: Droid's model check for '$MODEL' failed (exit $droid_probe_rc); if its message above is not a model rejection, check its network and sign-in, otherwise choose an id from 'droid exec --help' or omit --model" >&2
+        exit 1
+      fi
+    fi
+    DROID_EFFORT_APPLY=$EFFORT
+    if [ -n "$EFFORT" ] && [ "$EFFORT" != default ]; then
+      supported=
+      if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+        droid_help=$(FACTORY_DROID_AUTO_UPDATE_ENABLED=false fm_run_timed 10 "$DROID_BIN" exec --help </dev/null 2>/dev/null) || droid_help=
+        supported=$(printf '%s\n' "$droid_help" | droid_catalog_efforts "$MODEL") || supported=
+      fi
+      case " $supported " in
+        *" $EFFORT "*) ;;
+        *)
+          DROID_EFFORT_APPLY=
+          echo "notice: Droid model '${MODEL:-default}' does not establish support for effort '$EFFORT' (catalog supports: ${supported:-unknown}); recording effort but omitting it from runtime settings" >&2
+          ;;
+      esac
+    fi
+  fi
+  ;;
 devin)
   DEVIN_BIN=$(command -v devin) || {
     echo "error: devin executable not found on PATH" >&2
@@ -3684,6 +3782,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # uncommitted changes are exactly as the previous agent left them, and nothing
   # below may touch them.
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+  if [ "$BACKEND" = orca ]; then
+    # Orca's worktree and terminal are the endpoint this relaunch adopts.
+    # Keep both recorded ids when publishing the replacement generation;
+    # neither is returned again by the fresh-spawn create branch below.
+    ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
+    ORCA_TERMINAL=$(fm_meta_get "$RELAUNCH_META" terminal)
+  fi
   if [ "$RELAUNCH_REBIND" -eq 0 ]; then
     # Adopt the recorded endpoint instead of creating one. This is what keeps a
     # relaunch a REPLACEMENT rather than a second copy of the task: no new
@@ -4381,6 +4486,81 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# A fresh worktree presents Droid's folder-trust dialog even with --auto high.
+# Only a complete live viewport authorizes Enter; the initial prompt is proved
+# delivered by Droid's own UserPromptSubmit hook replacing the fm-spawn seed.
+droid_capture_visible() {
+  local bound=${FM_DROID_CAPTURE_TIMEOUT:-5}
+  case "$bound" in ''|*[!0-9]*|0*) bound=5 ;; esac
+  (
+    export FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME FM_STATE_OVERRIDE="$STATE_REAL" FM_CONFIG_OVERRIDE="$CONFIG"
+    # shellcheck disable=SC2016 # The child shell expands these positional arguments.
+    fm_run_timed "$bound" bash -c '
+      . "$1/bin/fm-backend.sh"
+      fm_backend_visible_capture "$2" "$3" "$4"
+    ' bash "$FM_ROOT" "$BACKEND" "$T" "$W" </dev/null
+  )
+}
+
+droid_wait_for_delivery() {
+  local pane record answered=0 trust_seen=0 captures_ok=0 capture_rc=0
+  local i=0 max=${FM_DROID_READY_POLLS:-120} interval=${FM_DROID_POLL_INTERVAL:-0.5}
+  local seconds=${FM_DROID_READY_SECONDS:-60} deadline
+  case "$seconds" in ''|*[!0-9]*|0*) seconds=60 ;; esac
+  deadline=$(($(date +%s) + seconds))
+  DROID_READY_FAILURE_DETAIL=
+  while [ "$i" -lt "$max" ] && [ "$(date +%s)" -le "$deadline" ]; do
+    if pane=$(droid_capture_visible 2>/dev/null); then
+      captures_ok=$((captures_ok + 1))
+    else
+      capture_rc=$?
+      i=$((i + 1))
+      [ "$i" -ge "$max" ] || sleep "$interval"
+      continue
+    fi
+    if printf '%s\n' "$pane" | grep -Fq 'Trust this folder?'; then
+      trust_seen=1
+      if printf '%s\n' "$pane" | grep -Eq '^[[:space:]]*>[[:space:]]*2[.] Exit without trusting[[:space:]]*$'; then
+        DROID_READY_FAILURE_DETAIL='Droid folder-trust dialog has Exit without trusting selected; refusing Enter'
+        return 1
+      fi
+      if [ "$answered" -eq 0 ] \
+        && printf '%s\n' "$pane" | grep -Fq 'Exit without trusting' \
+        && printf '%s\n' "$pane" | grep -Fq 'Enter to confirm' \
+        && printf '%s\n' "$pane" | grep -Eq '^[[:space:]]*>[[:space:]]*1[.] Trust this folder[[:space:]]*$'; then
+        spawn_send_key "$T" Enter || {
+          DROID_READY_FAILURE_DETAIL='Droid affirmative folder-trust answer could not be delivered'
+          return 1
+        }
+        answered=1
+      fi
+    else
+      record=$(fm_busy_record_read "$STATE_REAL" "$ID" 2>/dev/null || true)
+      case "$record" in
+        "busy droid-hook user-prompt-submit "*|"idle droid-hook stop "*) return 0 ;;
+      esac
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  if [ "$captures_ok" -eq 0 ]; then
+    DROID_READY_FAILURE_DETAIL="Droid viewport capture never succeeded (last exit $capture_rc); check backend readiness"
+  elif [ "$trust_seen" -eq 1 ] && [ "$answered" -eq 0 ]; then
+    DROID_READY_FAILURE_DETAIL='Droid folder-trust dialog never showed a selected Trust this folder choice; no key was sent'
+  elif [ "$trust_seen" -eq 1 ] && [ "$answered" -eq 1 ]; then
+    DROID_READY_FAILURE_DETAIL='Droid folder-trust dialog was answered but the launch prompt hook did not acknowledge the brief; check sign-in and hook policy'
+  else
+    DROID_READY_FAILURE_DETAIL='Droid launch prompt hook did not acknowledge the brief; check sign-in and whether hooks are disabled'
+  fi
+  return 1
+}
+
+droid_spawn_fail() {  # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+}
+
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
@@ -4634,7 +4814,7 @@ if [ "$KIND" != secondmate ]; then
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin)
+  gemini | devin | droid)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -4714,6 +4894,38 @@ EOF
       cat >"$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
 EOF
+    fi
+    ;;
+  droid)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      # Droid loads runtime settings passed with --settings for this process.
+      # The private file avoids modifying project or user hooks. Its prompt,
+      # completion, cancellation, and exit hooks are a closed busy-state pair.
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source droid-hook"
+      # Keep the exact submitted prompt digest beside its busy-event sequence
+      # so an Orca typed send cannot borrow a concurrent inbox doorbell hook.
+      d_submit="$(shell_quote "$FM_ROOT/bin/fm-droid-prompt-hook.sh") $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true"
+      d_stop="$busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 && touch $(shell_quote "$TURNEND") || true"
+      d_idle="jq -e '.notification_type == \"idle_prompt\"' >/dev/null 2>&1 && $busy_cmd_prefix idle $busy_suffix --event idle-prompt >/dev/null 2>&1 || true"
+      # SessionEnd records a session close for Orca stop detection, which also
+      # requires the Droid process to be gone. An old session cannot mark its
+      # replacement because the busy writer checks the gen.
+      d_end="$(shell_quote "$FM_ROOT/bin/fm-droid-session-end-hook.sh") $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true"
+      jq -n --arg model "$MODEL" --arg effort "$DROID_EFFORT_APPLY" \
+        --arg submit "$d_submit" --arg stop "$d_stop" --arg idle "$d_idle" --arg end "$d_end" '
+        {statusLine:{type:"command",command:"printf firstmate"},
+         sessionDefaultSettings:{interactionMode:"auto",autonomyLevel:"high"},
+         hooks:{
+           UserPromptSubmit:[{hooks:[{type:"command",command:$submit}]}],
+           Stop:[{hooks:[{type:"command",command:$stop}]}],
+           Notification:[{hooks:[{type:"command",command:$idle}]}],
+           SessionEnd:[{hooks:[{type:"command",command:$end}]}]
+         }}
+        + (if $model != "" and $model != "default" then {model:$model} else {} end)
+        + (if (["low","medium","high","xhigh","max"] | index($effort)) != null
+           then {reasoningEffort:$effort} else {} end)
+      ' >"$STATE_REAL/$ID.droid-settings.json" || exit 1
     fi
     ;;
   opencode*)
@@ -5273,6 +5485,12 @@ LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
 pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
+droid)
+  if [ "$RAW_LAUNCH" -eq 0 ]; then
+    LAUNCH=${LAUNCH//__DROIDBIN__/"$(shell_quote "$DROID_BIN")"}
+    LAUNCH=${LAUNCH//__DROIDSETTINGS__/"$(shell_quote "$STATE_REAL/$ID.droid-settings.json")"}
+  fi
+  ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
@@ -5614,6 +5832,12 @@ if [ "$HARNESS" = agy ]; then
     else
       agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
     fi
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = droid ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! droid_wait_for_delivery; then
+    droid_spawn_fail "$DROID_READY_FAILURE_DETAIL"
     exit 1
   fi
 fi
