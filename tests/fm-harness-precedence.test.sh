@@ -187,6 +187,31 @@ test_genuine_marker_and_ancestry_agree() {
   pass "a harness that publishes a marker inside its own process tree is unchanged"
 }
 
+# A session started by typing `Claude` on macOS's case-insensitive filesystem
+# runs claude under that process name. Unrecognized, that session lost its
+# ancestry verdict and a retained foreign marker renamed it.
+test_capitalized_claude_title_decides_at_comm_strength() {
+  local dir fakebin bin got
+  dir="$TMP_ROOT/capitalized-title"
+  fakebin=$(blind_ancestry_bin "$dir/blind")
+  bin=$(named_bin "$dir/titled-tree" Claude)
+
+  got=$(with_blind_ancestry "$fakebin" CURSOR_AGENT=1)
+  [ "$got" = cursor ] \
+    || fail "an inherited CURSOR_AGENT alone resolved '$got', expected cursor (the marker signal is not live)"
+
+  got=$(under_process "$bin" CURSOR_AGENT=1)
+  [ "$got" = claude ] \
+    || fail "a session titled Claude holding a retained CURSOR_AGENT resolved '$got', expected claude"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    "$bin" -c "r=\$(\"$HARNESS\" ancestry); printf '%s' \"\$r\"")
+  [ "$got" = "comm claude" ] \
+    || fail "a session titled Claude must decide at comm strength, got '$got'"
+  pass "a Claude Code session titled Claude keeps its identity at comm strength"
+}
+
 # Cursor is the case that motivated the pre-existing marker ordering: a cursor
 # session started by hand under a claude primary carries BOTH markers. Ancestry
 # is silent about which owns the tree there, so the ordering still decides.
@@ -828,6 +853,7 @@ test_supervision_protocol_follows_corrected_verdict() {
 
 test_markerless_ancestry_outranks_foreign_marker
 test_genuine_marker_and_ancestry_agree
+test_capitalized_claude_title_decides_at_comm_strength
 test_cursor_ordering_still_decides_when_ancestry_is_silent
 test_retained_cursor_marker_does_not_rename_a_nested_claude
 test_pi_signed_survives_agreeing_ancestry
