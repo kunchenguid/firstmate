@@ -524,6 +524,7 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
+Inside a watcher poll cycle each such call is also time-bounded; [Guard grace and the poll cadence](turnend-guard.md#guard-grace-and-the-poll-cadence) owns that bound and its unknown-result handling.
 
 When the selected named server is not running, the adapter launches it without these inherited values:
 
