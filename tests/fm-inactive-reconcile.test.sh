@@ -1574,7 +1574,7 @@ EOF
     FM_INACTIVE_RECONCILE_BUDGET_SECS=10 scan_handoff "$home"
   [ "$(records_for_count "$home" c)" = 0 ] \
     || fail "the later handoff was reached before the simulated budget was exhausted"
-  [ "$(handoff_field "$home/state/handoff-continuations/.cursor" cursor)" = b ] \
+  [ "$(handoff_field "$home/state/handoff-continuations/.cursor" cursor)" = a ] \
     || fail "the exhausted handoff pass did not persist the last visited task"
   FM_HANDOFF_CLOCK="$WORLD/handoff-clock" FM_HANDOFF_CREW_LOG="$WORLD/handoff-crew.log" \
     FM_INACTIVE_RECONCILE_BUDGET_SECS=10 scan_handoff "$home"
@@ -1585,6 +1585,59 @@ EOF
   [ -z "$(handoff_field "$home/state/handoff-continuations/.cursor" cursor)" ] \
     || fail "the handoff cursor remained after a complete traversal"
   pass "a bounded handoff scan resumes after its durable cursor"
+}
+
+test_handoff_reserves_time_for_a_terminal_outcome() {
+  local home real_date clock_start
+  make_world handoff-terminal-reserve
+  install_handoff_fakes
+  home=$MAIN
+  for id in a b c; do
+    write_child "$home" "$id" "needs-validation [at=$HANDOFF_OLD]: committed $id" "inc-$id-1"
+  done
+  write_child "$home" terminal 'done: green' inc-terminal-1
+  real_date=$(command -v date)
+  clock_start=$(date +%s)
+  printf '%s\n' "$clock_start" > "$WORLD/handoff-clock"
+  printf 'epoch=%s\ncursor=c\n' "$clock_start" > "$home/state/.inactive-outcome-reconcile"
+  cat > "$WORLD/fakebin/date" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  cat "\${FM_HANDOFF_CLOCK:?}"
+else
+  exec "$real_date" "\$@"
+fi
+EOF
+  cat > "$WORLD/fakebin/timeout" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = -k ] || exit 2
+shift 2
+seconds=$1
+shift
+id=${!#}
+if [ "$id" = terminal ] && [ "$seconds" -lt 5 ]; then
+  exit 124
+fi
+exec "$@"
+EOF
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  a|b|c)
+    now=$(cat "${FM_HANDOFF_CLOCK:?}")
+    printf '%s\n' "$((now + 5))" > "${FM_HANDOFF_CLOCK:?}"
+    printf 'state: working · source: fake\n'
+    ;;
+  terminal) printf 'state: done · source: fake\n' ;;
+  *) printf 'state: working · source: fake\n' ;;
+esac
+EOF
+  chmod +x "$WORLD/fakebin/date" "$WORLD/fakebin/timeout" "$WORLD/fakebin/fm-crew-state.sh"
+  FM_HANDOFF_CLOCK="$WORLD/handoff-clock" FM_INACTIVE_RECONCILE_BUDGET_SECS=10 \
+    run_reconcile "$home" --startup
+  grep -Fq 'child=terminal state=done' "$home/state/.wake-queue" \
+    || fail "a slow handoff pass starved the terminal outcome"
+  pass "handoff reconciliation reserves a bounded terminal-outcome read"
 }
 
 test_handoff_idle_clears_only_on_continuation() {
@@ -1980,6 +2033,7 @@ test_handoff_idle_compacted_duplicate_hold_clears_pending
 test_handoff_idle_compacted_distinct_hold_clears_earlier
 test_handoff_idle_compacted_duplicate_hold_without_prefix_clears_pending
 test_handoff_idle_cursor_reaches_later_tasks_after_budget_exhaustion
+test_handoff_reserves_time_for_a_terminal_outcome
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan
 test_handoff_idle_bound_refuses_out_of_range

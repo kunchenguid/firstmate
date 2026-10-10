@@ -1066,25 +1066,45 @@ handoff_pass() {
 }
 
 scan() {
-  local startup=${1:-0} self='' cursor handoff_cursor deadline rc=0 handoff_rc=0 marker_rc=0
+  local startup=${1:-0} self='' cursor handoff_cursor deadline handoff_deadline handoff_reserve marker_age
+  local rc=0 handoff_rc=0 marker_rc=0 terminal_due=0 handoff_scanned=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
+  if [ "$startup" = 1 ]; then
+    terminal_due=1
+  else
+    marker_age=$(scan_marker_age)
+    if [ $((marker_age + FM_INACTIVE_RECONCILE_BUDGET_SECS)) -ge "$FM_INACTIVE_RECONCILE_SECS" ]; then
+      terminal_due=1
+    fi
+  fi
+  handoff_deadline=$deadline
+  if [ "$terminal_due" -eq 1 ]; then
+    handoff_reserve=$FM_INACTIVE_RECONCILE_BUDGET_SECS
+    [ "$handoff_reserve" -le 5 ] || handoff_reserve=5
+    handoff_deadline=$((deadline - handoff_reserve))
+  fi
   # Before the cadence gate, so a 180-second handoff bound is not stuck
   # behind the 900-second terminal scan.
   handoff_cursor=$(handoff_cursor)
   valid_id "$handoff_cursor" || handoff_cursor=''
-  HANDOFF_FIRST_VISIT_PENDING=1
-  handoff_pass "$handoff_cursor" after "$deadline" || handoff_rc=$?
-  if [ "$handoff_rc" -eq 0 ] && [ -n "$handoff_cursor" ]; then
-    handoff_pass "$handoff_cursor" through "$deadline" || handoff_rc=$?
+  if [ "$(date +%s)" -lt "$handoff_deadline" ]; then
+    handoff_scanned=1
+    HANDOFF_FIRST_VISIT_PENDING=1
+    handoff_pass "$handoff_cursor" after "$handoff_deadline" || handoff_rc=$?
+    if [ "$handoff_rc" -eq 0 ] && [ -n "$handoff_cursor" ]; then
+      handoff_pass "$handoff_cursor" through "$handoff_deadline" || handoff_rc=$?
+    fi
   fi
-  if [ "$handoff_rc" -eq 0 ]; then
-    handoff_write_cursor '' || return 1
-  elif [ "$handoff_rc" -eq 3 ]; then
-    :
-  else
-    return "$handoff_rc"
+  if [ "$handoff_scanned" -eq 1 ]; then
+    if [ "$handoff_rc" -eq 0 ]; then
+      handoff_write_cursor '' || return 1
+    elif [ "$handoff_rc" -eq 3 ]; then
+      :
+    else
+      return "$handoff_rc"
+    fi
   fi
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
