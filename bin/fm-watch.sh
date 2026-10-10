@@ -710,7 +710,6 @@ signal_turnend_panes_churned() {  # <file> ...
   done
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    beat
     rec_task=${meta##*/}
     rec_task=${rec_task%.meta}
     kind=$(fm_meta_get "$meta" kind)
@@ -736,7 +735,6 @@ signal_turnend_panes_churned() {  # <file> ...
   # or tests/. A batch is normally one to three tasks and captures dominate its
   # cost; indexed lookup is the upgrade path if coalesced batches grow large.
   for task in "${signal_tasks[@]}"; do
-    beat
     task_index=-1
     for ((i = 0; i < ${#snapshot_tasks[@]}; i++)); do
       [ "${snapshot_tasks[$i]}" = "$task" ] && { task_index=$i; break; }
@@ -977,7 +975,6 @@ secondmate_wake_stall_tick() {
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    beat
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] || continue
     remote_host=$(fm_meta_get "$meta" remote_host)
