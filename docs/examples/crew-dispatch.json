@@ -17,6 +17,11 @@
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
       "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
+    },
+    {
+      "when": "The task is long multi-step research or investigation where most turns are routine but the plan and the final judgment decide the outcome.",
+      "use": { "harness": "claude", "model": "claude-haiku-5-5", "effort": "low", "advisor": "opus" },
+      "why": "A fast main model that consults a stronger Claude Code advisor at decision points; advisor applies only to claude profiles."
     }
   ],
   "default": [

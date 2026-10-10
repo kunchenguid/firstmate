@@ -5,7 +5,7 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--advisor <model>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -64,8 +64,13 @@
 #              answer. Reclaim is HERDR-ONLY for the reason `exit` gives above:
 #              a tmux `missing` cannot be proven absent from a task record, so
 #              it refuses.
-#              An explicit `default` model or effort clears that
-#              axis for the replacement. With no explicit axis, a secondmate
+#              An explicit `default` model, effort, or advisor clears that
+#              axis for the replacement. A crewmate or scout that stays on
+#              claude keeps its recorded Claude Code advisor unless --advisor
+#              names another; a switch to another harness drops it, and the
+#              replacement's advisor must pass bin/fm-claude-advisor-lib.sh
+#              against its model before the old agent stops. A secondmate
+#              takes no advisor. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
 #              plus its optional model and effort tokens) exactly as any other
 #              respawn does, while a ship or scout keeps the exact adapter
@@ -175,6 +180,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-claude-advisor-lib.sh
+. "$SCRIPT_DIR/fm-claude-advisor-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
@@ -243,9 +250,11 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+NEW_ADVISOR=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+ADVISOR_SET=0
 NOTE=
 NOTE_SET=0
 control_want_value=
@@ -258,6 +267,7 @@ for control_arg in "$@"; do
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      advisor) NEW_ADVISOR=$control_arg; ADVISOR_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -275,6 +285,8 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --advisor) control_want_value=advisor ;;
+    --advisor=*) NEW_ADVISOR=${control_arg#--advisor=}; ADVISOR_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -292,12 +304,13 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$ADVISOR_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --advisor, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
+[ "$ADVISOR_SET" = 0 ] || [ -n "$NEW_ADVISOR" ] || die "--advisor requires a non-empty value"
 case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max|ultra) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max, ultra" ;;
@@ -781,9 +794,11 @@ CONFIG_MODEL=
 CONFIG_EFFORT=
 PRIOR_MODEL=
 PRIOR_EFFORT=
+PRIOR_ADVISOR=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
+TARGET_ADVISOR=
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -803,6 +818,8 @@ journal_write() {  # <phase> [extra-line]...
     echo "to_harness=$TARGET_HARNESS"
     echo "to_model=$TARGET_MODEL"
     echo "to_effort=$TARGET_EFFORT"
+    echo "from_advisor=$PRIOR_ADVISOR"
+    echo "to_advisor=$TARGET_ADVISOR"
     local line
     for line in "$@"; do
       echo "$line"
@@ -887,6 +904,8 @@ resolve_relaunch_profile() {
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
+  PRIOR_ADVISOR=$(fm_meta_get "$META" advisor)
+  [ -n "$PRIOR_ADVISOR" ] || PRIOR_ADVISOR=default
   if [ "$HARNESS_SET" = 0 ] \
      && [ "$PRIOR_RECORDED_HARNESS" != "$PRIOR_HARNESS" ]; then
     die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"
@@ -953,6 +972,23 @@ resolve_relaunch_profile() {
   fi
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
+  fi
+  # The advisor belongs to a claude crewmate or scout, so it survives only a
+  # relaunch that stays on claude; checked here, before the old agent stops.
+  if [ "$ADVISOR_SET" = 1 ]; then
+    TARGET_ADVISOR=$NEW_ADVISOR
+  elif [ "$TARGET_HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+    TARGET_ADVISOR=$PRIOR_ADVISOR
+  else
+    TARGET_ADVISOR=default
+  fi
+  if [ "$TARGET_ADVISOR" != default ]; then
+    [ "$KIND" != secondmate ] || die "--advisor applies only to crewmate and scout tasks; secondmate $ID takes no advisor"
+    local advisor_problem advisor_model=$TARGET_MODEL
+    [ "$advisor_model" != default ] || advisor_model=
+    advisor_problem=$(fm_claude_advisor_problem "$TARGET_HARNESS" "$advisor_model" "$TARGET_ADVISOR") \
+      || die "could not validate advisor '$TARGET_ADVISOR' (jq unavailable or failed)"
+    [ -z "$advisor_problem" ] || die "relaunching $ID: $advisor_problem; pass --advisor default to relaunch without one, or name another"
   fi
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
@@ -1117,6 +1153,12 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  # Always explicit, so the launch owner never falls back to the recorded one.
+  if [ "$TARGET_ADVISOR" != default ]; then
+    spawn_args+=(--advisor "$TARGET_ADVISOR")
+  elif [ "$PRIOR_ADVISOR" != default ]; then
+    spawn_args+=(--advisor default)
+  fi
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
@@ -1150,7 +1192,7 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT advisor=$TARGET_ADVISOR backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
 # --- verbs ------------------------------------------------------------------

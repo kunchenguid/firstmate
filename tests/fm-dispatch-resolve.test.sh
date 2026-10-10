@@ -414,7 +414,7 @@ assert_contains "$out" "  profile: --harness 'gemini' --model 'gemini-3.8-flash-
 
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
 cat > "$RESPONSE" <<'JSON'
-{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}}},"usage":{"input_tokens":812,"output_tokens":60}}
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"rule_4":0.02,"default":0.92}}},"usage":{"input_tokens":812,"output_tokens":60}}
 JSON
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
@@ -948,6 +948,33 @@ TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "http 500 is a TOON error outcome"
 pass "API, transport, and response failures are error outcomes with exit 0"
 
+# --- advisor: carried on the chosen profile line ----------------------------------
+reset_log
+write_quota "$QUOTA" -0.9
+jq '.rules[3].use = [
+  { "harness": "claude", "model": "claude-haiku-5-5", "advisor": "opus" },
+  { "harness": "claude", "model": "claude-haiku-5-5" },
+  { "harness": "cursor", "model": "cursor-grok-4.6-medium" }
+]' "$BASE_RULES" > "$RULES"
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "advisor profiles resolve"
+assert_contains "$out" 'candidate: claude:claude-haiku-5-5  advisor=opus  provider=claude' "the advisor is shown on its candidate"
+assert_contains "$out" '  status: escalate' "two profiles differing only by advisor tie on the same quota row"
+write_quota "$QUOTA" -0.9
+jq '.rules[3].use = [
+  { "harness": "claude", "model": "claude-haiku-5-5", "advisor": "opus" },
+  { "harness": "cursor", "model": "cursor-grok-4.6-medium" }
+]' "$BASE_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "an advisor profile can win"
+assert_contains "$out" "  profile: --harness 'claude' --model 'claude-haiku-5-5' --advisor 'opus'" "the chosen advisor rides on the profile line"
+assert_not_contains "$(cat "$LOG/body")" 'advisor' "the advisor never leaves the machine"
+cp "$BASE_RULES" "$RULES"
+write_quota "$QUOTA" 0.7597
+pass "advisor: validated, shown per candidate, and carried on the profile line"
+
 # --- configuration errors exit 2 and select nothing ----------------------------------
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err
@@ -977,6 +1004,11 @@ for bad in \
   '{"rules":[{"when":"x","use":[{"harness":"codex","model":"gpt-5.5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]}]}|each rule use must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
+  '{"rules":[{"when":"x","use":{"harness":"codex","advisor":"opus"}}]}|use profile advisor applies only to the claude harness, not codex' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","advisor":""}}]}|use profile advisor must be a non-empty string' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","model":"claude-opus-5-5","advisor":"claude-sonnet-5-5"}}]}|use profile advisor claude-sonnet-5-5 ranks below main model claude-opus-5-5' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","advisor":"claude-haiku-4-5"}}]}|use profile advisor claude-haiku-4-5 cannot act as an advisor' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"}}],"default":{"harness":"claude","advisor":"haiku"}}|default profile advisor haiku must be fable, opus, sonnet, or a full claude-* model id' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
   '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|use profiles whose harness lacks one authoritative provider family require provider: opencode' \
   '{"rules":[{"when":"x","use":{"harness":"rovo"}}]}|use profiles whose harness lacks one authoritative provider family require provider: rovo' \

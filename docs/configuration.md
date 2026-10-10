@@ -1088,7 +1088,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 Firstmate chooses the best matching rule with judgment; shell scripts do not match the natural-language rules.
-Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, `--effort`, and, for a claude profile that declares one, `--advisor` flags to `fm-spawn.sh`.
 
 **Spawn requirements**
 
@@ -1110,7 +1110,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "min_confidence": 0.85,
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "advisor": "<optional Claude Code advisor, claude only>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
@@ -1129,7 +1129,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | Rule `when` and `use` | Required for each rule. |
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
-| Profile `model` and `effort`; rule `why` | Optional. |
+| Profile `model`, `effort`, and `advisor`; rule `why` | Optional. |
 
 **Fields applied only by typed resolution**
 
@@ -1179,13 +1179,23 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 - Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
 - Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 
+**Claude Code advisor**
+
+- A profile `advisor` pairs a claude worker with a [Claude Code advisor model](https://code.claude.com/docs/en/advisor) that it consults at decision points, such as a `claude-haiku-5-5` worker with an `opus` advisor.
+- It is accepted only on a `claude` profile and reaches that one worker as Claude Code's per-session `--advisor` launch flag, which overrides the operator's saved `advisorModel` setting for that session without changing it, so no other worker, including other claude workers, gains this advisor.
+- Accepted values are the aliases `fable`, `opus`, and `sonnet`, or a full `claude-*` model id; [`bin/fm-claude-advisor-lib.sh`](../bin/fm-claude-advisor-lib.sh) owns them and its copy of Claude Code's pairing table.
+- A pairing that table rejects, such as a `sonnet` advisor for a `claude-opus-5-5` worker, and a model that can never advise, such as Haiku 4.5, are refused, because Claude Code would otherwise start the worker without the advisor and say so only in its own pane.
+- A pairing that cannot be decided from the profile, such as an alias whose version matters or a profile with no `model`, is left to Claude Code, which exits at launch only on an advisor that can never advise or another launch error such as an allowlist or Fable consent, while an advisor ranked below the main model only warns in the worker's own pane and runs without it; set `model` on an advisor profile so the pairing can be checked here.
+- Unlike the resolver-only fields below, `advisor` changes the launch, so bootstrap and the resolver validate it with or without typed resolution; it adds nothing to quota selection, where advisor usage counts toward the worker's own Claude plan row.
+- The task record keeps it as `advisor=`, a relaunch that stays on claude keeps it, a switch to another harness drops it, and `bin/fm-control.sh <id> relaunch --advisor default` clears it.
+
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 
 **Validation and diagnostics**
 
 - When the file exists, bootstrap validates it with `jq`.
 - Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-- Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
+- Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, an effort value unsupported by that harness, or an `advisor` refused under "Claude Code advisor" above is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
 - While typed resolution is active, malformed `approval`, `min_confidence`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 - Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 - While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
@@ -1275,7 +1285,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 
 - Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
 - Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
-- On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
+- On the opted-in path, duplicate concrete profiles with the same harness, model, effort, and advisor inside one rule or the default array are configuration errors rather than ties.
 
 **Outcomes and exit status**
 

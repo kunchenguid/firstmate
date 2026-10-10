@@ -525,7 +525,67 @@ test_claude_threads_model_and_effort() {
   assert_contains "$launch" "$CLAUDE_CONTROL_CHANNEL_FLAG --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
+  assert_not_contains "$launch" "--advisor" "a claude launch without an advisor must not receive one"
+  assert_no_grep 'advisor=' "$HOME_DIR/state/$id.meta" "a task without an advisor must not record one"
   pass "claude receives --model and --effort profile flags"
+}
+
+test_claude_threads_advisor() {
+  local rec id out status launch
+  id=profile-claude-advisor-a1
+  rec=$(make_spawn_case profile-claude-advisor claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness claude --model claude-haiku-5-5 --effort low --advisor opus)
+  status=$?
+  expect_code 0 "$status" "claude spawn with an advisor should succeed: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude claude-haiku-5-5 low
+  assert_grep 'advisor=opus' "$HOME_DIR/state/$id.meta" "meta missing advisor=opus"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'claude-haiku-5-5' --effort 'low' --advisor 'opus' " \
+    "claude launch did not thread the advisor flag"
+  pass "claude receives --advisor and records it in the task meta"
+}
+
+test_advisor_refusals_happen_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-advisor-refuse-a2
+  rec=$(make_spawn_case profile-advisor-refuse claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-5 --advisor opus 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a non-claude advisor spawn should refuse"
+  assert_contains "$out" "--advisor applies only to the canonical claude harness launch, not 'codex'" "non-claude advisor refusal"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness claude --model claude-opus-5-5 --advisor sonnet 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a below-rank advisor spawn should refuse"
+  assert_contains "$out" "advisor sonnet ranks below main model claude-opus-5-5" "below-rank advisor refusal"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness claude --advisor 'Opus 5' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a malformed advisor spawn should refuse"
+  assert_contains "$out" "must be fable, opus, sonnet, or a full claude-* model id" "malformed advisor refusal"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness claude --advisor default 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--advisor default on a fresh spawn should refuse"
+  assert_contains "$out" "--advisor default only clears a recorded advisor on --relaunch" "fresh default advisor refusal"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate --harness claude --advisor opus 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate advisor spawn should refuse"
+  assert_contains "$out" "--advisor applies only to crewmate and scout spawns" "secondmate advisor refusal"
+
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused advisor spawn must not record the task"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused advisor spawn must not launch anything"
+  pass "advisor refusals (non-claude, below-rank, malformed, fresh default, secondmate) stop before any record or launch"
 }
 
 test_codex_threads_model_and_effort() {
@@ -1433,6 +1493,23 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_batch_forwards_shared_advisor() {
+  local rec id1 id2 out status
+  id1=profile-batch-adv-a3
+  id2=profile-batch-adv-a4
+  rec=$(make_spawn_case profile-batch-adv claude "$id1" "$id2")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness claude --model claude-haiku-5-5 --advisor claude-opus-5-5)
+  status=$?
+  expect_code 0 "$status" "batch spawn with a shared advisor should succeed: $out"
+  assert_grep 'advisor=claude-opus-5-5' "$HOME_DIR/state/$id1.meta" "first batch task lost the advisor"
+  assert_grep 'advisor=claude-opus-5-5' "$HOME_DIR/state/$id2.meta" "second batch task lost the advisor"
+  pass "batch dispatch forwards a shared --advisor to every pair"
+}
+
 test_claude_forwards_firstmate_config_dir_when_set() {
   local rec id out status launch
   id=profile-claude-cfgdir-z17
@@ -2202,6 +2279,8 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
+test_claude_threads_advisor
+test_advisor_refusals_happen_before_endpoint_or_metadata
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
@@ -2237,6 +2316,7 @@ test_pi_exclude_tools_malformed_entry_refuses_before_endpoint
 test_pi_exclude_tools_read_failure_refuses_before_launch
 test_pi_exclude_tools_do_not_leak_across_homes_or_to_secondmates
 test_batch_forwards_shared_profile_flags
+test_batch_forwards_shared_advisor
 test_claude_forwards_firstmate_config_dir_when_set
 test_lavish_server_address_is_exported_to_worker_launch
 test_lavish_absent_config_preserves_destination_ambient

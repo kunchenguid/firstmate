@@ -737,6 +737,76 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
+# set_advisor_profile <case-dir> <id> <model> <advisor>
+set_advisor_profile() {
+  sed "s/^model=default\$/model=$3/" "$1/home/state/$2.meta" > "$1/home/state/$2.meta.tmp"
+  printf 'advisor=%s\n' "$4" >> "$1/home/state/$2.meta.tmp"
+  mv "$1/home/state/$2.meta.tmp" "$1/home/state/$2.meta"
+}
+
+test_same_harness_relaunch_keeps_the_advisor() {
+  local dir out rc
+  dir=$(new_case keepadvisor rla1)
+  add_ship_task "$dir" rla1 claude
+  set_advisor_profile "$dir" rla1 claude-haiku-5-5 opus
+  out=$(run_control "$dir" rla1 relaunch --note "same runtime"); rc=$?
+  expect_code 0 "$rc" "a same-harness advisor relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rla1 advisor)" = opus ] || fail "the advisor should carry across a same-harness relaunch"
+  [ "$(meta_field "$dir" rla1 model)" = claude-haiku-5-5 ] || fail "the model should carry alongside the advisor"
+  assert_grep "--advisor 'opus'" "$dir/fake/literal" "the replacement claude launch must carry the advisor"
+  [ "$(journal_field "$dir" rla1 to_advisor)" = opus ] || fail "the journal should record the advisor transition"
+  pass "fm-control relaunch: a same-harness relaunch keeps the Claude Code advisor in the record and the launch"
+}
+
+test_advisor_is_dropped_on_a_harness_switch_and_cleared_by_default() {
+  local dir out rc
+  dir=$(new_case switchadvisor rla2)
+  add_ship_task "$dir" rla2 claude
+  set_advisor_profile "$dir" rla2 claude-haiku-5-5 opus
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rla2 relaunch --harness codex --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a harness switch from an advisor task should succeed"$'\n'"$out"
+  assert_no_grep "advisor=" "$dir/home/state/rla2.meta" "an advisor must not carry to another harness"
+  assert_no_grep "--advisor" "$dir/fake/literal" "a codex launch must not receive an advisor"
+
+  dir=$(new_case clearadvisor rla3)
+  add_ship_task "$dir" rla3 claude
+  set_advisor_profile "$dir" rla3 claude-haiku-5-5 opus
+  out=$(run_control "$dir" rla3 relaunch --advisor default --note "no advisor"); rc=$?
+  expect_code 0 "$rc" "clearing the advisor should succeed"$'\n'"$out"
+  assert_no_grep "advisor=" "$dir/home/state/rla3.meta" "--advisor default must clear the recorded advisor"
+  assert_no_grep "--advisor" "$dir/fake/literal" "a cleared advisor must not reach the launch"
+  pass "fm-control relaunch: the advisor drops on a harness switch and --advisor default clears it"
+}
+
+test_advisor_pairing_refuses_before_the_agent_stops() {
+  local dir out rc before
+  dir=$(new_case badadvisor rla4)
+  add_ship_task "$dir" rla4 claude
+  set_advisor_profile "$dir" rla4 claude-haiku-5-5 sonnet
+  before=$(cat "$dir/home/state/rla4.meta")
+  out=$(run_control "$dir" rla4 relaunch --model claude-opus-5-5 --note "upgrade model"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a model change that the recorded advisor cannot advise must refuse"
+  assert_contains "$out" "advisor sonnet ranks below main model claude-opus-5-5" "the refusal should name the pairing"
+  assert_no_grep "/exit" "$dir/fake/literal" "a pairing refusal must happen before the agent stops"
+  [ "$(cat "$dir/home/state/rla4.meta")" = "$before" ] || fail "a pairing refusal must leave the record unchanged"
+  pass "fm-control relaunch: an advisor the replacement model cannot use refuses before the agent stops"
+}
+
+test_spawn_relaunch_without_an_advisor_reuses_the_recorded_one() {
+  local dir out
+  dir=$(new_case spawnadvisor rla5)
+  add_ship_task "$dir" rla5 claude
+  set_advisor_profile "$dir" rla5 claude-haiku-5-5 claude-opus-5-5
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rla5 --relaunch --model claude-haiku-5-5)
+  assert_contains "$out" "spawned rla5 harness=claude" "the direct relaunch should launch$(printf '\n%s' "$out")"
+  [ "$(meta_field "$dir" rla5 advisor)" = claude-opus-5-5 ] \
+    || fail "fm-spawn --relaunch without --advisor must reuse the recorded advisor, got '$(meta_field "$dir" rla5 advisor)'"
+  assert_grep "--advisor 'claude-opus-5-5'" "$dir/fake/literal" "the direct relaunch must pass the recorded advisor"
+  pass "fm-spawn --relaunch: with no explicit advisor it reuses the task's recorded one"
+}
+
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
@@ -2502,6 +2572,10 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_same_harness_relaunch_keeps_the_advisor
+test_advisor_is_dropped_on_a_harness_switch_and_cleared_by_default
+test_advisor_pairing_refuses_before_the_agent_stops
+test_spawn_relaunch_without_an_advisor_reuses_the_recorded_one
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch

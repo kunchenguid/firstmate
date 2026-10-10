@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--advisor <model>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--advisor <model>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -52,7 +52,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--advisor <model|default>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -63,8 +63,8 @@
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
-#   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
+#   model, effort, and advisor may change, which is what makes a harness switch
+#   one ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
 #   the new incarnation. Two verdicts are agent-free: a `dead` endpoint is
@@ -97,6 +97,14 @@
 #   build agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
 #   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   --advisor <model> is the optional Claude Code advisor axis of a crewmate or
+#   scout profile, accepted only for the canonical claude harness and refused on
+#   --secondmate. bin/fm-claude-advisor-lib.sh owns the accepted values and the
+#   pairing check against --model, which runs before anything is provisioned.
+#   It reaches Claude Code as that one session's --advisor launch flag and is
+#   recorded as advisor= in state/<id>.meta. A relaunch with no --advisor reuses
+#   the recorded advisor while the replacement stays on claude, drops it on a
+#   switch to another harness, and `--advisor default` clears it.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -683,6 +691,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-claude-advisor-lib.sh
+. "$SCRIPT_DIR/fm-claude-advisor-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -694,6 +704,7 @@ KIND_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
+ADVISOR=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -702,6 +713,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+ADVISOR_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -735,6 +747,10 @@ for a in "$@"; do
     effort)
       EFFORT=$a
       EFFORT_SET=1
+      ;;
+    advisor)
+      ADVISOR=$a
+      ADVISOR_SET=1
       ;;
     backend)
       BACKEND_ARG=$a
@@ -794,6 +810,11 @@ for a in "$@"; do
     EFFORT=${a#--effort=}
     EFFORT_SET=1
     ;;
+  --advisor) want_value=advisor ;;
+  --advisor=*)
+    ADVISOR=${a#--advisor=}
+    ADVISOR_SET=1
+    ;;
   --backend) want_value=backend ;;
   --backend=*)
     BACKEND_ARG=${a#--backend=}
@@ -841,6 +862,18 @@ done
 }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || {
   echo "error: --effort requires a non-empty value" >&2
+  exit 1
+}
+[ "$ADVISOR_SET" -eq 0 ] || [ -n "$ADVISOR" ] || {
+  echo "error: --advisor requires a non-empty value" >&2
+  exit 1
+}
+[ "$KIND" != secondmate ] || [ "$ADVISOR_SET" -eq 0 ] || {
+  echo "error: --advisor applies only to crewmate and scout spawns; a secondmate takes no advisor" >&2
+  exit 1
+}
+[ "$RELAUNCH" -eq 1 ] || [ "$ADVISOR" != default ] || {
+  echo "error: --advisor default only clears a recorded advisor on --relaunch; omit --advisor for a fresh spawn without one" >&2
   exit 1
 }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || {
@@ -1384,6 +1417,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            [ -z "${ADVISOR:-}" ] || echo "advisor=$ADVISOR"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -1548,6 +1582,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$ADVISOR" ] || shared_args+=(--advisor "$ADVISOR")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -1875,6 +1910,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  # The advisor is reused like the worktree unless the caller names one, and
+  # only while the replacement stays on claude (resolved after the harness).
+  [ "$ADVISOR_SET" -eq 1 ] || ADVISOR=$(fm_meta_get "$RELAUNCH_META" advisor)
+  [ "$ADVISOR" != default ] || ADVISOR=
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -2103,7 +2142,7 @@ launch_template() {
     # record-backed doorbell: the full envelope is published into the receiving
     # home's state/operational-inbox before launch and only a printable doorbell
     # naming it is passed. A record that cannot be published stops the spawn.
-    printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
+    printf '%s' '__MODELFLAG____EFFORTFLAG____ADVISORFLAG____BRIEFDOORBELL__'
     ;;
   # --disable hooks (equivalent to -c features.hooks=false) turns codex's whole
   # lifecycle-hook layer off for CREWMATE and SCOUT launches only.
@@ -2478,6 +2517,33 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+# The Claude Code advisor axis (bin/fm-claude-advisor-lib.sh owns its values
+# and pairing table). A recorded advisor a relaunch inherited does not transfer
+# to another harness; one the caller passed explicitly refuses instead.
+if [ -n "$ADVISOR" ] && { [ "$HARNESS" != claude ] || [ "$RAW_LAUNCH" != 0 ]; }; then
+  if [ "$ADVISOR_SET" -eq 0 ]; then
+    ADVISOR=
+  else
+    echo "error: --advisor applies only to the canonical claude harness launch, not '$HARNESS'" >&2
+    exit 1
+  fi
+fi
+if [ -n "$ADVISOR" ] && [ "$KIND" = secondmate ]; then
+  echo "error: --advisor applies only to crewmate and scout spawns; a secondmate takes no advisor" >&2
+  exit 1
+fi
+if [ -n "$ADVISOR" ]; then
+  advisor_rc=0
+  advisor_problem=$(fm_claude_advisor_problem "$HARNESS" "$MODEL" "$ADVISOR") || advisor_rc=$?
+  [ "$advisor_rc" -eq 0 ] || {
+    echo "error: could not validate --advisor '$ADVISOR' (jq unavailable or failed)" >&2
+    exit 1
+  }
+  [ -z "$advisor_problem" ] || {
+    echo "error: --advisor: $advisor_problem" >&2
+    exit 1
+  }
 fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
@@ -5077,7 +5143,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort advisor account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5097,6 +5163,9 @@ preserve_relaunch_meta() {
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Only a task launched with an advisor records one, so every other task
+  # record stays byte-identical.
+  [ -z "$ADVISOR" ] || echo "advisor=$ADVISOR"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
@@ -5242,6 +5311,9 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+ADVISORFLAG=
+[ -z "$ADVISOR" ] || ADVISORFLAG="--advisor $(shell_quote "$ADVISOR") "
+LAUNCH=${LAUNCH//__ADVISORFLAG__/$ADVISORFLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.
