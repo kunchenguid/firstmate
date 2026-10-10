@@ -128,6 +128,8 @@ set -u
 FM_AFK_CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_AFK_CONTRACT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# shellcheck source=bin/fm-home-drift-lib.sh
+if [ -f "$FM_AFK_CONTRACT_DIR/fm-home-drift-lib.sh" ]; then . "$FM_AFK_CONTRACT_DIR/fm-home-drift-lib.sh" && fm_home_drift_warn; fi
 FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-classify-lib.sh
