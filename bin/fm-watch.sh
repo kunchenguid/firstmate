@@ -3054,6 +3054,23 @@ EOF
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
+    # A managed-policy refusal needs action even when a secondmate is otherwise
+    # exempt from stale-pane handling. Probe only canonical unconfigured bypass
+    # launches and emit once per recorded incarnation; firstmate owns applying
+    # the persistent fallback and guarded lifecycle recovery.
+    if [ -n "$task" ] && [ "$(fm_meta_get "$STATE/$task.meta" approval_configured)" = 0 ] \
+      && [ "$(fm_meta_get "$STATE/$task.meta" approval_mode)" = bypass ]; then
+      approval_gen=$(fm_meta_get "$STATE/$task.meta" spawn_gen)
+      approval_marker="$STATE/.approval-failover-notified-$task"
+      if [ -n "$approval_gen" ] && [ "$(cat "$approval_marker" 2>/dev/null || true)" != "$approval_gen" ]; then
+        if approval_reason=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+          "$SCRIPT_DIR/fm-approval-failover.sh" probe "$task" 2>/dev/null); then
+          fm_wake_append check "managed-approval-$task" "check: $approval_reason" || exit 1
+          printf '%s\n' "$approval_gen" > "$approval_marker" || exit 1
+          wake "check: $approval_reason"
+        fi
+      fi
+    fi
     last=$(status_declared_wait_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"

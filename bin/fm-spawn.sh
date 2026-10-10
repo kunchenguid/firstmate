@@ -347,15 +347,22 @@
 #   See docs/configuration.md for provider/Git setup and supported limits.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
-#   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
-#   `--dangerously-skip-permissions`; `auto` launches with `--permission-mode
-#   auto` instead, Claude Code's classifier-reviewed mode, for a captain who
-#   refuses to run workers in bypass mode. Every other part of the claude launch
+#   secondmate, and relaunch) carries. Absent or `bypass` selects
+#   `--dangerously-skip-permissions`; `auto` selects `--permission-mode auto`,
+#   the model-reviewed remedy for managed machines. Every other part of the claude launch
 #   is unchanged. The token is the file's whitespace-trimmed content; any other
 #   value, or an unreadable file, refuses the spawn before any endpoint,
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+# Codex approval mode (config/codex-approval-mode):
+#   One whitespace-trimmed token: absent or `bypass` selects
+#   --dangerously-bypass-approvals-and-sandbox; `approve-for-me` selects
+#   --approve-for-me, with model-reviewed approvals in workspace-write.
+#   Any other value or unreadable file refuses before mutation, like the Claude
+#   file. Both files apply to ships, scouts, secondmates, and relaunches.
+#   bin/fm-approval-failover.sh owns evidence-based durable failover when an
+#   unconfigured bypass launch meets an approval prompt or a policy refusal.
 # Worker tool exclusions:
 #   docs/configuration.md "Worker tool exclusions" owns config/crew-exclude-tools
 #   and its operator contract. Resolve it with bin/fm-exclude-tools-lib.sh
@@ -617,6 +624,28 @@ fi
 case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
+esac
+if ! CODEX_APPROVAL_PRESENT=$(fm_config_source_present "$CONFIG/codex-approval-mode"); then
+  exit 1
+fi
+CODEX_APPROVAL_MODE=bypass
+if [ "$CODEX_APPROVAL_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/codex-approval-mode" ] || [ ! -r "$CONFIG/codex-approval-mode" ]; then
+    echo "error: config/codex-approval-mode must be a readable regular file holding one of: bypass, approve-for-me" >&2
+    exit 1
+  fi
+  CODEX_APPROVAL_MODE=$(tr -d '[:space:]' <"$CONFIG/codex-approval-mode" || true)
+  case "$CODEX_APPROVAL_MODE" in
+    bypass | approve-for-me) ;;
+    *)
+      echo "error: config/codex-approval-mode holds '$CODEX_APPROVAL_MODE'; accepted values are: bypass (the default), approve-for-me" >&2
+      exit 1
+      ;;
+  esac
+fi
+case "$CODEX_APPROVAL_MODE" in
+  approve-for-me) CODEX_APPROVAL_FLAG='--approve-for-me' ;;
+  *) CODEX_APPROVAL_FLAG='--dangerously-bypass-approvals-and-sandbox' ;;
 esac
 # config/lavish-axi-host is the primary-owned per-machine address for the
 # shared Lavish server. Read it once per launch and refuse malformed values so
@@ -2079,7 +2108,7 @@ launch_template() {
   # policy in force regardless of which settings scopes end up loaded.
   # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
   # selects (header above): --dangerously-skip-permissions by default, or
-  # --permission-mode auto for a captain who refuses bypass mode.
+  # --permission-mode auto when configured.
   # __CLAUDEADDDIRS__ is the task-channel directory grant
   # claude_add_dirs_flag below builds: Claude path-checks Read/Glob/Grep (and
   # an Edit's mandatory prior Read) against cwd plus --add-dir, and since
@@ -2105,8 +2134,8 @@ launch_template() {
     # naming it is passed. A record that cannot be published stops the spawn.
     printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
     ;;
-  # --disable hooks (equivalent to -c features.hooks=false) turns codex's whole
-  # lifecycle-hook layer off for CREWMATE and SCOUT launches only.
+  # --disable hooks (equivalent to -c features.hooks=false) requests that codex
+  # turn its whole lifecycle-hook layer off for CREWMATE and SCOUT launches only.
   # Without it a crewmate launch parks forever on codex's hook-trust modal
   # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
   # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
@@ -2121,17 +2150,24 @@ launch_template() {
   # This is the opposite of --dangerously-bypass-hook-trust, which RUNS untrusted
   # hooks; disabling the feature runs none of them and leaves the operator's
   # ~/.codex untouched. An unknown feature name is a hard codex error, so a future
-  # release that drops this flag fails the launch loudly instead of silently
-  # restoring the modal.
+  # release that drops this flag stops the launch rather than silently restoring
+  # the modal. A managed policy can override the requested disablement, so its
+  # effective hook state is not guaranteed.
+  # --approve-for-me uses Codex's automatic approval review with its workspace-write
+  # sandbox. It replaces the complete-bypass posture because managed settings can
+  # override its approval component while still accepting the sandbox bypass. The
+  # workspace-write sandbox starts with network access disabled and reviews writes
+  # outside the worktree, so networked operations and external task channels may
+  # need automatic review before they proceed.
   # A secondmate is a firstmate PRIMARY in its own home, and its turn-end guard,
   # session-start digest, and cd/arm seatbelts are exactly those project hooks
   # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
-  # secondmate launch deliberately keeps hooks on.
+  # secondmate launch deliberately keeps hooks on but shares this approval posture.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -5077,7 +5113,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen approval_mode approval_configured traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5089,6 +5125,12 @@ preserve_relaunch_meta() {
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
+  if [ "$RAW_LAUNCH" = 0 ]; then
+    case "$HARNESS" in
+      claude) echo "approval_mode=$CLAUDE_PERMISSION_MODE"; echo "approval_configured=$CLAUDE_PERM_PRESENT" ;;
+      codex) echo "approval_mode=$CODEX_APPROVAL_MODE"; echo "approval_configured=$CODEX_APPROVAL_PRESENT" ;;
+    esac
+  fi
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
@@ -5251,6 +5293,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
 fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
+LAUNCH=${LAUNCH//__CODEXAPPROVALFLAG__/$CODEX_APPROVAL_FLAG}
 if [ "$KEEP_AI_TRAILERS" = 1 ]; then
   LAUNCH=${LAUNCH//__CLAUDEATTRIBUTION__/}
 else
