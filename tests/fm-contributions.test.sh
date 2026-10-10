@@ -659,7 +659,7 @@ case "$fault:$*" in
     if [ ! -e "$FORGE/fail-once-spent" ]; then
       : > "$FORGE/fail-once-spent"; printf 'HTTP 502\n' >&2; exit 1
     fi
-    sleep 3 ;;
+    sleep 6 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
   not-found:'api repos/o/r/'*) printf 'HTTP 404\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
@@ -1131,10 +1131,11 @@ test_failure_outlives_a_timed_out_retry() { # one failure, then a retry killed a
   forge_home "$home"
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  # A frozen clock and a one-second budget kill the hanging retry at the bound.
+  # A frozen clock keeps the read bound at five seconds. That bound kills only
+  # the hanging retry, never a real read.
   /bin/date +%s > "$home/forge/clock"
   printf 'fail-then-hang\n' > "$home/forge/fault"
-  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) \
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed when a retry timed out after a genuine failure'
   [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
     || fail "a timed-out retry erased the genuine failure before it: $out"
