@@ -46,10 +46,11 @@ mkdir -p "$STATE" 2>/dev/null || {
 
 if [ "${1:-}" = "status" ]; then
   fm_session_lock_inspect "$STATE"
-  case "$FM_LOCK_INSPECT_STATE" in
-    free) echo "lock: free" ;;
-    unreadable) echo "lock: unreadable" ;;
-    held) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
+  case "$FM_LOCK_INSPECT_STATE:$FM_LOCK_INSPECT_LIVE_HARNESS" in
+    free:*) echo "lock: free" ;;
+    unreadable:*) echo "lock: unreadable" ;;
+    held:*) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
+    unknown:unknown) echo "lock: unknown (pid $FM_LOCK_INSPECT_PID)" ;;
     *) echo "lock: stale (pid $FM_LOCK_INSPECT_PID dead or not a harness)" ;;
   esac
   exit 0
@@ -123,8 +124,10 @@ remember_lock_session() {
 # naming this id is left untouched, so a same-session confirmation keeps it
 # byte-identical.
 publish_lock_session() {
-  local trusted recorded tmp
-  if trusted=$(fm_session_lock_trusted_session_id); then
+  local trusted recorded tmp rc=0
+  trusted=$(fm_session_lock_trusted_session_id) || rc=$?
+  [ "$rc" -ne 2 ] || return 1
+  if [ "$rc" -eq 0 ]; then
     if recorded=$(fm_session_lock_recorded_session_id "$STATE") && [ "$recorded" = "$trusted" ]; then
       return 0
     fi
@@ -195,7 +198,7 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
     confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
   fi
-  if fm_harness_pid_alive "$old"; then
+  if fm_harness_pid_may_be_alive "$old"; then
     refuse_live_owner "$old"
   fi
 fi
@@ -219,10 +222,10 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ "$old" != "$me" ] && fm_harness_pid_may_be_alive "$old"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+    if [ "$old" != "$me" ] && fm_harness_pid_may_be_alive "$old"; then
       refuse_live_owner "$old"
     fi
   fi
