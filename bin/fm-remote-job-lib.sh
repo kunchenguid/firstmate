@@ -968,10 +968,30 @@ fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.r
 fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
+# The start identity every owner record in this library compares against. A
+# Linux-compatible /proc yields "proc-starttime=<ticks>" from stat field 22,
+# which is immune to the wall-clock and boot-time steps that re-render ps lstart
+# for one live process (observed on WSL2); the prefix keeps it from ever equaling
+# a legacy lstart date string. Capability-detect the file rather than keying on
+# uname, matching fm_pid_identity, and fall back to ps lstart where /proc is
+# absent (macOS). FM_PROC_ROOT_OVERRIDE points tests at a fake /proc.
 fm_remote_job_process_start() {
-  local pid=$1 ps_bin value
+  local pid=$1 proc_root stat_line starttime ps_bin value
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    # After the final comm delimiter, array index 19 is proc stat field 22.
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    printf 'proc-starttime=%s\n' "$starttime"
+    return 0
+  fi
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
-  value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  value=$(LC_ALL=C "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"
