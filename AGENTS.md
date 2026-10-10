@@ -300,6 +300,8 @@ Harness-aware turn-end guards are structural backstops, not permission to omit t
 Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
 Invoke the `/quiet` skill instead when the captain says `/quiet` or asks for quiet mode, or `state/.afk` already exists in quiet mode (`fm_afk_mode` in `bin/fm-wake-lib.sh`).
 Load `away-quiet-supervision` whenever either mode is invoked, either record exists, or a marked away-supervisor message arrives.
+Away mode parks main: the supervision host merges green PRs and answers routine gates, but every firstmate-level decision waits until main is next woken, and no new lane starts unless its backlog item is already filed and briefed.
+When the captain leaves with a build goal that must keep moving, recommend `/quiet` (attended, routine wakes kept out of the chat) rather than `/afk`, and before either posture fill the backlog with briefed, dispatch-ready items so slots refill without main; read the goal's progress at the first wake after any pause and say plainly what the pause cost.
 
 ### Stuck-worker trigger
 
