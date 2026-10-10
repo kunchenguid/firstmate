@@ -17,6 +17,10 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. The herdr reclaim block rounds out the family: an endpoint authoritatively
+#      gone is recovered by a rebind into a fresh tab or proven endpoint-gone by
+#      exit, while an agent presence that cannot be attributed positively keeps
+#      every verb refusing, so one endpoint never hosts two agents.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2036,6 +2040,11 @@ case "${1:-} ${2:-}" in
     elif [ -f "$D/herdr-agent-live" ]; then
       # The agent came back with its server. Nothing here is reclaimable.
       printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+    elif [ -f "$D/herdr-agent-ambiguous" ]; then
+      # An error the classifier has no authoritative mapping for, so the pane
+      # reads present while agent presence cannot be attributed either way.
+      # Recovery must refuse rather than treat unclassifiable as absent.
+      printf '{"error":{"code":"status_unavailable"}}\n'
     else
       # A pane that comes back holding no agent is the adoptable state.
       printf '{"error":{"code":"agent_not_found"}}\n'
@@ -2150,6 +2159,30 @@ EOF
   : > "$dir/fake/herdr-log"
   : > "$dir/fake/herdr-stopped"
   TASK_TMPS+=("/tmp/fm-$id")
+}
+
+# write_herdr_presentation_journal <home> <id> [session] [workspace] [pane]:
+# fabricate an exact version 2 presentation binding, mirroring the field order
+# and label grammar of fm_backend_herdr_projection_journal_write_v2 in
+# bin/backends/herdr.sh, so a stale-journal case reads like a real projected
+# spawn left it behind.
+write_herdr_presentation_journal() {
+  local home=$1 id=$2 ses=${3:-fmlab} ws=${4:-ws1} pane=${5:-%7}
+  local token=AbCdEfGhIjKlMnOpQrStUv
+  cat > "$home/state/$id.herdr-presentation" <<EOF
+version=2
+task_id=$id
+projection_id=$token
+home=$home
+session=$ses
+workspace_id=$ws
+tab_id=tab1
+pane_id=$pane
+parent_workspace_id=wspar
+parent_label=firstmate
+workspace_label=└ $id · p:$token
+task_label=fm-$id
+EOF
 }
 
 # Sets HERDR_CASE_DIR rather than echoing it, so callers invoke it as a plain
@@ -2278,6 +2311,158 @@ test_herdr_rebind_stays_in_the_recorded_session() {
   [ "$(meta_field "$dir" rl73 herdr_pane_id)" = '%9' ] \
     || fail "the rebound record should name the pane the reclaim minted, got $(meta_field "$dir" rl73 herdr_pane_id)"
   pass "reclaim: a herdr rebind is created in the session the record names, never the ambient one"
+}
+
+test_herdr_rebind_reclaims_a_pane_that_vanished_under_a_running_server() {
+  local dir out rc=0 log stray
+  # The observed revive-gap shape: the session server is ALREADY running while
+  # herdr reclaimed both the recorded pane and its workspace, so the very first
+  # read answers `pane_not_found` - not a stopped-server detour. The recovery
+  # must rebind into a fresh tab in the recorded session, keeping the task id,
+  # worktree, and brief.
+  herdr_case_or_skip gone-herdr-live-server rl78 fmlab '%none' || {
+    echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+
+  out=$(run_spawn "$dir" rl78 --relaunch --harness claude) || rc=$?
+  log=$(cat "$dir/fake/herdr-log")
+  expect_code 0 "$rc" "a pane reclaimed under a running server must be rebound"$'\n'"$out"$'\n'"$log"
+
+  assert_contains "$log" "pane get %7 --session fmlab" \
+    "the first read must ask the recorded pane itself for its state"
+  assert_not_contains "$log" "server --session" \
+    "a recovery whose recorded server is already running must not restart it"
+  assert_contains "$log" "tab create" "a reclaimed pane must be replaced by a fresh tab"
+  assert_not_contains "$log" "pane close" \
+    "a reclaim may never close anything, only mint its own replacement"
+  assert_not_contains "$log" "workspace close" \
+    "a reclaim never closes a workspace, least of all the reclaimed one"
+  stray=$(printf '%s\n' "$log" | grep -v -- '--session fmlab$' | grep -v '^status --json$' || true)
+  [ -z "$stray" ] || fail "the rebind touched a herdr session the record does not name: $stray"
+  [ "$(meta_field "$dir" rl78 window)" = 'fmlab:%9' ] \
+    || fail "the recovered endpoint should be the fresh pane in the recorded session, got $(meta_field "$dir" rl78 window)"
+  [ "$(meta_field "$dir" rl78 herdr_pane_id)" = '%9' ] \
+    || fail "the recovered record should name the pane the rebind minted, got $(meta_field "$dir" rl78 herdr_pane_id)"
+  [ "$(meta_field "$dir" rl78 herdr_session)" = fmlab ] \
+    || fail "the recovered record left its recorded session, got $(meta_field "$dir" rl78 herdr_session)"
+  assert_contains "$out" "window=fmlab:%9" "the report should name the recovered endpoint"
+  pass "reclaim: a pane reclaimed under a running server is rebound into a fresh tab in the recorded session"
+}
+
+test_herdr_exit_reports_endpoint_gone_when_a_running_server_reclaimed_its_window() {
+  local dir out rc=0
+  herdr_case_or_skip gone-herdr-gone-exit rl79 fmlab '%none' || {
+    echo "skip - herdr exit needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+
+  out=$(run_control "$dir" rl79 exit) || rc=$?
+  expect_code 0 "$rc" "an endpoint proven reclaimed while its server runs is agent-free, which exit proves and reports"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone" \
+    "a pane reclaimed under a running server is gone, not merely unreachable"
+  assert_not_contains "$out" "already-stopped" \
+    "already-stopped claims a pane that exists, which this pane does not"
+  [ "$(meta_field "$dir" rl79 window)" = 'fmlab:%7' ] \
+    || fail "exit must leave the recorded endpoint untouched for relaunch to rebind"
+  assert_not_contains "$(cat "$dir/fake/herdr-log")" "tab create" \
+    "exit owns no endpoint creation; only relaunch rebinds"
+  pass "fm-control exit: a window reclaimed under a running server is reported endpoint-gone, not a refusal"
+}
+
+test_herdr_control_relaunch_completes_when_a_running_server_reclaimed_its_window() {
+  local dir out rc=0 worktree log
+  herdr_case_or_skip gone-herdr-ctl rl80 fmlab '%none' || {
+    echo "skip - herdr control relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+
+  out=$(run_control "$dir" rl80 relaunch --note "the window was reclaimed; pick the work back up") || rc=$?
+  expect_code 0 "$rc" "the full relaunch transaction must complete over a reclaimed window"$'\n'"$out"
+  assert_contains "$out" "relaunched" "the report should state the relaunch outcome"
+
+  worktree=$(meta_field "$dir" rl80 worktree)
+  [ "$(journal_field "$dir" rl80 phase)" = complete ] \
+    || fail "the transaction journal should record completion, got $(journal_field "$dir" rl80 phase)"
+  [ "$(journal_field "$dir" rl80 exit_result)" = endpoint-gone ] \
+    || fail "the stop step should prove the reclaimed endpoint gone, got $(journal_field "$dir" rl80 exit_result)"
+  [ "$(journal_field "$dir" rl80 endpoint)" = 'fmlab:%9' ] \
+    || fail "the transaction should finish bound to the fresh pane, got $(journal_field "$dir" rl80 endpoint)"
+  [ "$(journal_field "$dir" rl80 worktree)" = "$worktree" ] \
+    || fail "recovery must adopt the recorded worktree, not split the task onto another one"
+  [ "$(meta_field "$dir" rl80 window)" = 'fmlab:%9' ] \
+    || fail "the recovered record should name the fresh endpoint, got $(meta_field "$dir" rl80 window)"
+  [ "$(meta_field "$dir" rl80 herdr_pane_id)" = '%9' ] \
+    || fail "the recovered record should name the pane the rebind minted, got $(meta_field "$dir" rl80 herdr_pane_id)"
+  assert_grep "## Progress note" "$dir/home/data/rl80/brief.md" \
+    "the progress note should reach the surviving instructions"
+  assert_grep "pick the work back up" "$dir/home/data/rl80/brief.md" \
+    "the note text should reach the replacement"
+  log=$(cat "$dir/fake/herdr-log")
+  assert_contains "$log" "pane send-text %9 " \
+    "the replacement launch brief must be delivered into the fresh pane"
+  assert_not_contains "$log" "pane send-text %7" \
+    "nothing may be delivered into the reclaimed pane"
+  pass "fm-control relaunch: a window reclaimed under a running server completes the stop-and-rebind transaction whole"
+}
+
+test_herdr_rebind_leaves_a_stale_presentation_journal_quarantined() {
+  local dir out rc=0 journal before
+  herdr_case_or_skip gone-herdr-stale-journal rl81 fmlab '%none' || {
+    echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  mkdir -p "$dir/home/config"
+  printf 'on\n' > "$dir/home/config/herdr-presentation-spaces"
+  write_herdr_presentation_journal "$dir/home" rl81 fmlab ws1 '%7'
+  journal="$dir/home/state/rl81.herdr-presentation"
+  cp "$journal" "$dir/fake/journal-before"
+
+  out=$(run_spawn "$dir" rl81 --relaunch --harness claude) || rc=$?
+  expect_code 0 "$rc" "a reclaimed window must recover even with its projection journal still present"$'\n'"$out"
+  [ "$(meta_field "$dir" rl81 window)" = 'fmlab:%9' ] \
+    || fail "the recovered endpoint should rebind to a fresh tab, got $(meta_field "$dir" rl81 window)"
+  cmp -s "$journal" "$dir/fake/journal-before" \
+    || fail "the rebind must not rewrite or corrupt the stale journal it quarantines"
+  pass "reclaim: a stale presentation journal neither blocks nor is corrupted by the flat rebind of a reclaimed window"
+}
+
+test_herdr_refuses_when_agent_presence_is_unclassifiable_under_a_running_server() {
+  local dir out rc=0 log
+  herdr_case_or_skip gone-herdr-ambiguous rl82 fmlab '%7' || {
+    echo "skip - herdr refusal needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  # The pane is present, but its agent answers an unmapped error, so nothing
+  # can attribute presence either way. Recovery must refuse here rather than
+  # trust what could be a momentarily silent live agent.
+  : > "$dir/fake/herdr-agent-ambiguous"
+
+  out=$(run_spawn "$dir" rl82 --relaunch --harness claude) || rc=$?
+  log=$(cat "$dir/fake/herdr-log")
+  expect_code 1 "$rc" "an unclassifiable agent must refuse relaunch, never be treated as absent"$'\n'"$out"$'\n'"$log"
+  assert_contains "$out" "positively agent-free endpoint" \
+    "the refusal should name the proof the relaunch demands"
+  assert_not_contains "$log" "tab create" "a refused relaunch must not mint a tab"
+  assert_not_contains "$log" "workspace close" "a refused relaunch must not close anything"
+  [ "$(meta_field "$dir" rl82 herdr_pane_id)" = '%7' ] \
+    || fail "a refused relaunch must leave the record byte-consistent"
+
+  out=$(run_control "$dir" rl82 exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse to stop an agent it cannot attribute"$'\n'"$out"
+  assert_contains "$out" "refusing to send a lifecycle command into an unattributed endpoint" \
+    "the exit refusal should name what it cannot trust"
+  pass "reclaim: an unattributable agent under a running server refuses both verbs, so two agents cannot share an endpoint"
 }
 
 test_herdr_reclaim_refuses_an_agent_that_came_back() {
@@ -2556,6 +2741,11 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
+test_herdr_rebind_reclaims_a_pane_that_vanished_under_a_running_server
+test_herdr_exit_reports_endpoint_gone_when_a_running_server_reclaimed_its_window
+test_herdr_control_relaunch_completes_when_a_running_server_reclaimed_its_window
+test_herdr_rebind_leaves_a_stale_presentation_journal_quarantined
+test_herdr_refuses_when_agent_presence_is_unclassifiable_under_a_running_server
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
