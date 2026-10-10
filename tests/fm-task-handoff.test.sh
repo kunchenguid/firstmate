@@ -61,6 +61,95 @@ inbox_body() {  # <record>
   bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$1"
 }
 
+make_handled_handoff() {  # <case-dir> <status-home-spelling>
+  local dir=$1 status_home=$2 home fakebin record
+  home=$(make_home "$dir" source target)
+  fakebin=$(make_fake_backend "$dir")
+  PATH="$fakebin:$PATH" PI_CODING_AGENT=true FM_HOME="$status_home" FM_SUPERVISION_ACTOR=main \
+    "$HANDOFF" send source target --id retirement-handoff 'retirement identity' >/dev/null \
+    || fail "retirement fixture handoff delivery failed"
+  record=$(find "$home/state/target.inbox" -maxdepth 1 -name '*.msg' -print)
+  [ -f "$record" ] || fail "retirement fixture has no delivered inbox record"
+  mkdir -p "$home/state/target.inbox/handled"
+  mv "$record" "$home/state/target.inbox/handled/${record##*/}"
+  printf '%s\n' "$home"
+}
+
+retirement_fixture_digest() {  # <home>
+  find "$1/state/task-handoffs" "$1/state/target.inbox" -type f -print \
+    | LC_ALL=C sort \
+    | while IFS= read -r file; do sha256sum "$file"; done
+}
+
+assert_retirement_refused_without_changes() {  # <home> <expected-error>
+  local home=$1 expected=$2 before after out rc=0
+  before=$(retirement_fixture_digest "$home")
+  out=$(FM_HOME="$home" "$HANDOFF" retirement-check target 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "unsafe retirement fixture passed: $expected"
+  assert_contains "$out" "$expected" "unsafe retirement refusal lost its reason"
+  after=$(retirement_fixture_digest "$home")
+  [ "$after" = "$before" ] || fail "refused retirement changed handoff or inbox evidence"
+}
+
+test_retirement_accepts_only_equivalent_handled_delivery_identity() {
+  local dir home alias before after status handled
+
+  dir="$TMP_ROOT/retirement-alias"
+  mkdir -p "$dir"
+  home="$dir/home"
+  alias="$dir/home-alias"
+  ln -s "$home" "$alias"
+  home=$(make_handled_handoff "$dir" "$alias")
+  status="$home/state/task-handoffs/status/retirement-handoff.state"
+  assert_contains "$(sed -n 's/^inbox_record=//p' "$status")" "$alias/state/target.inbox/001.msg" \
+    "fixture did not retain the alternate home spelling"
+  before=$(retirement_fixture_digest "$home")
+  FM_HOME="$home" "$HANDOFF" retirement-check target \
+    || fail "equivalent physical home spelling did not pass handled handoff retirement"
+  after=$(retirement_fixture_digest "$home")
+  [ "$after" = "$before" ] || fail "successful retirement proof rewrote historical handoff evidence"
+
+  dir="$TMP_ROOT/retirement-foreign-home"
+  mkdir -p "$dir/foreign/state/target.inbox"
+  home=$(make_handled_handoff "$dir" "$dir/home")
+  status="$home/state/task-handoffs/status/retirement-handoff.state"
+  sed -i "s|^inbox_record=.*|inbox_record=$dir/foreign/state/target.inbox/001.msg|" "$status"
+  assert_retirement_refused_without_changes "$home" 'has no exact inbox delivery path'
+
+  dir="$TMP_ROOT/retirement-wrong-task"
+  mkdir -p "$dir/home/state/other.inbox"
+  home=$(make_handled_handoff "$dir" "$dir/home")
+  status="$home/state/task-handoffs/status/retirement-handoff.state"
+  sed -i "s|/target\.inbox/001\.msg$|/other.inbox/001.msg|" "$status"
+  assert_retirement_refused_without_changes "$home" 'has no exact inbox delivery path'
+
+  dir="$TMP_ROOT/retirement-wrong-generation"
+  home=$(make_handled_handoff "$dir" "$dir/home")
+  handled="$home/state/target.inbox/handled/001.msg"
+  sed -i 's/^execution_generation=.*/execution_generation=wrong-generation/' "$handled"
+  assert_retirement_refused_without_changes "$home" 'handled evidence does not match its delivery identity'
+
+  dir="$TMP_ROOT/retirement-wrong-message"
+  home=$(make_handled_handoff "$dir" "$dir/home")
+  handled="$home/state/target.inbox/handled/001.msg"
+  sed -i 's/^handoff=.*/handoff=wrong-handoff/' "$handled"
+  assert_retirement_refused_without_changes "$home" 'handled evidence does not match its delivery identity'
+
+  dir="$TMP_ROOT/retirement-unhandled"
+  home=$(make_handled_handoff "$dir" "$dir/home")
+  handled="$home/state/target.inbox/handled/001.msg"
+  mv "$handled" "$home/state/target.inbox/001.msg"
+  assert_retirement_refused_without_changes "$home" 'is delivered but not handled'
+
+  dir="$TMP_ROOT/retirement-ambiguous"
+  home=$(make_handled_handoff "$dir" "$dir/home")
+  handled="$home/state/target.inbox/handled/001.msg"
+  cp "$handled" "$home/state/target.inbox/001.msg"
+  assert_retirement_refused_without_changes "$home" 'is delivered but not handled'
+
+  pass "task-handoff: retirement accepts equivalent home spellings without weakening delivery identity guards"
+}
+
 test_conflict_preserves_then_delivers_exactly_once() {
   local dir home fakebin id body out rc count record actual
   dir="$TMP_ROOT/conflict"
@@ -328,4 +417,5 @@ test_local_runtime_backend_matrix_uses_one_durable_plane
 test_uncertain_handoff_persists_recovery_before_suppression
 test_terminal_refusal_is_durable
 test_same_task_send_and_reminder_contract_stay_ordinary
+test_retirement_accepts_only_equivalent_handled_delivery_identity
 printf 'All task-handoff tests passed.\n'

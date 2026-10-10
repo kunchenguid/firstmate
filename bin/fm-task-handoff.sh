@@ -151,6 +151,11 @@ handoff_status_field() {  # <status-file> <field>
   return 1
 }
 
+handoff_physical_dir() {  # <existing-directory>
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  (CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P)
+}
+
 # Read-only retirement proof for every handoff targeting one task. Rejected
 # work remains durable but needs no delivery. Pending/retryable work refuses;
 # `delivered` is only transport state and becomes retirement-safe after the
@@ -159,6 +164,7 @@ handoff_status_field() {  # <status-file> <field>
 handoff_retirement_check_locked() {  # <target-task>
   local target=$1 record record_target handoff_id handoff_state_value status_file
   local inbox_root inbox_record relative base handled recorded_handoff target_generation inbox_generation
+  local recorded_inbox_root recorded_physical inbox_physical
   [ ! -e "$HANDOFF_RECORDS" ] && [ ! -L "$HANDOFF_RECORDS" ] && return 0
   [ -d "$HANDOFF_RECORDS" ] && [ ! -L "$HANDOFF_RECORDS" ] || {
     echo "REFUSED: task handoff records are unsafe; preserving task $target state" >&2
@@ -196,8 +202,16 @@ handoff_retirement_check_locked() {  # <target-task>
     case "$inbox_record" in
       "$inbox_root/"*) relative=${inbox_record#"$inbox_root/"} ;;
       *)
-        echo "REFUSED: task $target handoff $handoff_id has no exact inbox delivery path; delivered is not handled" >&2
-        return 1
+        case "$inbox_record" in
+          /*/*) recorded_inbox_root=${inbox_record%/*}; relative=${inbox_record##*/} ;;
+          *) recorded_inbox_root=; relative= ;;
+        esac
+        recorded_physical=$(handoff_physical_dir "$recorded_inbox_root" 2>/dev/null || true)
+        inbox_physical=$(handoff_physical_dir "$inbox_root" 2>/dev/null || true)
+        if [ -z "$recorded_physical" ] || [ "$recorded_physical" != "$inbox_physical" ]; then
+          echo "REFUSED: task $target handoff $handoff_id has no exact inbox delivery path; delivered is not handled" >&2
+          return 1
+        fi
         ;;
     esac
     case "$relative" in
