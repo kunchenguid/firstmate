@@ -28,8 +28,11 @@ EOF
     case "$busy_seq" in
       ''|*[!0-9]*) ;;
       *)
-        head=${LINE%%:*}
-        [ "$head" = "$LINE" ] || LINE="$head [busy-gen=$busy_gen] [busy-seq=$busy_seq]:${LINE#*:}"
+        current=$(fm_busy_record_read "$STATE" "$ID" snapshot 2>/dev/null || true)
+        if [ "$current" = "$snapshot" ]; then
+          head=${LINE%%:*}
+          [ "$head" = "$LINE" ] || LINE="$head [busy-gen=$busy_gen] [busy-seq=$busy_seq]:${LINE#*:}"
+        fi
         ;;
     esac
   fi

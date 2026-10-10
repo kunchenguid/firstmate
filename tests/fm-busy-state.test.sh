@@ -64,6 +64,31 @@ EOF
   pass "apply advances seq and exposes one exact generation-bound lifecycle snapshot"
 }
 
+test_status_append_binds_only_busy_pauses() {
+  local state gen line
+  state=$(new_state_dir status-append)
+  gen=$("$EV" arm "$state" t1)
+
+  "$ROOT/bin/fm-status-append.sh" "$state" t1 'paused: waiting for review'
+  line=$(tail -1 "$state/t1.status")
+  case "$line" in
+    "paused [busy-gen=$gen] [busy-seq=1]: waiting for review") ;;
+    *) fail "busy pause was not bound to its validated lifecycle snapshot: '$line'" ;;
+  esac
+
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
+  "$ROOT/bin/fm-status-append.sh" "$state" t1 'paused: waiting after the turn ended'
+  line=$(tail -1 "$state/t1.status")
+  [ "$line" = 'paused: waiting after the turn ended' ] \
+    || fail "an idle pause was incorrectly bound to a busy lifecycle: '$line'"
+
+  "$ROOT/bin/fm-status-append.sh" "$state" t1 'progress: ordinary status'
+  line=$(tail -1 "$state/t1.status")
+  [ "$line" = 'progress: ordinary status' ] \
+    || fail "a non-pause status was modified: '$line'"
+  pass "status append binds only pauses from an unchanged busy lifecycle snapshot"
+}
+
 test_apply_current_gen_reset() {
   local state out
   state=$(new_state_dir apply-current)
@@ -610,6 +635,7 @@ test_progress_is_generation_bound_and_not_semantic_state
 
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
+test_status_append_binds_only_busy_pauses
 test_apply_current_gen_reset
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
