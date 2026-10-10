@@ -2165,6 +2165,322 @@ EOF
   pass "unavailable or incompatible tasks-axi falls back to compact manual backlog rendering"
 }
 
+# --- configured (non-markdown) backlog backend --------------------------------
+#
+# A home whose .tasks.toml selects a non-markdown adapter keeps its queue in that
+# adapter, so the startup listing must read it from there: data/backlog.md is at
+# best a stale shadow. These cases drive the REAL installed tasks-axi against a
+# real Beads fixture home. The incompatible case uses the host's real tasks-axi
+# when it is below FM_TASKS_AXI_MIN. The compatible-gate cases are SIMULATED: a
+# wrapper reports a compatible version and the two capability probes, then
+# delegates every read to the real tasks-axi, so they prove the digest's own
+# behavior under a passing gate, never a real compatible tasks-axi end to end.
+
+real_adapter_available() {  # prints the explicit not-run line when a real tool is absent
+  if command -v tasks-axi >/dev/null 2>&1 && command -v br >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+  printf 'skip: real node, tasks-axi and br (Beads) are not installed; configured-backend checks not run\n'
+  return 1
+}
+
+# adapter_bin <name> [simulate]: a bin directory with the real node and tasks-axi
+# plus a guarded br (only inside this test's temp root, never --db). With
+# `simulate` the tasks-axi is a wrapper that reports a compatible version and
+# delegates reads to the real one, logging each call with its TASKS_AXI_FILE and
+# optionally breaking one group: FM_FAKE_AXI_BREAK=<in_flight|held|blocked|ready>=<fail|truncated|short|emptybad|followups>.
+adapter_bin() {
+  local dir=$TMP_ROOT/$1 real_axi real_br
+  mkdir -p "$dir"
+  real_axi=$(command -v tasks-axi)
+  real_br=$(command -v br)
+  ln -sf "$(command -v node)" "$dir/node"
+  cat > "$dir/br" <<SH
+#!/usr/bin/env bash
+case "\$PWD/" in "$TMP_ROOT"/*) ;; *) echo "guarded br: refusing cwd \$PWD" >&2; exit 90 ;; esac
+for arg in "\$@"; do case "\$arg" in --db|--db=*) echo "guarded br: refusing --db" >&2; exit 91 ;; esac; done
+exec "$real_br" "\$@"
+SH
+  if [ "${2:-}" = simulate ]; then
+    cat > "$dir/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_AXI_LOG:-}" ] || printf '%s|TASKS_AXI_FILE=%s\n' "$*" "${TASKS_AXI_FILE-unset}" >> "$FM_FAKE_AXI_LOG"
+case "${1:-}" in
+  --version|-v|-V) printf '%s\n' 0.2.6; exit 0 ;;
+  update) [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi update <id> [--archive-body]'; exit 0; } ;;
+  mv) [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi mv <dest> [<id>...]'; exit 0; } ;;
+esac
+group=other
+case "$*" in
+  ready*) group=ready ;;
+  *'--state in_flight'*) group=in_flight ;;
+  *'--state held'*) group=held ;;
+  *'--state queued --blocked'*) group=blocked ;;
+esac
+out=$(REAL_AXI "$@" 2>&1); rc=$?
+case "${FM_FAKE_AXI_BREAK:-}" in
+  "$group=fail") printf '%s\n' 'simulated tasks-axi failure'; exit 1 ;;
+  "$group=truncated") printf '%s\n' "$out" | sed -n '1p'; exit 0 ;;
+  "$group=short")
+    # Drop the last data row but keep the header's count: a success that is not a complete answer.
+    printf '%s\n' "$out" | awk '{ l[NR] = $0 } END { for (i = NR; i >= 1; i--) if (l[i] ~ /^  [^ -]/) { drop = i; break } for (i = 1; i <= NR; i++) if (i != drop) print l[i] }'
+    exit 0 ;;
+  "$group=emptybad") printf '%s\n' "$out" | sed -n '1p;3,$p'; exit 0 ;;
+  "$group=followups")
+    # Real ready output carries a second table (ready_public_followups) with indented rows.
+    printf '%s\n' "$out"
+    printf '%s\n' 'ready_public_followups[1]{id,state,kind,repo,title}:' '  pf-1,queued,ship,fixture,Public followup'
+    exit 0 ;;
+esac
+printf '%s\n' "$out"
+exit "$rc"
+SH
+    sed -i "s#REAL_AXI#$real_axi#" "$dir/tasks-axi"
+  else
+    ln -sf "$real_axi" "$dir/tasks-axi"
+  fi
+  chmod +x "$dir/br" "$dir/tasks-axi" 2>/dev/null || true
+  printf '%s\n' "$dir"
+}
+
+# beads_world <name> <adapter-bin> [populated]: new_world plus a Beads adapter
+# addressed by the home's own .tasks.toml, holding one row per startup group
+# (in flight, held, blocked, ready) when populated. Echoes the new_world record.
+beads_world() {
+  local name=$1 abin=$2 rec root home fakebin
+  rec=$(new_world "$name")
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$home/backend/.beads"
+  printf 'backend="beads"\n[beads]\npath="%s"\nbinary="%s"\nactor="fixture"\n' "$home/backend" "$abin/br" > "$home/.tasks.toml"
+  (cd "$home/backend" && PATH="$abin:$PATH" br init --prefix fx --json > /dev/null 2>&1) || fail "br init failed for $home"
+  if [ "${3:-}" = populated ]; then
+    (
+      cd "$home" || exit 1
+      seed() { env -u TASKS_AXI_FILE PATH="$abin:$PATH" tasks-axi "$@" > /dev/null || exit 1; }
+      seed add alpha "Alpha work" --kind ship --repo fixture
+      seed add beta "Beta work" --kind ship --repo fixture
+      seed start alpha
+      seed hold beta --reason wait --kind captain
+      seed add gamma "Gamma" --kind scout --repo fixture
+      seed add delta "Delta" --kind ship --repo fixture
+      seed block delta --by alpha
+    ) || fail "seeding the Beads fixture failed in $home"
+  fi
+  printf '%s\n' "$rec"
+}
+
+# backlog_section <digest>: the startup backlog listing, between the FLEET STATE
+# heading and the next subsection.
+backlog_section() {
+  printf '%s\n' "$1" | awk '/^FLEET STATE$/ { on = 1; next } /^Work under way/ { on = 0 } on'
+}
+
+test_backlog_configured_backend_incompatible_tasks_axi_is_unavailable_not_empty() {
+  real_adapter_available || return 0
+  local abin rec root home fakebin out section
+  if (. "$ROOT/bin/fm-tasks-axi-lib.sh" && fm_tasks_axi_compatible); then
+    printf 'skip: the host tasks-axi is compatible; the incompatible-version case was not run\n'
+    return 0
+  fi
+  abin=$(adapter_bin adapter-bin-real)
+  rec=$(beads_world backlog-beads-incompat "$abin" populated)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  # A stale shadow must not stand in for the configured queue either.
+  printf '## Queued\n- [ ] shadow-only - Stale shadow row (repo: fixture) (kind: ship)\n' > "$home/data/backlog.md"
+
+  out=$(run_session_start "$home" "$root" "$abin:$fakebin:$BASE_PATH")
+  section=$(backlog_section "$out")
+
+  assert_contains "$section" "Backlog unavailable (beads)" "an incompatible tasks-axi on a Beads home must be disclosed as unavailable"
+  assert_contains "$section" "required: >= 0.2.6" "the unavailable disclosure must name the required tasks-axi version"
+  assert_contains "$section" "installed: 0." "the unavailable disclosure must name the installed tasks-axi version"
+  assert_not_contains "$section" "shadow-only" "the stale data/backlog.md shadow must not be shown as the configured queue"
+  assert_not_contains "$section" "(no backlog item title lines found)" "unavailable must not look like an empty inventory"
+  assert_not_contains "$section" "ABSENT" "a configured backend must not be reported as an absent backlog file"
+  pass "an incompatible tasks-axi on a configured Beads home is disclosed as unavailable, never as a stale or empty queue"
+}
+
+test_backlog_configured_backend_without_a_shadow_file_is_not_absent() {
+  real_adapter_available || return 0
+  local abin rec root home fakebin out section
+  abin=$(adapter_bin adapter-bin-sim-absent simulate)
+  rec=$(beads_world backlog-beads-absent "$abin" populated)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  [ ! -e "$home/data/backlog.md" ] || fail "the fixture must not carry a data/backlog.md"
+
+  out=$(run_session_start "$home" "$root" "$abin:$fakebin:$BASE_PATH")
+  section=$(backlog_section "$out")
+
+  assert_not_contains "$section" "ABSENT" "a Beads home with no data/backlog.md was reported as an absent backlog"
+  assert_contains "$section" "alpha,in_flight,ship,fixture,Alpha work" "the configured in-flight row was not listed"
+  pass "a configured Beads home with no data/backlog.md still lists its queue"
+}
+
+test_backlog_configured_backend_reads_the_adapter_not_the_shadow_file() {
+  real_adapter_available || return 0
+  local abin rec root home fakebin out section log decoy
+  abin=$(adapter_bin adapter-bin-sim-groups simulate)
+  rec=$(beads_world backlog-beads-groups "$abin" populated)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  printf '## Queued\n- [ ] shadow-only - Stale shadow row (repo: fixture) (kind: ship)\n' > "$home/data/backlog.md"
+  decoy=$TMP_ROOT/inherited-decoy.md
+  printf '## Queued\n- [ ] decoy-row - Inherited override row (repo: fixture) (kind: ship)\n' > "$decoy"
+  log=$home/axi.log
+
+  out=$(FM_FAKE_AXI_LOG="$log" TASKS_AXI_FILE="$decoy" run_session_start "$home" "$root" "$abin:$fakebin:$BASE_PATH")
+  section=$(backlog_section "$out")
+
+  assert_contains "$section" "configured beads backend" "the listing did not name the configured backend"
+  assert_contains "$section" 'alpha,in_flight,ship,fixture,Alpha work,none,"-","-"' "the in-flight group lost its row"
+  assert_contains "$section" "beta,queued,ship,fixture,Beta work,none,captain,wait" "the held group lost its row"
+  assert_contains "$section" 'delta,queued,ship,fixture,Delta,alpha,"-","-"' "the blocked group lost its row"
+  assert_contains "$section" "gamma,queued,scout,fixture,Gamma" "the ready group lost its row"
+  assert_not_contains "$section" "shadow-only" "a stale shadow row leaked into the configured queue"
+  assert_not_contains "$section" "decoy-row" "an inherited TASKS_AXI_FILE redirected the configured backend read"
+  assert_not_contains "$section" "Backlog unavailable" "a healthy configured backend was reported unavailable"
+  assert_not_contains "$(cat "$log")" "--file" "a configured non-markdown backend must be addressed by its root, not --file"
+  assert_not_contains "$(grep -E '^(list|ready)' "$log")" "TASKS_AXI_FILE=$decoy" "a backlog read inherited TASKS_AXI_FILE"
+  pass "a configured Beads home lists in-flight, held, blocked and ready rows from the adapter, ignoring the shadow file and an inherited TASKS_AXI_FILE"
+}
+
+test_backlog_configured_backend_valid_empty_queue_is_distinguishable() {
+  real_adapter_available || return 0
+  local abin rec root home fakebin out section
+  abin=$(adapter_bin adapter-bin-sim-empty simulate)
+  rec=$(beads_world backlog-beads-empty "$abin")
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+
+  out=$(run_session_start "$home" "$root" "$abin:$fakebin:$BASE_PATH")
+  section=$(backlog_section "$out")
+
+  assert_contains "$section" "configured beads backend" "an empty configured queue lost its listing header"
+  assert_contains "$section" "count: 0" "an empty configured queue did not show the adapter's own empty answer"
+  assert_not_contains "$section" "Backlog unavailable" "a valid empty queue was reported unavailable"
+  pass "a valid empty configured queue shows the adapter's empty answer, distinct from unavailable"
+}
+
+# tasks-axi ready prints a second indented table (ready_public_followups) after
+# the ready table; its rows must not make a healthy ready group look incomplete.
+test_backlog_configured_backend_ready_public_followups_table_is_not_incomplete() {
+  real_adapter_available || return 0
+  local abin rec root home fakebin out section
+  abin=$(adapter_bin adapter-bin-sim-followups simulate)
+  rec=$(beads_world backlog-beads-followups "$abin" populated)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AXI_BREAK="ready=followups" run_session_start "$home" "$root" "$abin:$fakebin:$BASE_PATH")
+  section=$(backlog_section "$out")
+
+  assert_not_contains "$section" "Backlog unavailable" "a following ready_public_followups table made a healthy ready group incomplete"
+  assert_contains "$section" "alpha,in_flight,ship,fixture,Alpha work" "the in-flight row was not listed"
+  assert_contains "$section" "beta,queued,ship,fixture,Beta work,none,captain,wait" "the held row was not listed"
+  assert_contains "$section" 'delta,queued,ship,fixture,Delta,alpha,"-","-"' "the blocked row was not listed"
+  assert_contains "$section" "gamma,queued,scout,fixture,Gamma" "the ready row was not listed"
+  pass "a ready answer followed by a ready_public_followups table is still complete (simulated-compatible tasks-axi over real 0.2.5 and Beads)"
+}
+
+# A Markdown-default home with no data directory keeps the legacy ABSENT answer;
+# only an unreadable backend configuration is disclosed as unavailable.
+test_backlog_markdown_home_without_data_dir_keeps_absent_marker() {
+  local rec root home fakebin out section
+  rec=$(new_world backlog-markdown-no-data-dir)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mv "$home/data" "$TMP_ROOT/backlog-markdown-no-data-dir-moved"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  section=$(backlog_section "$out")
+
+  assert_contains "$section" "ABSENT" "a Markdown home without a data directory lost its ABSENT marker"
+  assert_not_contains "$section" "Backlog unavailable" "a Markdown home without a data directory was disclosed as unavailable"
+  pass "a Markdown-default home without a data directory keeps the ABSENT marker"
+}
+
+# A group that fails, or exits 0 with output that is not a complete answer, must
+# never be rendered as an empty or partial inventory - and the groups that did
+# answer must not be shown beside it as if the listing were whole.
+test_backlog_configured_backend_incomplete_or_failed_group_is_unavailable() {
+  real_adapter_available || return 0
+  local abin rec root home fakebin out section variant group mode populated
+  abin=$(adapter_bin adapter-bin-sim-break simulate)
+  for variant in in_flight=fail held=truncated blocked=short ready=short ready=truncated empty:in_flight=emptybad; do
+    populated=populated
+    case "$variant" in empty:*) populated=''; variant=${variant#empty:} ;; esac
+    group=${variant%%=*}
+    mode=${variant#*=}
+    rec=$(beads_world "backlog-beads-break-$group-$mode-${populated:-empty}" "$abin" $populated)
+    IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+    out=$(FM_FAKE_AXI_BREAK="$group=$mode" run_session_start "$home" "$root" "$abin:$fakebin:$BASE_PATH")
+    section=$(backlog_section "$out")
+    assert_contains "$section" "Backlog unavailable (beads)" "a $group=$mode group was not disclosed as unavailable"
+    assert_contains "$section" "$group" "the unavailable disclosure did not name the $group group"
+    assert_not_contains "$section" "in flight:" "a failed group was rendered next to answered groups ($variant)"
+    assert_not_contains "$section" "ready queued (dispatchable now):" "a failed group was rendered next to answered groups ($variant)"
+    assert_not_contains "$section" "(no backlog item title lines found)" "a failed group looked like an empty inventory ($variant)"
+  done
+  pass "a failing or incomplete group makes the configured listing unavailable instead of empty or partial"
+}
+
+# A backend configuration that cannot be read is not evidence of an empty or
+# absent queue either.
+test_backlog_unreadable_backend_configuration_is_unavailable() {
+  local rec root home fakebin out section
+  rec=$(new_world backlog-unreadable-config)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_tasks_axi_compact "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  write_long_body_backlog "$home/data/backlog.md"
+  mkdir -p "$home/.tasks.toml"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  section=$(backlog_section "$out")
+
+  assert_contains "$section" "Backlog unavailable (unresolved)" "an unreadable backend configuration must be disclosed as unavailable"
+  assert_not_contains "$section" "compact-startup" "the shadow data/backlog.md must not stand in for an unreadable configured backend"
+  pass "an unreadable backlog backend configuration is disclosed as unavailable, not as a stale queue"
+}
+
+# A configured non-Markdown backend whose data directory is missing is still
+# the authoritative queue: it must be disclosed as unavailable, never ABSENT.
+test_backlog_beads_home_without_data_dir_is_unavailable_not_absent() {
+  real_adapter_available || return 0
+  local abin rec root home fakebin out section
+  abin=$(adapter_bin adapter-bin-real)
+  rec=$(beads_world backlog-beads-no-data-dir "$abin")
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  rm -rf "$home/data"
+
+  out=$(run_session_start "$home" "$root" "$abin:$fakebin:$BASE_PATH")
+  section=$(backlog_section "$out")
+
+  assert_contains "$section" "Backlog unavailable (beads)" "a Beads home without a data directory was not disclosed as unavailable"
+  assert_not_contains "$section" "ABSENT" "a Beads home without a data directory printed the Markdown ABSENT marker"
+  pass "a Beads home without a data directory is disclosed as unavailable, not ABSENT"
+}
+
 # --- runtime bound -----------------------------------------------------------
 #
 # The digest runs on a session-open hook that blocks session initialization, so
@@ -3051,6 +3367,15 @@ test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
+test_backlog_configured_backend_incompatible_tasks_axi_is_unavailable_not_empty
+test_backlog_configured_backend_without_a_shadow_file_is_not_absent
+test_backlog_configured_backend_reads_the_adapter_not_the_shadow_file
+test_backlog_configured_backend_valid_empty_queue_is_distinguishable
+test_backlog_configured_backend_incomplete_or_failed_group_is_unavailable
+test_backlog_configured_backend_ready_public_followups_table_is_not_incomplete
+test_backlog_markdown_home_without_data_dir_keeps_absent_marker
+test_backlog_unreadable_backend_configuration_is_unavailable
+test_backlog_beads_home_without_data_dir_is_unavailable_not_absent
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon

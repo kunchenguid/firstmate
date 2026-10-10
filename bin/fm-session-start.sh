@@ -46,7 +46,8 @@
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   6. fleet digest   - a compact backlog identity/metadata listing (the
+#                       configured backend's queue; see BACKLOG DIGEST),
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
@@ -158,7 +159,17 @@
 # (`--state in_flight`, `--state held`, `--state queued --blocked`, and
 # `tasks-axi ready`), so this script never reimplements task state; the groups
 # can overlap, because an in-flight item that is also held appears under both.
-# When manual mode is selected, or tasks-axi is unavailable or incompatible,
+# A home whose tasks-axi backend is configured to something other than markdown
+# (for example Beads) keeps its queue in that adapter, so the same four groups
+# are read from the adapter's own addressing root, never through data/backlog.md
+# (a stale or absent shadow cannot stand in for it) and with any inherited
+# TASKS_AXI_FILE removed. If that tasks-axi is missing, incompatible, failing or
+# slow, or a group's answer is not complete (the count it states must agree with
+# its table, and an empty answer must say so), the section prints one
+# "Backlog unavailable (<backend>)" disclosure naming the reason and renders no
+# group at all, so a failure is never read as an empty or partial inventory.
+# The completeness check compares counts only; it does not decode cells.
+# When manual mode is selected, or a markdown-backed home has no usable tasks-axi,
 # this script prints only backlog section headings and item title lines, so
 # title-line hold and blocked-by metadata remain visible while indented bodies
 # stay out of the startup digest; the same never-bound-a-held-or-blocked-row
@@ -180,7 +191,8 @@
 # unbounded digest is no longer merely slow - it can strand a whole session or
 # first turn behind one hung subprocess. Every remaining step is local, but
 # local is not the same as bounded: tool version probes and the backlog
-# listing are unbounded subprocesses, while each per-task endpoint read runs
+# listing (except a configured non-markdown backend's, bounded per group by
+# FM_BACKLOG_ROW_TIMEOUT_SECS) are unbounded subprocesses, while each per-task endpoint read runs
 # in its own crash-isolated child under FM_SESSION_START_ENDPOINT_TIMEOUT
 # (default 10s). So the whole digest still runs as ONE bounded child of this
 # script (FM_SESSION_START_TIMEOUT, default 120s). The deferred network stage
@@ -363,6 +375,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -423,6 +437,91 @@ print_file_or_absent() {
 
 print_backlog_pointer() {
   printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+}
+
+# A configured non-markdown backend (see the BACKLOG note in this file's header).
+# One bounded read per group, from the adapter's addressing root with any
+# inherited TASKS_AXI_FILE removed, because that variable would redirect the read
+# to another file.
+configured_backlog_axi() {  # <tasks-axi arguments...>
+  local secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  [ "$secs" -gt 0 ] 2>/dev/null || secs=10
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+  fm_run_timed "$secs" bash -c 'cd "$1" 2>/dev/null || exit 1; shift; exec env -u TASKS_AXI_FILE tasks-axi "$@"' \
+    _ "$FM_BACKLOG_AXI_ROOT" "$@" 2>&1
+}
+
+# A success is only an answer when its own count agrees with its body: an empty
+# answer says so on its second line, and N > 0 carries an N-row table.
+configured_backlog_complete() {  # <list|ready> <output>
+  local zero_re='^tasks: 0 .*tasks in this backlog$' header=tasks
+  [ "$1" = ready ] && { zero_re='^ready: 0 unblocked queued tasks$'; header=ready; }
+  printf '%s\n' "$2" | awk -v zero_re="$zero_re" -v header="$header" '
+    NR == 1 { if ($0 ~ /^count: [0-9]+$/) { n = substr($0, 8) + 0 } else { bad = 1 }; next }
+    bad { next }
+    NR == 2 {
+      second = 1
+      if (n == 0) { if ($0 !~ zero_re) bad = 1 }
+      else if ($0 !~ ("^" header "\\[" n "\\]\\{[A-Za-z_,]+\\}:$")) { bad = 1 }
+      else { table = 1 }
+      next
+    }
+    table && !/^  / { table = 0 }
+    table && /^  [^ -]/ { rows++; next }
+    END { exit (bad || !second || (n > 0 && rows != n)) ? 1 : 0 }
+  '
+}
+
+print_backlog_unavailable() {  # <backend> <reason>
+  printf 'Backlog unavailable (%s): %s\n' "$1" "$2"
+  printf 'The configured backend was not read, and data/backlog.md is not its queue, so no backlog rows are shown; this is not an empty queue.\n'
+}
+
+print_backlog_configured() {  # <backend>; FM_BACKLOG_AXI_ROOT is already resolved
+  local backend=$1 group kind out version in_flight='' held='' blocked='' ready='' err=''
+  if ! fm_tasks_axi_compatible; then
+    version=$(fm_tasks_axi_version_parts 2>/dev/null | tr ' ' '.')
+    print_backlog_unavailable "$backend" "tasks-axi is missing or incompatible (installed: ${version:-none}, required: >= $FM_TASKS_AXI_MIN)"
+    return 0
+  fi
+  for group in in_flight held blocked ready; do
+    kind=list
+    case "$group" in
+      in_flight) set -- list --state in_flight --fields "$BACKLOG_FIELDS" ;;
+      held) set -- list --state held --fields "$BACKLOG_FIELDS" ;;
+      blocked) set -- list --state queued --blocked --fields "$BACKLOG_FIELDS" ;;
+      ready) kind=ready; set -- ready ;;
+    esac
+    if ! out=$(configured_backlog_axi "$@"); then
+      err="the $group read failed: $(printf '%s\n' "$out" | sed -n '1p')"
+      break
+    elif ! configured_backlog_complete "$kind" "$out"; then
+      err="the $group answer is incomplete or malformed"
+      break
+    fi
+    case "$group" in
+      in_flight) in_flight=$out ;;
+      held) held=$out ;;
+      blocked) blocked=$out ;;
+      ready) ready=$out ;;
+    esac
+  done
+  if [ -n "$err" ]; then
+    print_backlog_unavailable "$backend" "$err"
+    return 0
+  fi
+  printf 'compact backlog listing (tasks-axi, configured %s backend; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to %s; task bodies omitted)\n' \
+    "$backend" "$QUEUED_LIMIT"
+  printf '\nin flight:\n'
+  printf '%s\n' "$in_flight" | fm_hold_reason_decode_stream | strip_axi_help
+  printf '\nheld (captain- or time-gated; an in-flight item that is also held appears in both groups):\n'
+  printf '%s\n' "$held" | fm_hold_reason_decode_stream | strip_axi_help
+  printf '\nblocked queued:\n'
+  printf '%s\n' "$blocked" | fm_hold_reason_decode_stream | strip_axi_help
+  printf '\nready queued (dispatchable now):\n'
+  print_ready_queued_bounded "$ready"
+  printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full.\n'
 }
 
 # A queued title line whose own text already marks it held or blocked. The
@@ -539,7 +638,32 @@ print_backlog_tasks_axi_compact() {
 }
 
 print_backlog_compact() {
-  local path=$1 label=$2
+  local path=$1 label=$2 addressing_status backend
+  if ! fm_backlog_backend_manual "$CONFIG"; then
+    FM_BACKLOG_TRANSITION_ERROR=
+    fm_backlog_tasks_axi_addressing "$DATA"
+    addressing_status=$?
+    if [ "$addressing_status" -eq 2 ]; then
+      subsection "configured backlog"
+      print_backlog_unavailable "unresolved" "${FM_BACKLOG_TRANSITION_ERROR:-the backlog data directory cannot be resolved: $DATA}"
+      return 0
+    elif [ "$addressing_status" -eq 0 ] && [ -z "$FM_BACKLOG_AXI_FILE" ]; then
+      backend=$(fm_tasks_axi_backend "$FM_BACKLOG_AXI_ROOT")
+      subsection "configured backlog ($backend)"
+      print_backlog_configured "$backend"
+      return 0
+    elif [ "$addressing_status" -ne 0 ]; then
+      # The data directory is missing, so the addressing root is its parent,
+      # whose .tasks.toml still names the backend. A non-markdown backend is
+      # authoritative: never answer ABSENT for it.
+      backend=$(fm_tasks_axi_backend "${DATA%/*}" 2>/dev/null) || backend=unresolved
+      if [ "$backend" != markdown ]; then
+        subsection "configured backlog ($backend)"
+        print_backlog_unavailable "$backend" "${FM_BACKLOG_TRANSITION_ERROR:-the backlog data directory cannot be resolved: $DATA}"
+        return 0
+      fi
+    fi
+  fi
   subsection "$label"
   if [ -f "$path" ]; then
     if [ -s "$path" ]; then
@@ -857,7 +981,7 @@ stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
-a compact data/backlog.md listing, a bounded tail of every state/*.status,
+a compact backlog listing (data/backlog.md, or the configured backend's queue), a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
 and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
