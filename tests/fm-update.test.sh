@@ -155,6 +155,7 @@ new_jj_world() {
   local name=$1 w
   w=$(new_world "$name")
   ( cd "$w/main" && jj git init --colocate >/dev/null 2>&1 )
+  [ -d "$w/main/.jj" ] || fail "jj git init --colocate did not create $w/main/.jj"
   printf '%s\n' "$w"
 }
 
