@@ -1255,6 +1255,23 @@ test_handoff_idle_records_early_attributed_continuation_latency() {
   pass "an attributed validation run clears a young handoff with observed latency"
 }
 
+test_handoff_idle_rejects_terminal_run_step_evidence() {
+  local home state record
+  for state in failed done; do
+    make_world "handoff-terminal-run-step-$state"
+    install_handoff_fakes
+    home=$MAIN
+    write_child "$home" intake "needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests" "inc-terminal-run-step-$state"
+    FM_FAKE_CREW_SOURCE=run-step FM_FAKE_CREW_STATE=$state scan_handoff "$home"
+    record=$(one_record "$home" intake) || fail "$state run-step did not retain the handoff record"
+    [ -z "$(handoff_field "$record" cleared_epoch)" ] \
+      || fail "$state run-step cleared a handoff without active continuation"
+    [ -f "$home/state/handoff-continuations/intake.open" ] \
+      || fail "$state run-step retired the handoff marker"
+  done
+  pass "failed and completed run-step states do not clear handoffs"
+}
+
 test_handoff_idle_fails_closed_when_continuation_predicate_is_unreadable() {
   local home rc lock
   make_world handoff-unreadable-continuation
@@ -1461,6 +1478,34 @@ test_handoff_idle_compacted_duplicate_hold_clears_pending() {
   [ "$(handoff_wake_count "$home")" = 0 ] \
     || fail "the compacted hold queued a false idle handoff check"
   pass "a compacted hold clears pending identical handoffs"
+}
+
+test_handoff_idle_compacted_duplicate_hold_without_prefix_clears_pending() {
+  local home completion record saved_now=$HANDOFF_NOW
+  make_world handoff-compacted-duplicates-without-prefix
+  install_handoff_fakes
+  home=$MAIN
+  completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  write_child "$home" intake "$completion"$'\n'"$completion" inc-compacted-duplicates-without-prefix-1
+  HANDOFF_NOW=$HANDOFF_OLD
+  scan_handoff "$home"
+  HANDOFF_NOW=$saved_now
+  [ "$(records_for_count "$home" intake)" = 2 ] \
+    || fail "identical completions without a prefix did not retain separate records"
+  printf '%s\n%s\n' \
+    "$completion" \
+    "needs-decision [at=$HANDOFF_CONT] [key=hold]: an explicit hold" \
+    > "$home/state/intake.status"
+  scan_handoff "$home"
+  while IFS= read -r record; do
+    [ -n "$(handoff_field "$record" cleared_epoch)" ] \
+      || fail "the no-prefix compacted hold did not clear every pending completion"
+  done < <(records_for "$home" intake)
+  [ ! -e "$home/state/handoff-continuations/intake.open" ] \
+    || fail "the no-prefix compacted hold left the task handoff marker open"
+  [ "$(handoff_wake_count "$home")" = 0 ] \
+    || fail "the no-prefix compacted hold queued a false idle handoff check"
+  pass "a no-prefix compacted hold clears pending identical handoffs"
 }
 
 test_handoff_idle_cursor_reaches_later_tasks_after_budget_exhaustion() {
@@ -1886,6 +1931,7 @@ test_handoff_idle_bound_refuses_out_of_range() {
 
 test_handoff_idle_records_the_episode_and_alerts_once
 test_handoff_idle_records_early_attributed_continuation_latency
+test_handoff_idle_rejects_terminal_run_step_evidence
 test_handoff_idle_clears_only_on_continuation
 test_handoff_idle_skips_final_deliveries_and_secondmates
 test_handoff_idle_requires_canonical_delivery_for_every_mode
@@ -1900,6 +1946,7 @@ test_handoff_idle_replay_keeps_later_completion_open
 test_handoff_idle_records_repeated_identical_completions
 test_handoff_idle_reconciles_a_compacted_completion
 test_handoff_idle_compacted_duplicate_hold_clears_pending
+test_handoff_idle_compacted_duplicate_hold_without_prefix_clears_pending
 test_handoff_idle_cursor_reaches_later_tasks_after_budget_exhaustion
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan

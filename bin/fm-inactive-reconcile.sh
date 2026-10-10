@@ -803,7 +803,7 @@ handoff_write_cursor() {
 
 handoff_one() {
   local id=$1 meta=$2 timeout=$3 status kind mode incarnation line verb fingerprint observed record known ordinal=0
-  local line_clean matching_fp matching_count candidate_claimed collision
+  local line_clean matching_fp matching_count candidate_claimed collision line_count
   local -a open_fps=() stored_fps=() claimed_fps=() matching_fps=()
   local now age key alerted last_alert state_line state_rc path item fp
   local clearer_epoch marker proof='' reason='' evidence_rc=0
@@ -837,23 +837,29 @@ handoff_one() {
         for item in "${claimed_fps[@]+"${claimed_fps[@]}"}"; do
           [ "$item" = "$fingerprint" ] && candidate_claimed=1
         done
-        if [ "$candidate_claimed" -eq 1 ] || [ ! -f "$(handoff_record_path "$fingerprint")" ]; then
-          line_clean=$(clean_field "$line")
-          matching_fp=''
-          matching_count=0
-          matching_fps=()
-          for item in "${stored_fps[@]+"${stored_fps[@]}"}"; do
-            fp=${item%%|*}
-            known=0
-            for record in "${claimed_fps[@]+"${claimed_fps[@]}"}"; do
-              [ "$record" = "$fp" ] && known=1
-            done
-            [ "$known" -eq 0 ] || continue
-            [ "$(handoff_value "$(handoff_record_path "$fp")" completion_line)" = "$line_clean" ] || continue
-            matching_fp=$fp
-            matching_count=$((matching_count + 1))
-            matching_fps+=("$item")
+        line_clean=$(clean_field "$line")
+        matching_fp=''
+        matching_count=0
+        matching_fps=()
+        for item in "${stored_fps[@]+"${stored_fps[@]}"}"; do
+          fp=${item%%|*}
+          known=0
+          for record in "${claimed_fps[@]+"${claimed_fps[@]}"}"; do
+            [ "$record" = "$fp" ] && known=1
           done
+          [ "$known" -eq 0 ] || continue
+          [ "$(handoff_value "$(handoff_record_path "$fp")" completion_line)" = "$line_clean" ] || continue
+          matching_fp=$fp
+          matching_count=$((matching_count + 1))
+          matching_fps+=("$item")
+        done
+        line_count=0
+        if [ "$matching_count" -gt 1 ] && [ "$candidate_claimed" -eq 0 ] && [ -f "$(handoff_record_path "$fingerprint")" ]; then
+          line_count=$(grep -Fxc -- "$line" "$status" 2>/dev/null || true)
+          case "$line_count" in ''|*[!0-9]*) line_count=0 ;; esac
+        fi
+        if [ "$candidate_claimed" -eq 1 ] || [ ! -f "$(handoff_record_path "$fingerprint")" ] \
+          || { [ "$matching_count" -gt 1 ] && [ "$line_count" -lt "$matching_count" ]; }; then
           if [ "$matching_count" -eq 1 ]; then
             fingerprint=$matching_fp
           elif [ "$matching_count" -gt 1 ]; then
@@ -929,7 +935,7 @@ handoff_one() {
     state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
       "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
     case "$state_line" in
-      *'source: run-step'*)
+      'state: working'*'source: run-step'*)
         case "$state_line" in
           *'review ('*|*'fix_review'*) proof='review-started' ;;
           *) proof='attributed-run' ;;
