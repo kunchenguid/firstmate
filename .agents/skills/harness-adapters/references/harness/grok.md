@@ -26,9 +26,8 @@ Reliable Grok rules must account for hook markers as well as the child fast path
 Slash autocomplete can turn the first Enter into selection plus an argument hint, including `/no-mistakes`'s optional task argument or `/compact compaction instructions`, without submission.
 The shared classifier keeps that text pending, and retry sends the second Enter on both verified backends; Herdr may also prove a turn through native state.
 
-On 2026-07-03 two Grok 0.2.82 Herdr workers left `/no-mistakes` typed for minutes while send returned success.
-Old Herdr logic treated any pane delta as submission, including popup closure and placeholder fill.
-Tmux and Herdr now route captures through `../../../bin/fm-composer-lib.sh`, which classifies real text on every proven content row.
+Observed on 2026-07-03 with Grok 0.2.82 on Herdr: `/no-mistakes` stayed typed for minutes while send returned success, because a pane delta alone (popup closure, placeholder fill) is not a submission.
+Tmux and Herdr route captures through `../../../bin/fm-composer-lib.sh`, which classifies real text on every proven content row.
 `../../../docs/herdr-backend.md` owns the boundary and `../../../tests/fm-backend-herdr.test.sh` covers it.
 
 On 2026-09-24, on the first dispatches after Grok was added to this fleet, a steer landed in the Grok 1.0.41 composer unsent.
