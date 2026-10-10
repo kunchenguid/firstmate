@@ -2433,13 +2433,42 @@ Its native App Server peer and watcher-close process are deterministic fixtures;
 ## Oh My Pi (omp)
 
 omp runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#omp-oh-my-pi-native-delivery-2026-09-05) owns the primary evidence.
-The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin/omp`, a Bun-compiled single binary) on macOS 26 arm64 through the Herdr backend with the `openai-codex/gpt-6-astra` model, building on the 2026-09-02 adapter investigation against 18.1.2.
+The baseline omp integration evidence was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin/omp`, a Bun-compiled single binary) on macOS 26 arm64 through the Herdr backend with the `openai-codex/gpt-6-astra` model, building on the 2026-09-02 adapter investigation against 18.1.2.
 
 ### Process identity and markers
 
 `ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity is the anchored name; `ompd` and `comp` never match.
 omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
 `FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
+
+#### omp 18.4.4 daemon broker
+
+Verified 2026-09-30 on omp 18.4.4, macOS arm64: omp starts a per-project daemon broker from its own binary, `omp __omp_worker_daemon_broker`, as a child of the session, and a named bash service runs under it.
+The broker carries the exact process name `omp`, so the pre-fix ancestry walk anchored the session lock to the broker; a live broker left behind by an exited session (reparented to pid 1) then kept that lock looking held.
+Probe run as a named bash service inside a live omp worker session (pid 5343), with `/tmp/fm-prefix-lock-lib.sh` being `git show HEAD:bin/fm-session-lock-lib.sh` before the fix:
+
+```sh
+p=$$; for i in 1 2 3; do ps -o pid=,ppid=,args= -p $p | cut -c1-90; p=$(ps -o ppid= -p $p | tr -d ' '); done
+echo "fixed ancestry: $(bash -c '. bin/fm-session-lock-lib.sh; fm_harness_ancestry_pids' | tr '\n' ' ')"
+echo "prefix ancestry: $(bash -c '. /tmp/fm-prefix-lock-lib.sh; fm_harness_ancestry_pids' | tr '\n' ' ')"
+bin/fm-lock.sh
+```
+
+```text
+30485 55424 /bin/zsh -l -c ...
+55424  5343 /Users/stephensun/.local/bin/omp __omp_worker_daemon_broker
+ 5343  1315 /Users/stephensun/.local/bin/omp --config ...
+fixed ancestry: 5343
+prefix ancestry: 55424
+lock acquired: harness pid 5343
+```
+
+The same shell running `bin/fm-lock.sh` with only the pre-fix library swapped in printed `error: another live firstmate session holds the lock (pid 5343); operate read-only until resolved`, the read-only refusal a primary on 18.4.4 reported.
+`fm_harness_is_omp_worker_helper` in `bin/fm-session-lock-lib.sh` owns the helper rule, `tests/fm-session-lock-ancestry.test.sh` is the portable regression, and the broker-parented stage of `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes this record; on 2026-09-30 it passed on omp 18.4.4 with `openai-codex/gpt-6-astra`:
+
+```text
+ok - omp omp/18.4.4: a tool shell under the omp daemon broker resolves the lock-holding omp session as its owner
+```
 
 ### Composer
 

@@ -56,7 +56,49 @@ fm_harness_path_name() {  # <path>
 }
 
 # True when the process described by command name $1 and full argument string $2
-# is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
+# is an omp per-session worker helper rather than an omp session. omp 18.4.4 runs
+# helpers from its own binary under the exact `omp` name (verified:
+# `omp __omp_worker_daemon_broker`, with `__omp_worker_lsp_mux` and
+# `__omp_worker_text_predict` beneath it), and every tool shell of an interactive
+# session is a child of its broker. A helper is never the session: it can outlive
+# it reparented to pid 1. The marker is argv[1] exactly, never a substring,
+# because a session's own argv can quote a helper name inside its prompt.
+fm_harness_is_omp_worker_helper() {  # <comm> <args> [<pid>]
+  local comm=$1 args=$2 pid=${3:-} argv0 argv1 rest
+  [ "${comm##*/}" = omp ] || return 1
+  if [ "$(uname -s 2>/dev/null)" = Linux ] && [ -r "/proc/$pid/cmdline" ]; then
+    exec 9<"/proc/$pid/cmdline" || return 1
+    IFS= read -r -d '' argv0 <&9 || true
+    IFS= read -r -d '' argv1 <&9 || true
+    exec 9<&-
+    case "$argv1" in
+      __omp_worker_*) return 0 ;;
+    esac
+    return 1
+  fi
+  # Without /proc, args is argv joined by spaces, so only the text right after
+  # argv[0] may identify a helper. macOS ps reports argv[0]'s full path in comm,
+  # so args must begin with exactly that path, one space, and the marker. A bare
+  # comm (Linux procps without a readable /proc entry) locates the end of argv[0]
+  # at the FIRST `omp ` token instead; text later in a session prompt, such as
+  # `/opt/omp __omp_worker_daemon_broker`, never reaches either test.
+  case "$comm" in
+    */*) rest=${args#"$comm "}; [ "$rest" != "$args" ] || return 1 ;;
+    *)
+      case "$args" in
+        'omp '*) rest=${args#omp } ;;
+        */omp\ *) rest=${args#*/omp } ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  case "$rest" in __omp_worker_*) return 0 ;; esac
+  return 1
+}
+
+# True when the process described by command name $1 and full argument string $2
+# is a verified harness session. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
+# An omp worker helper is not a session, so it never matches.
 #
 # Evidence, in order:
 #   1. the basename of the reported command name, against FM_HARNESS_RE.
@@ -68,9 +110,10 @@ fm_harness_path_name() {  # <path>
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+fm_harness_process_matches() {  # <comm> <args> [<pid>]
+  local comm=$1 args=$2 pid=${3:-} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  fm_harness_is_omp_worker_helper "$comm" "$args" "$pid" && return 1
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
@@ -116,17 +159,27 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+#
+# An omp worker helper (fm_harness_is_omp_worker_helper) is crossed, never
+# printed: the omp 18.4.4 tool shell runs under its session's broker, and the
+# session is the omp process above it. Above a helper only an omp session is
+# accepted, so an orphaned helper (reparented to pid 1) or one under anything
+# else ends the walk with nothing to own.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
+  local pid=$$ comm args extending=0 printed=0 helper=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    if fm_harness_is_omp_worker_helper "$comm" "$args" "$pid"; then
+      [ "$extending" -eq 0 ] || break
+      helper=1
+    elif fm_harness_process_matches "$comm" "$args" "$pid"; then
+      [ "$helper" -eq 0 ] || [ "${comm##*/}" = omp ] || break
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
       extending=1
-    elif [ "$extending" -eq 1 ]; then
+    elif [ "$extending" -eq 1 ] || [ "$helper" -eq 1 ]; then
       break
     fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -169,7 +222,7 @@ fm_harness_pid_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  fm_harness_process_matches "$comm" "$args" "$pid"
 }
 
 # --- trusted same-session identity -------------------------------------------
@@ -210,7 +263,7 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
     [ "$pid" = "$claude_pid" ] || continue
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_harness_process_matches "$comm" "$args" || return 1
+    fm_harness_process_matches "$comm" "$args" "$pid" || return 1
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
     printf '%s\n' "$id"
     return 0
@@ -297,17 +350,28 @@ EOF
 # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
 FM_SESSION_LOCK_FOREIGN_OWNER_PID=
 fm_session_lock_foreign_owner_live() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid owner_pid owner_comm owner_args parent_comm
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  fm_harness_pid_alive "$lock_pid" || return 1
+  if fm_harness_pid_alive "$lock_pid"; then
+    owner_pid=$lock_pid
+  else
+    owner_comm=$(ps -o comm= -p "$lock_pid" 2>/dev/null) || return 1
+    owner_args=$(ps -o args= -p "$lock_pid" 2>/dev/null)
+    fm_harness_is_omp_worker_helper "$owner_comm" "$owner_args" "$lock_pid" || return 1
+    owner_pid=$(ps -o ppid= -p "$lock_pid" 2>/dev/null | tr -d ' ')
+    case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+    parent_comm=$(ps -o comm= -p "$owner_pid" 2>/dev/null) || return 1
+    [ "${parent_comm##*/}" = omp ] || return 1
+    fm_harness_pid_alive "$owner_pid" || return 1
+  fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 1
+    [ "$pid" = "$lock_pid" ] || [ "$pid" = "$owner_pid" ] && return 1
   done <<EOF
 $pids
 EOF
