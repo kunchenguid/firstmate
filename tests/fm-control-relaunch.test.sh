@@ -1272,6 +1272,61 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
 
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
+test_spawn_relaunch_refuses_a_slot_claimed_by_another_task() {
+  local dir out rc
+  dir=$(new_case reclaimed rl22)
+  add_ship_task "$dir" rl22 claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'task=other-task\nhome=%s\n' "$dir/home" > "$dir/.fm-slot-owner"
+  out=$(run_spawn "$dir" rl22 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relaunch into a slot claimed by another task should refuse"
+  assert_contains "$out" "reassigned to task other-task" "the refusal should name the slot's claimant"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing to the endpoint"
+  rm -f "$dir/.fm-slot-owner"
+  printf 'slot_reassigned_to=other-task\n' >> "$dir/home/state/rl22.meta"
+  out=$(run_spawn "$dir" rl22 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relaunch into a slot a claimant's teardown already returned should refuse"
+  assert_contains "$out" "reassigned to task other-task" "the refusal should name the claimant from the record's mark"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing to the endpoint"
+  printf 'task=rl22\nhome=%s\n' "$dir/home" > "$dir/.fm-slot-owner"
+  out=$(run_spawn "$dir" rl22 --relaunch)
+  assert_contains "$out" "spawned rl22 harness=claude" "a relaunch into its own claimed slot should proceed"
+  pass "fm-spawn --relaunch: refuses a pool slot another task has claimed since, proceeds on its own claim"
+}
+
+# A relaunch reads its slot's claim under the same project lock a fresh spawn
+# holds while it allocates and claims a slot, so it can never read a claim that
+# allocation is about to replace and launch into that task's slot.
+test_spawn_relaunch_refuses_while_a_slot_allocation_holds_the_project_lock() {
+  local dir out rc lock holder waited=0
+  dir=$(new_case alloclock rl23)
+  add_ship_task "$dir" rl23 claude
+  printf 'zsh' > "$dir/fake/command"
+  lock=$(FM_HOME="$dir/home" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/proj") \
+    || fail "could not resolve the task's Treehouse project lock"
+  FM_HOME="$dir/home" bash -c \
+    '. "$1"; fm_lock_try_acquire "$2" || exit 1; : > "$3"; exec sleep 30' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/lock-held" &
+  holder=$!
+  while [ ! -e "$dir/lock-held" ] && [ "$waited" -lt 100 ]; do
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$dir/lock-held" ] || fail "the stand-in slot allocation never took the project lock"
+  out=$(run_spawn "$dir" rl23 --relaunch); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 1 "$rc" "a relaunch should refuse while a slot allocation or return holds the project lock"
+  assert_contains "$out" "another Treehouse slot allocation or return is in progress" \
+    "the refusal should name the project lock"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing to the endpoint"
+  out=$(run_spawn "$dir" rl23 --relaunch)
+  assert_contains "$out" "spawned rl23 harness=claude" "a relaunch should proceed once the project lock is free"
+  pass "fm-spawn --relaunch: checks its slot's claim under the Treehouse project lock"
+}
+
 test_missing_worktree_refuses_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nowt rl10)
@@ -2519,6 +2574,8 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
+test_spawn_relaunch_refuses_a_slot_claimed_by_another_task
+test_spawn_relaunch_refuses_while_a_slot_allocation_holds_the_project_lock
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
