@@ -409,6 +409,7 @@ Linking the code-root copy into the home therefore forks the queue on the first 
 Run every routine Firstmate backlog command through [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh).
 Like lifecycle transitions, it addresses this home's backlog and archive from any working directory.
 Bootstrap reports a code-root `data/backlog.md` or `data/done-archive.md` that is not this home's own file as a `BACKLOG_RECONCILE: code-root ...` line, even in a read-only session.
+`detect_code_root_backlog_fork` in [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns how that check compares the home's own code root and treats every differing code-root file as potentially live, including one inside the home.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 
