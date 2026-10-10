@@ -527,6 +527,7 @@ A probe repository registered four `preToolUse` hooks matching `Shell` in `.curs
 | `true` | `Hook "true" returned invalid JSON. The command was blocked for safety.` |
 | `echo '{}'` | accepted |
 | `echo '{"permission":"allow"}'` | accepted |
+| process-table probe writing to a file, then `true` | rejected as invalid JSON (same message as `true`); its file showed `/bin/zsh -lc <command>` |
 
 In the unmodified copy every tracked entry - the two `--cursor` registrations and the three Claude-settings entries Cursor also loads - exited 0 with empty stdout, and the shell call was rejected:
 
