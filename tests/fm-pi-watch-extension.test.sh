@@ -11,6 +11,7 @@ EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 # from a clean checkout with no tracked .opencode/package.json. The warning is
 # unrelated to plugin output, which the assertions intentionally require empty.
 export NODE_NO_WARNINGS=1
+export FM_OPENCODE_TEST_CONTEXT="$ROOT/tests/opencode-plugin-context.mjs"
 
 # One owner for the readiness budget every unready-successor test below spends
 # on purpose. Both plugins start a successor arm through a login shell and
@@ -4116,25 +4117,6 @@ EOF
   pass "Pi process-exit cleanup stops the attached arm child"
 }
 
-test_opencode_plugin_package_boundary_is_explicit_esm() {
-  local fixture plugin out status
-  fixture="$TMP_ROOT/opencode-esm-boundary/.opencode"
-  plugin="$fixture/plugins/fm-primary-watch-arm.js"
-  mkdir -p "$fixture/plugins/lib"
-  printf '%s\n' '{"dependencies":{}}' > "$fixture/package.json"
-  cp "$ROOT/.opencode/plugins/package.json" "$fixture/plugins/package.json"
-  cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
-  cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$fixture/plugins/lib/fm-operational-input.js"
-  out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
-import { pathToFileURL } from "node:url";
-await import(pathToFileURL(process.env.PLUGIN).href);
-EOF
-)
-  status=$?
-  expect_code 0 "$status" "OpenCode plugin must import beneath an explicit ESM package boundary"
-  [ -z "$out" ] || fail "OpenCode ESM boundary import printed output: $out"
-  pass "OpenCode plugins have an explicit ESM boundary even under a typeless parent package"
-}
 
 test_opencode_primary_watch_plugin_uses_effective_state_home() {
   local plugin repo home log out status
@@ -4158,14 +4140,11 @@ import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const client = { session: { prompt: async () => {} } };
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -4208,14 +4187,11 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const client = { session: { prompt: async () => {} } };
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -4258,21 +4234,18 @@ import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
-const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const client = { session: { prompt: async () => {} } };
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
+const event = { type: "session.execution.succeeded", data: { sessionID: "session-test" } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
-await hooks.event(event);
+await hooks.emit(event);
 // The hook starts its attempt without awaiting it, and the plugin answers a
 // second attempt from the one already in flight. Join that attempt through the
 // coordinator rather than waiting a fixed span: refusing an unowned lock walks
 // git and ps probes that can outlast any such span, and the owned-lock event
 // below would then be answered from the refusal instead of arming.
-const refusal = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+const refusal = await globalThis.__firstmateOpenCodeWatchArm.get(JSON.stringify([process.env.WORKTREE, ""])).ensureArmed("session-test", client);
 if (refusal !== "read-only") {
   console.error(`expected a read-only refusal without the session lock, got ${refusal}`);
   process.exit(1);
@@ -4282,7 +4255,7 @@ if (existsSync(process.env.FM_ARM_LOG)) {
   process.exit(1);
 }
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event(event);
+await hooks.emit(event);
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -4320,14 +4293,11 @@ import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const client = { session: { prompt: async () => {} } };
+await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+const status = await globalThis.__firstmateOpenCodeWatchArm.get(JSON.stringify([process.env.WORKTREE, ""])).ensureArmed("session-test", client);
 await new Promise((resolve) => setTimeout(resolve, 120));
 if (status !== "not-primary") {
   console.error(`expected not-primary, got ${status}`);
@@ -4388,7 +4358,7 @@ const promptBlocked = new Promise((resolve) => {
 });
 const client = {
   session: {
-    promptAsync: async () => {
+    prompt: async () => {
       rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
         ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm=")).length
         : 0;
@@ -4397,14 +4367,11 @@ const client = {
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
-const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
+const event = { type: "session.execution.succeeded", data: { sessionID: "session-test" } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event(event);
+await hooks.emit(event);
 for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
@@ -4497,10 +4464,11 @@ import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
-const client = { session: { promptAsync: async (request) => { prompts.push(request.body.parts[0].text); } } };
-const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const client = { session: { prompt: async (request) => { prompts.push(request.text); } } };
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 400 && prompts.length < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
 const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
@@ -4574,18 +4542,15 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
 const client = {
   session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
+    prompt: async (request) => {
+      prompts.push(request.text);
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 500; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
@@ -4649,21 +4614,18 @@ let prompt = "";
 let rowsAtPrompt = 0;
 const client = {
   session: {
-    promptAsync: async (request) => {
-      prompt += request.body.parts[0].text;
+    prompt: async (request) => {
+      prompt += request.text;
       rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
         ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
         : 0;
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 // Three unready successors each cost the full readiness budget, so wait well
 // past their sum. The wait ends as soon as the wake lands.
 for (let i = 0; i < 1500 && !prompt; i += 1) {
@@ -4726,21 +4688,18 @@ let prompt = "";
 let rowsAtPrompt = 0;
 const client = {
   session: {
-    promptAsync: async (request) => {
-      prompt += request.body.parts[0].text;
+    prompt: async (request) => {
+      prompt += request.text;
       rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
         ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
         : 0;
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 500 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -4806,8 +4765,8 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
 const client = {
   session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
+    prompt: async (request) => {
+      prompts.push(request.text);
     },
   },
 };
@@ -4821,13 +4780,10 @@ async function waitFor(predicate, message) {
   }
   throw new Error(message);
 }
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 await waitFor(
   () => existsSync(process.env.FM_UNRETIRED_READY_FILE),
   "unretired successor did not enter its retirement wait",
@@ -4891,18 +4847,15 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
 const client = {
   session: {
-    promptAsync: async () => {
+    prompt: async () => {
       prompts += 1;
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
@@ -4948,18 +4901,15 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 const client = {
   session: {
-    promptAsync: async (request) => {
-      prompt += request.body.parts[0].text;
+    prompt: async (request) => {
+      prompt += request.text;
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -5004,19 +4954,16 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 const client = {
   session: {
-    promptAsync: async (request) => {
-      prompt += request.body.parts[0].text;
+    prompt: async (request) => {
+      prompt += request.text;
     },
   },
 };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 const lock = `${process.env.FM_HOME}/state/.lock`;
 writeFileSync(lock, `${process.pid}\n`);
-const eventPromise = hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+const eventPromise = hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -5076,23 +5023,16 @@ const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
 let promptBody = "";
 const client = {
   session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
+    prompt: async (request) => {
+      promptBody = request.text;
     },
   },
 };
-await armMod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
-const guardHooks = await guardMod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+await loadOpenCodePlugin(armMod.default, client, process.env.WORKTREE);
+const guardHooks = await loadOpenCodePlugin(guardMod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await guardHooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -5100,6 +5040,7 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run");
   process.exit(1);
 }
+await guardHooks.dispose();
 if (existsSync(process.env.FM_GUARD_LOG)) {
   console.error("turn-end guard ran before the watch arm could establish supervision");
   process.exit(1);
@@ -5150,26 +5091,21 @@ const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
 let promptBody = "";
 const client = {
   session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
+    prompt: async (request) => {
+      promptBody = request.text;
     },
   },
 };
-await armMod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
-const guardHooks = await guardMod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+await loadOpenCodePlugin(armMod.default, client, process.env.WORKTREE);
+const guardHooks = await loadOpenCodePlugin(guardMod.default, client, process.env.WORKTREE);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await guardHooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_GUARD_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
+for (let i = 0; i < 500 && !promptBody; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+await guardHooks.dispose();
 if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run");
   process.exit(1);
@@ -5237,7 +5173,6 @@ test_pi_replacement_tokens_are_process_unique
 test_pi_replacement_persistence_failure_keeps_predecessor_until_successor
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
-test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock

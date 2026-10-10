@@ -1,8 +1,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-
-const handledSessions = new Set();
+import { subscribeFirstmateEvents } from "./lib/fm-events.js";
 
 function runProcess(command, args) {
   return new Promise((resolveResult) => {
@@ -32,13 +31,13 @@ async function resolveRoot(anchor) {
   return resolvePath(anchor);
 }
 
-export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
-
-  return {
-    event: async ({ event }) => {
-      if (event.type !== "session.created") return;
-      const sessionID = event.properties?.info?.id ?? event.properties?.sessionID;
+export default {
+  id: "firstmate.primary.sessionstart-nudge",
+  async setup(ctx) {
+    const root = await resolveRoot(ctx.location.directory);
+    const handledSessions = new Set();
+    return subscribeFirstmateEvents(ctx, ["session.created"], async (event) => {
+      const sessionID = event.data?.sessionID;
       if (!sessionID || handledSessions.has(sessionID) || !root) return;
       handledSessions.add(sessionID);
 
@@ -47,14 +46,9 @@ export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }
       if (!nudge) return;
 
       try {
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text: nudge }],
-          },
-        });
+        await ctx.session.prompt({ sessionID, text: nudge, delivery: "queue" });
       } catch {
       }
-    },
-  };
+    });
+  },
 };

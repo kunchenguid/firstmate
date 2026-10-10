@@ -25,6 +25,7 @@ fi
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+export FM_OPENCODE_TEST_CONTEXT="$ROOT/tests/opencode-plugin-context.mjs"
 
 unset NO_MISTAKES_GATE
 
@@ -178,23 +179,27 @@ import { pathToFileURL } from "node:url";
 const prompts = [];
 const client = {
   session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
+    prompt: async (request) => {
+      prompts.push(request.text);
     },
   },
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const hooks = await mod.FmPrimarySessionstartNudge({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 const event = {
   type: "session.created",
-  properties: { sessionID: "session-nudge-test", info: { id: "session-nudge-test" } },
+  data: { sessionID: "session-nudge-test", location: { directory: process.env.WORKTREE } },
 };
-await hooks.event({ event });
-await hooks.event({ event });
+await hooks.emit({
+  type: "session.created",
+  data: { sessionID: "foreign-session", location: { directory: "/another/project" } },
+});
+await hooks.emit(event);
+await hooks.emit(event);
+for (let i = 0; i < 500 && !prompts.length; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+await hooks.dispose();
+await hooks.emit({ ...event, data: { ...event.data, sessionID: "disposed-session" } });
 if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.length}`);
 if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
 EOF
