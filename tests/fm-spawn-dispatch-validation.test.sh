@@ -149,6 +149,7 @@ test_absent_and_home_scope() {
     printf '#!/usr/bin/env bash\nexit 1\n' > "$CASE_DIR/other-home/config/dispatch-validator"
     chmod +x "$CASE_DIR/other-home/config/dispatch-validator"
     # An inactive hook must not start the added serializer.
+    # shellcheck disable=SC2016 # the single-quoted stub expands when the stub runs
     printf '#!/usr/bin/env bash\nprintf invoked >> "$FM_VALIDATION_CASE/python-called"\nexit 1\n' > "$FAKEBIN/python3"
     chmod +x "$FAKEBIN/python3"
     rc=0
