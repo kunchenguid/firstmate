@@ -226,6 +226,33 @@ test_forge_recorded_head_is_accepted_without_local_object() {
   pass "a forge-recorded head for the named PR is accepted without a local object"
 }
 
+# A GitLab task records the published head of its own merge request when it is
+# armed, and that record is what lets the same no-mistakes ready report be
+# accepted without the pipeline's commit ever being fetched into the worker
+# copy: bin/fm-pr-check.sh reads the value from refs/merge-requests/<iid>/head.
+test_gitlab_recorded_head_is_accepted_without_local_object() {
+  local repo wt meta state forge_head
+  repo="$TMP_ROOT/gitlab-forge-repo"
+  wt="$TMP_ROOT/gitlab-forge-wt"
+  state="$TMP_ROOT/gitlab-forge-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/forge
+  git -C "$wt" commit -q --allow-empty -m 'worker head, not pushed from this copy'
+  forge_head=0123456789abcdef0123456789abcdef01234567
+  meta="$state/forge.meta"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\npr=https://gitlab.example/group/subgroup/project/-/merge_requests/7\npr_head=%s\n' \
+    "$wt" "$repo" "$forge_head" > "$meta"
+  accept_done ship no-mistakes "$wt" "$repo" \
+    "done: PR https://gitlab.example/group/subgroup/project/-/merge_requests/7 checks green" \
+    "$state" forge "$meta" \
+    || fail "a GitLab task's recorded published head was refused"
+  accept_done ship no-mistakes "$wt" "$repo" \
+    "done: PR https://gitlab.example/group/subgroup/project/-/merge_requests/8 checks green" \
+    "$state" forge "$meta" >/dev/null \
+    && fail "the recorded GitLab head was accepted for a done naming another merge request"
+  pass "a GitLab task's recorded published head is accepted for its own merge request only"
+}
+
 # A direct-PR worker pushes from its own copy: a commit made after the PR's
 # recorded head, never pushed, is the named head and is refused.
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit() {
@@ -433,6 +460,7 @@ test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
 test_forge_recorded_head_is_accepted_without_local_object
+test_gitlab_recorded_head_is_accepted_without_local_object
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit
 test_ci_ready_variants_are_gated
 test_keyed_and_spaced_done_lines_are_gated

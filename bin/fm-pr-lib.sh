@@ -265,6 +265,22 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# The ref a forge publishes for one pull or merge request's current head, or
+# nonzero for a provider that publishes none. GitHub publishes
+# refs/pull/<n>/head and GitLab publishes refs/merge-requests/<n>/head; both are
+# server-side, both stay current while the request is open, and GitLab keeps its
+# own after the source branch is deleted, so a review or a ready record can read
+# the published head without the source branch. bin/fm-review-diff.sh fetches
+# this ref for its compare side and bin/fm-pr-check.sh records its commit as the
+# ready record's pr_head=, so no consumer has to know the ref layout twice.
+fm_pr_forge_head_ref() {  # <provider> <number>
+  case "${1-}" in
+    github) printf 'refs/pull/%s/head\n' "${2-}" ;;
+    gitlab) printf 'refs/merge-requests/%s/head\n' "${2-}" ;;
+    *) return 1 ;;
+  esac
+}
+
 # The one reading of a GitHub pull request's draft state. Prints "true" or
 # "false" for a boolean isDraft and nothing for anything else, so a caller can
 # tell a positive draft from an unreadable payload. bin/fm-pr-merge.sh refuses

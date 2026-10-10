@@ -112,24 +112,38 @@ fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head, and neither does a Gerrit task: a Gerrit
-# revision names one patch set, every amend or rebase is a new patch set, and
-# bin/fm-review-diff.sh has no Gerrit path to resolve a current head with, so a
-# recorded revision would silently become the reviewed content. Both consumers
-# already treat it as optional:
+# pr_head is recorded when the forge exposes the request's current head: gh
+# exposes a GitHub pull request's head commit as a selectable field, and a
+# GitLab merge request has a head ref of its own on the project remote
+# (bin/fm-pr-lib.sh owns the ref layout), which stays current while the request
+# is open and outlives the source branch's deletion. A Gerrit task records
+# none: a Gerrit revision names one patch set, every amend or rebase is a new
+# patch set, and bin/fm-review-diff.sh has no Gerrit path to resolve a current
+# head with, so a recorded revision would silently become the reviewed content.
+# Every consumer treats the record as optional and never as authority:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh fetches a pull request head from the remote when none is
-# recorded and otherwise diffs the local branch, which is the current content.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
+# metadata and falls back to its provider-agnostic content check,
+# bin/fm-review-diff.sh fetches the request's head ref from the remote and falls
+# back to the record only when that fetch fails, and bin/fm-pr-merge.sh reads the
+# head live at merge time and treats a recorded value that disagrees as stale
+# rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+# A GitLab task reads the same head ref bin/fm-review-diff.sh compares against,
+# from the copy's own project remote, so the recorded value is the published
+# head itself rather than a second reading of it. The ref is server-side and the
+# copy already holds the remote's credentials, so no JSON processor is needed.
+# An unreadable answer records nothing, exactly as an unreadable gh field does.
+if [ "$PROVIDER" = gitlab ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+  GITLAB_HEAD_REF=$(fm_pr_forge_head_ref gitlab "$NUMBER")
+  if REMOTE_HEAD=$(git -C "$WT" ls-remote --refs origin "$GITLAB_HEAD_REF" 2>/dev/null \
+      | awk 'NR == 1 { print $1 }') \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi

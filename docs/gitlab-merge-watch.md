@@ -1,7 +1,7 @@
 # GitLab merge request watch and merge verification
 
 Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
-The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
+The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22; the merge request head ref, the review and ready-record behavior built on it, and the pipeline provenance below were collected on 2026-10-09.
 Every output is reproduced exactly.
 
 ## Versions
@@ -28,6 +28,19 @@ GNU bash, version 5.2.15(1)-release (x86_64-amazon-linux-gnu)
 ```
 
 That `glab` is a locally built 1.82.0; only its build tag and commit are elided, because they name a private build rather than a released version.
+
+The 2026-10-09 evidence below ran `git ls-remote`, `curl`, and the firstmate scripts directly, on:
+
+```
+$ git --version
+git version 2.56.0
+
+$ jq --version
+jq-1.8.1
+
+$ bash --version | head -1
+GNU bash, version 5.3.9(1)-release (x86_64-redhat-linux-gnu)
+```
 
 ## The evidence project
 
@@ -184,6 +197,62 @@ The live registration tag is `fm-pr-poll-registration-v2`, which includes the pr
 A `fm-pr-poll-registration-v1` record no longer parses.
 Arm a current watch with `bin/fm-pr-check.sh`.
 
+## The merge request's own head ref
+
+GitLab publishes each merge request's current head inside the project repository at `refs/merge-requests/<iid>/head`.
+The ref is current while the merge request is open and it outlives the source branch, so reading the published head never depends on the source branch or on a local branch:
+
+```
+$ git ls-remote https://gitlab.com/KarotKris/gitlab-merge-watch-fixture.git "refs/merge-requests/2/*"
+66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8	refs/merge-requests/2/head
+4ee1baff65593d0091283b40533c3d87c8200584	refs/merge-requests/2/merge
+```
+
+That head is the merge request's own head commit, which the API reports as its `sha`:
+
+```
+$ curl -s "https://gitlab.com/api/v4/projects/KarotKris%2Fgitlab-merge-watch-fixture/merge_requests/2" | jq -r ".sha"
+66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8
+```
+
+The ref also outlives the source branch: the fixture's merged merge request no longer has its source branch, and its head ref still names that merge request's head:
+
+```
+$ git ls-remote https://gitlab.com/KarotKris/gitlab-merge-watch-fixture.git "refs/merge-requests/1/head" "refs/heads/merged-example"
+33762fcf6777c8d993220d25fb541e56c48081b9	refs/merge-requests/1/head
+$ curl -s "https://gitlab.com/api/v4/projects/KarotKris%2Fgitlab-merge-watch-fixture/merge_requests/1" | jq -r ".state, .source_branch, .sha"
+merged
+merged-example
+33762fcf6777c8d993220d25fb541e56c48081b9
+```
+
+`bin/fm-review-diff.sh` fetches that ref exactly as it fetches `refs/pull/<n>/head` on GitHub, and `bin/fm-pr-check.sh` records its commit as `pr_head=` when a GitLab task is armed.
+A review of the fixture's open merge request therefore shows the published change even when the worker copy's branch does not contain it:
+
+```
+$ fm-review-diff.sh proof --stat
+diff base: origin/main
+ open-example.txt | 2 ++
+ 1 file changed, 2 insertions(+)
+```
+
+The [review fallback contract](architecture.md#delivery-modes-are-explicit-per-task) applies when the published head cannot be fetched.
+For this fixture, with neither a usable recorded head nor local changes, that fallback prints `warning: PR head unavailable; diff may lag the open PR (using local branch fm/proof)` and `no changes vs origin/main`.
+
+Arming the same merge request records the published head rather than nothing:
+
+```
+$ fm-pr-check.sh ready https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
+armed: state/ready.check.sh
+$ grep '^pr_head=' state/ready.meta
+pr_head=66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8
+$ git ls-remote https://gitlab.com/KarotKris/gitlab-merge-watch-fixture.git "refs/merge-requests/2/head" | cut -f1
+66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8
+```
+
+The recorded value is the ref's own commit, read from the copy's project remote, so it names a head the forge holds.
+It stays a fallback: a fetch that succeeds always outranks it, and the merge path never treats it as authority.
+
 ## Merging a merge request
 
 `bin/fm-pr-merge.sh` now merges a GitLab merge request through the shared recording helper and GitLab's own live pre-merge guards.
@@ -237,12 +306,12 @@ $ echo $?
 ```
 
 A project that runs no pipeline at all therefore cannot merge through this path.
-That is the intended reading of the requirement rather than an oversight: a successful pipeline at the head is a condition, and "there is no pipeline" does not satisfy it.
+The [pipeline provenance requirements](#pipelines-that-run-on-a-merged-result) require a successful pipeline, so "there is no pipeline" does not satisfy them.
 
 Both refusals came after `pr=` was recorded and the merge poll was armed, as a failed live verification or `gh pr merge` does on the GitHub side, so a refusal still leaves the audit trail and the watch in place.
 
 A recorded `pr_head=` that no longer matches the live head is reported, and the live head is what gets verified.
-The stale value below was written into the task record by hand, because a GitLab task never records one on its own:
+The stale value below stands in for the one a rebase leaves behind:
 
 ```
 $ fm-pr-merge.sh e4 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
@@ -257,8 +326,41 @@ The remaining refusal conditions, and the merge itself, are covered by `tests/fm
 The conflict, unresolved-discussion, and running-pipeline conditions were additionally exercised against real merge requests on a private instance; those runs cannot be reproduced here, so their identifiers stay out of this record.
 The merge itself is not exercised against any live merge request, in either direction: `glab mr merge` has no dry run, so a live success path would mean merging someone's work to produce evidence.
 
+## Pipelines that run on a merged result
+
+Merged results pipelines and merge trains run the merge request's pipeline on a temporary merge commit rather than on the head, so `head_pipeline.sha` legitimately differs from the merge request's `sha` (GitLab: [merged results pipelines](https://docs.gitlab.com/ci/pipelines/merged_results_pipelines/), [merge trains](https://docs.gitlab.com/ci/pipelines/merge_trains/); both are Premium and Ultimate features and do not exist on GitLab CE or Free).
+`bin/fm-pr-merge.sh` accepts such a pipeline only as this merge request's own pipeline and only when it covers the current revisions:
+
+- the pipeline's `ref` is exactly `refs/merge-requests/<iid>/merge` or `refs/merge-requests/<iid>/train` for the merge request's own iid, which is what identifies the pipeline as this merge request's own rather than another's;
+- that ref's current tip in the project repository is exactly the commit the pipeline ran on, so a pipeline the ref has moved past is refused as superseded rather than merged;
+- the tested commit has exactly two parents, with the live source head as its second parent, so both source advances and rewinds refuse stale results;
+- a merged-results commit has the current target tip as its first parent; a train commit must have matching GitLab provenance proving an exact parent chain rooted at the current target tip.
+
+The pipeline's kind and iid, and the merge request's head and target branch, come from the same live merge request view as every other pre-merge condition; the ref, the tested commit, and the target branch tip come from the merge request's own project repository.
+The [target-branch merge-train endpoint](https://docs.gitlab.com/api/merge_trains/#list-all-merge-requests-in-a-merge-train) supplies all active cars across every page, ordered by car ID.
+Each car through the requested merge request must have exactly two parents, with its first parent equal to the preceding car's tested commit, or the current target tip for the first car.
+The requested car must report the same successful pipeline ID, SHA, and ref.
+Cars must report `fresh`, but that status alone does not prove target freshness.
+Missing, unreadable, stale, or mismatched train provenance refuses acceptance.
+
+The fixture's merged result shows the shape those refs carry on a live instance:
+
+```
+$ git ls-remote https://gitlab.com/KarotKris/gitlab-merge-watch-fixture.git "refs/merge-requests/2/merge"
+4ee1baff65593d0091283b40533c3d87c8200584	refs/merge-requests/2/merge
+$ git log --format="%H %P" -1 refs/merge-requests/2/merge
+4ee1baff65593d0091283b40533c3d87c8200584 03a7d33b229e80ced8af9b9534ed2affc4972cd3 66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8
+```
+
+That merged result's first parent is the target branch tip and its second parent is the merge request's head, in the order the guard requires.
+No licensed instance was available to run a real merged-results or merge-train pipeline, so no live pipeline of either kind is claimed here; `tests/fm-pr-merge.test.sh` exercises the accepted proofs and every refusal hermetically, building the same refs and topologies, including a chained car whose target is an ancestor rather than a parent, and asserting that a merge runs only on proven provenance and is always bound to the live head with `--sha`.
+
+A pipeline that did not run at the head and cannot be proven this way refuses the merge, and the refusal names the fact that could not be proven.
+
 ## Why the head is read live and bound to the merge
 
+After acquiring the away-record lock, the guard repeats the live mergeability checks and full pipeline proof immediately before merging.
+It refuses any observed change in the source head, target branch or tip, pipeline identity or ref, or train provenance.
 The verified head is passed to `glab mr merge --sha`, so GitLab refuses the merge if the source branch moved between the read and the merge.
 Without it, a push landing in that window would merge commits nothing verified.
 
@@ -267,9 +369,9 @@ It skips only that prompt; the conditions above are what authorize the merge.
 
 ## Why a recorded head is not the authority
 
-`bin/fm-pr-check.sh` records `pr_head=` only for GitHub, where `gh` exposes the head commit as a selectable field.
-It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` fetches a pull-request head from the remote when none is recorded, which a merge request has no ref for, so a GitLab task is diffed against its local branch under that script's warning ([architecture.md](architecture.md) owns that fallback).
+`bin/fm-pr-check.sh` records `pr_head=` for both forges: `gh` exposes a GitHub pull request's head commit as a selectable field, and a GitLab merge request's own head ref supplies the same fact ([above](#the-merge-requests-own-head-ref)).
+The record is optional by design; [architecture.md](architecture.md) owns review fallback and teardown behavior.
 
-The merge path does not record one either, and deliberately does not depend on one.
+The merge path deliberately does not depend on a recorded head.
 A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.
 Reading the head live at merge time, reporting a recorded value that disagrees, and binding the merge to what was actually verified is what closes that gap.

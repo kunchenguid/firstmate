@@ -868,6 +868,91 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+# Give a case's worker copy a real project remote that publishes one merge
+# request's head ref the way a GitLab instance serves it, and print the
+# published head. The copy's own branch is left where it was.
+publish_gitlab_head() {  # <dir> <iid>
+  local dir=$1 iid=$2 head
+  git -C "$dir/wt" commit -q --allow-empty -m 'published merge request head'
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  git init -q --bare "$dir/origin.git"
+  git -C "$dir/wt" remote add origin "$dir/origin.git"
+  git -C "$dir/wt" push -q origin "HEAD:refs/merge-requests/$iid/head"
+  printf '%s' "$head"
+}
+
+# A GitLab task records the head the merge request's own ref publishes, exactly
+# as a GitHub task records the forge's headRefOid, so a no-mistakes ready record
+# carries a head the forge holds and does not have to fall back to a local-only
+# claim. The ref is read from the copy's own remote and needs no JSON processor.
+test_gitlab_registration_records_published_head() {
+  local dir head out
+  dir=$(make_case gitlab-registration-head)
+  write_task_meta "$dir" task-gl
+  head=$(publish_gitlab_head "$dir" 7)
+
+  run_check_entry "$dir" task-gl https://gitlab.example/group/subgroup/project/-/merge_requests/7 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "valid GitLab registration failed: $(cat "$dir/stderr")"
+
+  grep -qxF 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
+    "$dir/home/state/task-gl.meta" || fail "canonical merge request URL was not recorded"
+  grep -qxF "pr_head=$head" "$dir/home/state/task-gl.meta" \
+    || fail "the published merge request head was not recorded"
+  [ "$(grep -c '^pr_head=' "$dir/home/state/task-gl.meta")" -eq 1 ] \
+    || fail "duplicate pr_head metadata was appended"
+  cmp -s "$POLL" "$dir/home/state/task-gl.check.sh" || fail "published check was not byte-for-byte static"
+  out=$(cat "$dir/home/state/task-gl.pr-poll")
+  [ "$out" = "gitlab
+https://gitlab.example/group/subgroup/project/-/merge_requests/7
+gitlab.example
+group/subgroup/project
+7" ] || fail "published sidecar bytes were not exact"
+  pass "fm-pr-check records the head a GitLab merge request's own ref publishes"
+}
+
+# Re-arming after the head moved records the new published head rather than
+# keeping the old one, so the record always tracks the forge's current head.
+test_gitlab_registration_refreshes_the_recorded_head() {
+  local dir first second
+  dir=$(make_case gitlab-registration-refresh)
+  write_task_meta "$dir" task-gl
+  first=$(publish_gitlab_head "$dir" 7)
+  run_check_entry "$dir" task-gl https://gitlab.example/group/subgroup/project/-/merge_requests/7 \
+    >/dev/null 2>/dev/null || fail "first GitLab registration failed"
+  grep -qxF "pr_head=$first" "$dir/home/state/task-gl.meta" || fail "first head was not recorded"
+
+  git -C "$dir/wt" commit -q --allow-empty -m 'second published head'
+  second=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" push -q origin "HEAD:refs/merge-requests/7/head"
+  run_check_entry "$dir" task-gl https://gitlab.example/group/subgroup/project/-/merge_requests/7 \
+    >/dev/null 2>/dev/null || fail "re-arming GitLab registration failed"
+
+  grep -qxF "pr_head=$second" "$dir/home/state/task-gl.meta" \
+    || fail "re-arming kept a stale head instead of the published one"
+  [ "$first" != "$second" ] || fail "fixture did not move the published head"
+  pass "fm-pr-check re-records the published head when a GitLab merge request's head moves"
+}
+
+# An unreadable head ref records nothing, exactly as an unreadable gh field
+# does: the ready record keeps the forge head optional rather than inventing a
+# value, and the named-head gate still has the final word.
+test_gitlab_unreadable_head_ref_records_nothing() {
+  local dir
+  dir=$(make_case gitlab-registration-no-ref)
+  write_task_meta "$dir" task-gl
+
+  run_check_entry "$dir" task-gl https://gitlab.example/group/subgroup/project/-/merge_requests/7 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "registration with an unreadable head ref failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
+    "$dir/home/state/task-gl.meta" || fail "canonical merge request URL was not recorded"
+  assert_no_grep 'pr_head=' "$dir/home/state/task-gl.meta" \
+    "an unreadable head ref recorded a head anyway"
+  cmp -s "$POLL" "$dir/home/state/task-gl.check.sh" || fail "published check was not byte-for-byte static"
+  pass "fm-pr-check records no head when a GitLab merge request's head ref is unreadable"
+}
+
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
 # used sixty seconds of its own time. The guard pauses while the file named by
 # FM_TEST_WATCH_BOUND_PAUSE exists, so a case that holds the watcher on work it
@@ -3469,6 +3554,9 @@ test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
+test_gitlab_registration_records_published_head
+test_gitlab_registration_refreshes_the_recorded_head
+test_gitlab_unreadable_head_ref_records_nothing
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

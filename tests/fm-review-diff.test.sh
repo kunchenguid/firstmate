@@ -17,6 +17,14 @@
 #       the moved worktree HEAD
 #   (h) meta records base_branch= -> the diff is against origin/<base_branch>,
 #       so the base branch's own commits never appear as task changes
+#   (i) GitLab MR URL -> fetch refs/merge-requests/<iid>/head and diff that
+#   (j) GitLab MR URL + stale recorded pr_head= -> the fetched merge-request
+#       head wins, so a review never lags a published fix
+#   (k) GitLab MR URL whose source branch was deleted from the origin -> the
+#       merge request's own head ref still supplies the published content
+#   (l) GitLab MR URL + unreachable remote -> recorded pr_head= is the offline
+#       fallback, exactly as on GitHub
+#   (m) GitLab MR URL whose head ref is absent -> local branch + warning
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -238,6 +246,126 @@ test_recorded_base_branch_is_the_review_base() {
   pass "fm-review-diff compares a task against its recorded base branch"
 }
 
+# The GitLab twin of stale_and_pr_commits: a stale local ship branch and a
+# pipeline fix published under the merge request's own head ref, which is how a
+# GitLab instance serves the current published head. MR_SHA is that published
+# head.
+stale_and_mr_commits() {
+  local case_dir=$1 iid=$2
+  printf 'stale-local\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "stale local branch"
+
+  git -C "$case_dir/wt" checkout -q -b mr-head-tmp
+  printf 'mr-fixed\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "pipeline fix on MR"
+  MR_SHA=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin "mr-head-tmp:refs/merge-requests/$iid/head"
+
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+}
+
+test_gitlab_merge_request_head_is_fetched() {
+  local case_dir out
+  case_dir=$(make_case gitlab-mr-head)
+  stale_and_mr_commits "$case_dir" 7
+  write_task_meta "$case_dir" "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+mr-fixed' \
+    "gitlab-mr-head: diff should use the published merge request head"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-mr-head: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "gitlab-mr-head: fetch of refs/merge-requests/<iid>/head should succeed"
+  pass "fm-review-diff fetches refs/merge-requests/<iid>/head for a GitLab merge request"
+}
+
+test_gitlab_stale_recorded_head_loses_to_fetched_head() {
+  local case_dir out stale_sha
+  case_dir=$(make_case gitlab-stale-recorded)
+  stale_and_mr_commits "$case_dir" 7
+  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  write_task_meta "$case_dir" \
+    "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7" \
+    "pr_head=$stale_sha"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+mr-fixed' \
+    "gitlab-stale-recorded: diff must show the fetched merge request head, not the recorded stale SHA"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-stale-recorded: diff must not use the stale local/recorded content"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "gitlab-stale-recorded: fetch of refs/merge-requests/<iid>/head should succeed"
+  [ "$stale_sha" != "$MR_SHA" ] || fail "gitlab-stale-recorded: fixture did not diverge recorded vs published head"
+  pass "fm-review-diff prefers a freshly fetched merge request head over a stale recorded pr_head="
+}
+
+test_gitlab_deleted_source_branch_still_reviews_published_head() {
+  local case_dir out
+  case_dir=$(make_case gitlab-deleted-source)
+  stale_and_mr_commits "$case_dir" 9
+  # A merge request whose source branch was published and then deleted, as a
+  # completed cleanup leaves it; the merge request's own head ref outlives that,
+  # which is what keeps the review on the published content instead of the
+  # worker copy.
+  git -C "$case_dir/wt" push -q origin "mr-head-tmp:refs/heads/mr-source"
+  git -C "$case_dir/wt" push -q origin --delete mr-source
+  [ -z "$(git -C "$case_dir/wt" ls-remote --heads origin mr-source)" ] \
+    || fail "gitlab-deleted-source: the fixture's source branch is still published"
+  write_task_meta "$case_dir" "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+mr-fixed' \
+    "gitlab-deleted-source: the published head must still be reviewed after the source branch is deleted"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-deleted-source: diff must not fall back to the local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "gitlab-deleted-source: the merge request's own head ref should still resolve"
+  pass "fm-review-diff reviews a GitLab merge request whose source branch was deleted"
+}
+
+test_gitlab_unreachable_remote_falls_back_to_recorded_head() {
+  local case_dir out
+  case_dir=$(make_case gitlab-offline-recorded)
+  stale_and_mr_commits "$case_dir" 7
+  git -C "$case_dir/wt" remote remove origin
+  write_task_meta "$case_dir" \
+    "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7" \
+    "pr_head=$MR_SHA"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+mr-fixed' \
+    "gitlab-offline-recorded: the recorded published head is the offline fallback"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-offline-recorded: diff must not use the stale local branch"
+  pass "fm-review-diff falls back to a recorded merge request head when the remote is unreachable"
+}
+
+test_gitlab_missing_head_ref_falls_back_with_warning() {
+  local case_dir out
+  case_dir=$(make_case gitlab-missing-ref)
+  stale_and_mr_commits "$case_dir" 7
+  # No ref for this merge request exists on the remote, and no head was recorded,
+  # so the review must warn and diff the local branch rather than invent a head.
+  write_task_meta "$case_dir" "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/8"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable; diff may lag the open PR' \
+    "gitlab-missing-ref: a missing merge request head must warn"
+  assert_contains "$out" '+stale-local' \
+    "gitlab-missing-ref: the local branch is the documented fallback"
+  assert_not_contains "$out" '+mr-fixed' \
+    "gitlab-missing-ref: another merge request's published head must never be reviewed"
+  pass "fm-review-diff warns and diffs the local branch when a merge request head ref is absent"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -246,3 +374,8 @@ test_unreachable_pr_head_falls_back_with_warning
 test_recorded_branch_beats_moved_worktree_head
 test_corrupt_recorded_branch_is_refused
 test_recorded_base_branch_is_the_review_base
+test_gitlab_merge_request_head_is_fetched
+test_gitlab_stale_recorded_head_loses_to_fetched_head
+test_gitlab_deleted_source_branch_still_reviews_published_head
+test_gitlab_unreachable_remote_falls_back_to_recorded_head
+test_gitlab_missing_head_ref_falls_back_with_warning
