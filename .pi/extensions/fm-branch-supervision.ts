@@ -76,7 +76,7 @@
 // its deliberate limits.
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Pi exposes pi-ai to extensions as a first-class module in both its Node
@@ -162,8 +162,42 @@ const BRANCH_TOOL_NAMES = ["read", "bash", "fm_branch_report"] as const;
 const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("hex").slice(0, 24)}`;
 
 const MIRROR_MESSAGE_CAP = 4000;
+const SECONDMATE_REGISTRY = `${fmHome}/data/secondmates.md`;
 const MERGE_NOTE_BOAT = "⛵";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
+
+// Each registered second mate's optional `icon:` glyph (bin/fm-secondmate-registry-lib.sh
+// owns the grammar); mirrors .claude/mods/firstmate-calm/lib/fm-branch-notes.ts. The map is
+// re-parsed only when the registry's mtime or size changes, so a registry edit shows without
+// a restart while a repaint costs one stat rather than one read per rendered note.
+let secondmateIconsCache: { key: string; icons: ReadonlyMap<string, string> } | undefined;
+function secondmateIcons(): ReadonlyMap<string, string> {
+  let key: string;
+  try {
+    const stat = statSync(SECONDMATE_REGISTRY);
+    key = `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    secondmateIconsCache = undefined;
+    return new Map();
+  }
+  if (secondmateIconsCache?.key === key) return secondmateIconsCache.icons;
+  const icons = new Map<string, string>();
+  let text = "";
+  try {
+    text = readFileSync(SECONDMATE_REGISTRY, "utf8");
+  } catch {
+    return icons;
+  }
+  for (const line of text.split("\n")) {
+    const match = /^- ([A-Za-z0-9._-]+) - .+;\s*projects:\s*[^;)]*;\s*icon:\s*([^;)]*?)\s*;\s*added\s+\d{4}-\d{2}-\d{2}\)\s*$/.exec(line);
+    if (match && match[2] !== "") icons.set(match[1]!, match[2]!);
+  }
+  secondmateIconsCache = { key, icons };
+  return icons;
+}
+function secondmateIcon(task: string): string | undefined {
+  return secondmateIcons().get(task);
+}
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
 // The processing half of the captain-outcome contract. The visible entry
 // above is the DISPLAY: crash-safe and exact-once. This hidden, typed request
@@ -999,9 +1033,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   function deliverRoutineOutcome(row: OutcomeRow): void {
+    const icon = secondmateIcon(row.task);
     const message = {
       customType: "fm-branch-merge",
-      content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
+      content: `${icon ?? MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
+      details: icon === undefined ? undefined : { icon },
       display: !row.silent,
     };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
@@ -2416,8 +2452,9 @@ ${context.command}
   pi.registerEntryRenderer?.(VISIBLE_OUTCOME_ENTRY_TYPE, (entry, _options, theme) => {
     const record = parseVisibleOutcomeRecord(entry.data);
     if (!record || record.verdict !== "captain") return undefined;
+    const icon = secondmateIcon(record.task) ?? "";
     return new Text(
-      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` [seq ${record.seq}] ${record.task}: ${record.summary}`)}`,
+      `${theme.fg("customMessageText", `${VISIBLE_OUTCOME_ANCHOR}${icon}`)}${theme.fg("dim", ` [seq ${record.seq}] ${record.task}: ${record.summary}`)}`,
       1,
       0,
     );
@@ -2427,11 +2464,13 @@ ${context.command}
   // routine note uses except an explicitly silent no-change outcome.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
-    const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
-    const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
+    const detailIcon = (message.details as { icon?: unknown } | undefined)?.icon;
+    const glyph = typeof detailIcon === "string" && note.startsWith(detailIcon) ? detailIcon : MERGE_NOTE_BOAT;
+    const hasGlyph = note.startsWith(glyph);
+    const rest = hasGlyph ? note.slice(glyph.length) : note;
     const outputPad = 1;
     return new Text(
-      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
+      `${hasGlyph ? theme.fg("customMessageText", glyph) : ""}${theme.fg("dim", rest)}`,
       outputPad,
       0,
     );

@@ -748,8 +748,9 @@ initialize_no_mistakes_project() {
 }
 
 write_registry() {
-  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today
+  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today icon=
   mkdir -p "$DATA"
+  if secondmate_registry_line_for_id "$REG" "$id"; then icon=$SECONDMATE_REGISTRY_ICON; fi
   scope=$(registry_scope_for_brief "$brief")
   summary=$(registry_summary_for_brief "$brief")
   today=$(date +%F)
@@ -759,7 +760,8 @@ write_registry() {
   else
     : > "$tmp"
   fi
-  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" >> "$tmp"
+  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; %sadded %s)\n' \
+    "$id" "$summary" "$home" "$scope" "$projects_csv" "$(secondmate_registry_icon_field "$icon")" "$today" >> "$tmp"
   mv "$tmp" "$REG"
 }
 

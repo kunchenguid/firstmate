@@ -8,6 +8,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 # shellcheck source=tests/herdr-client-pair-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$ROOT/bin/fm-secondmate-registry-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -510,6 +512,24 @@ assert_no_grep '- seed-fail ' "$TMP_ROOT/seed-parent/data/secondmates.md" "faile
 assert_grep '- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md" "failed seed rollback removed a competing successful route"
 assert_present "$TMP_ROOT/seed-keep-home/.fm-secondmate-home" "serialized seed lost its published remote home"
 pass "remote seed rollback preserves serialized competing routes"
+
+# A same-placement re-seed rewrites the id's registry line; an icon given by hand must survive it.
+seed_keep_line=$(grep '^- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md")
+grep -v '^- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md" > "$TMP_ROOT/seed-parent/data/secondmates.next" || true
+printf '%s\n' "${seed_keep_line%added *}icon: 🧪; added ${seed_keep_line##*added }" >> "$TMP_ROOT/seed-parent/data/secondmates.next"
+mv -f "$TMP_ROOT/seed-parent/data/secondmates.next" "$TMP_ROOT/seed-parent/data/secondmates.md"
+FM_SECONDMATE_CHARTER='Successful seed charter.' FM_SECONDMATE_SCOPE='successful seed' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-keep remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-keep-home" --no-projects > "$TMP_ROOT/seed-keep-again.out" 2>&1 \
+  || fail "same-placement remote re-seed failed: $(cat "$TMP_ROOT/seed-keep-again.out")"
+[ "$(grep -c '^- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md")" -eq 1 ] \
+  || fail "remote re-seed left more than one registry line for the id"
+secondmate_registry_line_for_id "$TMP_ROOT/seed-parent/data/secondmates.md" seed-keep \
+  || fail "re-seeded remote registry line did not parse"
+[ "$SECONDMATE_REGISTRY_ICON" = '🧪' ] || fail "remote re-seed dropped the registered icon: $SECONDMATE_REGISTRY_LINE"
+[ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] && [ "$SECONDMATE_REGISTRY_HOME" = "$TMP_ROOT/seed-keep-home" ] \
+  || fail "remote re-seed changed the route: $SECONDMATE_REGISTRY_LINE"
+pass "remote same-placement re-seed preserves the registered icon"
 
 : > "$DOCTOR_LOG"
 if FM_SECONDMATE_CHARTER='Unknown readiness charter.' FM_SECONDMATE_SCOPE='unknown readiness' \

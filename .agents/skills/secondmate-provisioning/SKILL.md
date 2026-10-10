@@ -32,6 +32,9 @@ A whole-home remote route uses:
 
 Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive clone list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that secondmate.
 Natural-language summary and `scope:` text may contain parentheses and semicolons; keep the generated `(home: ...; scope: ...; projects: ...; added ...)` suffix intact so operational consumers resolve its explicit field markers.
+Either route may carry an optional `icon: <glyph>;` field between `projects:` and `added`, for example `projects: book; icon: 🎙️; added <date>`; re-seeding an already-registered id rewrites its line but keeps that icon.
+The supervision notes in the Claude Code and Pi transcripts print that glyph in place of the boat (and after the anchor for captain outcomes) for the mate's tasks, so each area is recognizable at a glance; a mate without `icon:` keeps the default.
+Suggested glyphs: career 💼, research 🔬, Producer 🎙️, creator 🛠️, compute ⚡, publisher 📣, Manager (ben) 🧭.
 The `home:` path points to the seeded home containing `data/charter.md`; no extra registry pointer field is needed.
 For a remote route, `host:` is an OpenSSH config alias and `root:` is that host's separate tracked Firstmate code root.
 A remote second-mate agent always runs on the Herdr backend and every seed, launch, and liveness relaunch first gates its host on `bin/fm-remote-doctor.sh` readiness, so an unready host refuses with that doctor's own gap text rather than half-creating a route; the workers that second mate supervises keep the home's ordinary backend selection.
