@@ -68,6 +68,7 @@ SH
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
+  ln -s "$ROOT/bin/fm-supervision-engine-lib.sh" "$fake/bin/fm-supervision-engine-lib.sh"
   # Lifecycle serialization, status presentation retirement, and shared adapter
   # ownership are sourced by teardown.
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
@@ -98,6 +99,14 @@ SH
   # Ordinary teardown reports any final ledger outcome before removing records.
   ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
   ln -s "$ROOT/bin/fm-parent-channel-lib.sh" "$fake/bin/fm-parent-channel-lib.sh"
+  ln -s "$ROOT/bin/fm-secondmate-liveness-lib.sh" "$fake/bin/fm-secondmate-liveness-lib.sh"
+  ln -s "$ROOT/bin/fm-remote-readiness-lib.sh" "$fake/bin/fm-remote-readiness-lib.sh"
+  # This temp-cleanup fixture has no seat generations or accounting ledger.
+  cat > "$fake/bin/fm-fleet-seats.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = show ]
+SH
+  chmod +x "$fake/bin/fm-fleet-seats.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -175,6 +184,7 @@ SH
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
+  ln -s "$ROOT/bin/fm-supervision-engine-lib.sh" "$fake/bin/fm-supervision-engine-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
@@ -200,6 +210,13 @@ SH
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
   ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
   ln -s "$ROOT/bin/fm-parent-channel-lib.sh" "$fake/bin/fm-parent-channel-lib.sh"
+  ln -s "$ROOT/bin/fm-secondmate-liveness-lib.sh" "$fake/bin/fm-secondmate-liveness-lib.sh"
+  ln -s "$ROOT/bin/fm-remote-readiness-lib.sh" "$fake/bin/fm-remote-readiness-lib.sh"
+  cat > "$fake/bin/fm-fleet-seats.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = show ]
+SH
+  chmod +x "$fake/bin/fm-fleet-seats.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

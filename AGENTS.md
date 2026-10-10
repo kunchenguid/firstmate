@@ -110,6 +110,7 @@ Do not add model-specific versions of that policy.
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable; pass an explicit per-spawn `--backend` only under that exact task's own authority, never as later-task precedent (selection contract: [`docs/configuration.md`](docs/configuration.md) "Runtime backend").
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
+A fleet seat refusal from `fm-spawn` means admission on that route is unavailable: choose the matched rule's overflow route at its own verified model and effort, or hold the task (contract: `docs/configuration.md` "Fleet seat pools").
 
 ## 5. Recovery
 

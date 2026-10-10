@@ -231,8 +231,9 @@ If the secondmate is already running and only inherited local material changed, 
 To move a live LOCAL secondmate onto a newly pinned harness, model, or effort without a full recovery, set `config/secondmate-harness` and then relaunch it with `bin/fm-control.sh <id> relaunch`, which re-resolves that pin, stops the agent, and launches the replacement in the same home ([`docs/agent-control.md`](../../../docs/agent-control.md)).
 That plane refuses a remotely placed secondmate by name, because its agent runs on another host where none of the plane's postconditions can be read.
 Move a REMOTE one with `bin/fm-remote-secondmate-relaunch.sh <id> <harness> <model|default|-> <effort|default|->`, which runs that same control-plane relaunch on its host and then republishes this primary's own route metadata from the identity the host confirmed; pass the profile explicitly and use `default` for an absent pin, because `config/secondmate-harness` is not inherited and the copy on that host belongs to a different home ([`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md)).
-Never call `fm-remote-secondmate-control.sh relaunch` through `fm-on.sh` directly for this: it leaves this primary's own record naming the runtime the mate used to run.
-A successful update restarts every live mate of both placements on its own, including one already on the target commit; the `/updatefirstmate` skill owns that pass, and `bin/fm-secondmate-restart.sh` owns its persist gate and failure vocabulary.
+The [remote relaunch contract](../../../docs/remote-secondmates.md#relaunch-a-live-remote-second-mate) owns why direct host relaunch is refused with seat pools and otherwise leaves the primary's route stale.
+A successful update requests a restart of every live mate of both placements, including one already on the target commit; the `/updatefirstmate` skill owns that pass, and `bin/fm-secondmate-restart.sh` owns its persist gate and failure vocabulary.
+The [remote relaunch contract](../../../docs/remote-secondmates.md#relaunch-a-live-remote-second-mate) owns the legacy generation prerequisite for a clean update restart.
 
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.
@@ -253,7 +254,7 @@ A remote route delegates the in-flight guard to its configured host and addition
 SSH exit 255 preserves the route and local records because remote completion is unknown.
 When retirement proceeds, teardown kills the direct endpoint, removes every parent pending-reply record for that id including resolved leftovers and its delivery confirmation, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
 An endpoint close that could not be made stops the retirement before any record naming that endpoint is removed, so a cleanup never reports success for an agent that may still be live with nothing left on disk naming it.
-`--force` overrides that stop only for the retiring secondmate's own endpoint, never for a child endpoint inside forced cleanup, and a forced continue still names the endpoint you must then reconcile yourself; [`docs/verification/runtime-backends.md`](../../../docs/verification/runtime-backends.md) "Endpoint close" owns what each backend can prove about its own close.
+[`bin/fm-teardown.sh`](../../../bin/fm-teardown.sh)'s header owns endpoint-close refusals and the limited force override; [fleet seat pools](../../../docs/configuration.md#fleet-seat-pools-configfleet-seats) owns retention of counted generations and their recovery routes.
 Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
 A plain-clone home with no pool slot is simply removed.
 If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
@@ -263,7 +264,7 @@ Raw deletion is unsupported because a blocking process-event child can outlive i
 
 With `--force`, teardown is the explicit discard path.
 The worktree-slot ownership contract in `bin/fm-teardown.sh` still applies: `--force` never authorizes returning a descendant pool slot that another task may own.
-It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
+It discards child work and state only after the child cleanup gates in [`bin/fm-teardown.sh`](../../../bin/fm-teardown.sh) pass, then removes the route, releases the lease, and removes the retired secondmate home.
 If forced teardown contends with a fresh task publication in any affected home, one command refuses without publishing or removing task state; treat that refusal as terminal and inspect the other operation before retrying.
-Relaunch and non-forced teardown remain outside that serialization.
+The task-publication lock is specific to forced cleanup; [`bin/fm-secondmate-liveness-lib.sh`](../../../bin/fm-secondmate-liveness-lib.sh)'s header owns the lifecycle episode shared by relaunch and retirement.
 Never use `--force` unless the captain explicitly said to discard the work.
