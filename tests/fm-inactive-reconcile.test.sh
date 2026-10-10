@@ -1140,7 +1140,7 @@ install_handoff_fakes() {
   cat > "$WORLD/fakebin/fm-crew-state.sh" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$1" >> "$WORLD/crew-state.log"
-printf 'state: %s · source: %s\n' "\${FM_FAKE_CREW_STATE:-unknown}" "\${FM_FAKE_CREW_SOURCE:-fake}"
+printf 'state: %s · source: %s%s\n' "\${FM_FAKE_CREW_STATE:-unknown}" "\${FM_FAKE_CREW_SOURCE:-fake}" "\${FM_FAKE_CREW_DETAIL:+ · \$FM_FAKE_CREW_DETAIL}"
 EOF
   chmod +x "$WORLD/fakebin/fm-crew-state.sh"
   for tool in no-mistakes fm-send; do
@@ -1270,6 +1270,22 @@ test_handoff_idle_rejects_terminal_run_step_evidence() {
       || fail "$state run-step retired the handoff marker"
   done
   pass "failed and completed run-step states do not clear handoffs"
+}
+
+test_handoff_idle_accepts_verified_parked_run_step_waits() {
+  local home wait record
+  for wait in awaiting_approval fix_review review; do
+    make_world "handoff-parked-run-step-$wait"
+    install_handoff_fakes
+    home=$MAIN
+    write_child "$home" intake "needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests" "inc-parked-run-step-$wait"
+    FM_FAKE_CREW_SOURCE=run-step FM_FAKE_CREW_STATE=parked FM_FAKE_CREW_DETAIL="parked at $wait" scan_handoff "$home"
+    record=$(one_record "$home" intake) || fail "$wait parked run-step did not retain the handoff record"
+    [ "$(handoff_field "$record" clear_reason)" = run-step ] || fail "$wait parked run-step did not clear the handoff as continuation"
+    [ "$(handoff_wake_count "$home")" = 0 ] || fail "$wait parked run-step queued an idle alert"
+    [ ! -e "$home/state/handoff-continuations/intake.open" ] || fail "$wait parked run-step retained the handoff marker"
+  done
+  pass "verified parked approval, fix-review, and gate waits clear handoffs"
 }
 
 test_handoff_idle_fails_closed_when_continuation_predicate_is_unreadable() {
@@ -2016,6 +2032,7 @@ test_handoff_idle_bound_refuses_out_of_range() {
 test_handoff_idle_records_the_episode_and_alerts_once
 test_handoff_idle_records_early_attributed_continuation_latency
 test_handoff_idle_rejects_terminal_run_step_evidence
+test_handoff_idle_accepts_verified_parked_run_step_waits
 test_handoff_idle_clears_only_on_continuation
 test_handoff_idle_skips_final_deliveries_and_secondmates
 test_handoff_idle_requires_canonical_delivery_for_every_mode

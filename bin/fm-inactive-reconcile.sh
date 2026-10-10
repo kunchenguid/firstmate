@@ -980,6 +980,7 @@ handoff_one() {
           *) proof='attributed-run' ;;
         esac
         ;;
+      'state: parked'*'source: run-step'*) proof='attributed-run' ;;
     esac
   fi
   evidence_rc=0
