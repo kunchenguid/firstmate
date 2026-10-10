@@ -173,6 +173,10 @@
 # open-decision ledger fm-wake-drain folds lives in this home's own state dir
 # (a remote mate's escalations reach it through the parent-replies ingest);
 # only the answer message crosses the backend or remote transport.
+# --resolve-key records an ANSWER. A reply that leaves the decision open (still
+# held, still waiting on the captain) must not pass it: closing the record hides
+# the open question, and a secondmate hold then republishes the same
+# captain-hold-<task>-<n> key, which reads as a brand-new ask.
 #
 # Answering a decision is the gate-answer path and is main-owned while
 # attended: when any named key is an open needs-decision or a captain-held task

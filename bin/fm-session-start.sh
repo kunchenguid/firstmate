@@ -107,6 +107,12 @@
 # contract that only arrives after the payload it governs is the first thing a
 # truncated digest loses, and it carries the truncation caveat that keeps it
 # honest when a stage below it never ran.
+# "Recoverable with one targeted read" did not hold in practice: an omp primary
+# whose compaction digests truncated in bootstrap three times in two days never
+# made that read, so curated captain preferences dropped out of context. When
+# the runtime bound or a child death stops the digest before CONTEXT, the parent
+# now prints the context files itself after the banner. A harness tail cut
+# still drops them, as above.
 # The LOCK/BOOTSTRAP/WAKE-QUEUE safety preamble keeps its order: it establishes
 # mutation authority and this turn's work queue before anything else is read.
 #
@@ -352,6 +358,25 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
       printf '●  cannot help a digest that died, and a stage that dies is a fleet problem.\n'
     fi
     printf '%s\n' "$BAR"
+    # Curated memory is the stage a truncation drops most often (it prints
+    # last), and a session that re-runs a startup which keeps truncating never
+    # sees it. These are small local reads with no lock or network, so the
+    # parent prints them itself whenever the context stage never ran.
+    case " $SESSION_START_PENDING " in
+      *' context '*)
+        printf '\nCONTEXT (printed by the parent because the context stage never ran)\n'
+        for SESSION_START_CONTEXT_FILE in projects.md secondmates.md captain.md captain-shared.md learnings.md; do
+          printf '\ndata/%s\n' "$SESSION_START_CONTEXT_FILE"
+          if [ -s "$DATA/$SESSION_START_CONTEXT_FILE" ]; then
+            cat "$DATA/$SESSION_START_CONTEXT_FILE" 2>/dev/null || printf '(unreadable)\n'
+          elif [ -f "$DATA/$SESSION_START_CONTEXT_FILE" ]; then
+            printf '(present, empty)\n'
+          else
+            printf 'ABSENT\n'
+          fi
+        done
+        ;;
+    esac
   fi
   rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
   exit 0

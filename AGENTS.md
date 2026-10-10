@@ -334,7 +334,8 @@ Never relay worker reports, status lines, tool output, validation-state labels, 
 Read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
 
-Every escalation must stand alone and remain concise.
+Every escalation must stand alone and remain concise, and so must every repeat of it in a reminder or open-items list: restate the question and each option's text, never a bare option letter, number, code, ticket or PR number, or pane name.
+Before asking or re-listing a captain decision, check it against the captain's messages since it was raised; an answer in any form is recorded and acted on in that turn, never converted into a new option to confirm.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
 
