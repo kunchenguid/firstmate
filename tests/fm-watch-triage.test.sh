@@ -2341,6 +2341,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   wait_for_exit "$pid" 100 || fail "watcher did not escalate an overridden stale terminal status past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
+  grep -F ' task=validating' "$out" >/dev/null || fail "the wedge escalation did not name its task: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
@@ -3122,6 +3123,8 @@ test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
     ack_stopped_cycle "$state" || fail "could not acknowledge undeclared escalation $n"
     grep -F "possible wedge, escalation $n" "$out" >/dev/null \
       || fail "an undeclared working lane did not reach escalation $n: $(cat "$out")"
+    grep -F "possible wedge, escalation $n" "$out" | grep -F ' task=wedge' >/dev/null \
+      || fail "escalation $n did not name its task: $(cat "$out")"
     n=$((n + 1))
   done
   grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
@@ -3781,6 +3784,8 @@ test_gone_report_rearms_when_the_endpoint_comes_back() {
     || fail "a second death in the same window was never reported: $(cat "$out")"
   grep -F 'agent dead' "$out" >/dev/null \
     || fail "a second death was not reported as a gone endpoint: $(cat "$out")"
+  grep -F ' task=wedge' "$out" >/dev/null \
+    || fail "the gone-endpoint report did not name its task: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the second gone report"
   unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
   pass "the once-only gone report re-arms when the endpoint comes back, and reports a later death again"
