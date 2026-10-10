@@ -1320,7 +1320,7 @@ Every home requires:
 
 - node and git.
 - gh, with GitHub authentication through `gh auth login`.
-- no-mistakes v1.46.0 or newer.
+- no-mistakes v1.80.0 or newer.
 - Compatible gh-axi.
 - chrome-devtools-axi.
 - Compatible tasks-axi, as specified in "Backlog backend" above.
