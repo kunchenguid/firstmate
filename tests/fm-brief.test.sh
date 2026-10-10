@@ -260,7 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "then in the same turn run /no-mistakes yourself" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -290,8 +290,12 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+checkpoint on a direct-PR brief|brief-refused-b5 some-proj --mode direct-PR --checkpoint|--checkpoint applies only to --mode no-mistakes
+checkpoint on a local-only brief|brief-refused-b6 some-proj --mode local-only --checkpoint|--checkpoint applies only to --mode no-mistakes
+checkpoint on a Gerrit review pass|brief-refused-b7 some-proj --mode no-mistakes --forge gerrit --checkpoint|--checkpoint applies only to --mode no-mistakes
+checkpoint on a scout brief|brief-refused-b8 some-proj --scout --checkpoint|--checkpoint applies only to --mode no-mistakes
 ROWS
-  pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
+  pass "fm-brief.sh: --yolo, scout/secondmate --mode, and a pipeline-less --checkpoint are refused, never silently dropped"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -430,6 +434,47 @@ test_no_mistakes_dod_green_detection() {
   assert_no_grep "poll \`no-mistakes axi status\` from a separate call" "$brief" \
     "no-mistakes DOD still makes a status poll the wait for the next gate or outcome"
   pass "fm-brief.sh: no-mistakes DOD detects a green PR from the drive call, not a status poll"
+}
+
+# A no-mistakes worker starts its own validation after the commit-stage done:,
+# so no hand-written handoff is needed; --checkpoint keeps the stop at the
+# commit for a task whose commit must be inspected before validation.
+test_no_mistakes_commit_stage_handoff() {
+  local home id brief
+  home="$TMP_ROOT/commit-stage-home"
+  mkdir -p "$home/data"
+  id="brief-selfstart-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "default no-mistakes brief should scaffold"
+  brief="$home/data/$id/brief.md"
+  assert_grep "to the status file as your commit-stage line, then in the same turn run /no-mistakes yourself to validate and ship a PR" "$brief" \
+    "default no-mistakes brief must start the pipeline after the commit-stage line"
+  assert_grep "do not stop and wait for firstmate to tell you to" "$brief" \
+    "default no-mistakes brief must not wait for a hand-written handoff"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "default no-mistakes brief still stops at the commit"
+  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
+    "default no-mistakes brief lost the --intent contract"
+  assert_grep "ask-user findings are never yours to answer" "$brief" \
+    "default no-mistakes brief lost the ask-user rule"
+
+  id="brief-checkpoint-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --checkpoint >/dev/null 2>&1 \
+    || fail "checkpoint no-mistakes brief should scaffold"
+  brief="$home/data/$id/brief.md"
+  grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
+    || fail "checkpoint brief changed the machine-readable delivery contract line"
+  assert_grep "append \`done [at=<epoch>]: {summary}\` to the status file and stop." "$brief" \
+    "checkpoint brief must stop at the commit-stage line"
+  assert_grep "Firstmate will then instruct you to run /no-mistakes to validate and ship a PR." "$brief" \
+    "checkpoint brief must wait for firstmate to start validation"
+  assert_no_grep "run /no-mistakes yourself" "$brief" \
+    "checkpoint brief still starts the pipeline itself"
+  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
+    "checkpoint brief lost the --intent contract"
+  assert_grep "ask-user findings are never yours to answer" "$brief" \
+    "checkpoint brief lost the ask-user rule"
+  pass "fm-brief.sh: no-mistakes worker self-starts validation unless --checkpoint stops it at the commit"
 }
 
 test_ask_user_escalation_format() {
@@ -1475,6 +1520,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
+test_no_mistakes_commit_stage_handoff
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording

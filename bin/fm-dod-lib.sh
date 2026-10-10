@@ -7,9 +7,9 @@
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
-# prints the block on stdout with no trailing blank line. The caller validates the
-# mode; an unknown mode is refused rather than silently rendered as the pipeline
-# contract.
+# [<base>] [<checkpoint>] prints the block on stdout with no trailing blank line.
+# The caller validates the mode; an unknown mode is refused rather than silently
+# rendered as the pipeline contract.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -17,6 +17,13 @@
 # --base-branch; empty means the repository default. A named base is the branch
 # the worker starts from, never pushes to, and targets with its pull request, and
 # fm_base_branch_valid refuses it where no pull request carries the work.
+# The optional sixth argument is `commit` for bin/fm-brief.sh --checkpoint. By
+# default a no-mistakes worker appends its commit-stage `done: {summary}` and
+# starts the pipeline itself in the same turn; with `commit` it stops at that
+# line instead and waits for firstmate to start validation, so a commit can be
+# inspected before validation spends allowance. Only the forge-none no-mistakes
+# block takes it: the Gerrit review pass always stops at the commit and the
+# other modes run no pipeline.
 # Callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
@@ -400,11 +407,20 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<checkpoint>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} checkpoint=${6:-}
+  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q nm_handoff
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
+  case "$checkpoint:$mode:$forge" in
+    ':'*|commit:no-mistakes:none) ;;
+    commit:*)
+      echo "error: fm_dod_block: a commit checkpoint applies only to mode=no-mistakes without a forge (got mode=$mode forge=$forge)" >&2
+      return 1 ;;
+    *)
+      echo "error: fm_dod_block: unknown checkpoint '$checkpoint'" >&2
+      return 1 ;;
+  esac
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"
     pr_base=", against the base branch \`$base\` (\`--base $base_q\`), not the repository default"
@@ -489,14 +505,20 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
       ;;
     no-mistakes:*)
+      if [ "$checkpoint" = commit ]; then
+        nm_handoff="When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy."
+      else
+        nm_handoff="When you believe it is complete and committed, append \`done [at=<epoch>]: {summary}\` to the status file as your commit-stage line, then in the same turn run /no-mistakes yourself to validate and ship a PR; do not stop and wait for firstmate to tell you to.
+That first \`done:\` records the handoff to the pipeline, which owns the push; it is not a request to push from this copy."
+      fi
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 Ship branch: $branch
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
+${nm_handoff}
 ${nm_base}
 EOF
       fm_nm_driving_block "$forge"

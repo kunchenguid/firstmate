@@ -382,6 +382,38 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# The forge-none no-mistakes DoD has the worker start its own pipeline after
+# the commit-stage done:; a `commit` checkpoint restores the stop at the
+# commit, and is refused wherever no such pipeline handoff exists.
+test_no_mistakes_dod_commit_stage_checkpoint() {
+  local out err mode_forge
+  out="$TMP_ROOT/dod-selfstart.md"
+  fm_dod_block no-mistakes dod-selfstart-task > "$out" || fail "default no-mistakes DoD failed to render"
+  assert_grep "as your commit-stage line, then in the same turn run /no-mistakes yourself" "$out" \
+    "default no-mistakes DoD must start the pipeline after the commit-stage line"
+  assert_no_grep "Firstmate will then instruct you" "$out" \
+    "default no-mistakes DoD still waits for a hand-written handoff"
+
+  out="$TMP_ROOT/dod-checkpoint.md"
+  fm_dod_block no-mistakes dod-checkpoint-task '' none '' commit > "$out" \
+    || fail "checkpoint no-mistakes DoD failed to render"
+  assert_grep "Firstmate will then instruct you to run /no-mistakes to validate and ship a PR." "$out" \
+    "checkpoint no-mistakes DoD must stop at the commit"
+  assert_no_grep "run /no-mistakes yourself" "$out" \
+    "checkpoint no-mistakes DoD still starts the pipeline itself"
+
+  for mode_forge in direct-PR:none local-only:none no-mistakes:gerrit direct-PR:gerrit; do
+    err=$(fm_dod_block "${mode_forge%%:*}" dod-checkpoint-refused '' "${mode_forge##*:}" '' commit 2>&1 >/dev/null) \
+      && fail "$mode_forge: a commit checkpoint must be refused"
+    assert_contains "$err" "a commit checkpoint applies only to mode=no-mistakes without a forge" \
+      "$mode_forge: checkpoint refusal did not explain itself"
+  done
+  err=$(fm_dod_block no-mistakes dod-checkpoint-bogus '' none '' later 2>&1 >/dev/null) \
+    && fail "an unknown checkpoint must be refused"
+  assert_contains "$err" "unknown checkpoint 'later'" "unknown checkpoint refusal did not name the value"
+  pass "no-mistakes DoD self-starts validation unless a commit checkpoint stops it"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -442,6 +474,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_no_mistakes_dod_commit_stage_checkpoint
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the

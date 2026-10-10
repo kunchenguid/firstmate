@@ -8,7 +8,8 @@ metadata:
 
 # Validation supervision
 
-For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+A no-mistakes worker launched from a forge-less brief without `--checkpoint` starts validation itself right after its commit-stage `done:` and needs no reply; a Gerrit worker and a `--checkpoint` worker still stop after their commit and wait for firstmate's instruction.
+Scaffold the brief with `bin/fm-brief.sh --checkpoint` only when you must inspect the commit before validation spends allowance; trigger validation on the same worker after that commit, using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 `bin/fm-dod-lib.sh` owns the worker-side `--intent` contract.
