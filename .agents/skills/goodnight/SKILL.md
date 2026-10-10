@@ -68,7 +68,7 @@ State the list's actual path and any open decision that prevents current work fr
 
 Goodnight controls scheduling in the attended session, Pi supervision branch, supervision host, and away/quiet daemon alike.
 When an away or quiet record also exists, keep that mode's watcher ownership and return protocol; goodnight neither starts a second cycle nor clears those records.
-The spawn refusal is the shared enforcement point, not a separate daemon policy implementation.
+The spawn refusal and the automatic secondmate relaunch deferral in `bin/fm-secondmate-liveness-lib.sh` are the shared enforcement points, not a separate daemon policy implementation; automatic recovery of a dead or missing secondmate resumes once the hold lifts.
 Goodnight does not kill or interrupt workers, change merge authority, suspend, or shut down the machine.
 
 ## Morning

@@ -48,6 +48,8 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
+#                       the goodnight hold (state/.goodnight) with its
+#                       morning-list pointer,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read, each bounded and crash-

@@ -25,6 +25,10 @@
 # relaunching on inconclusive evidence could create a second endpoint beside a
 # live one - and an unreachable remote host is never evidence of death, so a
 # remote route is never replaced by a local endpoint.
+# While the goodnight hold exists (fm_goodnight_active), `dead` and `missing`
+# probe as `skipped` instead, before any caller's attempt bound or ledger
+# write, so the hold consumes no recovery budget and recovery stays eligible
+# once it lifts.
 #
 # Relaunch goes through `bin/fm-spawn.sh <id> --secondmate` with
 # FM_SPAWN_NO_GUARD=1, the same guarded path every recovery uses. That path
@@ -270,8 +274,9 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 # per-mate ledger, then runs the guarded secondmate spawn. A positive timeout
 # wraps the spawn in fm_run_timed so a watcher poll stays bounded; 124/137 mean
 # the bound fired. Returns the spawn exit status; combined spawn output is in
-# FM_SM_LIVE_OUT and the status in FM_SM_LIVE_RC. When the ledger cannot be
-# read or the attempt row cannot be appended, nothing is killed or spawned: the verdict becomes
+# FM_SM_LIVE_OUT and the status in FM_SM_LIVE_RC. When the goodnight hold is
+# active (including one entered after probing), the ledger cannot be read, or
+# the attempt row cannot be appended, nothing is killed or spawned: the verdict becomes
 # FM_SM_LIVE_STATUS=skipped with FM_SM_LIVE_REASON set and this returns 1.
 # Caller holds the liveness lock and owns reporting.
 fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
