@@ -16,6 +16,11 @@
 #
 #   v1 gen=<token> seq=<uint> state=<busy|idle|unknown> source=<token> event=<token> ts=<epoch>
 #
+# ts is when the recorded state began: the writer keeps it across events that
+# repeat the same state within one gen, except that a turn-opening event
+# (user-prompt-submit, before-agent) always starts a new ts, so a busy
+# record's ts is its turn start.
+#
 # Gen sidecar: state/<id>.busy-gen - one token minted when the task's busy
 # wiring is armed (fm-spawn, or a documented recovery re-arm). Every event
 # must present the current gen; an event or record carrying any other gen is
@@ -253,7 +258,7 @@ fm_busy_source_trusted() {  # <harness> <source>
 }
 
 # fm_busy_record_read: parse and validate state/<id>.busy-state against the
-# armed gen. Prints "<state> <source> <event> <seq>" for a valid record.
+# armed gen. Prints "<state> <source> <event> <seq> <ts>" for a valid record.
 # Non-zero returns name the reason on stdout instead:
 #   missing      no record file (or no armed gen and no record)
 #   malformed    unparseable line, bad tokens, or a missing armed gen for an
@@ -299,12 +304,14 @@ fm_busy_record_read() {  # <state-dir> <id>
   fm_busy_token_valid "$r_event" || { printf 'malformed'; return 1; }
   case "$r_seq" in ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
   case "$r_ts" in ''|*[!0-9]*) printf 'malformed'; return 1 ;; esac
+  # Bash interprets a leading zero as octal in the watcher's age arithmetic.
+  case "$r_ts" in 0|[1-9]*) : ;; *) printf 'malformed'; return 1 ;; esac
   case "$r_state" in busy|idle|unknown) : ;; *) printf 'malformed'; return 1 ;; esac
   if [ "$r_gen" != "$gen" ]; then
     printf 'gen-mismatch'
     return 1
   fi
-  printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+  printf '%s %s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq" "$r_ts"
 }
 
 # ---------------------------------------------------------------------------

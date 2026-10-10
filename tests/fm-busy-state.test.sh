@@ -56,6 +56,42 @@ test_apply_advances_seq_and_source() {
   pass "apply advances seq under the armed gen and attributes the writing source"
 }
 
+# The record's ts is when its state began. Rewrite the stored ts to an old
+# epoch, as a turn opened that long ago would have left it, then apply events.
+backdate_record_ts() {  # <state-dir> <id> <epoch>
+  local rec="$1/$2.busy-state" line
+  line=$(cat "$rec")
+  printf '%s\n' "${line% ts=*} ts=$3" > "$rec"
+}
+
+record_ts() {  # <state-dir> <id>
+  fm_busy_record_read "$1" "$2" | awk '{print $5}'
+}
+
+test_apply_keeps_turn_start_across_repeated_busy() {
+  local state gen ts
+  state=$(new_state_dir apply-turn-start)
+  gen=$("$EV" arm "$state" oc)
+  "$EV" apply "$state" oc busy --gen "$gen" --source opencode-plugin --event session-busy
+  backdate_record_ts "$state" oc 1000
+  "$EV" apply "$state" oc busy --gen "$gen" --source opencode-plugin --event session-retry \
+    || fail "repeated busy apply failed"
+  ts=$(record_ts "$state" oc)
+  [ "$ts" = 1000 ] || fail "a repeated busy status moved the turn start to '$ts'"
+  "$EV" apply "$state" oc idle --gen "$gen" --source opencode-plugin --event session-idle
+  ts=$(record_ts "$state" oc)
+  [ "$ts" -gt 1000 ] || fail "a busy->idle transition kept the busy start '$ts'"
+
+  gen=$("$EV" arm "$state" cl)
+  "$EV" apply "$state" cl busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  backdate_record_ts "$state" cl 1000
+  "$EV" apply "$state" cl busy --gen "$gen" --source claude-hook --event user-prompt-submit \
+    || fail "turn-opening busy apply failed"
+  ts=$(record_ts "$state" cl)
+  [ "$ts" -gt 1000 ] || fail "a new UserPromptSubmit after an interrupted busy turn kept its start '$ts'"
+  pass "repeated busy status keeps the turn start while a turn-opening event starts a new one"
+}
+
 test_apply_current_gen_reset() {
   local state out
   state=$(new_state_dir apply-current)
@@ -598,6 +634,7 @@ test_progress_is_generation_bound_and_not_semantic_state
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
+test_apply_keeps_turn_start_across_repeated_busy
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
 test_retire_missing_sidecar_is_idempotent
