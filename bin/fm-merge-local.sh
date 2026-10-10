@@ -135,6 +135,10 @@ case "$hold_status" in
     exit 1
     ;;
 esac
+FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-integrate-after.sh" check "$ID" >/dev/null || {
+  echo "error: integration-only dependency is not ready; local landing refused" >&2
+  exit 1
+}
 merge_status=0
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
