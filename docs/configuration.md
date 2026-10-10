@@ -569,6 +569,18 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## T3 main-thread lead (config/t3-main-thread-lead / FM_T3_MAIN_THREAD_LEAD)
+
+The optional local, gitignored `config/t3-main-thread-lead` presence flag enables the captain-selected workflow where Firstmate runs as the lead inside an active T3 Code main thread and delegates children through T3 MCP tools instead of `bin/fm-spawn.sh` for those tasks.
+
+`FM_T3_MAIN_THREAD_LEAD` overrides the file the same way as other presence flags: `1`/`on`/`true`/`yes` enables, any other non-empty value disables, and unset or empty defers to the file.
+
+This is not a runtime backend override.
+Do not set `config/backend` to reach T3; the lead calls T3 tools inside the app thread, and `bin/fm-t3-delegation.sh` persists validated tool JSON into `state/t3-delegations/` and maps imports into normal task status lines.
+
+Load [`.agents/skills/t3-main-thread-lead/SKILL.md`](../.agents/skills/t3-main-thread-lead/SKILL.md) when this mode is active.
+See [`t3-main-thread-lead.md`](t3-main-thread-lead.md) for operator boundaries and limits, and [`verification/t3-main-thread-lead.md`](verification/t3-main-thread-lead.md) for behavioral evidence.
+
 ## Fleet activity ledger (config/fleet-ledger)
 
 See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.

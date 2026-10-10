@@ -257,6 +257,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/t3-main-thread-lead/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -461,6 +465,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/t3-main-thread-lead.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/trace-context.md",
       "audience": "maintainer-architecture"
     },
@@ -522,6 +530,10 @@
     },
     {
       "path": "docs/verification/trace-context.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/t3-main-thread-lead.md",
       "audience": "maintainer-verification"
     },
     {
