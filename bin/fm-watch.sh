@@ -1354,10 +1354,13 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # fires, governed by its own throttle instead of by a wait age.
 # A CAPTAIN-facing wait is not rechecked at all while the away-posture record
 # exists: the one human who can answer it is away, the return brief already lists
-# it, and every other captain-facing path in this file absorbs it silently for
-# that reason (handle_paused_stale, surface_nonterminal_stale,
-# captain_call_stale_bound). That absorb arms no throttle and deliberately
-# leaves the idle timer alone: a `captain` whom is minted only by the
+# it, and every other captain-facing path in this file whose wait the return
+# brief lists absorbs it silently for that reason (handle_paused_stale,
+# surface_nonterminal_stale, captain_call_stale_bound). The one captain-facing
+# wait that brief does NOT list, an unheld terminal delivery, keeps its ordinary
+# cadence there instead; terminal_done_stale_bound's header owns why. The silent
+# absorb arms no throttle and deliberately leaves the idle timer alone: a
+# `captain` whom is minted only by the
 # captain-held arm of wedge_wait_evidence, which returns before the
 # wedge-defer-parked-gate flag test and therefore before any decision-fold or
 # current-state read, so the only read that repeats under the away record is the
@@ -1792,7 +1795,9 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
-# The two records of one ordinary crew wait, and why its stale alarm reads both.
+# The first two records of one ordinary crew wait, and why its stale alarm reads
+# both; the third, which only the terminal stale path consults, is
+# terminal_done_stale_bound below.
 #
 # status_is_paused_or_captain_held reads the status LINE a worker wrote, which is
 # the only record when the worker itself is waiting. It is not the only record

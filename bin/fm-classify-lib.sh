@@ -27,19 +27,21 @@
 # A missing, malformed, identity-mismatched, or past-end classified position reads
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
-# There are four documented exceptions. The absorb classification
-# (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
+# There are four documented exceptions. The crew current-state read
+# (crew_state_read, and everything built on it: crew_absorb_class with its
+# working/paused wrappers, and crew_is_terminal_done) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
-# deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
-# and first sighting of a stale hash, never on every wake, so the per-wake triage
-# stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
-# open-decisions fold" below) also writes: it persists a per-status-file byte
-# cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
-# stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time. status_home_appends_record writes the per-task home-owned
-# append ledger (see "home-owned status-append ledger" below) so the wake scan
-# can treat this home's own bookkeeping bytes as already owned.
+# deliberately paused, finished, or none of those. Callers run it ONLY on no-verb
+# signal handling and first sighting of a stale hash, never on every wake, so the
+# per-wake triage stays cheap. status_open_decisions_incremental (see
+# "incremental (cursor-backed) open-decisions fold" below) also writes: it
+# persists a per-status-file byte cursor and folded open-set as a side effect, so
+# a per-drain fleet-wide scan stays bounded by new appends instead of re-reading
+# each task's whole lifetime log every time. status_home_appends_record writes
+# the per-task home-owned append ledger (see "home-owned status-append ledger"
+# below) so the wake scan can treat this home's own bookkeeping bytes as already
+# owned.
 # crew_worktree_written_since reads the task's meta file and walks a bounded slice
 # of its worktree instead of a status file, so callers run it only at the moment
 # they would otherwise escalate.
