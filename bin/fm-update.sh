@@ -47,8 +47,8 @@
 # over as a reload:
 #   - its home was SKIPPED (dirty, uniquely diverged, offline, unsafe). It is not
 #     on the new bytes, nothing here forces, stashes, or discards it, and it gets
-#     no action at all. A divergence remains in the durable reconciliation record
-#     that this or a later bootstrap/update pass surfaces.
+#     no action at all. A git-home divergence remains in the durable
+#     reconciliation record that this or a later bootstrap/update pass surfaces.
 #   - its runtime cannot prove the old agent stopped and a replacement came up
 #     (bin/fm-secondmate-restart-lib.sh owns that test), so it falls to the
 #     honest re-read steer and is reported as a nudge, never as a reload.

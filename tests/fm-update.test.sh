@@ -8,8 +8,11 @@
 #     fast-forwards the same way.
 #   - A dirty, offline, wrong-branch, or genuinely unique diverged target is
 #     skipped and reported, never forced or stashed, so unlanded work survives.
-#     Divergence leaves a durable reconciliation record, while a clean local
-#     result already present upstream after a squash merge heals automatically.
+#     A git-home divergence leaves a durable reconciliation record, while a clean
+#     local result already present upstream after a squash merge heals
+#     automatically; a jj colocated home (its cases skip when jj is not on PATH)
+#     advances through the jj path instead, with diverged, described, or
+#     non-empty parked working copies skipped and preserved.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
 #     fast-forward of one worktree never disturbs another worktree's checkout
 #     or the shared default branch.
