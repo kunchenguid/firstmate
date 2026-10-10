@@ -200,6 +200,9 @@ a { color: inherit; text-decoration: none; }
 .bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0; }
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .bb-decision__link:hover { text-decoration: underline; }
+/* free card text may carry long addresses: wrap them inside the card */
+.bb-decision__title, .bb-decision__detail, .bb-ctx__v, .bb-opt__label, .bb-opt__hint { overflow-wrap: anywhere; }
+.bb-autolink { color: var(--ocean-600); text-decoration: underline; overflow-wrap: anywhere; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
    the card pad, and the foot rides margin-top:auto so every Queue answer button
    sits on the same baseline with identical breathing room. */
@@ -434,6 +437,31 @@ __FM_BEARINGS_BOARD_DATA__
     if (text != null) n.textContent = text;
     return n;
   }
+  /* Free card text renders http(s) addresses as links. Nodes are built from
+     text only, so payload HTML is never interpreted. */
+  var URL_RE = /https?:\/\/[^\s<>"']+/gi;
+  function linkified(tag, cls, text) {
+    var n = el(tag, cls);
+    var s = String(text), last = 0, m;
+    URL_RE.lastIndex = 0;
+    while ((m = URL_RE.exec(s))) {
+      var url = m[0];
+      while (url) {
+        var tail = url.slice(-1), open = { ")": "(", "]": "[", "}": "{" }[tail];
+        if (/[.,;:!?]/.test(tail) || (open && url.split(tail).length > url.split(open).length)) {
+          url = url.slice(0, -1);
+        } else break;
+      }
+      if (m.index > last) n.appendChild(document.createTextNode(s.slice(last, m.index)));
+      var a = el("a", "bb-autolink", url);
+      a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      n.appendChild(a);
+      last = m.index + url.length;
+      URL_RE.lastIndex = last;
+    }
+    if (last < s.length) n.appendChild(document.createTextNode(s.slice(last)));
+    return n;
+  }
   function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
   /* Warnings ride the charted feed for layout only; they are alarms, not work,
      so every count of queued work excludes them. */
@@ -480,7 +508,7 @@ __FM_BEARINGS_BOARD_DATA__
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
     row.appendChild(el("span", "bb-ctx__k", k));
-    row.appendChild(el("span", "bb-ctx__v", v));
+    row.appendChild(linkified("span", "bb-ctx__v", v));
     return row;
   }
 
@@ -498,10 +526,10 @@ __FM_BEARINGS_BOARD_DATA__
     }
     pad.appendChild(top);
 
-    pad.appendChild(el("h3", "bb-decision__title", item.title));
+    pad.appendChild(linkified("h3", "bb-decision__title", item.title));
 
     if (item.type === "merge") {
-      if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
+      if (item.detail) pad.appendChild(linkified("p", "bb-decision__detail", item.detail));
       if (item.pr_url) {
         var pr = el("a", "bb-decision__link", item.pr_url);
         pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
@@ -525,7 +553,7 @@ __FM_BEARINGS_BOARD_DATA__
       lab.appendChild(input);
       var body = el("span", "bb-opt__body");
       body.appendChild(el("span", "bb-opt__label", o.label));
-      if (o.hint) body.appendChild(el("span", "bb-opt__hint", o.hint));
+      if (o.hint) body.appendChild(linkified("span", "bb-opt__hint", o.hint));
       lab.appendChild(body);
       if (item.recommend_value && o.value === item.recommend_value) {
         lab.appendChild(el("span", "bb-opt__rec", "rec"));

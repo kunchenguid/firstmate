@@ -94,12 +94,12 @@ require_listener_reached_poll() {  # <home>
 
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
-render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
-  jq -n --argjson underway "$underway" --argjson charted "$charted" \
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [captains_call-json]
+  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} calls=${6:-[]} data="$1/payload.json"
+  jq -n --argjson underway "$underway" --argjson charted "$charted" --argjson calls "$calls" \
     --argjson more "$more" --argjson warning_more "$warning_more" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:$underway, landed:[],
+    prs_live:false, captains_call:$calls, underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -114,6 +114,71 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
 # Build the board from <charted-json> alone and return what the renderer produced.
 render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
   render_board "$1" '[]' "$2" "${3:-0}" "${4:-0}"
+}
+
+find_chrome() {
+  local candidate
+  if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
+    printf '%s\n' "$FM_CHROME_BIN"
+    return 0
+  fi
+  for candidate in \
+    google-chrome \
+    google-chrome-stable \
+    chromium \
+    chromium-browser \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+test_card_text_addresses_render_as_safe_links() {
+  local home out chrome url='HTTPS://workstation.example.ts.net:4387/session/16d4e6c54da3f5e6/Function_(mathematics)'
+  home=$(make_home card-links)
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg url "$url" '[
+    {key:"sample-links", type:"decision", repo:"sample", title:("Before and after " + $url),
+     about:("Compare at " + $url + ". Then pick."),
+     decide:"Keep it? <b>raw</b> javascript:alert(1) ftp://example.com/x",
+     options:[{value:"yes", label:("Yes " + $url), hint:("see (" + $url + ").")}]},
+    {key:"merge.sample-task", type:"merge", repo:"sample", title:("Merge " + $url),
+     detail:("preview " + $url), task_id:"sample-task",
+     pr_url:"https://github.com/example/sample/pull/1", checks:"green", risk:"low",
+     options:[{value:"merge", label:"Merge now"}]}
+  ]')")
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the board rendered its error instead of the cards: $out"
+  printf '%s' "$out" | jq -e --arg url "$url" '
+    def field($c): [.calls[].fields[] | select(.cls == $c)];
+    def onelink: .links == [{text:$url, href:$url, target:"_blank", rel:"noopener noreferrer"}];
+    (field("bb-ctx__v") | length) == 2
+      and (field("bb-ctx__v")[0] | onelink and .text == ("Compare at " + $url + ". Then pick."))
+      and (field("bb-ctx__v")[1] | .links == [] and (.tags | all(. == "#text"))
+        and .text == "Keep it? <b>raw</b> javascript:alert(1) ftp://example.com/x")
+      and (field("bb-opt__hint") | map(select(.links != [])) | length == 1
+        and (.[0] | onelink and .text == ("see (" + $url + ").")))
+      and (field("bb-decision__detail") | length == 1 and (.[0] | onelink))
+      and (field("bb-decision__title") | length == 2 and all(onelink))
+      and (field("bb-opt__label") | length == 3 and all(.links == []))
+      and (field("bb-opt__label")[0].text == ("Yes " + $url))
+  ' >/dev/null || fail "card text addresses did not render as safe links: $out"
+  pass "card text addresses render as new-tab links and other text stays plain"
+  if ! chrome=$(find_chrome); then
+    printf '%s\n' 'skip: card wrapping layout check requires Chrome or Chromium; set FM_CHROME_BIN'
+    return 0
+  fi
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html" --layout "$chrome") \
+    || fail "the browser could not measure card text wrapping"
+  printf '%s' "$out" | jq -e '
+    length == 5 and all(.wrap == "anywhere" and .width > 0 and .scroll <= .width)
+      and ([.[] | select(.cls == "bb-decision__title")] | all(.links == 1))
+      and ([.[] | select(.cls == "bb-opt__label")] | all(.links == 0))
+  ' >/dev/null || fail "titles or option labels overflowed or had incorrect links: $out"
+  pass "long titles and plain option labels wrap inside narrow cards"
 }
 
 charted_next_count() {  # <render-json>
@@ -266,6 +331,7 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_card_text_addresses_render_as_safe_links
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first

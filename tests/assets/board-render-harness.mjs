@@ -5,10 +5,46 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
-import { readFileSync } from "node:fs";
+//     charted:[{title,sub,badges,pickable}],
+//     calls:[{fields:[{cls,text,links:[{text,href,target,rel}]}]}],
+//     empty, more, error }
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const html = readFileSync(process.argv[2], "utf8");
+
+if (process.argv[3] === "--layout") {
+  const dir = mkdtempSync(join(tmpdir(), "board-layout-"));
+  try {
+    const probe = `<script>
+      document.querySelectorAll('.bb-decision').forEach(card => {
+        card.hidden = false;
+        card.style.width = '280px';
+      });
+      const fields = [...document.querySelectorAll('.bb-decision__title, .bb-opt__label')].map(n => ({
+        cls: n.className, text: n.textContent, links: n.querySelectorAll('a').length,
+        wrap: getComputedStyle(n).overflowWrap, width: n.clientWidth, scroll: n.scrollWidth
+      }));
+      const result = document.createElement('pre');
+      result.id = 'layout-result';
+      result.textContent = encodeURIComponent(JSON.stringify(fields));
+      document.body.appendChild(result);
+    </script>`;
+    const file = join(dir, "board.html");
+    writeFileSync(file, html.replace("</body>", probe + "</body>"));
+    const browser = spawnSync(process.argv[4], ["--headless", "--no-sandbox", "--disable-gpu",
+      "--no-first-run", "--user-data-dir=" + join(dir, "profile"), "--dump-dom", "file://" + file],
+      { encoding: "utf8", timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+    const result = browser.stdout?.match(/<pre id="layout-result">([^<]+)<\/pre>/);
+    if (browser.status !== 0 || !result) throw new Error(browser.error?.message || browser.stderr || "No browser layout result");
+    process.stdout.write(decodeURIComponent(result[1]) + "\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  process.exit(0);
+}
 
 class Node {
   constructor(tag) {
@@ -27,6 +63,11 @@ class Node {
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((k) => k && k !== c).join(" "); },
+      toggle: (c, on) => {
+        const has = this.className.split(/\s+/).includes(c);
+        if (on === undefined ? !has : on) { if (!has) this.classList.add(c); } else this.classList.remove(c);
+      },
     };
   }
   get textContent() {
@@ -62,6 +103,7 @@ byId.set("bearings-data", dataNode);
 
 globalThis.document = {
   createElement: (tag) => new Node(tag),
+  createTextNode: (text) => { const n = new Node("#text"); n.textContent = text; return n; },
   // Lazily mint any element the page asks for: the shim tracks whatever ids
   // the shipped template actually uses instead of pinning a fixed list.
   getElementById: (id) => {
@@ -119,8 +161,29 @@ const errorText = [...byId.entries()]
   .filter(([k]) => k.startsWith("sel:"))
   .flatMap(([, n]) => n.children.map((c) => c.textContent))
   .join(" ");
+// Captain's Call free-text fields, with the links each one carries.
+const FREE_TEXT = ["bb-decision__title", "bb-decision__detail", "bb-ctx__v", "bb-opt__label", "bb-opt__hint"];
+const calls = (byId.get("bb-call") || new Node("div")).children
+  .filter((c) => c.className.split(/\s+/).includes("bb-decision"))
+  .map((card) => {
+    const fields = [];
+    const walk = (n) => {
+      for (const c of n.children) {
+        const cls = c.className.split(/\s+/).find((k) => FREE_TEXT.includes(k));
+        if (cls) {
+          fields.push({
+            cls, text: c.textContent, tags: c.children.map((k) => k.tagName),
+            links: c.children.filter((k) => k.tagName === "a")
+              .map((a) => ({ text: a.textContent, href: a.href, target: a.target, rel: a.rel })),
+          });
+        } else walk(c);
+      }
+    };
+    walk(card);
+    return { fields };
+  });
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, underway, charted, calls, empty, more, error: errorText }) + "\n");
