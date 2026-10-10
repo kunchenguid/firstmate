@@ -452,7 +452,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
     || fail "remote-reply wake queued during downtime was not drained"
   grep "$(printf '\tcheck\tstartup-network\t')" "$drainout" >/dev/null \
     || fail "second durable wake queued during downtime was not drained"
-  grep -F 'ios [key=remote-signoff] needs-decision: remote secondmate is held for captain sign-off' "$drainout" >/dev/null \
+  grep -Fx 'OPEN DECISIONS: 1 unchanged' "$drainout" >/dev/null \
     || fail "remote parent-reply decision was not re-folded after watcher re-arm"
   ack_wakes "$state" || fail "recovery handling acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "re-arm recovery acknowledgement left durable wakes behind"
@@ -475,7 +475,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   decision_successor=$ARM_PID
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/decision-only-drain.out" \
     2> "$dir/decision-only-drain.err" || fail "decision-only drain after re-arm recovery failed"
-  grep -F 'ios [key=remote-signoff] needs-decision: remote secondmate is held for captain sign-off' \
+  grep -Fx 'OPEN DECISIONS: 1 unchanged' \
     "$dir/decision-only-drain.out" >/dev/null \
     || fail "unchanged remote decision was not re-folded after a later down interval"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/decision-only-drain.err")
@@ -495,7 +495,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
     || fail "successor did not re-surface the unacknowledged decision recovery"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replayed-decision-drain.out" \
     2> "$dir/replayed-decision-drain.err" || fail "replayed decision recovery drain failed"
-  grep -F 'ios [key=remote-signoff] needs-decision: remote secondmate is held for captain sign-off' \
+  grep -Fx 'OPEN DECISIONS: 1 unchanged' \
     "$dir/replayed-decision-drain.out" >/dev/null \
     || fail "interrupted decision recovery did not re-fold the open decision"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replayed-decision-drain.err")

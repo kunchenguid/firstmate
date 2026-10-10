@@ -15,6 +15,11 @@ set -u
 
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
+# This file drives the scan's cross-drain persistence, so every drain must list
+# the set it folded; the once-per-change compression has its own test in
+# tests/fm-wake-drain-open-decisions.test.sh.
+export FM_WAKE_DRAIN_OPEN_DECISIONS=full
+
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-open-decisions-cursor-tests)
 
 # Append <count> harmless filler lines (routine working: notes, never a
