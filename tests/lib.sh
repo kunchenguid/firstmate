@@ -52,6 +52,16 @@ export FM_GATE_REFUSE_BYPASS=1
 # leaked harness pin alone stays inert outside a suite.
 export FM_TEST_SEAM=1
 
+# Wedge-alarm notifier safety for EVERY suite. bin/fm-wedge-alarm-lib.sh posts a
+# real OS-level notification in production, and it is now sourced by the watcher
+# path as well as the away-mode daemon, so the daemon's own sourced-mode guard no
+# longer covers every reachable caller. Default its one execution seam to
+# "discard" here instead: sourcing this library is unavoidable for a test, so no
+# suite can forget. tests/wake-helpers.sh still replaces it with a recorder when
+# a suite needs to assert channel selection, and an explicit value set by the
+# caller wins.
+export FM_WEDGE_ALARM_EXEC=${FM_WEDGE_ALARM_EXEC:-discard}
+
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
