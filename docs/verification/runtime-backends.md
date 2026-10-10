@@ -1169,9 +1169,7 @@ SSH-born herdr server (child of `herdr --session fm-remote remote-client-bridge`
 ```
 
 `XPC_SERVICE_NAME` identifies a launchd label but does not identify its domain, because the Background `user/501` job also carried that variable while lacking keychain access.
-The owner classifier therefore accepts that label only when `launchctl print gui/<uid>/<label>` identifies the owner pid or the label is loaded in `gui/<uid>` but not `user/<uid>`.
-`XPC_SERVICE_NAME=0`, including a value inherited by a herdr live-handoff child, remains unknown.
-`FM_REMOTE_JOB_ACTIVE=1` proves the Aqua worker only when `dev.firstmate.remote-job` is loaded in `gui/<uid>` but not `user/<uid>`.
+The [owner classifier's header](../../bin/fm-remote-herdr-owner-lib.sh) owns the required domain and parent-job proof, including how it handles `XPC_SERVICE_NAME=0` and the worker marker.
 
 The SSH-born row was read on the remote host whose `dev.firstmate.herdr.fm-remote` job showed `state = spawn scheduled`, `runs = 239`, `last exit code = 1` and a log repeating `error: herdr server is already running`: herdr's remote attach had started the session's server as its own child before the login session existed, and launchd's copy lost the socket on every retry.
 `pgrep -f` did not list the herdr server's argv on macOS; `lsof -U -a -c herdr -F pn` named the socket owner.
@@ -1184,7 +1182,14 @@ Its `ProgramArguments` ran `/run/current-system/sw/bin/zsh -l -c "exec /etc/prof
 No other herdr process existed for that session, and after 15 seconds the job remained running with pid 4806.
 After a guarded `herdr session stop`, the job reported `state = not running` and `last exit code = 0`, and it stayed at rest through the throttle interval.
 A second `launchctl kickstart -k gui/501/dev.fm-rca.herdr-fg` started pid 45574, which was also the new socket owner.
-This proves that `herdr server` remains in the foreground as the launchd job, so the guard's final `exec` supplies the intended supervision and the earlier server that survived `launchctl bootout` was the unrelated SSH-bridge-born process.
+This check proved direct foreground supervision of Herdr 0.9.0 by launchd; it did not exercise the guard's later child-process supervision.
+
+A saved-machine check ran on 2026-09-29 on macOS 27.0 (26A428) with Herdr 0.9.1 on the remote host and the primary.
+With the guard exec-ing the server, `ps -o pid,ppid,pgid,stat` reported `335 1 335 S`, a process-group leader but not a session leader, and `herdr --session fm-remote status server --json` reported `"detached_server_daemon":false`.
+Herdr 0.9.1 derives that capability from `getsid(0) == getpid()` (`src/platform/mod.rs`) and refuses a saved machine without it (`src/remote/restart_policy.rs`), so `herdr machine add --label mini --remote-session fm-remote mini` printed `error: remote server is not ready for saved machines; machine was not saved`.
+With the guard starting the server through its perl setsid shim, the server reported `85864 85840 85864 Ss` with the guard pid 85840 as its parent, `launchctl print gui/503/dev.firstmate.herdr.fm-remote` reported `pid = 85840`, and the status reported `"detached_server_daemon":true`.
+That forked server's environment carried `XPC_SERVICE_NAME=0` rather than the job label; `fm_remote_herdr_owner_birth` printed `launchd` for pid 85864.
+The same `herdr machine add` then printed `Saved SSH machine 5d6f84af5f116cfb502607d3475bf5a1. Remote server is ready.`, and `herdr machine list` listed `mini mini fm-remote enabled`.
 
 `bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh` pins the resulting decision table against real marker-carrying processes, and `tests/fm-remote-doctor.test.sh` pins the doctor's verdicts on the same markers.
 
