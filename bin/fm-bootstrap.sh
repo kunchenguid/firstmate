@@ -57,9 +57,9 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
-#          The AXI-family floor policy is owned beside GH_AXI_MIN and
-#          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
-#          essential build below its floor reports MISSING like no-mistakes.
+#          The AXI-family floor policy is owned beside GH_AXI_MIN,
+#          CHROME_DEVTOOLS_AXI_MIN and LAVISH_AXI_MIN below; the per-tool owners
+#          point there. An installed essential build below its floor reports MISSING like no-mistakes.
 #          Missing or incompatible lavish-axi reports PRESENTATION_UNAVAILABLE;
 #          a compatible older build keeps legacy boards and reports a BOOTSTRAP_INFO
 #          upgrade recommendation for synchronous reply acceptance.
@@ -848,6 +848,7 @@ NO_MISTAKES_MIN=1.46.0
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
+CHROME_DEVTOOLS_AXI_MIN=0.1.39
 LAVISH_AXI_MIN=0.1.80
 LAVISH_AXI_BOARD_MIN=0.1.77
 
@@ -1426,6 +1427,9 @@ detect_local_tools() {
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
+  fi
+  if command -v chrome-devtools-axi >/dev/null 2>&1 && ! tool_version_at_least chrome-devtools-axi "$CHROME_DEVTOOLS_AXI_MIN"; then
+    echo "MISSING: chrome-devtools-axi (install: $(install_cmd chrome-devtools-axi))"
   fi
   if ! tool_version_at_least lavish-axi "$LAVISH_AXI_BOARD_MIN"; then
     echo "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=$LAVISH_AXI_BOARD_MIN; install: $(install_cmd lavish-axi)) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish"
