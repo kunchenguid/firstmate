@@ -5,9 +5,12 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
-# After endpoint and per-task temp cleanup, when xcrun and jq are available,
-# teardown attempts to shut down and delete every Simulator named exactly
-# fm-<task-id> on this host; no creation or ownership record is consulted.
+# When xcrun and jq are available, teardown attempts to shut down and delete
+# every Simulator named exactly fm-<task-id> on this host; no creation or
+# ownership record is consulted.
+# Ordinary teardown does this after endpoint and per-task temp cleanup;
+# forced secondmate cleanup also applies it recursively to each descendant
+# before removing that descendant's task record.
 # Task IDs matching pool-<digits> are exempt to preserve persistent Simulators;
 # other pool-prefixed IDs are ordinary tasks. Unrelated device names are untouched.
 # Shutdown failure does not prevent deletion, and deletion failure only warns;
