@@ -470,7 +470,7 @@ gitlab_verify_mergeable() {
   # after command substitution strips blank lines, and an absent or null field
   # becomes an empty string or the literal "null", neither of which satisfies any
   # check below, so an unreadable field refuses the merge instead of passing it.
-  if ! fields=$(printf '%s' "$json" | jq -r '
+  if ! fields=$(printf '%s' "$json" | fm_pr_jq -r '
       if type == "object" then
         "state=" + ((.state // "") | tostring),
         "detail=" + ((.detailed_merge_status // "") | tostring),
@@ -579,7 +579,8 @@ FIELDS
 # unnamed checks must not be treated as one.
 github_checks_not_green() {
   local json=$1
-  printf '%s' "$json" | jq -r '
+  # shellcheck disable=SC2016  # jq program text: $-names are jq variables.
+  printf '%s' "$json" | fm_pr_jq -r '
     def settled_at:
       if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
       then . else null end;
@@ -640,7 +641,7 @@ github_read_required_contexts() {
 
   if ! branch_json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$branch_path" 2>/dev/null) \
     || [ -z "$branch_json" ] \
-    || ! classic=$(printf '%s' "$branch_json" | jq -c '
+    || ! classic=$(printf '%s' "$branch_json" | fm_pr_jq -c '
       if type != "object" or (.protected | type) != "boolean" then
         error("branch payload is unreadable")
       elif .protected == false then
@@ -672,7 +673,7 @@ github_read_required_contexts() {
         FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
 }the branch rules for base branch $base could not be read"
       fi
-    elif [ -z "$rules_json" ] || ! ruleset=$(printf '%s' "$rules_json" | jq -c '
+    elif [ -z "$rules_json" ] || ! ruleset=$(printf '%s' "$rules_json" | fm_pr_jq -c '
         if type != "array" then error("rules payload is unreadable") else .[] end
         | select(type != "object" or .type == "required_status_checks")
         | if type == "object" and (.parameters.required_status_checks | type) == "array"
@@ -688,7 +689,7 @@ github_read_required_contexts() {
     rm -f "$api_err"
   fi
 
-  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n' "$classic" "$ruleset" | jq -sc '
+  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n' "$classic" "$ruleset" | fm_pr_jq -sc '
     unique_by([.context, .app_id]) | group_by(.context)
     | map(if any(.[]; .app_id != null) then map(select(.app_id != null)) else . end) | add // []')
   [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
@@ -696,7 +697,8 @@ github_read_required_contexts() {
 
 github_required_checks_missing() {
   local json=$1 required=$2 producers=$3
-  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
+  # shellcheck disable=SC2016  # jq program text: $-names are jq variables.
+  printf '%s' "$json" | fm_pr_jq -r --argjson required "$required" --argjson producers "$producers" '
     if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
     | .statusCheckRollup as $reported
     | $required
@@ -728,7 +730,7 @@ github_verify_mergeable() {
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
-  if ! fields=$(printf '%s' "$json" | jq -r '
+  if ! fields=$(printf '%s' "$json" | fm_pr_jq -r '
       if type == "object" then
         "state=" + ((.state // "") | tostring),
         "mergeable=" + ((.mergeable // "") | tostring),
@@ -815,10 +817,11 @@ $FM_PR_GITHUB_REQUIRED_ERROR
 EOF
   fi
   producers='[]'
-  if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
+  if printf '%s' "$FM_PR_GITHUB_REQUIRED" | fm_pr_jq -e 'any(.[]; .app_id != null)' >/dev/null; then
+    # shellcheck disable=SC2016  # jq program text: $-names are jq variables.
     if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
       || [ -z "$runs" ] \
-      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
+      || ! producers=$(printf '%s' "$runs" | fm_pr_jq -sc --arg head "$live_head" '
         [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
           | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
             then . else error("invalid check producer") end ]' 2>/dev/null); then
@@ -1316,7 +1319,7 @@ gitlab_confirm_merged() {
       "$URL" >&2
     return 2
   fi
-  if ! state=$(printf '%s' "$json" | jq -r \
+  if ! state=$(printf '%s' "$json" | fm_pr_jq -r \
     'if type == "object" and (.state | type == "string") then .state else error("invalid state") end' \
     2>/dev/null); then
     printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \

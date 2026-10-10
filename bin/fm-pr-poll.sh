@@ -158,7 +158,11 @@ case "$provider" in
     # a server, and this poll has no channel to report that it never matched.
     json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) || exit 0
     [ -n "$json" ] || exit 0
-    status=$(printf '%s' "$json" | jq -r --argjson change "$number" '
+    # Windows (captain-approved): native jq.exe ends lines with CRLF; -b keeps
+    # LF. This standalone poll sources nothing, so it inlines fm_win_host.
+    jq_binary=
+    [ ! -r "/proc/$$/winpid" ] || jq_binary=-b
+    status=$(printf '%s' "$json" | jq ${jq_binary:+"$jq_binary"} -r --argjson change "$number" '
       if type == "object" and .ok == true and (.changes | type) == "array" then
         [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
         | if ($match | length) == 1

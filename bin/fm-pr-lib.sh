@@ -25,6 +25,16 @@ _FM_PR_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_PR_LIB_DIR:-/}/fm-session-lock-lib.sh"
 unset _FM_PR_LIB_DIR
 
+# Windows (captain-approved): native jq.exe ends output lines with CRLF, which
+# corrupts every captured field; -b (Windows-only) keeps LF.
+fm_pr_jq() {
+  if fm_win_host; then
+    jq -b "$@"
+  else
+    jq "$@"
+  fi
+}
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -277,7 +287,7 @@ fm_pr_head_valid() {
 # a merge unless this prints "false"; bin/fm-pr-check.sh refuses to arm a merge
 # poll only when it prints "true".
 fm_pr_json_draft_state() {  # <pull-request-json>
-  printf '%s' "${1-}" | jq -r '
+  printf '%s' "${1-}" | fm_pr_jq -r '
     if type == "object" and (.isDraft | type) == "boolean" then (.isDraft | tostring) else "" end
   ' 2>/dev/null || true
 }
@@ -1024,7 +1034,7 @@ fm_pr_gitlab_read_record() {  # <host> <path> <number>
     || [ -z "$json" ]; then
     return 1
   fi
-  if ! fields=$(printf '%s' "$json" | jq -r '
+  if ! fields=$(printf '%s' "$json" | fm_pr_jq -r '
       if type == "object" and (.state | type == "string") and .state != "" then
         "state=" + .state,
         "merged=" + (if .state == "merged" then "true" else "false" end)
@@ -1078,7 +1088,8 @@ fm_pr_gerrit_read_change() {  # <host> <number>
     || [ -z "$json" ]; then
     return 1
   fi
-  printf '%s' "$json" | jq -c --argjson change "$number" '
+  # shellcheck disable=SC2016  # jq program text: $-names are jq variables.
+  printf '%s' "$json" | fm_pr_jq -c --argjson change "$number" '
     if type == "object" and .ok == true and (.changes | type) == "array" then
       [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
       | if ($match | length) == 1 and ($match[0] | type) == "object"
@@ -1098,7 +1109,7 @@ fm_pr_gerrit_read_record() {  # <host> <number>
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
   record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
-  state=$(printf '%s' "$record" | jq -r '
+  state=$(printf '%s' "$record" | fm_pr_jq -r '
     if (.status | type) == "string" and .status != "" and (.status | test("\n") | not)
     then .status
     else error("no status")
@@ -1123,7 +1134,7 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
   local record revision
   FM_PR_RECORD_REVISION=
   record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
-  revision=$(printf '%s' "$record" | jq -r '
+  revision=$(printf '%s' "$record" | fm_pr_jq -r '
     if (.revision | type) == "string" then .revision else error("no revision") end' 2>/dev/null) \
     || return 1
   fm_pr_head_valid "$revision" || return 1
