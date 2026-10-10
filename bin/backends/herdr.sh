@@ -1465,6 +1465,80 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   printf '%s\n' "$shell_pid"
 }
 
+# fm_backend_herdr_pane_runs_treehouse_get: true when one read of <pane-id>'s
+# process tree finds a `treehouse get` below the pane shell that has not yet
+# handed its slot over. Any unreadable step reads false.
+fm_backend_herdr_pane_runs_treehouse_get() {  # <session> <pane-id>
+  local shell_pid rows pid args
+  shell_pid=$(fm_backend_herdr_pane_shell_pid "$1" "$2") || return 1
+  rows=$(LC_ALL=C "${FM_HERDR_PS_BIN:-ps}" -axww -o pid=,ppid=,args= 2>/dev/null) || return 1
+  while IFS=$'\t' read -r pid args; do
+    fm_backend_herdr_args_run_treehouse_get "$args" || continue
+    fm_backend_herdr_treehouse_get_handed_over "$pid" "$rows" || return 0
+  done <<EOF
+$(fm_backend_herdr_shell_descendants "$shell_pid" "$rows")
+EOF
+  return 1
+}
+
+# fm_backend_herdr_pane_shell_pid: print the shell pid `pane process-info`
+# reports for exactly <pane-id>.
+fm_backend_herdr_pane_shell_pid() {  # <session> <pane-id>
+  fm_backend_herdr_cli "$1" pane process-info --pane "$2" 2>/dev/null | jq -er --arg pane "$2" '
+    .result.process_info
+    | select(.pane_id == $pane)
+    | .shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null
+}
+
+# fm_backend_herdr_shell_descendants: print "<pid><TAB><rest>" for every process
+# below <shell-pid> in <rows>, a `ps` listing of "<pid> <ppid> <rest>" lines.
+fm_backend_herdr_shell_descendants() {  # <shell-pid> <rows>
+  printf '%s\n' "$2" | awk -v shell="$1" '
+    {
+      pid[NR] = $1; ppid[NR] = $2
+      line = $0
+      sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
+      rest[NR] = line
+    }
+    END {
+      want[shell] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (n = 1; n <= NR; n++) {
+          if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
+        }
+      }
+      for (n = 1; n <= NR; n++) {
+        if ((pid[n] in want) && pid[n] != shell) printf "%s\t%s\n", pid[n], rest[n]
+      }
+    }'
+}
+
+# fm_backend_herdr_args_run_treehouse_get: true when a process command line runs
+# `treehouse get`, directly or through an interpreter.
+fm_backend_herdr_args_run_treehouse_get() {  # <args>
+  local word i
+  read -r -a word <<<"$1"
+  for ((i = 0; i + 1 < ${#word[@]}; i++)); do
+    [ "${word[i]##*/}" = treehouse ] && [ "${word[i + 1]}" = get ] && return 0
+  done
+  return 1
+}
+
+# fm_backend_herdr_treehouse_get_handed_over: true when <pid>, a `treehouse get`
+# in <rows>, has a direct child other than git. Treehouse runs only git while it
+# checks the slot out, then hands the pane over by starting the slot's shell,
+# whatever program that is.
+fm_backend_herdr_treehouse_get_handed_over() {  # <pid> <rows>
+  printf '%s\n' "$2" | awk -v parent="$1" '
+    $2 == parent {
+      program = $3; sub(/.*\//, "", program); sub(/^-/, "", program)
+      if (program != "git") found = 1
+    }
+    END { exit(found ? 0 : 1) }'
+}
+
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
 # returned by THIS projected create immediately after its owning parent's
 # contiguous child block and before the next parent.
@@ -2198,26 +2272,7 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
       return 0
     fi
   done <<EOF
-$(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
-  {
-    pid[NR] = $1; ppid[NR] = $2
-    line = $0
-    sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
-    comm[NR] = line
-  }
-  END {
-    want[shell] = 1
-    changed = 1
-    while (changed) {
-      changed = 0
-      for (n = 1; n <= NR; n++) {
-        if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
-      }
-    }
-    for (n = 1; n <= NR; n++) {
-      if ((pid[n] in want) && pid[n] != shell) printf "%s\t%s\n", pid[n], comm[n]
-    }
-  }')
+$(fm_backend_herdr_shell_descendants "$shell_pid" "$rows")
 EOF
   printf 'shell'
 }

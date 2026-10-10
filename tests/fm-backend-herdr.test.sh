@@ -562,6 +562,46 @@ test_registered_agent_with_a_live_foreground_process_stays_alive() {
   pass "herdr stale registration: a registered agent with a live Pi foreground process still reads alive"
 }
 
+# --- an aborted spawn's pane and its `treehouse get` --------------------------
+#
+# bin/fm-spawn.sh keeps an aborted herdr task pane open only while the checkout
+# under `treehouse get` still runs. Treehouse hands the pane over by starting
+# the slot's shell, whatever program that is, so any direct child other than git
+# means the checkout is done. Real processes stand in for the pane shell,
+# treehouse, and its child; `exec -a` gives the child the name under test.
+
+treehouse_get_child_case() {  # <dir-suffix> <child-name>
+  local dir="$TMP_ROOT/treehouse-get-$1" resp log fb shell_pid child_pid out
+  mkdir -p "$dir/responses" "$dir/bin"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf '#!/usr/bin/env bash\nexec -a "%s" sleep 300 &\necho $! > "%s"\nwait\n' "$2" "$dir/child.pid" > "$dir/bin/treehouse"
+  chmod +x "$dir/bin/treehouse"
+  bash -c '"$0" get; :' "$dir/bin/treehouse" &
+  shell_pid=$!
+  while [ ! -s "$dir/child.pid" ]; do sleep 0.05; done
+  child_pid=$(cat "$dir/child.pid")
+  shell_only_process_info "$shell_pid" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_pane_runs_treehouse_get fmtest w1:p2 && printf checking-out || printf handed-over' "$ROOT")
+  kill "$child_pid" 2>/dev/null || true
+  wait "$shell_pid" 2>/dev/null || true
+  printf '%s' "$out"
+}
+
+test_treehouse_get_hands_over_to_any_non_git_child() {
+  local child out
+  out=$(treehouse_get_child_case git git)
+  [ "$out" = checking-out ] \
+    || fail "a treehouse get whose child is git must read as still checking out, got '$out'"
+  for child in ash slot-shell; do
+    out=$(treehouse_get_child_case "$child" "$child")
+    [ "$out" = handed-over ] \
+      || fail "a treehouse get whose child is '$child' must read as handed over so the abort closes the pane, got '$out'"
+  done
+  pass "herdr aborted spawn: treehouse get hands over to any non-git child, including an unlisted shell"
+}
+
 # --- the bound agent session reference (relaunch session continuity) --------
 #
 # Herdr applies only reports carrying the session identity it bound to a pane,
@@ -5896,6 +5936,7 @@ test_stale_registration_ignores_status_and_reads_the_process
 test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
 test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable
 test_registered_agent_with_a_live_foreground_process_stays_alive
+test_treehouse_get_hands_over_to_any_non_git_child
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
 test_transient_prompt_helper_settles_into_stale_agent
 test_exhausted_settle_window_keeps_a_non_shell_foreground_live

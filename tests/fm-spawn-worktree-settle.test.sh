@@ -44,6 +44,11 @@ case "$*" in
     [ -f "$countfile" ] && n=$(cat "$countfile")
     n=$((n + 1))
     printf '%s\n' "$n" > "$countfile"
+    if [ -n "${FM_FAKE_ACQUIRE_AT:-}" ] && [ "$n" -eq "$FM_FAKE_ACQUIRE_AT" ]; then
+      git -C "$FM_FAKE_PANE_PATH" reset --hard --quiet
+      printf '{"version":4,"worktrees":[{"name":"1","path":"%s","owner_pid":%s}]}\n' \
+        "$FM_FAKE_PANE_PATH" "$FM_FAKE_OWNER_PID" > "$FM_FAKE_POOL/treehouse-state.json"
+    fi
     if [ "$n" -le "${FM_FAKE_PANE_STALE_READS:-0}" ]; then
       printf '%s\n' "${FM_FAKE_PANE_STALE:-}"
     else
@@ -221,9 +226,83 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# make_pool_case <name> <id> builds a Treehouse pool slot whose checkout has not
+# finished: the slot is registered with its HEAD set but nothing checked out,
+# which is what a pane read lands on when it reports a git process still writing
+# the slot. The fake pane finishes the checkout and publishes Treehouse's
+# acquired-slot state on read FM_FAKE_ACQUIRE_AT.
+make_pool_case() {
+  local name=$1 id=$2 case_dir home proj pool slot fakebin countfile
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  pool="$case_dir/pool/project-abc123"
+  slot="$pool/1/project"
+  countfile="$case_dir/pane-call-count"
+  fakebin=$(make_settle_fakebin "$case_dir/fake")
+  fm_test_spawn_home "$home" codex
+  fm_git_init_commit "$proj"
+  fm_git_add_origin "$proj" "$proj.origin.git"
+  mkdir -p "$pool"
+  : > "$pool/treehouse-state.lock"
+  git -C "$proj" worktree add --quiet --detach --no-checkout "$slot"
+  fm_test_spawn_brief "$home" "$id" "Exercise mid-checkout slot detection for $id."
+  printf '%s\n' "$case_dir|$home|$proj|$slot|$pool|$fakebin|$countfile|0"
+}
+
+run_pool_spawn() { # <id> <acquire-at-read>
+  FM_FAKE_ACQUIRE_AT=$2 FM_FAKE_OWNER_PID=$$ FM_FAKE_POOL="$STALE_DIR" run_settle_spawn "$1"
+}
+
+# A pane cwd read can report a child process rather than the shell treehouse
+# opens: herdr before 0.9.0 returns the first foreground-group member whose cwd
+# differs from the pane shell's, which is the git checkout running inside the
+# new slot. Two agreeing reads there are not a finished slot, so the spawn must
+# wait until Treehouse records the slot acquired before the clean check.
+test_slot_read_mid_checkout_waits_for_treehouse_acquisition() {
+  local rec id out status reads
+  id=settle-pool-midcheckout-z5
+  rec=$(make_pool_case settle-pool-midcheckout "$id")
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_pool_spawn "$id" 4)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed once Treehouse records the slot acquired"$'\n'"$out"
+  assert_not_contains "$out" "is not clean" "spawn checked the slot before its checkout finished"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the acquired slot"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -ge 5 ] || fail "spawn adopted the slot after $reads reads, before Treehouse recorded it acquired on read 4"
+  pass "a slot read while its checkout runs is adopted only after Treehouse records the acquisition"
+}
+
+# A slot Treehouse never records as acquired fails at the deadline naming that
+# reason, never by refusing a half-written slot as unclean.
+test_slot_never_acquired_fails_at_the_deadline() {
+  local rec id out status
+  id=settle-pool-unacquired-z6
+  rec=$(make_pool_case settle-pool-unacquired "$id")
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_pool_spawn "$id" 100000)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched in a slot Treehouse never recorded as acquired"$'\n'"$out"
+  assert_contains "$out" "did not enter an isolated worktree" \
+    "spawn did not fail at the discovery deadline"
+  assert_contains "$out" "Treehouse has not finished acquiring it" \
+    "the refusal did not say the slot was never acquired"
+  assert_not_contains "$out" "is not clean" "spawn ran the clean check on a slot still being acquired"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a slot Treehouse never records as acquired fails at the deadline"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_slot_read_mid_checkout_waits_for_treehouse_acquisition
+test_slot_never_acquired_fails_at_the_deadline
 
 echo "# all fm-spawn-worktree-settle tests passed"

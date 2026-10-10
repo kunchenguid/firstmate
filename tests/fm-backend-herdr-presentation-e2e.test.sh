@@ -158,7 +158,7 @@ if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.tab.tab_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-tab"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-pane"
       ;;
-    $'└ abort-a · p:'*|$'└ abort-b · p:'*)
+    $'└ abort-a · p:'*|$'└ abort-b · p:'*|$'└ abort-hold · p:'*)
       task=${label#$'└ '}; task=${task%% *}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$POST_CREATE_ABORT_CONTROL/$task/workspace"
@@ -171,7 +171,7 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/task-pane"
       printf '%s\n' task-created > "$ACTIVE_SEEDED_CONTROL/stage"
       ;;
-    fm-abort-a|fm-abort-b)
+    fm-abort-a|fm-abort-b|fm-abort-hold)
       task=${label#fm-}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
@@ -210,7 +210,7 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ ! -e "$POST_CREATE_ABORT_CONTROL/hold-get" ] && [ "${1:-}" = get ]; then
   exit 0
 fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
@@ -539,10 +539,18 @@ write_ship_brief "$HOME_DIR" wheelhouse-healing-r1 'Wheelhouse-style projection 
 write_ship_brief "$HOME_DIR" active-seeded 'Projection active seeded fixture.'
 write_ship_brief "$HOME_DIR" abort-a 'Projection abort fixture A.'
 write_ship_brief "$HOME_DIR" abort-b 'Projection abort fixture B.'
+write_ship_brief "$HOME_DIR" abort-hold 'Projection abort fixture with a held checkout.'
 write_ship_brief "$HOME_DIR" lock-contended 'Projection lock contention fixture.'
 write_ship_brief "$HOME_DIR" default-on 'Projection default-on fixture.'
 make_project "$PROJECT_DIR"
 make_project "$RECOVERY_PROJECT_DIR"
+# A fresh project gives the held-get abort a new pool slot, whose real checkout
+# runs this hook; the hold file keeps that checkout running under the pane.
+HOLD_PROJECT_DIR="$TMP_ROOT/hold-project"
+make_project "$HOLD_PROJECT_DIR"
+printf '#!/bin/sh\nwhile [ -e "%s/hold-get" ]; do sleep 0.1; done\n' "$POST_CREATE_ABORT_CONTROL" \
+  > "$HOLD_PROJECT_DIR/.git/hooks/post-checkout"
+chmod +x "$HOLD_PROJECT_DIR/.git/hooks/post-checkout"
 
 # Keep one ordinary primary task live so the durable firstmate workspace is
 # first and remains present while disposable workers are projected around it.
@@ -900,6 +908,37 @@ done
 rm -rf "$POST_CREATE_ABORT_CONTROL"
 rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
+
+# The aborts above ran after their `treehouse get` had handed over its slot
+# shell, so the cleanup closed their panes. An abort while the slot checkout
+# under `treehouse get` is still running must leave the pane open instead:
+# closing it would hang up the checkout. The hold file keeps that checkout
+# running through the spawn's whole discovery wait and abort.
+mkdir -p "$POST_CREATE_ABORT_CONTROL"
+: > "$POST_CREATE_ABORT_CONTROL/hold-get"
+HOLD_START=$(log_line_count)
+if spawn_task abort-hold "$HOME_DIR" "$HOLD_PROJECT_DIR" > "$TMP_ROOT/abort-hold.out" 2> "$TMP_ROOT/abort-hold.err"; then
+  fail "held-get abort fixture unexpectedly succeeded"
+fi
+grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-hold.err" >/dev/null 2>&1 \
+  || fail "held-get abort fixture did not reach the discovery deadline: $(cat "$TMP_ROOT/abort-hold.err")"
+HOLD_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-hold/task-pane")
+grep -F "leaving herdr pane $HOLD_PANE open because treehouse get is still running in it" "$TMP_ROOT/abort-hold.err" >/dev/null 2>&1 \
+  || fail "abort with treehouse get still running did not report keeping its pane: $(cat "$TMP_ROOT/abort-hold.err")"
+HOLD_CLOSES=$(sed -n "$((HOLD_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' -v pane="$HOLD_PANE" '$1 == "pane" && $2 == "close" && $3 == pane')
+[ -z "$HOLD_CLOSES" ] || fail "abort closed task pane $HOLD_PANE while treehouse get still ran in it"
+lab pane get "$HOLD_PANE" >/dev/null 2>&1 \
+  || fail "task pane $HOLD_PANE is gone although treehouse get still ran in it"
+[ ! -e "$HOME_DIR/state/abort-hold.meta" ] || fail "held-get abort fixture published task metadata before launch"
+assert_focus_is "$CAPTAIN_FOCUS" "abort with treehouse get still running"
+rm -rf "$POST_CREATE_ABORT_CONTROL"
+# This plain close empties a non-focused workspace, which moves focus to its
+# neighbor on Herdr releases before 0.8.0, so restore the captain's tab.
+lab pane close "$HOLD_PANE" >/dev/null 2>&1 || fail "could not close kept task pane $HOLD_PANE after the test"
+rm -f "$HOME_DIR/state/abort-hold.herdr-presentation"
+lab tab focus "$SECOND_TWO_TAB" >/dev/null || fail "could not restore the captured captain tab after closing the kept task pane"
+assert_focus_is "$CAPTAIN_FOCUS" "closing the kept task pane"
+pass "real Herdr lab: an abort while treehouse get still runs leaves its task pane open"
 
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \

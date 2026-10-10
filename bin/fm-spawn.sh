@@ -275,6 +275,12 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   A read inside a Treehouse pool slot is adopted only once Treehouse's pool
+#   state records that slot acquired, because a pane read can land on a git
+#   process still checking the slot out. A spawn that aborts while the checkout
+#   under `treehouse get` still runs, before Treehouse hands over the slot shell,
+#   leaves its herdr task pane open rather than hang up that checkout. Any other
+#   abort closes the pane, which also ends `treehouse get` and returns the slot.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -1310,6 +1316,17 @@ parse_orca_worktree_result() {
   fi
 }
 
+# True when an aborting spawn must leave its herdr task pane open: no slot was
+# adopted yet and the checkout under `treehouse get` still runs, before
+# Treehouse hands over the slot shell. Closing the pane then would hang up the
+# checkout; git drops the slot's registration but leaves the half-written slot,
+# which Treehouse quarantines and the next slot's registration can take over.
+spawn_abort_keeps_treehouse_pane() {
+  [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] && [ -z "${WT:-}" ] &&
+    [ -n "$HERDR_PROJECTION_ABORT_TASK_PANE" ] &&
+    fm_backend_herdr_pane_runs_treehouse_get "$HERDR_PROJECTION_ABORT_SESSION" "$HERDR_PROJECTION_ABORT_TASK_PANE"
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
@@ -1335,6 +1352,10 @@ spawn_abort_cleanup() {
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
     fi
+  fi
+  if spawn_abort_keeps_treehouse_pane; then
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    echo "warning: leaving herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE open because treehouse get is still running in it; close it once treehouse has finished" >&2
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] &&
     [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -4445,6 +4466,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # read of the project itself or of the repository primary checkout is treated
   # as the transient it is and the wait continues, instead of being adopted and
   # then refused by the guard.
+  # A slot inside a Treehouse pool must also be recorded acquired by Treehouse:
+  # a backend that reports a foreground child's cwd (herdr before 0.9.0) shows
+  # the slot while git is still checking it out, or while Treehouse's recovery
+  # check inspects a quarantined slot, and neither is a slot ready to use.
   # A candidate the screen rejects is never adopted, so a host where the pane
   # never reaches an isolated worktree spends the whole window before refusing.
   # That wait is deliberate - telling a transient apart from a terminal
@@ -4457,7 +4482,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
-    if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
+    if [ -n "$p" ] && spawn_worktree_isolated "$p" && fm_treehouse_slot_acquired "$p"; then
       p_real=$(real_path_or_raw "$p")
       last_reason="it is an isolated worktree, but no second read agreed with it"
       if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
@@ -4467,7 +4492,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       candidate="$p_real"
     else
       candidate=""
-      [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
+      [ -z "$p" ] || last_reason=${SPAWN_WT_REASON:-Treehouse has not finished acquiring it}
     fi
     sleep 1
   done

@@ -1576,6 +1576,34 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
+# True when <worktree> is ready as far as Treehouse is concerned: it lies outside
+# any Treehouse pool, or Treehouse has finished an interactive acquisition of it,
+# meaning its pool state lists the slot under a live owner reservation and no
+# lease. That entry is published only after the slot's checkout and seeding
+# complete, so it is the readiness signal; a process cwd inside the slot is not,
+# because the git processes that create or inspect a slot run there first. A
+# pool is recognized by the state lock Treehouse takes before it creates a slot,
+# because the state file itself is first written after.
+fm_treehouse_slot_acquired() {  # <worktree>
+  local slot pool
+  slot=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || return 1
+  pool=$(dirname "$(dirname "$slot")")
+  [ -e "$pool/treehouse-state.lock" ] || return 0
+  fm_treehouse_live_owned_slots "$pool" | grep -Fqx -- "$slot"
+}
+
+# fm_treehouse_live_owned_slots: print the physical path of every slot in
+# <pool> that its state lists under a live owner reservation and no lease.
+fm_treehouse_live_owned_slots() {  # <pool-dir>
+  local state="$1/treehouse-state.json" owner path
+  [ -f "$state" ] && [ ! -L "$state" ] || return 0
+  jq -r '.worktrees[]? | select((.leased // false) == false and (.owner_pid // 0) > 0) | "\(.owner_pid)\t\(.path)"' "$state" 2>/dev/null |
+    while IFS=$'\t' read -r owner path; do
+      kill -0 "$owner" 2>/dev/null || continue
+      CDPATH='' cd -- "$path" 2>/dev/null && pwd -P
+    done
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`

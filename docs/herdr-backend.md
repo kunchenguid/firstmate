@@ -469,6 +469,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 - Existing layouts are not force-renamed or rearranged.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces.
+  A spawn that aborts while `treehouse get` still checks out its slot also leaves its task pane and space open; the [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns that rule.
   Session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
