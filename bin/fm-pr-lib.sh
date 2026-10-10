@@ -1117,7 +1117,80 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
     if (.revision | type) == "string" then .revision else error("no revision") end' 2>/dev/null) \
     || return 1
   fm_pr_head_valid "$revision" || return 1
-  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_change_carries_head.
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_read_current.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_REVISION=$revision
+}
+
+# The current patch set of one Gerrit change, its revision, and whether a
+# change message on that patch set carries a run's summary - the line <first>,
+# plus a line starting "<step>:" for each step in the newline-separated <steps>
+# or, when <steps> is empty, the line "no findings" or any "<step>:" entry
+# line (a step whose findings were all fixed reports none left) - all from one live read
+# with every cover message whole (--full; without it gerrit-axi cuts a body to
+# its first 1000 characters, dropping a long summary's later step lines), so
+# the tree and the summary are checked against the same patch set. Gerrit names a message's patch set in its own first line
+# ("Patch Set 3:"), which is the patch_set gerrit-axi reports for the row.
+# Consumed by bin/fm-dod-lib.sh's no-mistakes ready gate, which accepts a
+# published change only when that revision carries the worker copy's HEAD tree
+# and the pipeline summary was posted on that patch set. Fails on any reading
+# that does not name exactly this change and its current patch set.
+fm_pr_gerrit_read_summary() {  # <host> <number> <first> <steps>
+  local host=$1 number=$2 first=$3 steps=$4 json reading ps posted revision
+  FM_PR_RECORD_PATCH_SET=
+  FM_PR_RECORD_SUMMARY_POSTED=
+  FM_PR_RECORD_REVISION=
+  command -v gerrit-axi >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if ! json=$(gerrit-axi show "$number" --host "$host" --messages all --full --json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  reading=$(printf '%s' "$json" | jq -r --argjson change "$number" --arg first "$first" --arg steps "$steps" '
+    . as $root
+    | if type == "object" and .ok == true and (.changes | type) == "array" then . else error("invalid gerrit record") end
+    | [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
+    | if ($match | length) == 1 and ($match[0].patch_set | type) == "number"
+      and ($match[0].revision | type) == "string"
+      then $match[0]
+      else error("no exact change record")
+      end
+    | .patch_set as $ps
+    | .revision as $revision
+    | ($root.messages // []) as $messages
+    | if ($messages | type) != "array" then error("invalid messages") else . end
+    | [$steps | split("\n")[] | select(test("^[a-z0-9_-]+$"))] as $required
+    | [$messages[] | select(type == "object" and .change == $change and .patch_set == $ps
+        and (.message | type) == "string"
+        and (.message | split("\n") as $lines
+          | ($lines | index([$first])) != null
+          and if ($required | length) == 0
+            then ($lines | index(["no findings"])) != null or any($lines[]; test("^[a-z0-9_-]+:"))
+            else all($required[]; . as $step | any($lines[]; startswith($step + ":")))
+            end))] as $posted
+    | "\($ps) \(($posted | length) > 0) \($revision)"' 2>/dev/null) || return 1
+  ps=${reading%% *}
+  posted=${reading#* }
+  revision=${posted#* }
+  posted=${posted%% *}
+  fm_pr_head_valid "$revision" || return 1
+  case "$ps" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$posted" in
+    true|false) ;;
+    *) return 1 ;;
+  esac
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_read_current.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_PATCH_SET=$ps
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_read_current.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_SUMMARY_POSTED=$posted
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_read_current.
   # shellcheck disable=SC2034
   FM_PR_RECORD_REVISION=$revision
 }

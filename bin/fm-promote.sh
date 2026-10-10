@@ -129,6 +129,7 @@ refuse_impossible_forge_posture() {
     echo "error: --yolo on is refused for forge=gerrit: a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); promote with --yolo off and take any landing on a current explicit captain instruction naming that concrete change" >&2
     return 1
   fi
+  fm_gerrit_summary_capable "$MODE" "$FORGE" fm-promote.sh || return 1
   return 0
 }
 refuse_impossible_forge_posture || exit 1
