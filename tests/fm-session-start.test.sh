@@ -769,6 +769,23 @@ write_omp_loaded_markers() {
   printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-turnend-extension-loaded"
 }
 
+# wait_for_home_summary <home> <seconds>: session start publishes the ledger
+# detached, so a reader polls for a valid document rather than reading it the
+# instant the digest returns.
+wait_for_home_summary() {
+  local home=$1 seconds=$2 i=0
+  while [ "$i" -lt $((seconds * 10)) ]; do
+    jq -e --arg home "$home" '
+      .schema == "fm-secondmate-home-summary.v1"
+      and .home == $home
+      and (.generated_epoch | type) == "number"
+    ' "$home/state/home-summary.json" >/dev/null 2>&1 && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # --- context digest: absent vs empty vs present -----------------------------
 
 test_context_digest_absent_empty_present() {
@@ -786,11 +803,7 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  jq -e --arg home "$home" '
-    .schema == "fm-secondmate-home-summary.v1"
-    and .home == $home
-    and (.generated_epoch | type) == "number"
-  ' "$home/state/home-summary.json" >/dev/null \
+  wait_for_home_summary "$home" 30 \
     || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
@@ -812,6 +825,65 @@ EOF
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+# A slow summary producer must not hold the digest. Stall the refresh's ledger
+# validation until the test releases it, under a deadline far longer than the
+# digest is allowed to take, and require the digest to return while that
+# refresh is still stalled - then require the refresh it left running to
+# publish once released, so the detachment never drops the publication.
+test_slow_home_summary_never_blocks_the_digest() {
+  local rec root home fakebin stallbin stalled release out started elapsed i
+  rec=$(new_world slow-home-summary)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  stallbin="${root%/root}/stallbin"
+  stalled="${root%/root}/summary-stalled"
+  release="${root%/root}/summary-release"
+  mkdir -p "$stallbin"
+  cat > "$stallbin/jq" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.home-summary.json.*)
+      : > "$FM_TEST_SUMMARY_STALLED"
+      i=0
+      while [ ! -e "$FM_TEST_SUMMARY_RELEASE" ] && [ "$i" -lt 1200 ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+  chmod +x "$stallbin/jq"
+
+  started=$(date +%s)
+  out=$(FM_TEST_REAL_JQ="$(command -v jq)" FM_TEST_SUMMARY_STALLED="$stalled" \
+    FM_TEST_SUMMARY_RELEASE="$release" FM_HOME_SUMMARY_TIMEOUT=90 \
+    run_session_start "$home" "$root" "$stallbin:$fakebin:$BASE_PATH")
+  elapsed=$(( $(date +%s) - started ))
+
+  assert_contains "$out" "SESSION START" "the digest did not complete"
+  i=0
+  while [ ! -e "$stalled" ] && [ "$i" -lt 300 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$stalled" ] || fail "the session-start summary refresh never reached its stalled validation"
+  [ ! -e "$home/state/home-summary.json" ] \
+    || fail "the summary published although its validation was still stalled"
+  [ "$elapsed" -lt 45 ] \
+    || fail "the digest waited ${elapsed}s on a stalled summary refresh"
+
+  : > "$release"
+  wait_for_home_summary "$home" 30 \
+    || fail "the detached summary refresh did not publish once released: $(cat "$home/state/.home-summary-refresh.log" 2>/dev/null)"
+  pass "session start: a slow summary refresh delays the ledger, not the digest"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -1461,6 +1533,21 @@ EOF
   pass "a killed per-task endpoint read becomes that task's error line and the digest completes"
 }
 
+# stray_herdr_after_summary <fakebin>: count hung fake herdr processes once the
+# detached home-summary refresh, bounded at 5s by its callers here, has had time
+# to finish. A read the endpoint bound failed to stop hangs for 300s, so it
+# still counts.
+stray_herdr_after_summary() {
+  local fakebin=$1 stray i=0
+  while :; do
+    stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$stray" -eq 0 ] || [ "$i" -ge 200 ]; then break; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf '%s\n' "$stray"
+}
+
 test_endpoint_read_hang_is_bounded_and_reported() {
   local rec root home fakebin out status=0 stray
   rec=$(new_world endpoint-hang)
@@ -1474,9 +1561,10 @@ EOF
   printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
 
-  # The same fake hangs the side-band home summary before the endpoint section.
-  # Bound that unrelated refresh at 5s instead of paying its production 60s;
-  # the endpoint's own 2s bound and descendant-cleanup assertions stay real.
+  # The same fake hangs the side-band home summary, which session start leaves
+  # running detached. Bound that unrelated refresh at 5s instead of paying its
+  # production 60s, and let it finish before counting strays below; the
+  # endpoint's own 2s bound and descendant-cleanup assertions stay real.
   out=$(FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=2 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
@@ -1491,7 +1579,7 @@ EOF
   assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START" \
     "a bounded endpoint-read hang raised the whole-digest truncation banner"
 
-  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+  stray=$(stray_herdr_after_summary "$fakebin")
   [ "$stray" -eq 0 ] || fail "the per-task read bound left $stray hung herdr process(es) behind"
 
   pass "a hung per-task endpoint read hits its configured bound, reports the task, and leaves nothing stuck"
@@ -1510,8 +1598,9 @@ EOF
   printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
 
-  # Only the unrelated summary gets a shorter fixture budget. The invalid
-  # endpoint value must still fall back to the real 10s production bound.
+  # Only the unrelated detached summary gets a shorter fixture budget, and the
+  # stray count below waits for it to finish. The invalid endpoint value must
+  # still fall back to the real 10s production bound.
   out=$(FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=00 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
@@ -1522,7 +1611,7 @@ EOF
   assert_contains "$out" "$(printf '\nCONTEXT\n')" \
     "a padded-zero bound cost the digest its context section"
 
-  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+  stray=$(stray_herdr_after_summary "$fakebin")
   [ "$stray" -eq 0 ] || fail "the fallback bound left $stray hung herdr process(es) behind"
 
   pass "a padded-zero per-read bound falls back to the 10s default instead of removing the bound"
@@ -3015,6 +3104,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_slow_home_summary_never_blocks_the_digest
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
