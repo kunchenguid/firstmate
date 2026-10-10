@@ -399,7 +399,7 @@ A live or unknown recorded or token-matched endpoint refuses duplicate launch.
 ### Startup cleanup of restored projections
 
 Locked session start has one narrower cleanup for a restored projected child that is no longer current task state.
-It runs only when the current home has at least one ordinary presentation journal, and it considers only that home.
+It runs only when the current home has at least one ordinary presentation journal whose task metadata is absent, and it considers only that home.
 A primary never recursively sweeps a secondmate home.
 
 Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.

@@ -293,10 +293,15 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
 }
 
 fm_herdr_session_cleanup() {
-  local session home_real list candidates workspace title journal found=0
+  local session home_real list candidates workspace title journal id found=0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
+  # Every candidate requires absent task metadata, so a journal whose task
+  # still has its .meta can never be retired. Skip workspace discovery unless
+  # at least one journal could still qualify.
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
-    if [ -f "$journal" ] && [ ! -L "$journal" ]; then
+    [ -f "$journal" ] && [ ! -L "$journal" ] || continue
+    id=$(basename "$journal" "$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX")
+    if [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ]; then
       found=1
       break
     fi
