@@ -319,7 +319,7 @@ Three checks run, all on exact identity and none on prose:
 - The card's key is the captain-held task id, so `bin/fm-captain-hold.sh open --distinguish-absent` is asked whether that task is still an open captain call.
   - Exit 1 means the task is present but closed, or no longer held for the captain, and drops the card.
   - Exit 2 means the answer could not be established, and keeps the card.
-  - Exit 3 means the task is absent from the main backlog, which includes a home carrying no backlog file at all, and keeps the card.
+  - Exit 3 means the task is absent from the main backlog, which includes a home carrying no backlog file at all and a non-markdown home the installed `tasks-axi` rejects as an unsupported backend, and keeps the card.
 
   Exits 2 and 3 keep the card because a card wrongly shown is recoverable and a call wrongly hidden is not.
 - The payload's own `landed` rows are the recently-landed artifacts.
