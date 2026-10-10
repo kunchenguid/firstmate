@@ -2494,3 +2494,32 @@ Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which
 This live proof covers the watcher and queue boundary; it does not establish live daemon-consumer delivery.
 `bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.
 Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
+
+## Codex app-server worker transport
+
+Verified on 2026-09-30 with codex-cli 0.156.1 on Linux/WSL using a private tmux server and disposable repository.
+The production spawn, current-state, send, keyed-answer, and control entrypoints were exercised with a real model turn.
+Refresh after changes to the protocol adapter or installed harness:
+
+```sh
+bash tests/fm-codex-appserver.test.sh
+FM_CODEX_APPSERVER_LIVE=1 bash tests/fm-codex-appserver-live-e2e.test.sh
+```
+
+The live guard spends model tokens and retains its evidence directory.
+Its successful output includes:
+
+```text
+ok - live working projection
+ok - live decision opens
+ok - live same-turn completion
+ok - live kernel sandbox denial {"workspace": "WORKSPACE_OK", "sibling": "DENIED:30", "socket": "DENIED:1"}
+ok - live failed turn never complete
+ok - live cancel pending decision
+ok - live cancellation retires callbacks and reaps app-server
+```
+
+The steer response and terminal trace name the same turn, and the final structured result contains both unique steering and answer markers.
+The security proof comes from a real shell command with a successful workspace-write control, kernel-denied sibling-state write and Unix-socket access, and an unchanged sentinel.
+A deliberately unavailable model produces terminal failure; cancellation of a pending dynamic call produces terminal interruption and a reaped app-server process.
+Other platforms, Codex versions, and endpoint providers are not verified by this guard.

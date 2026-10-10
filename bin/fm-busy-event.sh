@@ -29,6 +29,13 @@
 #       turn-ended notification. Arm and retire clear the marker, and an old
 #       incarnation can never refresh its replacement's progress.
 #
+#   report <state-dir> <id> --gen G
+#       Read one bounded canonical status declaration from stdin and append it
+#       under the generation lock. The app-server client validates the semantic
+#       schema and supplies its supervisor-owned task/generation binding.
+#       This never changes busy state; result publication is deferred by that
+#       client until a correlated successful terminal event.
+#
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
 #       writer lock used by arm and apply. An exact gen prevents teardown for
@@ -46,6 +53,7 @@ usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
   fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
   fm-busy-event.sh progress <state-dir> <id> --gen G
+  fm-busy-event.sh report <state-dir> <id> --gen G
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
@@ -58,7 +66,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD=${1:-}
 case "$CMD" in
-  arm|apply|progress|retire) shift ;;
+  arm|apply|progress|retire|report) shift ;;
   *) usage ;;
 esac
 
@@ -74,6 +82,7 @@ GEN=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
+REPORT=
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -180,6 +189,16 @@ if [ "$USE_CURRENT_GEN" != 1 ] || [ "$CMD" != retire ]; then
   fm_busy_token_valid "$GEN" || { umask "$old_umask"; echo "error: invalid --gen" >&2; exit 1; }
 fi
 
+if [ "$CMD" = report ]; then
+  # Supervisor-side semantic publication shares arm's generation lock.
+  REPORT=$(head -c 701)
+  [ "${#REPORT}" -le 700 ] && [ -n "$REPORT" ] || exit 1
+  case "$REPORT" in *$'\n'*|*$'\r'*) exit 1 ;; esac
+  case "$REPORT" in
+    'working: '*|'needs-decision [key='*']:'*|'resolved [key='*']:'*|'done: '*|'failed: '*) ;;
+    *) exit 1 ;;
+  esac
+fi
 lock_acquire || { umask "$old_umask"; exit 1; }
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
   if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
@@ -206,6 +225,15 @@ if [ "$GEN" != "$CURRENT" ]; then
   umask "$old_umask"
   echo "error: stale busy-state gen for $ID (event rejected)" >&2
   exit 1
+fi
+if [ "$CMD" = report ]; then
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$SCRIPT_DIR/fm-classify-lib.sh"
+  printf '%s\n' "$(status_stamp_line "$REPORT")" >> "$STATE/$ID.status"
+  report_rc=$?
+  lock_release
+  umask "$old_umask"
+  exit "$report_rc"
 fi
 if [ "$CMD" = retire ]; then
   rm -f "$GEN_FILE" "$REC" "$STATE/$ID.progress" || {

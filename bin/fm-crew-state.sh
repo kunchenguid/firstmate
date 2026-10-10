@@ -268,6 +268,31 @@ map_log_state() {  # <line>
 LOG_LINE=$(status_current_line "$LOG" "$KIND")
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
+# App-server terminal success is necessary before ANY delivery reconciler may
+# promote a worker's result, including a no-mistakes run that finished earlier.
+# An existing decision remains canonical while its dynamic call is pending.
+if [ "$(meta_value codex_transport)" = appserver ]; then
+  APPSERVER_BUSY=$(fm_busy_record_read "$STATE" "$ID") || emit unknown codex-appserver "$APPSERVER_BUSY"
+  case "$APPSERVER_BUSY" in
+    'busy codex-appserver '*|'busy fm-spawn '*)
+      python3 "$SCRIPT_DIR/fm-codex-appserver.py" control "$STATE" "$ID" \
+        "$(meta_value busy_gen)" status </dev/null >/dev/null 2>&1 ||
+        emit unknown codex-appserver "app-server owner unavailable"
+      if [ -n "$(status_open_decisions "$LOG" "$KIND")" ]; then
+        emit parked status-log "$(status_line_note "$LOG_LINE")"
+      fi
+      emit working codex-appserver "verified active turn"
+      ;;
+    'idle codex-appserver turn-failed '*|'idle codex-appserver turn-interrupted '*)
+      emit failed codex-appserver "turn failed or interrupted"
+      ;;
+    'idle codex-appserver turn-completed-result '*)
+      [ "$LOG_VERB" = "done" ] || emit unknown codex-appserver "successful turn without accepted result"
+      ;;
+    *) emit unknown codex-appserver "no verified terminal success ($APPSERVER_BUSY)" ;;
+  esac
+fi
+
 # --- remote secondmate: the true source is the remote endpoint ---------------
 # A remote mate's recorded worktree and backend target live on its own host, so
 # the local worktree probe above and the local pane reads below would misreport

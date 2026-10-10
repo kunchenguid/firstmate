@@ -225,6 +225,7 @@ fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
     claude*) adapter=claude-hook ;;
+    codex-appserver) adapter=codex-appserver ;;
     codex*)
       fm_busy_codex_semantic_source || { printf ''; return 0; }
       adapter='codex-hook codex-appserver'
@@ -1020,7 +1021,13 @@ fm_busy_launch_prompt_parked() {  # <harness>
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
+  # Transport selection belongs to this task's supervisor-written metadata.
+  if [ "$harness" = codex ] && [ -f "$state/$id.meta" ] &&
+    [ "$(sed -n 's/^codex_transport=//p' "$state/$id.meta")" = appserver ]; then
+    harness=codex-appserver
+  fi
   case "$harness" in
+    codex-appserver) ;;
     kimi*)
       if ! fm_busy_kimi_verified; then
         printf 'unknown kimi-unverified'

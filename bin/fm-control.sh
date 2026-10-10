@@ -28,6 +28,8 @@
 #              state is never rewritten as proof of the action. Devin
 #              cancellation invalidates it to unknown because its native hooks
 #              emit no cancellation close; this is not a success claim.
+#              The single-turn app-server transport interrupts through the
+#              protocol and then shuts down its process; its work is retained.
 #              An adapter whose repeated interrupt key does something else on
 #              an idle agent (Devin's revert picker) sends its later presses
 #              only after the first press rendered a running turn, and
@@ -1152,6 +1154,21 @@ do_relaunch() {
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
+
+if [ "$(fm_meta_get "$META" codex_transport)" = appserver ]; then
+  case "$VERB" in
+    interrupt|exit)
+      if [ "$VERB" = exit ] && [ "$(agent_state)" = dead ]; then
+        echo "already-stopped $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+        exit 0
+      fi
+      python3 "$SCRIPT_DIR/fm-codex-appserver.py" control "$STATE" "$ID" \
+        "$(fm_meta_get "$META" busy_gen)" "$VERB" </dev/null
+      exit $?
+      ;;
+    *) die "app-server relaunch is not supported; retain this task and its worktree" ;;
+  esac
+fi
 
 # --- verbs ------------------------------------------------------------------
 

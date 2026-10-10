@@ -45,6 +45,9 @@ relaunch_cleanup() {
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  # Spawn makes its generated hook directories read-only. Restore only this
+  # disposable fixture's owner permissions before removing it as a normal user.
+  chmod -R u+w "$TMP_ROOT"
   rm -rf "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
@@ -2175,6 +2178,9 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session() {
       return 0
     }
     dir=$HERDR_CASE_DIR
+    # This test captures the launch command; it never executes a real Pi.
+    printf '#!/usr/bin/env bash\nexit 99\n' > "$dir/fakebin/pi"
+    chmod +x "$dir/fakebin/pi"
     rm -f "$dir/fake/herdr-stopped"
     sed -i 's/^harness=claude$/harness=pi/' "$dir/home/state/resume-$registered.meta"
     # Keep the pane's status authority registered to an existing Pi session,
