@@ -19,16 +19,20 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
-_FM_PR_LIB_DIR=${BASH_SOURCE[0]%/*}
-[ "$_FM_PR_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_PR_LIB_DIR=.
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "${_FM_PR_LIB_DIR:-/}/fm-session-lock-lib.sh"
-unset _FM_PR_LIB_DIR
+# fm_win_host in bin/fm-session-lock-lib.sh owns the Windows host test; this
+# falls back to the same check when that library has not been sourced.
+fm_pr_win_host() {
+  if declare -F fm_win_host >/dev/null; then
+    fm_win_host
+  else
+    [ -r "/proc/$$/winpid" ]
+  fi
+}
 
 # Windows (captain-approved): native jq.exe ends output lines with CRLF, which
 # corrupts every captured field; -b (Windows-only) keeps LF.
 fm_pr_jq() {
-  if fm_win_host; then
+  if fm_pr_win_host; then
     jq -b "$@"
   else
     jq "$@"
@@ -357,7 +361,7 @@ fm_pr_private_file_valid() {
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   # Windows (captain-approved): noacl mounts report fixed modes and ignore
   # chmod, so the mode is not checked there (see bin/backends/herdr.sh).
-  if ! fm_win_host; then
+  if ! fm_pr_win_host; then
     [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
   fi
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
