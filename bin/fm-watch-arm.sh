@@ -32,11 +32,20 @@
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
+#   watcher: FAILED - attached watcher pid=<N> stalled (beacon <age>s at or past hard bound <bound>s)
+#                                                        - the followed holder is alive but its beacon
+#                                                          reached the stall bound
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. A cycle
+# reason; on attached it stays live across identity-matched successors. Once
+# attached, a stale beacon alone does not end the followed cycle: while that
+# holder is alive and the lock still names it under the same identity, the arm
+# keeps following it, as a started arm waits out a slow child, until the lock
+# changes or the beacon reaches fm_watcher_stall_bound (bin/fm-wake-lib.sh), the
+# age at which the watcher's own re-arm evicts it; there it fails with the
+# stalled-holder line so its owner's retry replaces the holder. A cycle
 # that ends with no reason line and no healthy successor is resolved against the
 # watcher's identity-bound delivery record: a matching record reports that wake
 # and exits 0, and only a cycle that delivered nothing is the typed nonzero
@@ -59,6 +68,17 @@
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
 #
+# --take-over <arm-pid>: own the cycle that arm <arm-pid> owns, for an owner
+# that left a successor cycle running through main's turn and now parks again
+# (bin/fm-supervision-host.sh). Only when this home's healthy watcher is that
+# arm's own child, it stops that watcher by its locked identity: a cycle that
+# delivered a reason before the stop landed reports it exactly as an attached
+# arm would, and otherwise this arm owns a fresh cycle as a plain arm does.
+# Recovery restoration follows docs/watcher-continuity.md "Generation reuse";
+# an unconfirmed stop leaves downtime for the fresh cycle's recovery check.
+# Any other watcher, or one that outlives the stop,
+# is attached to exactly as a plain arm attaches.
+#
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
 # its own supervision cycle on purpose (the supervision host's park boundary,
 # bin/fm-supervision-host.sh). The stopped watcher publishes downtime exactly
@@ -67,22 +87,36 @@
 # the stop.
 #
 # A copy of this script living under a disposable no-mistakes validation
-# checkout (a path containing /.no-mistakes/worktrees/) refuses every mode with
+# checkout (a path containing /.no-mistakes/worktrees/) refuses every mode
+# outside a marked lab with
 # "watcher: FAILED - refusing to arm from a disposable validation checkout" and
 # exits 1 before touching any state: a watcher armed from there outlives the
 # validation step, holds the real home's lock, and keeps writing that home's
-# state from a checkout that is about to be deleted. Firstmate's own test suite
-# runs from exactly such a checkout during validation, so the same
-# FM_GATE_REFUSE_BYPASS=1 escape hatch tests/lib.sh already exports for
-# bin/fm-gate-refuse-lib.sh lifts this refusal for a test's sandboxed home.
+# state from a checkout that is about to be deleted. A marked stock-layout lab
+# home is disposable and permitted; ordinary tests use the sandbox bypass
+# exported by tests/lib.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
   case "$SCRIPT_DIR/:$(cd "$SCRIPT_DIR" && pwd -P)/" in
     */.no-mistakes/worktrees/*)
-      echo "watcher: FAILED - refusing to arm from a disposable validation checkout: $SCRIPT_DIR"
-      exit 1 ;;
+      lab_root=$(cd -P -- "${FM_HOME:-/nonexistent}" 2>/dev/null && pwd -P || true)
+      state_dir=${FM_STATE_OVERRIDE:-${STATE:-${FM_HOME:-}/state}}
+      if [ -d "$state_dir" ]; then
+        resolved_state=$(cd -P -- "$state_dir" 2>/dev/null && pwd -P || true)
+      elif [ ! -e "$state_dir" ] && [ ! -L "$state_dir" ]; then
+        resolved_state=$(cd -P -- "$(dirname -- "$state_dir")" 2>/dev/null && pwd -P)/$(basename -- "$state_dir")
+      else
+        resolved_state=
+      fi
+      case "$resolved_state" in "$lab_root"/*) state_in_lab=1 ;; *) state_in_lab=0 ;; esac
+      if ! fm_gate_lab_permitted || [ "$state_in_lab" -ne 1 ]; then
+        echo "watcher: FAILED - refusing to arm from a disposable validation checkout: $SCRIPT_DIR"
+        exit 1
+      fi ;;
   esac
 fi
 # shellcheck source=bin/fm-wake-lib.sh
@@ -103,6 +137,9 @@ esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+# The beacon age at which the watcher's own re-arm evicts a live holder; an
+# attached arm follows a slow holder up to it (attach_and_wait).
+STALL_BOUND=$(fm_watcher_stall_bound)
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
@@ -111,9 +148,10 @@ ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
 
-# The lifecycle ledger is diagnostic evidence, not a supervision dependency.
-# Writes are bounded and best-effort so an observability failure cannot stall an
-# otherwise healthy watcher cycle.
+# Lifecycle writes are bounded and best-effort so an observability failure
+# cannot stall an otherwise healthy watcher cycle. Take-over also uses the
+# owner's row as stop evidence; missing evidence takes the safe recovery path
+# (docs/watcher-continuity.md "Generation reuse").
 cycle_clean_field() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-512
 }
@@ -211,9 +249,10 @@ cycle_log_append() {
 # A persistent adapter passes the arm pid that just closed. Once this new arm
 # verifies its watcher, update that predecessor's final record in place so the
 # one-record-per-cycle ledger captures the actual successor outcome without an
-# extra synthetic lifecycle row.
+# extra synthetic lifecycle row. A taking-over arm names itself instead, so its
+# record of the cycle it took over names the cycle it started.
 cycle_mark_predecessor_successor() {
-  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-} i tmp
+  local successor=$1 predecessor=${2:-${FM_WATCH_PREDECESSOR_ARM_PID:-}} i tmp
   case "$predecessor" in
     ''|*[!0-9]*) return 0 ;;
   esac
@@ -298,43 +337,63 @@ fail_unexplained_cycle() {
   return 1
 }
 
-# Close a cycle whose reason line this arm could not read against the bounded
-# terminal-delivery ledger the watcher publishes before releasing its lock.
-close_unobserved_cycle() {
-  local i reason clean_identity record_pid record_identity record_reason
+# Read the reason the current cycle's watcher recorded in the bounded
+# terminal-delivery ledger it publishes before releasing its lock. Sets
+# DELIVERED_REASON; fails when no record matches the cycle's pid and identity.
+DELIVERED_REASON=
+cycle_delivered_reason() {
+  local i clean_identity record_pid record_identity record_reason
+  DELIVERED_REASON=
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
-    [ "$i" -lt 20 ] || {
-      fail_unexplained_cycle
-      return 1
-    }
+    [ "$i" -lt 20 ] || return 1
     sleep 0.02
     i=$((i + 1))
   done
-  reason=
   if [ -f "$WATCH_DELIVERY_LOG" ]; then
     while IFS=$'\t' read -r record_pid record_identity record_reason; do
       if [ "$record_pid" = "$cycle_watcher_pid" ] && [ "$record_identity" = "$clean_identity" ]; then
-        reason=$record_reason
+        DELIVERED_REASON=$record_reason
       fi
     done < "$WATCH_DELIVERY_LOG"
   fi
   fm_lock_release "$WATCH_DELIVERY_LOCK"
-  if [ -n "$reason" ]; then
-    printf '%s\n' "$reason"
+  [ -n "$DELIVERED_REASON" ]
+}
+
+# Close a cycle whose reason line this arm could not read against that ledger.
+close_unobserved_cycle() {
+  if cycle_delivered_reason; then
+    printf '%s\n' "$DELIVERED_REASON"
     return 0
   fi
   fail_unexplained_cycle
   return 1
 }
 
+# True while <pid> is alive and this home's watcher lock still names it under
+# the identity this arm's current cycle attached to, whatever its beacon age.
+attached_holder_live() {
+  local pid=$1 lock_pid
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$pid" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME" || return 1
+  [ "$FM_WATCHER_MATCHED_IDENTITY" = "$cycle_watcher_identity" ]
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, report the wake that cycle durably
 # delivered, or fail loudly - never a clean empty completion that an adapter could
 # mistake for a no-op.
+# A stale beacon alone does not end the followed cycle: while the holder is alive
+# and the lock still names it under the same identity, it is a slow cycle, which
+# a started arm tolerates by waiting on its child, so this arm keeps following it.
+# Only at the stall bound, where the watcher's own re-arm evicts a live holder,
+# does it fail with the typed stalled-holder line so its owner's retry replaces it.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 age
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
@@ -345,6 +404,16 @@ attach_and_wait() {
       fi
       sleep "$ATTACH_POLL"
       continue
+    fi
+    if attached_holder_live "$attached_pid"; then
+      age=$(fm_path_age "$BEAT")
+      if [ "$age" -lt "$STALL_BOUND" ]; then
+        sleep "$ATTACH_POLL"
+        continue
+      fi
+      cycle_log_append unknown unknown attached-holder-stalled none
+      echo "watcher: FAILED - attached watcher pid=$attached_pid stalled (beacon ${age}s at or past hard bound ${STALL_BOUND}s)"
+      return 1
     fi
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
@@ -409,10 +478,17 @@ handling_successor_generation() {
 mode=arm
 handling_generation=
 handling_watcher_pid=
+take_over_arm_pid=
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
   --stop) mode=stop ;;
+  --take-over)
+    mode=take-over
+    take_over_arm_pid=${2:-}
+    case "$take_over_arm_pid" in ''|*[!0-9]*) echo "watcher: invalid take-over arm pid" >&2; exit 2 ;; esac
+    [ "$#" -eq 2 ] || { echo "watcher: unexpected take-over arguments" >&2; exit 2; }
+    ;;
   --handling-delivered)
     mode=handling-delivered
     handling_generation=${2:-}
@@ -422,7 +498,7 @@ case "${1:-}" in
     case "$handling_watcher_pid" in ''|*[!0-9]*) echo "watcher: invalid successor watcher pid" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "watcher: unexpected handling delivery arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: $(basename "$0") [--restart | --stop | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
+  *) echo "usage: $(basename "$0") [--restart | --stop | --take-over ARM_PID | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
 esac
 
 if [ "$mode" = handling-delivered ]; then
@@ -470,6 +546,67 @@ if [ "$mode" = stop ]; then
     echo "watcher: none running"
   fi
   exit 0
+fi
+
+# Stop the watcher the named arm owns, by its locked identity, and wait for it
+# to exit (header, --take-over). Returns 3 after printing the reason that cycle
+# delivered before the stop landed, 0 once it stopped without delivering, and
+# 1 when it was not stopped (its handover state was unreadable, or it outlived
+# the stop), which leaves it to the plain attach below.
+take_over_cycle() {  # <watcher-pid> <identity>
+  local pid=$1 i owner_signal
+  cycle_begin "$pid" attached "$2"
+  fm_recovery_marker_handover_snapshot "$STATE/.watcher-down" || return 1
+  if attached_holder_live "$pid"; then
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+  i=0
+  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if fm_pid_alive "$pid"; then
+    return 1
+  fi
+  if cycle_delivered_reason; then
+    cycle_log_append unknown unknown taken-over-delivered-wake none
+    printf '%s\n' "$DELIVERED_REASON"
+    return 3
+  fi
+  # Only the owner can wait on this watcher and distinguish our TERM from a
+  # self-exit that raced the stop. Give its post-wait ledger append a short bound.
+  i=0
+  owner_signal=
+  while [ "$i" -lt 50 ]; do
+    owner_signal=$(awk -F '\t' -v arm="$take_over_arm_pid" -v watcher="$pid" '
+      $1 == "arm_pid=" arm && $2 == "watcher_pid=" watcher { signal = $7 }
+      END { sub(/^signal=/, "", signal); print signal }
+    ' "$CYCLE_LOG" 2>/dev/null || true)
+    [ -z "$owner_signal" ] || break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if [ "$owner_signal" = TERM ]; then
+    fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
+      "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
+    cycle_log_append unknown unknown taken-over none
+  else
+    cycle_log_append unknown unknown taken-over-unconfirmed-stop none
+  fi
+  return 0
+}
+
+TAKEN_OVER=0
+if [ "$mode" = take-over ]; then
+  mode=arm
+  if healthy_watcher \
+    && [ "$(ps -o ppid= -p "$HEALTHY_PID" 2>/dev/null | tr -d ' ')" = "$take_over_arm_pid" ]; then
+    take_over_cycle "$HEALTHY_PID" "$HEALTHY_IDENTITY"
+    case $? in
+      0) TAKEN_OVER=1 ;;
+      3) exit 0 ;;
+    esac
+  fi
 fi
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
@@ -620,6 +757,7 @@ while :; do
         exit 1
       fi
       cycle_mark_predecessor_successor "started:$child"
+      [ "$TAKEN_OVER" -eq 0 ] || cycle_mark_predecessor_successor "started:$child" "$ARM_PID"
       if [ -n "$handling_generation" ]; then
         echo "watcher: started pid=$child (beacon fresh) recovery-generation=$handling_generation"
       else

@@ -207,12 +207,14 @@ missing_provider=$(jq -r '
 ' "$RULES" | while IFS=$'\t' read -r location harness; do
   if ! fm_quota_single_provider_for_harness "$harness" >/dev/null; then
     printf '%s\t%s\n' "$location" "$harness"
-    break
   fi
 done)
 if [ -n "$missing_provider" ]; then
-  IFS=$'\t' read -r location harness <<< "$missing_provider"
-  die "malformed rules file: $RULES_PATH - $location profiles whose harness lacks one authoritative provider family require provider: $harness"
+  missing_provider_detail=''
+  while IFS=$'\t' read -r location harness; do
+    missing_provider_detail="${missing_provider_detail:+$missing_provider_detail; }$location profiles whose harness lacks one authoritative provider family require provider: $harness"
+  done <<< "$missing_provider"
+  die "malformed rules file: $RULES_PATH - $missing_provider_detail"
 fi
 
 # ---- harness -> provider map, from the single owner in fm-quota-axi-lib.sh -----

@@ -19,8 +19,9 @@
 #       because git -c core.hooksPath=<this dir> (or a child process that
 #       inherits it) carries the override there, and a lookup that honored it
 #       would find this directory again and never run the repository's own
-#       hook - a skipped pre-push guard. A lookup that fails exits nonzero
-#       rather than skipping the repository's hook. Does not touch the
+#       hook - a skipped pre-push guard. An empty core.hooksPath means no
+#       repository hook, as in plain git; any other failed lookup exits
+#       nonzero rather than skipping the repository's hook. Does not touch the
 #       project's git config; the caller prefixes the pane with
 #       GIT_CONFIG_COUNT / GIT_CONFIG_KEY_0 / GIT_CONFIG_VALUE_0.
 #
@@ -153,14 +154,21 @@ write_executable() {
 # is the other environment channel that can carry this directory as
 # core.hooksPath; only the repository's config files name its own hooks. Skip
 # when the lookup still names this launch's own hooks dir, meaning those files
-# point here, so the wrapper cannot recurse into itself.
+# point here, so the wrapper cannot recurse into itself. An empty
+# core.hooksPath makes that lookup fail, but plain git reads it as "no hooks",
+# so the wrapper runs none; any other failure reruns the lookup to show git's
+# error and refuses.
 runtime_chain_body() {
   local ours=$1
   cat <<EOF
 unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 ours=$(quote_for_hook "$ours")
 name=\${0##*/}
-orig=\$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-path hooks) || {
+orig=\$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
+  if hooks_path=\$(unset GIT_CONFIG_PARAMETERS; git config --get --type=path core.hooksPath 2>/dev/null) && [ -z "\$hooks_path" ]; then
+    exit 0
+  fi
+  (unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-path hooks >/dev/null)
   echo "fm-git-strip-ai-trailers: cannot resolve this repository's hooks directory; refusing to skip its \$name hook" >&2
   exit 1
 }

@@ -5,14 +5,17 @@
 # to a secondmate, this library records a durable parent-owned pending-reply
 # expectation BEFORE delivery, embeds a privacy-safe correlation id in the
 # outbound message, and later resolves that expectation only from a correlated
-# parent status line or status-pointed document - never from transport success,
-# chat content, or unrelated status activity.
+# line in the asked task's own parent status log, or a document it points to -
+# never from transport success, chat content, unrelated status activity, or
+# another task's line that echoes or quotes the token.
 #
 # Safety property (captain direction 2026-07-22): a secondmate agent may ignore
 # the marker and answer only in its visible conversation. The parent must notice
 # the missing correlated report without scraping that conversation, send exactly
-# one automatic recovery request asking for a repost through the parent channel,
-# and escalate once if the recovery turn also completes without a correlated
+# one automatic recovery request asking for a repost through the parent channel
+# (held back, when config/wait-no-turns is present, while the mate waits on its
+# own open decision or blocker), and
+# escalate once if the recovery turn also completes without a correlated
 # report. Never loop, never repeatedly inject, never silently expire unresolved
 # records, and never treat wrong-home or structured-home heuristics as
 # acknowledgement. A same-basename restatement-copy of the mate home's
@@ -64,7 +67,10 @@
 #   wrong_home_first_sighting= encoded path:line identity of the first sighting
 #   wrong_home_sightings=   comma-separated encoded path:line identities
 #   wrong_home_scan_signature=
-#   grace_secs=             bounded grace before recovery is eligible
+#   grace_secs=             bounded grace before recovery, and before the
+#                           missed-report escalation, are eligible - measured
+#                           from the relevant turn's completion (request or
+#                           recovery), never from delivery or send time
 #
 # Escalation lifecycle: an escalation is not just a message, it OPENS a durable
 # keyed decision in the parent status log, and bin/fm-classify-lib.sh's fold is
@@ -88,10 +94,15 @@
 # contract; the remote enqueue deduplicates onto the same record). The resend
 # resets the record to awaiting_report and leaves the published escalation
 # decision open: a confirmed delivery does not settle the request, only a
-# correlated report does. A later missed-report escalation reuses that key
-# rather than opening a duplicate, and only the ordinary resolve close closes
-# it. A delivered record, whatever its phase, is never reset. Without this, a
-# wake retried only through its owner
+# correlated report does. A later escalation reuses that key rather than
+# opening a duplicate while the decision stays open, and only the ordinary
+# resolve close closes it. Once that close is in the log, the next escalation
+# of a record that already escalated and was reset is a new episode: it
+# appends a new blocked line for the same key, even one identical to the
+# first, and the fold opens the decision again. That reopen belongs to this
+# escalation alone; status_event_recorded (bin/fm-classify-lib.sh) stays an
+# idempotent retry check for every caller. A delivered record, whatever its
+# phase, is never reset. Without this, a wake retried only through its owner
 # (bin/fm-backlog-handoff.sh's receiver wake) stayed refused forever once the
 # watcher escalated between the lost transport and the next resume.
 #
@@ -99,7 +110,10 @@
 # tests. No side effects on source. set -u / set -e safe.
 #
 # Tunables (env):
-#   FM_PENDING_REPLY_GRACE_SECS   default 120
+#   FM_PENDING_REPLY_GRACE_SECS   default 120; counted from the request turn's
+#                                 completion for the recovery repost, and from
+#                                 the recovery turn's completion for the
+#                                 missed-report escalation - never from delivery
 #   FM_PENDING_REPLY_DIR_OVERRIDE override the pending-replies directory (tests)
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
@@ -181,14 +195,12 @@ fm_pending_reply_extract_corr() {  # <text>
   printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null | head -1 | cut -d= -f2- | tr 'A-F' 'a-f' || true
 }
 
-# 0 if <text> carries the exact correlation token for <corr_id>.
+# 0 if <text> carries the exact correlation token for <corr_id>, as a whole
+# word: xcorr=<id> or corr=<id>ff is a different token, not this one.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2 token
-  token=$(fm_pending_reply_corr_token "$corr")
-  case "$text" in
-    *"$token"*) return 0 ;;
-  esac
-  return 1
+  local text=$1 corr=$2 re
+  re="(^|[^[:alnum:]_])$(fm_pending_reply_corr_token "$corr")([^[:alnum:]_]|\$)"
+  [[ $text =~ $re ]]
 }
 
 # Sanitize a short request summary: single line, bounded, no control chars.
@@ -676,7 +688,13 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     case "$delivery_state" in attempted|confirmed) ;; *) return 1 ;; esac
     unconfirmed=1
   fi
-  status_file=${status_override:-$(fm_pending_reply_get "$rec" parent_status)}
+  status_file=$(fm_pending_reply_get "$rec" parent_status)
+  # Only the asked task's own status log answers its request: another mate's
+  # line echoing or quoting this corr= token must leave the request open.
+  if [ -n "$status_override" ]; then
+    [ "$status_override" -ef "$status_file" ] || return 1
+    status_file=$status_override
+  fi
   if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
     signature=$(fm_pending_reply_file_signature "$status_file")
     previous=$(fm_pending_reply_get "$rec" parent_status_scan_signature)
@@ -931,7 +949,8 @@ fm_pending_reply_recovery_message() {  # <record-path>
 fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed delivered attempted grace now age task_id msg parent_home send_status=0
-  local sender_pid sender_identity
+  local sender_pid sender_identity status_file lock
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -948,19 +967,47 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   grace=$(fm_pending_reply_get "$rec" grace_secs)
   case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
   now=$(fm_pending_reply_now)
-  age=$((now - delivered))
+  # Grace runs from the request turn's completion, not from delivery: delivery
+  # only proves the request arrived, while the turn's completion is the
+  # earliest moment a correlated report could exist to race against.
+  age=$((now - completed))
   [ "$age" -ge "$grace" ] || return 1
   task_id=$(fm_pending_reply_get "$rec" task_id)
   # A remote mate's report may exist and simply not have been mirrored yet.
   fm_pending_reply_missing_report_is_evidence "$state" "$task_id" "$completed" || return 1
+  # config/wait-no-turns: a mate waiting on its own open decision or blocker
+  # is never poked. The recovery stays unattempted until the answer lands.
+  if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
+    [ -z "$(status_own_open_decisions "$state/$task_id.status")" ] || return 1
+  fi
+  status_file=$(fm_pending_reply_get "$rec" parent_status)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   msg=$(fm_pending_reply_recovery_message "$rec")
   sender_pid=${BASHPID:-$$}
   sender_identity=$(fm_pending_reply_pid_identity "$sender_pid") || return 1
-  fm_pending_reply_set "$rec" recovery_sender_pid "$sender_pid" || return 1
-  fm_pending_reply_set "$rec" recovery_sender_identity "$sender_identity" || return 1
-  fm_pending_reply_set "$rec" recovery_attempted_epoch "$now" || return 1
-  fm_pending_reply_set "$rec" phase recovery_sending || return 1
+  # One fresh, uncached read immediately before firing, under the same
+  # per-correlation lock that records the send: a correlated report resolved
+  # in between can then never be overwritten by the repost. Lock globals are
+  # local for the reason fm_pending_reply_try_resolve documents.
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # Deliberately undirected: bin/fm-wake-lib.sh is expanded once at the
+  # fm_pending_reply_try_resolve site; each directed site would re-expand its
+  # whole transitive graph under ShellCheck's external-source traversal.
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  # The phase is re-read after the resolve attempt, whatever it returned: a
+  # resolve that failed on a later field write has still committed resolved.
+  fm_lock_acquire_wait "$lock" || return 1
+  if _fm_pending_reply_try_resolve_locked "$state" "$corr" "$status_file" \
+    || [ "$(fm_pending_reply_get "$rec" phase)" != awaiting_report ] \
+    || ! fm_pending_reply_set "$rec" recovery_sender_pid "$sender_pid" \
+    || ! fm_pending_reply_set "$rec" recovery_sender_identity "$sender_identity" \
+    || ! fm_pending_reply_set "$rec" recovery_attempted_epoch "$now" \
+    || ! fm_pending_reply_set "$rec" phase recovery_sending; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
   if [ -n "${FM_PENDING_REPLY_SEND_HOOK:-}" ]; then
     # Hook receives: task_id message
     # shellcheck disable=SC2086
@@ -1220,7 +1267,7 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed now payload parent_status line kind first display
-  local delivered task_id meta sm_home remote_host
+  local delivered task_id meta sm_home remote_host grace age key new_episode
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -1233,6 +1280,13 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
     recovery_sent)
       completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
       [ -n "$completed" ] || return 1
+      # Grace runs from the recovery turn's completion, the same anchor the
+      # recovery repost itself uses (never from delivery or send time).
+      grace=$(fm_pending_reply_get "$rec" grace_secs)
+      case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
+      now=$(fm_pending_reply_now)
+      age=$((now - completed))
+      [ "$age" -ge "$grace" ] || return 1
       # Same reply-channel evidence rule the recovery repost obeys: a missing
       # correlated report is not a missed report until the mirror caught up.
       fm_pending_reply_missing_report_is_evidence "$state" \
@@ -1252,11 +1306,14 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
       fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home" || true
     fi
   fi
-  # Resolve wins if a late report arrived between completion and this call.
-  if _fm_pending_reply_try_resolve_locked "$state" "$corr"; then
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  # One fresh, uncached read immediately before firing: a correlated report can
+  # land in the instant between the last resolve attempt and this call.
+  if _fm_pending_reply_try_resolve_locked "$state" "$corr" "$parent_status"; then
     return 0
   fi
-  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  # A resolve that failed on a later field write has still committed resolved.
+  [ "$(fm_pending_reply_get "$rec" phase)" = "$phase" ] || return 1
   case "$phase" in
     delivery_unknown) kind=delivery-unknown ;;
     recovery_failed|recovery_unknown) kind='recovery-delivery' ;;
@@ -1271,8 +1328,19 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   fi
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
-  line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
-  if ! status_event_recorded "$parent_status" "$line"; then
+  key=$(fm_pending_reply_escalation_key "$corr")
+  line="blocked [key=$key]: $payload"
+  # A record that already escalated reaches here again only after a reset, so
+  # a closed decision means the operator settled the earlier episode and this
+  # loss is a new one. While the decision is open the identical line is a retry.
+  new_episode=1
+  if [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ]; then
+    case $'\n'"$(status_open_decisions "$parent_status")" in
+      *$'\n'"$key"$'\t'*) ;;
+      *) new_episode=0 ;;
+    esac
+  fi
+  if [ "$new_episode" -eq 0 ] || ! status_event_recorded "$parent_status" "$line"; then
     printf '%s\n' "$(status_stamp_line "$line")" >> "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
@@ -1445,20 +1513,60 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   return 0
 }
 
+# Print, one per line, the records among <record-path>... that the tick has work
+# for, reading every record once in a single awk process instead of forking
+# per record. A resolved record needs work only while an escalation it opened
+# is still unclosed: for every other resolved record the tick's per-record path
+# (fm_pending_reply_close_escalation) is a no-op that still pays a lock and
+# several forks, and records are never pruned, so that cost grew with the store.
+# Every other record - any phase but resolved, no phase at all, or one awk
+# cannot read - is selected, so the per-record path still decides it. Values
+# follow fm_pending_reply_get: the last line for a key wins.
+_fm_pending_reply_select_needing_work() {  # <record-path>...
+  [ "$#" -gt 0 ] || return 0
+  printf '%s\n' "$@" | LC_ALL=C awk '
+    {
+      path = $0
+      phase = ""; escalated = ""; closed = ""
+      while ((rc = (getline line < path)) > 0) {
+        if (index(line, "phase=") == 1) phase = substr(line, 7)
+        else if (index(line, "escalated_epoch=") == 1) escalated = substr(line, 17)
+        else if (index(line, "escalation_closed_epoch=") == 1) closed = substr(line, 25)
+      }
+      close(path)
+      if (rc < 0 || phase != "resolved" || (escalated != "" && closed == "")) print path
+    }
+  '
+}
+
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
-# state, and optional secondmate-home wrong-home path checks.
+# state, and optional secondmate-home wrong-home path checks. Records are
+# selected in one pass first (_fm_pending_reply_select_needing_work), so a
+# settled record costs no lock and no fork, and the per-record path below runs,
+# unchanged, only for the records that selection returns.
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
-  local -a observation_tasks=() observation_values=()
+  local -a observation_tasks=() observation_values=() records=() selected=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
-    case "$(basename "$rec")" in
+    case "${rec##*/}" in
       .*) continue ;;
     esac
+    case "$rec" in
+      # A newline would split this path in the selection's input, so such a
+      # record skips selection and always takes the per-record path.
+      *$'\n'*) selected+=("$rec") ;;
+      *) records+=("$rec") ;;
+    esac
+  done
+  while IFS= read -r rec; do
+    selected+=("$rec")
+  done < <(_fm_pending_reply_select_needing_work ${records[@]+"${records[@]}"})
+  for rec in ${selected[@]+"${selected[@]}"}; do
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)

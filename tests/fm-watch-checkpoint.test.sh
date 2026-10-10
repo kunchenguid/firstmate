@@ -89,6 +89,7 @@ make_host_home() {  # <name>
   home=$(make_home "$1")
   mkdir -p "$home/root/bin"
   cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
+  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
   cat > "$home/root/bin/fm-supervision-host.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'args=%s\nprimary=%s\npark=%s\nlimit=%s\n' "$*" "${FM_SUPERVISION_HOST_PRIMARY:-}" \
@@ -116,7 +117,7 @@ run_host_checkpoint() {  # <home> <kind> [checkpoint args...]; sets STATUS
 }
 
 test_host_checkpoint_bounds_the_park_by_posture() {
-  local home
+  local home f
   home=$(make_host_home host-bound)
   run_host_checkpoint "$home" boundary --seconds 5
   expect_code 124 "$STATUS" "a host park that reached its bound is a quiet checkpoint"
@@ -132,7 +133,16 @@ test_host_checkpoint_bounds_the_park_by_posture() {
   assert_contains "$(cat "$home/host-env")" 'park=900' "the away bound must be configurable"
   FM_CODEX_WATCH_CHECKPOINT_AWAY=900 run_host_checkpoint "$home" boundary --seconds 1000
   assert_contains "$(cat "$home/host-env")" 'park=1000' "the away bound must never shorten a longer checkpoint"
-  pass "checkpoint: an opted-in home runs the host for the checkpoint's bound, raised while away"
+  # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+  # QUIET), so the checkpoint keeps its attended bound beside it.
+  for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh; do cp "$ROOT/bin/$f" "$home/root/bin/$f"; done
+  rm -f "$home/state/.afk-contract"
+  FM_HOME="$home" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+    || fail "fixture: could not record quiet mode"
+  run_host_checkpoint "$home" boundary --seconds 5
+  expect_code 124 "$STATUS" "a park beside a quiet record that reached its bound is a quiet checkpoint"
+  assert_contains "$(cat "$home/host-env")" 'park=5' "beside a quiet record the host must park for the attended bound"
+  pass "checkpoint: an opted-in home runs the host for the checkpoint's bound, raised only while away"
 }
 
 test_host_checkpoint_passes_a_handback_and_reports_a_stand_down() {
@@ -147,6 +157,20 @@ test_host_checkpoint_passes_a_handback_and_reports_a_stand_down() {
   expect_code 1 "$STATUS" "a host that stood down is a failed checkpoint"
   assert_contains "$(cat "$home/out.txt")" "supervision-host stood down" "the stand-down must be shown"
   pass "checkpoint: a handed-back wake passes through, and a host stand-down is a failure"
+}
+
+# The Codex owner stays file-gated: without config/supervision-host, or with
+# config/supervision-host-off, the checkpoint never runs the host.
+test_host_checkpoint_needs_the_file_and_honors_off() {
+  local home line
+  home=$(make_host_home host-gate)
+  for line in - off; do
+    rm -f "$home/config/supervision-host" "$home/config/supervision-host-off" "$home/host-env"
+    [ "$line" = - ] || : > "$home/config/supervision-host-off"
+    run_host_checkpoint "$home" boundary --seconds 1
+    [ ! -e "$home/host-env" ] || fail "a Codex home whose config/supervision-host is ${line/-/absent} ran the supervision host"
+  done
+  pass "checkpoint: a Codex home without config/supervision-host, or with an off file, never runs the host"
 }
 
 # The real host under a fake Codex harness that holds the home's session lock.
@@ -178,4 +202,5 @@ test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
 test_host_checkpoint_bounds_the_park_by_posture
 test_host_checkpoint_passes_a_handback_and_reports_a_stand_down
+test_host_checkpoint_needs_the_file_and_honors_off
 test_real_host_checkpoint_ends_quietly_at_its_bound

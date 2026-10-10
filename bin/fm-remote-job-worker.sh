@@ -22,6 +22,23 @@
 # its recorded command group, leaving interrupted records for the replacement
 # worker's orphan recovery.
 #
+# The serving loop does not busy-poll an idle queue. After a lane starts or is
+# reaped it rescans every FM_REMOTE_JOB_POLL_SECONDS for four passes, so a home
+# whose lane just finished starts its next job promptly; otherwise it sleeps
+# one second between passes. Work arriving after the four-pass burst may wait
+# for that quiet scan. Newly staged or cancelled work, a lane that died, an
+# orphaned claim, or an expired queue deadline can wait that interval plus
+# scan work and scheduling time. A separate heartbeat process refreshes readiness
+# about once per second, including during slow scans and sweeps, only while the
+# serving process is alive and its recorded lock ownership still verifies.
+# The heartbeat recreates a missing ready file with the serving process's PID
+# and mode 0600 after verifying ownership, without waiting for the serving loop.
+# Losing lock ownership stops heartbeat refresh; losing the heartbeat process
+# while still owning the lock stops the serving loop on its next pass.
+# The stale sweep, whose state preparation also re-applies the queue directories' 0700
+# modes, runs at startup and then at most every 60 seconds, never more rarely
+# than the shortest record reap age.
+#
 # The worker is abandoned when its configured FM_ROOT stops being a genuine
 # Firstmate checkout - the state a pruned no-mistakes gate worktree, a returned
 # pooled worktree, or a removed test fixture root leaves behind. It can never
@@ -50,6 +67,9 @@ FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_ORP
 FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS:-}" 20)
 FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS:-}" 5)
 FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS:-}" 10)
+WORKER_FAST_PASSES=4
+WORKER_IDLE_WAIT_SECONDS=1
+WORKER_SWEEP_SECONDS=60
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
@@ -62,6 +82,7 @@ WORKER_LOCK_HELD=0
 WORKER_LOCK_BOUND=
 WORKER_RELEASE_OWNERSHIP=1
 WORKER_SUPERVISED_PID=
+WORKER_HEARTBEAT_PID=
 WORKER_PREEMPTIBLE=0
 WORKER_PREEMPTED=0
 WORKER_LANE_HOME=
@@ -69,6 +90,7 @@ WORKER_LANE_HOMES=()
 WORKER_LANE_PIDS=()
 WORKER_LANE_STARTS=()
 WORKER_LANE_JOBS=()
+WORKER_ACTIVITY=0
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
@@ -81,13 +103,45 @@ worker_account_home() {
   CDPATH='' cd ~ 2>/dev/null && pwd -P
 }
 
-worker_write_heartbeat() {
-  local ready tmp
+worker_write_heartbeat() { # <owner-pid>
+  local owner=$1 ready tmp
   ready=$(fm_remote_job_worker_ready_path)
   tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.ready.XXXXXX") || return 1
-  printf '%s\n' "${BASHPID:-$$}" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  printf '%s\n' "$owner" > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$ready"
+}
+
+worker_heartbeat_loop() { # <account-home> <owner-pid>
+  local account_home=$1 owner=$2 ready owner_state
+  ready=$(fm_remote_job_worker_ready_path)
+  trap 'exit 0' HUP INT TERM
+  while kill -0 "$owner" 2>/dev/null &&
+    owner_state=$(/bin/ps -p "$owner" -o state= 2>/dev/null) &&
+    [ -n "$owner_state" ] && [[ "$owner_state" != *Z* ]] &&
+    fm_remote_job_lock_owner_matches_process "$account_home" &&
+    [ "$FM_REMOTE_JOB_OWNER_PID" = "$owner" ]; do
+    if [ ! -e "$ready" ] && [ ! -L "$ready" ]; then
+      worker_write_heartbeat "$owner" || exit 1
+    else
+      touch -c -- "$ready" || exit 1
+    fi
+    /bin/sleep 1
+  done
+}
+
+worker_start_heartbeat() { # <account-home>
+  local account_home=$1 owner=${BASHPID:-$$}
+  worker_heartbeat_loop "$account_home" "$owner" &
+  WORKER_HEARTBEAT_PID=$!
+}
+
+worker_stop_heartbeat() {
+  local pid=${WORKER_HEARTBEAT_PID:-}
+  [ -n "$pid" ] || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  WORKER_HEARTBEAT_PID=
 }
 
 worker_publish_pid() {
@@ -99,9 +153,8 @@ worker_publish_pid() {
   mv -f -- "$tmp" "$pid_file"
 }
 
-worker_publish_identity() {
-  local account_home=$1 identity identity_file tmp
-  identity=$(fm_remote_job_code_identity "$FM_ROOT" "$account_home") || return 1
+worker_publish_identity() { # <identity>
+  local identity=$1 identity_file tmp
   identity_file=$(fm_remote_job_worker_identity_path)
   tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.identity.XXXXXX") || return 1
   printf '%s\n' "$identity" > "$tmp" || { rm -f -- "$tmp"; return 1; }
@@ -158,12 +211,16 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
-worker_acquire_lock() {
-  local account_home=$1 attempt=0
+worker_acquire_lock() { # <account-home> <identity>
+  local account_home=$1 identity=$2 attempt=0
   while [ "$attempt" -lt 150 ]; do
     if (umask 077; mkdir "$WORKER_LOCK") 2>/dev/null; then
       WORKER_LOCK_HELD=1
+      # Discard the predecessor's heartbeat before publishing our identity:
+      # readiness must come from this owner after lock publication succeeds.
+      rm -f -- "$(fm_remote_job_worker_ready_path)" || return 1
       worker_publish_lock_owner || return 1
+      worker_publish_identity "$identity" || return 4
       return 0
     fi
     [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
@@ -517,6 +574,7 @@ worker_shutdown() {
 }
 
 worker_exit_cleanup() {
+  worker_stop_heartbeat
   if [ "$WORKER_RELEASE_OWNERSHIP" -eq 1 ] && ! worker_stop_active_execution; then
     worker_error "could not stop the active command tree during exit"
     worker_publish_quarantine || worker_error "could not quarantine failed exit ownership"
@@ -724,7 +782,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
       fi
       next_check=$((SECONDS + 1))
     fi
-    sleep "$FM_REMOTE_JOB_POLL_SECONDS"
+    sleep "$FM_REMOTE_JOB_ACTIVE_POLL_SECONDS"
   done
   wait "$group_pid" 2>/dev/null
   rc=$?
@@ -735,25 +793,49 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   return "$rc"
 }
 
-worker_job_command() { # <job-dir>; the first argv element of a staged record
-  local job=$1 first=
-  fm_remote_job_regular_bounded "$job/argv" "$FM_REMOTE_JOB_MAX_BYTES" || return 1
-  IFS= read -r -d '' first < "$job/argv" || [ -n "$first" ] || return 1
-  printf '%s\n' "$first"
-}
-
 worker_preempting_waiter_exists() { # <lane-home>
-  local lane_home=$1 job state command job_home
+  local lane_home=$1 job state command job_home field_terminated remaining chunk
+  # The argv byte bound counts with read -n and ${#...}, which count bytes only
+  # in the C locale.
+  local LC_ALL=C
   for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
     [ -d "$job" ] && [ ! -L "$job" ] || continue
-    state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
+    fm_remote_job_read_state "$job" state 2>/dev/null || continue
     [ "$state" = queued ] || continue
     fm_remote_job_cancelled "$job" && continue
     # Lanes are per home, so only a waiter for this lane's own home may
-    # preempt; another home's queue drains through its own lane.
-    job_home=$(worker_read_text "$job" home 8192 2>/dev/null || true)
+    # preempt; another home's queue drains through its own lane. The record
+    # fields are read with builtins only: this scan runs once a second in
+    # every lane that executes a preemptible long poll, so no field read may
+    # spawn a child process.
+    fm_remote_job_read_line "$job/home" 8192 job_home 2>/dev/null || job_home=
     [ "$job_home" = "$lane_home" ] || continue
-    command=$(worker_job_command "$job" 2>/dev/null || true)
+    # The staged argv record must fit within FM_REMOTE_JOB_MAX_BYTES: bound
+    # the first NUL-delimited field, then walk the remaining NUL-terminated
+    # fields and any unterminated tail, still with builtins only. -d '' -n
+    # is the bounded read on the macOS stock bash (3.2 has -n but no -N);
+    # never pass -n 0, whose behavior diverges across bash versions.
+    command=
+    if [ -f "$job/argv" ] && [ ! -L "$job/argv" ]; then
+      { field_terminated=
+        IFS= read -r -d '' -n "$((FM_REMOTE_JOB_MAX_BYTES + 1))" command && field_terminated=1
+        if [ -n "$field_terminated" ]; then
+          if [ "${#command}" -gt "$FM_REMOTE_JOB_MAX_BYTES" ]; then
+            false
+          else
+            remaining=$((FM_REMOTE_JOB_MAX_BYTES - ${#command} - 1))
+            chunk=
+            while [ "$remaining" -ge 0 ] && IFS= read -r -d '' -n "$((remaining + 1))" chunk; do
+              [ "${#chunk}" -le "$remaining" ] || break
+              remaining=$((remaining - ${#chunk} - 1))
+            done
+            remaining=$((remaining - ${#chunk}))
+            [ "$remaining" -ge 0 ]
+          fi
+        else
+          [ -n "$command" ]
+        fi; } < "$job/argv" 2>/dev/null || command=
+    fi
     fm_remote_job_command_preemptible "$command" || return 0
   done
   return 1
@@ -917,6 +999,7 @@ worker_reap_finished_lanes() {
       live_jobs+=("${WORKER_LANE_JOBS[$i]}")
     else
       wait "$pid" 2>/dev/null || true
+      WORKER_ACTIVITY=1
     fi
     i=$((i + 1))
   done
@@ -1010,6 +1093,7 @@ worker_start_lane() { # <job-dir> <home>
   local job=$1 home=$2 lane_pid lane_start
   "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" &
   lane_pid=$!
+  WORKER_ACTIVITY=1
   lane_start=$(fm_remote_job_process_start "$lane_pid" 2>/dev/null || true)
   WORKER_LANE_HOMES+=("$home")
   WORKER_LANE_PIDS+=("$lane_pid")
@@ -1036,6 +1120,9 @@ worker_process_once() { # <account-home>
     [ -d "$job" ] && [ ! -L "$job" ] || continue
     id=${job##*/}
     fm_remote_job_safe_id "$id" || continue
+    # A live lane owns this record whatever its state, and every state below
+    # skips a lane-owned job, so do not re-read it on every pass.
+    worker_lane_owns_job "$FM_REMOTE_JOB_JOBS/$id" && continue
     job=$(fm_remote_job_job_dir "$id" 2>/dev/null || true)
     [ -n "$job" ] || continue
     state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
@@ -1096,40 +1183,69 @@ worker_process_once() { # <account-home>
   done < <(printf '%s' "$candidates" | sort -t $'\t' -k1,1n -k2,2)
 }
 
+# Wait for the next pass: poll quickly for a short window after a lane starts
+# or is reaped, so a finished lane's home starts its next job promptly,
+# otherwise sleep out the idle bound.
+worker_wait_for_work() {
+  if [ "$WORKER_ACTIVITY" -eq 1 ]; then
+    WORKER_FAST_REMAINING=$WORKER_FAST_PASSES
+    WORKER_ACTIVITY=0
+  fi
+  if [ "$WORKER_FAST_REMAINING" -gt 0 ]; then
+    WORKER_FAST_REMAINING=$((WORKER_FAST_REMAINING - 1))
+    sleep "$FM_REMOTE_JOB_POLL_SECONDS"
+    return 0
+  fi
+  sleep "$WORKER_IDLE_WAIT_SECONDS"
+}
+
 main() {
-  local account_home lock_status
+  local account_home identity lock_status next_sweep=0 sweep_interval
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; exit 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; exit 1; }
+  identity=$(fm_remote_job_code_identity "$FM_ROOT" "$account_home") || { worker_error "cannot compute worker code identity"; exit 1; }
   WORKER_LOCK=$(fm_remote_job_worker_lock_path)
   trap worker_exit_cleanup EXIT
-  worker_acquire_lock "$account_home"
+  worker_acquire_lock "$account_home" "$identity"
   lock_status=$?
   case "$lock_status" in
     0) ;;
     2) exit 0 ;;
     3) worker_error "worker ownership is quarantined after an unconfirmed shutdown"; exit 75 ;;
+    4) worker_error "cannot publish worker code identity"; exit 1 ;;
     *) worker_error "cannot acquire or safely reclaim worker ownership"; exit 1 ;;
   esac
   trap worker_shutdown HUP INT TERM
-  worker_publish_identity "$account_home" || { worker_error "cannot publish worker code identity"; exit 1; }
   worker_publish_pid || { worker_error "cannot publish worker pid"; exit 1; }
+  worker_write_heartbeat "${BASHPID:-$$}" || { worker_error "cannot update worker heartbeat"; exit 1; }
+  worker_start_heartbeat "$account_home"
+  sweep_interval=$WORKER_SWEEP_SECONDS
+  [ "$FM_REMOTE_JOB_STAGE_REAP_SECONDS" -ge "$sweep_interval" ] || sweep_interval=$FM_REMOTE_JOB_STAGE_REAP_SECONDS
+  [ "$FM_REMOTE_JOB_REAP_SECONDS" -ge "$sweep_interval" ] || sweep_interval=$FM_REMOTE_JOB_REAP_SECONDS
+  [ "$sweep_interval" -ge 1 ] || sweep_interval=1
+  WORKER_FAST_REMAINING=0
+  WORKER_ACTIVITY=1
   while :; do
-    worker_write_heartbeat || { worker_error "cannot update worker heartbeat"; exit 1; }
-    # Checked right after a fresh heartbeat, so the grace window cannot make a
-    # still-healthy worker read as unready to a concurrent probe.
+    # The independent heartbeat keeps readiness fresh through slow serving
+    # passes while ownership remains verifiable.
+    if ! kill -0 "$WORKER_HEARTBEAT_PID" 2>/dev/null &&
+      fm_remote_job_lock_owner_matches_process "$account_home" &&
+      [ "$FM_REMOTE_JOB_OWNER_PID" = "${BASHPID:-$$}" ]; then
+      worker_error "readiness heartbeat process stopped"
+      exit 1
+    fi
     if worker_code_root_abandoned; then
       worker_error "configured FM_ROOT $FM_ROOT no longer exists; stopping the abandoned worker"
       exit 0
     fi
-    worker_reap=0
-    if [ "$worker_reap" -eq 0 ]; then
+    if [ "$SECONDS" -ge "$next_sweep" ]; then
       fm_remote_job_reap_stale "$account_home" || true
-      worker_reap=1
+      next_sweep=$((SECONDS + sweep_interval))
     fi
     worker_process_once "$account_home"
-    sleep "$FM_REMOTE_JOB_POLL_SECONDS"
+    worker_wait_for_work
   done
 }
 

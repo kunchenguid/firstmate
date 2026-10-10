@@ -20,6 +20,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$ROOT/bin/fm-tmux-lib.sh"
 
 fm_live_gate opt-in FM_HOST_MIRROR_LIVE_E2E jq tmux
 
@@ -85,6 +87,17 @@ check() {  # <harness> <version> <root>
 # harness, so the lock holder is the harness that fires the hooks.
 LOCKED_EXEC='printf "%s\n" "$$" > state/.lock; exec "$@"'
 
+# These bare tmux launches have no native agent-idle event. Require tmux's
+# Claude-scoped busy read and the shared composer classifier to agree on idle.
+claude_ready_state() {  # <socket> <target> -> diagnostic state; success when ready
+  local socket=$1 target=$2 busy composer
+  tmux() { command tmux -L "$socket" "$@"; }
+  busy=$(fm_pane_busy_state "$target" claude)
+  composer=$(fm_tmux_composer_state "$target")
+  printf 'busy=%s composer=%s' "$busy" "$composer"
+  [ "$busy" = idle ] && [ "$composer" = empty ]
+}
+
 # Claude runs interactively with one extra Stop hook that rewakes the session
 # once, as the supervision host's own handback does, so the guard also proves
 # that a harness-started turn is never mirrored as the captain's words.
@@ -104,13 +117,16 @@ SH
   chmod +x "$root/rewake-once.sh"
   jq '.hooks.Stop += [{hooks: [{type: "command", command: "\"$CLAUDE_PROJECT_DIR\"/rewake-once.sh", asyncRewake: true, timeout: 60}]}]' \
     "$root/.claude/settings.json" > "$root/.claude/settings.json.tmp" && mv "$root/.claude/settings.json.tmp" "$root/.claude/settings.json"
-  REWAKE_WANTED=mirror-rewake-ok run_interactive claude claude --model haiku --dangerously-skip-permissions
+  # Keep the idle composer empty for the shared classifier. Claude's rotating
+  # prompt suggestion is ordinary visible composer text on this tmux surface.
+  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false REWAKE_WANTED=mirror-rewake-ok \
+    run_interactive claude claude --model haiku --dangerously-skip-permissions
 }
 
 # An interactive session in a private tmux server: answer a trust prompt when
 # one appears, type the prompt, and wait for the mirror.
 run_interactive() {  # <harness> <command> [arguments...]
-  local harness=$1 command=$2 root version i screen
+  local harness=$1 command=$2 root version i screen readiness=unknown last_seen=none
   shift 2
   version=$("$command" --version 2>/dev/null | head -n 1)
   root="$LAB/$harness"
@@ -120,6 +136,8 @@ run_interactive() {  # <harness> <command> [arguments...]
   i=0
   while [ "$i" -lt 60 ]; do
     screen=$(tmux -L "$SOCKET-$harness" capture-pane -p -t "$harness" 2>/dev/null)
+    last_seen=$(printf '%s\n' "$screen" | grep -v '^[[:space:]]*$' | tail -n 6)
+    [ -n "$last_seen" ] || last_seen='empty screen'
     # A key sent to a dialog is followed by a pause long enough for the
     # harness to redraw, so the same dialog is never answered twice.
     case "$screen" in
@@ -127,13 +145,17 @@ run_interactive() {  # <harness> <command> [arguments...]
       *'Yes, I trust this folder'*|*'Trust all and continue'*)
         tmux -L "$SOCKET-$harness" send-keys -t "$harness" Down; sleep 0.5; tmux -L "$SOCKET-$harness" send-keys -t "$harness" Enter; sleep 3 ;;
       *'1. Yes, continue'*) tmux -L "$SOCKET-$harness" send-keys -t "$harness" Enter; sleep 3 ;;
-      *'bypass permissions on'*) break ;;
       *'Do you trust the contents of this directory'*) tmux -L "$SOCKET-$harness" send-keys -t "$harness" y; sleep 3 ;;
       *'Plan, search, build'*) break ;;
+      *)
+        if [ "$harness" = claude ]; then
+          readiness=$(claude_ready_state "$SOCKET-$harness" "$harness") && break
+        fi ;;
     esac
     sleep 1
     i=$((i + 1))
   done
+  [ "$i" -lt 60 ] || fail "$harness $version: never reached an idle empty composer (last readiness: $readiness; last screen: $last_seen)"
   sleep 3
   tmux -L "$SOCKET-$harness" send-keys -t "$harness" -l "$PROMPT"
   sleep 1
@@ -160,7 +182,7 @@ run_interactive() {  # <harness> <command> [arguments...]
 for harness in $HARNESSES; do
   case "$harness" in
     claude) bin=$harness ;;
-    cursor) bin=cursor-agent ;;
+    cursor) bin='cursor-agent' ;;
     *) fail "unknown harness in FM_HOST_MIRROR_LIVE_HARNESSES: $harness" ;;
   esac
   if ! command -v "$bin" >/dev/null 2>&1; then

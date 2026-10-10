@@ -914,6 +914,90 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
   pass "a proven-idle leftover row is rung so the child home can drain without a parent alarm"
 }
 
+# The idle proof that gates a drain ring reads the mate's pane. A TERM that
+# lands while that read is blocked must still stop the watcher at once and run
+# its cleanup, as it does for every other pane read.
+test_term_stops_a_watcher_blocked_in_the_drain_ring_idle_capture() {
+  local dir state sub fakebin fifo out pid holder i rc orphan
+  dir=$(make_case secondmate-ring-blocked-capture)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  fifo="$dir/pane.fifo"
+  out="$dir/watch-blocked.out"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_stall_date "$fakebin"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --current-gen \
+    --source claude-hook --event stop >/dev/null \
+    || fail "could not mark the mate idle"
+
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "first" progress mate "$(printf '1000\t100-7')"
+
+  # The active-turn read returns, then the idle-proof read blocks on a FIFO
+  # whose write end the holder keeps open without writing.
+  mv "$fakebin/tmux" "$fakebin/tmux-alive"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = capture-pane ]; then
+  n=$(( $(cat "$FM_FAKE_CAPTURE_COUNT" 2>/dev/null || echo 0) + 1 ))
+  printf '%s\n' "$n" > "$FM_FAKE_CAPTURE_COUNT"
+  [ "$n" -ge 2 ] || exit 0
+  exec cat "$FM_FAKE_TMUX_CAPTURE"
+fi
+exec "$(dirname "$0")/tmux-alive" "$@"
+SH
+  chmod +x "$fakebin/tmux"
+  mkfifo "$fifo"
+  ( exec 3> "$fifo"; : > "$dir/capture-blocked"; exec sleep 30 ) &
+  holder=$!
+
+  printf '1002\n' > "$dir/now"
+  touch "$state/.secondmate-liveness-tick"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_FAKE_TMUX_CAPTURE="$fifo" FM_FAKE_CAPTURE_COUNT="$dir/captures" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -e "$dir/capture-blocked" ] && [ "$i" -lt 300 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/capture-blocked" ] || ! is_live_non_zombie "$pid"; then
+    kill "$holder" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+    fail "the watcher never blocked inside the drain-ring idle capture: $(cat "$out")"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 100
+  rc=$?
+  orphan=$(pgrep -f "cat $fifo" || true)
+  [ -z "$orphan" ] || pkill -f "cat $fifo" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 124 ] || fail "TERM did not stop a watcher blocked in the drain-ring idle capture"
+  [ -z "$orphan" ] || fail "a watcher stopped in the drain-ring idle capture left that capture running"
+  [ "$(cat "$dir/captures")" = 2 ] \
+    || fail "the watcher did not block in the drain-ring idle capture: $(cat "$dir/captures") pane reads"
+  [ ! -e "$state/.watch.lock" ] \
+    || fail "a watcher stopped in the drain-ring idle capture kept its singleton lock"
+  [ ! -s "$dir/sent" ] || fail "a watcher stopped before its idle proof still rang the mate"
+  pass "TERM stops a watcher blocked in the drain-ring idle capture and runs its cleanup"
+}
+
 # Busy and unknown panes are never typed into. Busy still defers inside the
 # active-turn bound. Unknown keeps the parent alarm. Empty inbox is not idle
 # proof, so the unknown fixture starts with no instruction records.
@@ -1909,6 +1993,57 @@ test_legacy_generationless_wake_is_adopted() {
 
 # Pin the recovery acknowledgement contract from docs/watcher-continuity.md at
 # the queue-library boundary.
+# A handover (bin/fm-watch-arm.sh --take-over) undoes only the downtime its own
+# watcher stop published over an acknowledged episode. A wake appended between
+# the snapshot and the stop, or an episode that was still open, is left for the
+# next watcher's arm check to surface.
+handover_case() {  # <state> <acked|handling> <append-between 0|1>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1/bin/fm-wake-lib.sh"
+    marker="$STATE/.watcher-down"
+    fm_recovery_marker_publish "$marker" downtime || exit 1
+    fm_recovery_marker_read "$marker" || exit 1
+    case "$2" in
+      acked) fm_recovery_marker_ack "$marker" "${FM_RECOVERY_MARKER_TOKEN##*:}" || exit 1 ;;
+      handling) fm_recovery_marker_begin_handling "$marker" || exit 1 ;;
+    esac
+    fm_recovery_marker_read "$marker" || exit 1
+    printf "before=%s\n" "$FM_RECOVERY_MARKER_TOKEN"
+    fm_recovery_marker_handover_snapshot "$marker" || exit 1
+    [ "$3" = 0 ] || fm_wake_append signal handover "signal: appended during the handover" || exit 1
+    # The stopped watcher closes and publishes downtime, as its EXIT cleanup does.
+    fm_recovery_marker_publish "$marker" downtime || exit 1
+    fm_recovery_marker_handover_restore "$marker" "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || exit 1
+    fm_recovery_marker_read "$marker" || exit 1
+    printf "after=%s\n" "$FM_RECOVERY_MARKER_TOKEN"
+  ' _ "$ROOT" "$2" "$3"
+}
+
+test_handover_restore_undoes_only_its_own_stop() {
+  local out before after
+  out=$(handover_case "$(make_case handover-acked)/state" acked 0) || fail "acked handover case failed: $out"
+  before=$(printf '%s\n' "$out" | sed -n 's/^before=//p')
+  after=$(printf '%s\n' "$out" | sed -n 's/^after=//p')
+  case "$before" in acked:downtime:*) ;; *) fail "fixture: the episode was not acknowledged: $out" ;; esac
+  [ "$after" = "$before" ] || fail "a handover with nothing queued left a downtime episode: $out"
+
+  out=$(handover_case "$(make_case handover-appended)/state" acked 1) || fail "appended handover case failed: $out"
+  before=$(printf '%s\n' "$out" | sed -n 's/^before=//p')
+  after=$(printf '%s\n' "$out" | sed -n 's/^after=//p')
+  case "$after" in
+    pending:downtime:*) [ "${after##*:}" != "${before##*:}" ] || fail "fixture: no fresh episode opened: $out" ;;
+    *) fail "a handover hid a wake appended during it: $out" ;;
+  esac
+
+  out=$(handover_case "$(make_case handover-handling)/state" handling 0) || fail "handling handover case failed: $out"
+  before=$(printf '%s\n' "$out" | sed -n 's/^before=//p')
+  after=$(printf '%s\n' "$out" | sed -n 's/^after=//p')
+  case "$before" in pending:handling:*) ;; *) fail "fixture: the episode was not being handled: $out" ;; esac
+  [ "$after" = "pending:downtime:${before##*:}" ] || fail "a handover rewrote an episode main had not acknowledged: $out"
+  pass "a handover undoes only the downtime its own stop published over an acknowledged episode"
+}
+
 test_stale_recovery_generation_cannot_touch_a_newer_episode() {
   local dir state first_err replay_err sequence generation handling_marker
   local newer_marker newer_sequence newer_generation rc
@@ -2145,11 +2280,15 @@ test_interruption_before_and_after_raw_commit() {
   FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=5 "$DRAIN" > "$before_out" &
   pid=$!
   i=0
-  while [ "$i" -lt 100 ] && [ ! -e "$state/.wake-queue.lock" ]; do
+  while [ "$i" -lt 100 ]; do
+    if [ "$(cat "$state/.wake-queue.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && grep -Eq '^(pending|announced):handling:' "$state/.watcher-down" 2>/dev/null; then
+      break
+    fi
     sleep 0.05
     i=$((i + 1))
   done
-  [ -e "$state/.wake-queue.lock" ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never entered its serialized read boundary"; }
+  [ "$i" -lt 100 ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never entered its serialized read boundary"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain before raw commitment"
   set +e
   wait "$pid"
@@ -2843,6 +2982,26 @@ test_wake_queue_prune_task() {
   pass "fm_wake_queue_prune_task: prunes wakes for target task without touching other tasks"
 }
 
+# Scratch a drain minted under the queue lock and never removed was left by a
+# drain that died mid-write; the next locked drain rotates it away.
+test_drain_rotates_orphaned_scratch() {
+  local dir state name
+  dir=$(make_case scratch-rotation)
+  state="$dir/state"
+  for name in .main-eligible-rows.tmp.dead01 .wake-rows.consume.dead02 .wake-queue.retire.dead03 \
+    .wake-queue.ack.dead04 .wake-queue.actor-view.dead05; do
+    : > "$state/$name"
+  done
+  : > "$state/.main-eligible-rows"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain failed with orphaned scratch present"
+  for name in .main-eligible-rows.tmp.dead01 .wake-rows.consume.dead02 .wake-queue.retire.dead03 \
+    .wake-queue.ack.dead04 .wake-queue.actor-view.dead05; do
+    [ ! -e "$state/$name" ] || fail "drain left orphaned scratch $name behind"
+  done
+  [ -e "$state/.main-eligible-rows" ] || fail "scratch rotation removed the live main rows claim"
+  pass "drain rotates scratch files an interrupted drain left under the queue lock"
+}
+
 # --- secondmate endpoint liveness tick ---------------------------------------
 # bin/fm-watch.sh's secondmate_liveness_tick drives the shared
 # bin/fm-secondmate-liveness-lib.sh probe+relaunch machinery during ordinary
@@ -3357,6 +3516,7 @@ test_secondmate_reprovisioned_queue_starts_a_fresh_interval
 test_secondmate_active_turn_defers_stall_until_the_turn_ends
 test_secondmate_long_lived_mate_mid_turn_is_not_a_stall
 test_secondmate_proven_idle_ring_lets_the_child_drain
+test_term_stops_a_watcher_blocked_in_the_drain_ring_idle_capture
 test_secondmate_busy_and_unknown_panes_are_not_rung
 test_secondmate_genuine_stall_after_idle_ring_still_alarms
 test_secondmate_stall_marker_rejects_symlink
@@ -3393,12 +3553,14 @@ test_branch_actor_without_eligible_snapshot_refuses
 test_wake_publish_requires_atomic_recovery_evidence
 test_recovery_mint_and_delivery_log_avoid_sibling_subst
 test_legacy_generationless_wake_is_adopted
+test_handover_restore_undoes_only_its_own_stop
 test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_stale_ack_that_consumes_nothing_names_the_current_wake
 test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
 test_wake_queue_prune_task
+test_drain_rotates_orphaned_scratch
 test_secondmate_liveness_tick_relaunches_dead_endpoint_once
 test_secondmate_liveness_tick_relaunches_missing_endpoint
 test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking

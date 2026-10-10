@@ -53,6 +53,17 @@ wait_for_text() {
   return 1
 }
 
+# Pi 1.0.0 defaults its TUI to a fullscreen alternate-screen mode whose scrollable
+# transcript is application-owned: rows that leave the viewport stay reachable
+# through Pi's own scroll keys but never enter terminal scrollback, so
+# tmux capture-pane -S can no longer see them. Transcript assertions below need
+# real terminal scrollback, so each launch pins the regular TUI mode wherever the
+# flag exists; versions without the flag retain their existing launch arguments.
+PI_TUI_MODE_ARGS=
+if pi --help 2>&1 | grep -q -- '--tui-mode'; then
+  PI_TUI_MODE_ARGS='--tui-mode regular'
+fi
+
 find_chrome() {
   local candidate
   if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
@@ -569,6 +580,8 @@ function makeSession({ missing = [], rejectPrompt = false } = {}) {
 }
 
 function makeHost(session) {
+  // The InteractiveMode.agent getter reads session.agent on older Pi installs.
+  session.agent = session;
   const host = Object.create(InteractiveMode.prototype);
   const children = [];
   Object.assign(host, {
@@ -1646,14 +1659,23 @@ for (const { name, actual } of rows) {
     throw new Error(`${name} was not hidden before export rendering`);
   }
 }
-async function assertStockHtmlRendering(command, submitData) {
-  editorText = command;
-  terminalInputHandler(submitData);
-  const htmlRenderer = createToolHtmlRenderer({
-    getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+// Pi 1.0.0 resolves export HTML through getToolDefinition. Pi 1.0.1 renamed that
+// dependency to getToolRenderers and ignores the old key, so a fixture that
+// passes only the old key reports every tool as missing. Supply both; each
+// release reads the key it knows and renders the same wrapped definitions.
+function createInstalledToolHtmlRenderer() {
+  const lookup = (name) => tools.find((tool) => tool.name === name);
+  return createToolHtmlRenderer({
+    getToolDefinition: lookup,
+    getToolRenderers: lookup,
     theme,
     cwd: process.cwd(),
   });
+}
+async function assertStockHtmlRendering(command, submitData) {
+  editorText = command;
+  terminalInputHandler(submitData);
+  const htmlRenderer = createInstalledToolHtmlRenderer();
   const exportCases = [
     ...cases.filter(([toolName]) => toolName === "grep" || toolName === "find"),
     ["fm_watch_arm_pi", watchArgs, watchResult],
@@ -1680,11 +1702,7 @@ await assertStockHtmlRendering("/export calm.html", "\r");
 getKeybindings().setUserBindings({ "tui.input.submit": "alt+s" });
 editorText = "/export remapped.html";
 terminalInputHandler("\r");
-const unmatchedRenderer = createToolHtmlRenderer({
-  getToolDefinition: (name) => tools.find((tool) => tool.name === name),
-  theme,
-  cwd: process.cwd(),
-});
+const unmatchedRenderer = createInstalledToolHtmlRenderer();
 if (unmatchedRenderer.renderCall("unmatched-submit", "grep", { pattern: "alpha", path: "." })) {
   throw new Error("ordinary non-submit input activated HTML export rendering");
 }
@@ -2287,7 +2305,7 @@ TS
     fi
 
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions $extensions $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi $PI_TUI_MODE_ARGS --approve --no-context-files --no-skills --no-prompt-templates --no-extensions $extensions $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     i=0
     while [ "$i" -lt 120 ]; do
       pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
@@ -2426,7 +2444,7 @@ JS
     tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     printf '%s\n' on >"$home/config/calm"
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./followup-e2e.ts --session '$exact_session'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi $PI_TUI_MODE_ARGS --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./followup-e2e.ts --session '$exact_session'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     i=0
     while [ "$i" -lt 120 ]; do
       pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
@@ -2506,11 +2524,19 @@ test_queued_operational_escape_e2e() {
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
 
   cat >"$project/queued-escape-e2e.ts" <<'TS'
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { InteractiveMode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { encodeFirstmateOperationalInput } from "./.pi/extensions/lib/fm-operational-input.ts";
+
+// The status may disappear on Pi's next repaint; observe the live call without
+// changing its display behavior.
+const showStatus = InteractiveMode.prototype.showStatus;
+InteractiveMode.prototype.showStatus = function (message: string) {
+  appendFileSync(process.env.QUEUED_ESCAPE_STATUS_LOG as string, `${message}\n`);
+  return showStatus.call(this, message);
+};
 
 let label = "";
 
@@ -2589,7 +2615,7 @@ TS
     printf '%s\n' "$calm_state" >"$home/config/calm"
     mkdir -p "$sessions/$label"
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' QUEUED_ESCAPE_HELD='$held' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./queued-escape-e2e.ts --session-dir '$sessions/$label'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' QUEUED_ESCAPE_HELD='$held' QUEUED_ESCAPE_STATUS_LOG='$sessions/$label/status.log' PI_OFFLINE=1 pi $PI_TUI_MODE_ARGS --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./queued-escape-e2e.ts --session-dir '$sessions/$label'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     wait_for_text "$TMP_ROOT/queued-escape-pane" 'queued-escape-e2e.ts' \
       || fail "Pi queued-row $label case did not reach the ready composer"
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/queued-escape-e2e $label"
@@ -2634,7 +2660,12 @@ TS
       pane=$(cat "$TMP_ROOT/queued-escape-pane")
       assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi Calm exposed a hidden notification after Escape"
       assert_not_contains "$pane" "FIRSTMATE_OP" "Pi Calm exposed operational text after Escape"
-      assert_contains "$pane" "Firstmate supervision continues in a new turn." "Pi Calm restarted a turn silently after Escape"
+      # Pi before 0.87 drains the retained queue in its own aborted-run loop;
+      # only newer Pi needs Calm to start and announce a replacement turn.
+      if node -e 'const v=process.argv[1].match(/(\d+)\.(\d+)\.(\d+)/); process.exit(v && (+v[1]>0 || +v[2]>87 || (+v[2]===87 && +v[3]>=1)) ? 0 : 1)' "$version"; then
+        grep -Fxq 'Firstmate supervision continues in a new turn.' "$sessions/$label/status.log" \
+          || fail "Pi Calm restarted a turn without announcing it after Escape"
+      fi
       if [ "$captain_queued" = yes ]; then
         [ "$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" | grep -c "^CAPTAIN_QUEUED_$label *\$")" -eq 1 ] \
           || fail "Pi Calm did not return the captain's queued text to the editor on Escape"
@@ -2670,7 +2701,7 @@ JS
   run_queued_escape_case on queued_on no
   run_queued_escape_case on queued_mixed yes
   run_queued_escape_case off queued_off no
-  pass "Pi $version with Calm on keeps a queued Firstmate notification unlisted, out of the editor on Escape, and delivers it once in a new announced turn, while Calm off stays stock"
+  pass "Pi $version with Calm on hides and retains queued Firstmate input through Escape, delivers it once, and leaves Calm off stock"
 }
 
 test_hidden_block_geometry_e2e() {
@@ -2783,7 +2814,7 @@ TS
     local session_arg=$1
     tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 44 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi $PI_TUI_MODE_ARGS --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
   }
 
   capture_geometry_viewport() {
@@ -2802,13 +2833,17 @@ TS
     return 1
   }
 
-  wait_for_geometry_transition() {
-    local file=$1 transient_text=$2 final_text=$3 attempt=0 saw_transient=0
+  # Pi's "Reloading..." box is a single intermediate frame, so no polling
+  # interval can be guaranteed to sample it on a loaded machine. Wait instead
+  # for the durable status row Pi appends to the transcript once the reload has
+  # completed and the chat has been rebuilt: it is absent before the reload and
+  # never appears when the reload fails.
+  wait_for_geometry_reload() {
+    local file=$1 reloaded_text=$2 final_text=$3 attempt=0
     while [ "$attempt" -lt 600 ]; do
       capture_geometry_viewport "$file" || true
-      if grep -Fq "$transient_text" "$file" 2>/dev/null; then
-        saw_transient=1
-      elif [ "$saw_transient" -eq 1 ] && grep -Fq "$final_text" "$file" 2>/dev/null; then
+      if grep -Fq "$reloaded_text" "$file" 2>/dev/null &&
+        grep -Fq "$final_text" "$file" 2>/dev/null; then
         return 0
       fi
       sleep 0.01
@@ -2863,9 +2898,9 @@ TS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  wait_for_geometry_transition \
+  wait_for_geometry_reload \
     "$snapshot" \
-    "Reloading keybindings, extensions, skills, prompts, themes, and context files..." \
+    "Reloaded keybindings, extensions, skills, prompts, themes, and context files" \
     "CALM_GEOMETRY_FINAL" \
     || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
@@ -2921,7 +2956,7 @@ TS
 }
 
 test_working_ship_geometry_and_lifecycle() {
-  local fixture out status version
+  local fixture out status version standalone_ship
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "skip: node or npm not found for Pi Calm working-ship test"
     return 0
@@ -2932,6 +2967,17 @@ test_working_ship_geometry_and_lifecycle() {
   fi
   version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
   record_pi_version_evidence "$version" "Pi Calm working-ship assumptions"
+
+  # The standalone Pi Calm extension is a separate project that installs its own boat
+  # in the same Pi working-row slot, so the dual-install check below reads its real
+  # module when it is installed: a rename on either side then renders two boats and
+  # fails there, instead of passing against a key this test invented. The pinned slot
+  # contract inside the program covers a machine without that extension.
+  standalone_ship=${FM_STANDALONE_CALM_SHIP:-}
+  if [ -z "$standalone_ship" ] && [ -f "${HOME:-}/.pi/agent/extensions/calm/lib/working-ship.ts" ]; then
+    standalone_ship=${HOME:-}/.pi/agent/extensions/calm/lib/working-ship.ts
+  fi
+  [ -f "$standalone_ship" ] || standalone_ship=
 
   fixture="$TMP_ROOT/working-ship"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
@@ -2949,7 +2995,7 @@ test_working_ship_geometry_and_lifecycle() {
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
 
-  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" STANDALONE_CALM_SHIP="$standalone_ship" node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
@@ -3607,6 +3653,39 @@ const reset = () => {
 };
 const shipWidget = () => ui.widgets.get(CALM_WORKING_SHIP_WIDGET_KEY);
 
+let standaloneDisposed = false;
+const standaloneWidget = {
+  render: () => ["standalone boat"],
+  dispose: () => { standaloneDisposed = true; },
+};
+const firstmateWidget = {
+  render: () => ["firstmate boat"],
+  dispose: () => {},
+};
+// The standalone Pi Calm extension installs its boat in the same Pi working-row
+// widget slot. Where that extension is installed, the slot key comes from its own
+// module, so a rename on either side registers two widgets and fails here rather
+// than passing against a key this test invented; the pinned slot is the shared
+// contract both implementations must keep.
+const STANDALONE_SLOT = "calm-working-ship";
+let standaloneSlot = STANDALONE_SLOT;
+if (process.env.STANDALONE_CALM_SHIP) {
+  const standaloneShip = await import(
+    `${pathToFileURL(process.env.STANDALONE_CALM_SHIP).href}?standalone=${Date.now()}`
+  );
+  standaloneSlot = standaloneShip.CALM_WORKING_SHIP_WIDGET_KEY;
+}
+ui.setWidget(standaloneSlot, () => standaloneWidget);
+ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, () => firstmateWidget);
+const renderedDualInstallWidgets = [...ui.widgets.values()].map((widget) => widget.render(80));
+check(
+  standaloneDisposed &&
+    renderedDualInstallWidgets.length === 1 &&
+    renderedDualInstallWidgets[0][0] === "firstmate boat",
+  `dual Calm install rendered ${renderedDualInstallWidgets.length} working widgets instead of one`,
+);
+ui.setWidget(standaloneSlot, undefined);
+
 // --- Calm off leaves Pi's stock working behavior completely untouched -------------
 await fire("session_start", { reason: "startup" });
 reset();
@@ -3814,6 +3893,25 @@ check(liveTimers === 1, "a later run did not use the boat after an idle Calm tog
 await fire("agent_settled");
 check(liveTimers === 0, "the later run did not clean up");
 
+await fire("agent_start");
+let survivingStandaloneDisposed = false;
+const survivingStandaloneWidget = {
+  render: () => ["standalone boat"],
+  dispose: () => { survivingStandaloneDisposed = true; },
+};
+ui.setWidget(standaloneSlot, () => survivingStandaloneWidget);
+reset();
+await calmCommand.handler("", ctx);
+check(
+  !survivingStandaloneDisposed &&
+    ui.widgets.size === 1 &&
+    ui.widgets.get(standaloneSlot) === survivingStandaloneWidget &&
+    ui.widgetOps.length === 0 &&
+    ui.workingVisible.length === 0,
+  "turning Firstmate Calm off cleared or exposed the standalone working ship",
+);
+ui.setWidget(standaloneSlot, undefined);
+
 // --- The visual-only widget never touches session, transcript, or export data ------
 check(
   sessionWrites.length === 0,
@@ -3828,6 +3926,11 @@ JS
   [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
   pass "Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, paints all water standard blue and the whole boat standard yellow with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
+  if [ -n "$standalone_ship" ]; then
+    pass "Pi Calm dual-install coverage read the installed standalone Pi Calm extension's own working-ship slot from $standalone_ship"
+  else
+    pass "SKIP: no standalone Pi Calm extension is installed, so dual-install coverage used the pinned shared-slot contract; set FM_STANDALONE_CALM_SHIP to check one"
+  fi
 }
 
 # The rendered-DOM assertions below depend on a real browser, so the render step
@@ -4175,7 +4278,7 @@ TS
 JSON
 
   tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
-    "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
+    "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi $PI_TUI_MODE_ARGS --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$default_snapshot" "The deterministic tool example is complete." \
     || fail "Pi calm E2E did not reach the restored session transcript"
   assert_contains "$(cat "$default_snapshot")" "CALM_E2E_OUTPUT" "calm mode was not off by default"
@@ -4382,19 +4485,79 @@ JS
     || fail "Chrome or Chromium is required for rendered export DOM assertions; set FM_CHROME_BIN to one"
   chrome_report=$(render_export_dom "$chrome" "$export_file" "$export_dom" "$version") \
     || fail "could not render calm-mode HTML export DOM: $chrome_report"
+  # Pi 0.99 renders display:false custom messages into the conversation
+  # column as hook-message-hidden and hides them with CSS until the viewer
+  # asks to show hidden messages. Pi 0.87 omitted those rows from the column
+  # entirely. The boundary is the visible conversation: a synthetic row may
+  # sit in a hidden hook message, and nowhere a reader sees by default.
   node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
 const tree = dom.match(/<div[^>]*id="tree-container"[^>]*>([\s\S]*?)<div[^>]*id="tree-status"/)?.[1];
-if (!messages || !tree) process.exit(1);
-if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) process.exit(1);
-if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) process.exit(1);
-if (messages.includes('<div class="hook-message"')) process.exit(1);
-if (messages.includes("[firstmate-synthetic-input]")) process.exit(1);
-for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
-  if (!messages.includes(current)) process.exit(1);
+if (!messages || !tree) throw new Error("export DOM is missing the messages column or the session tree");
+if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) {
+  throw new Error("genuine user prompt is missing from the conversation column");
 }
-if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) process.exit(1);
+if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) {
+  throw new Error("genuine assistant reply is missing from the conversation column");
+}
+if (/<body[^>]*show-hidden-messages/.test(dom)) {
+  throw new Error("export opened with hidden messages shown");
+}
+const rendersHiddenRows = /<div[^>]*class="[^"]*\bhook-message-hidden\b/.test(messages);
+if (rendersHiddenRows && !/body:not\(\.show-hidden-messages\)\s+\.hook-message-hidden\s*\{[^}]*display:\s*none/.test(dom)) {
+  throw new Error("export no longer hides terminal-hidden custom messages by default");
+}
+function stripHiddenHookMessages(html) {
+  const marker = "<div";
+  let out = "";
+  let i = 0;
+  while (i < html.length) {
+    const start = html.indexOf(marker, i);
+    if (start < 0) { out += html.slice(i); break; }
+    const tagEnd = html.indexOf(">", start);
+    if (tagEnd < 0) throw new Error("unclosed tag in the conversation column");
+    const tag = html.slice(start, tagEnd + 1);
+    const classes = tag.match(/class="([^"]*)"/)?.[1].split(/\s+/) ?? [];
+    const hiddenHook = classes.includes("hook-message") && classes.includes("hook-message-hidden");
+    if (!hiddenHook) {
+      out += html.slice(i, start + marker.length);
+      i = start + marker.length;
+      continue;
+    }
+    out += html.slice(i, start);
+    let depth = 0;
+    let j = start;
+    while (j < html.length) {
+      const nextOpen = html.indexOf("<div", j);
+      const nextClose = html.indexOf("</div>", j);
+      if (nextClose < 0) throw new Error("unclosed hidden hook message");
+      if (nextOpen >= 0 && nextOpen < nextClose) {
+        depth += 1;
+        j = nextOpen + 4;
+      } else {
+        depth -= 1;
+        j = nextClose + 6;
+        if (depth === 0) break;
+      }
+    }
+    i = j;
+  }
+  return out;
+}
+const visible = stripHiddenHookMessages(messages);
+if (visible.includes('<div class="hook-message"') || visible.includes("hook-message")) {
+  throw new Error("a visible hook message leaked into the conversation column");
+}
+if (visible.includes("[firstmate-synthetic-input]") || visible.includes("/tmp/probe.status")) {
+  throw new Error("a synthetic Firstmate row is visible in the conversation column");
+}
+for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
+  if (!visible.includes(current)) throw new Error(`operational input ${current} is missing from the conversation column`);
+}
+if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) {
+  throw new Error("the session tree lost the synthetic row");
+}
 JS
   # Calm returns the transcript to its own presentation once the export has been
   # rendered. That repaint runs on the macrotask right after Pi prints the export
@@ -4788,7 +4951,7 @@ JS
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
   tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
-    "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
+    "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi $PI_TUI_MODE_ARGS --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$restarted_snapshot" "CALM_WORKING_E2E_RESPONSE" \
     || fail "Pi did not restore the persisted session after restart"
   assert_not_contains "$(cat "$restarted_snapshot")" "CALM_E2E_OUTPUT" "restart/resume reset Calm and restored a tool row"

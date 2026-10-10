@@ -55,9 +55,9 @@
 #   - Guard semantics (fm_lease_guard): no lease, a same-actor lease, or a
 #     provably stale lease passes; a live lease held by the OTHER actor
 #     refuses with exit FM_LEASE_REFUSE_EXIT. Whenever the guard engages - a
-#     supervision context (Pi, or an explicit actor), a home opted into the
-#     supervision host (config/supervision-host, whose host can claim a task
-#     that has no lease yet), or any lease file for the task - it retains the
+#     supervision context (Pi, or an explicit actor), a home that runs the
+#     supervision host (fm_supervision_host_enabled, whose host can claim a
+#     task that has no lease yet), or any lease file for the task - it retains the
 #     lease-command lock until fm_lease_guard_release, so the other actor
 #     cannot claim between the check and the guarded mutation, including the
 #     first claim of a task no one has leased. An unmarked caller in any other
@@ -67,9 +67,9 @@
 #     merging a PR, landing local-only work, spawning workers, answering a
 #     decision, retiring a secondmate - refuse the branch actor outright,
 #     lease or no lease, while the home is attended. While a confirmed,
-#     readable, live away-posture
-#     record exists (bin/fm-afk-contract.sh validate; docs/pi-supervision-
-#     branch.md "Postures"), main is parked and its STANDING authority
+#     readable, live away record exists (bin/fm-afk-contract.sh validate and
+#     mode, never quiet mode's record, whose captain is present; docs/pi-
+#     supervision-branch.md "Postures"), main is parked and its STANDING authority
 #     relocates to the branch for exactly the actions whose guarded script
 #     opts in with --away-relocated: a PR merge, a fresh spawn of queued work,
 #     and a decision answer. Each guarded script keeps its own mechanical gate;
@@ -101,7 +101,7 @@
 # unconfirmed submit (3): recognizable as "the other supervision actor holds
 # this task right now - retry after the lease clears".
 FM_LEASE_REFUSE_EXIT=6
-FM_LEASE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_LEASE_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 FM_LEASE_GUARD_LOCK=
 
 fm_lease_lock_helpers() {
@@ -112,6 +112,16 @@ fm_lease_lock_helpers() {
   # recursively duplicate that large graph for every lease-lib consumer.
   # shellcheck source=/dev/null
   . "$FM_LEASE_LIB_DIR/fm-wake-lib.sh"
+}
+
+# fm_lease_home_runs_host: 0 iff this home runs the supervision host
+# (fm_supervision_host_enabled owns the gate).
+fm_lease_home_runs_host() {
+  if ! command -v fm_supervision_host_enabled >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-supervision-engine-lib.sh
+    . "$FM_LEASE_LIB_DIR/fm-supervision-engine-lib.sh"
+  fi
+  fm_supervision_host_enabled "${FM_CONFIG_OVERRIDE:-${FM_HOME:-$STATE/..}/config}"
 }
 
 # fm_lease_actor: print the current actor after validating it. Returns 1 (with
@@ -202,9 +212,7 @@ fm_lease_guard() {
   case "${PI_CODING_AGENT:-}:${FM_SUPERVISION_ACTOR:-}" in
     true:*|*:main|*:branch) ;;
     *)
-      [ -e "$(fm_lease_path "$task")" ] \
-        || [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-$STATE/..}/config}/supervision-host" ] \
-        || return 0
+      [ -e "$(fm_lease_path "$task")" ] || fm_lease_home_runs_host || return 0
       ;;
   esac
   fm_lease_lock_helpers
@@ -237,13 +245,14 @@ fm_lease_guard_release() {
 }
 
 # fm_lease_away_relocated: 0 iff main's standing authority is relocated to the
-# branch actor right now - a confirmed, readable, live away-posture record
-# exists in $STATE, as bin/fm-afk-contract.sh's own validate subcommand judges
+# branch actor right now - a confirmed, readable, live away record exists in
+# $STATE, as bin/fm-afk-contract.sh's own validate and mode subcommands judge
 # it (the header's role-partition paragraph). Read fresh on every call, never
 # cached, because the record can be archived between two guarded actions.
 fm_lease_away_relocated() {
   [ -f "$STATE/.afk-contract" ] || return 1
-  FM_STATE_OVERRIDE="$STATE" "$FM_LEASE_LIB_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1
+  FM_STATE_OVERRIDE="$STATE" "$FM_LEASE_LIB_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 1
+  [ "$(FM_STATE_OVERRIDE="$STATE" "$FM_LEASE_LIB_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]
 }
 
 # fm_lease_forbid_branch <action-label> [--away-relocated]: refuse (exit

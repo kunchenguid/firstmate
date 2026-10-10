@@ -108,6 +108,8 @@ extension_test_cleanup() {
     (
       # worker.pid names the serving child; the copied remote helper stops its
       # known isolated supervisor tree so it cannot respawn during teardown.
+      # Production libraries are linted independently by fm-lint.sh.
+      # shellcheck source=/dev/null
       . "$REMOTE_ROOT/bin/fm-remote-job-lib.sh"
       fm_remote_job_stop_worker_tree "$(cat "$TMP_ROOT/remote-jobs/worker.pid")"
     ) 2>/dev/null || true
@@ -1884,7 +1886,7 @@ mkdir -p "$H_REMOTE_CONTROL/data" "$H_REMOTE" "$REMOTE_ROOT/bin"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 for remote_file in \
   fm-extension.mjs fm-extension-launch-barrier.mjs fm-extension.sh fm-procevent.sh fm-procevent-lib.sh fm-procevent-extension-capture.pl fm-procevent-lavish.sh \
-  fm-pr-lib.sh fm-wake-lib.sh fm-remote-entrypoint.sh fm-remote-job-lib.sh \
+  fm-pr-lib.sh fm-wake-lib.sh fm-path-lib.sh fm-remote-entrypoint.sh fm-remote-job-lib.sh \
   fm-remote-job-worker.sh; do
   cp "$ROOT/bin/$remote_file" "$REMOTE_ROOT/bin/$remote_file"
 done

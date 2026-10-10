@@ -358,6 +358,90 @@ EOF
   pass "failed escalation writes retain durable wakes and classification positions"
 }
 
+test_busy_inbox_escalation_reaches_supervision() {
+  local variant=$1 mode=$2 dir state task=busy-inbox win gen pane reason detail buffer sent drain
+  dir=$(make_supercase "busy-inbox-$variant-$mode"); state="$dir/state"
+  win="sess:fm-$task"; pane="$dir/pane.txt"; sent="$dir/sent.log"
+  buffer="$state/.subsuper-escalations"; drain="$dir/daemon-bin"
+  printf '%s\n' "$mode" > "$state/.afk"
+  printf 'working: processing instructions\n' > "$state/$task.status"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=claude"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" busy --gen "$gen" \
+    --source claude-hook --event UserPromptSubmit
+  printf 'Question awaiting an answer\n' > "$pane"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    stale_window_is_busy "$win" "$state" || fail "inbox consumer fixture is not busy"
+  case "$variant" in
+    stuck)
+      detail="unread firstmate instruction: stuck-busy after 2 consecutive busy-deferred due doorbells; $state/$task.inbox/001.msg stays unhandled and no doorbell was typed; inspect the worker"
+      ;;
+    write)
+      detail="steering-inbox busy bookkeeping unwritable: $state/$task.inbox/.busy-state cannot be written while $state/$task.inbox/001.msg stays unhandled; inspect the inbox directory"
+      ;;
+    reset)
+      detail="steering-inbox busy bookkeeping unwritable: $state/$task.inbox/.busy-state cannot be reset after a non-busy check; inspect the inbox directory"
+      ;;
+  esac
+  reason="stale: $win ($detail)"
+  mkdir "$drain"
+  cat > "$drain/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+if [ "\${FM_TEST_WAKE_FALLBACK:-0}" != 1 ]; then
+  printf '1\t1\tstale\t$win\t%s\n' "$reason"
+fi
+printf 'WAKE_ACK_REQUIRED: inbox --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$drain/fm-wake-drain.sh"
+  FM_DAEMON_DIR="$drain" FM_ESCALATE_BATCH_SECS=999999 handle_durable_wakes "$reason" "$state" \
+    || fail "$variant $mode inbox wake was not handled"
+  [ "$(cat "$buffer" 2>/dev/null)" = "${reason#stale: }" ] \
+    || fail "$variant $mode inbox escalation was absorbed before supervision"
+  [ "$(cat "$dir/acked")" = ack ] || fail "buffered inbox wake was not acknowledged once"
+  [ "$(status_seen_offset "$state" "$task")" = 0 ] || fail "inbox escalation consumed worker status"
+  [ ! -e "$state/.subsuper-stale-$task" ] || fail "inbox escalation entered transient stale recovery"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=0 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ "$(cat "$buffer")" = "${reason#stale: }" ] || fail "busy housekeeping lost the inbox escalation"
+  printf '❯ \n' > "$pane"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=sess:supervisor escalate_flush "$state" \
+    || fail "$variant $mode inbox escalation did not reach the supervisor"
+  assert_contains "$(delivered_digest "$sent")" "${reason#stale: }" "supervisor digest lost the inbox reason"
+  [ ! -s "$buffer" ] || fail "delivered inbox escalation stayed buffered"
+
+  rm "$buffer" "$dir/acked"
+  mkdir "$buffer"
+  ! FM_DAEMON_DIR="$drain" FM_ESCALATE_BATCH_SECS=999999 handle_durable_wakes "$reason" "$state" 2>/dev/null \
+    || fail "unwritable inbox escalation buffer acknowledged its wake"
+  [ ! -e "$dir/acked" ] || fail "failed inbox buffering acknowledged the wake"
+  rmdir "$buffer"
+  FM_DAEMON_DIR="$drain" FM_ESCALATE_BATCH_SECS=999999 FM_TEST_WAKE_FALLBACK=1 \
+    handle_durable_wakes "$reason" "$state" || fail "inbox fallback reason did not recover"
+  [ "$(cat "$buffer")" = "${reason#stale: }" ] || fail "fallback lost the inbox escalation"
+  [ "$(cat "$dir/acked")" = ack ] || fail "recovered inbox buffering did not acknowledge the wake"
+  pass "$variant inbox escalation reaches supervision in $mode mode and survives buffering failure"
+}
+
+test_busy_inbox_dispatch_preserves_other_stale_reasons() {
+  local dir state detail
+  dir=$(make_supercase inbox-dispatch-scope); state="$dir/state"
+  printf 'working: processing instructions\n' > "$state/ordinary.status"
+  for detail in \
+    '' \
+    'busy for 4000s without a turn boundary' \
+    "unread firstmate instruction: $state/ordinary.inbox/001.msg still unhandled after 3 doorbell delivery attempts with an idle pane; inspect the worker" \
+    'steering-inbox ladder bookkeeping unwritable: .ring-state cannot be written' \
+    'steering-inbox retry mark unremovable: .retry-ring cannot be removed'; do
+    FM_ESCALATE_BATCH_SECS=999999 handle_wake "stale: sess:fm-ordinary${detail:+ ($detail)}" "$state" \
+      || fail "ordinary stale handling failed"
+    [ ! -s "$state/.subsuper-escalations" ] || fail "inbox dispatch changed another stale reason: $detail"
+    [ -e "$state/.subsuper-stale-ordinary" ] || fail "inbox dispatch bypassed ordinary stale recovery"
+  done
+  pass "inbox dispatch preserves ordinary stale, busy-turn, and other doorbell routing"
+}
+
 test_catchall_buffer_failure_preserves_position() {
   local dir state buffer out
   dir=$(make_supercase catchall-write-failure); state="$dir/state"
@@ -1112,6 +1196,36 @@ test_housekeeping_captain_held_resurfaces_and_resets() {
   age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
   [ "$age" -lt 60 ] || fail "captain-held marker was not reset to now on re-surface (age ${age}s)"
   pass "housekeeping re-surfaces a forgotten captain hold on the long cadence and resets its window"
+}
+
+# The away record owns the one exception: nobody is there to answer a captain
+# hold, so it is never rechecked. Quiet mode's record is a present captain
+# (bin/fm-afk-contract.sh AWAY OR QUIET), so a quiet daemon rechecks the same
+# hold on the same cadence.
+test_housekeeping_captain_held_silenced_only_by_an_away_record() {
+  local mode dir state fakebin win pane key
+  for mode in away quiet; do
+    dir=$(make_supercase "captain-held-$mode-record")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    win="sess:fm-held-w11r"; pane="$dir/pane.txt"
+    printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$state/held-w11r.status"
+    printf 'idle prompt $\n' > "$pane"
+    key=$(printf '%s' "held-w11r" | tr ':/.' '___')
+    echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_AFK_MODE="$mode" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+      || fail "fixture: could not record the $mode posture"
+    [ "$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" mode)" = "$mode" ] || fail "fixture: the record is not $mode"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+    if [ "$mode" = away ]; then
+      ! grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+        || fail "a captain hold was rechecked while the away record exists: $(cat "$state/.subsuper-escalations")"
+    else
+      grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+        || fail "quiet mode's record silenced a captain hold as if the captain were away: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
+    fi
+  done
+  pass "housekeeping silences a captain hold only under an away record, never under quiet mode's"
 }
 
 # A crew that RESUMED - whose latest status line no longer declares the wait - drops
@@ -3141,6 +3255,7 @@ test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
+test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_declared_time_controls_pause_recheck
@@ -3190,6 +3305,13 @@ test_unverifiable_identity_surfaces_without_marker
 test_status_read_failure_surfaces_without_advancing_seen
 test_catchall_advances_routine_then_surfaces_append
 test_escalation_buffer_failure_retains_wake_and_position
+test_busy_inbox_escalation_reaches_supervision stuck away
+test_busy_inbox_escalation_reaches_supervision stuck quiet
+test_busy_inbox_escalation_reaches_supervision write away
+test_busy_inbox_escalation_reaches_supervision write quiet
+test_busy_inbox_escalation_reaches_supervision reset away
+test_busy_inbox_escalation_reaches_supervision reset quiet
+test_busy_inbox_dispatch_preserves_other_stale_reasons
 test_catchall_buffer_failure_preserves_position
 test_durable_wake_failure_retains_entire_batch
 test_missing_status_stale_is_acknowledged_without_diagnostic

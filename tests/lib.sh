@@ -102,12 +102,45 @@ pass() {
 # that file is armed once, here, at source time - which always runs in the
 # real caller, never a subshell.
 
+# fm_test_tmpdir: directory used for registries and fixture roots.
+# Resolves absolute or relative TMPDIR to an existing physical directory,
+# falling back to /tmp if resolution fails or the directory contains .git.
+# Keep registries out of git worktree roots so concurrent git add -A cannot
+# accidentally stage live test state.
+fm_test_tmpdir() {
+  local base=${TMPDIR:-/tmp} physical
+  base=${base%/}
+  [ -n "$base" ] || base=/tmp
+  case "$base" in
+    /*) ;;
+    *)
+      if physical=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P); then
+        base=$physical
+      else
+        base=/tmp
+      fi
+      ;;
+  esac
+  if physical=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P); then
+    base=$physical
+  else
+    base=/tmp
+  fi
+  if [ -e "$base/.git" ]; then
+    printf '%s\n' /tmp
+    return 0
+  fi
+  printf '%s\n' "$base"
+}
+
+FM_TEST_TMPDIR=$(fm_test_tmpdir) || return 1
+
 FM_TEST_CLEANUP_DIRS=()
-FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
+FM_TEST_CLEANUP_REGISTRY=$(mktemp "$FM_TEST_TMPDIR/.fm-test-cleanup.$$.XXXXXX") || return 1
 
 fm_test_pid_identity() {
   local pid=$1
-  FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c \
+  FM_STATE_OVERRIDE="$FM_TEST_TMPDIR" bash -c \
     '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid"
 }
 
@@ -130,7 +163,7 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 # private one). It never matches on a script or process name, which would reach
 # into another home's live runners.
 
-FM_TEST_PROCEVENT_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-procevent.$$.XXXXXX") || return 1
+FM_TEST_PROCEVENT_REGISTRY=$(mktemp "$FM_TEST_TMPDIR/.fm-test-procevent.$$.XXXXXX") || return 1
 
 fm_test_track_procevent_home() {  # <home> [claim-root]
   [ -n "${1:-}" ] || return 1
@@ -169,7 +202,7 @@ fm_test_reap_procevent_homes() {
 # deleted has no lock and is skipped; that watcher exits on its own home-gone
 # check within one poll.
 
-FM_TEST_WATCHER_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-watcher.$$.XXXXXX") || return 1
+FM_TEST_WATCHER_REGISTRY=$(mktemp "$FM_TEST_TMPDIR/.fm-test-watcher.$$.XXXXXX") || return 1
 
 fm_test_track_watcher_state() {  # <state-dir>
   [ -n "${1:-}" ] || return 1
@@ -234,7 +267,7 @@ fm_test_cleanup() {
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root tmp_base
-  tmp_base=${TMPDIR:-/tmp}
+  tmp_base=$(fm_test_tmpdir)
   tmp_base=${tmp_base%/}
   root=$(mktemp -d "$tmp_base/${prefix}.XXXXXX") || return 1
   root=$(cd -P -- "$root" && pwd -P) || return 1
@@ -264,7 +297,7 @@ FM_TEST_ORPHAN_MAX_AGE_SECONDS=${FM_TEST_ORPHAN_MAX_AGE_SECONDS:-3600}
 fm_test_reap_orphans() {
   local marker dir mtime now owner_pid owner_identity current_identity
   now=$(date +%s)
-  for marker in "${TMPDIR:-/tmp}"/fm-*/.fm-test-fixture; do
+  for marker in "$FM_TEST_TMPDIR"/fm-*/.fm-test-fixture; do
     [ -e "$marker" ] || continue
     owner_pid=$(sed -n '1p' "$marker" 2>/dev/null) || owner_pid=
     owner_identity=$(sed -n '2,$p' "$marker" 2>/dev/null) || owner_identity=
@@ -320,6 +353,10 @@ fi
 # lets a live guard drive the real fm-spawn/fm-send/fm-teardown from inside a
 # no-mistakes gate worktree instead of being refused by
 # bin/fm-gate-refuse-lib.sh.
+#
+# Every path that lets a live run proceed also exports DISABLE_AUTOUPDATER=1,
+# so a live harness invocation never lets Claude Code's auto-updater rewrite
+# the installed binary out from under the host.
 
 fm_live_gate() {
   local policy=$1 vars=$2
@@ -383,6 +420,7 @@ fm_live_gate() {
     exit 0
   done
 
+  export DISABLE_AUTOUPDATER=1
   return 0
 }
 
@@ -493,6 +531,134 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/$tool"
+}
+
+# fm_fake_claude_outside_read_gate <fakebin>
+# Drops a claude stub that models the 2.1.257 outside-read gate instead of
+# answering like a generic exit-0 tool: it resolves its own cwd and every
+# --add-dir argument to real paths, then fails with "would prompt" unless each
+# required Firstmate channel path lies within one of them - the launch record
+# its own doorbell argument names, plus every path listed one per line in the
+# file FM_FAKE_CLAUDE_REQUIREMENTS names (absent file or unset var: doorbell
+# record only). Paths need not exist; a nonexistent leaf resolves through its
+# parent so a lazily created channel dir is still checked. Evaluating the
+# captured launch command under this binary exercises the real spawn output
+# the way Claude Code's working-directory check would consume it.
+fm_fake_claude_outside_read_gate() {
+  local fakebin=$1
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+set -u
+cwd=$(pwd -P) || exit 3
+allowed=$cwd
+argv=("$@")
+last=${argv[$((${#argv[@]} - 1))]:-}
+for ((i = 0; i < ${#argv[@]}; i++)); do
+  if [ "${argv[$i]}" = --add-dir ]; then
+    d=${argv[$((i + 1))]:-}
+    [ -n "$d" ] || { echo "fake-claude: --add-dir with no value" >&2; exit 3; }
+    r=$(cd "$d" 2>/dev/null && pwd -P) || r=$d
+    allowed="$allowed
+$r"
+    i=$((i + 1))
+  fi
+done
+resolve_target() {  # <path> -> real path even when the leaf does not exist yet
+  local p=$1
+  if [ -d "$p" ]; then
+    (cd "$p" && pwd -P)
+  elif pdir=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P); then
+    printf '%s/%s\n' "$pdir" "$(basename "$p")"
+  else
+    return 1
+  fi
+}
+covered() {  # <path>
+  local want dir
+  want=$(resolve_target "$1") || return 1
+  while IFS= read -r dir; do
+    case "$want/" in "$dir/"*) return 0 ;; esac
+  done <<EOF2
+$allowed
+EOF2
+  return 1
+}
+failures=
+record=$(printf '%s' "$last" | sed -n "s/.*: Firstmate operational input waiting: read '\([^']*\)'.*/\1/p")
+while IFS= read -r need; do
+  [ -n "$need" ] || continue
+  covered "$need" || failures="$failures$need
+"
+done <<EOF3
+$record
+$(cat "${FM_FAKE_CLAUDE_REQUIREMENTS:-/dev/null}" 2>/dev/null)
+EOF3
+if [ -n "$failures" ]; then
+  printf 'fake-claude: would prompt outside working directories on:\n%s' "$failures" >&2
+  exit 42
+fi
+exit 0
+SH
+  chmod +x "$fakebin/claude"
+}
+
+# fm_eval_launch <launch-command> <pane-path> <fakebin> [VAR=val ...]
+# Runs a captured launch command the way the destination pane would: from the
+# pane's cwd with the fakebin on PATH and any extra environment assignments.
+# The command is text the suite already received from the spawn, so bash -c
+# reproduces the pane's shell read of it.
+fm_eval_launch() {
+  local launch=$1 pane=$2 fakebin=$3
+  shift 3
+  (cd "$pane" && env "$@" PATH="$fakebin:${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c "$launch")
+}
+
+# --- agent-named process stand-ins ------------------------------------------
+#
+# fm_agent_standin <dir> echoes the path of a long-running native executable
+# that a liveness case symlinks under a harness name (`ln -s "$standin"
+# "$bin/pi"`), so the kernel records the harness name as the process identity
+# while a real process runs. Symlink it, never copy it: a copied platform binary
+# fails code-signing validation and is killed on macOS arm64.
+#
+# The target must not dispatch on its own invoked name. A multicall coreutils
+# (uutils, the Ubuntu 26.04 default, or busybox) resolves the applet from that
+# name: a host `sleep` invoked through a symlink named `pi` refuses or runs the
+# wrong applet and exits at once, so the agent-named process never exists. The
+# helper compiles a dedicated spinner when a C compiler exists, falls back to the
+# host `sleep` only when it demonstrably survives a foreign name, and otherwise
+# returns nonzero so the caller can skip with a reason rather than fail.
+# fm_agent_standin_alive <path> is that survival check: it starts <path> and
+# succeeds only if it is still running a moment later.
+fm_agent_standin_alive() {  # <path>
+  local pid
+  "$1" 60 >/dev/null 2>&1 &
+  pid=$!
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 1; }
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+fm_agent_standin() {  # <dir> -> echoes the stand-in path; nonzero when none survives a foreign name
+  local dir=$1 cc_bin sleep_bin
+  mkdir -p "$dir" || return 1
+  cc_bin=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+  if [ -n "$cc_bin" ] &&
+    printf '%s\n' '#include <unistd.h>' 'int main(void){int i;for(i=0;i<600;i++)sleep(1);return 0;}' > "$dir/standin.c" &&
+    "$cc_bin" -o "$dir/standin" "$dir/standin.c" 2>/dev/null &&
+    fm_agent_standin_alive "$dir/standin"; then
+    printf '%s\n' "$dir/standin"
+    return 0
+  fi
+  rm -f "$dir/standin"
+  sleep_bin=$(command -v sleep) || return 1
+  ln -s "$sleep_bin" "$dir/standin" 2>/dev/null || return 1
+  if ! fm_agent_standin_alive "$dir/standin"; then
+    rm -f "$dir/standin"
+    return 1
+  fi
+  printf '%s\n' "$dir/standin"
 }
 
 # --- portable file timestamps -----------------------------------------------

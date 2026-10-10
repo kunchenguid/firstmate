@@ -7,13 +7,15 @@
 # drive the real fm-send executable over a stubbed tmux and pin:
 #   1. The payload is durably recorded and never typed; only the doorbell
 #      crosses the terminal, and the send exits 0 at enqueue.
+#      The doorbell names the inbox once and never grows with the home's depth.
 #   2. Multi-line steers are legal and round-trip byte-exact.
 #   3. A re-send enqueues a NEW sequence and still never retypes a payload,
 #      so the terminal can never truncate, garble, or duplicate a steer.
 #   4. The composer pre-check is advisory: visibly pending text skips the ring
 #      with a notice, and the steer is still durably sent (exit 0).
 #   5. A failed doorbell is still a sent steer (exit 0, record durable): the
-#      watcher's re-ring ladder owns delivery from the record on.
+#      watcher's re-ring ladder owns delivery from the record on. A
+#      fire-and-forget record whose ring did not land is owed one retry ring.
 #   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
 #      "$" to codex, an explicit backend target, and the --key path.
 #   7. A marked secondmate steer carries its marker + corr token in the record
@@ -129,12 +131,53 @@ test_text_steer_rides_inbox() {
   body=$(record_body _ "$rec")
   [ "$body" = "please rebase onto main" ] || fail "the recorded body differs: $body"
   typed=$(cat "$dir/send.log")
-  assert_contains "$typed" "Firstmate instruction waiting: list '$dir/home/state/t1.inbox'/*.msg" \
+  assert_contains "$typed" "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't1.inbox' steering inbox" \
     "the doorbell should direct the worker to drain the inbox"
   case "$typed" in
   *"please rebase onto main"*) fail "the payload must never be typed:"$'\n'"$typed" ;;
   esac
   pass "fm-send inbox: the payload is recorded durably and only the doorbell is typed"
+}
+
+# A home nested deep must not lengthen the doorbell: a long line wraps past
+# what a composer read can prove, so a Herdr submit reports it never reached
+# the pane and every re-ring fails the same way.
+test_deep_home_doorbell_stays_short() {
+  local shallow deep home err rest typed shallow_typed found
+  shallow=$(setup_case shallow-home)
+  run_send "$shallow" "$shallow/send.err" -- t1 "please continue" || fail "the shallow-home send failed"
+  shallow_typed=$(cat "$shallow/send.log")
+  deep="$TMP_ROOT/deep-home"
+  home="$deep/one/two/three/four/five/six/seven/eight-secondmate-homes-nest-under-long-worktree-paths"
+  mkdir -p "$home/state"
+  make_stubs "$deep" >/dev/null
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  err="$deep/send.err"
+  env PATH="$deep/fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$deep/send.log" \
+    FM_SEND_SETTLE=0 "$SEND" t1 "please continue" >/dev/null 2>"$err" ||
+    fail "the deep-home send failed: $(cat "$err")"
+  [ -f "$home/state/t1.inbox/001.msg" ] || fail "the deep-home steer was not durably recorded"
+  typed=$(cat "$deep/send.log")
+  [ "$typed" = "$shallow_typed" ] ||
+    fail "the doorbell should not depend on the home's depth:"$'\n'"shallow: $shallow_typed"$'\n'"deep:    $typed"
+  [ "${#typed}" -le 200 ] || fail "the doorbell should stay under 200 characters, got ${#typed}: $typed"
+  case "$typed" in
+  *"$deep"* | *"$TMP_ROOT"*) fail "the doorbell should not carry the home's absolute path: $typed" ;;
+  esac
+  rest=${typed#*t1.inbox}
+  [ "$rest" != "$typed" ] || fail "the doorbell should name the inbox: $typed"
+  case "$rest" in
+  *t1.inbox*) fail "the doorbell should name the inbox once: $typed" ;;
+  esac
+  found=$(cd / && FM_TASK_INBOX="$home/state/t1.inbox" bash -c 'ls "$FM_TASK_INBOX"/*.msg') ||
+    fail "a shell with FM_TASK_INBOX exported could not list the deep inbox"
+  [ "$found" = "$home/state/t1.inbox/001.msg" ] ||
+    fail "the doorbell's list instruction did not resolve the deep inbox from an unrelated cwd: $found"
+  (cd / && FM_TASK_INBOX="$home/state/t1.inbox" bash -c 'mv "$FM_TASK_INBOX"/001.msg "$FM_TASK_INBOX"/handled/') ||
+    fail "the doorbell's mv instruction did not acknowledge through FM_TASK_INBOX"
+  [ -f "$home/state/t1.inbox/handled/001.msg" ] || fail "the acknowledged record did not land in handled/"
+  pass "fm-send inbox: a deep home rings the same short doorbell naming the inbox once"
 }
 
 test_multiline_steer_is_legal() {
@@ -197,6 +240,56 @@ test_failed_ring_is_still_sent() {
   assert_contains "$(cat "$err")" "watcher will re-ring" \
     "the failed-ring notice should point at the re-ring"
   pass "fm-send inbox: a failed doorbell is still a durably sent steer"
+}
+
+# Contract: a fire-and-forget record stays outside the re-ring ladder, so a
+# ring that did not land at enqueue is owed exactly one retry by the watcher.
+test_fire_and_forget_unlanded_ring_owes_one_retry() {
+  local dir err rc
+  dir=$(setup_case faf-retry)
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/wait-no-turns"
+  err="$dir/send.err"
+  # The stub lists only window fm-t1, so the secondmate takes it over.
+  rm -f "$dir/home/state/t1.meta"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-t1" alpha claude
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- \
+    fm-domain --fire-and-forget 0123456789abcdef "reconcile your books"; rc=$?
+  expect_code 0 "$rc" "a skipped fire-and-forget ring is still a sent steer"
+  [ "$(cat "$dir/home/state/domain.inbox/.retry-ring" 2>/dev/null)" = 001.msg ] \
+    || fail "a skipped fire-and-forget ring did not owe its one retry"
+  assert_contains "$(cat "$err")" "the watcher will ring it once more" \
+    "the skip notice should promise exactly one retry"
+
+  run_send "$dir" "$err" -- fm-domain --fire-and-forget 1123456789abcdef "reconcile again"; rc=$?
+  expect_code 0 "$rc" "a rung fire-and-forget steer should succeed"
+  [ "$(cat "$dir/home/state/domain.inbox/.retry-ring" 2>/dev/null)" = 001.msg ] \
+    || fail "a ring that landed must not owe a retry for its own record"
+
+  dir=$(setup_case ordinary-no-retry)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- t1 "ordinary steer"
+  [ ! -e "$dir/home/state/t1.inbox/.retry-ring" ] \
+    || fail "an ordinary record rides the ladder and must not owe a separate retry"
+  pass "fm-send inbox: a fire-and-forget ring that did not land owes one retry ring"
+}
+
+# Without the flag a skipped fire-and-forget ring is not owed a retry.
+test_fire_and_forget_retry_stays_off_without_the_flag() {
+  local dir err rc
+  dir=$(setup_case faf-retry-off)
+  err="$dir/send.err"
+  [ ! -e "$dir/home/config/wait-no-turns" ]
+  rm -f "$dir/home/state/t1.meta"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-t1" alpha claude
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- \
+    fm-domain --fire-and-forget 0123456789abcdef "reconcile your books"; rc=$?
+  expect_code 0 "$rc" "a skipped fire-and-forget ring is still a sent steer"
+  [ ! -e "$dir/home/state/domain.inbox/.retry-ring" ] \
+    || fail "an absent flag still owed a fire-and-forget retry"
+  assert_contains "$(cat "$err")" "the watcher will re-ring" \
+    "an absent flag should keep the ordinary re-ring notice"
+  pass "fm-send inbox: without config/wait-no-turns a fire-and-forget ring is not retried"
 }
 
 test_harness_invocations_stay_typed() {
@@ -412,10 +505,13 @@ test_empty_message_refused() {
 }
 
 test_text_steer_rides_inbox
+test_deep_home_doorbell_stays_short
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
+test_fire_and_forget_unlanded_ring_owes_one_retry
+test_fire_and_forget_retry_stays_off_without_the_flag
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox

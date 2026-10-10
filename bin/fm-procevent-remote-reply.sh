@@ -9,6 +9,7 @@
 #   fm-procevent-remote-reply.sh terminal <result-file>
 #   fm-procevent-remote-reply.sh self-announcing
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
+#   fm-procevent-remote-reply.sh relisten
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
 #
 # `arm` registers one blocking, non-destructive delta source for the remote
@@ -16,7 +17,12 @@
 # capture, publication, and one machine-wide source owner. Each captured delta is
 # terminal for that exact registration; `handle` validates and idempotently
 # ingests it, acknowledges the captured generation, then registers the next
-# cursor-anchored source. A continuity break is escalated and not re-armed.
+# cursor-anchored source. `relisten` tells that runner to poll again in the same
+# process, still holding the claim, after an empty window and after that re-arm.
+# A window the remote job worker preempted is reported to the runner as an empty
+# window, so it relistens too (see JOB_PREEMPTED below).
+# A continuity break is escalated and not re-armed, so the registration is dropped
+# and the runner stops. The runner does not refresh the owner lease.
 #
 # `autohandle` is the runner's own entry into that same `handle`: it takes the
 # canonical source id instead of the secondmate id and is called by the runner
@@ -91,7 +97,7 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -122,6 +128,7 @@ source_id() {
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
 ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
+retirement_count_path() { printf '%s/%s.retirements\n' "$CURSOR_DIR" "$1"; }
 mirrored_source_path() { printf '%s/.remote-reply-mirrored-%s\n' "$STATE" "$1"; }
 
 read_cursor() { # <id>; sets CURSOR_OFFSET and CURSOR_HASH
@@ -156,6 +163,43 @@ write_cursor() { # <id> <offset> <hash>
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$path"
+}
+
+# A missing file is zero and is not created. Ingest only reads this.
+# Retirement is the one writer, so a crash during ingest cannot change it.
+read_retirement_count() { # <id>; sets RETIREMENT_COUNT
+  local path count lines
+  path=$(retirement_count_path "$1")
+  RETIREMENT_COUNT=0
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || die "reply retirement count is unsafe: $path"
+  lines=$(grep -c '^count=' "$path" 2>/dev/null || true)
+  [ "$lines" = 1 ] || die "reply retirement count is invalid: $path"
+  count=$(sed -n 's/^count=//p' "$path")
+  case "$count" in ''|*[!0-9]*) die "reply retirement count is invalid: $path" ;; esac
+  RETIREMENT_COUNT=$count
+}
+
+write_retirement_count() { # <id> <count>
+  local id=$1 count=$2 path tmp
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  mkdir -p "$CURSOR_DIR" || return 1
+  chmod 700 "$CURSOR_DIR" 2>/dev/null || true
+  path=$(retirement_count_path "$id")
+  [ ! -L "$path" ] || return 1
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.retirements.XXXXXX") || return 1
+  printf 'count=%s\n' "$count" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! mv -f -- "$tmp" "$path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Twelve characters distinguish breaks in the status line. The cursor keeps
+# the full digest the reader uses.
+continuity_prefix() {
+  printf '%.12s' "$CURSOR_HASH"
 }
 
 ingest_receipt_matches() { # <id> <sequence> <result>
@@ -252,6 +296,14 @@ cmd_arm() {
 # honest watermark, and bin/fm-pending-reply-lib.sh consumes it so a missing
 # correlated report is judged only against a channel known to have caught up.
 WINDOW_CLOSED_EMPTY=75
+# The remote job worker's exit when it preempted this long-poll to run another
+# job for the same home (bin/fm-remote-job-lib.sh header), such as the watcher's
+# per-cycle liveness probe. The read is cursor-anchored and non-destructive, so a
+# preempted window loses nothing: it is a window that closed early, and the
+# runner relistens exactly as after WINDOW_CLOSED_EMPTY instead of reading it as
+# a failed read that releases the listener's claim. It proves nothing about the
+# channel being caught up, so it records no watermark.
+JOB_PREEMPTED=76
 
 cmd_source() {
   local id=${1:-} started rc=0
@@ -262,6 +314,8 @@ cmd_source() {
     "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
   if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
     fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
+  elif [ "$rc" -eq "$JOB_PREEMPTED" ]; then
+    rc=$WINDOW_CLOSED_EMPTY
   fi
   return "$rc"
 }
@@ -528,7 +582,12 @@ cmd_ingest() {
     die "result does not continue the current cursor for $id"
   fi
   if [ "$class" = continuity-broken ]; then
-    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
+    # The same offset, prefix, and retirement count build the same line, so a
+    # retry appends nothing. Retirement removes the cursor before it records
+    # the next count, so a later break is a new line even when the restored
+    # bytes match, and a stop between those steps leaves the count unchanged.
+    read_retirement_count "$id"
+    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason) at offset ${CURSOR_OFFSET} prefix $(continuity_prefix) retirements ${RETIREMENT_COUNT}"
     append_rc=0
     if status_event_recorded "$status_file" "$line"; then
       append_rc=1
@@ -710,7 +769,7 @@ cmd_retire_quiesce_locked() {
 }
 
 cmd_retire_finalize_locked() {
-  local id=${1:-} force=${2:-} sid path
+  local id=${1:-} force=${2:-} sid path cursor
   validate_id "$id"
   [ -z "$force" ] || [ "$force" = --force ] || die "invalid retirement option: $force"
   sid=$(source_id "$id")
@@ -726,7 +785,16 @@ cmd_retire_finalize_locked() {
       done
     fi
   fi
-  rm -f -- "$(cursor_path "$id")"
+  # Remove the cursor first. A stop before the count write leaves that count
+  # unchanged, so the same break still builds the same line.
+  cursor=$(cursor_path "$id")
+  rm -f -- "$cursor" || die "cannot remove remote reply cursor"
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    die "cannot remove remote reply cursor"
+  fi
+  read_retirement_count "$id"
+  write_retirement_count "$id" "$((RETIREMENT_COUNT + 1))" \
+    || die "cannot record remote reply retirement"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
   rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
@@ -767,6 +835,7 @@ case "${1:-}" in
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
   self-announcing) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
+  relisten) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;
   retire-finalize-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_finalize_locked "$@" ;;

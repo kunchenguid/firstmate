@@ -121,6 +121,9 @@ SH
   # plain text with no run id and no quoting - see the ledger fixtures below),
   # and `runs` appends its own invocation to FM_FAKE_NM_RUNS_LOG when set, so
   # a test can prove whether the ledger fallback ever engaged.
+  # The bare `axi` overview answers FM_FAKE_AXI_OVERVIEW verbatim (empty by
+  # default, so no repository resolves and the pipeline-spend record is
+  # written as unavailable).
   # This keeps every case hermetic - without it, `command -v no-mistakes`
   # would fall through to whatever real binary happens to be on the test
   # runner's own PATH. Tests exercising the run-abort path override
@@ -132,6 +135,8 @@ case "${1:-}" in
   axi)
     shift
     case "${1:-}" in
+      '')
+        printf '%s\n' "${FM_FAKE_AXI_OVERVIEW:-}" ;;
       status)
         shift
         run_id=""
@@ -727,6 +732,51 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
+test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
+  local case_dir out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
+  case_dir=$(make_case tasks-axi-close-gerrit)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$gerrit_url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
+  # GitHub pull request, so this case keeps reproducing whatever the installed
+  # release accepts.
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed Gerrit task failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left a landed Gerrit task's backlog item at $(backlog_row_state "$case_dir"): $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"Gerrit change $gerrit_url\"" >/dev/null \
+    || fail "closed Gerrit backlog item did not record its change URL as a note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a landed Gerrit close left its pending-close record behind"
+
+  case_dir=$(make_case tasks-axi-close-github-under-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
+    || fail "a GitHub pull request no longer closed as the item's pr link"
+  pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -1123,6 +1173,52 @@ SH
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
+# A task recording base_branch= landed when its content reached that branch, not
+# the default branch: a squash merge into the base branch is the landing.
+test_content_fallback_uses_recorded_base_branch() {
+  local case_dir rc landed tmp
+  for landed in base default; do
+    case_dir=$(make_case "content-base-$landed")
+    write_meta "$case_dir" direct-PR ship
+    printf 'base_branch=feature/hub\n' >> "$case_dir/state/task-x1.meta"
+    tmp="$case_dir/_hub"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    git -C "$tmp" push -q origin HEAD:refs/heads/feature/hub
+    rm -rf "$tmp"
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    if [ "$landed" = base ]; then
+      tmp="$case_dir/_land"
+      git clone -q "$case_dir/origin.git" "$tmp"
+      git -C "$tmp" checkout -q feature/hub
+      printf 'hello\n' > "$tmp/feature.txt"
+      git -C "$tmp" add feature.txt
+      git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash feature.txt"
+      git -C "$tmp" push -q origin HEAD:feature/hub
+      rm -rf "$tmp"
+    else
+      land_on_origin_main "$case_dir" feature.txt hello
+    fi
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/treehouse"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    if [ "$landed" = base ]; then
+      expect_code 0 "$rc" "content-base: content squashed into the recorded base branch should count as landed"
+      assert_absent "$case_dir/state/task-x1.meta" "content-base: teardown kept the record of landed work"
+    else
+      [ "$rc" -ne 0 ] || fail "content-base: content only on the default branch passed for a task based on feature/hub"
+      assert_present "$case_dir/state/task-x1.meta" "content-base: a refused teardown removed the task record"
+    fi
+  done
+  pass "the content-landed fallback checks a task's recorded base branch, not the default branch"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -1165,6 +1261,76 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+assert_dirty_diagnostic() {
+  local kind=$1 mode=$2 case_dir rc before n
+  case_dir=$(make_case "dirty-$kind-$mode")
+  write_meta "$case_dir" "$mode" ship
+  wt_commit_file "$case_dir" feature.txt hello
+  # Exercise both dirty refusal sites: remote-reachable work and local-only
+  # work merged into local main but absent from every remote.
+  if [ "$mode" = local-only ]; then
+    git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  else
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+  fi
+  if [ "$kind" != untracked ]; then
+    printf '%s\n' 'uncommitted edit' > "$case_dir/wt/feature.txt"
+    # Cover index edits as well as unstaged edits.
+    [ "$mode" != local-only ] || git -C "$case_dir/wt" add feature.txt
+  fi
+  if [ "$kind" != tracked ]; then
+    mkdir "$case_dir/wt/00 proof scratch"
+    printf '%s\n' 'manual server log' > "$case_dir/wt/00 proof scratch/server.log"
+    for n in 01 02 03 04 05 06 07 08 09 10 11; do
+      touch "$case_dir/wt/$n-scratch.txt"
+    done
+    # Preserve the existing exemptions without counting them as leftovers.
+    mkdir "$case_dir/wt/.claude"
+    touch "$case_dir/wt/.claude/settings.local.json" "$case_dir/wt/.fm-grok-turnend"
+  fi
+  before=$(git -C "$case_dir/wt" status --porcelain)
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "$kind/$mode: dirty teardown must still refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "$kind/$mode: no refusal"
+  if [ "$kind" = untracked ]; then
+    grep -Fq 'uncommitted changes present (untracked-only leftovers)' "$case_dir/stderr" \
+      || fail "$kind/$mode: missing untracked-only classification"
+    ! grep -q 'includes tracked edits' "$case_dir/stderr" || fail "$kind/$mode: misclassified as tracked"
+  else
+    grep -Fq 'uncommitted changes present (includes tracked edits)' "$case_dir/stderr" \
+      || fail "$kind/$mode: missing tracked-edit classification"
+    ! grep -q 'untracked-only' "$case_dir/stderr" || fail "$kind/$mode: misclassified as untracked-only"
+  fi
+  if [ "$kind" != tracked ]; then
+    grep -Fq '00 proof scratch/' "$case_dir/stderr" || fail "$kind/$mode: scratch folder not named"
+    grep -Fxq '  09-scratch.txt' "$case_dir/stderr" || fail "$kind/$mode: tenth path missing"
+    ! grep -q '10-scratch.txt\|11-scratch.txt\|\.claude/\|\.fm-grok-turnend' "$case_dir/stderr" \
+      || fail "$kind/$mode: path list exceeded its bound or included exempt files"
+    grep -Fq 'additional untracked paths omitted' "$case_dir/stderr" || fail "$kind/$mode: no truncation notice"
+  else
+    ! grep -q 'untracked paths' "$case_dir/stderr" || fail "$kind/$mode: invented untracked paths"
+  fi
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "$kind/$mode: task metadata removed"
+  [ "$before" = "$(git -C "$case_dir/wt" status --porcelain)" ] || fail "$kind/$mode: worktree changed"
+  pass "$kind/$mode: dirty refusal classifies leftovers and preserves work"
+}
+
+test_untracked_only_refusal_diagnostic() {
+  assert_dirty_diagnostic untracked no-mistakes
+  assert_dirty_diagnostic untracked local-only
+}
+
+test_tracked_edit_refusal_diagnostic() {
+  assert_dirty_diagnostic tracked no-mistakes
+  assert_dirty_diagnostic tracked local-only
+}
+
+test_mixed_refusal_diagnostic() {
+  assert_dirty_diagnostic mixed no-mistakes
+  assert_dirty_diagnostic mixed local-only
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -2395,6 +2561,146 @@ test_herdr_flat_teardown_preflight_refuses_before_changes() {
   pass "herdr flat teardown preflight refuses before every destructive change"
 }
 
+# The Herdr presentation-lock namespace is named per OS account. These cases
+# act as a fixture account uid (via an `id -u` shim) so they never touch the
+# real account's namespace or the old shared /tmp/firstmate-herdr-presentation,
+# and every directory the fixture account resolves is really owned by the
+# running account, i.e. by another uid from the fixture account's view.
+# FM_FAKE_NS_STAT names one path whose owner and mode the `stat` shim reports
+# instead; the adapter reads ownership through a PATH `stat` only on its non-
+# Darwin branch, so the arms that need it run only there.
+herdr_lock_ns_fake_uid() {
+  printf '%s' "$((3000000000 + $$ % 1000000))"
+}
+
+configure_herdr_lock_ns_shims() {  # <case-dir>
+  local case_dir=$1 real_id real_stat
+  real_id=$(command -v id); real_stat=$(command -v stat)
+  cat > "$case_dir/fakebin/id" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -u ] && [ "\$#" -eq 1 ] && [ -n "\${FM_FAKE_ACCOUNT_UID:-}" ]; then
+  printf '%s\n' "\$FM_FAKE_ACCOUNT_UID"
+  exit 0
+fi
+exec "$real_id" "\$@"
+SH
+  cat > "$case_dir/fakebin/stat" <<SH
+#!/usr/bin/env bash
+if [ "\$#" -eq 3 ] && [ "\$1" = -c ] && [ -n "\${FM_FAKE_NS_STAT:-}" ] \\
+  && [ "\$3" = "\${FM_FAKE_NS_STAT%%:*}" ]; then
+  rest=\${FM_FAKE_NS_STAT#*:}
+  case "\$2" in
+    %u) printf '%s\n' "\${rest%%:*}"; exit 0 ;;
+    %a) printf '%s\n' "\${rest#*:}"; exit 0 ;;
+  esac
+fi
+exec "$real_stat" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/id" "$case_dir/fakebin/stat"
+}
+
+herdr_lock_ns_path_state() {  # <path>
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    # A fixed, known path: ls is the portable way to read mode and numeric owner.
+    # shellcheck disable=SC2012
+    ls -ldn "$1" 2>/dev/null | awk '{print $1, $3, $4}'
+  else
+    printf 'absent'
+  fi
+}
+
+run_herdr_lock_ns_teardown() {  # <case-dir> <fake-uid> [stat-spec]
+  local case_dir=$1 fake_uid=$2 stat_spec=${3:-} rc=0
+  FM_FAKE_ACCOUNT_UID="$fake_uid" FM_FAKE_NS_STAT="$stat_spec" \
+    FM_FAKE_HERDR_LOG="$case_dir/herdr.log" FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  return "$rc"
+}
+
+new_herdr_lock_ns_case() {  # <name>
+  local case_dir
+  case_dir=$(make_case "$1")
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  configure_herdr_lock_ns_shims "$case_dir"
+  : > "$case_dir/herdr.log"
+  : > "$case_dir/state/task-x1.status"
+  printf '%s' "$case_dir"
+}
+
+assert_herdr_lock_ns_refused() {  # <case-dir> <label>
+  local case_dir=$1 label=$2
+  assert_grep "presentation lock could not be resolved" "$case_dir/stderr" \
+    "$label: the namespace refusal was not explained visibly"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "$label: refusal erased the durable endpoint metadata"
+  [ -d "$case_dir/wt" ] || fail "$label: refusal removed the isolated copy"
+  [ ! -e "$case_dir/closed" ] || fail "$label: refusal attempted a pane close without the lock"
+}
+
+test_herdr_teardown_presentation_lock_namespace_is_per_account() {
+  local fake_uid own_ns legacy legacy_before legacy_after own_before case_dir rc lock linux_arms=0
+  fake_uid=$(herdr_lock_ns_fake_uid)
+  [ "$fake_uid" != "$(id -u)" ] || fail "herdr-lock-ns: fixture account uid collides with the running account"
+  own_ns="/tmp/firstmate-herdr-presentation-$fake_uid"
+  legacy=/tmp/firstmate-herdr-presentation
+  [ ! -e "$own_ns" ] && [ ! -L "$own_ns" ] \
+    || fail "herdr-lock-ns: fixture namespace $own_ns already exists; refusing to reuse it"
+  printf '%s\n' "$own_ns" >> "$FM_TEST_CLEANUP_REGISTRY"
+  mkdir -m 700 "$own_ns" || fail "herdr-lock-ns: could not stage $own_ns"
+  legacy_before=$(herdr_lock_ns_path_state "$legacy")
+
+  # This account's own name, really owned by another uid, is still refused and
+  # is left exactly as it was.
+  own_before=$(herdr_lock_ns_path_state "$own_ns")
+  case_dir=$(new_herdr_lock_ns_case herdr-lock-ns-foreign-owner)
+  rc=0; run_herdr_lock_ns_teardown "$case_dir" "$fake_uid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "herdr-lock-ns-foreign-owner: teardown adopted a namespace another uid owns"
+  assert_herdr_lock_ns_refused "$case_dir" herdr-lock-ns-foreign-owner
+  [ "$(herdr_lock_ns_path_state "$own_ns")" = "$own_before" ] \
+    || fail "herdr-lock-ns-foreign-owner: refusal changed the foreign-owned namespace: $(herdr_lock_ns_path_state "$own_ns")"
+
+  if [ "$(uname -s)" != Darwin ]; then
+    linux_arms=1
+    # The old shared name is owned by another uid whenever it exists here, as
+    # on a host where a second account created it first; this account's
+    # teardown no longer consults it and completes in its own namespace.
+    case_dir=$(new_herdr_lock_ns_case herdr-lock-ns-other-account)
+    run_herdr_lock_ns_teardown "$case_dir" "$fake_uid" "$own_ns:$fake_uid:700" \
+      || fail "herdr-lock-ns-other-account: teardown was blocked: $(cat "$case_dir/stderr")"
+    [ -e "$case_dir/closed" ] || fail "herdr-lock-ns-other-account: the pane was not closed under the lock"
+    [ ! -e "$case_dir/state/task-x1.meta" ] || fail "herdr-lock-ns-other-account: teardown left the metadata behind"
+    grep -q "teardown task-x1 complete" "$case_dir/stdout" \
+      || fail "herdr-lock-ns-other-account: teardown did not report completion"
+    lock=$(FM_FAKE_ACCOUNT_UID="$fake_uid" FM_FAKE_NS_STAT="$own_ns:$fake_uid:700" \
+      FM_FAKE_HERDR_LOG="$case_dir/herdr.log" FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
+      PATH="$case_dir/fakebin:$PATH" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path default' "$ROOT") \
+      || fail "herdr-lock-ns-other-account: could not resolve the fixture account's lock path"
+    case "$lock" in
+      "$own_ns"/order-*.lock) ;;
+      *) fail "herdr-lock-ns-other-account: the lock is not in this account's namespace: $lock" ;;
+    esac
+
+    # This account's own name with the right owner but the wrong mode is refused.
+    case_dir=$(new_herdr_lock_ns_case herdr-lock-ns-wrong-mode)
+    rc=0; run_herdr_lock_ns_teardown "$case_dir" "$fake_uid" "$own_ns:$fake_uid:755" || rc=$?
+    [ "$rc" -ne 0 ] || fail "herdr-lock-ns-wrong-mode: teardown adopted a namespace that is not mode 700"
+    assert_herdr_lock_ns_refused "$case_dir" herdr-lock-ns-wrong-mode
+    [ -d "$own_ns" ] || fail "herdr-lock-ns-wrong-mode: refusal removed the namespace"
+  fi
+
+  legacy_after=$(herdr_lock_ns_path_state "$legacy")
+  [ "$legacy_after" = "$legacy_before" ] \
+    || fail "herdr-lock-ns: teardown changed the old shared namespace: $legacy_before -> $legacy_after"
+  rm -rf "$own_ns"
+  if [ "$linux_arms" = 1 ]; then
+    pass "herdr teardown takes its lock in a per-account namespace another account cannot block, and still refuses a foreign-owned or wrong-mode one"
+  else
+    pass "herdr teardown refuses a foreign-owned per-account namespace (owner-shim arms need the non-Darwin stat branch; skipped on Darwin)"
+  fi
+}
+
 configure_secondmate_with_herdr_child() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -2810,6 +3116,192 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
   pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
 }
 
+# A task's per-task watcher markers (.seen-<id>_status, .seen-<id>_turn-ended,
+# .hb-surfaced-<id>) and an orphaned presentation journal - one whose pane the
+# close path proved gone without retiring it - must not outlive teardown, while
+# another task's markers and a journal bound to a different pane must.
+seed_watcher_markers() {  # <case-dir> <task-id>
+  local state="$1/state" id=$2
+  printf '0:0\n' > "$state/.seen-${id}_status"
+  printf '0:0\n' > "$state/.seen-${id}_turn-ended"
+  printf '0\n' > "$state/.hb-surfaced-$id"
+}
+
+test_teardown_retires_task_watcher_markers_and_orphan_journal() {
+  local case_dir log closed restored marker
+  case_dir=$(make_case retire-watcher-markers)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  # The projected workspace is already gone before teardown runs, so the close
+  # path cannot match the journal to a live workspace and leaves it behind.
+  : > "$closed"
+  seed_watcher_markers "$case_dir" task-x1
+  seed_watcher_markers "$case_dir" task-y2
+  seed_watcher_markers "$case_dir" task-x1_extra
+  printf '%s\n' 'version=1' 'task_id=task-y2' 'projection_id=ZyXwVuTsRqPoNmLkJiHgFe' \
+    > "$case_dir/state/task-y2.herdr-presentation"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "retire-watcher-markers: teardown failed: $(cat "$case_dir/stderr")"
+  for marker in .seen-task-x1_status .seen-task-x1_turn-ended .hb-surfaced-task-x1 task-x1.herdr-presentation; do
+    assert_absent "$case_dir/state/$marker" "teardown left the torn-down task's $marker behind"
+  done
+  for marker in .seen-task-y2_status .seen-task-y2_turn-ended .hb-surfaced-task-y2 task-y2.herdr-presentation \
+    .seen-task-x1_extra_status .seen-task-x1_extra_turn-ended .hb-surfaced-task-x1_extra; do
+    assert_present "$case_dir/state/$marker" "teardown removed another task's $marker"
+  done
+  pass "teardown retires the task's own watcher markers and orphaned presentation journal, leaving other tasks' markers alone"
+}
+
+test_teardown_retains_journal_bound_to_another_pane() {
+  local case_dir log closed restored
+  case_dir=$(make_case retain-drifted-journal)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  : > "$closed"
+  # A version 2 binding that advanced to a replacement pane the metadata never
+  # recorded may still name a live quarantined space; only the sweep may judge it.
+  printf '%s\n' 'version=2' 'task_id=task-x1' 'projection_id=AbCdEfGhIjKlMnOpQrStUv' \
+    "home=$case_dir" 'session=fmtest' 'workspace_id=w1' 'tab_id=w1:t2' 'pane_id=w1:p9' \
+    'parent_workspace_id=w0' 'parent_label=firstmate' \
+    'workspace_label=└ task-x1 · p:AbCdEfGhIjKlMnOpQrStUv' 'task_label=fm-task-x1' \
+    > "$case_dir/state/task-x1.herdr-presentation"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "retain-drifted-journal: teardown failed: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.herdr-presentation" \
+    "teardown retired a journal bound to a pane it never proved gone"
+  assert_absent "$case_dir/state/task-x1.meta" "retain-drifted-journal: teardown did not complete"
+  assert_grep "retaining herdr presentation journal" "$case_dir/stderr" \
+    "teardown kept the drifted journal without saying why"
+  pass "teardown retains a presentation journal bound to a pane other than the closed endpoint"
+}
+
+# A version 1 attempt journal binds no pane, so proving the recorded task pane
+# gone does not prove its token-bearing projected workspace gone. When the v2
+# bind never landed (RETIRE_CANDIDATE stays 0 because the metadata workspace no
+# longer matches the drifted token workspace), teardown may retire the journal
+# only after the session's workspace list confirms the token workspace is gone;
+# while it is still present the session-start sweep alone owns it.
+configure_herdr_v1_orphan_workspace_case() {  # <case-dir>
+  local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
+  sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w9' \
+    'herdr_tab_id=w1:t2' \
+    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'version=1' \
+    'task_id=task-x1' \
+    "projection_id=$token" > "$case_dir/state/task-x1.herdr-presentation"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "workspace list")
+    if [ "${FM_FAKE_HERDR_WS_MALFORMED:-0}" = 1 ]; then
+      # A non-object entry before a live token-bearing workspace: the token query
+      # is ambiguous, so teardown must treat it as unknown and keep the journal.
+      printf '%s\n' '{"result":{"workspaces":[42,{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false}]}}'
+    elif [ "${FM_FAKE_HERDR_WS_COLLAPSED:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true}]}}'
+    else
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true}]}}'
+    fi
+    ;;
+  "status --json")
+    printf '%s\n' '{"server":{"running":true}}'
+    ;;
+  "session list")
+    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}'
+    ;;
+  "pane close")
+    : > "${FM_FAKE_HERDR_CLOSED:?}"
+    ;;
+  "pane get")
+    printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+    exit 1
+    ;;
+  "agent get")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
+test_teardown_retires_v1_journal_when_projected_workspace_gone() {
+  local case_dir log closed
+  case_dir=$(make_case retire-v1-journal-workspace-gone)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_v1_orphan_workspace_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_WS_COLLAPSED=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "retire-v1-journal-workspace-gone: teardown failed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.herdr-presentation" \
+    "a v1 journal whose token workspace is confirmed gone was not retired"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "retire-v1-journal-workspace-gone: teardown did not complete"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "retire-v1-journal-workspace-gone: teardown must never call workspace close"
+  pass "teardown retires a v1 presentation journal once its token workspace is confirmed gone"
+}
+
+test_teardown_retains_v1_journal_when_projected_workspace_present() {
+  local case_dir log closed
+  case_dir=$(make_case retain-v1-journal-workspace-present)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_v1_orphan_workspace_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "retain-v1-journal-workspace-present: teardown failed: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.herdr-presentation" \
+    "a v1 journal whose token workspace is still present was wrongly retired, stranding the workspace"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "retain-v1-journal-workspace-present: teardown did not complete"
+  assert_grep "retaining herdr presentation journal" "$case_dir/stderr" \
+    "teardown retained the v1 journal without saying why"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "retain-v1-journal-workspace-present: teardown must not escalate to workspace cleanup"
+  pass "teardown retains a v1 presentation journal while its token workspace is still present"
+}
+
+test_teardown_retains_v1_journal_when_workspace_query_ambiguous() {
+  local case_dir log closed
+  case_dir=$(make_case retain-v1-journal-workspace-ambiguous)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_v1_orphan_workspace_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
+
+  # A malformed workspace-list entry makes the token query ambiguous: teardown
+  # cannot prove the token workspace gone, so it must keep the journal.
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_WS_MALFORMED=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "retain-v1-journal-workspace-ambiguous: teardown failed: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.herdr-presentation" \
+    "a v1 journal was retired even though the workspace query was ambiguous"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "retain-v1-journal-workspace-ambiguous: teardown did not complete"
+  assert_grep "retaining herdr presentation journal" "$case_dir/stderr" \
+    "teardown retained the v1 journal without saying why"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "retain-v1-journal-workspace-ambiguous: teardown must not escalate to workspace cleanup"
+  pass "teardown retains a v1 presentation journal when the workspace query is ambiguous"
+}
+
 # --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
 # worker is removed, and Fix 2: reap leaked descendant processes rooted under
 # the task's own worktree/tasktmp - both exercised through the real teardown
@@ -2884,6 +3376,93 @@ land_shippable_commit() {
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+}
+
+# Cleanup keeps the task's no-mistakes pipeline spend in this home's records
+# (bin/fm-pipeline-spend.sh) while the task branch that attributes its runs and
+# the task record still exist, then removes both as before.
+test_teardown_records_the_task_pipeline_spend() {
+  local case_dir rc=0 ledger
+  case_dir=$(make_case pipeline-spend)
+  write_meta "$case_dir" no-mistakes ship
+  : > "$case_dir/config/pipeline-spend"
+  land_shippable_commit "$case_dir"
+  mkdir -p "$case_dir/nm"
+  python3 - "$case_dir/nm/state.sqlite" "$case_dir/project" "$(date +%s)" <<'PY'
+import sqlite3
+import sys
+
+database, project, created = sys.argv[1], sys.argv[2], int(sys.argv[3])
+db = sqlite3.connect(database)
+db.executescript("""
+    CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+    CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                       status TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE agent_invocations (id TEXT, run_id TEXT, purpose TEXT, session_mode TEXT,
+        started_at INTEGER, exit_status TEXT, duration_ms INTEGER, input_tokens INTEGER,
+        output_tokens INTEGER, cache_read_tokens INTEGER, cache_creation_tokens INTEGER,
+        delta_input_tokens INTEGER, delta_output_tokens INTEGER, delta_cache_read_tokens INTEGER);
+""")
+db.execute("INSERT INTO repos VALUES ('r1', ?)", (project,))
+db.execute("INSERT INTO runs VALUES ('01RUN', 'r1', 'fm/task-x1', 'completed', ?)", (created,))
+db.execute("INSERT INTO agent_invocations VALUES ('i1', '01RUN', 'review', 'cold', ?, 'ok', 100, 7, 8, 9, 10, 7, 8, 9)",
+           (created,))
+db.execute("INSERT INTO agent_invocations VALUES ('i2', '01RUN', 'review', 'cold', ?, 'cancelled', 50, "
+           "NULL, NULL, NULL, NULL, NULL, NULL, NULL)", (created + 1,))
+db.commit()
+PY
+  (
+    export NM_HOME="$case_dir/nm" FM_FAKE_AXI_OVERVIEW="repo: $case_dir/project"
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  ) || rc=$?
+
+  expect_code 0 "$rc" "pipeline-spend: teardown should succeed"
+  ledger=$case_dir/data/pipeline-spend.jsonl
+  assert_present "$ledger" "pipeline-spend: teardown left no pipeline spend record"
+  jq -e '
+    .task == "task-x1" and .spawn_gen == "teardown-test-task-x1"
+    and .source == "no-mistakes-state" and .branch == "fm/task-x1"
+    and [.runs[].id] == ["01RUN"]
+    and .total.invocations == 2 and .total.exit == {"ok": 1, "cancelled": 1}
+    and .total.input_tokens == {"total": 7, "unknown": 1}
+  ' "$ledger" >/dev/null || fail "pipeline-spend: the recorded spend is wrong: $(cat "$ledger")"
+  assert_absent "$case_dir/state/task-x1.meta" "pipeline-spend: teardown kept the task record"
+  ! git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "pipeline-spend: teardown kept the task branch"
+  pass "teardown records the task's pipeline spend before removing its branch and record"
+}
+
+test_teardown_skips_pipeline_spend_when_disabled() {
+  local case_dir rc=0
+  case_dir=$(make_case pipeline-spend-disabled)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pipeline-spend-disabled: teardown should succeed"
+  assert_absent "$case_dir/data/pipeline-spend.jsonl" \
+    "pipeline-spend-disabled: teardown created a spend ledger without opt-in"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "pipeline-spend-disabled: teardown kept the task record"
+  pass 'teardown skips all pipeline-spend recording when the home has not opted in'
+}
+
+# An owned ship task whose local copy is already gone still leaves a durable
+# account: the recorder writes an unavailable-source line before the record goes.
+test_teardown_records_unavailable_spend_for_a_gone_worktree() {
+  local case_dir rc=0 ledger
+  case_dir=$(make_case pipeline-spend-gone)
+  write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  : > "$case_dir/config/pipeline-spend"
+  seed_backlog_in_flight "$case_dir"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pipeline-spend-gone: teardown should succeed"
+  ledger=$case_dir/data/pipeline-spend.jsonl
+  assert_present "$ledger" "pipeline-spend-gone: teardown left no pipeline spend record"
+  jq -e '.task == "task-x1" and .source == "unavailable" and .total == null
+    and (.reason | contains("is gone"))' "$ledger" >/dev/null \
+    || fail "pipeline-spend-gone: the recorded spend is wrong: $(cat "$ledger")"
+  assert_absent "$case_dir/state/task-x1.meta" "pipeline-spend-gone: teardown kept the task record"
+  pass "teardown records unavailable pipeline spend for an owned ship task whose copy is gone"
 }
 
 test_parked_own_run_is_aborted_before_teardown() {
@@ -4066,6 +4645,7 @@ test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
@@ -4079,6 +4659,7 @@ test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
+test_herdr_teardown_presentation_lock_namespace_is_per_account
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
@@ -4086,6 +4667,11 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
+test_teardown_retires_task_watcher_markers_and_orphan_journal
+test_teardown_retains_journal_bound_to_another_pane
+test_teardown_retires_v1_journal_when_projected_workspace_gone
+test_teardown_retains_v1_journal_when_projected_workspace_present
+test_teardown_retains_v1_journal_when_workspace_query_ambiguous
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
@@ -4098,8 +4684,12 @@ test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_content_fallback_uses_recorded_base_branch
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_untracked_only_refusal_diagnostic
+test_tracked_edit_refusal_diagnostic
+test_mixed_refusal_diagnostic
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_windowless_legacy_record_with_gone_worktree_tears_down
@@ -4123,6 +4713,9 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_teardown_records_the_task_pipeline_spend
+test_teardown_skips_pipeline_spend_when_disabled
+test_teardown_records_unavailable_spend_for_a_gone_worktree
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_concludes_on_passed_with_override_after_abort
 test_parked_own_run_concludes_on_passed_with_skips_after_abort

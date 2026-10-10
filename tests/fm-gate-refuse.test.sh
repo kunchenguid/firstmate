@@ -185,6 +185,66 @@ test_helper_lab_home_admits() {
   pass "fm-gate-refuse-lib: marked lab home permitted in a gate; unmarked home or an override stay refused"
 }
 
+test_lab_home_private_tmux_socket_survives_deep_paths() {
+  local root=$TMP/deep lab socket_dir ready socket_path depth=0
+  local real_tmux
+  real_tmux=$(command -v tmux) || fail "tmux is required for the lab socket behavioral test"
+  while [ "${#root}" -le 150 ]; do
+    root="$root/long-directory-segment"
+    depth=$((depth + 1))
+  done
+  mkdir -p "$root"
+  lab="$root/lab-home"
+  lab=$("$LABHOME" create "$lab") || fail "could not create lab home under a long path"
+  socket_dir=$("$LABHOME" tmux-dir "$lab") || fail "could not create the lab's private tmux directory"
+  socket_path="$socket_dir/tmux-$(id -u)/fm-lab"
+  ready="$lab/state/primary-started"
+  [ "${#lab}" -gt 120 ] || fail "lab path was not deliberately long enough"
+  [ "${#socket_path}" -lt 60 ] || fail "tmux socket path is not short: $socket_path"
+  local mode owner
+  case "$(uname -s)" in
+    Darwin) mode=$(stat -f '%Lp' "$socket_dir"); owner=$(stat -f '%u' "$socket_dir") ;;
+    *) mode=$(stat -c '%a' "$socket_dir"); owner=$(stat -c '%u' "$socket_dir") ;;
+  esac
+  [ "$mode" = 700 ] || fail "private tmux directory mode is not 0700"
+  [ "$owner" = "$(id -u)" ] || fail "private tmux directory is not owned by the current user"
+  [ "${socket_dir#/tmp/fml.}" != "$socket_dir" ] || fail "socket directory is not under the short /tmp/fml prefix"
+
+  cleanup_deep_lab() {
+    env TMUX_TMPDIR="$socket_dir" "$real_tmux" -L fm-lab kill-server >/dev/null 2>&1 || true
+    "$LABHOME" teardown "$lab" >/dev/null 2>&1 || true
+    fm_test_cleanup
+  }
+  trap cleanup_deep_lab EXIT
+  # shellcheck disable=SC2016 # The fake primary expands $1 in its own sh process.
+  env TMUX_TMPDIR="$socket_dir" "$real_tmux" -L fm-lab -f /dev/null new-session -d -s primary \
+    /bin/sh -c 'printf started > "$1"; exec sleep 60' sh "$ready" \
+    || fail "tmux could not start the fake primary through the lab socket"
+  [ -S "$socket_path" ] || fail "tmux did not create its socket in the private short directory"
+  local attempts=0
+  while [ ! -f "$ready" ] && [ "$attempts" -lt 20 ]; do sleep 0.05; attempts=$((attempts + 1)); done
+  [ -f "$ready" ] || fail "fake primary did not start"
+  env TMUX_TMPDIR="$socket_dir" "$real_tmux" -L fm-lab has-session -t primary \
+    || fail "primary session is not reachable through the lab's TMUX_TMPDIR"
+  if "$LABHOME" teardown "$lab" >/dev/null 2>&1; then
+    fail "lab teardown removed the directory while its server was running"
+  fi
+  [ -d "$socket_dir" ] || fail "refused active-server teardown removed the socket directory"
+  env TMUX_TMPDIR="$socket_dir" "$real_tmux" -L fm-lab kill-server \
+    || fail "could not stop the isolated lab tmux server"
+  mkdir -p "$TMP/failing-tmux-bin"
+  printf '#!/bin/sh\necho "tmux: probe failed" >&2\nexit 1\n' > "$TMP/failing-tmux-bin/tmux"
+  chmod +x "$TMP/failing-tmux-bin/tmux"
+  if PATH="$TMP/failing-tmux-bin:$PATH" "$LABHOME" teardown "$lab" >/dev/null 2>&1; then
+    fail "lab teardown removed the directory when its tmux probe failed"
+  fi
+  [ -d "$socket_dir" ] || fail "failed-probe teardown removed the socket directory"
+  "$LABHOME" teardown "$lab" || fail "lab tmux directory teardown failed"
+  [ ! -e "$socket_dir" ] || fail "lab teardown left the private tmux directory behind"
+  trap fm_test_cleanup EXIT
+  pass "fm-lab-home: a primary starts on a private short tmux socket from a long lab path and teardown removes it"
+}
+
 test_lab_home_helper() {
   local lab populated unlistable newline out rc
   # create on an absent path mints the marker and the stock layout.
@@ -472,6 +532,7 @@ test_helper_path_backstop_refuses
 test_helper_normal_is_noop
 test_helper_lab_home_admits
 test_lab_home_helper
+test_lab_home_private_tmux_socket_survives_deep_paths
 test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
