@@ -364,8 +364,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     (prov($p; $lane) != null and (["known", "partial"] | index(prov($p; $lane).quotaSemantics.status)) != null);
   def applicable($p; $lane; $m):
     (bare($m)) as $bare |
+    quota_wide_scope($p; $m; rows($p; $lane)) as $wide |
     [rows($p; $lane)[] | select(
-      .scope == "all_models" or .scope == "all_products" or
+      .scope == $wide or .scope == "all_products" or
       ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
     )];
   def floor_state($f; $p; $lane):
