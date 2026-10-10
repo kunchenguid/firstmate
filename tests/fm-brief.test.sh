@@ -294,6 +294,103 @@ ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
 
+test_worker_briefs_include_post_merge_verification_and_decision_context() {
+  local home id brief base_brief
+  home="$TMP_ROOT/post-merge-rules-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR; do
+    id="brief-post-merge-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode brief scaffold failed"
+    brief="$home/data/$id/brief.md"
+    assert_grep "You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly state the captain has authorized you to merge; (b) the captain gave you the word to merge in this conversation." "$brief" \
+      "$mode brief must grant a worker merge only under the captain's explicit authorization"
+    assert_grep "Firstmate's own word is not authorization and never justifies a merge." "$brief" \
+      "$mode brief must state that firstmate's word is not merge authorization"
+    assert_grep "If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first." "$brief" \
+      "$mode brief must require asking, not guessing, when merge authority is unclear"
+    assert_grep "(i) verify in a disposable copy that the branch merges without conflicts into the default branch" "$brief" \
+      "$mode brief must require the conflict-free merge check against the PR target"
+    assert_grep "(ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of the default branch" "$brief" \
+      "$mode brief must test the merged tree against the target's baseline"
+    assert_grep "(iii) end-to-end test and recalculate the target feature on the merged tree" "$brief" \
+      "$mode brief must verify functionality after merge"
+    assert_grep "(iv) if any of the mandatory post-merge steps fails after the merge, revert to the state before the merge and report the failure" "$brief" \
+      "$mode brief must require rollback and reporting on any post-merge verification failure"
+    assert_no_grep "if step (iii) fails" "$brief" \
+      "$mode brief must not limit rollback to step (iii) alone"
+    assert_grep "report the PR and stop there, awaiting authorization" "$brief" \
+      "$mode brief must default to reporting the PR and awaiting authorization"
+    assert_no_grep "You are finished" "$brief" \
+      "$mode brief must not blanket-stop an authorized worker before the merge checks"
+    assert_no_grep "Never merge a PR" "$brief" "$mode brief must not forbid all worker merges"
+    # The terminal report must wait for the post-merge verification or the
+    # rollback to produce its result: the terminal done starts the landing poll,
+    # and the cleanup that follows landing terminates the worker and reclaims
+    # its copy, so a pre-merge done could never report or roll back a failure.
+    assert_grep "do not append a terminal \`done:\` line before merging" "$brief" \
+      "$mode brief must forbid the terminal done before the merge"
+    if [ "$mode" = direct-PR ]; then
+      assert_grep "done [at=<epoch>]: PR {url} verified on landed main" "$brief" \
+        "$mode brief must pin the post-verification terminal done shape"
+    else
+      assert_grep "done [at=<epoch>]: PR {url} checks green; post-merge verification passed on landed main" "$brief" \
+        "$mode brief must keep the checks-green token on the post-verification terminal line so the named-head gate fires"
+    fi
+    assert_grep "blocked [key=merge-rolled-back] until {ISO8601Z}: PR {url} was merged then reverted after post-merge verification failed - the change is NOT landed; {one-line cause and the post-rollback head}" "$brief" \
+      "$mode brief must pin the non-terminal rollback report shape"
+    assert_no_grep "done [at=<epoch>]: PR {url} rolled back" "$brief" \
+      "$mode brief must not report a rollback as a done line"
+    assert_grep 'read as "delivered and landed"' "$brief" \
+      "$mode brief must explain why a rollback cannot be a done line"
+    assert_grep "starts the landing poll" "$brief" \
+      "$mode brief must state why the terminal done waits for verification"
+    assert_no_grep "Then append \`done [at=<epoch>]: PR {url}" "$brief" \
+      "$mode brief must not order the terminal done before the merge"
+    if [ "$mode" = direct-PR ]; then
+      assert_grep "working [at=<epoch>]: PR {url} opened; merge authorized; post-merge verification in progress" "$brief" \
+        "$mode brief must render the pre-merge non-terminal report"
+    else
+      assert_grep "working [at=<epoch>]: PR {url} checks green; merge authorized; post-merge verification in progress" "$brief" \
+        "$mode brief must render the pre-merge non-terminal report"
+    fi
+  done
+
+  # A named PR base must be the branch the mandatory checks validate against, so
+  # a release/x PR is tested against release/x rather than the repository default.
+  for mode in no-mistakes direct-PR; do
+    id="brief-base-branch-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" --base-branch release/x >/dev/null 2>&1 \
+      || fail "$mode base-branch brief scaffold failed"
+    base_brief="$home/data/$id/brief.md"
+    assert_grep "(i) verify in a disposable copy that the branch merges without conflicts into the branch this PR targets (its base branch \`release/x\`)" "$base_brief" \
+      "$mode brief must merge-check against the PR's base branch"
+    assert_grep "(ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of that same base branch" "$base_brief" \
+      "$mode brief must baseline against the PR's base branch"
+  done
+
+  for kind in scout secondmate; do
+    id="brief-decision-context-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null 2>&1 \
+        || fail "scout brief scaffold failed"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 \
+        || fail "secondmate charter scaffold failed"
+    fi
+    brief="$home/data/$id/brief.md"
+    if [ "$kind" = scout ]; then
+      assert_grep 'background and each option with its consequence' "$brief" \
+        "$kind brief must require decision background and option consequences"
+    else
+      assert_grep 'consequence of each option' "$brief" \
+        "$kind brief must require decision background and option consequences"
+    fi
+    assert_no_grep 'summary of options' "$brief" "$kind brief must not retain the underspecified decision template"
+  done
+  pass "fm-brief.sh: worker merge authority, post-merge checks, rollback, and decision context render in all briefs"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -301,7 +398,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-direct-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
+  assert_grep "otherwise the configured merge authority decides and firstmate relays the outcome" "$brief" \
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
@@ -1472,6 +1569,7 @@ test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
+test_worker_briefs_include_post_merge_verification_and_decision_context
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection

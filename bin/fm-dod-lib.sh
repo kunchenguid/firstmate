@@ -190,23 +190,23 @@ fm_brief_base_branches() {  # <brief>
 
 fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-}
-  local branch=${3:-fm/$id} target='the default branch'
+  local branch=${3:-fm/$id} target='the default branch' merge_target='the default branch' baseline_target='the default branch'
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_ship_rule_one || return 1
-  [ -z "$base" ] || target="the base branch \`$base\` or the default branch"
+  [ -z "$base" ] || { target="the base branch \`$base\` or the default branch"; merge_target="the branch this PR targets (its base branch \`$base\`)"; baseline_target="that same base branch"; }
   if [ "$forge" = gerrit ]; then
     printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
     return 0
   fi
   case "$mode" in
     direct-PR)
-      printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). Never merge a PR."
+      printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly state the captain has authorized you to merge; (b) the captain gave you the word to merge in this conversation. Firstmate's own word is not authorization and never justifies a merge. If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first. Once you are authorized to merge, these four steps are mandatory: (i) verify in a disposable copy that the branch merges without conflicts into $merge_target; (ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of $baseline_target; (iii) end-to-end test and recalculate the target feature on the merged tree; (iv) if any of the mandatory post-merge steps fails after the merge, revert to the state before the merge and report the failure."
       ;;
     local-only)
       printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
       ;;
     no-mistakes)
-      printf '%s\n' "1. Never push to $target. Never merge a PR."
+      printf '%s\n' "1. Never push to $target. You may merge only your own task's PR, and only when one of these holds: (a) this task's instructions explicitly state the captain has authorized you to merge; (b) the captain gave you the word to merge in this conversation. Firstmate's own word is not authorization and never justifies a merge. If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first. Once you are authorized to merge, these four steps are mandatory: (i) verify in a disposable copy that the branch merges without conflicts into $merge_target; (ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of $baseline_target; (iii) end-to-end test and recalculate the target feature on the merged tree; (iv) if any of the mandatory post-merge steps fails after the merge, revert to the state before the merge and report the failure."
       ;;
     *)
       echo "error: fm_ship_rule_one: unknown delivery mode '$mode'" >&2
@@ -467,12 +467,18 @@ Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft$pr_base.
-Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
-A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
+Before you report the PR, read it back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
+A draft cannot be merged, so a report on one leaves the merge unasked.
+You may merge the PR only when this task's instructions explicitly state the captain has authorized you to merge or the captain gave you the word to merge in this conversation; firstmate's own word is not authorization. When that authorization holds, continue to perform Rule 1's mandatory post-merge verification, merge the PR, and report the merge; otherwise the configured merge authority decides and firstmate relays the outcome, and you report the PR and stop there, awaiting authorization. If you cannot tell whether you are authorized, do not guess, do not merge, and append a needs-decision asking first.
+When you are not authorized to merge, that report is the terminal \`done [at=<epoch>]: PR {url}\`; you never merge, so no verification is interrupted.
+When you are authorized to merge, do not append a terminal \`done:\` line before merging: report the PR with a non-terminal line, \`working [at=<epoch>]: PR {url} opened; merge authorized; post-merge verification in progress\`, then perform Rule 1's mandatory post-merge verification and merge the PR.
+Append the terminal \`done [at=<epoch>]: PR {url} verified on landed main\` line only after every mandatory post-merge verification step passes.
+If any mandatory post-merge step fails, revert to the state before the merge and report it with \`blocked [key=merge-rolled-back] until {ISO8601Z}: PR {url} was merged then reverted after post-merge verification failed - the change is NOT landed; {one-line cause and the post-rollback head}\` instead of a \`done:\` line.
+A \`done:\` line is read as "delivered and landed", while a rollback is the opposite, so the two cannot share a line: the rollback is reported as \`blocked\` so the task stays open for firstmate.
+The terminal \`done:\` line starts the landing poll, and the cleanup that follows landing terminates you and reclaims your copy, so it must wait until the post-merge verification has produced its result.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+Do NOT run /no-mistakes.
 EOF
       ;;
     local-only:*)
@@ -503,9 +509,15 @@ EOF
       cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
-A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
-That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
+A draft cannot be merged, so a report on one leaves the merge unasked.
+You may merge the PR only when this task's instructions explicitly state the captain has authorized you to merge or the captain gave you the word to merge in this conversation; firstmate's own word is not authorization. When that authorization holds, continue to perform Rule 1's mandatory post-merge verification, merge the PR, and report the merge; otherwise the configured merge authority decides and firstmate relays the outcome, and you report the PR and stop there, awaiting authorization. If you cannot tell whether you are authorized, do not guess, do not merge, and append a needs-decision asking first.
+When you are not authorized to merge, that report is the terminal \`done [at=<epoch>]: PR {url} checks green\`; you never merge, so no verification is interrupted.
+When you are authorized to merge, do not append a terminal \`done:\` line before merging: report the PR with a non-terminal line, \`working [at=<epoch>]: PR {url} checks green; merge authorized; post-merge verification in progress\`, then perform Rule 1's mandatory post-merge verification and merge the PR.
+Append the terminal \`done [at=<epoch>]: PR {url} checks green; post-merge verification passed on landed main\` line only after every mandatory post-merge verification step passes.
+If any mandatory post-merge step fails, revert to the state before the merge and report it with \`blocked [key=merge-rolled-back] until {ISO8601Z}: PR {url} was merged then reverted after post-merge verification failed - the change is NOT landed; {one-line cause and the post-rollback head}\` instead of a \`done:\` line.
+A \`done:\` line is read as "delivered and landed", while a rollback is the opposite, so the two cannot share a line; the post-verification terminal line keeps \`checks green\` so the existing check that this head exists outside the worker copy still fires.
+The terminal \`done:\` line starts the landing poll, and the cleanup that follows landing terminates you and reclaims your copy, so it must wait until the post-merge verification has produced its result.
+That \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 EOF
       ;;
