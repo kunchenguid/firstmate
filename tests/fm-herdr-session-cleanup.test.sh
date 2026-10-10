@@ -98,6 +98,9 @@ fixture_workspaces() {
   if [ -e "$FIXTURE_DIR/duplicate-token" ]; then
     printf ',{"workspace_id":"w3","label":"└ copy · p:%s","focused":false,"active_tab_id":"w3:t1","tab_count":1,"pane_count":1}' "$TOKEN"
   fi
+  if [ -e "$FIXTURE_DIR/unlabeled-live" ]; then
+    printf ',{"workspace_id":"wNoLabel","label":null,"focused":false,"active_tab_id":"wNoLabel:t1","tab_count":1,"pane_count":1}'
+  fi
   printf ']'
 }
 
@@ -202,6 +205,15 @@ write_v1() { # <id> [token]
   } > "$FM_STATE_OVERRIDE/$id.herdr-presentation"
 }
 
+write_task_v2() { # <id> <token> <workspace>
+  local id=$1 token=$2 ws=$3
+  {
+    printf 'version=2\ntask_id=%s\nprojection_id=%s\n' "$id" "$token"
+    printf 'home=%s\nsession=test\nworkspace_id=%s\ntab_id=%s:t1\npane_id=%s:p1\n' "$FM_HOME" "$ws" "$ws" "$ws"
+    printf 'parent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=└ %s · p:%s\ntask_label=fm-%s\n' "$id" "$token" "$id"
+  } > "$FM_STATE_OVERRIDE/$id.herdr-presentation"
+}
+
 write_v2() { # <home> <workspace> <tab> <pane>
   local home=$1 workspace=$2 tab=$3 pane=$4
   {
@@ -281,6 +293,88 @@ reset_fixture; : > "$FIXTURE_DIR/error-workspace-get"; assert_preserved "unreada
 reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "revalidation race"
 reset_fixture; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "active target"
 reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
+
+# Regression: a seeded dead v2 journal is pruned; a live journal and an
+# unreferenced v1 journal (liveness cannot be disproved) both survive
+reset_fixture
+printf 'live\n' > "$FIXTURE_DIR/agent"
+write_v1 "dead-v1" "DeadTokV11234567890123"
+write_task_v2 "dead-v2" "DeadTokV21234567890123" wDead
+write_task_v2 "live-v2" "LiveTokV21234567890123" w2
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ -f "$FM_STATE_OVERRIDE/dead-v1.herdr-presentation" ] || fail "unreferenced v1 journal was pruned"
+[ ! -e "$FM_STATE_OVERRIDE/dead-v2.herdr-presentation" ] || fail "seeded dead v2 journal was not pruned"
+[ -f "$FM_STATE_OVERRIDE/live-v2.herdr-presentation" ] || fail "v2 journal bound to a live workspace was pruned"
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "seeded live journal was unexpectedly pruned"
+pass "only a provably dead v2 journal is pruned"
+
+# Regression: a journal bound to a live workspace with no string label survives
+reset_fixture
+: > "$FIXTURE_DIR/unlabeled-live"
+write_task_v2 "live-nolabel" "NoLabel123456789012345" wNoLabel
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ -f "$FM_STATE_OVERRIDE/live-nolabel.herdr-presentation" ] || fail "journal of a live unlabeled workspace was pruned"
+pass "a live workspace without a string label keeps its journal"
+
+# Regression: a dead journal whose spawn lock is held is never pruned
+reset_fixture
+write_task_v2 "dead-busy" "DeadBusy12345678901234" wDead
+mkdir "$FM_STATE_OVERRIDE/.spawn-dead-busy.lock"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ -f "$FM_STATE_OVERRIDE/dead-busy.herdr-presentation" ] || fail "dead journal pruned while its spawn lock was held"
+[ -d "$FM_STATE_OVERRIDE/.spawn-dead-busy.lock" ] || fail "prune released a spawn lock it did not own"
+pass "dead journal under a held spawn lock survives the prune"
+
+# Regression: a full pass completes inside the bound under load with accumulated dead journals
+reset_fixture
+for i in $(seq 1 100); do
+  write_task_v2 "load-$i" "$(printf 'LoadTok%015d' "$i")" "wLoad$i"
+done
+start_secs=$SECONDS
+FM_HERDR_CLEANUP_BUDGET_SECS=20 fm_herdr_session_cleanup >/dev/null 2>&1 || fail "cleanup pass under load failed"
+duration=$((SECONDS - start_secs))
+[ "$duration" -le 20 ] || fail "cleanup pass exceeded 20s bound under load: ${duration}s"
+[ ! -e "$FM_STATE_OVERRIDE/load-1.herdr-presentation" ] || fail "load dead journal was not pruned"
+[ ! -e "$FM_STATE_OVERRIDE/load-100.herdr-presentation" ] || fail "load dead journal was not pruned"
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "positive cleanup did not finish under load"
+pass "full cleanup pass completes inside the bound under load"
+
+# Regression: a pass whose budget expires while reading journals still prunes.
+# Expiry is forced after 10 safe-point checks so the stop is deterministic.
+reset_fixture
+for i in $(seq 1 150); do
+  write_task_v2 "starve-$i" "$(printf 'StarveT%015d' "$i")" "wStarve$i"
+done
+STARVE_CHECKS="$TMP_ROOT/starve-checks"
+: > "$STARVE_CHECKS"
+starve_err=$(
+  # shellcheck disable=SC2329 # invoked indirectly by the cleanup pass.
+  fm_herdr_cleanup_expired() {
+    printf '.\n' >> "$STARVE_CHECKS"
+    [ "$(wc -l < "$STARVE_CHECKS")" -gt 10 ]
+  }
+  fm_herdr_session_cleanup 2>&1 >/dev/null
+) || fail "budget-stopped pass failed"
+left=$(find "$FM_STATE_OVERRIDE" -name 'starve-*.herdr-presentation' | wc -l | tr -d ' ')
+[ "$left" -lt 150 ] || fail "budget-stopped pass pruned nothing"
+[ "$left" -gt 0 ] || fail "forced budget expiry did not stop the pass early"
+case "$starve_err" in *"exceeded budget"*) ;; *) fail "early budget stop was not reported: $starve_err" ;; esac
+pass "a budget-stopped pass still prunes the dead journals it read ($((150 - left)) of 150)"
+
+# Regression: a hung Herdr call cannot hold the script past its wall budget
+reset_fixture
+HANGBIN="$TMP_ROOT/hangbin"
+mkdir -p "$HANGBIN"
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$HANGBIN/herdr"
+chmod +x "$HANGBIN/herdr"
+start_secs=$SECONDS
+hang_err=$(PATH="$HANGBIN:$PATH" FM_HERDR_CLEANUP_BUDGET_SECS=2 \
+  "$ROOT/bin/fm-herdr-session-cleanup.sh" 2>&1 >/dev/null) || fail "bounded cleanup did not exit 0"
+duration=$((SECONDS - start_secs))
+[ "$duration" -le 8 ] || fail "hung Herdr call held cleanup for ${duration}s past a 2s budget"
+case "$hang_err" in *"wall budget"*) ;; *) fail "hard-bound stop was not reported: $hang_err" ;; esac
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "hard-bound stop removed a journal"
+pass "a hung Herdr call is stopped at the wall budget"
 
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"
