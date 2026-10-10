@@ -264,12 +264,14 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
-# transitively above) is the single owner of the max(300, poll+60)
-# derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
+# The liveness beacon is touched once per cycle at the top of the loop, and
+# every second at startup from the moment the singleton lock is claimed until
+# the blocking recovery-marker transitions finish (at most the stall bound
+# below), so a live watcher still starting never reads as a stale holder. A healthy cycle's beacon can
+# legitimately age up to POLL seconds between touches. fm_poll_derived_grace
+# (bin/fm-wake-lib.sh, already sourced transitively above) is the single
+# owner of the max(300, poll+60) derivation - see docs/turnend-guard.md
+# "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
 # POLL is known.
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$POLL")}}
@@ -2488,25 +2490,6 @@ done
 if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
-WATCHER_RECOVERY_PENDING=0
-if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
-  WATCHER_RECOVERY_PENDING=1
-fi
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
-  if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
-    echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
-    exit 1
-  fi
-fi
-if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
-  echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
-  exit 1
-fi
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-  WATCHER_RECOVERY_PENDING=0
-elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
-  WATCHER_RECOVERY_PENDING=1
-fi
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
@@ -2612,6 +2595,71 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# Home-gone exit: a deleted home, state directory, or code root means this
+# watcher's world is gone (a torn-down temporary home or a discarded
+# disposable checkout). Exit with a logged reason rather than writing state
+# into nothing, or into a live home from a checkout that no longer exists.
+# A detached helper this watcher started (home-summary refresh, reconcile)
+# can recreate a deleted state directory before the next poll, so a lock
+# with no holder at all is read as the same teardown: only a fresh watcher
+# ever recreates the lock, and that case is the poll loop's self-eviction.
+# Scoped to this process alone: no other watcher is signalled.
+exit_if_world_gone() {
+  if [ "$WATCH_HOME_EXISTED" -eq 1 ] && [ ! -d "$FM_HOME" ]; then
+    echo "watcher: exiting - home no longer exists: $FM_HOME" >&2
+    exit 1
+  elif [ ! -d "$STATE" ]; then
+    echo "watcher: exiting - state directory no longer exists: $STATE" >&2
+    exit 1
+  elif [ ! -e "$WATCH_LOCK/pid" ]; then
+    echo "watcher: exiting - state directory was torn down (singleton lock removed): $STATE" >&2
+    exit 1
+  elif [ ! -d "$SCRIPT_DIR" ]; then
+    echo "watcher: exiting - code root no longer exists: $SCRIPT_DIR" >&2
+    exit 1
+  fi
+}
+# Keep beating from the moment the lock identity is published until the
+# recovery-marker transitions below finish: they wait on the wake-queue lock a
+# long drain holds, and a live watcher held there must read to a racing arm and
+# the guard as a healthy identity-matched holder, not a stale-heartbeat one.
+# Both the beat and those waits end at the stall bound, so a startup wedged
+# behind a hung holder goes stale and refuses rather than looking supervised.
+# Their refusals keep the stale lock evidence, so they leave without the
+# cleanup trap, unless the state was torn down under the wait.
+STARTUP_BEAT_UNTIL=$((SECONDS + WATCHER_STALL_BOUND))
+( while fm_pid_alive "$WATCHER_PID" && [ "$SECONDS" -lt "$STARTUP_BEAT_UNTIL" ]; do
+    touch "$BEAT"
+    sleep 1
+  done ) </dev/null >/dev/null 2>&1 &
+STARTUP_BEAT_PID=$!
+WATCHER_RECOVERY_PENDING=0
+if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
+  WATCHER_RECOVERY_PENDING=1
+fi
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
+  if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER" "$WATCHER_STALL_BOUND"; then
+    kill "$STARTUP_BEAT_PID" 2>/dev/null || true
+    exit_if_world_gone
+    trap - EXIT
+    echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
+    exit 1
+  fi
+fi
+if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER" "$WATCHER_STALL_BOUND"; then
+  kill "$STARTUP_BEAT_PID" 2>/dev/null || true
+  exit_if_world_gone
+  trap - EXIT
+  echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
+  exit 1
+fi
+kill "$STARTUP_BEAT_PID" 2>/dev/null || true
+wait "$STARTUP_BEAT_PID" 2>/dev/null || true
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  WATCHER_RECOVERY_PENDING=0
+elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
+  WATCHER_RECOVERY_PENDING=1
+fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -2668,7 +2716,8 @@ resurface_after_downtime() {
     return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
-    if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
+    if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER" "$WATCHER_STALL_BOUND"; then
+      exit_if_world_gone
       echo "watcher: recovery state could not be consumed safely" >&2
       exit 1
     fi
@@ -2678,28 +2727,7 @@ resurface_after_downtime() {
 }
 
 while :; do
-  # Home-gone exit: a deleted home, state directory, or code root means this
-  # watcher's world is gone (a torn-down temporary home or a discarded
-  # disposable checkout). Exit with a logged reason rather than writing state
-  # into nothing, or into a live home from a checkout that no longer exists.
-  # A detached helper this watcher started (home-summary refresh, reconcile)
-  # can recreate a deleted state directory before the next poll, so a lock
-  # with no holder at all is read as the same teardown: only a fresh watcher
-  # ever recreates the lock, and that case is the self-eviction below.
-  # Scoped to this process alone: no other watcher is signalled.
-  if [ "$WATCH_HOME_EXISTED" -eq 1 ] && [ ! -d "$FM_HOME" ]; then
-    echo "watcher: exiting - home no longer exists: $FM_HOME" >&2
-    exit 1
-  elif [ ! -d "$STATE" ]; then
-    echo "watcher: exiting - state directory no longer exists: $STATE" >&2
-    exit 1
-  elif [ ! -e "$WATCH_LOCK/pid" ]; then
-    echo "watcher: exiting - state directory was torn down (singleton lock removed): $STATE" >&2
-    exit 1
-  elif [ ! -d "$SCRIPT_DIR" ]; then
-    echo "watcher: exiting - code root no longer exists: $SCRIPT_DIR" >&2
-    exit 1
-  fi
+  exit_if_world_gone
 
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -2740,8 +2768,10 @@ while :; do
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
   # is also what unsticks that mate's foreign wake queue. The tick's single
   # wake exits the cycle like every other wake, so its marker is stamped before
-  # any relaunch and the restarted watcher will not re-probe early.
+  # any relaunch and the restarted watcher will not re-probe early. A state
+  # directory torn down mid-cycle fails these ticks; report it as such.
   secondmate_liveness_tick || {
+    exit_if_world_gone
     echo "watcher: secondmate liveness check failed" >&2
     exit 1
   }
@@ -2750,6 +2780,7 @@ while :; do
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
   # the parent without consuming or rewriting the receiving home's record.
   secondmate_wake_stall_tick || {
+    exit_if_world_gone
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
