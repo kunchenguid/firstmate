@@ -682,6 +682,22 @@ test_matrix_opencode_leftbar_signals() {
   assert_screen "opencode idle on herdr" empty "$CAPS_STYLED" "$dim_screen"
   assert_screen "opencode idle on zellij" empty "$CAPS_STYLED_NOID" "$dim_screen"
   assert_screen "opencode idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  # opencode 2.0.22 (the fleet-installed CLI, captured live in a disposable
+  # lab) renders the mode with its auto-follow marker BEFORE the model:
+  # `Build auto · Muse Spark 1.3 Free OpenCode Zen · xhigh`, not the 1.x
+  # `Build · Model · intensity` form. The old footer rule never matched that
+  # row, so every clean idle 2.x pane read pending and the v2 launch gate
+  # refused each dispatch after its poll budget instead of delivering the
+  # brief. This live idle pane must read empty on every profile.
+  v22_idle=$'  ┃\n  ┃  Ask anything… "What is the tech stack of this project?"\n  ┃\n  ┃  Build auto · Muse Spark 1.3 Free OpenCode Zen · xhigh\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 2.0.22 idle on tmux" empty "$CAPS_TMUX" "$v22_idle" 1
+  assert_screen "opencode 2.0.22 idle on herdr" empty "$CAPS_STYLED" "$v22_idle"
+  assert_screen "opencode 2.0.22 idle on zellij" empty "$CAPS_STYLED_NOID" "$v22_idle"
+  assert_screen "opencode 2.0.22 idle on cmux/orca" empty "$CAPS_PLAIN" "$v22_idle"
+  # The same 2.0.22 footer must never swallow real typed text above it.
+  v22_typed=$'┃\n┃  fix the flaky test please\n┃\n┃  Build auto · Muse Spark 1.3 Free OpenCode Zen · xhigh\n╹▀▀▀▀'
+  assert_screen "opencode 2.0.22 typed on tmux" pending "$CAPS_TMUX" "$v22_typed" 1
+  assert_screen "opencode 2.0.22 typed on plain backends" unknown "$CAPS_PLAIN" "$v22_typed"
   # This sanitized live OpenCode 1.18.30 capture preserves its U+2026 hint and
   # RGB 128 styling. RGB 128 is deliberately outside the ghost threshold, so
   # the placeholder spelling is the independent empty signal. The completed-
