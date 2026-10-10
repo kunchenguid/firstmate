@@ -560,6 +560,44 @@ test_crew_is_provably_working_classifier() {
   pass "crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface"
 }
 
+# crew_is_terminal_done: the positive evidence that a quiet crew is FINISHED
+# rather than possibly wedged. Deliberately reads the RECONCILED state, so a
+# `done:` leftover in the log that fm-crew-state.sh has already overridden with a
+# running pipeline step is not terminal, and every non-done verdict - including an
+# unreadable one and an empty id - stays un-absorbable.
+test_crew_is_terminal_done_classifier() {
+  local dir fakebin
+  dir=$(make_case terminal-done); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  crew_is_terminal_done a || fail "a finished run was not read as terminal done"
+  FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://example.invalid/pull/1'
+  crew_is_terminal_done a || fail "a delivered status log was not read as terminal done"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  ! crew_is_terminal_done a || fail "an active run was read as terminal done"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  ! crew_is_terminal_done a || fail "a parked run was read as terminal done"
+  FM_FAKE_CREW_STATE='state: blocked · source: status-log · blocked: no credential'
+  ! crew_is_terminal_done a || fail "a blocked crew was read as terminal done"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  ! crew_is_terminal_done a || fail "a failed run was read as terminal done"
+  FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell'
+  ! crew_is_terminal_done a || fail "a stopped crew was read as terminal done"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  ! crew_is_terminal_done a || fail "an unknown crew was read as terminal done"
+  FM_FAKE_CREW_STATE='no verdict at all'
+  ! crew_is_terminal_done a || fail "an unreadable verdict was read as terminal done"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  ! crew_is_terminal_done "" || fail "an empty id was read as terminal done"
+  # The absorb vocabulary is unchanged by the split: done is still not an absorb
+  # reason, so no existing caller starts treating a finished crew as working.
+  [ "$(crew_absorb_class a)" = none ] \
+    || fail "terminal done leaked into the absorb classification"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_is_terminal_done: only a reconciled done verdict is terminal, and the absorb vocabulary is unchanged"
+}
+
 # status_is_paused: the shared pause verb test both consumers read (so neither
 # hardcodes the literal). Matches only the verb before the first colon, so a reason
 # that merely mentions "paused" does not false-match, and a genuine blocker stays a
@@ -3986,16 +4024,19 @@ make_hold_home() {  # <name> <status-line> <hold|nohold>
 
 # Launch one watcher against a hold fixture, armed the way parked_watch_round
 # arms one, plus the home the backlog read resolves against. The crew reads
-# stopped: a delivered worker's agent has exited, and that is the population
-# whose alarm the call must bound. The pid lands in HOLD_WATCH_PID rather than on
-# stdout: a command substitution would background the watcher inside a subshell,
-# leaving the caller unable to wait on or reap its own watcher.
+# stopped by default: a delivered worker's agent has exited, and that is the
+# population whose alarm the call must bound. HOLD_CREW_STATE drives that
+# reconciled verdict instead where a case is about what the crew state SAYS -
+# the terminal-delivery bound below turns entirely on it.
+# The pid lands in HOLD_WATCH_PID rather than on stdout: a command substitution
+# would background the watcher inside a subshell, leaving the caller unable to
+# wait on or reap its own watcher.
 HOLD_WATCH_PID=
 hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
-    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_FAKE_CREW_STATE="${HOLD_CREW_STATE:-state: stopped · source: pane · bare shell}" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
@@ -4115,6 +4156,212 @@ test_stale_churn_without_a_captain_call_still_alarms() {
     done
   done
   pass "a stale window with no open captain call keeps alarming on every new hash"
+}
+
+
+# --- delivered work awaiting the captain's merge word ------------------------
+# The third record of a legitimate wait, and the one neither bound above can see.
+# A ship task that finished and appended `done: PR <url>` declared no pause, is no
+# captain-held transfer, and keeps its backlog item In flight until the work
+# lands - so every new pane hash re-alarmed as a possible wedge for the captain's
+# whole deciding time (observed 2026-09-18 on three delivered tasks at once).
+# What marks it instead is the RECONCILED state: fm-crew-state.sh reads the crew
+# as done. The bound rides the captain-relevant branch the worker's own `done:`
+# line routes through; a task whose last line is not captain-relevant keeps the
+# inconclusive-state alarm, which the test below pins.
+test_terminal_delivery_bounds_stale_churn() {
+  local dir state out capture throttle wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (terminal delivery stale bound)"; return 0; }
+  HOLD_CREW_STATE='state: done · source: run-step · checks green'
+  export HOLD_CREW_STATE
+  dir=$(make_hold_home delivered-line 'done: PR https://example.invalid/pull/1 checks green' nohold) \
+    || fail "could not build a delivered-work fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+
+  # The delivery itself must still reach the captain: only repetition is bounded.
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of delivered work did not surface"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "first sight produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
+
+  # The pane churns while the merge word is still owed. Every one of these alarmed.
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "watcher exited during pane churn instead of supervising through it"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] \
+    || fail "pane churn re-alarmed delivered work $wakes time(s) inside the re-surface window"
+
+  # A delivery nobody merged must not rot: the window's end re-surfaces it once.
+  [ -e "$throttle" ] || fail "the absorbed churn recorded no re-surface cadence to elapse"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "delivered work did not re-surface once its re-surface window elapsed"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "elapsed re-surface window produced $wakes wakes instead of one"
+  unset HOLD_CREW_STATE
+  pass "delivered work awaiting the merge word surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+}
+
+
+# The boundary the bound deliberately stops at. A reconciled `done` describes the
+# RUN, not the worker: a task whose own last line is still `working:` while its
+# pipeline finished is an agent that may have died the moment the run completed,
+# which is exactly the inconclusive state the non-terminal stale path exists to
+# surface. So that pane keeps alarming on every new hash, and no re-surface
+# throttle is armed to swallow the next one.
+test_nonterminal_line_with_a_finished_run_still_alarms() {
+  local dir state out capture throttle round wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (non-terminal line with finished run)"; return 0; }
+  HOLD_CREW_STATE='state: done · source: run-step · checks green'
+  export HOLD_CREW_STATE
+  dir=$(make_hold_home done-run-working-line 'working: still tidying the branch' nohold) \
+    || fail "could not build a finished-run fixture with a worker line"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+  round=1
+  while [ "$round" -le 2 ]; do
+    hold_watch_surface "$dir" "$out" "$capture" "idle, elapsed ${round}s" \
+      || fail "an inconclusive stale window stopped alarming on round $round"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "round $round produced $wakes wakes instead of one"
+    [ ! -e "$throttle" ] \
+      || fail "round $round armed a re-surface throttle on an inconclusive stale window"
+    ack_stopped_cycle "$state" || fail "could not acknowledge round $round"
+    round=$((round + 1))
+  done
+  unset HOLD_CREW_STATE
+  pass "a finished run behind a worker's own non-terminal line keeps alarming on every new hash"
+}
+
+
+# The half that decides whether the bound was safe to add. The SAME `done:` line,
+# with a reconciled state that is anything but terminal, must keep alarming on
+# every new hash: a stopped pane may have died mid-work, an unknown one may have
+# lost its worktree, and a failed one is a result the captain has not seen. A
+# bound that read the word done out of the log instead of the crew's state would
+# swallow all three.
+test_undelivered_crew_state_keeps_alarming_on_every_hash() {
+  local verdict name dir state out capture round wakes i
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (non-terminal delivery alarm)"; return 0; }
+  i=0
+  for verdict in \
+    'state: stopped · source: pane · bare shell' \
+    'state: unknown · source: none · worktree gone' \
+    'state: failed · source: run-step · run failed' \
+    'state: working · source: status-log · working: compiling'
+  do
+    i=$((i + 1))
+    name="undelivered-$i"
+    HOLD_CREW_STATE="$verdict"
+    export HOLD_CREW_STATE
+    dir=$(make_hold_home "$name" 'done: PR https://example.invalid/pull/1 checks green' nohold) \
+      || fail "[$name] could not build a non-terminal fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    round=1
+    while [ "$round" -le 2 ]; do
+      hold_watch_surface "$dir" "$out" "$capture" "idle, elapsed ${round}s" \
+        || fail "[$name] a non-terminal stale window stopped alarming on round $round ($verdict)"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] \
+        || fail "[$name] round $round produced $wakes wakes instead of one ($verdict)"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
+      round=$((round + 1))
+    done
+  done
+  unset HOLD_CREW_STATE
+  pass "a stale window whose reconciled state is not terminal keeps alarming on every new hash"
+}
+
+
+# The other direction of the same precedence, and the reason the bound needs both
+# halves. bin/fm-crew-state.sh lets a PASSED run supersede the log, so a worker
+# that appended `needs-decision:`, `blocked:` or `failed:` after its run finished
+# reconciles to `state: done` while having delivered nothing. Reading the
+# reconciled state alone would absorb those panes for the whole re-surface window
+# and label them a delivery awaiting the merge word. The task's own last verb
+# must therefore be `done` too, so a declared decision or failure keeps alarming
+# on every new hash and is never recorded as delivered work.
+test_superseded_decision_or_failure_is_not_a_delivery() {
+  local line name dir state out capture round wakes i
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (superseded decision alarm)"; return 0; }
+  i=0
+  HOLD_CREW_STATE='state: done · source: run-step · checks green · status-log superseded (run done)'
+  export HOLD_CREW_STATE
+  for line in \
+    'needs-decision: open the PR against main or release?' \
+    'blocked: cannot reach the release host' \
+    'failed: cannot satisfy the review without a redesign'
+  do
+    i=$((i + 1))
+    name="superseded-$i"
+    dir=$(make_hold_home "$name" "$line" nohold) \
+      || fail "[$name] could not build a superseded-log fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    round=1
+    while [ "$round" -le 2 ]; do
+      hold_watch_surface "$dir" "$out" "$capture" "idle, elapsed ${round}s" \
+        || fail "[$name] a superseded $line window stopped alarming on round $round"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] \
+        || fail "[$name] round $round produced $wakes wakes instead of one ($line)"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
+      round=$((round + 1))
+    done
+    [ ! -e "$state/.paused-resurfaced-$(hold_key)" ] \
+      || fail "[$name] a superseded $line armed the delivery re-surface cadence"
+    ! grep -F 'terminal delivery awaiting' "$state/.watch-triage.log" >/dev/null 2>&1 \
+      || fail "[$name] a pane that delivered nothing was recorded as a delivery: $(cat "$state/.watch-triage.log")"
+  done
+  unset HOLD_CREW_STATE
+  pass "a decision or failure a passed run superseded keeps alarming and is never recorded as a delivery"
+}
+
+
+# Order between the two bounds, pinned by the one behavior that can tell them
+# apart. A delivered task that is ALSO under an open captain call keeps the call's
+# own lifecycle scope: answering and re-holding it is a second, distinct call with
+# no status append, and it must alarm again. Were the delivery bound to take that
+# window first, the second call would inherit the first one's silence - the one
+# alarm these bounds must never swallow.
+test_captain_call_scope_survives_a_terminal_delivery() {
+  local dir state out capture wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (call scope over delivery)"; return 0; }
+  HOLD_CREW_STATE='state: done · source: run-step · checks green'
+  export HOLD_CREW_STATE
+  dir=$(make_hold_home reheld-delivered 'done: PR https://example.invalid/pull/1 checks green' hold) \
+    || fail "could not build a captain-held delivered fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of the held delivery did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first call's surface"
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 1 \
+    || fail "the held delivery's churn was not absorbed"
+  [ "$(hold_stale_wakes "$state")" -eq 0 ] \
+    || fail "the held delivery's churn re-alarmed inside its own window"
+
+  printf 'go ahead\n' > "$dir/decision.txt"
+  run_hold "$dir" answer held-merge --decision-file "$dir/decision.txt" --release \
+    || fail "could not record the captain's answer"
+  run_hold "$dir" hold held-merge --reason 'awaiting the captain a second time' \
+    || fail "could not re-hold the task as a second captain call"
+
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 3s' \
+    || fail "the second captain call inherited the delivery bound's silence"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "the second captain call on delivered work produced $wakes first wakes instead of one"
+  unset HOLD_CREW_STATE
+  pass "an open captain call keeps its own re-surface scope on work that is also terminally delivered"
 }
 
 
@@ -6494,6 +6741,50 @@ test_backlog_hold_never_rechecked_while_away_record_exists() {
   pass "a delivery the captain already holds is never rechecked while the away-posture record exists"
 }
 
+# The boundary of that away silence. A HELD delivery may go absolutely quiet
+# because bin/fm-afk-return.sh reprints its backlog hold row under "Waiting on
+# you", so the recheck is owed in full on return. A delivery bounded only by its
+# reconciled terminal-done state has no hold row and appears in no section of
+# that brief, so the away record must not silence it outright: it keeps the
+# ordinary re-surface cadence, alarming on first sight and again once the window
+# elapses, which is the only record that the delivery is still unmerged.
+test_terminal_delivery_keeps_its_cadence_under_the_away_record() {
+  local dir state out capture throttle wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (away-record terminal delivery)"; return 0; }
+  HOLD_CREW_STATE='state: done · source: run-step · checks green'
+  export HOLD_CREW_STATE
+  dir=$(make_hold_home away-record-terminal-delivery 'done: PR https://example.test/pr/11 checks green' nohold) \
+    || fail "could not build an unheld delivered-work fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+  write_away_record "$state"
+
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of an unheld delivery did not surface under the away-posture record"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "the away-posture record swallowed the first sight of an unheld delivery ($wakes wakes)"
+  [ -e "$throttle" ] \
+    || fail "the away-posture first sight armed no re-surface cadence, so the next hash would alarm again"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the away-posture first surface"
+
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "watcher exited while churning an unheld delivery under the away-posture record: $(cat "$out")"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] \
+    || fail "pane churn re-alarmed an away-window delivery $wakes time(s) inside its re-surface window"
+
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "an unmerged delivery did not re-surface once its window elapsed under the away-posture record"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "the elapsed away-window re-surface produced $wakes wakes instead of one"
+  unset HOLD_CREW_STATE
+  pass "a delivery bounded only by its terminal-done state keeps the ordinary re-surface cadence while the away-posture record exists"
+}
+
 test_afk_one_shot_never_hands_off_captain_held_under_away_record() {
   local dir state fakebin out capture_file statusf window key sig pid
   dir=$(make_case away-record-held-afk-oneshot); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6619,6 +6910,7 @@ test_stale_is_terminal_classifier
 test_classifier_primitives
 test_unrecognized_status_prefix_is_visible
 test_crew_is_provably_working_classifier
+test_crew_is_terminal_done_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_crew_worktree_written_since_classifier
@@ -6712,6 +7004,11 @@ test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
+test_terminal_delivery_bounds_stale_churn
+test_nonterminal_line_with_a_finished_run_still_alarms
+test_undelivered_crew_state_keeps_alarming_on_every_hash
+test_superseded_decision_or_failure_is_not_a_delivery
+test_captain_call_scope_survives_a_terminal_delivery
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode
@@ -6746,6 +7043,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale
 test_captain_held_never_rechecked_while_away_record_exists
 test_live_captain_held_first_sight_silenced_by_away_record
 test_backlog_hold_never_rechecked_while_away_record_exists
+test_terminal_delivery_keeps_its_cadence_under_the_away_record
 test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
