@@ -1562,7 +1562,11 @@ handle_wake() {  # <reason> <state>
                 *) arg="${reason#signal: }" ;;
               esac
               decision=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$arg" "$state") ;;
-    stale:*" (unread firstmate instruction: stuck-busy "*|stale:*" (steering-inbox busy bookkeeping unwritable: "*)
+    # The parked-run reason is the watcher's own crew-state verdict (its
+    # parked_gate_notice): classify_stale reads only the status log, where that
+    # pane is a declared pause, so classifying it again would absorb the one
+    # wake that says the pause no longer holds.
+    stale:*" (unread firstmate instruction: stuck-busy "*|stale:*" (steering-inbox busy bookkeeping unwritable: "*|stale:*" (declared pause on a parked run - "*)
               decision="escalate|${reason#stale: }" ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac

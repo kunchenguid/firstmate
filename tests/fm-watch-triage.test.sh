@@ -620,6 +620,49 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+# crew_line_parked_gate: the pure reading of one current-state line as a run
+# parked at a gate, and who owes the gate its answer. Only the minted ask-user
+# component, compared as a whole component, makes the owner a human: a gate
+# name or a finding detail that merely contains those words must not, because a
+# human-owned verdict wakes firstmate and a worker-owned one does not.
+test_crew_line_parked_gate_classifier() {
+  local tab gate
+  tab=$(printf '\t')
+  gate=$(crew_line_parked_gate 'state: parked · source: run-step · parked at fix_review: 1 finding(s) · run: 01RUNGATE') \
+    || fail "a parked run-step line was not read as a parked gate"
+  [ "$gate" = "worker${tab}01RUNGATE" ] || fail "a gate with no ask-user finding is the worker's to answer, got: $gate"
+  gate=$(crew_line_parked_gate 'state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision · run: 01RUNGATE') \
+    || fail "a parked ask-user line was not read as a parked gate"
+  [ "$gate" = "human${tab}01RUNGATE" ] || fail "an ask-user gate is owed by a human, got: $gate"
+  gate=$(crew_line_parked_gate 'state: parked · source: run-step · parked at awaiting_agent · run: 01RUNGATE · ask-user: authority decision') \
+    || fail "component order changed whether a line is a parked gate"
+  [ "$gate" = "human${tab}01RUNGATE" ] || fail "the owner depended on component order, got: $gate"
+  gate=$(crew_line_parked_gate 'state: parked · source: run-step · parked at review: note says ask-user: authority decision pending · run: 01RUNGATE') \
+    || fail "a parked line with a wordy detail was not read as a parked gate"
+  [ "$gate" = "worker${tab}01RUNGATE" ] || fail "words inside another component minted a human owner, got: $gate"
+  gate=$(crew_line_parked_gate 'state: parked · source: run-step · parked at fix_review: 1 finding(s)') \
+    || fail "a parked line with no run id was not read as a parked gate"
+  [ "$gate" = "worker${tab}" ] || fail "a line with no run id should carry an empty one, got: $gate"
+  gate=$(crew_line_parked_gate 'state: parked · source: run-step · parked at fix_review · run: 01RUN GATE') \
+    || fail "a parked line with a spaced run id was not read as a parked gate"
+  [ "$gate" = "worker${tab}" ] || fail "a run id holding whitespace was passed on, got: $gate"
+  crew_line_parked_gate 'state: working · source: run-step · validating (running) · run: 01RUNGATE' >/dev/null \
+    && fail "an executing run was read as parked"
+  crew_line_parked_gate 'state: parked · source: status-log · parked: waiting · ask-user: authority decision' >/dev/null \
+    && fail "a parked verdict that is not a run step was read as a parked gate"
+  crew_line_parked_gate 'state: paused · source: status-log · awaiting upstream' >/dev/null \
+    && fail "a declared pause was read as a parked gate"
+  crew_line_parked_gate 'state: unknown · source: none · worktree gone' >/dev/null \
+    && fail "an unknown verdict was read as a parked gate"
+  crew_line_parked_gate '' >/dev/null && fail "an empty line was read as a parked gate"
+  [ "$(crew_line_absorb_class 'state: parked · source: run-step · parked at fix_review: 1 finding(s) · run: 01RUNGATE')" = none ] \
+    || fail "a parked gate must never be absorbable as working or paused"
+  [ "$(crew_line_absorb_class 'state: working · source: run-step · validating (running)')" = working ] \
+    || fail "the line classifier disagrees with crew_absorb_class about an executing run"
+  [ "$(crew_line_absorb_class '')" = none ] || fail "an empty line was classed absorbable"
+  pass "crew_line_parked_gate: only a parked run step is a gate, and only the minted ask-user component makes a human its owner"
+}
+
 # The wedge detector's third liveness input: writes inside the crew's own recorded
 # worktree. Every negative outcome must report "no evidence" so the caller keeps
 # its existing escalation schedule, and a supervisor-side git read (which touches
@@ -6316,6 +6359,222 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- away mode: a declared pause on a parked run is not handed off as a pause --
+# The daemon classifies a stale `paused:` pane from the status log alone, so it
+# cannot see a run park behind that declaration, and a worker that already ended
+# its turn never changes its pane again to earn a second handoff. The watcher
+# therefore keeps reading a `paused:` pane's current state in this posture too:
+# the worker is pointed at its gate through its steering inbox either way, and
+# only an ask-user gate is handed to the daemon, under a reason the daemon does
+# not classify as a pause.
+PARKED_GATE_WORKER='state: parked · source: run-step · parked at fix_review: 1 finding(s) · run: 01RUNAFK'
+PARKED_GATE_HUMAN='state: parked · source: run-step · parked at fix_review: 1 finding(s) · ask-user: authority decision · run: 01RUNAFK'
+
+# A pane this posture already handed off once: same hash, stale suppressor set,
+# so nothing but the parked-gate read can produce a wake.
+afk_parked_fixture() {  # <name> -> echoes case dir
+  local dir state window key statusf
+  dir=$(make_case "$1"); state="$dir/state"
+  window="test:fm-afk-parked"
+  statusf="$state/afk-parked.status"
+  printf 'idle after declaring the wait\n' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/afk-parked.meta"
+  printf 'paused: waiting for no-mistakes run 01RUNAFK; next status check no sooner than 10 minutes\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-afk-parked_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  printf '%s' "$(hash_text 'idle after declaring the wait')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$(hash_text 'idle after declaring the wait')" > "$state/.stale-$key"
+  date '+%s' > "$state/.afk"
+  printf '%s\n' "$dir"
+}
+
+afk_parked_watch() {  # <case-dir> <crew-state-line>
+  PATH="$1/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-afk-parked" FM_FAKE_TMUX_CAPTURE="$1/pane.txt" \
+    FM_FAKE_CREW_STATE="$2" FM_STATE_OVERRIDE="$1/state" FM_CREW_STATE_BIN="$1/fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_TASK_INBOX_GRACE_SECS=999999 "$WATCH" > "$1/watch.out" 2>/dev/null &
+}
+
+afk_parked_records() {  # <case-dir> -> count of steering records written
+  find "$1/state/afk-parked.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' '
+}
+
+test_afk_declared_pause_on_an_ask_user_gate_is_handed_off_as_a_gate() {
+  local dir state out drain_out pid window="test:fm-afk-parked"
+  dir=$(afk_parked_fixture afk-parked-ask-user); state="$dir/state"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  afk_parked_watch "$dir" "$PARKED_GATE_HUMAN"
+  pid=$!
+  wait_for_exit "$pid" 300 \
+    || fail "an already handed-off paused pane whose run parked on an ask-user finding was never handed off again"
+  grep -F "stale: $window (declared pause on a parked run - " "$out" >/dev/null \
+    || fail "the handoff did not say the pause sits on a parked run: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the parked-run handoff failed"
+  [ "$(grep -c "$(printf '\tstale\t')" "$drain_out")" = 1 ] \
+    || fail "the parked run should be queued as exactly one stale wake: $(cat "$drain_out")"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F 'declared pause on a parked run' >/dev/null \
+    || fail "the queued wake lost the parked-run reason: $(cat "$drain_out")"
+  [ "$(afk_parked_records "$dir")" = 1 ] || fail "the worker was not pointed at its gate exactly once"
+  grep -F 'no-mistakes axi status' "$state/afk-parked.inbox/001.msg" >/dev/null \
+    || fail "the steering record does not point at the run's status"
+  pass "away mode hands a declared pause on an ask-user gate to the daemon as a parked run, not as a pause"
+}
+
+test_afk_declared_pause_on_a_worker_gate_rings_only_the_worker() {
+  local dir state out pid
+  dir=$(afk_parked_fixture afk-parked-worker); state="$dir/state"; out="$dir/watch.out"
+  afk_parked_watch "$dir" "$PARKED_GATE_WORKER"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a gate the worker can answer itself was handed to the daemon: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a worker-owned gate queued a wake: $(cat "$state/.wake-queue")"; }
+  [ "$(afk_parked_records "$dir")" = 1 ] \
+    || { reap "$pid"; fail "expected exactly one steering record across several polls, got $(afk_parked_records "$dir")"; }
+  reap "$pid"
+  grep -F 'no-mistakes axi status' "$state/afk-parked.inbox/001.msg" >/dev/null \
+    || fail "the steering record does not point at the run's status"
+  pass "away mode points a paused worker at a gate it can answer without waking anyone else"
+}
+
+test_afk_declared_pause_on_an_executing_run_stays_handed_off_once() {
+  local dir state out pid
+  dir=$(afk_parked_fixture afk-parked-still-running); state="$dir/state"; out="$dir/watch.out"
+  afk_parked_watch "$dir" 'state: working · source: run-step · validating (running) · run: 01RUNAFK'
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a paused pane whose run is still executing was handed off twice: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "an executing run queued a wake: $(cat "$state/.wake-queue")"; }
+  [ "$(afk_parked_records "$dir")" = 0 ] || { reap "$pid"; fail "a worker whose run is still executing was rung"; }
+  reap "$pid"
+  pass "away mode leaves a declared pause alone while its run is still executing"
+}
+
+# A no-mistakes that stops answering must not hold the fleet scan behind this
+# read. Two handed-off paused panes: the first in scan order reads a current
+# state that hangs far past the bound, the second's run is parked on an ask-user
+# finding. The hung read is killed at its bound, before it can finish, the second
+# pane is read on the next poll instead of being starved behind it, and the hung
+# pane is not read again inside its cadence. The proof is the order of the reads
+# rather than elapsed time, so a loaded machine cannot make it pass or fail: an
+# unbounded read finishes before the scan reaches the second pane.
+test_afk_parked_gate_read_is_bounded_when_no_mistakes_hangs() {
+  local dir state fakebin out drain_out reads stub pid t w key hang=300
+  local hung_window="test:fm-afk-hung" parked_window="test:fm-afk-parked2"
+  dir=$(make_case afk-parked-hung); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; reads="$dir/reads.log"
+  stub="$fakebin/fm-crew-state-hung.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_TEST_READS_LOG"
+case "$1" in
+  a-hung)
+    sleep "$FM_TEST_HANG_SECS"
+    printf 'a-hung finished\n' >> "$FM_TEST_READS_LOG"
+    printf 'state: working · source: run-step · validating (running) · run: 01RUNHUNG\n' ;;
+  *) printf '%s\n' "$FM_TEST_PARKED_LINE" ;;
+esac
+SH
+  chmod +x "$stub"
+  printf 'idle after declaring the wait\n' > "$dir/pane.txt"
+  for t in a-hung b-parked; do
+    case "$t" in a-hung) w=$hung_window ;; *) w=$parked_window ;; esac
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$w" > "$state/$t.meta"
+    printf 'paused: waiting for no-mistakes run; next status check no sooner than 10 minutes\n' > "$state/$t.status"
+    printf '%s' "$(seen_sig "$state/$t.status")" > "$state/.seen-${t}_status"
+    key=$(printf '%s' "$w" | tr '.:/' '___')
+    printf '%s' "$(hash_text 'idle after declaring the wait')" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    printf '%s' "$(hash_text 'idle after declaring the wait')" > "$state/.stale-$key"
+  done
+  date '+%s' > "$state/.afk"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-afk-hung\nfm-afk-parked2')" \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_TEST_READS_LOG="$reads" FM_TEST_HANG_SECS="$hang" \
+    FM_TEST_PARKED_LINE="$PARKED_GATE_HUMAN" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$stub" \
+    FM_PARKED_GATE_READ_TIMEOUT=5 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_TASK_INBOX_GRACE_SECS=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 1800 \
+    || { reap "$pid"; fail "the paused pane behind a hung read was never handed off: $(cat "$out")"; }
+  grep -F "stale: $parked_window (declared pause on a parked run - " "$out" >/dev/null \
+    || fail "the parked pane behind the hung read was not handed off as a parked run: $(cat "$out")"
+  [ "$(cat "$reads")" = "$(printf 'a-hung\nb-parked')" ] \
+    || fail "expected the hung read killed before it finished, then one read of the parked pane, got: $(tr '\n' ' ' < "$reads")"
+  grep -F "parked-gate read deferred to the next poll (this poll already spent its read): $parked_window" \
+    "$state/.watch-triage.log" >/dev/null \
+    || fail "the parked pane was not deferred behind the hung read: $(cat "$state/.watch-triage.log")"
+  grep -F "parked-gate read gave no verdict (unreadable, or past its 5s bound): $hung_window" \
+    "$state/.watch-triage.log" >/dev/null || fail "the cut read was not recorded as no verdict"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the bounded reads failed"
+  [ "$(grep -c "$(printf '\tstale\t')" "$drain_out")" = 1 ] \
+    || fail "expected exactly the parked pane's stale wake: $(cat "$drain_out")"
+  [ "$(find "$state/b-parked.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the parked pane's worker was not pointed at its gate exactly once"
+  [ ! -d "$state/a-hung.inbox" ] || fail "the hung pane's worker was rung on no verdict"
+  pass "away mode bounds the parked-gate read, so a hung no-mistakes neither holds the scan nor starves the next paused pane"
+}
+
+# The one read a poll starts must not always go to the first due pane in scan
+# order: with enough paused panes ahead of it, those panes come due again before
+# a later pane ever gets a turn, and the later pane's parked run is never read.
+# A one-second cadence makes the first pane due again on every poll, the compressed
+# form of that fleet. The second pane, passed over on the first poll, must take the
+# second poll's read even though the first pane is due again ahead of it in scan
+# order. The proof is the order of the reads plus the logged reservation, which
+# also shows the first pane really was due when it was passed over.
+test_afk_parked_gate_read_goes_to_the_pane_read_least_recently() {
+  local dir state fakebin out drain_out reads stub pid t w key
+  local busy_window="test:fm-afk-first" parked_window="test:fm-afk-parked3"
+  dir=$(make_case afk-parked-rotation); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; reads="$dir/reads.log"
+  stub="$fakebin/fm-crew-state-rotation.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_TEST_READS_LOG"
+case "$1" in
+  a-first) printf 'state: working · source: run-step · validating (running) · run: 01RUNFIRST\n' ;;
+  *) printf '%s\n' "$FM_TEST_PARKED_LINE" ;;
+esac
+SH
+  chmod +x "$stub"
+  printf 'idle after declaring the wait\n' > "$dir/pane.txt"
+  for t in a-first b-parked; do
+    case "$t" in a-first) w=$busy_window ;; *) w=$parked_window ;; esac
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$w" > "$state/$t.meta"
+    printf 'paused: waiting for no-mistakes run; next status check no sooner than 10 minutes\n' > "$state/$t.status"
+    printf '%s' "$(seen_sig "$state/$t.status")" > "$state/.seen-${t}_status"
+    key=$(printf '%s' "$w" | tr '.:/' '___')
+    printf '%s' "$(hash_text 'idle after declaring the wait')" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    printf '%s' "$(hash_text 'idle after declaring the wait')" > "$state/.stale-$key"
+  done
+  date '+%s' > "$state/.afk"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-afk-first\nfm-afk-parked3')" \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_TEST_READS_LOG="$reads" \
+    FM_TEST_PARKED_LINE="$PARKED_GATE_HUMAN" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$stub" \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_TASK_INBOX_GRACE_SECS=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 1800 \
+    || { reap "$pid"; fail "the paused pane behind an always-due pane was never read: reads $(tr '\n' ' ' < "$reads" 2>/dev/null)"; }
+  grep -F "stale: $parked_window (declared pause on a parked run - " "$out" >/dev/null \
+    || fail "the paused pane behind an always-due pane was not handed off as a parked run: $(cat "$out")"
+  [ "$(cat "$reads")" = "$(printf 'a-first\nb-parked')" ] \
+    || fail "expected one read of the first pane, then the passed-over pane's read on the next poll, got: $(tr '\n' ' ' < "$reads")"
+  grep -F "parked-gate read deferred to the next poll (this poll's read is reserved for a pane read less recently): $busy_window" \
+    "$state/.watch-triage.log" >/dev/null \
+    || fail "the first pane was not due again and passed over for the reserved pane: $(cat "$state/.watch-triage.log")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the rotated reads failed"
+  [ "$(grep -c "$(printf '\tstale\t')" "$drain_out")" = 1 ] \
+    || fail "expected exactly the parked pane's stale wake: $(cat "$drain_out")"
+  [ "$(find "$state/b-parked.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the parked pane's worker was not pointed at its gate exactly once"
+  [ ! -d "$state/a-first.inbox" ] || fail "the working pane's worker was rung"
+  pass "away mode gives the parked-gate read to the pane read least recently, so a later paused pane is not starved"
+}
+
 # --- the away-posture record: captain-held items are never rechecked ----------
 # While state/.afk-contract exists (bin/fm-afk-contract.sh) nobody is there to
 # answer a captain-held item and the return brief lists it, so every stale path
@@ -6621,6 +6880,7 @@ test_unrecognized_status_prefix_is_visible
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_line_parked_gate_classifier
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
@@ -6743,6 +7003,11 @@ test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_afk_declared_pause_on_an_ask_user_gate_is_handed_off_as_a_gate
+test_afk_declared_pause_on_a_worker_gate_rings_only_the_worker
+test_afk_declared_pause_on_an_executing_run_stays_handed_off_once
+test_afk_parked_gate_read_is_bounded_when_no_mistakes_hangs
+test_afk_parked_gate_read_goes_to_the_pane_read_least_recently
 test_captain_held_never_rechecked_while_away_record_exists
 test_live_captain_held_first_sight_silenced_by_away_record
 test_backlog_hold_never_rechecked_while_away_record_exists

@@ -2487,10 +2487,23 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+# The read and the decision are separate functions so a caller that needs more
+# than the token from the same sighting (crew_line_parked_gate below) pays for
+# one read: crew_state_line is the read, crew_line_absorb_class the pure decision.
+# A <bound> in seconds hard-limits the read through fm_run_timed, for a caller
+# that must not wait on a no-mistakes that stops answering; a read past it is
+# killed and reads as empty, exactly like an unreadable one.
+crew_state_line() {  # <id> [<bound>] -> the fm-crew-state.sh line, empty when unreadable
+  [ -n "${1:-}" ] || return 0
+  if [ -n "${2:-}" ]; then
+    fm_run_timed "$2" "$FM_CREW_STATE_BIN" "$1" 2>/dev/null || true
+  else
+    "$FM_CREW_STATE_BIN" "$1" 2>/dev/null || true
+  fi
+}
+
+crew_line_absorb_class() {  # <crew-state-line>
+  local line=$1 state src
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
@@ -2499,6 +2512,10 @@ crew_absorb_class() {  # <id>
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
+}
+
+crew_absorb_class() {  # <id>
+  crew_line_absorb_class "$(crew_state_line "${1:-}")"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
@@ -2525,34 +2542,24 @@ crew_is_paused() {  # <id>
 # The one spelling of the verdict component that says a parked gate's answer is
 # owed by a HUMAN. bin/fm-crew-state.sh mints it (nm_gate_awaits_human_decision
 # owns the derivation: the findings table's `action` column, read by position);
-# crew_gate_awaits_human_decision below is its only consumer.
+# crew_line_parked_gate below is its only reader.
 FM_GATE_HUMAN_DECISION='ask-user: authority decision'
 
-# 0 if crew <id>'s authoritative current state is a no-mistakes gate whose answer
-# is owed by a human rather than by the crewmate itself.
-#
-# `parked` alone cannot answer this: the gate's shape (awaiting_approval,
-# fix_review, awaiting_agent) is reported parked in every case and does not by
-# itself say who owes the answer; only a findings row whose `action` column is
-# exactly `ask-user` does. A crewmate that goes quiet before answering its OWN
-# gate is precisely the wedge the escalation ladder exists to catch, so only the
-# minted component above - never the parked verdict, the gate name, or the
-# finding text - admits a lane here.
-#
-# The whole component is compared for equality rather than searched for, so a
-# gate name or a reconciliation note that happens to contain the words cannot
-# mint it downstream either.
-# On success it prints the reported run id, read from the line's whole
-# `run: <id>` component, so the caller can bind the gate to the decision that
-# names that run; a line carrying no run id is not evidence, since nothing could
-# then tie a decision to this gate.
-# Same cost and the same caveat as crew_absorb_class: one fm-crew-state.sh read,
-# which may make a bounded no-mistakes call, so callers take it only where they
-# already accept that cost.
-crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
-  local id=$1 line state src rest part human='' run=''
-  [ -n "$id" ] || return 1
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+# Pure: read ONE fm-crew-state.sh line as a no-mistakes run parked at a gate.
+# Returns 1 for every other verdict. On success prints "<owner>\t<run-id>":
+#   owner  - `human` when the line carries the minted component above as a whole
+#            ` · ` component, else `worker`: the gate waits on the crewmate
+#            itself. The whole component is compared for equality rather than
+#            searched for, so a gate name or a reconciliation note that happens
+#            to contain the words cannot mint it downstream.
+#   run-id - the line's whole `run: <id>` component, empty when the line carries
+#            none or the id holds whitespace.
+# `parked` alone cannot say who owes the answer: the gate's shape
+# (awaiting_approval, fix_review, awaiting_agent) is reported parked in every
+# case, and only a findings row whose `action` column is exactly `ask-user`
+# mints the human component.
+crew_line_parked_gate() {  # <crew-state-line> -> "<owner>\t<run-id>" on stdout
+  local line=$1 state src rest part owner=worker run=''
   case "$line" in state:*) ;; *) return 1 ;; esac
   state=${line#state: }; state=${state%% *}
   [ "$state" = parked ] || return 1
@@ -2562,11 +2569,33 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   while [ -n "$rest" ]; do
     part=${rest%% · *}
     rest=${rest#* · }
-    [ "$part" = "$FM_GATE_HUMAN_DECISION" ] && human=1
+    [ "$part" = "$FM_GATE_HUMAN_DECISION" ] && owner=human
     case "$part" in "run: "?*) run=${part#run: } ;; esac
   done
-  [ -n "$human" ] && [ -n "$run" ] || return 1
-  case "$run" in *[[:space:]]*) return 1 ;; esac
+  case "$run" in *[[:space:]]*) run='' ;; esac
+  printf '%s\t%s\n' "$owner" "$run"
+}
+
+# 0 if crew <id>'s authoritative current state is a no-mistakes gate whose answer
+# is owed by a human rather than by the crewmate itself.
+#
+# A crewmate that goes quiet before answering its OWN gate is precisely the wedge
+# the escalation ladder exists to catch, so only crew_line_parked_gate's `human`
+# owner - never the parked verdict, the gate name, or the finding text - admits a
+# lane here.
+# On success it prints the reported run id so the caller can bind the gate to the
+# decision that names that run; a line carrying no run id is not evidence, since
+# nothing could then tie a decision to this gate.
+# Same cost and the same caveat as crew_absorb_class: one fm-crew-state.sh read,
+# which may make a bounded no-mistakes call, so callers take it only where they
+# already accept that cost.
+crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
+  local id=$1 gate run
+  [ -n "$id" ] || return 1
+  gate=$(crew_line_parked_gate "$(crew_state_line "$id")") || return 1
+  [ "${gate%%$'\t'*}" = human ] || return 1
+  run=${gate#*$'\t'}
+  [ -n "$run" ] || return 1
   printf '%s\n' "$run"
 }
 

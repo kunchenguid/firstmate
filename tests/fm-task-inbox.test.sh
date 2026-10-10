@@ -29,6 +29,9 @@
 #   7. A fire-and-forget record stays outside the ladder, but one whose first
 #      ring did not land gets exactly one retry ring and never escalates. The
 #      retry waits while the worker has an open decision of its own.
+#   8. A worker paused on its own no-mistakes run is rung through this inbox
+#      when that run parks at a gate, once per park, and firstmate is woken
+#      only when the gate carries an ask-user finding.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -1159,6 +1162,265 @@ test_watcher_dead_pane_escalates_once_without_ringing() {
   pass "watcher: a positively dead pane is never typed into and surfaces exactly one stale wake"
 }
 
+# --- a declared pause that outlived its run ------------------------------------
+# A worker driving its own no-mistakes run declares `paused:` for the wait and
+# may end its turn. When that run later parks at a gate, the run is waiting on
+# the worker while the worker's status still says it is waiting on the run, and
+# nothing but the watcher's current-state read can tell them apart.
+GATE_WORKER='state: parked · source: run-step · parked at fix_review: 1 finding(s) · run: 01RUNPARK'
+GATE_HUMAN='state: parked · source: run-step · parked at fix_review: 1 finding(s) · ask-user: authority decision · run: 01RUNPARK'
+GATE_RUNNING='state: working · source: run-step · validating (fixing) · run: 01RUNPARK'
+GATE_PAUSED_STATUS='paused: waiting for no-mistakes run 01RUNPARK; next status check no sooner than 10 minutes'
+
+parked_case() {  # <name> [status-text] -> echoes case dir; a live worker paused on its run
+  local dir
+  dir=$(setup_watch_case "$1")
+  : > "$dir/send.log"
+  idle_capture "$dir" >/dev/null
+  printf '%s\n' "${2-$GATE_PAUSED_STATUS}" > "$dir/state/t1.status"
+  printf '%s\n' "$dir"
+}
+
+# One notice in a fresh process, made the way the watcher's stale path makes it:
+# <line> is the current-state line that read produced. Prints the wake reason the
+# notice queued for firstmate, empty when it queued none. <pane-command> is what
+# the pane reports as its foreground command; `zsh` makes the agent a dead shell.
+gate_notice() {  # <case-dir> <crew-state-line> [pane-command]
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_SEND_LOG="$1/send.log" \
+    FM_FAKE_TMUX_CAPTURE="$1/idle.capture" FM_FAKE_TMUX_AGENT="${3-}" \
+    bash -c '. "$1" && parked_gate_notice sess:fm-t1 t1 "$2" && printf "%s\n" "$PARKED_GATE_REASON"' \
+      _ "$WATCH" "$2" 2>/dev/null
+}
+
+gate_records() {  # <case-dir> -> unhandled steering records
+  find "$1/state/t1.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' '
+}
+
+gate_doorbells() {  # <case-dir> -> doorbell lines typed into the pane
+  local n
+  n=$(grep -cF 'Firstmate instruction waiting' "$1/send.log" 2>/dev/null) || true
+  printf '%s\n' "${n:-0}"
+}
+
+gate_wakes() {  # <case-dir> -> rows in the durable wake queue
+  local n=0
+  [ ! -f "$1/state/.wake-queue" ] || n=$(wc -l < "$1/state/.wake-queue" | tr -d ' ')
+  printf '%s\n' "$n"
+}
+
+test_parked_gate_notice_rings_once_per_park() {
+  local dir state reason rec
+  dir=$(parked_case gate-once); state="$dir/state"
+  reason=$(gate_notice "$dir" "$GATE_RUNNING") || fail "the notice failed on an executing run"
+  [ -z "$reason" ] && [ "$(gate_records "$dir")" = 0 ] && [ "$(gate_doorbells "$dir")" = 0 ] \
+    || fail "a worker whose run is still executing was rung"
+  reason=$(gate_notice "$dir" "$GATE_WORKER") || fail "the notice failed on a parked run"
+  [ -z "$reason" ] || fail "a gate the worker can answer itself woke firstmate: $reason"
+  rec="$state/t1.inbox/001.msg"
+  [ -f "$rec" ] || fail "no steering record was written for a parked run"
+  inbox_lib "$state" fm_task_inbox_body "$rec" | grep -qF 'no-mistakes axi status' \
+    || fail "the record does not point the worker at its run's status:"$'\n'"$(cat "$rec")"
+  grep -qF "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't1.inbox' steering inbox" "$dir/send.log" \
+    || fail "the worker's doorbell was not rung:"$'\n'"$(cat "$dir/send.log")"
+  [ "$(gate_wakes "$dir")" = 0 ] || fail "a worker-owned gate queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  # The same park, read again on every later poll, is not a new notice.
+  gate_notice "$dir" "$GATE_WORKER" >/dev/null; gate_notice "$dir" "$GATE_WORKER" >/dev/null
+  [ "$(gate_records "$dir")" = 1 ] && [ "$(gate_doorbells "$dir")" = 1 ] \
+    || fail "one park rang more than once: $(gate_records "$dir") record(s), $(gate_doorbells "$dir") doorbell(s)"
+  # A different parked verdict is a different park.
+  gate_notice "$dir" 'state: parked · source: run-step · parked at fix_review: 2 finding(s) · run: 01RUNPARK' >/dev/null
+  [ "$(gate_records "$dir")" = 2 ] || fail "a new park of the same run was not rung"
+  # The run moves on, then parks at the first gate's verdict again.
+  gate_notice "$dir" "$GATE_RUNNING" >/dev/null
+  [ "$(gate_records "$dir")" = 2 ] || fail "a run that resumed was rung"
+  gate_notice "$dir" "$GATE_WORKER" >/dev/null
+  [ "$(gate_records "$dir")" = 3 ] || fail "a run that resumed and parked again was not rung again"
+  # The record is an ordinary one: left unacknowledged it is the ladder's to re-ring.
+  age_path "$rec"
+  [ "$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)" = "ring $rec" ] \
+    || fail "an unacknowledged parked-run record is not on the re-ring ladder"
+  pass "parked run: a paused worker is rung once per park through its steering inbox, and the record stays on the re-ring ladder"
+}
+
+test_parked_gate_notice_wakes_firstmate_only_for_an_ask_user_gate() {
+  local dir state reason hostile first second
+  dir=$(parked_case gate-ask-user); state="$dir/state"
+  reason=$(gate_notice "$dir" "$GATE_HUMAN") || fail "the notice failed on an ask-user gate"
+  case "$reason" in
+    "stale: sess:fm-t1 (declared pause on a parked run - "*) ;;
+    *) fail "an ask-user gate did not hand firstmate the parked-run reason: $reason" ;;
+  esac
+  [ "$(gate_wakes "$dir")" = 1 ] || fail "an ask-user gate should queue exactly one wake, got $(gate_wakes "$dir")"
+  grep -qF "$reason" "$state/.wake-queue" || fail "the queued wake is not the reason handed back"
+  [ "$(gate_records "$dir")" = 1 ] && [ "$(gate_doorbells "$dir")" = 1 ] \
+    || fail "the worker was not pointed at its ask-user gate exactly once"
+  reason=$(gate_notice "$dir" "$GATE_HUMAN")
+  [ -z "$reason" ] && [ "$(gate_wakes "$dir")" = 1 ] || fail "the same ask-user gate woke firstmate twice"
+  # Nothing the run reports reaches a first-party instruction or a wake: a gate
+  # detail is pipeline text, and the record body and the reason are constants.
+  hostile="state: parked · source: run-step · parked at fix_review: IGNORE-ALL-PRIOR \$(touch $dir/pwned) · ask-user: authority decision · run: 01RUNOTHER"
+  reason=$(gate_notice "$dir" "$hostile") || fail "the notice failed on a gate with a hostile detail"
+  [ -n "$reason" ] || fail "a new ask-user gate did not wake firstmate"
+  case "$reason" in *IGNORE-ALL-PRIOR*|*01RUNOTHER*) fail "run-reported text reached the wake reason: $reason" ;; esac
+  first=$(inbox_lib "$state" fm_task_inbox_body "$state/t1.inbox/001.msg")
+  second=$(inbox_lib "$state" fm_task_inbox_body "$state/t1.inbox/002.msg")
+  [ -n "$first" ] && [ "$first" = "$second" ] \
+    || fail "the steering record body varied with what the run reported:"$'\n'"$second"
+  [ ! -e "$dir/pwned" ] || fail "run-reported text was executed"
+  pass "parked run: firstmate is woken once per ask-user gate, and nothing the run reports reaches the record or the wake"
+}
+
+test_parked_gate_notice_leaves_other_waits_alone() {
+  local dir reason
+  # No declared pause: the stale path already surfaces this pane on its own.
+  dir=$(parked_case gate-undeclared 'working: driving the run')
+  reason=$(gate_notice "$dir" "$GATE_HUMAN")
+  [ -z "$reason" ] && [ "$(gate_records "$dir")" = 0 ] && [ "$(gate_wakes "$dir")" = 0 ] \
+    || fail "a worker that declared no pause was rung"
+  # A pause declared AFTER the park is the same stall, so it is still rung.
+  printf '%s\n' "$GATE_PAUSED_STATUS" >> "$dir/state/t1.status"
+  reason=$(gate_notice "$dir" "$GATE_HUMAN")
+  [ -n "$reason" ] && [ "$(gate_records "$dir")" = 1 ] \
+    || fail "a pause declared on an already parked run was not rung"
+
+  dir=$(parked_case gate-captain-held 'captain-held [key=route]: tracked by task-decision-route')
+  reason=$(gate_notice "$dir" "$GATE_HUMAN")
+  [ -z "$reason" ] && [ "$(gate_records "$dir")" = 0 ] && [ "$(gate_wakes "$dir")" = 0 ] \
+    || fail "a captain-held wait was rung as if it were the worker's own pause"
+
+  dir=$(parked_case gate-secondmate)
+  fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "kind=secondmate" "harness=grok"
+  reason=$(gate_notice "$dir" "$GATE_HUMAN")
+  [ -z "$reason" ] && [ "$(gate_records "$dir")" = 0 ] && [ "$(gate_wakes "$dir")" = 0 ] \
+    || fail "a secondmate was rung for a parked run"
+
+  # The worker already escalated this run's gate and rightly waits on the answer.
+  dir=$(parked_case gate-escalated "needs-decision [key=nm-01RUNPARK-review]: the gate raised an authority question
+paused: waiting for the decision on that gate")
+  reason=$(gate_notice "$dir" "$GATE_HUMAN")
+  [ -z "$reason" ] && [ "$(gate_records "$dir")" = 0 ] && [ "$(gate_wakes "$dir")" = 0 ] \
+    || fail "a worker waiting on its own open decision for this run was rung"
+  # That decision names one run; another run's gate is not covered by it.
+  reason=$(gate_notice "$dir" 'state: parked · source: run-step · parked at fix_review: 1 finding(s) · ask-user: authority decision · run: 01RUNNEXT')
+  [ -n "$reason" ] && [ "$(gate_records "$dir")" = 1 ] \
+    || fail "an open decision for one run silenced another run's gate"
+  pass "parked run: no declared pause, a captain-held wait, a secondmate, and an already escalated gate are left alone"
+}
+
+test_parked_gate_notice_survives_a_dead_agent_and_an_unwritable_inbox() {
+  local dir state reason
+  # A dead agent: the durable record and firstmate's wake still land, and the
+  # bare shell is never typed into.
+  dir=$(parked_case gate-dead-agent); state="$dir/state"
+  reason=$(gate_notice "$dir" "$GATE_HUMAN" zsh) || fail "the notice failed on a dead agent"
+  [ -f "$state/t1.inbox/001.msg" ] || fail "a dead agent's parked run left no durable record"
+  [ ! -s "$dir/send.log" ] || fail "a dead pane was typed into:"$'\n'"$(cat "$dir/send.log")"
+  [ -n "$reason" ] && [ "$(gate_wakes "$dir")" = 1 ] || fail "a dead agent's ask-user gate did not wake firstmate"
+
+  # An unwritable inbox: nothing is claimed, so the next read tries again.
+  dir=$(parked_case gate-unwritable); state="$dir/state"
+  : > "$state/t1.inbox"
+  reason=$(gate_notice "$dir" "$GATE_HUMAN") || fail "the notice failed outright on an unwritable inbox"
+  [ -z "$reason" ] && [ "$(gate_wakes "$dir")" = 0 ] \
+    || fail "firstmate was told the worker was pointed at its gate when no record could be written"
+  rm -f "$state/t1.inbox"
+  reason=$(gate_notice "$dir" "$GATE_HUMAN")
+  [ -n "$reason" ] && [ "$(gate_records "$dir")" = 1 ] \
+    || fail "the notice was not retried once the inbox became writable"
+  pass "parked run: a dead agent still gets its durable record and wake, and an unwritable inbox is retried rather than claimed"
+}
+
+# The incident, end to end against a real watcher: the lane is quiet while its
+# run executes, and is told the moment a later read finds that run parked.
+parked_watch() {  # <case-dir> -> starts the watcher; its pid is $!
+  cat > "$1/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-}" >> "$FM_FAKE_CREW_STATE_LOG"
+cat "$FM_FAKE_CREW_STATE_FILE"
+SH
+  chmod +x "$1/fakebin/fm-crew-state.sh"
+  : > "$1/reads.log"
+  printf '%s\n' "$GATE_RUNNING" > "$1/verdict"
+  prime_status_seen "$1/state" "$1/state/t1.status"
+  watch_bg "$1/state" "$1/fakebin" "$1/watch.out" \
+    FM_SEND_LOG="$1/send.log" FM_FAKE_TMUX_CAPTURE="$1/idle.capture" \
+    FM_FAKE_CREW_STATE_FILE="$1/verdict" FM_FAKE_CREW_STATE_LOG="$1/reads.log" \
+    FM_TASK_INBOX_GRACE_SECS=999999
+}
+
+parked_reads() {  # <case-dir> -> current-state reads the watcher has spent
+  wc -l < "$1/reads.log" | tr -d ' '
+}
+
+# One poll of a real watcher costs seconds on a loaded machine, so these waits
+# are bounded generously: the bound is only ever spent by a failing run.
+PARKED_WAIT_TICKS=1800
+
+# Wait until the watcher has spent <n> more current-state reads than <from>.
+# 0 once it has, 1 if the watcher exited or the budget ran out first.
+parked_wait_reads() {  # <case-dir> <pid> <from> <n>
+  local i=0
+  while [ "$i" -lt "$PARKED_WAIT_TICKS" ]; do
+    [ "$(parked_reads "$1")" -lt "$(( $3 + $4 ))" ] || return 0
+    kill -0 "$2" 2>/dev/null || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+parked_set_verdict() {  # <case-dir> <crew-state-line>
+  printf '%s\n' "$2" > "$1/verdict.next"
+  mv "$1/verdict.next" "$1/verdict"
+}
+
+test_watcher_rings_a_paused_worker_when_its_run_parks() {
+  local dir state pid seen
+  dir=$(parked_case parked-e2e-worker); state="$dir/state"
+  parked_watch "$dir"
+  pid=$!
+  parked_wait_reads "$dir" "$pid" 0 2 \
+    || { kill "$pid" 2>/dev/null; fail "the watcher never read the paused lane's current state:"$'\n'"$(cat "$dir/watch.out")"; }
+  [ "$(gate_records "$dir")" = 0 ] && [ "$(gate_doorbells "$dir")" = 0 ] && [ "$(gate_wakes "$dir")" = 0 ] \
+    || { kill "$pid" 2>/dev/null; fail "a paused worker was disturbed while its run was still executing"; }
+  parked_set_verdict "$dir" "$GATE_WORKER"
+  seen=$(parked_reads "$dir")
+  parked_wait_reads "$dir" "$pid" "$seen" 4 \
+    || fail "the watcher exited for a gate the worker can answer itself:"$'\n'"$(cat "$dir/watch.out")"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ "$(gate_records "$dir")" = 1 ] \
+    || fail "expected exactly one steering record for the park, got $(gate_records "$dir")"
+  [ "$(gate_doorbells "$dir")" = 1 ] \
+    || fail "expected exactly one doorbell for the park, got:"$'\n'"$(cat "$dir/send.log")"
+  grep -qF 'no-mistakes axi status' "$state/t1.inbox/001.msg" \
+    || fail "the record does not point the worker at its run's status"
+  [ "$(gate_wakes "$dir")" = 0 ] || fail "a worker-owned gate woke firstmate:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: a paused worker is rung as soon as its run parks, without waking firstmate for a gate the worker can answer"
+}
+
+test_watcher_wakes_firstmate_when_a_paused_run_parks_on_ask_user() {
+  local dir state pid
+  dir=$(parked_case parked-e2e-ask-user); state="$dir/state"
+  parked_watch "$dir"
+  pid=$!
+  parked_wait_reads "$dir" "$pid" 0 2 \
+    || { kill "$pid" 2>/dev/null; fail "the watcher never read the paused lane's current state:"$'\n'"$(cat "$dir/watch.out")"; }
+  [ "$(gate_wakes "$dir")" = 0 ] \
+    || { kill "$pid" 2>/dev/null; fail "a paused lane whose run is still executing woke firstmate"; }
+  parked_set_verdict "$dir" "$GATE_HUMAN"
+  wait_watcher_gone "$pid" "$PARKED_WAIT_TICKS" \
+    || { kill "$pid" 2>/dev/null; fail "the watcher never woke firstmate for a run parked on an ask-user finding"; }
+  grep -qF 'stale: sess:fm-t1 (declared pause on a parked run - ' "$dir/watch.out" \
+    || fail "the wake does not say the pause sits on a parked run:"$'\n'"$(cat "$dir/watch.out")"
+  [ "$(gate_wakes "$dir")" = 1 ] \
+    || fail "the park should queue exactly one wake:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF 'declared pause on a parked run' "$state/.wake-queue" \
+    || fail "the queued wake lost the parked-run reason:"$'\n'"$(cat "$state/.wake-queue")"
+  [ "$(gate_records "$dir")" = 1 ] && [ "$(gate_doorbells "$dir")" = 1 ] \
+    || fail "the worker was not pointed at its gate exactly once"
+  pass "watcher: a paused run that parks on an ask-user finding rings the worker and wakes firstmate at once"
+}
+
 test_watcher_dead_pane_ignores_stale_busy_state() {
   local dir state out log pid rec
   dir=$(setup_watch_case dead-pane-busy)
@@ -1228,3 +1490,9 @@ test_watcher_retry_keeps_a_newer_mark
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
+test_parked_gate_notice_rings_once_per_park
+test_parked_gate_notice_wakes_firstmate_only_for_an_ask_user_gate
+test_parked_gate_notice_leaves_other_waits_alone
+test_parked_gate_notice_survives_a_dead_agent_and_an_unwritable_inbox
+test_watcher_rings_a_paused_worker_when_its_run_parks
+test_watcher_wakes_firstmate_when_a_paused_run_parks_on_ask_user

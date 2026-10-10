@@ -1095,6 +1095,40 @@ test_wait_no_turns_absent_keeps_the_previous_brief() {
   pass "fm-brief: without config/wait-no-turns the brief and drive text stay as they were"
 }
 
+# A wait on a no-mistakes run is true only while that run is still working. The
+# brief must send the worker to `no-mistakes axi status` before it declares one,
+# and to the gate rather than to a pause when the run is parked - in both drive
+# variants, and not in a mode that drives no run.
+test_no_mistakes_brief_reads_run_status_before_a_wait() {
+  local home variant id brief
+  for variant in backgrounded foreground; do
+    home="$TMP_ROOT/parked-run-$variant"
+    mkdir -p "$home/data" "$home/config"
+    [ "$variant" != foreground ] || : > "$home/config/wait-no-turns"
+    id="brief-parked-run-$variant"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+      || fail "fm-brief.sh no-mistakes scaffold ($variant drive) exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_grep 'a run parked at a gate is waiting on you, not you on it' "$brief" \
+      "$variant drive: the brief does not say a parked run waits on the worker"
+    assert_grep "read \`no-mistakes axi status\` before you declare a wait on it or end a turn with one standing" "$brief" \
+      "$variant drive: the brief does not send the worker to the run's status before a declared wait"
+    assert_grep "When it shows the run parked at a gate, do not declare a wait: answer the gate with \`no-mistakes axi respond\`, or escalate its ask-user findings" "$brief" \
+      "$variant drive: the brief does not tell the worker to answer a parked gate instead of pausing"
+    assert_grep 'never a promise to check the run later' "$brief" \
+      "$variant drive: the brief still lets a wait stand in for a later status check"
+    assert_grep 'never wait on a status poll for the next gate or outcome' "$brief" \
+      "$variant drive: the one status read displaced the rule against waiting on a status poll"
+  done
+  home="$TMP_ROOT/parked-run-direct"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-parked-run-direct some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh direct-PR scaffold exited non-zero"
+  assert_no_grep 'a run parked at a gate is waiting on you' "$home/data/brief-parked-run-direct/brief.md" \
+    "a direct-PR brief, which drives no run, carried the parked-run rule"
+  pass "fm-brief: a no-mistakes worker reads its run's status before declaring a wait and answers a parked gate instead of pausing"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -1493,6 +1527,7 @@ test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
+test_no_mistakes_brief_reads_run_status_before_a_wait
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded
 test_ship_branch_prefix_defaults_to_legacy_fm

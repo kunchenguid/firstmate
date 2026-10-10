@@ -442,6 +442,38 @@ test_busy_inbox_dispatch_preserves_other_stale_reasons() {
   pass "inbox dispatch preserves ordinary stale, busy-turn, and other doorbell routing"
 }
 
+# The watcher's parked-run reason is its own current-state verdict: the lane's
+# status log still declares a pause, and the status log is all this daemon reads
+# for a stale pane. So the reason must reach supervision as it stands rather
+# than be classified a second time into the pause it contradicts.
+test_parked_run_wake_reaches_supervision_despite_the_declared_pause() {
+  local dir state task=parked-run win key reason buffer
+  dir=$(make_supercase parked-run-escalation); state="$dir/state"
+  win="sess:fm-$task"; buffer="$state/.subsuper-escalations"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  printf 'away\n' > "$state/.afk"
+  printf 'paused: waiting for no-mistakes run 01RUNPARK; next status check no sooner than 10 minutes\n' \
+    > "$state/$task.status"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=codex"
+  # The control: this lane's plain stale wake IS a declared pause to the daemon,
+  # so the escalation below is the reason's doing and not the fixture's.
+  FM_ESCALATE_BATCH_SECS=999999 handle_wake "stale: $win" "$state" || fail "plain stale handling failed"
+  [ ! -s "$buffer" ] && [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "the fixture's plain stale wake was not classified as a declared pause, so it proves nothing"
+  # Taken from the watcher that mints it, so a rewording there that this daemon
+  # no longer recognizes fails here instead of silently absorbing the wake.
+  reason=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1" && parked_gate_notice "$2" "$3" "$4" && printf "%s\n" "$PARKED_GATE_REASON"
+  ' _ "$ROOT/bin/fm-watch.sh" "$win" "$task" \
+    'state: parked · source: run-step · parked at fix_review: 1 finding(s) · ask-user: authority decision · run: 01RUNPARK' \
+    2>/dev/null)
+  [ -n "$reason" ] || fail "the watcher minted no parked-run reason for an ask-user gate"
+  FM_ESCALATE_BATCH_SECS=999999 handle_wake "$reason" "$state" || fail "the parked-run wake was not handled"
+  [ "$(cat "$buffer" 2>/dev/null)" = "${reason#stale: }" ] \
+    || fail "the parked-run wake was absorbed as a declared pause instead of reaching supervision: $(cat "$buffer" 2>/dev/null)"
+  pass "a declared pause on a parked run reaches supervision instead of being classified as the pause it contradicts"
+}
+
 test_catchall_buffer_failure_preserves_position() {
   local dir state buffer out
   dir=$(make_supercase catchall-write-failure); state="$dir/state"
@@ -3312,6 +3344,7 @@ test_busy_inbox_escalation_reaches_supervision write quiet
 test_busy_inbox_escalation_reaches_supervision reset away
 test_busy_inbox_escalation_reaches_supervision reset quiet
 test_busy_inbox_dispatch_preserves_other_stale_reasons
+test_parked_run_wake_reaches_supervision_despite_the_declared_pause
 test_catchall_buffer_failure_preserves_position
 test_durable_wake_failure_retains_entire_batch
 test_missing_status_stale_is_acknowledged_without_diagnostic
