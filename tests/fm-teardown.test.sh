@@ -4131,6 +4131,204 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+# A child that has left both the worktree and its parent's process group is
+# still this task's: ownership is ancestry from a cwd-owned process, not the
+# child's command name. A same-named sleeper that is not a descendant stays.
+test_browser_helper_descendant_outside_worktree_is_reaped() {
+  local case_dir rc parent_pid child_pid bystander_pid outside child_file
+  local parent_pgid child_pgid child_cwd outside_canon wt_canon i
+  case_dir=$(make_case browser-helper-descendant)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  outside=$(mktemp -d "$case_dir/outside.XXXXXX")
+  child_file=$case_dir/child.pid
+  outside_canon=$(cd "$outside" && pwd -P)
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+
+  perl -e '
+    use POSIX qw(setsid);
+    my ($wt, $outside, $child_file) = @ARGV;
+    chdir $wt or die "chdir wt: $!";
+    my $pid = fork();
+    die "fork: $!" unless defined $pid;
+    if ($pid == 0) {
+      setsid() or die "setsid: $!";
+      chdir $outside or die "chdir outside: $!";
+      open my $fh, ">", $child_file or die "open: $!";
+      print $fh "$$\n";
+      close $fh;
+      exec "sleep", "300" or die "exec: $!";
+    }
+    sleep 300;
+  ' "$wt_canon" "$outside_canon" "$child_file" &
+  parent_pid=$!
+  disown || true
+  ( cd "$outside_canon" && exec sleep 300 ) &
+  bystander_pid=$!
+  disown || true
+
+  i=0
+  while [ ! -s "$child_file" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  child_pid=$(tr -d '[:space:]' < "$child_file")
+  if ! kill -0 "$parent_pid" 2>/dev/null || ! kill -0 "$child_pid" 2>/dev/null \
+     || ! kill -0 "$bystander_pid" 2>/dev/null; then
+    kill -KILL "$parent_pid" "$child_pid" "$bystander_pid" 2>/dev/null || true
+    fail "browser-helper-descendant: setup processes did not stay alive"
+  fi
+  parent_pgid=$(ps -o pgid= -p "$parent_pid" | tr -d '[:space:]')
+  child_pgid=$(ps -o pgid= -p "$child_pid" | tr -d '[:space:]')
+  if [ -z "$parent_pgid" ] || [ "$parent_pgid" = "$child_pgid" ]; then
+    kill -KILL "$parent_pid" "$child_pid" "$bystander_pid" 2>/dev/null || true
+    fail "browser-helper-descendant: child did not leave the parent process group"
+  fi
+  child_cwd=$(lsof -a -p "$child_pid" -d cwd -Fn | sed -n 's/^n//p' | head -n 1)
+  case "$child_cwd" in
+    "$wt_canon"|"$wt_canon"/*)
+      kill -KILL "$parent_pid" "$child_pid" "$bystander_pid" 2>/dev/null || true
+      fail "browser-helper-descendant: child cwd is still the worktree ($child_cwd)"
+      ;;
+  esac
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$parent_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+    kill -KILL "$parent_pid" "$child_pid" "$bystander_pid" 2>/dev/null || true
+    fail "browser-helper-descendant: owned parent or setsid child survived teardown"
+  fi
+  if ! kill -0 "$bystander_pid" 2>/dev/null; then
+    fail "browser-helper-descendant: unrelated sleeper outside the worktree was killed"
+  fi
+  kill -KILL "$bystander_pid" 2>/dev/null || true
+  expect_code 0 "$rc" "browser-helper-descendant: teardown should still succeed"
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "browser-helper-descendant: teardown did not report reaping the owned process"
+  pass "a setsid child outside the worktree is reaped with its cwd-owned parent, and an unrelated sleeper is not"
+}
+
+# A chrome-devtools-axi bridge.pid is owned only when that pid is still the
+# bridge and its PWD or OLDPWD is this task's directory. The same command name
+# with a different directory, and a non-bridge pid recorded beside it, stay.
+test_recorded_browser_helper_is_reaped_without_a_name_sweep() {
+  local case_dir rc bridge_pid child_pid other_pid stranger_pid plain_pid
+  local outside elsewhere state_root proc_root bridge_bin child_file
+  local wt_canon outside_canon elsewhere_canon child_pgid bridge_pgid i
+  case_dir=$(make_case recorded-browser-helper)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  outside=$(mktemp -d "$case_dir/outside.XXXXXX")
+  elsewhere=$(mktemp -d "$case_dir/elsewhere.XXXXXX")
+  state_root=$case_dir/browser-helper-state
+  proc_root=$case_dir/proc
+  child_file=$case_dir/child.pid
+  mkdir -p "$state_root/sessions/owned" "$state_root/sessions/other" \
+    "$state_root/sessions/plain" "$case_dir/bin"
+  bridge_bin=$case_dir/bin/chrome-devtools-axi-bridge
+  cat > "$bridge_bin" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = "detached-child" ]; then
+  exec sleep 300
+fi
+child_file=$1
+elsewhere=$2
+perl -e '
+  use POSIX qw(setsid);
+  my ($elsewhere, $child_file) = @ARGV;
+  my $pid = fork();
+  die "fork: $!" unless defined $pid;
+  if ($pid == 0) {
+    setsid() or die "setsid: $!";
+    chdir $elsewhere or die "chdir: $!";
+    open my $fh, ">", $child_file or die "open: $!";
+    print $fh "$$\n";
+    close $fh;
+    exec "sleep", "300" or die "exec: $!";
+  }
+  sleep 300;
+' "$elsewhere" "$child_file" &
+wait
+SH
+  chmod +x "$bridge_bin"
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  outside_canon=$(cd "$outside" && pwd -P)
+  elsewhere_canon=$(cd "$elsewhere" && pwd -P)
+
+  (
+    cd "$outside_canon" || exit 1
+    exec "$bridge_bin" "$child_file" "$elsewhere_canon"
+  ) &
+  bridge_pid=$!
+  disown || true
+  (
+    cd "$elsewhere_canon" || exit 1
+    exec "$bridge_bin" detached-child
+  ) &
+  other_pid=$!
+  disown || true
+  (
+    cd "$outside_canon" || exit 1
+    exec "$bridge_bin" detached-child
+  ) &
+  stranger_pid=$!
+  disown || true
+  (
+    cd "$outside_canon" || exit 1
+    exec sleep 300
+  ) &
+  plain_pid=$!
+  disown || true
+
+  i=0
+  while [ ! -s "$child_file" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  child_pid=$(tr -d '[:space:]' < "$child_file")
+  if ! kill -0 "$bridge_pid" 2>/dev/null || ! kill -0 "$child_pid" 2>/dev/null \
+     || ! kill -0 "$other_pid" 2>/dev/null || ! kill -0 "$stranger_pid" 2>/dev/null \
+     || ! kill -0 "$plain_pid" 2>/dev/null; then
+    kill -KILL "$bridge_pid" "$child_pid" "$other_pid" "$stranger_pid" "$plain_pid" 2>/dev/null || true
+    fail "recorded-browser-helper: setup processes did not stay alive"
+  fi
+  bridge_pgid=$(ps -o pgid= -p "$bridge_pid" | tr -d '[:space:]')
+  child_pgid=$(ps -o pgid= -p "$child_pid" | tr -d '[:space:]')
+  if [ -z "$bridge_pgid" ] || [ "$bridge_pgid" = "$child_pgid" ]; then
+    kill -KILL "$bridge_pid" "$child_pid" "$other_pid" "$stranger_pid" "$plain_pid" 2>/dev/null || true
+    fail "recorded-browser-helper: child did not leave the bridge process group"
+  fi
+
+  mkdir -p "$proc_root/$bridge_pid" "$proc_root/$other_pid" "$proc_root/$plain_pid"
+  printf 'OLDPWD=%s\0PWD=%s\0' "$wt_canon" "$outside_canon" > "$proc_root/$bridge_pid/environ"
+  printf 'OLDPWD=%s\0PWD=%s\0' "$elsewhere_canon" "$elsewhere_canon" > "$proc_root/$other_pid/environ"
+  printf 'OLDPWD=%s\0PWD=%s\0' "$wt_canon" "$outside_canon" > "$proc_root/$plain_pid/environ"
+  printf '{"pid":%s,"port":1}\n' "$bridge_pid" > "$state_root/sessions/owned/bridge.pid"
+  printf '{"pid":%s,"port":2}\n' "$other_pid" > "$state_root/sessions/other/bridge.pid"
+  printf '{"pid":%s,"port":3}\n' "$plain_pid" > "$state_root/sessions/plain/bridge.pid"
+
+  rc=0
+  FM_BROWSER_HELPER_STATE_OVERRIDE="$state_root" \
+  FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$bridge_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+    kill -KILL "$bridge_pid" "$child_pid" "$other_pid" "$stranger_pid" "$plain_pid" 2>/dev/null || true
+    fail "recorded-browser-helper: owned bridge or its setsid child survived teardown"
+  fi
+  if ! kill -0 "$other_pid" 2>/dev/null || ! kill -0 "$stranger_pid" 2>/dev/null \
+     || ! kill -0 "$plain_pid" 2>/dev/null; then
+    kill -KILL "$other_pid" "$stranger_pid" "$plain_pid" 2>/dev/null || true
+    fail "recorded-browser-helper: a bridge for another directory, an unrecorded bridge, or a non-bridge pid was killed"
+  fi
+  kill -KILL "$other_pid" "$stranger_pid" "$plain_pid" 2>/dev/null || true
+  expect_code 0 "$rc" "recorded-browser-helper: teardown should still succeed"
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "recorded-browser-helper: teardown did not report reaping the owned bridge"
+  pass "a recorded bridge whose previous directory is the worktree is reaped with its setsid child, and same-named processes that are not this task's are not"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -4740,6 +4938,8 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_browser_helper_descendant_outside_worktree_is_reaped
+test_recorded_browser_helper_is_reaped_without_a_name_sweep
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

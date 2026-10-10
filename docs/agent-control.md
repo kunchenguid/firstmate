@@ -55,7 +55,11 @@ A stopped agent whose pane still shows the dialog text is not refused.
 [`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
 
 **Teardown and discard are not verbs and will not become verbs.**
-`exit` stops an agent and preserves everything else.
+After proving the agent stopped, `exit` also runs browser-helper cleanup for ship and scout tasks, including already-stopped agents and proven-gone endpoints.
+`relaunch` inherits this cleanup through its exit step; a cleanup failure stops the operation even though the old agent has already stopped.
+The browser-only scope leaves unrelated worktree processes alone and preserves the endpoint, worktree, and uncommitted changes.
+Secondmates skip this cleanup entirely because their recorded worktree is a shared home containing child work.
+[`bin/fm-task-process-lib.sh`](../bin/fm-task-process-lib.sh) owns helper ownership checks and signaling limits; [`tests/fm-control.test.sh`](../tests/fm-control.test.sh) covers worker cleanup and secondmate exclusion.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
@@ -111,7 +115,7 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   It starts that server (only the server: no workspace and no tab are created) and **re-reads the recorded pane**.
   `dead` means the pane survived the restart and is adopted after all, with no second tab; `alive` means the agent came back and refuses; only a second `missing` proves the pane itself did not survive ([`docs/herdr-backend.md`](herdr-backend.md) "Restart and liveness behavior").
   That server start is a real side effect, and the parenthetical above does not cover it: when the recorded session's server no longer exists at all, the probe stands a fresh empty one up in order to ask, and nothing afterwards uses it.
-  So in that state `exit` - which otherwise reads as a read-only inspection - leaves an idle herdr server behind.
+  So in that state `exit` leaves an idle herdr server behind.
 - **tmux cannot.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint.
   A different but running server would answer "not anywhere" about a window it was never able to see, so a server-wide read cannot tell a destroyed window from one on a server this process cannot address.
   There is no read available that closes that gap, so tmux always refuses - for a renamed session, a moved window, a foreign socket, and a dead server alike.
