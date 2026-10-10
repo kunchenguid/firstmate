@@ -4646,6 +4646,59 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+test_forced_secondmate_teardown_cleans_descendant_simulators() {
+  local case_dir home nested_home child delete_fail rc
+  for delete_fail in 0 1; do
+    case_dir=$(make_case "sim-descendants-$delete_fail")
+    write_meta "$case_dir" local-only secondmate
+    configure_secondmate_with_tmux_children "$case_dir"
+    home="$case_dir/secondmate-home"
+    nested_home="$home/nested-home"
+    mkdir -p "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
+    printf '%s\n' nested-sm > "$nested_home/.fm-secondmate-home"
+    fm_write_meta "$home/state/nested-sm.meta" \
+      "window=firstmate:fm-nested-sm" \
+      "endpoint_task_id=nested-sm" \
+      "worktree=$nested_home" \
+      "project=$case_dir/project" \
+      "kind=secondmate" \
+      "mode=local-only" \
+      "home=$nested_home"
+    for child in grandchild pool-3 pool-cleanup; do
+      fm_write_meta "$nested_home/state/$child.meta" \
+        "window=firstmate:fm-$child" \
+        "endpoint_task_id=$child" \
+        "worktree=$case_dir/$child-wt" \
+        "project=$case_dir/project" \
+        "kind=ship" \
+        "mode=local-only"
+    done
+    printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-task-x1","name":"fm-task-x1","state":"Booted"},{"udid":"SIM-child-a","name":"fm-child-a","state":"Booted"},{"udid":"SIM-child-b","name":"fm-child-b","state":"Shutdown"},{"udid":"SIM-nested-sm","name":"fm-nested-sm","state":"Shutdown"},{"udid":"SIM-grandchild","name":"fm-grandchild","state":"Shutdown"},{"udid":"SIM-pool-3","name":"fm-pool-3","state":"Booted"},{"udid":"SIM-pool-cleanup","name":"fm-pool-cleanup","state":"Shutdown"},{"udid":"SIM-unrelated","name":"fm-unrelated","state":"Booted"}]}}' \
+      > "$case_dir/simctl-devices.json"
+    rc=0
+    FM_FAKE_SIMCTL_LIST_FILE="$case_dir/simctl-devices.json" FM_SIMCTL_LOG="$case_dir/simctl.log" \
+      FM_FAKE_SIMCTL_DELETE_FAIL="$delete_fail" \
+      run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "sim-descendants: forced teardown should complete: $(cat "$case_dir/stderr")"
+    for child in task-x1 child-a child-b nested-sm grandchild pool-cleanup; do
+      assert_grep "simctl shutdown SIM-$child" "$case_dir/simctl.log" \
+        "sim-descendants: $child simulator shutdown was not attempted"
+      assert_grep "simctl delete SIM-$child" "$case_dir/simctl.log" \
+        "sim-descendants: $child simulator deletion was not attempted"
+      if [ "$delete_fail" = 1 ]; then
+        assert_grep "warning: could not delete simulator fm-$child (SIM-$child)" "$case_dir/stderr" \
+          "sim-descendants: $child delete failure did not warn"
+      fi
+    done
+    if grep -qE 'simctl (shutdown|delete) SIM-(pool-3|unrelated)$' "$case_dir/simctl.log"; then
+      fail "sim-descendants: teardown touched a persistent or unrelated simulator"
+    fi
+    [ ! -e "$case_dir/state/task-x1.meta" ] && [ ! -d "$home" ] \
+      || fail "sim-descendants: simulator cleanup prevented task record or home removal"
+  done
+  pass "forced teardown cleans child and grandchild simulators and tolerates delete failures"
+}
+
 test_teardown_deletes_only_the_task_owned_simulator() {
   local case_dir rc
   case_dir=$(make_case sim-task-cleanup)
@@ -4875,3 +4928,5 @@ test_teardown_simulator_delete_failure_only_warns
 test_teardown_pool_task_id_never_queries_simctl
 
 test_teardown_non_numeric_pool_task_deletes_simulator
+
+test_forced_secondmate_teardown_cleans_descendant_simulators
