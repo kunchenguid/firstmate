@@ -92,6 +92,14 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
     "Ordinary teardown of a confirmed-landed ship or a completed scout, steering, lifecycle control, PR checks, and backlog status moves are yours, under the task's lease." \
     "branch role limits still exclude completed-scout cleanup"
 
+  # This checks delivery of the per-task result contract, not model adherence.
+  assert_contains "$prompt" \
+    "Run each task's cleanup in a separate tool call and use that call's exit status and output for its outcome." \
+    "branch prompt omits per-task cleanup result attribution"
+  assert_contains "$prompt" \
+    "An allowance diagnostic is not a refusal; report a refusal only when that task's cleanup actually refuses, quoting its reason." \
+    "branch prompt does not distinguish cleanup permission from refusal"
+
   # Verbatim policy inclusion is an owned output contract. These owners must
   # reach hosts that disable automatic skill loading, without a policy copy.
   for skill in scout-completion captain-hold-lifecycle; do
