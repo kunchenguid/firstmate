@@ -316,6 +316,63 @@ backlog_key_noncanonical_body_lines() {
   ' "$file"
 }
 
+# Host-operation requirement markers. An item whose brief names any of these
+# needs the primary AMD host (QA copies, compose stacks, the QA dashboard,
+# preview host); a secondmate whose scope reserves that class to the primary
+# cannot perform it, so routing the item there would strand it.
+HOST_OP_MARKERS=(
+  "AMD-host operations"
+  "AMD host operations"
+  "compose stack"
+  "QA dashboard"
+  "preview host"
+)
+
+# Print the full brief for an item: its header line plus every body line
+# indented by two or more spaces, up to the next item or section heading.
+# Mirrors backlog_key_noncanonical_body_lines but keeps the canonical body.
+backlog_key_brief_lines() { # <file> <key>
+  local file=$1 key=$2
+  [ -f "$file" ] || return 1
+  awk -v key="$key" '
+    /^- \[[ x]\] / {
+      rest = $0
+      sub(/^- \[[ x]\] +/, "", rest)
+      id = rest
+      sub(/[ \t].*/, "", id)
+      if (capturing) exit
+      if (id == key) { capturing = 1; print; next }
+      next
+    }
+    capturing && /^##[[:space:]]+/ { exit }
+    capturing { print }
+  ' "$file"
+}
+
+# Print the first host-operation marker found in the item brief; no output and
+# a non-zero status when the item needs no host operation.
+host_ops_marker_in_item() { # <file> <key>
+  local file=$1 key=$2 marker brief
+  brief=$(backlog_key_brief_lines "$file" "$key" 2>/dev/null) || return 1
+  for marker in "${HOST_OP_MARKERS[@]}"; do
+    case "$brief" in
+    *"$marker"*) printf "%s\n" "$marker"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# True when the secondmate scope text reserves AMD-host operations to the
+# primary: the scope names that class as out of the mate remit.
+secondmate_scope_excludes_host_ops() { # <secondmate-id>
+  local scope
+  scope=$(secondmate_registry_field "$REG" "$1" scope 2>/dev/null || true)
+  case "${scope,,}" in
+  *"amd-host operations"*|*"amd host operations"*) return 0 ;;
+  esac
+  return 1
+}
+
 seed_backlog_scaffold() { # <path>
   mkdir -p "$(dirname "$1")"
   [ -f "$1" ] || printf '## In flight\n\n## Queued\n\n## Done\n' >"$1"
@@ -756,10 +813,14 @@ remove_interrupted_source_duplicates() { # <outbox> <keys...>
 }
 
 remote_handoff() { # <secondmate-id> <keys...>
-  local id=$1 outbox section main_section out_section key mv_out
-  local -a requested to_move already missing in_flight done_items not_queued
+  local id=$1 outbox section main_section out_section key mv_out marker
+  local -a requested to_move already missing in_flight done_items not_queued host_blocked
   shift
   requested=("$@")
+  local scope_excludes_host_ops=0
+  if secondmate_scope_excludes_host_ops "$id"; then
+    scope_excludes_host_ops=1
+  fi
   outbox="$DATA/handoff/$id.outbox.md"
   validate_backlog_file "main backlog" "$MAIN_BACKLOG" || return 1
   validate_backlog_file "remote handoff outbox" "$outbox" || return 1
@@ -779,6 +840,7 @@ remote_handoff() { # <secondmate-id> <keys...>
   in_flight=()
   done_items=()
   not_queued=()
+  host_blocked=()
   for key in "${requested[@]}"; do
     out_section=$(backlog_key_section "$outbox" "$key" 2>/dev/null || true)
     main_section=$(backlog_key_section "$MAIN_BACKLOG" "$key" 2>/dev/null || true)
@@ -788,15 +850,27 @@ remote_handoff() { # <secondmate-id> <keys...>
       continue
     fi
     case "$main_section" in
-    '## Queued') to_move+=("$key") ;;
+    "## Queued")
+      marker=
+      if [ "$scope_excludes_host_ops" -eq 1 ]; then
+        marker=$(host_ops_marker_in_item "$MAIN_BACKLOG" "$key" || true)
+      fi
+      if [ -n "$marker" ]; then
+        host_blocked+=("$key ($marker)")
+      else
+        to_move+=("$key")
+      fi
+      ;;
     '## In flight') in_flight+=("$key") ;;
     '## Done') done_items+=("$key") ;;
     '') missing+=("$key") ;;
     *) not_queued+=("$key") ;;
     esac
   done
-  if [ "${#in_flight[@]}" -gt 0 ] || [ "${#done_items[@]}" -gt 0 ] ||
+  if [ "${#host_blocked[@]}" -gt 0 ] ||
+    [ "${#in_flight[@]}" -gt 0 ] || [ "${#done_items[@]}" -gt 0 ] ||
     [ "${#not_queued[@]}" -gt 0 ] || [ "${#missing[@]}" -gt 0 ]; then
+    [ "${#host_blocked[@]}" -eq 0 ] || echo "error: refusing to hand off host-operation work to secondmate $id: ${host_blocked[*]}; the scope of secondmate $id reserves AMD-host operations to the primary." >&2
     [ "${#in_flight[@]}" -eq 0 ] || echo "error: refusing to hand off in-flight backlog items: ${in_flight[*]}" >&2
     [ "${#done_items[@]}" -eq 0 ] || echo "error: refusing to hand off Done backlog items: ${done_items[*]}" >&2
     [ "${#not_queued[@]}" -eq 0 ] || echo "error: refusing to hand off non-Queued outbox or backlog items: ${not_queued[*]}" >&2
@@ -946,6 +1020,13 @@ RAW_HOME=$(secondmate_home "$ID") || exit 1
   exit 1
 }
 SUB_HOME=$(validate_secondmate_home "$ID" "$RAW_HOME") || exit 1
+
+# Read the registered scope before routing: a mate whose scope reserves
+# AMD-host operations to the primary must never receive host-operation work.
+SUB_SCOPE_EXCLUDES_HOST_OPS=0
+if secondmate_scope_excludes_host_ops "$ID"; then
+  SUB_SCOPE_EXCLUDES_HOST_OPS=1
+fi
 SUB_BACKLOG="$SUB_HOME/data/backlog.md"
 validate_backlog_file "main backlog" "$MAIN_BACKLOG" || exit 1
 validate_backlog_file "secondmate backlog" "$SUB_BACKLOG" || exit 1
@@ -958,12 +1039,20 @@ MISSING=()
 IN_FLIGHT=()
 DONE=()
 NOT_QUEUED=()
+HOST_OP_BLOCKED=()
 for key in "$@"; do
   if backlog_key_section "$SUB_BACKLOG" "$key" >/dev/null; then
     ALREADY+=("$key")
   elif section=$(backlog_key_section "$MAIN_BACKLOG" "$key"); then
     case "$section" in
-    "## Queued") TO_MOVE+=("$key") ;;
+    "## Queued")
+      if [ "$SUB_SCOPE_EXCLUDES_HOST_OPS" -eq 1 ] &&
+        marker=$(host_ops_marker_in_item "$MAIN_BACKLOG" "$key"); then
+        HOST_OP_BLOCKED+=("$key ($marker)")
+      else
+        TO_MOVE+=("$key")
+      fi
+      ;;
     "## In flight") IN_FLIGHT+=("$key") ;;
     "## Done") DONE+=("$key") ;;
     *) NOT_QUEUED+=("$key") ;;
@@ -988,6 +1077,10 @@ if [ "${#NOT_QUEUED[@]}" -gt 0 ]; then
 fi
 if [ "${#MISSING[@]}" -gt 0 ]; then
   echo "error: no backlog item matched these keys in $MAIN_BACKLOG: ${MISSING[*]}" >&2
+  FAILED=1
+fi
+if [ "${#HOST_OP_BLOCKED[@]}" -gt 0 ]; then
+  echo "error: refusing to hand off host-operation work to secondmate $ID: ${HOST_OP_BLOCKED[*]}; the scope of secondmate $ID reserves AMD-host operations to the primary." >&2
   FAILED=1
 fi
 if [ "$FAILED" -ne 0 ]; then
