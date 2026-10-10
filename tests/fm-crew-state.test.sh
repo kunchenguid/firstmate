@@ -1294,6 +1294,47 @@ EOF
   pass "pending no-checks ci-monitor marker stays working"
 }
 
+# Approval-held workflows must supersede earlier green evidence, including a
+# stale worker completion report, until a later passed marker arrives.
+test_ci_monitoring_maintainer_approval_ordering() {
+  local scenario d out
+  for scenario in passed-then-held held-then-passed held-only; do
+    reset_fakes
+    d=$(new_case "ci-approval-$scenario")
+    make_repo_on_branch "$d/wt" fm/feat-ciapproval
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-ciapproval.meta" "window=fm:fm-feat-ciapproval" "worktree=$d/wt" "kind=ship"
+    printf 'done: PR checks green\n' > "$d/state/feat-ciapproval.status"
+    FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciapproval)"
+    case "$scenario" in
+      passed-then-held)
+        FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed
+CI workflows are held awaiting maintainer approval - no jobs have run, waiting..."
+        ;;
+      held-then-passed)
+        FM_FAKE_CI_LOGS="CI workflows are held awaiting maintainer approval - no jobs have run, waiting...
+CI checks running, waiting for results...
+all CI checks passed - still monitoring until merged or closed"
+        ;;
+      held-only)
+        FM_FAKE_CI_LOGS="CI workflows are held awaiting maintainer approval - no jobs have run, waiting..."
+        ;;
+    esac
+    out=$(run_crew_state "$d" feat-ciapproval)
+    assert_contains "$out" "source: run-step" "$scenario remains run-step sourced"
+    if [ "$scenario" = held-then-passed ]; then
+      assert_contains "$out" "state: done" "$scenario reads done after checks pass"
+      assert_contains "$out" "checks green" "$scenario reads checks green"
+    else
+      assert_contains "$out" "state: working" "$scenario waits for CI to run"
+      assert_not_contains "$out" "state: done" "$scenario must not read as done"
+      assert_not_contains "$out" "checks green" "$scenario must not read as green"
+      assert_not_contains "$out" "PR ready for review" "$scenario must not read as ready"
+    fi
+    pass "ci approval ordering: $scenario"
+  done
+}
+
 test_ci_monitoring_still_waiting_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-waiting)
@@ -5537,6 +5578,7 @@ test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_green_then_rearm_stays_green
 test_ci_monitoring_green_before_log_tail_stays_green
 test_ci_monitoring_no_checks_yet_stays_working
+test_ci_monitoring_maintainer_approval_ordering
 test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working
 test_ci_ready_done_log_relapse_stays_working

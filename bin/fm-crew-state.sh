@@ -111,7 +111,8 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a check of the full ci-step log overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating. And a
+#      green, so a green PR is never silently read as still-validating. A later
+#      maintainer-approval hold means CI has not run and returns not-ready. A
 #      terminal failed or cancelled run whose only unfinished step is the ci
 #      monitor, after every substantive step completed (an explicitly skipped
 #      rebase is allowed) and the ci log's last marker reads checks green,
@@ -852,8 +853,9 @@ nm_effective_ci_step_status() {
 # ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
 # actual PR #252 run). Reads the ci step's log via `axi logs --full` and scans
 # it for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
+# so the last match is current): green with no later not-ready marker means
+# CI is green right now, still only waiting on merge/close. A workflow held
+# awaiting maintainer approval is not-ready, even after an earlier green marker.
 # "base branch advanced (..), re-arming CI monitor timeout" is deliberately NOT
 # a marker: the monitor logs a checks state only when that state changes, and a
 # base advance re-arms only its idle timeout without clearing readiness, so the
@@ -867,11 +869,11 @@ nm_ci_checks_state() {
   ci_log=$(nm_run axi logs --step ci --run "$run_id" --full) || true
   [ -n "$ci_log" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$ci_log" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running' \
+    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|CI workflows are held awaiting maintainer approval' \
     | tail -1)
   case "$marker" in
     *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*) printf 'not-ready' ;;
+    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"CI workflows are held awaiting maintainer approval"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
 }
