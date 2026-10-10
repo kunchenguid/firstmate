@@ -585,17 +585,21 @@ retire_successor() {
 # Hand the close to main: stop the successor cycle, print the close, why, and
 # any further "supervision-host:" lines, and exit.
 exit_to_main() {  # <why> [further lines]
-  local lines=${2:-} rc=0
   retire_successor
   if [ -n "$SUCCESSOR_GENERATION" ] \
     && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
     log_line "to-main	downtime-unrestored	$1"
-    lines=${lines:+$lines$'\n'}"supervision-host: watcher downtime could not be restored for the main hand-back"
-    rc=1
+    # Keep this non-actionable: the Stop hook deliberately ignores an acked
+    # marker, but a failed restoration still needs its ordinary failure notice.
+    # The stderr line is the one diagnostic that notice and the Codex
+    # checkpoint's failure output can show; "supervision-host " without the
+    # colon so no close reader takes it as a wake.
+    printf 'supervision-host hand-back failed: watcher downtime could not be restored; the dropped close was: %s\n' "$1" >&2
+    exit 1
   fi
   log_line "to-main	$1"
-  emit "supervision-host: $1" "$lines"
-  exit "$rc"
+  emit "supervision-host: $1" "${2:-}"
+  exit 0
 }
 
 # The outcome store (bin/fm-branch-outcome.sh) owns and validates these rows.
@@ -1145,6 +1149,8 @@ while :; do
     if [ -n "$SUCCESSOR_GENERATION" ] \
       && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
       log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
+      printf 'supervision-host hand-back failed: watcher downtime could not be restored; the dropped close was: %s\n' \
+        "$(printf '%s\n' "$REASON" | head -n 1)" >&2
       exit 1
     fi
     emit

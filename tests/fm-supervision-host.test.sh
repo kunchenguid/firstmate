@@ -140,7 +140,7 @@ case "$mode" in
     esac
     case "$mode" in return-fail|return-fail-silent) exit 3 ;; esac
     [ "$mode" != return-first ] || sleep "$FM_TEST_STUB_MAX_BLOCK_SECONDS"
-    [ "$mode" != emptyresult ] || { printf '{}\n'; exit 0; }
+    [ "$mode" != emptyresult ] || { : > "$FM_HOME/stub-finished"; printf '{}\n'; exit 0; }
     result
     ;;
   noreport) result ;;
@@ -1348,6 +1348,78 @@ test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record() {
   pass "host+hook: a captain outcome beside a quiet record rewakes the present captain with no away note"
 }
 
+# A failed engine result after acknowledging the last row leaves acked:handling.
+# If downtime publication then fails, the host must return a failure without
+# an actionable banner: the Stop hook deliberately ignores acknowledged wakes.
+test_claude_stop_hook_reports_failed_handback_publication() {
+  local home real_mktemp
+  home=$(make_primary_home hook-handback-write-fails)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo emptyresult > "$home/stub-mode"
+  real_mktemp=$(command -v mktemp)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/state/.watcher-down.tmp.'*) [ ! -e "\$FM_HOME/stub-finished" ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hand-back write failure: no watcher"
+  append_status "$home" 'first event'
+  wait_until 400 hook_exited "$home" || fail "hand-back write failure: hook did not close"
+  assert_re 'to-main[[:space:]]+downtime-unrestored' "$home/state/.supervision-host.log" "the hand-back publication must have failed"
+  assert_re '^acked:handling:' "$home/state/.watcher-down" "fixture: the engine must have acknowledged its last row before publication failed"
+  ! watcher_live "$home" || fail "fixture: the host must have retired its successor"
+  expect_code 2 "$(cat "$home/hook.rc")" "a failed hand-back must notify main"
+  assert_grep 'firstmate watcher auto-arm FAILED' "$home/hook.err" "the failed hand-back must surface a failure notice"
+  assert_grep 'supervision-host hand-back failed: watcher downtime could not be restored' "$home/hook.err" \
+    "the failure notice must carry the hand-back diagnostic"
+  assert_re 'outcome=failed ' "$home/state/.claude-autoarm-epoch" "failure must close the arm claim"
+  pass "host+hook: failed hand-back publication surfaces a committed failure instead of silently losing the wake"
+}
+
+# The same publication failure on a Codex primary, whose close reader is the
+# foreground checkpoint (bin/fm-watch-checkpoint.sh): the close must stay
+# non-actionable, and the host's stderr diagnostic must reach the checkpoint's
+# stderr beside its failure status so the operator sees what failed.
+test_codex_checkpoint_surfaces_failed_handback_publication() {
+  local home real_mktemp
+  home=$(make_home codex-handback-write-fails away claude)
+  ln -s /bin/bash "$home/fakebin/codex"
+  echo emptyresult > "$home/stub-mode"
+  real_mktemp=$(command -v mktemp)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/state/.watcher-down.tmp.'*) [ ! -e "\$FM_HOME/stub-finished" ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp"
+  FM_HOME="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$home/fakebin:$PATH" \
+    "$home/fakebin/codex" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s\n" "$$" >> "$FM_HOME/claude-pids"
+      "$0" --seconds 20 > "$FM_HOME/checkpoint.out" 2> "$FM_HOME/checkpoint.err"
+      printf "%s\n" "$?" > "$FM_HOME/checkpoint.rc"
+    ' "$ROOT/bin/fm-watch-checkpoint.sh" 2>> "$home/claude.err" &
+  wait_until 150 watcher_live "$home" || fail "codex hand-back write failure: no watcher"
+  append_status "$home" 'first event'
+  wait_until 400 test -s "$home/checkpoint.rc" \
+    || fail "codex hand-back write failure: the checkpoint did not return: $(tail -n 8 "$home/state/.supervision-host.log" 2>/dev/null)"
+  assert_re 'to-main[[:space:]]+downtime-unrestored' "$home/state/.supervision-host.log" "the hand-back publication must have failed"
+  assert_re '^acked:handling:' "$home/state/.watcher-down" "fixture: the engine must have acknowledged its last row before publication failed"
+  expect_code 1 "$(cat "$home/checkpoint.rc")" "a failed hand-back must be the checkpoint's failure status"
+  assert_no_re '^supervision-host:' "$home/checkpoint.out" "the failed hand-back must not pass through as an actionable wake"
+  assert_re '^supervision-host hand-back failed: watcher downtime could not be restored.*could not take this wake' \
+    "$home/checkpoint.err" "the checkpoint must show the diagnostic beside its failure status"
+  ! watcher_live "$home" || fail "fixture: the host must have retired its successor"
+  pass "host+checkpoint: a Codex hand-back publication failure returns a failure status that shows its diagnostic"
+}
+
 # Default-on for Claude (docs/configuration.md "Supervision host"): through the
 # real Stop hook and mirror writer, a Claude primary home with no
 # config/supervision-host runs the host at the default engine, mirrors the
@@ -1457,6 +1529,8 @@ SH
   assert_re '^(pending|announced):handling:' "$home/state/.watcher-down" "fixture: the marker unexpectedly became downtime"
   expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must notify main instead of dropping the close"
   assert_grep 'firstmate watcher auto-arm FAILED' "$home/hook.err" "main must receive the failure notification"
+  assert_grep 'supervision-host hand-back failed: watcher downtime could not be restored' "$home/hook.err" \
+    "the failure notice must carry the hand-back diagnostic"
   assert_re 'outcome=failed ' "$home/state/.claude-autoarm-epoch" "the failure must be committed"
   pass "host+hook: failed at-turn downtime write notifies main despite a healthy successor"
 }
@@ -2987,6 +3061,8 @@ test_close_accepted_away_that_turns_attended_passes_to_main
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
 test_claude_stop_hook_delivers_a_main_only_pass_through
 test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
+test_claude_stop_hook_reports_failed_handback_publication
+test_codex_checkpoint_surfaces_failed_handback_publication
 test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
 test_successor_left_at_the_turn_survives_the_hook_process_group_teardown
