@@ -127,6 +127,12 @@ test_worked_examples() {
   assert_contains "$out" 'note: tie at 74 broken by the fixed rank in config/lane-placement (scholar-lanes rank 1, pc-lanes rank 2)' "s1 tie"
   assert_contains "$out" 'place: scholar-lanes' "s1 place"
   assert_contains "$out" 'log: 1791493200-fc-castle-siege-r1' "s1 log id"
+  cp "$w/main/config/lane-placement.json" "$w/policy.saved"
+  jq '.homes["pc-lanes"].rank = 1' "$w/policy.saved" > "$w/main/config/lane-placement.json"
+  out=$(place "$w" $T --task fc-castle-siege-r1b "${ROUTE[@]}" --profile engine-heavy)
+  assert_contains "$out" 'note: tie at 74 broken by the home id (pc-lanes and scholar-lanes both rank 1)' "s1 equal-rank tie"
+  assert_contains "$out" 'place: pc-lanes' "s1 equal-rank tie goes to the lower home id"
+  cp "$w/policy.saved" "$w/main/config/lane-placement.json"
 
   # Example B (s2a-s2d): the PC's WSL rebooting with its real boot times.
   T=1791558810
@@ -135,10 +141,12 @@ test_worked_examples() {
   mk "$w/scholar" scholar-lanes scholar-wsl $T 4 12 12 ok '[]' 13.11 25.2 0.94 86599 not-configured "" 5 "$OLD"
   out=$(place "$w" $T --task fc-commander-rank-r2 "${ROUTE[@]}" --profile engine-heavy)
   assert_contains "$out" 'status: ambiguous' "s2a status"
-  assert_contains "$out" 'candidate: pc-lanes -> unknown: facts unreachable: fm-on.sh pc-lanes: exit 255 (ssh: connect to host fm-lanes port 22: Connection timed out)' "s2a pc unreachable"
+  assert_contains "$out" 'candidate: pc-lanes -> unknown: facts unreachable (exit 255)' "s2a pc unreachable"
+  assert_contains "$(cat "$w/stderr")" 'fm-place: pc-lanes: fm-on.sh exit 255: ssh: connect to host fm-lanes port 22: Connection timed out' "s2a ssh detail on stderr"
+  assert_not_contains "$(cat "$w/main/state/lane-placement.jsonl")" 'fm-lanes port 22' "s2a ssh detail never logged"
   assert_contains "$out" 'candidate: scholar-lanes -> not eligible: full: 12 of 12 lanes' "s2a scholar full"
   assert_contains "$out" 'candidate: main (fallback) -> not eligible: full: 10 of 10 lanes; no room for a 1.5 GB lane: 4.5 GB available, 4 GB kept' "s2a main"
-  assert_contains "$out" 'reason: no home is rankable on known facts (pc-lanes: facts unreachable: fm-on.sh pc-lanes: exit 255 (ssh: connect to host fm-lanes port 22: Connection timed out)); every other home is refused; decide as today' "s2a reason names each unknown home"
+  assert_contains "$out" 'reason: no home is rankable on known facts (pc-lanes: facts unreachable (exit 255)); every other home is refused; decide as today' "s2a reason names each unknown home"
   assert_not_contains "$out" 'place:  ' "s2a has no place"
   rm -f "$w/pc/.unreachable"
 
@@ -174,9 +182,10 @@ test_worked_examples() {
   mk "$w/pc" pc-lanes homecommand-wsl $T 3 0 10 ok '[]' 28.0 31.3 0.1 60000 not-configured "tower reserved by the captain" 6 "$PC_BOOTS"
   mk "$w/scholar" scholar-lanes scholar-wsl $T 4 12 12 ok '[]' 9.8 25.2 1.2 120000 not-configured "" 5 "$OLD"
   out=$(place "$w" $T --task writeide-docs-r1 "${ROUTE[@]}" --profile docs)
-  assert_contains "$out" 'candidate: pc-lanes -> not eligible: captain reserve: tower reserved by the captain' "s3a pc reserved"
+  assert_contains "$out" 'candidate: pc-lanes -> not eligible: captain-reserve' "s3a pc reserved"
+  assert_not_contains "$(cat "$w/main/state/lane-placement.jsonl")" 'tower reserved' "s3a reserve label never logged"
   assert_contains "$out" 'candidate: main (fallback) -> eligible score 22: mem 5/40 cpu 20/25 room 12/20 captain -15  [lanes 4/10, 5.5 GB free, runq 0.6/core, facts 5 s]' "s3a main with the captain term"
-  assert_contains "$out" 'note: every fitting home is blocked (pc-lanes: captain reserve: tower reserved by the captain; scholar-lanes: full: 12 of 12 lanes); main is the fallback' "s3a fallback note"
+  assert_contains "$out" 'note: every fitting home is blocked (pc-lanes: captain-reserve; scholar-lanes: full: 12 of 12 lanes); main is the fallback' "s3a fallback note"
   assert_contains "$out" 'place: main' "s3a place"
 
   mk "$w/main" main maccommand $T 5 4 10 ok '[]' 4.8 16 0.6 400000 present "" 4 "$OLD"
@@ -293,7 +302,7 @@ test_filters() {
   check "on battery" pc pc-lanes '.pressure.on_battery = true' 'not eligible: on battery'
   check "invalid cap" pc pc-lanes '.cap = {target: null, status: "invalid"}' 'not eligible: its config/lane-capacity is unreadable'
   check "quota exhausted" pc pc-lanes '.quota = {provider: "claude", runway: "exhausted_now"}' 'not eligible: quota exhausted now'
-  check "quota tight" pc pc-lanes '.quota = {provider: "claude", runway: "exhausts_before_reset"}' 'eligible score 61: mem 33/40 cpu 22/25 room 16/20 quota -10'
+  check "quota tight" pc pc-lanes '.quota = {provider: "claude", runway: "projected_exhaustion"}' 'eligible score 61: mem 33/40 cpu 22/25 room 16/20 quota -10'
   check "warn pressure" pc pc-lanes '.pressure.level = "warn" | .pressure.why = ["memory stall 12%"]' 'not eligible: pressure warn: memory stall 12%'
   check "own verdict" pc pc-lanes '.verdict = {admit: false, free_lanes: 0, reasons: ["load: 24.7 over its max-load1 20"]}' 'not eligible: its own verdict: load: 24.7 over its max-load1 20'
   check "one restart" pc pc-lanes '.boots = [.generated_epoch - 7200]' 'eligible score 61: mem 33/40 cpu 22/25 room 16/20 unstable -10'
@@ -311,7 +320,7 @@ test_filters() {
   assert_contains "$out" 'candidate: pc-lanes -> unknown: facts unreadable: not JSON' "malformed facts"
   rm -f "$w/pc/state/lane-capacity.json"
   out=$(place "$w" $T --task f-missing --project field-commander --delivery no-mistakes --fitting pc-lanes)
-  assert_contains "$out" 'candidate: pc-lanes -> unknown: no published facts (fm-on.sh pc-lanes: exit 1' "remote home not publishing"
+  assert_contains "$out" 'candidate: pc-lanes -> unknown: no published facts: missing (exit 1)' "remote home not publishing"
   assert_contains "$out" 'status: ambiguous' "only an unknown home is ambiguous"
   base_facts "$w" $T
 
@@ -377,7 +386,7 @@ test_unreachable_budget_and_log() {
   touch "$w/scholar/.stall"
   out=$(place "$w" $T --task r1 "${ROUTE[@]}"); rc=$?
   expect_code 0 "$rc" "a stalled home"
-  assert_contains "$out" 'candidate: scholar-lanes -> unknown: facts unreachable: fm-on.sh scholar-lanes: no answer within 1 s' "the budget bounds a stalled read"
+  assert_contains "$out" 'candidate: scholar-lanes -> unknown: facts unreachable: timeout after 1 s (exit 124)' "the budget bounds a stalled read"
   assert_contains "$out" 'candidate: pc-lanes -> eligible score 71' "a stalled home does not block the others"
   rm -f "$w/scholar/.stall"
   out=$(place "$w" $((T + 60)) --task r2 --project field-commander --delivery no-mistakes --fitting scholar-lanes)
@@ -430,7 +439,10 @@ test_review() {
   assert_contains "$out" 'span: 14 d   advice: 2   outcomes: 2' "review counts"
   assert_contains "$out" 'status: clear 2' "review status counts"
   assert_contains "$out" 'agreement: 1 of 2 followed (50%)' "review agreement"
-  assert_contains "$out" 'override: v2 advised scholar-lanes chose pc-lanes by firstmate: kept with its sibling lane' "review override"
+  assert_contains "$out" 'override: v2 advised scholar-lanes chose pc-lanes by firstmate' "review override"
+  assert_not_contains "$(cat "$w/main/state/lane-placement.jsonl")" 'sibling lane' "outcome reason text never logged"
+  tail -n 1 "$w/main/state/lane-placement.jsonl" | jq -e '.outcome == "override" and (has("reason") | not)' >/dev/null \
+    || fail "an override outcome must log the fixed code only"
   assert_contains "$out" 'home: pc-lanes   advised 0   chosen 1   listed 2   unknown 0 (unreachable 0)   refused: full 1' "review per home"
   out=$(FM_HOME="$w/main" FM_PLACE_NOW=$((T + 20)) "$PLACE" review --json)
   printf '%s' "$out" | jq -e '.advice == 2 and .agreement.followed == 1 and (.overrides | length) == 1' >/dev/null \
