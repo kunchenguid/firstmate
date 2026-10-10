@@ -3029,6 +3029,107 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
+# Regression (parked-seat stale loop): a seat intentionally stopped while it
+# holds unlanded work - endpoint gone, no attributable run - is a crew on a
+# DECLARED wait, not unexplained silence. A current paused: declaration in the
+# status log outranks every unknown verdict (emit's declared-pause read owns
+# the rule for every source except remote-endpoint). Both directions pin the
+# line: too lenient hides real silence behind a pause that was never declared,
+# too strict leaves a declared wait unreadable to supervision.
+test_dead_window_declared_pause_reads_paused() {
+  reset_fakes
+  local d; d=$(new_case dead-window-paused)
+  make_repo_on_branch "$d/wt" fm/feat-dead-pause
+  # Unlanded work in the worktree: the seat was parked deliberately, not finished.
+  printf 'scratch\n' > "$d/wt/unlanded.txt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-pause.meta" "window=fm:fm-feat-dead-pause" "worktree=$d/wt" "kind=ship"
+  printf 'paused: holding for the upstream tool release\n' > "$d/state/feat-dead-pause.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-dead-pause)
+  assert_contains "$out" "state: paused" "dead window with a declared pause -> paused"
+  assert_contains "$out" "source: status-log" "the declared pause is the source"
+  assert_contains "$out" "holding for the upstream tool release" "the pause reason is carried in the detail"
+  assert_not_contains "$out" "state: unknown" "a declared wait never reads as unexplained silence"
+  assert_contains "$out" "backend target gone" "the death evidence survives the pause"
+  pass "a stopped seat holding unlanded work reports its declared pause"
+}
+
+test_dead_window_without_declared_pause_stays_unknown() {
+  reset_fakes
+  local d; d=$(new_case dead-window-silent)
+  make_repo_on_branch "$d/wt" fm/feat-dead-silent
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-silent.meta" "window=fm:fm-feat-dead-silent" "worktree=$d/wt" "kind=ship"
+  printf 'working: mid-implementation\n' > "$d/state/feat-dead-silent.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-dead-silent)
+  assert_contains "$out" "state: unknown" "dead window with no declared pause stays unknown"
+  assert_contains "$out" "source: none" "no declared wait means no status-log source"
+  assert_contains "$out" "backend target gone" "the death evidence is still reported"
+  pass "a stopped seat with no declared pause keeps its unknown (real silence is not masked)"
+}
+
+test_torn_down_worktree_declared_pause_reads_paused() {
+  reset_fakes
+  local d; d=$(new_case torndown-paused)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gone-p.meta" "window=fm:fm-gone-p" "worktree=$d/no-such-worktree" "kind=ship"
+  printf 'paused: holding for a scheduled maintenance window\n' > "$d/state/gone-p.status"
+  local out rc
+  out=$(run_crew_state "$d" gone-p); rc=$?
+  expect_code 0 "$rc" "torn-down worktree with a declared pause exits 0"
+  assert_contains "$out" "state: paused" "worktree gone with a declared pause -> paused"
+  assert_contains "$out" "source: status-log" "the declared pause is the source"
+  assert_contains "$out" "holding for a scheduled maintenance window" "the pause reason survives the missing worktree"
+  assert_contains "$out" "worktree gone" "the missing-worktree evidence survives the pause"
+  pass "a torn-down worktree still surfaces its declared pause"
+}
+
+test_dead_window_superseded_pause_stays_unknown() {
+  reset_fakes
+  local d; d=$(new_case dead-window-resumed)
+  make_repo_on_branch "$d/wt" fm/feat-dead-resumed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-resumed.meta" "window=fm:fm-feat-dead-resumed" "worktree=$d/wt" "kind=ship"
+  printf 'paused: holding for the upstream tool release\nworking: release landed, resuming\n' > "$d/state/feat-dead-resumed.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-dead-resumed)
+  assert_contains "$out" "state: unknown" "a pause superseded by a later event no longer declares"
+  assert_not_contains "$out" "state: paused" "a stale pause cannot mask real silence"
+  pass "a superseded pause stays unknown (only a current pause declares)"
+}
+
+test_unverified_run_identity_declared_pause_reads_paused() {
+  reset_fakes
+  local d out; d=$(new_case run-identity-paused)
+  make_repo_on_branch "$d/wt" fm/feat-idpause
+  printf 'scratch\n' > "$d/wt/unlanded.txt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/idpause.meta" "window=fm:fm-idpause" "worktree=$d/wt" "kind=ship"
+  printf 'paused: holding for the upstream tool release\n' > "$d/state/idpause.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-idpause,completed,f0f0f0f0,\"\""
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-idpause)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d" idpause)
+  assert_contains "$out" "state: paused" "an unverifiable run record with a declared pause -> paused"
+  assert_contains "$out" "source: status-log" "the declared pause is the source"
+  assert_contains "$out" "holding for the upstream tool release" "the pause reason leads the detail"
+  assert_contains "$out" "selected run code identity unverified; run ids: 01RUN" "the run-step evidence survives the pause"
+  pass "a declared pause surfaces over an unverified run record without losing its evidence"
+}
+
 # Regression (2026-09 G7 stale-claim incident, tmux half): the default backend
 # reached the same false-death path as herdr. A tmux that cannot answer at all
 # - a trimmed PATH, or any non-definitive error - made every live crew report
@@ -5594,6 +5695,11 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+test_dead_window_declared_pause_reads_paused
+test_dead_window_without_declared_pause_stays_unknown
+test_torn_down_worktree_declared_pause_reads_paused
+test_dead_window_superseded_pause_stays_unknown
+test_unverified_run_identity_declared_pause_reads_paused
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
