@@ -390,7 +390,8 @@ esac
 exit 1
 SH
 chmod +x "$E2E_FAKEBIN/ps"
-fm_fake_exit0 "$E2E_FAKEBIN" tmux node chrome-devtools-axi gh treehouse
+fm_fake_exit0 "$E2E_FAKEBIN" tmux node gh treehouse
+fm_fake_version_tool "$E2E_FAKEBIN" chrome-devtools-axi FM_FAKE_CHROME_DEVTOOLS_AXI_VERSION 0.1.39
 fm_fake_version_tool "$E2E_FAKEBIN" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
 fm_fake_version_tool "$E2E_FAKEBIN" gh-axi FM_FAKE_GH_AXI_VERSION 0.1.29
 fm_fake_version_tool "$E2E_FAKEBIN" no-mistakes FM_FAKE_NO_MISTAKES_VERSION \
