@@ -22,8 +22,8 @@
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
 # accepted while the named head exists only in the worker's disposable copy.
 # The check tests that head, not whether some branch moved. In no-mistakes
-# mode the pre-validation `done: {summary}` is the pipeline handoff and is
-# not gated; only the later CI-ready `done: PR <url> checks green` is, or on a
+# mode the pre-validation `working: implemented, ready for the pipeline` is the
+# handoff; only the later CI-ready `done: PR <url> checks green` is gated, or on a
 # Gerrit project the later `done: PR <change url> published for review`. The
 # named head is the worker copy's HEAD, except that a done naming the task's
 # recorded pr= passes when the forge holds that head: a forge-reported
@@ -47,6 +47,11 @@
 # appends " forge=gerrit shape=squash" to that line. The "Ship branch: <branch>"
 # line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
+# A "Terminal condition:" line names the sole legal `done:` form. Keep it before
+# the implementation handoff so a local commit cannot be mistaken for delivery.
+# `done:` is terminal to status consumers, so a no-mistakes implementation
+# commit hands off with `working:`. bin/fm-classify-lib.sh recognises that exact
+# handoff as a mandatory captain-relevant wake in both present and away postures.
 # forge is none|gerrit and defaults to none; bin/fm-project-mode.sh's header owns
 # what the registry binding means, and this file owns what gerrit changes for a
 # WORKER (docs/gerrit-forge-integration.md is the design). A forge composes with
@@ -417,9 +422,9 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
 # Definition of done
 Delivery contract: mode=direct-PR forge=gerrit shape=squash
 Ship branch: $branch
+Terminal condition: \`done [at=<epoch>]: PR {change url} published for review\`. A commit without a published change is not done.
 This task ships **direct-PR** to a Gerrit review server: you publish the change yourself, without the no-mistakes pipeline.
 Gerrit has no pull requests, so there is nothing to open; publishing creates the change.
-The task is complete only when committed on your branch.
 When it is implemented and committed, publish it.
 EOF
       fm_gerrit_publish_block
@@ -432,13 +437,13 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes forge=gerrit shape=squash
 Ship branch: $branch
+Terminal condition: \`done [at=<epoch>]: PR {change url} published for review\`. A commit without a published change is not done.
 This project's review server is Gerrit: it has no pull requests and no forge CI the pipeline can watch, so **no-mistakes runs here as a review pass that ends at a ready branch**, and you then publish that branch as one change.
 Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
 Those three are the only steps that reach a forge, and skipping them is a supported outcome, not a degraded one.
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
+Commit the finished implementation, then append \`working [at=<epoch>]: implemented, ready for the pipeline\` to the status file and stop the turn.
 Firstmate will then instruct you to run /no-mistakes to validate.
-That first \`done:\` is the handoff that starts the pipeline; it is not a request to publish.
+That \`working:\` line is the handoff that starts the pipeline; it is not a request to publish.
 
 EOF
       fm_nm_driving_block "$forge"
@@ -464,8 +469,8 @@ EOF
 # Definition of done
 Delivery contract: mode=direct-PR
 Ship branch: $branch
+Terminal condition: \`done [at=<epoch>]: PR {url}\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft$pr_base.
 Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
@@ -480,6 +485,7 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 Ship branch: $branch
+Terminal condition: \`done [at=<epoch>]: ready in branch $branch\`. That is this task's ONLY legal \`done:\` line.
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
@@ -493,18 +499,16 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 Ship branch: $branch
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
+Terminal condition: \`done [at=<epoch>]: PR {url} checks green\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
+Commit the finished implementation, then append \`working [at=<epoch>]: implemented, ready for the pipeline\` to the status file and stop the turn. Do not start the pipeline yourself; firstmate owns that runtime-specific invocation and sends it to you.
 ${nm_base}
 EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
+Only now is the terminal condition reachable: after /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
+Then append \`done [at=<epoch>]: PR {url} checks green\` to the status file and stop. You are finished.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 EOF
@@ -547,7 +551,8 @@ fm_dod_note_reports_published_change() {  # <note>
 }
 
 # 0 when this ship done: is one the named-head gate must accept or refuse.
-# no-mistakes pre-validation done: is the pipeline handoff and is not gated.
+# A no-mistakes pre-validation done: from an older brief (the handoff is now
+# working:) is tolerated and not gated.
 # Empty mode is treated as no-mistakes, the unregistered-project default.
 fm_dod_should_gate_ship_done() {  # <kind> <mode> <line>
   local note
