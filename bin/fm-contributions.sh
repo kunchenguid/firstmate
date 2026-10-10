@@ -50,8 +50,13 @@
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
 # a direct child) with a three-second margin. Every read is capped at five
-# seconds, and a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
+# seconds. A read a bound stopped answered nothing and is unmeasured, never a
+# forge failure: that is the statuses fm-timeout-lib.sh reports as its own
+# bound, 124 and the kill's 137, plus TERM's 143, INT's 130 and HUP's 129,
+# which reach the poll when the signal hit the read alone - possible because
+# every bounding mechanism runs the read in its own process group. Every other
+# status is unavailable evidence, including a client death by some other
+# signal such as SIGSEGV's 139. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
@@ -60,13 +65,16 @@
 # reordering. Terminal URLs settle separately before the forge budget starts
 # and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct URL is
+# unmeasured, rather than being mislabeled unavailable. A URL on an
+# unsupported forge is never read and stays unmeasured for the same reason.
+# Each distinct URL is
 # attempted at most once per poll and its observation applied to every owner.
 # A final observation applies
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
-# next URL that still has a full observation reserve; only a genuine forge
-# failure or head change records an error.
+# next URL that still has a full observation reserve; only evidence the read
+# itself produced - a forge failure, a malformed response, a client death
+# outside the bound set, or a head change - records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
@@ -214,19 +222,31 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
+# A read nothing answered leaves the URL unmeasured. The flag carries that
+# within one shell and the marker file carries it out of a backgrounded read.
+unmeasured() {
+  BUDGET_EXHAUSTED=1
+  : > "$TMP/budget-exhausted"
+}
+
+# The script header owns the read-outcome classification contract in full.
+read_cut_short() { # exit-status
+  if fm_timed_out "$1"; then return 0; fi
+  case $1 in 129|130|143) return 0 ;; esac
+  return 1
+}
+
 forge() {
   local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
+  [ "$remaining" -gt 0 ] || { unmeasured; return 1; }
   [ "$remaining" -le 5 ] || remaining=5
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A kill at the read bound or the deadline is budget refusal too; only the
-  # forge's own nonzero exit is unavailable evidence.
-  if [ "$rc" -eq 124 ]; then
-    BUDGET_EXHAUSTED=1
-    : > "$TMP/budget-exhausted"
+  # read_cut_short sorts the status; the script header owns that contract.
+  if read_cut_short "$rc"; then
+    unmeasured
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
   fi
@@ -246,11 +266,14 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
-  case "$url" in https://github.com/*) ;; *) return 1 ;; esac
-  part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
-  case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
+  # Reset before every exit path: the poll reads this flag after any return,
+  # and an unsupported forge is never read at all, so it stays unmeasured
+  # rather than inheriting the previous URL's result or becoming an error.
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   BUDGET_EXHAUSTED=0
+  case "$url" in https://github.com/*) ;; *) unmeasured; return 1 ;; esac
+  part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
+  case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) unmeasured; return 1 ;; esac
   forge api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
