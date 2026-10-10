@@ -361,8 +361,8 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
+if [ "${1:-}" = lease ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse lease <name> [--lease-holder <holder>]'
 fi
 exit 0
 SH
@@ -1247,7 +1247,7 @@ test_bootstrap_syncs_remote_home_to_primary_commit() {
     FM_BOOTSTRAP_NETWORK=only \
     FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
     FM_TEST_REPO_ROOT="$ROOT" \
-    FM_INHERITABLE_CONFIG='' FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+    FM_INHERITABLE_CONFIG='' FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1)
 
   [ "$(head_of "$w/sm")" = "$c2" ] \
@@ -1285,7 +1285,7 @@ test_bootstrap_reports_outdated_host_actionably() {
     FM_BOOTSTRAP_NETWORK=only \
     FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
     FM_TEST_REPO_ROOT="$ROOT" FM_TEST_REMOTE_LEG_REJECT_SYNC=1 \
-    FM_INHERITABLE_CONFIG='' FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+    FM_INHERITABLE_CONFIG='' FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1)
 
   assert_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped:" \
