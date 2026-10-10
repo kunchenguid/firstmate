@@ -516,12 +516,32 @@ SH
   chmod +x "$fakebin/ps"
 }
 
+fm_fake_lavish_health_curl() {
+  local fakebin=$1
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  */health*)
+    [ -n "${FM_FAKE_LAVISH_HEALTH:-}" ] || exit 7
+    printf '%s' "$FM_FAKE_LAVISH_HEALTH" ;;
+  *)
+    self=$(cd "$(dirname "$0")" && pwd)
+    PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$self" | paste -sd: -) exec curl "$@" ;;
+esac
+SH
+  chmod +x "$fakebin/curl"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation
 # exits 0. A case that needs to drive a version floor exports the variable.
+# For lavish-axi it also installs a curl stub that answers any /health request
+# with FM_FAKE_LAVISH_HEALTH (connection failure when unset), so no suite reaches
+# a Lavish server running on the developer machine.
 fm_fake_version_tool() {
   local fakebin=$1 tool=$2 override=$3 default=$4
+  [ "$tool" != lavish-axi ] || fm_fake_lavish_health_curl "$fakebin"
   cat > "$fakebin/$tool" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = --version ]; then
