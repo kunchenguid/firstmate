@@ -2827,7 +2827,15 @@ while :; do
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          run_check_capture "$custom_snapshot" || exit 1
+          # A home-registered check must not take supervision down with it: each
+          # fatal exit here opens a recovery episode and costs the primary an
+          # empty rearm-resurface turn. Log it and skip the check this sweep.
+          if ! run_check_capture "$custom_snapshot"; then
+            fm_check_output_cleanup
+            fm_custom_check_snapshot_cleanup
+            triage_log "custom check $id could not be captured; skipped this sweep"
+            continue
+          fi
           out=$FM_CHECK_RESULT
           fm_custom_check_snapshot_cleanup
         else

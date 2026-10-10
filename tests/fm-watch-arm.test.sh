@@ -1450,6 +1450,37 @@ test_watcher_exits_when_its_home_is_removed() {
   pass "watch-arm: a watcher exits when its home is removed"
 }
 
+# The watcher's stderr must survive in a bounded durable log: the hook that
+# starts a handling successor deletes the arm's own output, so a crash's last
+# words would otherwise be unrecoverable. The log is still passed through to the
+# arm's stderr, and an oversized log is trimmed to its newest bytes at arm time.
+test_watcher_stderr_is_kept_in_a_bounded_durable_log() {
+  local dir home state fakebin armout log size
+  dir=$(make_case stderr-log)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  log="$state/.watch-stderr.log"
+  mkdir -p "$home/data" "$state"
+  awk 'BEGIN { for (i = 0; i < 2000; i++) printf "old stderr line %04d\n", i }' > "$log"
+  FM_WATCH_STDERR_LOG_MAX_BYTES=4096 start_owned_watcher "$home" "$state" "$fakebin" "$armout"
+  size=$(wc -c < "$log" | tr -d '[:space:]')
+  [ "$size" -le 4096 ] || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "the stderr log was not trimmed at arm time ($size bytes)"; }
+  grep -q 'old stderr line 1999' "$log" \
+    || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "trimming dropped the newest stderr line"; }
+
+  rm -rf "$home"
+  wait_for_pid_gone "$WATCH_PID" 400 \
+    || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "watcher pid $WATCH_PID outlived its deleted home"; }
+  wait_for_exit "$ARM_PID" 100 >/dev/null 2>&1 || true
+  grep -qF 'watcher: exiting - home no longer exists' "$log" \
+    || fail "the watcher's exit reason did not reach the durable stderr log: $(cat "$log")"
+  grep -qF 'watcher: exiting - home no longer exists' "$armout" \
+    || fail "the watcher's stderr no longer reaches the arm's own stderr: $(cat "$armout")"
+  pass "watch-arm: the watcher's stderr is kept in a bounded durable log and still passed through"
+}
+
 # tests/lib.sh's exit-time reaper must stop a watcher a suite armed for a
 # temporary home, through the home-scoped stop, so no test leaves one behind.
 # The reaper is driven with a private registry so this suite's own registry
@@ -1719,6 +1750,7 @@ test_arm_refuses_an_unusable_launch_confirm_window
 test_arm_refuses_a_disposable_validation_checkout
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
+test_watcher_stderr_is_kept_in_a_bounded_durable_log
 test_reaper_stops_a_tracked_watcher
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_attached_arm_follows_a_slow_live_holder
