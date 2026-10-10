@@ -20,6 +20,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-backlog-read-bound-tests)
@@ -177,6 +179,65 @@ case "$(sed -n 's/^error=//p' "$PADDED_OUT")" in
   *) fail "a padded-zero bound must fall back to the default bound and report it: $(cat "$PADDED_OUT")" ;;
 esac
 pass "a padded-zero bound falls back to the default instead of disabling the deadline"
+
+# The inventory archive fallback must normalize the same padded zero too.
+# Active reads are promptly absent; only the private archive snapshot stalls.
+ARCHIVE="$TMP_ROOT/archive"
+ARCHIVE_FAKEBIN=$(fm_fakebin "$ARCHIVE")
+mkdir -p "$ARCHIVE/data" "$ARCHIVE/state" "$ARCHIVE/config"
+make_hanging_tasks_axi "$ARCHIVE_FAKEBIN"
+mv "$ARCHIVE_FAKEBIN/tasks-axi" "$ARCHIVE_FAKEBIN/tasks-axi-compatible"
+cat > "$ARCHIVE_FAKEBIN/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" != show ]; then
+  exec "${0%/*}/tasks-axi-compatible" "$@"
+fi
+shift 2
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --file ]; then
+    case "${2:-}" in
+      */fm-captain-inventory.*)
+        printf 'archive read reached\n' >> "$FM_TEST_ARCHIVE_READ_LOG"
+        sleep 30
+        exit 2
+        ;;
+    esac
+  fi
+  shift
+done
+printf 'code: NOT_FOUND\n'
+exit 1
+SH
+chmod +x "$ARCHIVE_FAKEBIN/tasks-axi"
+cp "$ROOT/.tasks.toml" "$ARCHIVE/.tasks.toml"
+printf '## Queued\n\n## Done\n' > "$ARCHIVE/data/backlog.md"
+printf '## Archived 2026-10-04\n- [x] archive-call - Answered approval (kind: captain)\n' \
+  > "$ARCHIVE/data/done-archive.md"
+fm_write_meta "$ARCHIVE/state/archive-origin.meta" \
+  'decisions_reviewed=1' 'decision_keys=archive-call'
+for ARCHIVE_COMMAND in verify complete; do
+  ARCHIVE_OUT="$ARCHIVE/$ARCHIVE_COMMAND.out"
+  ARCHIVE_LOG="$ARCHIVE/$ARCHIVE_COMMAND.log"
+  ARCHIVE_STATUS=0
+  ARCHIVE_START=$(date +%s)
+  ARCHIVE_ARGS=(archive-origin)
+  [ "$ARCHIVE_COMMAND" != complete ] || ARCHIVE_ARGS+=(archive-call)
+  fm_run_timed "$((BOUND_CEILING + 10))" env PATH="$ARCHIVE_FAKEBIN:$BASE_PATH" \
+    FM_HOME="$ARCHIVE" FM_STATE_OVERRIDE="$ARCHIVE/state" \
+    FM_DATA_OVERRIDE="$ARCHIVE/data" FM_CONFIG_OVERRIDE="$ARCHIVE/config" \
+    FM_BACKLOG_ROW_TIMEOUT_SECS=00 FM_TEST_ARCHIVE_READ_LOG="$ARCHIVE_LOG" \
+    bash "$ROOT/bin/fm-captain-hold.sh" "$ARCHIVE_COMMAND" "${ARCHIVE_ARGS[@]}" \
+    > "$ARCHIVE_OUT" 2>&1 || ARCHIVE_STATUS=$?
+  ARCHIVE_ELAPSED=$(elapsed_since "$ARCHIVE_START")
+  [ "$ARCHIVE_STATUS" -ne 0 ] && [ "$ARCHIVE_ELAPSED" -lt "$BOUND_CEILING" ] \
+    || fail "$ARCHIVE_COMMAND did not bound the padded-zero archive read (${ARCHIVE_ELAPSED}s)"
+  [ -s "$ARCHIVE_LOG" ] || fail "$ARCHIVE_COMMAND did not exercise the archive fallback"
+  assert_grep 'archive read exceeded its bound for archive-call' "$ARCHIVE_OUT" \
+    "$ARCHIVE_COMMAND did not name the archive read bound"
+  [ ! -d "$ARCHIVE/state/.meta-archive-origin.lock" ] \
+    || fail "$ARCHIVE_COMMAND left its metadata lock after a bounded archive read"
+done
+pass "verify and complete normalize padded-zero archive bounds and refuse stalled inventory reads"
 
 # --- a bound hit is not absence ---------------------------------------------
 #
