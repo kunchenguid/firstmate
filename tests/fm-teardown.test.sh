@@ -4131,6 +4131,49 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+# The cwd scan must run as `lsof -b -w -a -d cwd -Fpn`: -b skips lsof's
+# mount-table stat phase (which stalls for minutes on an unresponsive network
+# mount), -w drops the unreadable-cwd warning records. A scan that lists only
+# processes rooted elsewhere is a successful empty result, never a refusal.
+test_cwd_scan_skips_mount_table_and_tolerates_no_match() {
+  local case_dir rc argv flag
+  case_dir=$(make_case cwd-scan-flags)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  cat > "$case_dir/fakebin/lsof" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" -d cwd "*)
+    printf '%s\n' "\$*" >> '$case_dir/lsof-cwd-argv'
+    # One process rooted outside every task root: no match, a real pid line.
+    printf 'p1\nfcwd\nn/\n'
+    exit 0
+    ;;
+esac
+exit 1
+EOF
+  chmod +x "$case_dir/fakebin/lsof"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cwd-scan-flags: teardown should succeed on a no-match scan"
+  assert_no_grep "REFUSED" "$case_dir/stderr" "cwd-scan-flags: a no-match scan was treated as a failed scan"
+  assert_no_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "cwd-scan-flags: teardown reaped a process the scan rooted elsewhere"
+  [ -s "$case_dir/lsof-cwd-argv" ] || fail "cwd-scan-flags: teardown never ran the cwd scan"
+  while IFS= read -r argv; do
+    for flag in -b -w -a "-d cwd" -Fpn; do
+      case " $argv " in
+        *" $flag "*) ;;
+        *) fail "cwd-scan-flags: cwd scan ran without '$flag': $argv" ;;
+      esac
+    done
+  done < "$case_dir/lsof-cwd-argv"
+  pass "the cwd scan runs lsof -b -w -a -d cwd -Fpn and a no-match result is empty, not a refusal"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -4740,6 +4783,7 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_cwd_scan_skips_mount_table_and_tolerates_no_match
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

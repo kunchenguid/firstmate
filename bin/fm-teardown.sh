@@ -278,7 +278,7 @@
 #     hours with no live task meta to attribute them to once teardown had
 #     already removed it). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
+#     root via `lsof -b -w -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches. Both
 #     roots are unique per task and never
@@ -2072,15 +2072,22 @@ conclude_task_no_mistakes_run() {  # <worktree>
 }
 
 # Fix 2 (see script header): pids of every process whose CURRENT WORKING
-# DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
-# -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
-# documents as slow). Never $$ (this script's own pid). Empty output when
-# nothing matches; failure means the scan could not establish a safe result.
+# DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -b -w
+# -a -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
+# documents as slow). `-b` skips lsof's mount-table phase, which stat()s every
+# mount point and blocks for lsof's per-call guard (15 s plus kill grace, up to
+# four times per scan) on a mounted-but-unresponsive network share; the cwd
+# path comes from readlink(/proc/<pid>/cwd) and never needs that stat. `-w`
+# drops the unreadable-cwd warning records (root-owned pids this script cannot
+# signal anyway), whose "n" field is a diagnostic rather than a path and so
+# never matched a worktree prefix. Never $$ (this script's own pid). Empty
+# output when nothing matches; failure means the scan could not establish a
+# safe result.
 pids_with_cwd_under() {  # <dir>
   local dir=$1 out pid path line
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
+  out=$(lsof -b -w -a -d cwd -Fpn 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   pid=
   while IFS= read -r line; do
