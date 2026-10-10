@@ -4770,6 +4770,23 @@ test_teardown_pool_task_id_never_queries_simctl() {
   pass "a pool-<n> task id never triggers simulator cleanup"
 }
 
+
+test_teardown_non_numeric_pool_task_deletes_simulator() {
+  local case_dir rc id=pool-cleanup
+  case_dir=$(make_case sim-pool-cleanup "$id")
+  write_meta "$case_dir" local-only ship "$id"
+  wt_commit "$case_dir" "task work"
+  add_fork_with_pushed_branch "$case_dir" "$id"
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-POOL-CLEANUP","name":"fm-pool-cleanup","state":"Shutdown"}]}}' > "$case_dir/simctl-devices.json"
+  rc=0
+  FM_FAKE_SIMCTL_LIST_FILE="$case_dir/simctl-devices.json" FM_SIMCTL_LOG="$case_dir/simctl.log" \
+    run_teardown_id "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pool-cleanup: ordinary task teardown should succeed"
+  assert_grep "simctl delete SIM-POOL-CLEANUP" "$case_dir/simctl.log" "pool-cleanup: ordinary task simulator was retained"
+  [ ! -e "$case_dir/state/$id.meta" ] || fail "pool-cleanup: task record was retained"
+  pass "non-numeric pool task ids still delete their simulator"
+}
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -4885,3 +4902,5 @@ test_teardown_deletes_only_the_task_owned_simulator
 test_teardown_tolerates_absent_task_simulator
 test_teardown_simulator_delete_failure_only_warns
 test_teardown_pool_task_id_never_queries_simctl
+
+test_teardown_non_numeric_pool_task_deletes_simulator
