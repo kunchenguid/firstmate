@@ -9,7 +9,9 @@
 # it does not prove a URL is public, inspect attachments, or classify arbitrary
 # prose. Authors must verify URL accessibility and inspect remaining text.
 # Run before create/edit/post on the exact outgoing text. Relay enforces this
-# before transport; PR readiness checks are later detection, not prevention.
+# before transport; GitHub PR readiness checks are later detection, not prevention.
+# GitLab and Gerrit receive written pre-publication instructions only, without
+# automatic readiness refusal; provider read-back is separate follow-up work.
 # no-mistakes and forge CLIs own their generated outbound text: Firstmate cannot
 # intercept those publications with this check alone.
 # Usage: fm-public-text-check.sh <text-file|->
@@ -35,7 +37,7 @@ awk '
 {
   text = tolower($0)
   # URL paths are not filesystem paths. Reject explicitly local URL hosts first.
-  unsafe = text ~ /https?:\/\/(localhost|127\.[0-9.]+|\[::1\]|[^\/[:space:]]+\.local)([:\/[:space:]]|$)/
+  unsafe = text ~ /https?:\/\/([^\/@[:space:]]+@)?(localhost|127\.[0-9.]+|10\.[0-9.]+|192\.168\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+|\[::1\]|[^\/[:space:]]+\.local)([:\/[:space:]]|$)/
   gsub(/https?:\/\/[^[:space:]<>"`]+/, "", text)
   if (text ~ /file:\/\// ||
       text ~ /(^|[^[:alnum:]_.-])\/(users|home|root|tmp|private|volumes|mnt|media|workspace|srv|opt)\// ||

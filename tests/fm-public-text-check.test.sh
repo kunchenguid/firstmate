@@ -24,6 +24,10 @@ unsafe=(
   'Evidence: .no-mistakes/runs/example/proof.md'
   'Evidence: http://localhost:8080/proof'
   'Evidence: https://proof.local/report'
+  'Evidence: http://192.168.1.20/private/report.md'
+  'Evidence: http://10.0.0.5/proof'
+  'Evidence: http://172.16.0.1/proof'
+  'Evidence: https://172.31.255.254:8080/proof'
   'Private proof: report.md'
 )
 for text in "${unsafe[@]}"; do
@@ -43,6 +47,7 @@ Benchmarks passed 50 iterations with zero failed oracle comparisons.
 Source: tests/benchmark.test.sh; state/parser.go; data/schema/report.md.
 Public proof: https://github.com/example/repo/actions/runs/123
 Public URL paths stay intact: https://example.org/home/example/report.md
+Public host outside the private range: https://172.32.0.1/proof
 Intended system examples: /usr/bin/env, /etc/hosts and /dev/null.
 Web route example: /api/v1/users.
 EOF

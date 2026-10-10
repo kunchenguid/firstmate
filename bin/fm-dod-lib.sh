@@ -421,6 +421,7 @@ Before publishing or editing a PR description, comment, review description, or o
 Check authored publication text before handing it to a forge CLI or no-mistakes; do not change the captain's authorized \`--intent\` to satisfy this check.
 When no-mistakes generates and publishes the body itself, its outbound publication step is the necessary prevention boundary outside Firstmate; these instructions alone cannot guarantee that generated text is safe.
 Read the complete published title and body back before reporting ready; apply the same check and inspect evidence URLs for public accessibility.
+GitHub readiness automatically refuses recognized unsafe text; GitLab and Gerrit receive these written instructions only, with no automatic refusal (provider read-back is separate follow-up work).
 If generated text leaked a local reference, correct the public text without removing required attestations, retain evidence privately, and report the publication failure to Firstmate rather than treating a green run as sufficient.
 
 EOF
