@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini agy)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -422,6 +422,65 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 
+test_agy_hooks_semantic_lifecycle() {
+  local rec id=busy-agy-1 out state hooks
+  rec=$(make_spawn_case agy-lifecycle agy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "agy spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.agents/hooks.json"
+  assert_present "$hooks" "agy spawn did not write hooks.json"
+  jq -e . "$hooks" >/dev/null || fail "agy hook settings are not valid JSON"
+  for ev in PreInvocation Stop; do
+    jq -e ".\"fm-crew-busy\"[\"$ev\"]" "$hooks" >/dev/null || fail "agy hook settings lack $ev"
+  done
+
+  out=$(classify agy "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(run_agy_hook "$hooks" Stop) || fail "Stop hook command failed"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "Stop must print only a JSON object on stdout, got '$out'"
+  [ "$(printf '%s' "$out" | jq -r '.decision')" = "allow" ] \
+    || fail "Stop hook must emit allow decision"
+  [ -f "$state/$id.turn-ended" ] || fail "Stop no longer touches the notification marker"
+  out=$(classify agy "$id" "$state")
+  [ "$out" = "idle agy-hook" ] || fail "Stop must classify 'idle agy-hook', got '$out'"
+
+  out=$(run_agy_hook "$hooks" PreInvocation) || fail "PreInvocation hook command failed"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "PreInvocation must print only a JSON object on stdout, got '$out'"
+  out=$(classify agy "$id" "$state")
+  [ "$out" = "busy agy-hook" ] || fail "PreInvocation must classify 'busy agy-hook', got '$out'"
+
+  pass "agy hooks open on PreInvocation and close on Stop touching turn-ended"
+}
+
+run_agy_hook() {  # <hooks.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".\"fm-crew-busy\"[\"$2\"][0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  sh -c "$cmd"
+}
+
+test_agy_hooks_stale_incarnation_harmless() {
+  local rec id=busy-agy-2 out state hooks
+  rec=$(make_spawn_case agy-stale agy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "agy spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.agents/hooks.json"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_agy_hook "$hooks" Stop >/dev/null \
+    || fail "a stale-gen hook must still exit 0 so agy's lifecycle is never broken"
+  out=$(classify agy "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
+  pass "agy hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
@@ -433,6 +492,8 @@ test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate
+test_agy_hooks_semantic_lifecycle
+test_agy_hooks_stale_incarnation_harmless
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

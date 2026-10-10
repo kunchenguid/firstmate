@@ -404,6 +404,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     devin) printf '%s\n' "$state/$id.devin-config.json" ;;
+    agy) printf '%s\n' "$wt/.agents/hooks.json" ;;
   esac
 }
 
@@ -429,3 +430,43 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
     *) return 0 ;;
   esac
 }
+
+# Clear per-task wiring artifacts left behind by a previous incarnation of a harness.
+# For agy, if .agents/hooks.json contains hooks other than fm-crew-busy, it prunes
+# fm-crew-busy rather than removing the entire file.
+fm_control_clear_harness_wiring() {  # <harness> <worktree> <state-dir> <id>
+  local harness=${1-} wt=${2-} state=${3-} id=${4-}
+  local token_path token auth_path path other_keys tmp_hooks
+  harness=$(fm_control_harness_family "$harness") || harness=
+  token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
+  token=
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token <"$token_path" || [ -n "$token" ] || return 1
+  fi
+  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
+  if [ -n "$auth_path" ]; then
+    rm -f -- "$auth_path" || return 1
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if [ "$harness" = agy ] && [ "$path" = "$wt/.agents/hooks.json" ] && [ -f "$path" ] && command -v jq >/dev/null 2>&1; then
+      other_keys=$(jq 'del(."fm-crew-busy") | keys | length' "$path" 2>/dev/null || echo 0)
+      case "$other_keys" in
+        ''|*[!0-9]*) other_keys=0 ;;
+      esac
+      if [ "$other_keys" -gt 0 ]; then
+        tmp_hooks="$path.tmp.$$"
+        if jq 'del(."fm-crew-busy")' "$path" > "$tmp_hooks" 2>/dev/null; then
+          mv -f "$tmp_hooks" "$path"
+        else
+          rm -f "$tmp_hooks"
+        fi
+        continue
+      fi
+    fi
+    rm -f -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+EOF
+}
+
