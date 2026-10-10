@@ -23,6 +23,7 @@
 # into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
+#   .input-<task>.lock        serializes doorbell input with native discard
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
@@ -70,11 +71,13 @@
 # Retry ring (fm_task_inbox_mark_retry): only while config/wait-no-turns is
 # present. A fire-and-forget record never enters the ladder, but when
 # fm-send's ring at enqueue did not land
-# (fm_task_inbox_ring returned 1 or 2) it marks the record, and one grace later
+# (fm_task_inbox_ring returned 1, 2, or 4) it marks the record, and one grace later
 # the due action is `retry`: once the worker has no open decision of its own,
 # the watcher rings once more and spends the mark
-# whatever the result, so the record never rings a third time and never
-# escalates. A waiting worker does not poll its inbox (bin/fm-brief.sh), so
+# unless the task input lock defers it (return 4), which preserves the mark
+# without spending retry or escalation budget. Otherwise the record never rings
+# a third time and never escalates. A waiting worker does not poll its inbox
+# (bin/fm-brief.sh), so
 # without this retry the record could sit unread until a checkpoint. A pending ordinary record's
 # ladder rings the same inbox, so the retry waits behind it, and an
 # acknowledged record drops its mark. The remote steer leg has no watcher
@@ -341,9 +344,10 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # other than our own doorbell (the watcher re-rings later), 2 the backend send
 # failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
+# typed; recovery owns the record), 4 deferred by the task input lock without
+# spending retry or escalation budget. No return value is delivery proof; the
 # acknowledgement move is the only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict can defer,
+# The composer skip is narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
@@ -353,7 +357,19 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
+fm_task_inbox_ring() (  # <backend> <target> <record-path> [expected-label]
+  # Native discard owns this same input lock, independently of lifecycle locks.
+  # Contention defers only the ring: the durable record stays unacknowledged.
+  local inbox state id lock
+  inbox=${3%/*}; state=${inbox%/*}; id=${inbox##*/}; id=${id%.inbox}
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
+  lock="$state/.input-$id.lock"
+  fm_lock_try_acquire "$lock" || return 4
+  trap 'fm_lock_release "$lock"' EXIT
+  fm_task_inbox_ring_unlocked "$@"
+)
+
+fm_task_inbox_ring_unlocked() {  # internal; caller holds the task input lock
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;

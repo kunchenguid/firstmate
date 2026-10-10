@@ -1181,6 +1181,43 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   pass "watcher: dead-pane recovery overrides stale busy state"
 }
 
+test_native_control_serializes_doorbell() {
+  local dir pid rc i
+  dir="$TMP_ROOT/native-control-lock"
+  mkdir -p "$dir/state/t1.inbox/handled"
+  printf 'preserve this steer\n' > "$dir/state/t1.inbox/001.msg"
+  bash -c '
+    . "$1/bin/fm-task-inbox-lib.sh"
+    fm_lock_try_acquire "$2/state/.input-t1.lock" || exit 1
+    trap '\''fm_lock_release "$2/state/.input-t1.lock"'\'' EXIT
+    touch "$2/locked"
+    while [ ! -e "$2/release" ]; do sleep 0.05; done
+  ' _ "$ROOT" "$dir" &
+  pid=$!
+  for i in $(seq 1 50); do
+    [ ! -e "$dir/locked" ] || break
+    sleep 0.05
+  done
+  [ -e "$dir/locked" ] || { kill "$pid"; wait "$pid"; fail "input lock not acquired"; }
+  bash -c '
+    . "$1/bin/fm-task-inbox-lib.sh"
+    fm_backend_agent_state() { echo alive; }
+    fm_backend_composer_state() { echo empty; }
+    export PROBE_DIR="$2"
+    fm_backend_send_text_submit() { touch "$PROBE_DIR/typed"; echo empty; }
+    fm_task_inbox_ring herdr lab:w1:p1 "$2/state/t1.inbox/001.msg" fm-t1
+  ' _ "$ROOT" "$dir"
+  rc=$?
+  touch "$dir/release"
+  wait "$pid" || fail "input lock holder failed"
+  [ "$rc" = 4 ] || fail "native control lock must defer doorbell (got $rc)"
+  [ ! -e "$dir/typed" ] || fail "doorbell typed during native discard"
+  [ -f "$dir/state/t1.inbox/001.msg" ] || fail "deferred steer lost"
+  [ ! -e "$dir/state/t1.inbox/handled/001.msg" ] || fail "deferred steer acknowledged"
+  pass "native control lock defers doorbell without losing or acknowledging the steer"
+}
+
+test_native_control_serializes_doorbell
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls

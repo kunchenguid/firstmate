@@ -838,6 +838,18 @@ For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-disco
 
 ## Claude permission mode (config/claude-permission-mode)
 
+### Optional native draft control
+
+The local, gitignored `config/claude-native-control` file accepts `on` to load the optional native control adapter on managed Claude workers running on Herdr; raw-command launches are excluded.
+Absent or other contents leave it disabled; the setting is local to this home and is not inherited into secondmate homes.
+The adapter enables Claude's early-access function hooks for that worker.
+Claude must also admit plugin hook modules for that session; an account's disabled rollout can prevent loading despite the opt-in environment variable, and a missing capability always refuses.
+Loading the adapter does not authorize discarding a draft.
+[`fm-control.sh --help`](../bin/fm-control.sh) owns the separate explicit discard option, exact admitted versions, refusal boundaries, and residual input races.
+An existing worker requires a normal relaunch to acquire this capability; the flag cannot inject an adapter into a running worker.
+
+### Permission selection
+
 The optional local, gitignored `config/claude-permission-mode` selects the permission flag for every Claude worker launch: crewmates, scouts, Claude secondmates, and control-plane relaunches.
 
 ### Accepted values and refusals

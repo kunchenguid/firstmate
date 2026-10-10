@@ -570,6 +570,7 @@ inbox_steer_check() {  # <window> <task>
     ring)
       ring_rc=0
       fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      [ "$ring_rc" -ne 4 ] || return 0
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
@@ -590,6 +591,7 @@ inbox_steer_check() {  # <window> <task>
     retry)
       ring_rc=0
       fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      [ "$ring_rc" -ne 4 ] || return 0
       if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
         reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
         fm_wake_append stale "$w" "$reason" || exit 1
