@@ -2,7 +2,8 @@
 # fm-fleet-snapshot.sh - structured fleet snapshot with observational caching.
 #
 # Output contract: `--json` prints one object with schema
-# `fm-fleet-snapshot.v1`.
+# `fm-fleet-snapshot.v2`; v2 added the backlog `ask` field and the summary page
+# fields below.
 # The command does not acquire the session lock, drain wakes, arm watchers,
 # mutate backlog state, or write reports. Its default ledger collector may
 # atomically refresh parent-side cached copies of remote home summaries under
@@ -39,6 +40,10 @@
 #     row carries null.
 #     captain_actionable means "waiting on the captain now" and is exactly
 #     hold_bucket == "live".
+#     ask is the structured question bin/fm-captain-hold.sh recorded at hold
+#     time (bin/fm-hold-ask-lib.sh owns its shape), present only on a live or
+#     aged captain hold, where the captain's answer is what restarts the work;
+#     every other row, and every row without a valid stored ask, carries null.
 #     hold_age_days is the hold's age when computable, else null.
 #     Aging is a projection safety net only: the durable deferral remains
 #     re-holding with --until.
@@ -85,7 +90,31 @@
 #     observed status file's mtime instead: freshness is how fresh this snapshot's
 #     own observation is, never when a worker emitted the event.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. provenance.summary_source
+#     queued, landed, endpoints, counts, and omitted, as published by that home's
+#     `--secondmate-home-summary` (schema `fm-secondmate-home-summary.v2`; v1
+#     summaries from older producers lack the page fields below; a mixed-version
+#     fleet upgrades the parent home first, because this reader accepts v1 and
+#     v2 while an older parent accepts only v1 and reports an upgraded child's v2
+#     summary as unavailable until the parent upgrades):
+#       decisions_open rows keep every live captain hold and keyed status
+#       decision, each with `ask` (the backlog ask, or null); counts.asks counts
+#       rows carrying one. The list is not narrowed to asks because current
+#       consumers read it as the live Captain's Call.
+#       active_children rows add title_plain, since_epoch (the spawn time in the
+#       task's spawn_gen token, else the backlog since date), produces
+#       (scout=report, local-only ship=landing, other ship=pr, else null), and
+#       open_url (the PR once recorded, else the row's linked issue, else null).
+#       landed rows add project, title_plain, and open_url by the same rule.
+#       holds rows add project, title_plain, and restart
+#       {kind,until?,blocker_ids?,text}: after_work for unresolved blockers, date
+#       for a future hold-until, captain_word for a stored ask, event for an
+#       external hold or a paused child, else null. proposals is reserved: no
+#       structured field proves it yet. text is display-only reason text.
+#       holds shares the queued bound; counts.holds is its real total and an
+#       omitted {surface:"holds"} entry discloses the cut.
+#       title_plain is display-only: the title without conventional-commit, kind,
+#       status-word, or own-project prefixes, its own id, or a leading issue
+#       reference, cut at a word boundary. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
@@ -96,10 +125,10 @@
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
 #     filed date newest first, with undated rows stable at the end.
-#     Structured-home input must declare the current home-summary and hold-classifier
-#     schemas; a live ledger or cached copy missing either declaration or declaring
-#     an unsupported version is unavailable even when it contains no captain holds.
-#     These schemas also accept v1 summaries from older producers.
+#     Structured-home input must declare a supported home-summary schema (v2, or
+#     v1 from an older producer) and the current hold-classifier schema; a live
+#     ledger or cached copy missing either declaration or declaring an
+#     unsupported version is unavailable even when it contains no captain holds.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
 #     structured homes are partial, not unreadable, when an unavailable child state
@@ -231,6 +260,8 @@ esac
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-hold-ask-lib.sh
+. "$SCRIPT_DIR/fm-hold-ask-lib.sh"  # FM_HOLD_ASK_JQ_DEFS: the stored ask contract
 
 usage() {
   cat <<'EOF'
@@ -281,6 +312,9 @@ FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
 FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
 Every captain hold carries hold_bucket, decided only from structured fields and
 never from hold reason or body prose: "blocked", "dated", "aged", or "live".
+A live or aged captain hold carries the ask recorded at hold time, and the
+summary adds display fields for a fleet page (title_plain, open_url, restart);
+the script header owns their contract.
 An undated hold ages once its hold-set timestamp is at least
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; 0 ages every hold with a
 non-negative computed age); legacy holds without a stamp fall back to their
@@ -393,7 +427,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
   set -o pipefail
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
-    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
+    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" "$FM_HOLD_ASK_JQ_DEFS"'
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -500,6 +534,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
              hold_kind:metadata($rest; "hold-kind"),
              hold_until:metadata($rest; "hold-until"),
              hold_set:null,
+             ask:null,
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
              blocked_by_ids:blocked_by_ids($rest),
              blocked_reason:blocked_reason($rest),
@@ -536,6 +571,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if (.body_lines | length) > 0 then
           .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          | .ask = (.body_lines | hold_ask_from_lines)
           | .local_note = (.local_note
               // (if any(.body_lines[];
                     test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
@@ -571,6 +607,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
                     and .hold_age_days >= $age_days then "aged"
                else "live" end)
           | .captain_actionable = (.hold_bucket == "live")
+          | .ask = (if .hold_bucket == "live" or .hold_bucket == "aged" then .ask else null end)
         else . end)
     | del(.section,.order)
   ' < "$backlog" | fm_hold_reason_decode_stream json
@@ -978,6 +1015,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
+    --arg today "$SNAPSHOT_TODAY" \
     --slurpfile backlog "$1" \
     --slurpfile tasks "$2" --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" "$FM_LANDED_JQ_DEFS"'
     ($backlog[0]) as $backlog
@@ -995,6 +1033,65 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
       | sort_by((.value | filed_epoch) as $epoch
           | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
       | map(.value);
+    # Display-only title for a fleet page: the backlog title without its
+    # conventional-commit, kind, status-word, or own-project prefix, its own id,
+    # or a leading issue reference, bounded at a word boundary. It never feeds
+    # any classification.
+    def word_bounded($n):
+      if length <= $n then .
+      else . as $full
+        | .[:$n] as $cut
+        | (if (.[$n:$n + 1] | test("^[[:space:]]")) then $cut
+           else ($cut | sub("[^[:space:]]*$"; "")) end) as $words
+        | (if ($words | test("[^[:space:]]")) then $words
+           else ($full | capture("^(?<w>[^[:space:]]*)").w) end)
+        | sub("[[:space:],;:.-]+$"; "")
+        | if . == $full then . else . + "…" end
+      end;
+    def plain_title:
+      . as $row
+      | (($row.title // $row.id // "") | tostring | gsub("[[:space:]]+"; " ")) as $raw
+      | ($row.repo // "" | tostring | ascii_downcase) as $repo
+      | ($row.id // "" | tostring) as $id
+      | $raw
+      | (if $id == "" then .
+         else gsub("(?<![A-Za-z0-9._-])" + ($id | gsub("(?<c>[.\\[\\](){}*+?^$|])"; "\\\(.c)")) + "(?![A-Za-z0-9._-])"; "")
+         end)
+      | reduce range(0; 6) as $_ (.;
+          sub("^[[:space:]:;,.-]+"; "")
+          | sub("^(?:feat|fix|chore|docs|refactor|test|tests|perf|build|ci|style|revert)(?:\\([^)]*\\))?!?:[[:space:]]*"; "")
+          | sub("^(?:SCOUT|SHIP)(?![A-Za-z0-9_])[[:space:]]*:?"; "")
+          | sub("^(?:scout|ship|working|blocked|paused|parked|needs-decision|done|failed)[[:space:]]*:[[:space:]]*"; ""; "i")
+          | sub("^[A-Za-z0-9._/-]*#[0-9]+(?![0-9])[[:space:]]*:?"; "")
+          | (if $repo != "" and (ascii_downcase | startswith($repo + ":"))
+             then .[($repo | length) + 1:] else . end))
+      | gsub("\\([[:space:]]*\\)"; "")
+      | gsub("[[:space:]]+"; " ")
+      | sub("^[[:space:]:;,.-]+"; "")
+      | sub("[[:space:]]+$"; "")
+      | (if . == "" then ($raw | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "")) else . end)
+      | word_bounded(90);
+    def issue_url:
+      ([(.links // [])[] | select(test("/issues/[0-9]+(?:[#?].*)?$"))][0] // null);
+    def date_epoch:
+      if type != "string" then null
+      elif test("T") then try fromdateiso8601 catch null
+      else try ((. + "T00:00:00Z") | fromdateiso8601) catch null end;
+    # Restart condition for a parked row, decided only from structured fields:
+    # unresolved blockers, a future hold-until date, a stored ask, an external
+    # hold kind, or a declared paused child wait. Anything else stays null; no
+    # reason or body prose is matched. The proposals kind is part of the
+    # contract but no structured field proves it yet, so it is never emitted.
+    def restart($child_state; $text):
+      ((.unresolved_blocker_ids // []) | map(trunc(120))) as $blockers
+      | (if ($blockers | length) > 0 then {kind:"after_work",blocker_ids:$blockers}
+         elif .hold_reason != null and .hold_kind != null
+              and .hold_until != null and .hold_until > $today then {kind:"date",until:(.hold_until | trunc(40))}
+         elif .ask != null then {kind:"captain_word"}
+         elif .hold_reason != null and .hold_kind == "external" then {kind:"event"}
+         elif $child_state == "paused" then {kind:"event"}
+         else {kind:null} end)
+      + {text:(if $text == null then null else ($text | trunc(160)) end)};
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -1010,14 +1107,18 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             reason:(.hold_reason | trunc(160)),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
-            hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
+            hold_age_days:(.hold_age_days // null),source:"backlog",
+            ask:(.ask // null)} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             kind:((.kind // null) | if . == null then null else trunc(40) end),
             hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
-            local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
+            local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion,
+            project:((.repo // null) | if . == null then null else trunc(120) end),
+            title_plain:plain_title,
+            open_url:((.pr_url // issue_url) | if . == null then null else trunc(500) end)} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
     | ([ $owned_in_flight[]
@@ -1060,24 +1161,42 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
-            doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+            doing:((.current_state.detail // "") | trunc(120)),
+            title_plain:($work | plain_title),
+            since_epoch:(((.spawn_gen // "") | (capture("^s(?<e>[0-9]+)[.]").e | tonumber)?)
+                         // ($work.since | date_epoch)),
+            produces:(if .kind == "scout" then "report"
+                      elif .kind == "ship" and .mode == "local-only" then "landing"
+                      elif .kind == "ship" then "pr"
+                      else null end),
+            open_url:((.pr.url // ($work | issue_url)) | if . == null then null else trunc(500) end)} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
+            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status",ask:null} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
-            reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
+            reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),source:"backlog",
+            project:((.repo // null) | if . == null then null else trunc(120) end),
+            title_plain:plain_title,
+            restart:restart(null; (.hold_reason // .blocked_reason))} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
            | select(($work.hold_reason != null and $work.hold_kind != null) | not)
-           | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
-              blocked_by_ids:[],unresolved_blocker_ids:[],
-              reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
+           | . as $child
+           | {id,title:((.backlog.title // .id) | trunc(90)),
+              blocked_by:(($work.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
+              blocked_by_ids:($work.blocked_by_ids | map(trunc(120))),
+              unresolved_blocker_ids:($work.unresolved_blocker_ids | map(trunc(120))),
+              reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state",
+              project:(($work.repo // null) | if . == null then null else trunc(120) end),
+              title_plain:($work | plain_title),
+              restart:($work | restart($child.current_state.state;
+                ($child.current_state.detail // $child.current_state.state)))} ]) as $holds_all
     | ($backlog.present == true
        and ($unstructured_current | length) == 0
        and ($unknown_children | length) == 0
@@ -1101,7 +1220,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state
     | {
-        schema:"fm-secondmate-home-summary.v1",
+        schema:"fm-secondmate-home-summary.v2",
         hold_classifier_schema:"fm-captain-hold-buckets.v1",
         contributions:$contributions[0],
         generated:$generated,
@@ -1137,6 +1256,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         counts:{
           active_children:($active_all | length),
           decisions_open:($decisions_all | length),
+          asks:([$decisions_all[] | select(.ask != null)] | length),
           holds:($holds_all | length),
           queued:($queued_all | length),
           landed:($landed_all | length),
@@ -1145,6 +1265,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         omitted:[
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
+          (if ($holds_all | length) > $queued_n then {surface:"holds",count:(($holds_all | length) - $queued_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
           (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
@@ -1377,7 +1498,7 @@ prepare_remote_summary_collection() {  # <sampled-row-json-lines>
   SNAPSHOT_SUMMARY_FILTER="$SNAPSHOT_COLLECT_DIR/summary-filter.jq"
   cat > "$SNAPSHOT_SUMMARY_FILTER" <<'JQ'
 length == 1 and (.[0] |
-  .schema == "fm-secondmate-home-summary.v1"
+  (.schema == "fm-secondmate-home-summary.v2" or .schema == "fm-secondmate-home-summary.v1")
   and .hold_classifier_schema == "fm-captain-hold-buckets.v1"
   and .home == $home
   and (.generated | type) == "string"
@@ -2064,7 +2185,7 @@ jq -n \
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
    {
-     schema:"fm-fleet-snapshot.v1",
+     schema:"fm-fleet-snapshot.v2",
      generated:$generated,
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},

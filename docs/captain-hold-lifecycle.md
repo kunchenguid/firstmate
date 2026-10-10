@@ -52,8 +52,9 @@ It works in this order:
 1. It uses an existing task, or creates one when nothing exists to hold.
 2. It records the task's UTC hold-set timestamp as the leading line of the task body.
 3. When `--origin` is supplied, it records the origin on the task, replacing any previous association.
-4. It invokes the underlying tasks-axi hold operation.
-5. It verifies the hold and timestamp.
+4. When `--ask-file` is supplied, it records the validated ask - the question waiting on the captain and how it can be answered - on its own `Captain hold ask:` body line.
+5. It invokes the underlying tasks-axi hold operation.
+6. It verifies the hold and timestamp.
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
@@ -65,6 +66,8 @@ Repeat and edge cases:
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - Before the backend hold runs, `--origin` records the origin the call is held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
   If that write fails, the backend hold is not attempted.
+- An ask belongs to one hold lifecycle: a repeated active hold keeps it, a new lifecycle drops it unless a new ask is given, and a refused backend hold restores the previous one.
+  [`bin/fm-hold-ask-lib.sh`](../bin/fm-hold-ask-lib.sh) owns its shape, and `bin/fm-fleet-snapshot.sh` exposes it only while the captain's answer is what restarts the work.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
 
@@ -534,6 +537,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
+- An `--ask-file` ask follows its hold lifecycle: a repeated active hold keeps it, a release-then-re-hold drops it, a refused backend hold restores the previous one, and an invalid ask file is refused before any task is created.
 
 ### Legacy paths
 
@@ -631,7 +635,7 @@ Projection regressions live in two suites:
 
 | Suite | What it covers |
 | --- | --- |
-| `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping. |
+| `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, title stripping, and the home summary's page fields: the stored ask as the only source of `ask`, `title_plain` word-boundary cuts, `open_url`, `since_epoch`, `produces`, structured-only `restart` kinds, and the capped `holds` list's disclosed total. |
 | `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, and scout-report precedence over competing pull-request links. |
 
 ### Refreshing this record

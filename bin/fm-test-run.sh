@@ -1644,6 +1644,12 @@ families_for_changed_path() {
     bin/fm-home-summary-refresh.sh)
       printf '%s\n' snapshot-bearings
       ;;
+    bin/fm-hold-ask-lib.sh)
+      # The stored-ask contract: written by fm-captain-hold.sh, read back by
+      # fm-fleet-snapshot.sh.
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' pure-contract-unit
+      ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
       printf '%s\n' pure-contract-unit
       # Pin or cleanup changes also select the real-Herdr family so the required
