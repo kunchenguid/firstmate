@@ -33,7 +33,7 @@ Multiple positional arguments become separate queued messages; the spawn templat
 A project trust dialog can appear on the first Pi run in any not-yet-trusted directory that holds a trust-requiring resource such as `.pi/extensions/`, including a clean worktree and a freshly seeded secondmate home.
 Accept it with Enter and verify the instructions begin processing.
 The decision persists per path in `~/.pi/agent/trust.json`, or in the pinned root's `trust.json` under a worker account pin, so later spawns in the same pooled slot under that root skip it.
-For unattended seeded-secondmate launches, `../../../bin/fm-spawn.sh --help` owns the capability-gated project-trust approval mechanics; [runtime verification](../../../../../docs/verification/runtime-backends.md#pi-seeded-secondmate-project-trust) owns the regression evidence.
+For unattended launches, `../../../bin/fm-spawn.sh --help` owns the capability-gated project-trust flags (`--approve` for seeded secondmate homes, `--no-approve` for ship and scout worktrees, which ignores project `.pi` resources rather than trusting them); [runtime verification](../../../../../docs/verification/runtime-backends.md#pi-seeded-secondmate-project-trust) owns the regression evidence.
 
 ## Worker turn-end extension
 
