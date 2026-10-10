@@ -138,6 +138,7 @@ case "$*" in
     printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
   'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
   'api repos/o/r') printf '{"permissions":{"push":false}}\n' ;;
+  'auth token --hostname github.com') printf 'fixture-token\n' ;;
   *) printf 'unexpected gh fixture call: %s\n' "$*" >&2; exit 1 ;;
 esac
 SH
@@ -651,10 +652,18 @@ case "$fault:$*" in
   exhaust:'api repos/o/r/issues/8/comments?'*) clock_bump 100 ;;
   fail-late:'api repos/o/r/pulls/8/reviews?'*) clock_bump 100; printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
-  down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
+  down:'api '*|down:'pr '*) printf 'HTTP 502\n' >&2; exit 1 ;;
   not-found:'api repos/o/r/'*) printf 'HTTP 404\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
+  # A slow stored-credential lookup: each process without an environment
+  # token pays it, and a parallel wave serializes on it past the read bound.
+  keychain:'auth token --hostname github.com') sleep 1; printf 'fixture-token\n'; exit 0 ;;
+  keychain:*) [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] || sleep 6 ;;
+  # A lookup that fails or hangs, while a read without a token fails auth.
+  keychain-fail:'auth token --hostname github.com') printf 'keyring read failed\n' >&2; exit 1 ;;
+  keychain-hang:'auth token --hostname github.com') sleep 6; exit 1 ;;
+  keychain-*:*) [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] || { printf 'gh auth login required\n' >&2; exit 4; } ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
 SH
@@ -911,6 +920,73 @@ test_slow_read_deadline_kill_is_budget_refusal() {
     || fail 'a deadline-killed slow read rewrote the prior record'
   [ ! -s "$home/state/.wake-queue" ] || fail 'a deadline-killed slow read enqueued a wake'
   pass 'a read killed at the five-second bound is budget refusal and stays silent'
+}
+
+test_slow_credential_lookup_still_observes_fresh() {
+  local home out
+  home=$(new_home slow-credential)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'keychain\n' > "$home/forge/fault"
+  out=$(with_home "$home" env -u GH_TOKEN -u GITHUB_TOKEN FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed behind a slow credential lookup'
+  [ -z "$out" ] || fail "a slow credential lookup printed a wake: $out"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'an unchanged PR behind a slow credential lookup was not observed fresh'
+  [ "$(grep -cFx 'auth token --hostname github.com' "$home/forge/calls")" = 1 ] \
+    || fail 'the stored credential was not resolved exactly once per poll'
+  grep -rF fixture-token "$home/data" "$home/state" >/dev/null && fail 'the resolved token reached a durable record'
+  : > "$home/forge/calls"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  with_home "$home" env -u GH_TOKEN GITHUB_TOKEN=preset FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'poll failed with an environment token'
+  grep -F 'auth token' "$home/forge/calls" >/dev/null && fail 'an environment token was replaced by a stored-credential lookup'
+  jq -e --arg now "$NOW" '.records[0].checked_at == $now' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'an environment-token poll was not observed fresh'
+  pass 'a slow stored-credential lookup is paid once and an unchanged PR stays observed'
+}
+
+test_small_budget_still_resolves_the_credential_once() {
+  local home out budget
+  home=$(new_home small-budget-credential)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'keychain\n' > "$home/forge/fault"
+  for budget in FM_CONTRIBUTIONS_BUDGET=10 FM_CHECK_TIMEOUT=18; do
+    : > "$home/forge/calls"
+    mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+    out=$(with_home "$home" env -u GH_TOKEN -u GITHUB_TOKEN -u FM_CONTRIBUTIONS_BUDGET "$budget" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed behind a slow credential lookup ($budget)"
+    [ -z "$out" ] || fail "a small-budget poll printed a wake ($budget): $out"
+    [ "$(grep -cFx 'auth token --hostname github.com' "$home/forge/calls")" = 1 ] \
+      || fail "a small-budget poll did not resolve the stored credential once ($budget)"
+    jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+      "$home/data/delivery/contributions.json" >/dev/null \
+      || fail "an unchanged PR was not observed fresh under a small budget ($budget)"
+  done
+  pass 'a small effective budget still resolves the credential once and observes fresh'
+}
+
+test_failed_credential_lookup_leaves_the_url_unmeasured() { # fail|hang
+  local home out mode
+  for mode in fail hang; do
+    home=$(new_home "credential-$mode")
+    forge_home "$home"
+    wrap_forge "$home"
+    mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+    cp "$home/data/delivery/contributions.json" "$home/prior.json"
+    printf 'keychain-%s\n' "$mode" > "$home/forge/fault"
+    out=$(with_home "$home" env -u GH_TOKEN -u GITHUB_TOKEN FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed after a credential lookup $mode"
+    [ -z "$out" ] || fail "a credential lookup $mode printed a wake: $out"
+    grep -F 'api ' "$home/forge/calls" >/dev/null && fail "a read started without a token after a credential lookup $mode"
+    cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+      || fail "a credential lookup $mode rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
+    [ ! -s "$home/state/.wake-queue" ] || fail "a credential lookup $mode enqueued a wake"
+  done
+  pass 'a failed or timed-out credential lookup leaves the URL unmeasured and silent'
 }
 
 test_unmeasured_url_does_not_starve_the_tail() {
@@ -1183,7 +1259,7 @@ test_retire_is_idempotent_and_refuses_unknown_pairs() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_slow_credential_lookup_still_observes_fresh test_small_budget_still_resolves_the_credential_once test_failed_credential_lookup_leaves_the_url_unmeasured test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
