@@ -22,10 +22,13 @@ make_spawn_pi_probe() {
 set -u
 if [ "${1:-}" = --help ]; then
   # Mirror real Pi help advertising: 0.82.0 has --approve but not --tui-mode;
-  # 0.50.0 is a synthetic pre-approve probe; current defaults advertise both.
+  # 0.50.0 is a synthetic pre-approve probe; 1.0.4 prints Pi's real
+  # "--approve, -a" and "--no-approve, -na" rows; current defaults advertise
+  # --tui-mode and --approve.
   case "${FM_FAKE_PI_VERSION:-0.84.0}" in
   0.50.0) printf '%s\n' 'Pi 0.50.0' 'Options: --help' ;;
   0.82.0) printf '%s\n' 'Pi 0.82.0' 'Options: --help --approve' ;;
+  1.0.4) printf '%s\n' 'Pi 1.0.4' '  --tui-mode <mode>' '  --approve, -a                  Trust project-local files for this run' '  --no-approve, -na              Ignore project-local files for this run' ;;
   *) printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode> --approve' ;;
   esac
 fi
@@ -1079,6 +1082,62 @@ test_pi_worker_launch_omits_seeded_home_approve() {
   assert_not_contains "$launch" "--approve" \
     "ordinary Pi worker launches must not receive secondmate seeded-home --approve"
   pass "ordinary Pi worker launches omit --approve"
+}
+
+test_pi_worker_launch_ignores_project_trust_when_advertised() {
+  local harness rec id out status launch kindflag sm
+  for harness in pi pi-signed; do
+    for kindflag in --ship --scout; do
+      id="noapprove-${harness}-${kindflag#--}-z8h"
+      rec=$(make_spawn_case "noapprove-${harness}-${kindflag#--}" "$harness" "$id")
+      read_case_record "$rec"
+      if [ "$kindflag" = --scout ]; then
+        out=$(FM_TEST_PI_VERSION=1.0.4 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      else
+        out=$(FM_TEST_PI_VERSION=1.0.4 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+      fi
+      status=$?
+      expect_code 0 "$status" "$harness $kindflag spawn on a --no-approve Pi should succeed"$'\n'"$out"
+      launch=$(cat "$LAUNCH_LOG")
+      assert_contains "$launch" "FM_PI_HARNESS=$harness '$FAKEBIN_DIR/$harness' --tui-mode regular --no-approve " \
+        "$harness $kindflag launch must ignore project trust with --no-approve when help advertises it"
+      assert_not_contains "$launch" " --approve" \
+        "$harness $kindflag launch must never trust project-local files"
+
+      id="noapprove-old-${harness}-${kindflag#--}-z8i"
+      rec=$(make_spawn_case "noapprove-old-${harness}-${kindflag#--}" "$harness" "$id")
+      read_case_record "$rec"
+      if [ "$kindflag" = --scout ]; then
+        out=$(FM_TEST_PI_VERSION=0.82.0 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      else
+        out=$(FM_TEST_PI_VERSION=0.82.0 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+      fi
+      status=$?
+      expect_code 0 "$status" "$harness $kindflag spawn on a Pi without --no-approve should succeed"$'\n'"$out"
+      launch=$(cat "$LAUNCH_LOG")
+      assert_not_contains "$launch" " --no-approve" \
+        "$harness $kindflag launch must omit --no-approve when help lacks it"
+      assert_not_contains "$launch" " --approve" \
+        "$harness $kindflag launch must not fall back to --approve when help lacks --no-approve"
+    done
+
+    id="noapprove-sm-${harness}-z8j"
+    rec=$(make_spawn_case "noapprove-sm-${harness}" codex "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+    sm=$(cd "$sm" && pwd -P)
+    out=$(FM_TEST_PI_VERSION=1.0.4 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+    status=$?
+    expect_code 0 "$status" "$harness seeded secondmate spawn on a --no-approve Pi should succeed"$'\n'"$out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" " --approve " \
+      "$harness seeded secondmate must keep its session --approve"
+    assert_not_contains "$launch" "--no-approve" \
+      "$harness seeded secondmate must not ignore its own tracked extensions"
+  done
+  pass "Pi and pi-signed ship and scout launches ignore project trust with --no-approve, secondmates keep --approve"
 }
 
 test_pi_approve_probe_omits_unsupported_flag() {
@@ -2228,6 +2287,7 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_pi_seeded_secondmate_preapproves_project_trust
 test_pi_worker_launch_omits_seeded_home_approve
+test_pi_worker_launch_ignores_project_trust_when_advertised
 test_pi_approve_probe_omits_unsupported_flag
 test_pi_exclude_tools_reach_ship_and_scout_launches
 test_pi_exclude_tools_worker_registry_reports

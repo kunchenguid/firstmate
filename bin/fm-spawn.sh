@@ -214,7 +214,10 @@
 #   also adds --approve when that help advertises it, so the first unattended
 #   launch does not stall on Pi's "Trust project folder?" dialog for that home
 #   path; --approve is session-scoped to the launch cwd and does not rewrite the
-#   operator's trust.json. Ordinary Pi worker launches never receive --approve.
+#   operator's trust.json. Ordinary Pi worker launches never receive --approve:
+#   a ship or scout launch adds --no-approve when that help advertises it, so a
+#   worktree with tracked .pi resources starts without the trust dialog and
+#   without loading or executing those project-local resources.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
 #   Devin is worker-only: --permission-mode dangerous and
@@ -383,9 +386,10 @@
 #                  supplies its own trailing space, empty never used)
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
-#     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
-#                  that executable advertises the flag (empty otherwise; session
-#                  trust for the launch cwd only, never a trust.json rewrite)
+#     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate, or
+#                  --no-approve on a ship or scout launch, when that executable
+#                  advertises the flag (empty otherwise; session-scoped to the
+#                  launch cwd, never a trust.json rewrite)
 #     __PIEXCLUDE__ optional ` --exclude-tools '<comma-joined names>'` from
 #                  config/crew-exclude-tools on Pi/pi-signed ship and scout
 #                  launches (supplies its own leading space, empty otherwise)
@@ -1974,14 +1978,16 @@ pi_supports_tui_mode() {
 }
 
 # Same help-probe shape as pi_supports_tui_mode for the session-scoped project
-# trust flag. A seeded secondmate home carries tracked .pi/extensions that gate
-# Pi behind "Trust project folder?" on first launch; --approve trusts that
-# launch cwd for the run without rewriting ~/.pi/agent/trust.json.
-pi_supports_approve() {
-  local executable=$1 help
+# trust flags. A directory holding tracked .pi/extensions gates Pi behind
+# "Trust project folder?" on first launch. --approve trusts that launch cwd for
+# the run (seeded secondmate homes only); --no-approve ignores its project .pi
+# resources for the run (ship and scout worktrees). Neither rewrites
+# ~/.pi/agent/trust.json.
+pi_supports_flag() { # <executable> <flag>
+  local executable=$1 flag=$2 help
   help=$("$executable" --help 2>&1) || return 1
   # Pi prints "--approve, -a"; allow comma (and any non-token char) after the name.
-  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--approve([^[:alnum:]_-]|$)'
+  printf '%s\n' "$help" | grep -Eq -- "(^|[[:space:]])${flag}([^[:alnum:]_-]|\$)"
 }
 
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
@@ -2412,10 +2418,14 @@ pi | pi-signed)
   # Seeded-home signal is .fm-secondmate-home (required by
   # validate_firstmate_home_for_spawn before any secondmate launch reaches
   # the pane). Session-only --approve; never expand to a parent path or
-  # rewrite the operator trust store.
+  # rewrite the operator trust store. A ship or scout worktree instead gets
+  # --no-approve: it starts unattended while the project's committed .pi
+  # resources stay unloaded, and the worker extension still rides -e from state/.
   PI_APPROVE=
-  if [ "$KIND" = secondmate ] && pi_supports_approve "$PI_BIN"; then
-    PI_APPROVE=' --approve'
+  if [ "$KIND" = secondmate ]; then
+    if pi_supports_flag "$PI_BIN" --approve; then PI_APPROVE=' --approve'; fi
+  elif pi_supports_flag "$PI_BIN" --no-approve; then
+    PI_APPROVE=' --no-approve'
   fi
   LAUNCH=${LAUNCH//__PIAPPROVE__/$PI_APPROVE}
   PI_EXCLUDE=
