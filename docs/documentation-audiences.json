@@ -549,6 +549,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "tests/captures/tasks-axi-0.2.5/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": ".agents/skills/agent-skill-trigger-index/SKILL.md",
       "audience": "agent-runtime"
     },

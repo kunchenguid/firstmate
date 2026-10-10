@@ -16,6 +16,20 @@
 #   roots: resolved root/config/data/state/projects directories.
 #   backlog: {path,present,records[]} where records are ordered as written in
 #     data/backlog.md and cover In flight, Queued, and Done.
+#     When the home's configured tasks-axi backend is not markdown, the rows
+#     come from one bounded adapter read through fm-backlog-transition-lib.sh
+#     (fm_backlog_rows_json owns the read, its completeness rule and the strict
+#     decoder) and the object also carries source "tasks-axi", backend and error.
+#     An unreadable configuration or an unavailable, malformed or incomplete
+#     read is present:false with error set, a backlog_error that main_inventory
+#     reports as "Backlog unavailable: ...", and never an empty valid backlog;
+#     a stale data/backlog.md beside such an adapter is ignored. Titles keep the
+#     raw cell in title_raw and end with an ellipsis when the adapter truncated
+#     them; a links cell the adapter grammar cannot consume entirely keeps
+#     links_raw, sets links_ambiguous, withholds parsed artifacts and is listed
+#     in main_inventory.links_ambiguous_ids. The adapter list carries no hold-set
+#     time or in-flight start date, so those stay null and an undated hold is
+#     never aged.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
 #     Structured rows preserve captain-hold metadata such as hold_kind,
@@ -69,7 +83,8 @@
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
-#   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
+#   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count,
+#     backlog_error,links_ambiguous_ids[]} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
 #     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
 #     current backlog rows). Does not invent live tasks; meta remains truth for
@@ -224,6 +239,12 @@ esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"  # fm_tasks_axi_backend, fm_backlog_backend_manual: the configured backend
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"  # fm_backlog_rows_json: the shared backlog reader
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
@@ -383,17 +404,11 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
-backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
-  local backlog=${1:-$BACKLOG}
-  if [ ! -f "$backlog" ]; then
-    jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
-    return 0
-  fi
-
-  set -o pipefail
-  # shellcheck disable=SC2094
-  jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
-    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
+# jq definitions shared by the markdown parser and the tasks-axi adapter reader, so every record,
+# whichever backend produced it, gets the same blocker, role, hold-bucket and actionability fields.
+# It reads $today, $now and $age_days, which each caller binds.
+# shellcheck disable=SC2016 # jq program text, expanded by jq and not by the shell.
+BACKLOG_JQ_COMMON='
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -404,14 +419,104 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
       | (timestamp_epoch($to)) as $b
       | if $a == null or $b == null then null
         else (($b - $a) / 86400 | floor) end;
+    def cap($rest; $re):
+      (((($rest | capture($re)?) // {}) | .v) // null) as $v
+      | if $v == null then null else ($v | trim) end;
+    def finish_records:
+      .records |= map(
+        if (.body_lines | length) > 0 then
+          .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          | .local_note = (.local_note
+              // (if any(.body_lines[];
+                    test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
+                  then null
+                  else cap(.body_lines[-1]; "^(?<v>local main)$")
+                  end))
+          | .body_excerpt = ((.body_lines | join(" "))[:240])
+        else . end)
+    | .records as $records
+    | (reduce ($records[] | select(.structured)) as $record ({};
+         .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
+    | .records |= map(
+        if .structured then
+          . as $record
+          | .unresolved_blocker_ids = [
+              $record.blocked_by_ids[] as $blocker
+              | select($resolved_ids[$blocker] != true)
+              | $blocker
+            ]
+          | .current_role =
+              (if .state == "in_flight" and .hold_reason != null and .hold_kind != null then "held"
+               elif .state == "in_flight" and .kind == "program" then "program"
+               elif .state == "in_flight" then "worker"
+               elif .state == "queued" then "queued"
+               else "done" end)
+          | .requires_child_metadata = (.current_role == "worker")
+          | .hold_age_days = days_between((.hold_set // .since); $now)
+          | .hold_bucket =
+              (if .hold_kind != "captain" or .hold_reason == null or .state == "done" then null
+               elif (.unresolved_blocker_ids | length) > 0 then "blocked"
+               elif .hold_until != null and .hold_until > $today then "dated"
+               elif .hold_until == null and .hold_age_days != null
+                    and .hold_age_days >= $age_days then "aged"
+               else "live" end)
+          | .captain_actionable = (.hold_bucket == "live")
+        else . end)
+    | del(.section,.order);
+'
+
+# This home's backlog when its configured tasks-axi backend is not markdown: one bounded read of the
+# adapter through the shared backlog reader, shaped like the markdown records. Returns 1 when the markdown
+# file is the backlog (the default, config/backlog-backend=manual, or no data directory), so that path
+# stays exactly as it was. An unreadable configuration or an unavailable, malformed or incomplete adapter
+# read is present:false with an error and never an empty valid backlog. Hold reasons come back from
+# tasks-axi still in their stored fm-hold-v1 form, so they are decoded here exactly as for markdown.
+backlog_adapter_json() {
+  local root backend status rows
+  fm_backlog_backend_manual "$CONFIG" && return 1
+  root=$(CDPATH='' cd -- "$(dirname -- "$DATA")" 2>/dev/null && pwd -P) || return 1
+  backend=$(fm_tasks_axi_backend "$root" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    rows=$(jq -n --arg error "$backend" '{ok:false,error:$error}') || return 2
+    backend=unavailable
+  elif [ "$backend" = markdown ]; then
+    return 1
+  elif [ ! -d "$DATA" ]; then
+    rows=$(jq -n --arg error "backlog data directory is not a directory at $DATA" '{ok:false,error:$error}') || return 2
+  else
+    rows=$(fm_backlog_rows_json "$DATA") || return 2
+  fi
+  set -o pipefail  # runs in backlog_json's subshell
+  printf '%s\n' "$rows" | jq -c --arg path "$BACKLOG" --arg backend "$backend" --arg today "$SNAPSHOT_TODAY" \
+    --arg now "$SNAPSHOT_NOW" --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" "$BACKLOG_JQ_COMMON"'
+    {path:$path,present:(.ok == true),source:"tasks-axi",backend:$backend,
+     error:(if .ok == true then null else (.error // "backlog read failed") end),
+     records:(if .ok == true then [.rows[] | del(._deps,._held,._blocked)] else [] end)}
+    | finish_records' | fm_hold_reason_decode_stream json || return 2
+}
+
+backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
+  local backlog=${1:-$BACKLOG} adapter_status
+  if [ -z "${1:-}" ]; then
+    backlog_adapter_json
+    adapter_status=$?
+    [ "$adapter_status" -eq 1 ] || return "$adapter_status"
+  fi
+  if [ ! -f "$backlog" ]; then
+    jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
+    return 0
+  fi
+
+  set -o pipefail
+  # shellcheck disable=SC2094
+  jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
+    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" "$BACKLOG_JQ_COMMON"'
     def section_state:
       if . == "In flight" then "in_flight"
       elif . == "Queued" then "queued"
       elif . == "Done" then "done"
       else null end;
-    def cap($rest; $re):
-      (((($rest | capture($re)?) // {}) | .v) // null) as $v
-      | if $v == null then null else ($v | trim) end;
     def metadata($rest; $key):
       cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + ":[[:space:]]*(?<v>[^,)]*)");
     # LOAD-BEARING, do not remove as a duplicate definition of the kind field.
@@ -533,46 +638,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
          .order += 1
          | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
        end)
-    | .records |= map(
-        if (.body_lines | length) > 0 then
-          .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
-          | .local_note = (.local_note
-              // (if any(.body_lines[];
-                    test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
-                  then null
-                  else cap(.body_lines[-1]; "^(?<v>local main)$")
-                  end))
-          | .body_excerpt = ((.body_lines | join(" "))[:240])
-        else . end)
-    | .records as $records
-    | (reduce ($records[] | select(.structured)) as $record ({};
-         .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
-    | .records |= map(
-        if .structured then
-          . as $record
-          | .unresolved_blocker_ids = [
-              $record.blocked_by_ids[] as $blocker
-              | select($resolved_ids[$blocker] != true)
-              | $blocker
-            ]
-          | .current_role =
-              (if .state == "in_flight" and .hold_reason != null and .hold_kind != null then "held"
-               elif .state == "in_flight" and .kind == "program" then "program"
-               elif .state == "in_flight" then "worker"
-               elif .state == "queued" then "queued"
-               else "done" end)
-          | .requires_child_metadata = (.current_role == "worker")
-          | .hold_age_days = days_between((.hold_set // .since); $now)
-          | .hold_bucket =
-              (if .hold_kind != "captain" or .hold_reason == null or .state == "done" then null
-               elif (.unresolved_blocker_ids | length) > 0 then "blocked"
-               elif .hold_until != null and .hold_until > $today then "dated"
-               elif .hold_until == null and .hold_age_days != null
-                    and .hold_age_days >= $age_days then "aged"
-               else "live" end)
-          | .captain_actionable = (.hold_bucket == "live")
-        else . end)
-    | del(.section,.order)
+    | finish_records
   ' < "$backlog" | fm_hold_reason_decode_stream json
 )
 
@@ -952,16 +1018,25 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
     | ([ $owned_in_flight[]
          | select(.id as $id | [$tasks[].id] | index($id) | not)
          | .id ]) as $orphan_in_flight
-    | (($unstructured_current | length) == 0
-       and ($orphan_in_flight | length) == 0) as $valid
-    | (if ($unstructured_current | length) > 0 then "unstructured current backlog row"
+    | ($backlog.error // null) as $backlog_error
+    | ([ $backlog.records[]? | select(.links_ambiguous == true) | .id ]) as $links_ambiguous
+    | (($backlog_error == null)
+       and ($unstructured_current | length) == 0
+       and ($orphan_in_flight | length) == 0
+       and ($links_ambiguous | length) == 0) as $valid
+    | (if $backlog_error != null then "Backlog unavailable: " + $backlog_error
+       elif ($unstructured_current | length) > 0 then "unstructured current backlog row"
        elif ($orphan_in_flight | length) > 0 then "in-flight backlog item has no child metadata"
+       elif ($links_ambiguous | length) > 0 then
+         "backlog artifact links ambiguous or unparseable, parsed links withheld: " + ($links_ambiguous | join(", "))
        else null end) as $reason
     | {
         valid:$valid,
         reason:$reason,
         orphan_in_flight:$orphan_in_flight,
-        unstructured_current_count:($unstructured_current | length)
+        unstructured_current_count:($unstructured_current | length),
+        backlog_error:$backlog_error,
+        links_ambiguous_ids:$links_ambiguous
       }'
 }
 
@@ -1033,7 +1108,9 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
-          {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
+          {kind:"missing_backlog",ids:[],
+           reason:(if ($backlog.error // null) != null then "Backlog unavailable: " + $backlog.error
+                   else "missing structured backlog" end)}
         else empty end,
         if ($unstructured_current | length) > 0 then
           {kind:"unstructured_current",ids:[],reason:"unstructured current backlog row"}
