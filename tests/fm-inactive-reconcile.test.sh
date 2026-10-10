@@ -1257,7 +1257,7 @@ test_handoff_idle_records_early_attributed_continuation_latency() {
 
 test_handoff_idle_rejects_terminal_run_step_evidence() {
   local home state record
-  for state in failed done; do
+  for state in failed 'done'; do
     make_world "handoff-terminal-run-step-$state"
     install_handoff_fakes
     home=$MAIN

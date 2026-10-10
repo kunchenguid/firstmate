@@ -803,8 +803,8 @@ handoff_write_cursor() {
 
 handoff_one() {
   local id=$1 meta=$2 timeout=$3 status kind mode incarnation line verb fingerprint observed record known ordinal=0
-  local line_clean matching_fp matching_count candidate_claimed collision line_count
-  local -a open_fps=() stored_fps=() claimed_fps=() matching_fps=()
+  local line_clean matching_fp matching_count candidate_claimed collision line_count status_line
+  local -a open_fps=() stored_fps=() claimed_fps=() matching_fps=() status_lines=()
   local now age key alerted last_alert state_line state_rc path item fp
   local clearer_epoch marker proof='' reason='' evidence_rc=0
   status="$STATE/$id.status"
@@ -827,6 +827,9 @@ handoff_one() {
   # its own episode and then a second episode once the line is finished.
   if [ -f "$status" ] && [ ! -L "$status" ]; then
     while IFS= read -r line; do
+      status_lines+=("$line")
+    done < "$status"
+    for line in "${status_lines[@]+"${status_lines[@]}"}"; do
       case "$line" in *[![:space:]]*) ;; *) continue ;; esac
       verb=$(status_line_verb "$line")
       _fm_status_verb_recognized "$verb" || continue
@@ -855,8 +858,9 @@ handoff_one() {
         done
         line_count=0
         if [ "$matching_count" -gt 1 ] && [ "$candidate_claimed" -eq 0 ] && [ -f "$(handoff_record_path "$fingerprint")" ]; then
-          line_count=$(grep -Fxc -- "$line" "$status" 2>/dev/null || true)
-          case "$line_count" in ''|*[!0-9]*) line_count=0 ;; esac
+          for status_line in "${status_lines[@]+"${status_lines[@]}"}"; do
+            [ "$status_line" = "$line" ] && line_count=$((line_count + 1))
+          done
         fi
         if [ "$candidate_claimed" -eq 1 ] || [ ! -f "$(handoff_record_path "$fingerprint")" ] \
           || { [ "$matching_count" -gt 1 ] && [ "$line_count" -lt "$matching_count" ]; }; then
@@ -908,7 +912,7 @@ handoff_one() {
       else
         [ "$?" -eq 1 ] || return 1
       fi
-    done < "$status"
+    done
   fi
   for item in "${stored_fps[@]+"${stored_fps[@]}"}"; do
     fp=${item%%|*}
