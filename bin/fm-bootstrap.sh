@@ -606,7 +606,9 @@ secondmate_sync() {
   # instead of running the whole deferred network stage into its bound. The
   # tracked-file sync and the inheritance push run under what is left of it; a
   # step that hits it, or finds nothing left, fails like any other failed step,
-  # which leaves the mate unconverged with its retry marker kept.
+  # which leaves the mate unconverged with its retry marker kept. A step cut off
+  # by the budget may already have changed the home without reporting it, so it
+  # also marks the re-read as owed; the next convergence then nudges the mate.
   remote_convergence_budget() {
     local budget=${FM_SECONDMATE_CONVERGENCE_TIMEOUT:-75}
     case "$budget" in ''|*[!0-9]*|0) budget=75 ;; esac
@@ -615,7 +617,7 @@ secondmate_sync() {
 
   secondmate_sync_remote_one() {  # <id> <home> <remote-host>
     local id=$1 _home=$2 remote_host=$3
-    local sync_out sync_rc inherit_out inherit_rc nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local sync_out sync_rc inherit_out='' inherit_rc nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
     local budget deadline left
     budget=$(remote_convergence_budget)
     deadline=$(( $(date +%s) + budget ))
@@ -659,6 +661,7 @@ secondmate_sync() {
     if fm_timed_out "$sync_rc"; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: no answer within the ${budget}s per-mate convergence budget"
       converged=0
+      nudge_needed=1
     elif [ "$sync_rc" -ne 0 ]; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(remote_sync_failure_reason "$sync_rc" "$sync_out")"
       converged=0
@@ -669,13 +672,16 @@ secondmate_sync() {
       inherit_rc=124
     elif inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
       fm_run_timed "$left" "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
-      if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
+      :
     else
       inherit_rc=$?
     fi
+    # Items a failed push applied before it stopped changed the home too.
+    if printf '%s\n' "${inherit_out:-}" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     if fm_timed_out "$inherit_rc"; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: no answer within the ${budget}s per-mate convergence budget"
       converged=0
+      nudge_needed=1
     elif [ "$inherit_rc" -ne 0 ]; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(remote_inherit_failure_reason "$inherit_out")"
       converged=0

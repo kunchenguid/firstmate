@@ -278,7 +278,12 @@ publish_healthy_watcher_identity() { # <state> <home> <watch-script>
   touch "$state/.last-watcher-beat"
 }
 
+# Every remote leg here runs the real entrypoint and job worker on this
+# machine, which on a loaded runner can outlast the production per-mate
+# convergence budget; tests/fm-bootstrap-network-parallel.test.sh owns that
+# budget's behavior, so this suite gives convergence ample time.
 remote_env() {
+  FM_SECONDMATE_CONVERGENCE_TIMEOUT="${FM_SECONDMATE_CONVERGENCE_TIMEOUT:-900}" \
   FM_HOME="$PARENT" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \

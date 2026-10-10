@@ -433,7 +433,7 @@ printf 'START %s %s %s %s\n' "$host" "$command_name" "$subcommand" "$item_rel" >
 case "$command_name:$subcommand" in
   fm-remote-secondmate-control.sh:sync)
     if [ "$host" = "${FM_FAKE_SYNC_HANG_HOST:-none}" ]; then
-      sleep 30
+      sleep 120
     fi
     printf 'END %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
     printf 'current: test\n'
@@ -442,11 +442,17 @@ case "$command_name:$subcommand" in
   fm-remote-secondmate-control.sh:state) printf 'END %s\n' "$host" >> "$log"; printf 'alive\n'; exit 0 ;;
   fm-remote-secondmate-control.sh:route) printf 'END %s\n' "$host" >> "$log"; printf 'backend=herdr\n'; exit 0 ;;
   fm-remote-inherit.sh:*)
-    sleep "${FM_FAKE_ITEM_SLEEP:-0}"
-    printf 'END %s %s %s %s\n' "$host" "$command_name" "$subcommand" "$item_rel" >> "$log"
+    # The failing item answers at once, so it settles before any sibling.
     if [ "$item_rel" = "${FM_FAKE_ITEM_FAIL:-none}" ]; then
+      printf 'END %s %s %s %s\n' "$host" "$command_name" "$subcommand" "$item_rel" >> "$log"
       printf 'error: synthetic refusal of %s\n' "$item_rel" >&2
       exit 1
+    fi
+    sleep "${FM_FAKE_ITEM_SLEEP:-0}"
+    printf 'END %s %s %s %s\n' "$host" "$command_name" "$subcommand" "$item_rel" >> "$log"
+    if [ "$item_rel" = "${FM_FAKE_ITEM_PUSHED:-none}" ]; then
+      printf 'pushed: %s\n' "$item_rel"
+      exit 0
     fi
     printf 'unchanged: %s\n' "$item_rel"
     exit 0
@@ -540,7 +546,7 @@ test_inherit_push_failure_stops_new_sends() {
   assert_not_contains "$out" "config/item-d" "no item after the failure may be reported as sent"
 
   : > "$CF_LOG"
-  out=$(FM_FAKE_ITEM_FAIL=config/item-a FM_FAKE_ITEM_SLEEP=0.3 run_inherit_push sm 2); rc=$?
+  out=$(FM_FAKE_ITEM_FAIL=config/item-a FM_FAKE_ITEM_SLEEP=2 run_inherit_push sm 2); rc=$?
   [ "$rc" -ne 0 ] || fail "a failed first item must fail a concurrent push: $out"
   if grep -q 'START .* data/captain-shared.md' "$CF_LOG"; then
     fail "a concurrent push kept starting items after the first item failed"$'\n'"$(cat "$CF_LOG")"
@@ -574,27 +580,54 @@ test_convergence_budget_isolates_a_hung_mate() {
     FM_SSH_BIN="$CF_FAKEBIN/fake-ssh" \
     FM_FAKE_SSH_LOG="$CF_LOG" \
     FM_FAKE_SYNC_HANG_HOST=host-alpha \
-    FM_SECONDMATE_CONVERGENCE_TIMEOUT=3 \
+    FM_SECONDMATE_CONVERGENCE_TIMEOUT=15 \
     FM_INHERITABLE_CONFIG='item-a' \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
   )
   elapsed=$(( $(date +%s) - start ))
-  [ "$elapsed" -lt 25 ] || fail "a hung mate held the network phase for ${elapsed}s past its 3s budget"$'\n'"$out"
+  [ "$elapsed" -lt 90 ] || fail "a hung mate held the network phase for ${elapsed}s past its 15s budget"$'\n'"$out"
   assert_contains "$out" \
-    "SECONDMATE_SYNC: secondmate alpha: skipped: remote tracked-file sync failed on host-alpha: no answer within the 3s per-mate convergence budget" \
+    "SECONDMATE_SYNC: secondmate alpha: skipped: remote tracked-file sync failed on host-alpha: no answer within the 15s per-mate convergence budget" \
     "the hung mate must be reported as its own skip"
   assert_contains "$out" \
-    "SECONDMATE_SYNC: secondmate alpha: skipped: remote inheritance failed on host-alpha: no answer within the 3s per-mate convergence budget" \
+    "SECONDMATE_SYNC: secondmate alpha: skipped: remote inheritance failed on host-alpha: no answer within the 15s per-mate convergence budget" \
     "an exhausted budget skips the hung mate's inheritance push too"
   assert_not_contains "$out" "SECONDMATE_SYNC: secondmate bravo:" "the healthy mate must converge without a skip"
   grep -q 'START host-bravo fm-remote-inherit.sh' "$CF_LOG" \
     || fail "the healthy mate's inheritance push did not run"$'\n'"$(cat "$CF_LOG")"
   [ -f "$CF_HOME/state/.secondmate-nudge-pending/alpha.pending" ] \
     || fail "the hung mate's retry marker must survive so the next session start retries it"
+  assert_grep 'owed=1' "$CF_HOME/state/.secondmate-nudge-pending/alpha.pending" \
+    "a step cut off by the budget may have changed the home, so the re-read must stay owed"
   [ ! -f "$CF_HOME/state/.secondmate-nudge-pending/bravo.pending" ] \
     || fail "the converged mate's retry marker must be cleared"
   pass "per-mate convergence budget: a hung host is that mate's skip, keeps its retry marker, and does not hold the others"
+}
+
+test_partial_push_failure_keeps_the_reread_owed() {
+  local out
+  convergence_fixture "$TMP_ROOT/partial-push-owed" alpha:host-alpha
+  out=$(
+    PATH="$CF_FAKEBIN:$BASE_PATH" \
+    FM_HOME="$CF_HOME" \
+    FM_ROOT_OVERRIDE="$CF_PRIMARY" \
+    FM_BOOTSTRAP_NETWORK=only \
+    FM_SSH_BIN="$CF_FAKEBIN/fake-ssh" \
+    FM_FAKE_SSH_LOG="$CF_LOG" \
+    FM_FAKE_ITEM_PUSHED=config/item-a \
+    FM_FAKE_ITEM_FAIL=config/item-b \
+    FM_REMOTE_INHERIT_PUSH_JOBS=1 \
+    FM_INHERITABLE_CONFIG='item-a item-b' \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1
+  )
+  assert_contains "$out" \
+    "SECONDMATE_SYNC: secondmate alpha: skipped: remote inheritance failed on host-alpha: error: synthetic refusal of config/item-b" \
+    "the failed push must be reported with its own error"
+  assert_grep 'owed=1' "$CF_HOME/state/.secondmate-nudge-pending/alpha.pending" \
+    "an item the failed push already applied changed the home, so the re-read must stay owed"
+  pass "a push that fails after applying an item keeps the mate's re-read owed"
 }
 
 test_remote_probe_scheduling_keeps_per_mate_lines parallel
@@ -604,4 +637,5 @@ test_inherit_push_overlaps_items_and_replays_in_order
 test_inherit_push_failure_stops_new_sends
 test_inherit_push_local_refusal_sends_nothing
 test_convergence_budget_isolates_a_hung_mate
+test_partial_push_failure_keeps_the_reread_owed
 echo "# all fm-bootstrap-network-parallel tests passed"
