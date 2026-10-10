@@ -883,8 +883,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Reads the
 # status file, plus its sibling `.meta` for the task kind the terminal rule needs
-# when the caller passes no <kind>; no globals beyond the optional
-# FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
+# when the caller passes no <kind>. This is the durable open-set the fleet
 # snapshot and any point-in-time consumer must use instead of trusting the last
 # status line.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
@@ -893,12 +892,31 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
-status_open_decisions() {  # <status-file> [<kind>]
-  local f=$1 kind=${2:-} line resolve held open='' verb
+# Given <live-status-file> - the log <status-file> is, or was copied from - the
+# fold may start from that log's persisted incremental cursor instead of byte 0
+# (_fm_open_decisions_seeded_fold below), reading the cursor without writing it.
+# The result is byte for byte the whole-stream fold; only the cost changes.
+# <cursor-file> names a copy of that cursor captured before <status-file> was.
+status_open_decisions() {  # <status-file> [<kind>] [<live-status-file> [<cursor-file>]]
+  local f=$1 kind=${2:-} live=${3:-} cursor=${4:-} resolve held open
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f" "$kind")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  if [ -n "$live" ]; then
+    [ -n "$cursor" ] || cursor=$(_fm_open_decisions_cursor_path "$live")
+    if open=$(_fm_open_decisions_seeded_fold "$f" "$kind" "$live" "$cursor" "$resolve" "$held"); then
+      printf '%s' "$open"
+      return 0
+    fi
+  fi
+  _fm_decision_fold_stream '' "$resolve" "$held" "$kind" < "$f"
+}
+
+# Fold every status line on stdin into <open-set>, printing the resulting set.
+# The verb prefilter only skips lines _fm_decision_fold_line would leave alone.
+_fm_decision_fold_stream() {  # <open-set> <resolve-verb> <held-verb> <kind>
+  local open=$1 resolve=$2 held=$3 kind=$4 line verb
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" verb
     case "$verb" in
@@ -906,7 +924,7 @@ status_open_decisions() {  # <status-file> [<kind>]
         open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
         ;;
     esac
-  done < "$f"
+  done
   printf '%s' "$open"
 }
 
@@ -915,9 +933,10 @@ status_open_decisions() {  # <status-file> [<kind>]
 # fold's most recently opened record supplies it; a standing declared wait, then
 # the latest recognized event, stands when nothing is open.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
-status_current_line() {  # <status-file> <kind>
+# The optional arguments are status_open_decisions' cursor seed.
+status_current_line() {  # <status-file> <kind> [<live-status-file> [<cursor-file>]]
   local open key verb note current=''
-  open=$(status_open_decisions "$1" "$2")
+  open=$(status_open_decisions "$1" "$2" "${3:-}" "${4:-}")
   while IFS=$'\t' read -r key verb note; do
     case "$verb" in ?*) current="$verb [key=$key]: $note" ;; esac
   done <<EOF
@@ -1114,7 +1133,8 @@ EOF
 # --- incremental (cursor-backed) open-decisions fold ------------------------
 #
 # status_open_decisions above re-reads and re-folds a status file's ENTIRE
-# lifetime on every call, so its cost grows with total log size. A per-drain
+# lifetime on every call unless a caller lets it start from the cursor kept
+# here, so its cost grows with total log size. A per-drain
 # fleet-wide scan using that whole-file function would pay that cost for every
 # task on every wake, which grows unbounded as tasks run longer and accumulate
 # status history. status_open_decisions_incremental and scan_open_decisions_incremental
@@ -1133,11 +1153,18 @@ EOF
 # shared fold rule retires removes one.
 #
 # The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION plus the task
-# kind, as `<n>:<kind>`), `offset`, `ident`, then the folded open set.
+# kind, as `<n>:<kind>`, with effective resolution/captain-held verbs and
+# reserved-key prefixes appended only when they differ from their defaults;
+# _fm_open_decisions_fold_version owns the encoding), `offset`, `ident`, then
+# the folded open set.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
 # _fm_decision_fold_line semantics change, so persisted state from an older
 # interpretation is discarded and rebuilt from byte 0; the kind suffix does the
 # same when a task kind changes, because kind changes the fold below.
+# Effective verb or reserved-prefix changes likewise invalidate the cursor;
+# default-configuration cursors retain their existing version string.
+# tests/fm-home-summary-refresh.test.sh and
+# tests/fm-open-decisions-prefix-cursor.test.sh cover configuration compatibility.
 #
 # Cursor invalidation is deliberately minimal, matching how status files are
 # ACTUALLY used in this repo: every one is created once (`>`) and only ever
@@ -1196,6 +1223,20 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
 FM_OPEN_DECISIONS_FOLD_VERSION=9
+
+# The one owner of the persisted cursor version string; every cursor writer and
+# reader, including the legacy presented-offset reader, compares against it.
+_fm_open_decisions_fold_version() {  # <kind> <resolve-verb> <held-verb>
+  local prefixes=${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}
+  printf '%s:%s' "$FM_OPEN_DECISIONS_FOLD_VERSION" "$1"
+  if [ "$2" != "$FM_CLASSIFY_RESOLVE_VERB_DEFAULT" ] \
+    || [ "$3" != "$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT" ]; then
+    printf ':resolve=%q:held=%q' "$2" "$3"
+  fi
+  if [ "$prefixes" != "$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT" ]; then
+    printf ':reserved=%q' "$prefixes"
+  fi
+}
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
@@ -1267,55 +1308,74 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
+# Parse a persisted cursor into <offset-var>, <ident-var>, and <open-var>.
+# Returns nonzero, assigning nothing, unless the cursor is a regular readable
+# file whose version is <fold-version> and whose offset and identity are present.
+_fm_open_decisions_cursor_load() {  # <cursor-file> <fold-version> <offset-var> <ident-var> <open-var>
+  local _cf=$1 _version=$2 _data _line _offset _ident _open=''
+  [ -f "$_cf" ] && [ -r "$_cf" ] && [ ! -L "$_cf" ] || return 1
+  _data=$(LC_ALL=C command cat "$_cf" 2>/dev/null) || return 1
+  [ "${_data%%$'\n'*}" = "version=$_version" ] || return 1
+  case "$_data" in *$'\n'*) _data=${_data#*$'\n'} ;; *) return 1 ;; esac
+  _line=${_data%%$'\n'*}
+  case "$_line" in offset=*) _offset=${_line#offset=} ;; *) return 1 ;; esac
+  case "$_offset" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_data" in *$'\n'*) _data=${_data#*$'\n'} ;; *) return 1 ;; esac
+  _line=${_data%%$'\n'*}
+  case "$_line" in ident=?*) _ident=${_line#ident=} ;; *) return 1 ;; esac
+  case "$_data" in *$'\n'*) _open=${_data#*$'\n'} ;; esac
+  printf -v "$3" '%s' "$_offset"
+  printf -v "$4" '%s' "$_ident"
+  printf -v "$5" '%s' "$_open"
+}
+
+# Read-only use of a persisted cursor by status_open_decisions. <status-file> is
+# <live-status-file> or a copy of it; <cursor-file> is that log's cursor or a copy
+# captured before <status-file> was. The cursor's open set is the fold of the
+# log's first <offset> bytes, so when its version and kind match, its identity is
+# the live log's, and <status-file> holds at least <offset> bytes that end at a
+# line boundary, folding only the rest onto that set yields the whole-stream
+# result. Any other case returns nonzero for the caller's whole-stream fold.
+# Never writes the cursor: the wake drain owns its advancement, and a home with
+# no presentation manifest reads it as the presented offset.
+_fm_open_decisions_seeded_fold() {  # <status-file> <kind> <live-status-file> <cursor-file> <resolve-verb> <held-verb>
+  local f=$1 kind=$2 live=$3 cf=$4 resolve=$5 held=$6 offset ident open size
+  _fm_open_decisions_cursor_load "$cf" "$(_fm_open_decisions_fold_version "$kind" "$resolve" "$held")" offset ident open || return 1
+  [ "$offset" -gt 0 ] || return 1
+  [ "$ident" = "$(_fm_open_decisions_file_ident "$live")" ] || return 1
+  size=$(_fm_status_file_size "$f") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$offset" -le "$size" ] || return 1
+  # The span starts one byte early: that byte must be the newline ending the
+  # cursor's last folded line, which reads as an empty first line.
+  (
+    set -o pipefail
+    tail -c "+$offset" "$f" | {
+      IFS= read -r line && [ -z "$line" ] || exit 1
+      # The incremental fold's test-only read probe, recording the bytes folded.
+      [ -z "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
+        || printf '%s\t%s\n' "$f" "$((size - offset))" >> "$FM_OPEN_DECISIONS_READ_PROBE"
+      _fm_decision_fold_stream "$open" "$resolve" "$held" "$kind"
+    }
+  )
+}
+
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
+  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open=''
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
   local target_cursor kind fold_version
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f")
-  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind"
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  fold_version=$(_fm_open_decisions_fold_version "$kind" "$resolve" "$held")
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
-  if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
-    cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null) || cursor_data=''
-  fi
-  if [ -n "${cursor_data:-}" ]; then
-      first=${cursor_data%%$'\n'*}
-      case "$first" in
-        version=*)
-          version=${first#version=}
-          [ "$version" = "$fold_version" ] || version=''
-          rest=${cursor_data#*$'\n'}
-          offset_line=${rest%%$'\n'*}
-          case "$offset_line" in
-            offset=*) offset=${offset_line#offset=} ;;
-            *) offset=0; version='' ;;
-          esac
-          case "$offset" in
-            ''|*[!0-9]*) offset=0; version='' ;;
-            *)
-              case "$rest" in
-                *$'\n'*)
-                  rest=${rest#*$'\n'}
-                  ident_line=${rest%%$'\n'*}
-                  case "$ident_line" in
-                    ident=*)
-                      ident=${ident_line#ident=}
-                      case "$rest" in
-                        *$'\n'*) open=${rest#*$'\n'} ;;
-                      esac
-                      if [ -n "$version" ] && [ -n "$ident" ]; then trusted_open=$open; fi
-                      ;;
-                    *) offset=0; version='' ;;
-                  esac
-                  ;;
-                *) offset=0; version='' ;;
-              esac
-              ;;
-          esac
-          ;;
-      esac
+  if _fm_open_decisions_cursor_load "$cf" "$fold_version" offset ident open; then
+    version=$fold_version
+    trusted_open=$open
   fi
 
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
@@ -1360,8 +1420,6 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     # than re-reading the whole file, without relying on timing or source text.
     [ -n "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
       && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
-    resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-    held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
       open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
     done < "$chunk_file"
@@ -1896,7 +1954,9 @@ status_open_decisions_cursor_offset() {  # <status-file>
   local f=$1 cf offset=0 ident='' version='' cursor_data first rest open=''
   local offset_line ident_line cur_ident size fold_version
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
-  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$(_fm_status_kind "$f")"
+  fold_version=$(_fm_open_decisions_fold_version "$(_fm_status_kind "$f")" \
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" \
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}")
   cf=$(_fm_open_decisions_cursor_path "$f")
   if [ -e "$cf" ] || [ -L "$cf" ]; then
     [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ] || return 1
