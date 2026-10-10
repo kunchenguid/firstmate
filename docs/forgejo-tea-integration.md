@@ -168,6 +168,7 @@ HTTP/1.1 200 OK
 
 A stale or wrong head is refused with `409 head out of date`; the exact current head succeeds and actually merges (`state` read back as `closed`, `merged: true`).
 This exactly parities `--match-head-commit`/`--sha`: a push landing between the verifying read and the merge call is refused rather than merged un-reviewed.
+The `Do` field is the style the caller names (`--merge`, `--rebase`, `--squash`, or `--method <style>`); when none is named it is the repository's own `default_merge_style`, read live from `/repos/{owner}/{repo}` through the same login, and the merge is refused when that value cannot be read.
 
 **`tea api` reports an HTTP-level failure with exit status 0.** Both calls above exited 0; only the JSON body differed.
 This was the single most consequential finding of this verification pass: a naive implementation gating success on `tea api`'s exit status would treat every rejected merge as a success.

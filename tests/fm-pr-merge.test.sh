@@ -421,7 +421,9 @@ write_mr_json() {
 # /repos/.../commits/<sha>/status answers its first page from tea-status.json
 # and page <n> from tea-status-page<n>.json, an empty page once that file is
 # absent, so a case can put a failing context past the first page; a POST to
-# .../pulls/<n>/merge is the one path that can actually record a merge.
+# .../pulls/<n>/merge is the one path that can actually record a merge. The
+# repository read /repos/{owner}/{repo} answers from tea-repo.json, or a
+# default_merge_style of merge when that file is absent.
 # Verified against a real Forgejo instance that "tea api" reports an
 # HTTP-level failure with exit status 0 and the error only in the body
 # (docs/forgejo-tea-integration.md), so every branch here exits 0 too - a test
@@ -472,6 +474,14 @@ case "$endpoint" in
       cat "$log_dir/tea-status-page$page.json"
     else
       printf '{"state":"","total_count":0,"statuses":[]}\n'
+    fi
+    ;;
+  "/repos/{owner}/{repo}")
+    [ ! -e "$log_dir/tea-repo-fails" ] || exit 1
+    if [ -e "$log_dir/tea-repo.json" ]; then
+      cat "$log_dir/tea-repo.json"
+    else
+      printf '{"default_merge_style":"merge"}\n'
     fi
     ;;
   */merge)
@@ -2504,14 +2514,48 @@ test_forgejo_transient_confirm_read_failure_still_persists_authority() {
 }
 
 test_forgejo_merge_method_and_extra_args() {
-  local case_dir rc merge_line
+  local case_dir rc merge_line style variant
 
-  case_dir=$(make_forgejo_case forgejo-default-method)
-  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+  # With no method named, the repository's own default_merge_style decides,
+  # whichever style it is.
+  for style in squash rebase merge; do
+    case_dir=$(make_forgejo_case "forgejo-default-method-$style")
+    printf '{"default_merge_style":"%s"}\n' "$style" > "$case_dir/tea-repo.json"
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" \
+      || fail "forgejo-default-method-$style: an unqualified merge should succeed: $(cat "$case_dir/stderr")"
+    [ "$(cat "$case_dir/tea-merge-do" 2>/dev/null)" = "$style" ] \
+      || fail "forgejo-default-method-$style: the unqualified merge did not use the repository's default style"
+  done
+
+  # A named method wins without the repository read deciding anything.
+  case_dir=$(make_forgejo_case forgejo-named-beats-default)
+  printf '{"default_merge_style":"rebase"}\n' > "$case_dir/tea-repo.json"
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" -- --merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "forgejo-default-method: an unqualified merge should succeed"
+    || fail "forgejo-named-beats-default: --merge should succeed"
   [ "$(cat "$case_dir/tea-merge-do" 2>/dev/null)" = merge ] \
-    || fail "forgejo-default-method: the default merge style must be 'merge', not GitHub's squash default"
+    || fail "forgejo-named-beats-default: a named method was overridden by the repository default"
+
+  # An unreadable or unrecognized default refuses before any merge.
+  for variant in unreadable unknown missing; do
+    case_dir=$(make_forgejo_case "forgejo-default-$variant")
+    case "$variant" in
+      unreadable) : > "$case_dir/tea-repo-fails" ;;
+      unknown) printf '{"default_merge_style":"manually-merged"}\n' > "$case_dir/tea-repo.json" ;;
+      missing) printf '{"message":"not found"}\n' > "$case_dir/tea-repo.json" ;;
+    esac
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "forgejo-default-$variant: a merge with no readable default style must be refused"
+    assert_grep "the repository's default merge style could not be read" "$case_dir/stderr" \
+      "forgejo-default-$variant: refusal did not name the unreadable default style"
+    [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+      || fail "forgejo-default-$variant: a merge was attempted without a readable default style"
+  done
 
   case_dir=$(make_forgejo_case forgejo-squash-method)
   run_pr_merge "$case_dir" task-x1 "$FJ_URL" -- --squash \
@@ -2532,7 +2576,7 @@ test_forgejo_merge_method_and_extra_args() {
   [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
     || fail "forgejo-unsupported-arg: a merge was attempted despite the unsupported argument"
 
-  pass "fm-pr-merge maps --squash/--rebase to Forgejo's Do field, defaults to merge, and refuses any other extra argument"
+  pass "fm-pr-merge maps --squash/--rebase to Forgejo's Do field, defaults to the repository's default merge style, and refuses any other extra argument"
 }
 
 test_gitlab_head_override_args_refuse_before_recording() {

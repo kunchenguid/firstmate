@@ -12,6 +12,8 @@
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
+# On Forgejo the merge style defaults to the repository's own
+# default_merge_style, read live, and a merge is refused when it cannot be read.
 # A GitHub merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the pull request
 # is open, not a draft, mergeable, free of conflicts, every unwaived check
@@ -777,6 +779,27 @@ forgejo_reject_unsupported_args() {
         ;;
     esac
   done
+}
+
+# The merge style a Forgejo merge uses when the caller names none: the
+# repository's own default_merge_style, read live through the same tea login,
+# so a repository that allows only squash or rebase merges is not sent a merge
+# commit it refuses. An unreadable or unrecognized value is refused rather than
+# replaced by a style chosen here.
+forgejo_default_merge_style() {
+  local repo_json style
+  repo_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+    "/repos/{owner}/{repo}" 2>/dev/null) || repo_json=
+  style=$(printf '%s' "$repo_json" | jq -r '
+    if type == "object" and (.default_merge_style | type) == "string"
+    then .default_merge_style else "" end' 2>/dev/null) || style=
+  case "$style" in
+    merge|rebase|rebase-merge|squash|fast-forward-only) printf '%s' "$style" ;;
+    *)
+      echo "error: refusing to merge $URL: the repository's default merge style could not be read; name one with --merge, --rebase, --squash, or --method <style>" >&2
+      return 1
+      ;;
+  esac
 }
 
 # Every GitHub check that is not green in the given live pull-request JSON, one
@@ -1709,7 +1732,7 @@ case "$PROVIDER" in
   forgejo)
     forgejo_reject_unsupported_args "$@" || exit 1
     forgejo_method=$(caller_merge_method "$@")
-    [ -n "$forgejo_method" ] || forgejo_method=merge
+    [ -n "$forgejo_method" ] || forgejo_method=$(forgejo_default_merge_style) || exit 1
     forgejo_verify_mergeable || exit 1
     # The away record is locked first, so this last presence and authority
     # read and the forge command below share one live-owner critical section.
