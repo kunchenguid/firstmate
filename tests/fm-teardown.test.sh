@@ -1013,6 +1013,60 @@ test_squash_merged_rebased_branch_allows() {
   pass "squash-merged task whose local branch followed the pipeline rebase is torn down"
 }
 
+# Override tea to answer one login for git.example.org and a pull request
+# read through "tea api" with the supplied merged flag and head.
+add_tea_pull_for_head() {
+  local case_dir=$1 merged=$2 head=$3
+  cat > "$case_dir/fakebin/tea" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tea.log"
+if [ "\${1:-} \${2:-}" = "login list" ]; then
+  printf '[\n  {\n    "name": "fj",\n    "url": "https://git.example.org"\n  }\n]\n'
+  exit 0
+fi
+[ "\${1:-}" = api ] || exit 1
+printf '{"state":"closed","merged":%s,"head":{"sha":"%s"}}\n' '$merged' '$head'
+SH
+  chmod +x "$case_dir/fakebin/tea"
+}
+
+# A Forgejo task whose default branch moved on after the squash merge, editing
+# the same lines, leaves the content check inconclusive, so only the forge's
+# merged record can prove the work landed. With the record merged teardown
+# proceeds; with it unmerged the same history refuses.
+test_squash_merged_forgejo_pr_allows_when_main_moved_on() {
+  local case_dir rc pr_head tmp merged expected
+  for merged in true false; do
+    case_dir=$(make_case "forgejo-merged-$merged")
+    write_meta "$case_dir" no-mistakes ship
+    pr_head=$(setup_squash_rebased_history "$case_dir" rebased)
+    tmp="$case_dir/_main_later"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    printf '%s\n' base main-edit feature-edit-reworded > "$tmp/shared.txt"
+    git -C "$tmp" add -- shared.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "main rewords shared"
+    git -C "$tmp" push -q origin main
+    rm -rf "$tmp"
+    printf '%s\n' \
+      'pr=https://git.example.org/team/repo/pulls/7' \
+      "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+    add_gh_axi_error "$case_dir"
+    add_tea_pull_for_head "$case_dir" "$merged" "$pr_head"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expected=1
+    [ "$merged" = false ] || expected=0
+    expect_code "$expected" "$rc" "forgejo-merged-$merged: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    grep -qF -- 'api --login fj --repo team/repo /repos/{owner}/{repo}/pulls/7' "$case_dir/tea.log" \
+      || fail "forgejo-merged-$merged: teardown did not read the Forgejo pull request through tea"
+  done
+  pass "teardown proves a Forgejo task landed from the merged pull request when the content check is inconclusive"
+}
+
 test_squash_merged_same_file_different_content_refuses() {
   local case_dir rc pr_head local_head
   case_dir=$(make_case squash-same-path-diverged)
@@ -4678,6 +4732,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
+test_squash_merged_forgejo_pr_allows_when_main_moved_on
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable

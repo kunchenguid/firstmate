@@ -180,6 +180,25 @@ case "${1:-} ${2:-}" in
 esac
 exit 1
 SH
+  # tea answers its login list with one login for git.example.org and a pull
+  # request read through "tea api" with the configured state; a read failure
+  # prints the error body with exit 0, as the real tea api does.
+  cat > "$fb/tea" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '[\n  {\n    "name": "fj",\n    "url": "https://git.example.org"\n  }\n]\n'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 1
+[ -z "${FM_FAKE_TEA_READ_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TEA_READ_LOG"
+if [ "${FM_FAKE_TEA_READ_FAIL:-0}" = 1 ]; then
+  printf '{"message":"not found"}\n'
+  exit 0
+fi
+printf '{"state":"%s","merged":%s,"head":{"sha":"abc"}}\n' \
+  "${FM_FAKE_TEA_STATE:-closed}" "${FM_FAKE_TEA_MERGED:-true}"
+SH
   cat > "$fb/gerrit-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -276,7 +295,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/gh" "$fb/gh-axi" "$fb/glab" "$fb/gerrit-axi" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/gh" "$fb/gh-axi" "$fb/glab" "$fb/tea" "$fb/gerrit-axi" "$fb/tmux" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -346,6 +365,10 @@ reset_fakes() {
   FM_FAKE_GLAB_STATE=merged
   FM_FAKE_GLAB_READ_FAIL=0
   FM_FAKE_GLAB_READ_LOG=
+  FM_FAKE_TEA_STATE=closed
+  FM_FAKE_TEA_MERGED=true
+  FM_FAKE_TEA_READ_FAIL=0
+  FM_FAKE_TEA_READ_LOG=
   FM_FAKE_GERRIT_STATUS=MERGED
   FM_FAKE_GERRIT_CHANGE=
   FM_FAKE_GERRIT_URL_JSON=
@@ -358,6 +381,7 @@ reset_fakes() {
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
+  export FM_FAKE_TEA_STATE FM_FAKE_TEA_MERGED FM_FAKE_TEA_READ_FAIL FM_FAKE_TEA_READ_LOG
   export FM_FAKE_GERRIT_STATUS FM_FAKE_GERRIT_CHANGE FM_FAKE_GERRIT_URL_JSON
   export FM_FAKE_GERRIT_READ_FAIL FM_FAKE_GERRIT_READ_LOG
   export FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
@@ -1598,6 +1622,35 @@ test_terminal_passed_with_failed_gitlab_read_reports_unknown() {
   assert_contains "$out" "run passed: PR state unknown (unreadable)" "failed GitLab read is honest unknown"
   assert_not_contains "$out" "PR merged" "failed GitLab read must not be reported merged"
   pass "terminal passed run handles failed GitLab read"
+}
+
+test_terminal_passed_with_forgejo_pull_reports_its_state() {
+  reset_fakes
+  local d read_log out spec state merged fail expected name
+  for spec in "open|open|false|0|run passed: PR open" \
+    "merged|closed|true|0|run passed: PR merged" \
+    "closed|closed|false|0|run passed: PR closed" \
+    "unreadable|open|false|1|run passed: PR state unknown (unreadable)"; do
+    IFS='|' read -r name state merged fail expected <<<"$spec"
+    d=$(new_case "passed-forgejo-$name")
+    make_repo_on_branch "$d/wt" "fm/feat-dforgejo$name"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-dforgejo$name.meta" "window=fm:fm-feat-dforgejo$name" \
+      "worktree=$d/wt" "kind=ship" "pr=https://git.example.org/team/repo/pulls/12"
+    read_log="$d/tea-read.log"
+    : > "$read_log"
+    FM_FAKE_TEA_READ_LOG=$read_log
+    FM_FAKE_TEA_STATE=$state
+    FM_FAKE_TEA_MERGED=$merged
+    FM_FAKE_TEA_READ_FAIL=$fail
+    FM_FAKE_AXI_STATUS="$(run_passed_with_pr "fm/feat-dforgejo$name" https://git.example.org/team/repo/pulls/12)"
+    out=$(run_crew_state "$d" "feat-dforgejo$name")
+    assert_contains "$out" "$expected" "Forgejo pull request reading $name is reported"
+    [ "$name" = merged ] || assert_not_contains "$out" "PR merged" "Forgejo $name pull request must not be reported merged"
+    assert_grep 'api --login fj --repo team/repo /repos/{owner}/{repo}/pulls/12' "$read_log" \
+      "Forgejo read uses the host's tea login and the parsed project path"
+  done
+  pass "terminal passed run reads Forgejo pull request state through tea api"
 }
 
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged() {
@@ -5552,6 +5605,7 @@ test_terminal_passed_with_open_pr_does_not_claim_merged
 test_terminal_passed_run_pr_overrides_stale_metadata
 test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
+test_terminal_passed_with_forgejo_pull_reports_its_state
 test_terminal_passed_with_merged_gitlab_mr_reports_merged
 test_terminal_passed_with_failed_gitlab_read_reports_unknown
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged

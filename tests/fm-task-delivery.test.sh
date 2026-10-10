@@ -1520,6 +1520,59 @@ STUB
   pass "fm-promote: a promoted worker receives the project's registered forge contract with no flag to remember"
 }
 
+# forgejo is a value of the same binding, so the spawn's agreement check and
+# promotion's registry read carry it exactly as they carry gerrit, while its
+# contract differs only in naming tea and keeping +yolo: a Forgejo pull request
+# is merged through the ordinary merge authority, not an attributed vote.
+test_forge_forgejo_rides_the_same_binding() {
+  local rec home proj fakebin out status sendroot meta payload id
+  rec=$(make_home forge-forgejo "- proj [direct-PR +yolo forge=forgejo] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" forge-forgejo-s1 direct-PR
+  out=$(run_spawn "$home" "$fakebin" forge-forgejo-s1 "$proj" claude --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a forgejo project launched on a brief that records no forge"
+  assert_contains "$out" "forge mismatch for forge-forgejo-s1" "the refusal did not name the drift it caught"
+  assert_contains "$out" "fm-brief.sh forge-forgejo-s1 proj --mode direct-PR --forge forgejo" \
+    "the refusal did not print the forgejo re-scaffold command"
+  assert_absent "$home/state/forge-forgejo-s1.meta" "the refused spawn still recorded a task"
+
+  FM_HOME="$home" "$BRIEF" forge-forgejo-s2 proj --mode direct-PR --forge forgejo >/dev/null \
+    || fail "a forgejo direct-PR brief should scaffold"
+  fill_brief_subsections "$home/data/forge-forgejo-s2/brief.md" "Open the pull request." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" forge-forgejo-s2 "$proj" claude --mode direct-PR --yolo on 2>&1)
+  assert_not_contains "$out" "forge mismatch" "an agreeing forgejo brief and registry were reported as drift"
+  assert_not_contains "$out" "--yolo on is refused" "yolo was refused on forgejo, where only gerrit deactivates it"
+
+  sendroot="$TMP_ROOT/forge-forgejo/sendroot"
+  mkdir -p "$sendroot/bin"
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "$2" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
+  id="forge-forgejo-p1"
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Fix what the investigation found." "Carry over only the fix."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1) \
+    || fail "promotion should take the forgejo binding and keep yolo: $out"
+  payload="$TMP_ROOT/forge-forgejo/payload"
+  ( cd "$sendroot" \
+    && FM_TEST_CAPTURE="$payload" \
+       eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+    || fail "promotion's delivery command did not run"
+  grep -qx "Delivery contract: mode=direct-PR forge=forgejo" "$payload" \
+    || fail "the promoted worker did not receive the forgejo delivery contract"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'open a PR with `tea`' "$payload" "the promoted forgejo worker was not told to open the PR with tea"
+  pass "forge=forgejo: spawn agreement and promotion carry the binding, name tea, and keep yolo"
+}
+
 # direct-PR composes with the forge: the mode still means "publish without the
 # pipeline", and on Gerrit publishing is one gerrit-axi call rather than a push
 # plus a pull request. The worker reports the published change, never submits or
@@ -1647,6 +1700,7 @@ test_spawn_requires_the_brief_to_carry_the_selected_branch
 test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
+test_forge_forgejo_rides_the_same_binding
 test_spawn_and_promote_require_filled_task_subsections
 test_project_mode_resolves_branch_prefix
 echo "# all fm-task-delivery tests passed"
