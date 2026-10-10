@@ -78,7 +78,8 @@
 # without this retry the record could sit unread until a checkpoint. A pending ordinary record's
 # ladder rings the same inbox, so the retry waits behind it, and an
 # acknowledged record drops its mark. The remote steer leg has no watcher
-# ladder and owes no retry.
+# ladder; its notification retry contract is owned by
+# bin/fm-remote-secondmate-control.sh.
 #
 # Inbox names containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.

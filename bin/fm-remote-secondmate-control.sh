@@ -6,7 +6,7 @@
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
-#   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
+#   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget|""] [budget-seconds]
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
@@ -52,6 +52,13 @@
 # the default-off path. print_route echoes the carrier the endpoint actually
 # holds, including for an already-alive endpoint that was not relaunched, so the
 # parent records the identity the agent really received rather than an intent.
+# A send's post-enqueue doorbell attempt is bounded to five seconds, capped by
+# its receiver-local elapsed budget minus two seconds for timeout cleanup and
+# result relay. The parent independently bounds the entire transport attempt.
+# No cross-host wall-clock comparison is used. Exit 75 means the durable record
+# exists but notification is still owed; retry only the same correlation or
+# fire-and-forget delivery id. Exit 0 means notified or already handled.
+# Enqueue and synchronous lifecycle commands retain their existing bounds.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,6 +76,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -270,8 +279,14 @@ cmd_relaunch() {
 
 cmd_send() {
   local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock
+  local budget=${4:-} started=$SECONDS remaining ring_budget=5
   validate_id "$id"
   [ -z "$delivery_mode" ] || [ "$delivery_mode" = fire-and-forget ] || die "invalid send delivery mode"
+  case "$budget" in
+    '') ;;
+    *[!0-9]*) die "send budget must be a positive integer" ;;
+    *) [ "$((10#$budget))" -gt 0 ] || die "send budget must be a positive integer" ;;
+  esac
   validate_home "$id"
   meta=$(meta_path "$id")
   meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
@@ -287,9 +302,8 @@ cmd_send() {
   # best-effort (bin/fm-task-inbox-lib.sh owns the record and doorbell). The
   # write is idempotent - re-running the same request after an ambiguous
   # transport failure lands on the existing record instead of a duplicate - so
-  # the parent may safely repeat this leg. Exit 0 once the record durably
-  # exists; no ring outcome changes it, because the parent transport owns any
-  # retry or reply-tracking policy from here.
+  # the parent may safely repeat this leg. Notification failure returns 75
+  # without removing that record; the parent retains its safe resend identity.
   if ! rec=$(fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message" "$delivery_mode"); then
     fm_lock_release "$meta_lock"
     die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
@@ -303,12 +317,31 @@ cmd_send() {
       return 0
       ;;
   esac
-  fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
+  # Bound the receiver's notification work after enqueue, including its
+  # liveness and foreign-composer checks, in a child process group; the timeout
+  # owner also reaps stalled descendants. Transport delay is bounded only by
+  # the parent's timeout, whose unconfirmed result preserves safe resend.
+  if [ -n "$budget" ]; then
+    remaining=$(( 10#$budget - (SECONDS - started) ))
+    if [ "$remaining" -le 2 ]; then
+      printf 'notice: doorbell skipped (send budget reserved for confirmation); the steer is durably recorded at %s\n' "$rec" >&2
+      return 75
+    fi
+    [ "$remaining" -ge 7 ] || ring_budget=$(( remaining - 2 ))
+  fi
+  fm_run_timed "$ring_budget" bash -c '
+    . "$1"
+    shift
+    fm_task_inbox_ring "$@"
+  ' _ "$SCRIPT_DIR/fm-task-inbox-lib.sh" \
+    "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
   case "$ring_rc" in
     1) printf 'notice: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at %s\n' "$rec" >&2 ;;
     2) printf 'notice: doorbell did not reach %s; the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
     3) printf 'notice: doorbell not typed because the agent in %s has exited; the steer is durably recorded at %s for recovery\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
+    124) printf 'notice: doorbell attempt exceeded its %ss budget; the steer is durably recorded at %s for recovery\n' "$ring_budget" "$rec" >&2 ;;
   esac
+  [ "$ring_rc" -eq 0 ] || return 75
 }
 
 cmd_key() {
@@ -439,7 +472,7 @@ case "${1:-}" in
   relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
-  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
+  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 4 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
