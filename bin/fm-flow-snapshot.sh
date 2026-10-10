@@ -38,8 +38,12 @@
 #       steps and active_steps are empty; run may still carry the id and status
 #       the overview attributed, when it was the per-run read that failed.
 #     run: {present,id,status,error,head} - the no-mistakes run attributed to
-#       this task's branch. error is the run's OWN recorded error and is empty
-#       unless the read succeeded; a failed read's own first line is in
+#       this task's branch. status is the run LIST's own word - one of pending,
+#       running, completed, failed or cancelled - not the per-run detail's wider
+#       vocabulary, which also admits `fixing` and `ci`, so a fix round and a ci
+#       wait both read as `running` here and steps/active_steps are where the
+#       phase shows. error is the run's OWN recorded error and is empty unless
+#       the read succeeded; a failed read's own first line is in
 #       collection.reason instead.
 #     steps[]: {step,status,findings,duration_ms}, the run's own steps behind
 #       the synthetic `building` step described under the limits below.
@@ -93,6 +97,12 @@
 #     view's decision.
 #   - Crew state and endpoint liveness are whatever bin/fm-fleet-snapshot.sh
 #     published, read at ITS observation time rather than at draw time.
+#   - The reads are per agent and strictly serial: a pipeline agent costs up to
+#     two bounded `no-mistakes axi status` reads, one more inside
+#     bin/fm-nm-run-lib.sh when the run list is capped, and one bounded
+#     `gh pr view`. Each timeout below bounds ONE such read, so the whole-fleet
+#     form has no total bound and its cost grows with the drawn fleet: `--task`
+#     is the targeted refresh and `--no-ci` drops the GitHub read.
 #
 # Usage:
 #   fm-flow-snapshot.sh [--no-ci] [--task <id>]
