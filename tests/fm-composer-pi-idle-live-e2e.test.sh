@@ -8,7 +8,9 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-fm_live_gate default-on FM_COMPOSER_PI_IDLE_LIVE pi tmux
+pi_gate=pi
+command -v pi >/dev/null 2>&1 || pi_gate=pi-signed
+fm_live_gate default-on FM_COMPOSER_PI_IDLE_LIVE tmux "$pi_gate"
 
 LAB=$(fm_test_tmproot fm-composer-pi-live)
 LAB_HOME_HELPER="$ROOT/bin/fm-lab-home.sh"
@@ -74,18 +76,20 @@ check_drafts() {  # <executable> <version> <identity>
 
 check_pi() {  # <executable>
   local binary=$1 version help screen='' identity='' anchored='' cursorless='' i out
-  version=$("$binary" --version 2>/dev/null | head -1)
+  local -a pi_command=(
+    env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SESSION
+    HOME="$LAB_HOME" PI_CODING_AGENT_DIR="$LAB/pi"
+    "$binary" --provider openai-codex --model gpt-6.1-sol --thinking xhigh
+    --offline --no-session --no-extensions --no-skills --no-prompt-templates --no-themes
+  )
+  version=$(cd "$LAB/cwd" && "${pi_command[@]}" --version 2>/dev/null | head -1)
   [ -n "$version" ] || fail "$binary: could not read version"
-  help=$("$binary" --help 2>&1)
+  help=$(cd "$LAB/cwd" && "${pi_command[@]}" --help 2>&1)
   local -a display=() trust=()
   if printf '%s' "$help" | grep -q -- '--tui-mode'; then display=(--tui-mode regular); fi
   if printf '%s' "$help" | grep -q -- '--approve'; then trust=(--approve); fi
   tmux new-session -d -s "$binary" -x 160 -y 40 -c "$LAB/cwd" -- \
-    env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SESSION \
-    HOME="$LAB/home" PI_CODING_AGENT_DIR="$LAB/pi" \
-    "$binary" --provider openai-codex --model gpt-6.1-sol --thinking xhigh \
-    --offline --no-session --no-extensions --no-skills --no-prompt-templates \
-    ${display[@]+"${display[@]}"} ${trust[@]+"${trust[@]}"} \
+    "${pi_command[@]}" ${display[@]+"${display[@]}"} ${trust[@]+"${trust[@]}"} \
     || fail "$binary ($version): could not launch in private tmux server"
   for ((i=0; i<150; i++)); do
     screen=$(tmux capture-pane -e -p -t "$binary" 2>/dev/null) || screen=''
