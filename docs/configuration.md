@@ -122,6 +122,31 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 - Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Session lock and read-only sessions
+
+Each firstmate home takes a per-home session lock at session start (`bin/fm-lock.sh`), keyed to the harness process it finds by walking its own process ancestry with `ps`.
+A session that cannot take the lock stays read-only and skips every mutating step, and `bin/fm-session-start.sh` prints a loud banner explaining why.
+The banner distinguishes the causes, because they need different responses.
+
+When another live firstmate session genuinely holds the lock, the banner says another live session holds the fleet lock; operate read-only and let that session own mutable follow-up.
+
+When this session cannot identify its own harness - process inspection failed or was denied (`ps-unavailable`), or the ancestry walk found no verified harness (`harness-detect-failed`) - the banner instead says it is unable to verify this session's identity, and explicitly does not claim another session holds the lock.
+This is what a Codex sandbox produces: `workspace-write` with `on-request` approvals can deny `ps`, while a sandboxed PID namespace can hide the harness above a minimal ancestry, so `bin/fm-lock.sh` can neither inspect nor find its own harness.
+Firstmate stays read-only here on purpose, because it must not mutate fleet state when it cannot verify its own identity.
+To determine the true state, run the diagnostics the banner prints:
+
+```sh
+bin/fm-lock.sh status
+tmux list-sessions
+tmux list-panes -a
+ps -axo pid,ppid,stat,lstart,command
+```
+
+A `lock: free` status means no lock file exists; use the acquisition reason to distinguish denied or failed process inspection (`ps-unavailable`) from a walk that found no verified harness (`harness-detect-failed`).
+An `unknown` status line is the honest verdict for a recorded pid that process inspection cannot classify as a live verified harness or provably dead.
+Under a Codex sandbox, granting the approval that lets `ps` run - or launching the harness where its ancestry is inspectable - lets the next session start acquire the lock normally.
+`bin/fm-lock.sh` emits a stable `FM_LOCK_REASON=<lock-held|ps-unavailable|harness-detect-failed>` line to stderr on an identity-relevant acquire failure so this classification is scriptable; its header owns the reasons, and every acquire failure still exits 1.
+
 ## Orchestrator behavior (AGENTS.md)
 
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md).

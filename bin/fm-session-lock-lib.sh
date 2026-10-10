@@ -119,8 +119,8 @@ fm_harness_process_matches() {  # <comm> <args>
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 2
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || return 2
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
@@ -129,7 +129,8 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null) || return 2
+    pid=${pid// /}
     # Examine the top of the chain before stopping. Inside a PID namespace the
     # harness itself is pid 1, so stopping as soon as the next pid is 1 hides the
     # very process this walk exists to find. A host's real pid 1 (init, systemd,
@@ -147,7 +148,7 @@ fm_harness_ancestry_pids() {
 # reports a single pid, so this remains its innermost match unchanged.
 fm_harness_ancestry_pid() {
   local pids
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || return $?
   _fm_harness_outermost_pid "$pids"
 }
 
@@ -204,7 +205,7 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
   case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
   case "$claude_pid" in ''|*[!0-9]*) return 1 ;; esac
   if [ -z "$pids" ]; then
-    pids=$(fm_harness_ancestry_pids) || return 1
+    pids=$(fm_harness_ancestry_pids) || return $?
   fi
   while IFS= read -r pid; do
     [ "$pid" = "$claude_pid" ] || continue
@@ -253,7 +254,7 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
 # outermost pid of its contiguous run, exactly as before.
 fm_session_lock_anchor_pid() {
   local pids
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || return $?
   if fm_session_lock_trusted_session_id "$pids" >/dev/null; then
     printf '%s\n' "$CLAUDE_PID"
     return 0
@@ -279,7 +280,7 @@ fm_session_lock_owned_by_self() {
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || return $?
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0
   done <<EOF
@@ -305,7 +306,7 @@ fm_session_lock_foreign_owner_live() {
     ''|*[!0-9]*) return 1 ;;
   esac
   fm_harness_pid_alive "$lock_pid" || return 1
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || return $?
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 1
   done <<EOF
@@ -336,7 +337,7 @@ FM_LOCK_INSPECT_STATE=unknown
 FM_LOCK_INSPECT_PID=
 FM_LOCK_INSPECT_LIVE_HARNESS=unknown
 fm_session_lock_inspect() {  # <state>
-  local state=$1 lock pid
+  local state=$1 lock pid pids inspected_pid
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
   FM_LOCK_INSPECT_STATE=unknown
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
@@ -380,6 +381,15 @@ fm_session_lock_inspect() {  # <state>
     FM_LOCK_INSPECT_STATE=unknown
     return 0
   fi
+  # A failed per-pid query cannot distinguish an absent owner from denied
+  # inspection. Only a successful process listing that omits the owner can
+  # establish that it is gone; inspecting this shell proves nothing about it.
+  pids=$(ps -e -o pid= 2>/dev/null) || return 0
+  while read -r inspected_pid; do
+    [ "$inspected_pid" != "$pid" ] || return 0
+  done <<EOF
+$pids
+EOF
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
   FM_LOCK_INSPECT_STATE=stale
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
