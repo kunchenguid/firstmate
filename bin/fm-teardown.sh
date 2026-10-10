@@ -5,6 +5,14 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# After endpoint and per-task temp cleanup, when xcrun and jq are available,
+# teardown attempts to shut down and delete every Simulator named exactly
+# fm-<task-id> on this host; no creation or ownership record is consulted.
+# Task IDs matching pool-<digits> are exempt to preserve persistent Simulators;
+# other pool-prefixed IDs are ordinary tasks. Unrelated device names are untouched.
+# Shutdown failure does not prevent deletion, and deletion failure only warns;
+# an absent device or unavailable tools do not block task-record cleanup.
+# tests/fm-teardown.test.sh covers these cleanup and failure contracts.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -3745,8 +3753,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-# Delete a simulator this task created, which the brief names fm-<id>; best effort.
-# A task id pool-<n> would name a persistent fm-pool-<n> simulator, so it is skipped.
+# The header owns the name-based Simulator cleanup contract.
 if ! [[ "$ID" =~ ^pool-[0-9]+$ ]] && command -v xcrun >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   for sim_udid in $(xcrun simctl list devices -j 2>/dev/null |
     jq -r --arg n "fm-$ID" '.devices[][]? | select(.name == $n) | .udid' 2>/dev/null); do

@@ -222,7 +222,7 @@ add_fork_with_pushed_branch() {
   git init -q --bare "$case_dir/fork.git"
   git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
   # Push the task branch from the worktree to the fork, then fetch into project
-  # so refs/remotes/fork/fm-<id> is visible from the worktree (shared object db).
+  # so refs/remotes/fork/fm/<id> is visible from the worktree (shared object db).
   git -C "$case_dir/wt" push -q fork "fm/$id"
   git -C "$case_dir/project" fetch -q fork
 }

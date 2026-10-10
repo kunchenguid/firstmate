@@ -1590,8 +1590,7 @@ fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
   exit 2
 }
-# Home-owned spawn preflight (e.g. a free-disk guard). It runs before anything
-# exists, so a non-zero exit refuses the spawn with nothing to unwind.
+# docs/configuration.md "New-task preflight" owns the home hook contract.
 if [ "$RELAUNCH" -eq 0 ] && [ -x "$CONFIG/spawn-preflight" ]; then
   if ! "$CONFIG/spawn-preflight" "$ID" >&2; then
     echo "error: spawn of $ID refused by $CONFIG/spawn-preflight" >&2
