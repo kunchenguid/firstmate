@@ -1457,6 +1457,7 @@ This section is the single owner of the canonical schema.
 - An omitted `branch` uses the remote's default branch, taken from the clone's own record of it and otherwise asked of the remote directly, so a `--single-branch` clone still resolves.
 
 Both probe kinds are read-only and bounded, and a probe that cannot answer is reported as a check failure rather than assumed current.
+A failure the probe itself answered is reported on the sweep it happens; one where nothing answered at all waits for the streak described under "Repeat reporting and inheritance" below.
 See [`docs/examples/watched-tools.json`](examples/watched-tools.json) for a starting point to copy into local `config/watched-tools.json`.
 
 **Arm, edit, and disarm**
@@ -1469,8 +1470,22 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 
 **Repeat reporting and inheritance**
 
-- The check prints nothing when everything is current, and `state/.tool-updates` records the findings the last report was made from so the same pending update is reported once instead of on every poll.
-- A changed or returning condition is reported again.
+- The check prints nothing when everything is current, and `state/.tool-updates` records the findings already reported so the same pending update is reported once instead of on every poll.
+- Each recorded finding carries the tool and the kind of check it came from, and it is forgotten only once that same kind of check for that same tool reaches a conclusion again.
+  What counts as no conclusion is no answer at all: a probe cut short by its bound or by a signal, a remote that could not be read, a budget that ran out, or a tool a truncated sweep never reached.
+  So an unanswered remote does not make an already reported update news again, and an unreadable `git` remote does not clear what the `command` probe of the same tool answered.
+- A failure the probe did answer, such as a command that is no longer on PATH, a directory that is not a repository, or a branch the remote does not have, is a conclusion and settles that kind of check like any clean sweep does.
+- A changed or returning condition is reported again, a failure the probe answered included.
+- A check with no answer is not reported for its own sake, because a remote that flaps between answering and not would otherwise wake you on every failing poll and say nothing you can act on.
+  It is reported once that kind of check for that tool has gone unanswered three sweeps in a row, once per such streak, and an answer ends the streak.
+  A sweep that ran out of time before it reached every watched tool counts as such a check of its own, so a marginal budget is reported on the same terms rather than on every other poll.
+  What was held back while a streak ran does not count as already reported: the same condition is still said once a sweep reaches it with an answer behind it.
+- A check with no answer never claims to know an update either: from its first unanswered probe onwards it reports no update at all that sweep, since every comparison it could rest on is incomplete.
+  For a `command` check, that covers a copy on PATH that was cut short, a budget that ended the loop before the last copies were asked, and an announcement command that was asked and never answered.
+  A copy that was cut short is reported as the copy that did not answer in time, not as one that answered without a version.
+- Of the unanswered entries the earlier sweeps of one kind of check left behind, only the newest is remembered, so a check that keeps getting no answer does not grow the record one sweep at a time.
+  What one sweep itself found is all remembered, however many dead ends one kind of check reached in it, because that memory is also what keeps each of them from being reported twice.
+  So the record is bounded by what a single sweep can find rather than by how long a check has gone unanswered.
 - Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 - This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 
