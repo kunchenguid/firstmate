@@ -55,6 +55,8 @@
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
 #                tolerated, including Grok 1.0.5's three-column title overhang.
+#                Pi's rounded branch-titled box uses the title constraints in
+#                _fm_composer_titled_top_spaces and _fm_composer_titled_bottom_ok.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -960,7 +962,14 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         ascii) top_inner=${top_inner#+}; top_inner=${top_inner%+}; top_spaces=${top_inner//-/ } ;;
       esac
       case "$top_spaces" in
-        *[![:space:]]*) geometry_check=0; geometry_ambiguous=1 ;;
+        *[![:space:]]*)
+          if [ "$kind" = top ] && top_spaces=$(_fm_composer_titled_top_spaces "$family" "$top_inner"); then
+            :
+          else
+            geometry_check=0
+            geometry_ambiguous=1
+          fi
+          ;;
       esac
     elif [ "$kind" = bottom ] || { [ "$kind" = ascii ] && [ "$top" -ge 0 ]; }; then
       if [ "$top" -ge 0 ] && [ "$family" = "$current_family" ] \
@@ -1063,8 +1072,10 @@ EOF
 # 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
+# Non-ASCII middle dots are admitted only for a rounded Pi elapsed/model/effort
+# footer matching the validated vocabulary below; its width must still align.
 _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
-  local family=$1 inner=$2 expected=$3 dash spaces title effort model
+  local family=$1 inner=$2 expected=$3 dash spaces title effort model pi_title=0
   fm_composer_normalize_trim_var inner
   case "$family" in
     rounded|light) dash='─' ;;
@@ -1077,8 +1088,16 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     "$dash"*"$dash") ;;
     *) return 1 ;;
   esac
+  title=${inner//"$dash"/}
+  fm_composer_normalize_trim_var title
+  if [ "$family" = rounded ] && [[ "$title" =~ ^[0-9]+([.][0-9]+)?s[[:space:]]·[[:space:]][A-Za-z0-9._/-]+[[:space:]]·[[:space:]](low|medium|high|xhigh|max)$ ]]; then
+    pi_title=1
+  fi
   spaces=${inner//"$dash"/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
+  if [ "$pi_title" = 1 ]; then
+    spaces=${spaces//·/ }
+  fi
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
   esac
@@ -1107,6 +1126,36 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   [ -n "$model" ] || return 1
   case "$model" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   return 0
+}
+
+# A Pi 1.0.4 top border includes its current git branch after the first rule
+# glyph. Accept only rounded frames with the explicit `─ ⎇ <branch> ─...`
+# shape, and return a column-preserving blank row for the existing
+# corners/family/indent/content-geometry proof. Unvalidated titles stay unknown;
+# this does not extend titled-top acceptance to the legacy border families.
+_fm_composer_titled_top_spaces() {  # <family> <top-inner> -> spaces
+  local family=$1 inner=$2 dash='─' rest branch spaces
+  [ "$family" = rounded ] || return 1
+  case "$inner" in
+    "$dash ⎇ "*) rest=${inner#"$dash ⎇ "} ;;
+    *) return 1 ;;
+  esac
+  branch=${rest%%" $dash"*}
+  [ -n "$branch" ] || return 1
+  case "$branch" in
+    detached) ;;
+    [A-Za-z0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$branch" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  rest=${rest#"$branch $dash"}
+  [ -n "$rest" ] || return 1
+  [ -z "${rest//"$dash"/}" ] || return 1
+  spaces=${inner//"$dash"/ }
+  spaces=${spaces//⎇/ }
+  spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
+  case "$spaces" in *[![:space:]]*) return 1 ;; esac
+  printf '%s' "$spaces"
 }
 
 # fm_composer_row_has_edge: 0 when the trimmed row starts or ends with a

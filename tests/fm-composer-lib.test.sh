@@ -784,6 +784,64 @@ test_matrix_claude_titled_top_rule() {
   pass "matrix: claude's titled top rule proves an idle composer empty and a draft pending (#5601, #5558)"
 }
 
+test_matrix_pi_104_titled_top_border() {
+  local screen typed malformed top bottom top_inner bottom_inner top_fill bottom_fill content draft tail width effort
+  local family left_top right_top left_bottom right_bottom dash side rule
+  top_inner='─ ⎇ detached ─'
+  width=${top_inner//─/ }
+  width=${width//⎇/ }
+  printf -v top_fill '%*s' "$((70 - ${#width}))" ''
+  top="╭${top_inner}${top_fill// /─}╮"
+  printf -v content '%*s' 69 ''
+  draft='❯ fix the composer proof'
+  width=${draft//❯/>}
+  printf -v tail '%*s' "$((70 - ${#width}))" ''
+  for effort in low medium high xhigh max; do
+    bottom_inner="─ 0.0s · pi-codex · $effort ─"
+    width=${bottom_inner//─/ }
+    width=${width//·/ }
+    printf -v bottom_fill '%*s' "$((70 - ${#width}))" ''
+    bottom="╰${bottom_inner}${bottom_fill// /─}╯"
+    screen="$top"$'\n│❯'"$content"$'│\n'"$bottom"
+    assert_screen "Pi 1.0.4 detached branch frame ($effort) on Herdr" empty "$CAPS_STYLED" "$screen"
+    assert_screen "Pi 1.0.4 detached branch frame ($effort) with cursor" empty "$CAPS_TMUX" "$screen" 1
+    typed="$top"$'\n│'"$draft$tail"$'│\n'"$bottom"
+    assert_screen "Pi 1.0.4 typed branch frame ($effort) on Herdr" pending "$CAPS_STYLED" "$typed"
+    assert_screen "Pi 1.0.4 typed branch frame ($effort) with cursor" pending "$CAPS_TMUX" "$typed" 1
+  done
+  top_inner='─ ⎇ bad branch ─'
+  width=${top_inner//─/ }
+  width=${width//⎇/ }
+  printf -v top_fill '%*s' "$((70 - ${#width}))" ''
+  malformed="╭${top_inner}${top_fill// /─}╮"$'\n│❯'"$content"$'│\n'"$bottom"
+  assert_screen "Pi 1.0.4 malformed branch title stays unknown" unknown "$CAPS_STYLED" "$malformed"
+  top_inner='─ ⎇ feature/composer-proof ─'
+  width=${top_inner//─/ }
+  width=${width//⎇/ }
+  printf -v top_fill '%*s' "$((70 - ${#width}))" ''
+  top="╭${top_inner}${top_fill// /─}╮"
+  screen="$top"$'\n│❯'"$content"$'│\n'"$bottom"
+  assert_screen "Pi 1.0.4 named branch frame on Herdr" empty "$CAPS_STYLED" "$screen"
+  printf -v rule '%*s' 70 ''
+  for family in light double heavy ascii; do
+    case "$family" in
+      light) left_top='┌'; right_top='┐'; left_bottom='└'; right_bottom='┘'; dash='─'; side='│' ;;
+      double) left_top='╔'; right_top='╗'; left_bottom='╚'; right_bottom='╝'; dash='═'; side='║' ;;
+      heavy) left_top='┏'; right_top='┓'; left_bottom='┗'; right_bottom='┛'; dash='━'; side='┃' ;;
+      ascii) left_top='+'; right_top='+'; left_bottom='+'; right_bottom='+'; dash='-'; side='|' ;;
+    esac
+    top="$left_top${top_inner//─/$dash}${top_fill// /$dash}$right_top"
+    bottom="$left_bottom${rule// /$dash}$right_bottom"
+    screen="$top"$'\n'"${side}❯${content}${side}"$'\n'"$bottom"
+    assert_screen "Pi-shaped titled top in $family frame stays unknown" unknown "$CAPS_STYLED" "$screen"
+    top="$left_top${rule// /$dash}$right_top"
+    bottom="$left_bottom${bottom_inner//─/$dash}${bottom_fill// /$dash}$right_bottom"
+    screen="$top"$'\n'"${side}❯${content}${side}"$'\n'"$bottom"
+    assert_screen "Pi-shaped footer in $family frame stays unknown" unknown "$CAPS_STYLED" "$screen"
+  done
+  pass "matrix: Pi 1.0.4 branch-titled frames prove empty and pending composers while malformed titles stay unknown"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -1036,6 +1094,7 @@ test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
+test_matrix_pi_104_titled_top_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence

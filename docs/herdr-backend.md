@@ -633,12 +633,13 @@ It hands the visible pane's ANSI viewport plus Herdr's capability facts to the f
 - opencode's left bar.
 - The Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
 
-### Pi composer states
+### Pi separator composer states
 
-A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's.
+A blocked Pi is parked on an interactive prompt, so its blank separator region is a menu's and not a free composer's.
 That state defers instead of proving emptiness.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
+A working Pi separator region, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
+Pi 1.0.4's rounded branch-titled box instead uses the shared bordered-composer proof; `bin/fm-composer-lib.sh` owns its title and geometry constraints, pinned by `test_matrix_pi_104_titled_top_border` in `tests/fm-composer-lib.test.sh`.
 
 ### Placeholder and ghost text
 
