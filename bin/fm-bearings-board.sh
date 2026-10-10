@@ -79,6 +79,14 @@
 # first; a row with no comparable date keeps its payload order after every dated
 # row. Anything else in that field refuses rather than sorting on garbage.
 #
+# Every Captain's Call item and every Underway, Recently Landed, and Charted
+# Next row MAY carry `pr_url` (the PR's forge URL) and `ticket_url` (the work
+# item's issue-tracker URL), each an https URL, plus `ticket`, a non-empty
+# display label such as the tracker identifier; the template renders each URL
+# as a new-tab link, labelling the ticket link with `ticket` when present.
+# The template hardcodes no tracker or forge host, so a link exists only when
+# the payload supplies its URL. A non-https or malformed URL refuses.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
@@ -128,6 +136,7 @@ validate_payload() {  # <data.json>
     def optional_filed:
       (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
+    def optional_nonempty_string($name): (has($name) | not) or (.[$name] | nonempty_string);
     def optional_https_url($name):
       (has($name) | not)
       or (.[$name]
@@ -141,6 +150,10 @@ validate_payload() {  # <data.json>
           and (keys | sort) == ["artifact", "version"]
           and (.artifact | slug(128))
           and (.version | version));
+    def links:
+      optional_https_url("pr_url")
+      and optional_https_url("ticket_url")
+      and optional_nonempty_string("ticket");
     def call_item:
       type == "object"
       and (.key | slug(128))
@@ -157,7 +170,7 @@ validate_payload() {  # <data.json>
       and (optional_string("about"))
       and (optional_string("decide"))
       and (optional_string("detail"))
-      and (optional_https_url("pr_url"))
+      and links
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
@@ -171,11 +184,12 @@ validate_payload() {  # <data.json>
       and (if .type == "merge" then (.risk | nonempty_string) else true end);
     def underway_item:
       type == "object" and repo_marker and name_marker and (.id | nonempty_string)
-      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
+      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string)
+      and links;
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
-      and optional_https_url("pr_url")
+      and links
       and optional_subject;
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
@@ -183,6 +197,7 @@ validate_payload() {  # <data.json>
       and (.dispatchable | type == "boolean")
       and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
       and optional_filed
+      and links
       and (if .kind == "warning" then .dispatchable == false else true end);
     type == "object"
     and (.schema == $schema)
