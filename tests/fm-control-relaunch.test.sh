@@ -43,9 +43,9 @@ TASK_TMPS=()
 relaunch_cleanup() {
   local d
   for d in "${TASK_TMPS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] && fm_test_remove_tree "$d"
   done
-  rm -rf "$TMP_ROOT"
+  fm_test_remove_tree "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
 
@@ -488,6 +488,90 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# The watcher's verdict on a task's armed check, through the same functions in
+# the same order bin/fm-watch.sh uses: an authenticated PR poll, else a custom
+# check snapshot, else a rejected unauthenticated check.
+watcher_check_verdict() {  # <case-dir> <id>
+  # shellcheck disable=SC2016
+  bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    . "$1/bin/fm-check-lib.sh"
+    if fm_pr_poll_snapshot_capture "$2" "$3" "$1/bin/fm-pr-poll.sh"; then
+      echo authenticated-pr-poll
+    elif fm_custom_check_snapshot_prepare "$2" "$3"; then
+      fm_custom_check_snapshot_cleanup
+      echo custom-check
+    else
+      fm_custom_check_snapshot_cleanup
+      echo rejected-unauthenticated
+    fi
+  ' _ "$ROOT" "$1/home/state" "$2"
+}
+
+# assert_relaunch_keeps_pr_poll_authenticated <name> <id> <trace on|off> [broken]
+# With `broken`, the registered record first gets the trailing
+# control_relaunch_tx= (and traceparent= when tracing is on) an earlier relaunch
+# left after pr=, and relaunch must restore that same poll's authentication.
+assert_relaunch_keeps_pr_poll_authenticated() {
+  local name=$1 id=$2 trace=$3 start=${4:-fresh} dir out rc url head
+  url="https://github.com/example/repo/pull/711"
+  head=0123456789abcdef0123456789abcdef01234567
+  dir=$(new_case "$name" "$id")
+  add_ship_task "$dir" "$id" claude
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s %s\n' "$$" "$trace" > "$dir/home/state/.trace-context-effective"
+  cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" --json isDraft "*) printf '%s\n' '{"isDraft":false}' ;;
+  *" headRefOid "*) printf '%s\n' '$head' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-pr-check.sh" "$id" "$url" 2>&1); rc=$?
+  expect_code 0 "$rc" "PR registration should arm the poll"$'\n'"$out"
+  [ "$(watcher_check_verdict "$dir" "$id")" = authenticated-pr-poll ] \
+    || fail "the freshly registered PR poll must be authenticated (trace $trace)"
+  if [ "$start" = broken ]; then
+    printf '%s\n' 'control_relaunch_tx=earlier-relaunch' >> "$dir/home/state/$id.meta"
+    [ "$trace" = off ] || printf '%s\n' 'traceparent=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' \
+      >> "$dir/home/state/$id.meta"
+    out=$(watcher_check_verdict "$dir" "$id")
+    [ "$out" = rejected-unauthenticated ] \
+      || fail "a key after pr= must still be rejected before relaunch (trace $trace), got $out"
+  fi
+
+  out=$(run_control "$dir" "$id" relaunch --note "continuing after the PR"); rc=$?
+  expect_code 0 "$rc" "relaunch of a PR-registered task should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" pr)" = "$url" ] || fail "relaunch dropped the task PR"
+  [ "$(meta_field "$dir" "$id" pr_head)" = "$head" ] || fail "relaunch dropped the task PR head"
+  if [ "$trace" = on ]; then
+    fm_trace_context_valid "$(meta_field "$dir" "$id" traceparent)" \
+      || fail "an enabled relaunch must record the replacement trace carrier"
+  fi
+  out=$(watcher_check_verdict "$dir" "$id")
+  [ "$out" = authenticated-pr-poll ] \
+    || fail "relaunch (trace $trace) turned the armed PR poll into $out:"$'\n'"$(cat "$dir/home/state/$id.meta")"
+  pass "fm-control relaunch: an armed PR poll ($start record) is authenticated to the watcher after relaunch (trace $trace)"
+}
+
+test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_off() {
+  assert_relaunch_keeps_pr_poll_authenticated pr-poll-trace-off rl711 off
+}
+
+test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_on() {
+  assert_relaunch_keeps_pr_poll_authenticated pr-poll-trace-on rl712 on
+}
+
+test_relaunch_repairs_a_pr_poll_broken_by_an_earlier_relaunch_with_trace_off() {
+  assert_relaunch_keeps_pr_poll_authenticated pr-poll-broken-trace-off rl713 off broken
+}
+
+test_relaunch_repairs_a_pr_poll_broken_by_an_earlier_relaunch_with_trace_on() {
+  assert_relaunch_keeps_pr_poll_authenticated pr-poll-broken-trace-on rl714 on broken
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2493,6 +2577,10 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_off
+test_relaunch_keeps_an_armed_pr_poll_authenticated_with_trace_on
+test_relaunch_repairs_a_pr_poll_broken_by_an_earlier_relaunch_with_trace_off
+test_relaunch_repairs_a_pr_poll_broken_by_an_earlier_relaunch_with_trace_on
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
