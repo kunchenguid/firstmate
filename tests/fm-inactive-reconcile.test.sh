@@ -1480,6 +1480,37 @@ test_handoff_idle_compacted_duplicate_hold_clears_pending() {
   pass "a compacted hold clears pending identical handoffs"
 }
 
+test_handoff_idle_compacted_distinct_hold_clears_earlier() {
+  local home record first second saved_now=$HANDOFF_NOW
+  make_world handoff-compacted-distinct
+  install_handoff_fakes
+  home=$MAIN
+  first="needs-validation [at=$HANDOFF_OLD]: commit A"
+  second="needs-validation [at=$HANDOFF_CONT]: commit B"
+  write_child "$home" intake "$first"$'\n'"$second" inc-compacted-distinct-1
+  HANDOFF_NOW=$HANDOFF_OLD
+  scan_handoff "$home"
+  HANDOFF_NOW=$saved_now
+  [ "$(records_for_count "$home" intake)" = 2 ] \
+    || fail "distinct completions did not retain separate pending records"
+  printf '%s\n%s\n' \
+    "$second" \
+    "needs-decision [at=$HANDOFF_NOW] [key=hold]: an explicit hold" \
+    > "$home/state/intake.status"
+  scan_handoff "$home"
+  while IFS= read -r record; do
+    [ -n "$(handoff_field "$record" cleared_epoch)" ] \
+      || fail "the compacted hold did not clear both distinct completions"
+    [ "$(handoff_field "$record" clear_reason)" = status:needs-decision ] \
+      || fail "the compacted hold recorded the wrong continuation reason"
+  done < <(records_for "$home" intake)
+  [ ! -e "$home/state/handoff-continuations/intake.open" ] \
+    || fail "the compacted hold left the task handoff marker open"
+  [ "$(handoff_wake_count "$home")" = 0 ] \
+    || fail "the compacted hold queued a false idle handoff check"
+  pass "a compacted hold clears an earlier distinct completion"
+}
+
 test_handoff_idle_compacted_duplicate_hold_without_prefix_clears_pending() {
   local home completion record saved_now=$HANDOFF_NOW
   make_world handoff-compacted-duplicates-without-prefix
@@ -1946,6 +1977,7 @@ test_handoff_idle_replay_keeps_later_completion_open
 test_handoff_idle_records_repeated_identical_completions
 test_handoff_idle_reconciles_a_compacted_completion
 test_handoff_idle_compacted_duplicate_hold_clears_pending
+test_handoff_idle_compacted_distinct_hold_clears_earlier
 test_handoff_idle_compacted_duplicate_hold_without_prefix_clears_pending
 test_handoff_idle_cursor_reaches_later_tasks_after_budget_exhaustion
 test_parent_publication_does_not_clear_local_continuation

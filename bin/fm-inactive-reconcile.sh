@@ -804,6 +804,7 @@ handoff_write_cursor() {
 handoff_one() {
   local id=$1 meta=$2 timeout=$3 status kind mode incarnation line verb fingerprint observed record known ordinal=0
   local line_clean matching_fp matching_count candidate_claimed collision line_count status_line
+  local matched_ordinal earlier_ordinal
   local -a open_fps=() stored_fps=() claimed_fps=() matching_fps=() status_lines=()
   local now age key alerted last_alert state_line state_rc path item fp
   local clearer_epoch marker proof='' reason='' evidence_rc=0
@@ -866,6 +867,36 @@ handoff_one() {
           || { [ "$matching_count" -gt 1 ] && [ "$line_count" -lt "$matching_count" ]; }; then
           if [ "$matching_count" -eq 1 ]; then
             fingerprint=$matching_fp
+            # A uniquely matched retained completion also leaves every
+            # still-pending stored record ordered before it pending, so the
+            # following continuation covers those records too.
+            matched_ordinal=$(handoff_value "$(handoff_record_path "$fingerprint")" completion_ordinal)
+            case "$matched_ordinal" in
+              ''|*[!0-9]*) matched_ordinal= ;;
+            esac
+            if [ -n "$matched_ordinal" ]; then
+              for item in "${stored_fps[@]+"${stored_fps[@]}"}"; do
+                fp=${item%%|*}
+                [ "$fp" = "$fingerprint" ] && continue
+                known=0
+                for record in "${claimed_fps[@]+"${claimed_fps[@]}"}"; do
+                  [ "$record" = "$fp" ] && known=1
+                done
+                [ "$known" -eq 0 ] || continue
+                [ -z "$(handoff_value "$(handoff_record_path "$fp")" cleared_epoch)" ] || continue
+                earlier_ordinal=$(handoff_value "$(handoff_record_path "$fp")" completion_ordinal)
+                case "$earlier_ordinal" in
+                  ''|*[!0-9]*) continue ;;
+                esac
+                [ "$earlier_ordinal" -lt "$matched_ordinal" ] || continue
+                claimed_fps+=("$fp")
+                known=0
+                for record in "${open_fps[@]+"${open_fps[@]}"}"; do
+                  [ "${record%%|*}" = "$fp" ] && known=1
+                done
+                [ "$known" -eq 1 ] || open_fps+=("$item")
+              done
+            fi
           elif [ "$matching_count" -gt 1 ]; then
             for item in "${matching_fps[@]}"; do
               fp=${item%%|*}
