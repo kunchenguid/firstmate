@@ -33,31 +33,17 @@
 #                          applies does the log's latest recognized status event decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
+#                          wedge threshold that its threshold probes do not defer
+#                          surfaces with an "escalation N" count in the reason; at
+#                          FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane about to escalate
-#                          that can account for its quiet - a `paused:` external
-#                          wait or a verified `captain-held` transfer its worker
-#                          declared, or, where config/wedge-defer-parked-gate
-#                          arms it, a validation gate of its own awaiting a
-#                          supervisor decision nobody has answered yet - is
-#                          deferred to that same long recheck cadence instead
-#                          (wedge_wait_evidence), and a pane whose own task
-#                          worktree was written during the quiet window is
-#                          deferred rather than escalated (wedge_defer_writing),
-#                          because files appearing there are liveness the pane and
-#                          the run step cannot show; that deferral still
-#                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
-#                          A pane whose recorded endpoint holds no agent at all is
-#                          not a wedge and is reported ONCE instead of escalating
-#                          on that cadence forever (wedge_dead_record); only the
-#                          two recovery-grade verdicts license it, and every other
-#                          verdict escalates unchanged.
+#                          resume. Unless afk is active. The threshold probes and
+#                          their deferrals are owned by wedge_timer_check below;
+#                          docs/architecture.md owns the wait-evidence and
+#                          dead-endpoint reporting contract.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -69,11 +55,12 @@
 #                          plain reason once per declaration, while captain-held
 #                          work stays silent until return
 #                          (busy_turn_bound_check owns that split);
-#                          every other pane goes through the same wedge timer,
-#                          the dead-record probe above included, and surfaces
-#                          with the identical "stale: ..." reason, escalation
-#                          count, and demand-deep-inspection marker for a live
-#                          agent, for human inspection only - never an automatic
+#                          every other pane goes through the same wedge timer
+#                          and its threshold probes - the dead-record probe
+#                          above included - and one that none of them defer
+#                          surfaces with the identical "stale: ..." reason,
+#                          escalation count, and demand-deep-inspection marker,
+#                          for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
@@ -325,7 +312,7 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
-STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale reaches the wedge_timer_check probes
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -334,10 +321,11 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # is crossed, busy_turn_over_age routes the pane through
 # busy_turn_bound_check, which hands a crossed bound to the same
 # STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
-# non-busy stale - so it escalates via the existing stale reason, escalation
-# counter, and demand-deep-inspection marker for human inspection only, never an
-# automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, which takes the long pause cadence instead. Set generously above
+# non-busy stale - so its threshold probes decide, and a pane none of them defer
+# escalates via the existing stale reason, escalation counter, and
+# demand-deep-inspection marker for human inspection only, never an automatic
+# interrupt, signal, or restart - unless the crew declared the wait itself, which
+# takes the long pause cadence instead. Set generously above
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
@@ -1244,22 +1232,22 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 #
 # A declared clearing time that has ALREADY passed (`paused: ... until <t>`) is
 # not evidence: the wait the worker described is over, so it no longer explains
-# the silence, and the pane keeps the unchanged schedule. The records are read in
-# this order rather than pooled because the routing already guarantees it is the
-# right one: a pane whose last line is `paused:` or `captain-held:` reaches this
-# timer only through pause_state_class answering `working`, so its crew state is
-# a running step, never a parked gate.
+# the silence, and the lane continues through the remaining threshold probes. The
+# records are read in this order rather than pooled because the routing already
+# guarantees it is the right one: a pane whose last line is `paused:` or
+# `captain-held:` reaches this timer only through pause_state_class answering
+# `working`, so its crew state is a running step, never a parked gate.
 #
 # The second record is OFF unless the home creates config/wedge-defer-parked-gate,
 # and that one guard is what makes an unconfigured home's behaviour identical to
 # having no second record at all: it is read before the fold, so no fold or
 # crew-state read is spent, no wait record exists to defer on, no recheck wording
-# is reachable, and the lane keeps the unchanged escalation schedule, reason and
-# demand-deep-inspection wording. Unlike the status line, which is the worker's
-# own declaration about its own silence, this record is derived from a pipeline's
-# gate state, so which lanes lose the ladder for it is a home's choice to make
-# rather than a default every fleet inherits - the same reason
-# config/turnend-churn-absorb gates its own widened absorb.
+# is reachable, and the lane continues through the remaining threshold probes.
+# Unlike the status line, which is the worker's own declaration about its own
+# silence, this record is derived from a pipeline's gate state, so which lanes
+# lose the ladder for it is a home's choice to make rather than a default every
+# fleet inherits - the same reason config/turnend-churn-absorb gates its own
+# widened absorb.
 #
 # The second record takes TWO signals, and needs both. The crew's authoritative
 # current state must be a no-mistakes gate whose answer is owed by a HUMAN
@@ -1329,7 +1317,7 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 }
 
 # Defer ONE wedge escalation for a pane whose wait record explains the quiet
-# (wedge_wait_evidence above). Deliberately the same shape as
+# (wedge_wait_evidence above, or a `ci` record minted at the threshold). Deliberately the same shape as
 # wedge_defer_writing: a DEFERRAL, not a cancellation, so the idle timer restarts
 # and the next window probes the evidence again - a wait that ends is escalating
 # again within one STALE_ESCALATE_SECS, which is why the worst-case detection
@@ -1443,9 +1431,10 @@ clear_write_tracking() {  # <window-key>
 #
 # fm_backend_agent_state (bin/fm-backend.sh) owns the vocabulary and the
 # process-level proof behind it. Every verdict short of proof - `alive`,
-# `ambiguous`, `unreadable`, `unverified`, or a read that failed outright - keeps
-# the unchanged escalation schedule, reason and count, so this narrows WHICH panes
-# escalate and never how loudly the ones that still do.
+# `ambiguous`, `unreadable`, `unverified`, or a read that failed outright -
+# continues to the CI probe with the escalation schedule, reason and count
+# intact, so this narrows WHICH panes escalate and never how loudly the ones
+# that still do.
 #
 # Deliberately NOT a deferral like the two above it. They restart the idle timer
 # because the pane might still be working; this is terminal for as long as the
@@ -1503,22 +1492,29 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Shared by both places a hash
-# can be absorbed this way: the plain non-terminal path, and the
-# stale_is_terminal-overridden path (a captain-relevant status-log line that an
-# active run/busy pane outranked).
-# The wait-evidence consult (wedge_wait_evidence), the worktree write probe, and
-# the dead-record probe (wedge_dead_record) run ONLY here, inside the
-# at-threshold branch that is about to escalate: at most one each per window per
-# STALE_ESCALATE_SECS, never on an ordinary poll. The crew-state read
-# wedge_wait_evidence may take under config/wedge-defer-parked-gate keeps that
-# same bound however long the wait lasts, because the deferral it feeds restarts
-# the idle timer like every other deferral below; an unconfigured home never
-# reaches that read at all. The wait consult runs first, because a pane that can
-# account for its own quiet has nothing to prove through its worktree. The dead-record probe
-# runs last of the three, so the two cheaper deferrals keep the panes they
-# already own on their existing bounded cadences and only a pane that would
-# otherwise alarm pays for a backend read.
+# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew state
+# on an ordinary poll (the costly check already ran once, at classification
+# time). Shared by both places a hash can be absorbed this way: the plain
+# non-terminal path, and the stale_is_terminal-overridden path (a captain-relevant
+# status-log line that an active run/busy pane outranked).
+# All four probes - the wait-evidence consult (wedge_wait_evidence, one
+# status-line read), the worktree write probe, the dead-record probe
+# (wedge_dead_record), and the external-step probe (crew_is_ci_waiting, one
+# fm-crew-state.sh read) - run ONLY here, inside the at-threshold branch that is
+# about to escalate: at most one each per window per STALE_ESCALATE_SECS, never
+# per poll. Order is by cost and by what each can prove. The wait consult runs
+# first, because a pane whose worker already said why it is quiet has nothing to
+# prove through its worktree. The crew-state read wedge_wait_evidence may take
+# under config/wedge-defer-parked-gate keeps that same bound however long the
+# wait lasts, because the deferral it feeds restarts the idle timer like every
+# other deferral below; an unconfigured home never reaches that read at all. The
+# two expensive probes run after the two cheap ones, so the cheaper deferrals
+# keep the panes they already own on their existing bounded cadences and only a
+# pane that would otherwise alarm pays for them. The external-step probe runs
+# LAST, after the dead-record probe, because unlike the worker's own declaration
+# it is a fact about the PIPELINE rather than about the pane: a ci step can still
+# be pending in the ledger while the agent that started it is gone, so an
+# endpoint proven dead is still reported once rather than absorbed behind the step.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1543,6 +1539,17 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           return 0
         fi
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
+          return 0
+        fi
+        if crew_is_ci_waiting "$task"; then
+          if [ "$CREW_CI_WAIT" = green ]; then
+            evidence=$(wait_record 'ci checks green, waiting on merge/close - external pipeline step' \
+              'waiting on merge/close' external 'checks are green; confirm the PR is still awaiting merge/close' '')
+          else
+            evidence=$(wait_record 'ci running, awaiting the forge checks - external pipeline step' \
+              'awaiting the forge checks' external 'confirm the checks are still running' '')
+          fi
+          wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -3170,8 +3177,8 @@ EOF
           # Decided once per distinct stale hash (the costly state reads run only
           # on first sight, never every poll) via pause_state_class, which returns:
           #   - working: an actively-running pipeline legitimately sits on a static
-          #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
-          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
+          #     pane, so absorb and start the shared wedge timer;
+          #     wedge_timer_check owns its threshold probes and deferrals;
           #   - paused: a declared wait pause_state_class admits (its header owns which
           #     liveness evidence each kind of crew must supply), so absorb on the long
           #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;

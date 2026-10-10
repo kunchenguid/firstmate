@@ -50,9 +50,15 @@
 #     routine is escalated.
 #   - Bounded wedge latency: ordinary pane staleness without a declared wait escalates
 #     only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
-#     paused: external wait or a verified captain-held transfer, per
+#     (configurable), rechecked once - except while the crew's no-mistakes `ci`
+#     step is active: housekeeping restarts that lane's window instead and
+#     re-surfaces it as one `still waiting on CI` recheck per
+#     PAUSE_RESURFACE_SECS, and a ci-parked lane whose endpoint is proven gone
+#     or agent-free is reported once rather than held behind the step. A wedged
+#     crewmate that is not waiting on an active `ci` step is therefore detected
+#     within STALE_ESCALATE_SECS + a tick, never lost (.agents/skills/afk/SKILL.md
+#     Classification policy owns that wait-evidence contract). A declared
+#     wait - either a paused: external wait or a verified captain-held transfer, per
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
 #     reads idle or busy; only a status append that stops declaring the wait
@@ -101,8 +107,10 @@
 #                                   disables. Use sparingly: it overrides the
 #                                   captain-relevant escalation for matching
 #                                   kinds.
-#          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
-#                                   as a possible wedge (default 240)
+#          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane reaches the
+#                                   wedge probes (default 240;
+#                                   .agents/skills/afk/SKILL.md Classification
+#                                   policy owns escalation and deferral)
 #          FM_PAUSE_RESURFACE_SECS  seconds a declared wait stays declared,
 #                                   idle or busy, before it re-surfaces as a
 #                                   recheck (default 14400, four hours); an
@@ -582,9 +590,16 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   if status_is_paused_or_captain_held "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
-  elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
+    return 0
+  fi
+  if [ -e "$state/.subsuper-stale-$key" ] \
+    && ! status_is_captain_relevant "$(last_status_line "$state/$task.status")"; then
+    return 0
+  fi
+  if [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
     clear_pause_tracking "$win" "$state"
   fi
+  return 0
 }
 
 migrate_watcher_pause_markers() {  # <state>
@@ -1188,8 +1203,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
 #     the block below and escalate what it finds; that block owns its file set.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason agent_state detail id gen pause_age busy ci_wait
   now=$(_now)
+  pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   migrate_watcher_pause_markers "$state"
 
   # (1) batch flush
@@ -1242,12 +1258,59 @@ housekeeping() {  # <state>
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
-    case "$?" in
+    busy=$?
+    case "$busy" in
       0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
-      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
-           stale_marker_remove "$win" "$state"
-         fi ;;
+      *)
+        # A failed capture (2) is often the gone endpoint itself, so a ci-waiting
+        # lane takes the endpoint probe before the marker is dropped.
+        if crew_is_ci_waiting "$task"; then
+          _now > "$marker"
+          agent_state=$(fm_backend_agent_state "$(task_window_backend "$win" "$state")" "$win" 2>/dev/null)
+          case "$agent_state" in
+            dead) detail='the endpoint is still there with no agent running in it' ;;
+            missing) detail='the recorded endpoint is gone' ;;
+            *)
+              if [ "$busy" -eq 2 ]; then
+                rm -f "$marker"; continue
+              fi
+              rm -f "$state/.subsuper-dead-reported-$key"
+              pause_marker_record "$win" "$state"
+              marker_epoch=$(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo "$now")
+              case "$marker_epoch" in ''|*[!0-9]*) marker_epoch=$now ;; esac
+              pause_age=$(( now - marker_epoch ))
+              if [ "$pause_age" -ge "$pause_secs" ]; then
+                if [ "$CREW_CI_WAIT" = green ]; then
+                  ci_wait='checks are green, waiting on merge/close, recheck on a long cadence'
+                else
+                  ci_wait='awaiting the forge checks, recheck on a long cadence; confirm the checks are still running'
+                fi
+                if escalate_add "$state" "still waiting on CI ${pause_age}s ($ci_wait): $win"; then
+                  _now > "$state/.subsuper-paused-$key"
+                fi
+              fi
+              continue
+              ;;
+          esac
+          id=$key
+          if gen=$(fm_busy_current_gen "$state" "$task"); then
+            id=$gen
+          fi
+          if [ "$(cat "$state/.subsuper-dead-reported-$key" 2>/dev/null || true)" = "$agent_state $id" ]; then
+            continue
+          fi
+          if escalate_add "$state" "agent $agent_state ${age}s idle ($detail; not a wedge - reported once and not repeated while it stays that way; reconcile this record and check for unlanded work before any cleanup): $win"; then
+            printf '%s %s' "$agent_state" "$id" > "$state/.subsuper-dead-reported-$key"
+          fi
+          continue
+        fi
+        if [ "$busy" -eq 2 ]; then
+          rm -f "$marker"; continue
+        fi
+        if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+          stale_marker_remove "$win" "$state"
+        fi
+        ;;
     esac
   done
 
@@ -1266,7 +1329,6 @@ housekeeping() {  # <state>
   # exactly the declaration that needs it. The crew's own latest status line is the
   # authority, and the loop head above already drops the marker the moment that line
   # stops declaring the wait.
-  pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-paused-}"
@@ -1547,7 +1609,7 @@ is_wake_reason() {  # <reason>
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
   local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest sig marker
-  local kind="" arg="" classification_failed=0 span_failure_repeat=0
+  local kind="" arg="" classification_failed=0 span_failure_repeat=0 key
   : > "$capture" || return 1
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -1675,7 +1737,10 @@ handle_wake() {  # <reason> <state>
         if [ "$_clear_wedge" = 1 ]; then
           stale_marker_remove "$arg" "$state"
         else
-          pause_marker_remove "$arg" "$state"
+          key=$(_stale_key "$task")
+          if [ ! -e "$state/.subsuper-paused-$key" ] || ! crew_is_ci_waiting "$task"; then
+            pause_marker_remove "$arg" "$state"
+          fi
           stale_marker_record "$arg" "$state"
         fi
       fi
