@@ -24,9 +24,10 @@
 #      retryable send failure that could duplicate the durable instruction.
 #   9. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
-#  10. An empty or whitespace-only text steer is refused before anything is
-#      marked, recorded, or typed - on the marked secondmate path that means
-#      no marker-only record and no pending-reply expectation.
+#  10. An empty, whitespace-only, or separator-only ('--') text steer is
+#      refused before anything is marked, recorded, or typed - on the marked
+#      secondmate path that means no marker-only record and no pending-reply
+#      expectation.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -504,6 +505,61 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+test_separator_only_body_is_refused() {
+  local dir err rc rec body
+  # The lived defect: a heredoc parked after '--' never reaches the argument
+  # list (fm-send reads arguments, not stdin), so the literal '--' was the
+  # entire recorded body, reporting success while delivering nothing.
+  dir=$(setup_case separator-only)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 -- <<'EOF' ; rc=$?
+this heredoc text lands on stdin, which fm-send never reads
+EOF
+  [ "$rc" -ne 0 ] || fail "a separator-only body should refuse"
+  assert_contains "$(cat "$err")" "nonempty message" \
+    "the separator-only refusal should be explicit"
+  assert_contains "$(cat "$err")" "reads message arguments, not stdin" \
+    "the refusal should name the heredoc-after-separator cause"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a separator-only steer still wrote an inbox record"
+  [ ! -s "$dir/send.log" ] || fail "a separator-only steer still rang the doorbell"
+
+  # Separators among whitespace-only arguments are still no content.
+  dir=$(setup_case separators-among-space)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 " " -- "  "
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "separators among whitespace-only arguments should refuse"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a separators-among-space steer still wrote an inbox record"
+
+  # A literal '--' inside real text is content and still sends.
+  dir=$(setup_case separator-in-text)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 "git diff a -- b, then run it with --verbose"
+  rc=$?
+  expect_code 0 "$rc" "a body whose text merely contains '--' should send"
+  rec="$dir/home/state/t1.inbox/001.msg"
+  [ -f "$rec" ] || fail "a text body containing '--' was not recorded"
+  body=$(record_body _ "$rec")
+  [ "$body" = "git diff a -- b, then run it with --verbose" ] \
+    || fail "a literal '--' inside real text did not round-trip:"$'\n'"$body"
+
+  # An all-hyphen run that is not a standalone '--' token is literal content.
+  dir=$(setup_case hyphen-run)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 "----"
+  rc=$?
+  expect_code 0 "$rc" "an all-hyphen run that is not a standalone '--' should send"
+  body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
+  [ "$body" = "----" ] \
+    || fail "a '----' body did not round-trip as literal content:"$'\n'"$body"
+
+  # The --key lifecycle path is unaffected: it takes no text at all.
+  dir=$(setup_case keypath-after-separator-refusal)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 --key Enter || fail "a --key send should still succeed"
+  pass "fm-send: a separator-only text steer refuses before anything is recorded or typed"
+}
+
 test_text_steer_rides_inbox
 test_deep_home_doorbell_stays_short
 test_multiline_steer_is_legal
@@ -520,3 +576,4 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+test_separator_only_body_is_refused
