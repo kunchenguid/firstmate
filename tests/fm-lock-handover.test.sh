@@ -214,7 +214,7 @@ test_request_wait_expires_and_rerun_queues_no_second_note() {
 }
 
 test_request_fails_when_note_cannot_wake_the_holder() {
-  local home a b out status
+  local home a b out status snapshot_note
   home=$(make_home unwoken)
   a=$(new_harness "$home")
   b=$(new_harness "$home")
@@ -235,6 +235,21 @@ test_request_fails_when_note_cannot_wake_the_holder() {
   expect_code 1 "$status" "a snapshot request whose note never woke the holder must fail"
   assert_contains "$out" "did not wake the live session" "the failed snapshot request did not say the holder was not woken"
   assert_absent "$home/state/.handover-request" "the failed snapshot request was still recorded"
+  assert_equals "" "$(run_inbox "$home" list --ids)" "a failed request left its request note pending"
+
+  # A failed takeover leaves an already pending snapshot request untouched.
+  rmdir "$home/state/.wake-queue"
+  sleep 1
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_HOME="$home" FM_FAKE_HARNESS_DIR="$home/harness" \
+    PATH="$FAKEBIN:$PATH" "$LOCK_BIN" handover request --snapshot >/dev/null 2>&1 || fail "snapshot request failed"
+  snapshot_note=$(run_inbox "$home" list --ids)
+  [ -n "$snapshot_note" ] || fail "the snapshot request queued no note"
+  rm -f "$home/state/.wake-queue"
+  mkdir "$home/state/.wake-queue"
+  as_session "$home" "$b" "$LOCK_BIN" handover request --no-start --wait 30 >/dev/null 2>&1 \
+    && fail "a takeover whose note never woke the holder reported success"
+  assert_equals snapshot "$(sed -n 's/^kind=//p' "$home/state/.handover-request")" "a failed takeover replaced the pending snapshot request"
+  assert_equals "$snapshot_note" "$(run_inbox "$home" list --ids)" "a failed takeover changed the pending request notes"
   pass "a request whose note cannot wake the holder fails at once instead of waiting"
 }
 
