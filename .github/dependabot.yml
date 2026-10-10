@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned third-party actions in .github/workflows/ current and
+  # surfaces security advisories against them.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ['*']
