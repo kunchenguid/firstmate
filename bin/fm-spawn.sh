@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--tier <strong|standard|fast>] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--tier <strong|standard|fast>] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--tier <strong|standard|fast>] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -692,6 +692,7 @@ fm_refuse_if_gate_agent
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
+TIER=
 MODEL=
 EFFORT=
 BACKEND_ARG=
@@ -700,6 +701,7 @@ YOLO=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
 HARNESS_SET=0
+TIER_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
@@ -727,6 +729,10 @@ for a in "$@"; do
     harness)
       HARNESS_ARG=$a
       HARNESS_SET=1
+      ;;
+    tier)
+      TIER=$a
+      TIER_SET=1
       ;;
     model)
       MODEL=$a
@@ -784,6 +790,11 @@ for a in "$@"; do
     HARNESS_ARG=${a#--harness=}
     HARNESS_SET=1
     ;;
+  --tier) want_value=tier ;;
+  --tier=*)
+    TIER=${a#--tier=}
+    TIER_SET=1
+    ;;
   --model) want_value=model ;;
   --model=*)
     MODEL=${a#--model=}
@@ -833,6 +844,10 @@ done
 }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || {
   echo "error: --harness requires a non-empty value" >&2
+  exit 1
+}
+[ "$TIER_SET" -eq 0 ] || [ -n "$TIER" ] || {
+  echo "error: --tier requires a non-empty value" >&2
   exit 1
 }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || {
@@ -964,7 +979,7 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
+  local remote_traceparent remote_recorded_traceparent remote_tier sm_primary_head sync_out sync_rc
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1021,7 +1036,7 @@ spawn_remote_secondmate() {
   model=${MODEL:--}
   effort=${EFFORT:--}
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
-    if [ "$MODEL_SET" -eq 0 ]; then
+    if [ "$MODEL_SET" -eq 0 ] && [ -z "$TIER" ]; then
       model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
       [ -n "$model" ] || model=-
     fi
@@ -1030,6 +1045,13 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
+  [ "$MODEL_SET" -eq 0 ] || TIER=
+  if [ "$TIER_SET" -eq 0 ] && [ "$MODEL_SET" -eq 0 ] \
+     && { [ "$model" = - ] || [ "$model" = default ]; } \
+     && [ "$harness" = "$(fm_meta_get "$STATE/$id.meta" harness)" ]; then
+    TIER=$(fm_meta_get "$STATE/$id.meta" tier)
+  fi
+  [ -z "$TIER" ] || model=-
   # A remote second mate always runs on Herdr: its server belongs to the host's
   # own GUI login session, so the endpoint outlives every SSH connection that
   # supervises it. bin/fm-remote-doctor.sh gates that host on the same
@@ -1147,7 +1169,11 @@ spawn_remote_secondmate() {
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
-  [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  if [ -n "$TIER" ]; then
+    launch_args+=("$remote_traceparent" "$TIER")
+  elif [ -n "$remote_traceparent" ]; then
+    launch_args+=("$remote_traceparent")
+  fi
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
@@ -1208,7 +1234,9 @@ spawn_remote_secondmate() {
     echo "mode=secondmate"
     echo "yolo=off"
     echo "tasktmp="
-    echo "model=${model#-}"
+    echo "model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)"
+    remote_tier=$(printf '%s\n' "$out" | sed -n 's/^tier=//p' | tail -1)
+    [ -z "$remote_tier" ] || echo "tier=$remote_tier"
     echo "effort=${effort#-}"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
@@ -1546,6 +1574,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
+  [ -z "$TIER" ] || shared_args+=(--tier "$TIER")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
@@ -2465,7 +2494,7 @@ esac
 # here on every spawn makes the pin durable across respawns. Precedence: explicit
 # --model/--effort flags still win over the file's tokens.
 if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
-  if [ "$MODEL_SET" -eq 0 ]; then
+  if [ "$MODEL_SET" -eq 0 ] && [ -z "$TIER" ]; then
     SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
     [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
   fi
@@ -2479,6 +2508,18 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
+[ "$MODEL_SET" -eq 0 ] || TIER=
+if { [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; } \
+   && [ "$TIER_SET" -eq 0 ] && [ "$MODEL_SET" -eq 0 ] \
+   && { [ -z "$MODEL" ] || [ "$MODEL" = default ]; } \
+   && [ "$HARNESS" = "$(fm_meta_get "$STATE/$ID.meta" harness)" ]; then
+  TIER=$(fm_meta_get "$STATE/$ID.meta" tier)
+fi
+if [ -n "$TIER" ]; then
+  MODEL=$("$SCRIPT_DIR/fm-model-tier.sh" resolve "$HARNESS" "$TIER" "${EFFORT:-}") || exit 1
+  MODEL_SET=1
+fi
+
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then
@@ -2692,13 +2733,12 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The installed codex config schema uses model_reasoning_effort. The
-    # installed model catalog supports max for gpt-5.6-luna; keep that level
-    # scoped to the model whose catalog entry advertises it.
+    # The installed codex config schema uses model_reasoning_effort. Max reasoning
+    # effort is passed only when the model catalog advertises that reasoning level.
     case "$effort" in
     low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     max)
-      [ "$model" = gpt-5.6-luna ] || return 0
+      "$SCRIPT_DIR/fm-model-tier.sh" supports-effort codex "$model" max || return 0
       printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
       ;;
     esac
@@ -5077,7 +5117,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model tier effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5096,6 +5136,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   echo "model=${MODEL:-default}"
+  [ -z "$TIER" ] || echo "tier=$TIER"
   echo "effort=${EFFORT:-default}"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.

@@ -33,7 +33,7 @@ fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-restart)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'rm -rf -- "$TMP_ROOT"' EXIT
+trap 'find "$TMP_ROOT" -type d -name "*.git-hooks" -exec chmod u+w {} +; rm -rf -- "$TMP_ROOT"' EXIT
 
 # A session-provider stub that models the two things this pass depends on: the
 # harness exit command stops the agent, a launch brief starts the replacement,
@@ -494,6 +494,7 @@ case "${rargs[1]:-}" in
     printf 'harness=%s\n' "${rargs[3]}"
     printf 'model=%s\n' "${rargs[4]}"
     printf 'effort=%s\n' "${rargs[5]}"
+    [ -z "${rargs[6]:-}" ] || printf 'tier=%s\n' "${rargs[6]}"
     ;;
 esac
 exit 0
@@ -532,6 +533,40 @@ test_remote_mate_restarts_over_the_transport_hop() {
 }
 
 # --- T7: an unreachable host is unknown, never a claimed reload --------------
+test_remote_restart_preserves_the_recorded_tier() {
+  local dir out rc
+  dir=$(new_case remote-tier)
+  setup_remote_case "$dir" sm2 normal
+  printf 'harness=codex\ntier=strong\nmodel=gpt-5-astra\n' >> "$dir/home/state/sm2.meta"
+  printf 'codex default high\n' > "$dir/home/config/secondmate-harness"
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  out=$(run_restart "$dir" sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+  expect_code 0 "$rc" "tier restart must succeed: $out"
+  assert_grep 'fm-remote-secondmate-control.sh relaunch sm2 codex default high strong' "$dir/ssh.log" "remote restart lost the tier"
+  assert_no_grep 'gpt-5-astra' "$dir/ssh.log" "remote restart reused recorded model"
+  assert_grep 'tier=strong' "$dir/home/state/sm2.meta" "remote restart lost confirmed tier"
+  pass "remote restart forwards the tier instead of the recorded model"
+}
+
+test_remote_restart_model_pin_overrides_recorded_tier() {
+  local dir out rc
+  dir=$(new_case remote-tier-pin)
+  setup_remote_case "$dir" sm2 normal
+  printf 'harness=codex\ntier=strong\nmodel=gpt-5-astra\n' >> "$dir/home/state/sm2.meta"
+  printf 'codex gpt-6-luna high\n' > "$dir/home/config/secondmate-harness"
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  out=$(run_restart "$dir" sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+  expect_code 0 "$rc" "tier restart must succeed: $out"
+  assert_grep 'fm-remote-secondmate-control.sh relaunch sm2 codex gpt-6-luna high' "$dir/ssh.log" "remote restart lost configured model"
+  assert_no_grep 'gpt-5-astra' "$dir/ssh.log" "remote restart reused recorded model"
+  assert_no_grep ' high strong' "$dir/ssh.log" "remote restart forwarded overridden tier"
+  assert_grep 'model=gpt-6-luna' "$dir/home/state/sm2.meta" "remote restart lost confirmed model"
+  assert_no_grep '^tier=strong$' "$dir/home/state/sm2.meta" "remote restart retained overridden tier"
+  pass "remote restart model pin overrides the recorded tier"
+}
+
 test_unreachable_host_is_reported_unknown() {
   local dir out rc
   dir=$(new_case unreachable)
@@ -857,6 +892,8 @@ test_refused_restart_falls_back_without_claiming_a_reload
 test_local_restart_uses_the_home_pin_and_reports_what_ran
 test_native_ultra_restart_keeps_local_and_remote_profiles
 test_remote_mate_restarts_over_the_transport_hop
+test_remote_restart_preserves_the_recorded_tier
+test_remote_restart_model_pin_overrides_recorded_tier
 test_unreachable_host_is_reported_unknown
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together

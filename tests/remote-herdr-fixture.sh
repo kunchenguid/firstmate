@@ -83,7 +83,11 @@ case "${1:-} ${2:-}" in
     if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
       printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane"
     else
-      printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane"
+      jq_state --arg p "$pane" '
+        {result:{pane:({pane_id:$p} +
+          (if .lifecycle then
+            {foreground_cwd:([.tabs[]|select(.pane_id==$p)][0].cwd)}
+          else {} end))}}'
     fi
     ;;
   "pane close")
@@ -93,12 +97,27 @@ case "${1:-} ${2:-}" in
        | .working |= with_entries(select(.key != $p))' | save ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
+    jq_state --arg p "${3:-}" --arg text "${4:-}" '
+      .typed[$p] = true
+      | if .lifecycle then
+          .stopped[$p] = ($text == "/quit")
+        else . end' | save ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
-  "pane read") printf '\n' ;;
+    jq_state --arg p "${3:-}" '
+      .typed[$p] = (.stopped[$p] != true)
+      | .working[$p] = (.stopped[$p] != true)' | save ;;
+  "pane read")
+    if [ "$(jq_state -r '.lifecycle // false')" = true ]; then
+      printf '╭────╮\n│    │\n╰────╯\n'
+    else
+      printf '\n'
+    fi ;;
   "pane process-info")
+    if [ "$(jq_state -r --arg p "$pane" '.stopped[$p] // false')" = true ]; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["zsh"],"cmdline":"zsh"}]}}}\n' "$pane" "$$" "$$" "$$"
+      exit 0
+    fi
     printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"codex","argv0":"codex","argv":["codex"],"cmdline":"codex"}]}}}\n' \
       "$pane" "$$" "$$" "$$" ;;
   "agent get")

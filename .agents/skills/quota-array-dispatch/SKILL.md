@@ -53,7 +53,7 @@ Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports 
 `--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
 Read `quota-axi auth --json` only when a candidate's credential surface is in question.
 
-For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
+For each candidate, preserve explicit `harness`, `tier`, `model`, and `provider` under the [configuration contract](../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson); `harness-adapters` owns identity, and model/provider never infer harness.
 
 ## Three gates, then spendPriority
 

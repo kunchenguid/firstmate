@@ -65,9 +65,9 @@ argv_b64=$4
 command_fields=$(perl -MMIME::Base64=decode_base64 -e '
   my $data=decode_base64($ARGV[0]);
   my @args=split(/\0/, $data);
-  print join("\t", map { defined $_ ? $_ : "" } @args[0..5]);
+  print join("\t", map { defined $_ ? $_ : "" } @args[0..6]);
 ' "$argv_b64")
-IFS=$'\t' read -r cmd action id harness model effort <<EOF
+IFS=$'\t' read -r cmd action id harness model effort tier <<EOF
 $command_fields
 EOF
 [ "$cmd" = fm-remote-secondmate-control.sh ] || exit 93
@@ -92,6 +92,7 @@ printf 'herdr_session=fm-remote\n'
 printf 'harness=%s\n' "$harness"
 printf 'model=%s\n' "$model"
 printf 'effort=%s\n' "$effort"
+[ -z "$tier" ] || printf 'tier=%s\n' "$tier"
 SH
 chmod +x "$FAKEBIN/fake-ssh"
 
@@ -190,3 +191,9 @@ fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
 pass "a remote relaunch keeps an already-armed PR poll authenticating"
 
 echo "ALL TESTS PASSED"
+
+reset_meta
+OUT=$(run_relaunch ios codex default high strong); RC=$?
+expect_code 0 "$RC" "remote replacement carries a tier: $OUT"
+assert_grep 'tier=strong' "$HOME_DIR/state/ios.meta" "remote replacement lost confirmed tier"
+pass "remote replacement preserves tier across the transport and readback"

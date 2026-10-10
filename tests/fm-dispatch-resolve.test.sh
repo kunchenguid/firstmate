@@ -416,8 +416,12 @@ cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
 cat > "$RESPONSE" <<'JSON'
 {"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}}},"usage":{"input_tokens":812,"output_tokens":60}}
 JSON
+mkdir -p "$TMP_ROOT/codex-home"
+cat > "$TMP_ROOT/codex-home/models_cache.json" <<'JSON'
+{"models":[{"slug":"gpt-6-sol","description":"workhorse","supported_reasoning_levels":[{"effort":"medium"},{"effort":"high"}]},{"slug":"gpt-6-astra","description":"Frontier","supported_reasoning_levels":[{"effort":"high"}]}]}
+JSON
 reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+CODEX_HOME="$TMP_ROOT/codex-home" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "the documented example passes opted-in resolution"
 assert_contains "$out" 'candidate: pi:anthropic/claude-sonnet-5  provider=claude' "the documented Pi default uses its declared Claude provider"
 assert_not_contains "$err" 'malformed rules file' "the documented example reaches resolution"
@@ -1004,5 +1008,71 @@ run code out err --help
 expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
+
+reset_log
+jq '.rules[0].use = {harness:"agy",tier:"strong",effort:"high"}
+  | .rules[3].use = {harness:"codex",tier:"strong",effort:"max"}
+  | .default = {harness:"agy",tier:"strong",effort:"high"}' "$BASE_RULES" > "$RULES"
+cat > "$FAKEBIN/agy" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' >> "${FAKE_CURL_LOG}/discovery-agy"
+exit 1
+SH
+chmod +x "$FAKEBIN/agy"
+mkdir -p "$TMP_ROOT/codex-home"
+printf '%s\n' '{"models":[{"slug":"gpt-9-astra","description":"Frontier","supported_reasoning_levels":[{"effort":"max"}]}]}' > "$TMP_ROOT/codex-home/models_cache.json"
+write_response "$RESPONSE" rule_4 0.96
+CODEX_HOME="$TMP_ROOT/codex-home" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "selected tier resolves without unrelated discovery"
+assert_contains "$out" '  status: clear' "tier dispatch must be clear"
+assert_contains "$out" "candidate: codex:gpt-9-astra" "quota evidence uses discovered model"
+assert_contains "$out" "profile: --harness 'codex' --tier 'strong' --effort 'max'" "launch profile retains tier"
+assert_absent "$LOG/discovery-agy" "unselected rules and default must not discover models"
+pass "dispatch resolves only selected candidates and forwards their tiers"
+printf '%s\n' '{"models":[{"slug":"gpt-9-astra","description":"Frontier","supported_reasoning_levels":[{"effort":"high"}]}]}' > "$TMP_ROOT/codex-home/models_cache.json"
+CODEX_HOME="$TMP_ROOT/codex-home" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "unsupported tier effort uses dispatch error interface"
+assert_contains "$out" '  status: error' "unsupported tier effort cannot be ranked"
+assert_not_contains "$out" '  profile:' "unsupported tier effort cannot be recommended"
+assert_contains "$err" "does not support effort 'max'" "shared discovery reports unsupported effort"
+pass "dispatch refuses unsupported resolved effort before ranking"
+
+# A model pin overrides its tier for launch, quota matching, and effort checks.
+reset_log
+jq '.rules[3].use = {harness:"codex",tier:"strong",model:"gpt-6-luna",effort:"high"}' "$BASE_RULES" > "$RULES"
+printf '%s\n' '{"models":[]}' > "$TMP_ROOT/codex-home/models_cache.json"
+CODEX_HOME="$TMP_ROOT/codex-home" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "pinned dispatch exits 0 without tier candidates"
+assert_contains "$out" '  status: clear' "a pin does not require tier discovery"
+assert_contains "$out" "profile: --harness 'codex' --model 'gpt-6-luna' --effort 'high'" "launch retains the explicit pin"
+assert_not_contains "$out" ' --tier ' "the overridden tier is not forwarded"
+
+printf '%s\n' '{"models":[{"slug":"gpt-9-astra","description":"Frontier","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"},{"effort":"max"}]}]}' > "$TMP_ROOT/codex-home/models_cache.json"
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability) += [
+  {scope:"model:gpt-6-luna",status:"known",effectivePercentRemaining:80,runway:{status:"through_reset"},selection:{spendPriority:0.5}},
+  {scope:"model:gpt-9-astra",status:"known",effectivePercentRemaining:0,runway:{status:"exhausted_now"},selection:{spendPriority:0}}
+]' "$QUOTA" > "$TMP_ROOT/pinned-quota.json"
+jq '.rules[3].use.effort = "max"' "$RULES" > "$TMP_ROOT/pinned-rules.json"
+cp "$TMP_ROOT/pinned-rules.json" "$RULES"
+QUOTA_AXI_FIXTURE="$TMP_ROOT/pinned-quota.json" CODEX_HOME="$TMP_ROOT/codex-home" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "pinned max effort exits 0"
+assert_contains "$out" '  status: clear' "pin effort support and quota win over the tier model"
+assert_contains "$out" 'candidate: codex:gpt-6-luna' "quota evidence names the pin"
+assert_contains "$out" 'model:gpt-6-luna:80%/through_reset' "quota evidence includes the pinned model scope"
+assert_not_contains "$out" 'gpt-9-astra' "the tier model does not affect quota eligibility"
+assert_contains "$out" "profile: --harness 'codex' --model 'gpt-6-luna' --effort 'max'" "supported pin effort is forwarded"
+
+printf '%s\n' '{"models":[{"slug":"gpt-9-astra","description":"Frontier","supported_reasoning_levels":[{"effort":"max"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}' > "$TMP_ROOT/codex-home/models_cache.json"
+CODEX_HOME="$TMP_ROOT/codex-home" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "unsupported pinned effort is rejected"
+assert_contains "$err" 'each use profile effort must be supported by its harness and model' "tier effort support cannot override the pin"
+assert_not_contains "$out" '  profile:' "unsupported pin effort is not recommended"
+pass "explicit model pins override tiers for discovery, launch, quota, and effort"
+cp "$BASE_RULES" "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "legacy model profiles remain selectable"
+assert_not_contains "$err" 'hardcoded model' "legacy profiles do not introduce warning output"
+pass "legacy model profiles remain compatible without warnings"
+
 
 printf '# all fm-dispatch-resolve tests passed\n'
