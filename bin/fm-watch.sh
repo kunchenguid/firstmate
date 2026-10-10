@@ -283,6 +283,11 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+HERDR_CLI_TIMEOUT=${FM_HERDR_CLI_TIMEOUT:-30}  # seconds allowed per herdr CLI call
+case "$HERDR_CLI_TIMEOUT" in
+  ''|*[!0-9]*|0) HERDR_CLI_TIMEOUT=30 ;;
+esac
+FM_BACKEND_HERDR_CLI_TIMEOUT=$HERDR_CLI_TIMEOUT
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
@@ -1994,29 +1999,6 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
-# A due sweep advances one registered check per poll. A persisted basename keeps
-# the sweep moving across actionable exits without making the next watcher repeat
-# the checks that already ran. The final check closes the sweep and starts the
-# normal CHECK_INTERVAL timer again.
-CHECK_SWEEP_CURSOR="$STATE/.check-cursor"
-CHECK_SWEEP_LAST=0
-
-check_sweep_has_next() {  # <current-basename>
-  local current=$1 c id
-  for c in "$STATE"/*.check.sh; do
-    [ -e "$c" ] || continue
-    id=${c##*/}
-    [[ "$id" > "$current" ]] && return 0
-  done
-  return 1
-}
-
-check_sweep_finish_position() {
-  [ "$CHECK_SWEEP_LAST" -eq 1 ] || return 0
-  rm -f "$CHECK_SWEEP_CURSOR"
-  touch "$STATE/.last-check"
-}
-
 # Layer 2 + 3 signal scan: status files and turn-end markers.
 # Each file is compared against its persisted reported signature in .seen-* rather
 # than mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -2122,17 +2104,23 @@ procevent_surface_queued() {
   wake "$reason"
 }
 
+fm_backend_run_bounded() {  # <seconds> <owned-group> <command...>
+  local seconds=$1 owned=$2
+  shift 2
+  if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
+    exec timeout "$seconds" "$@"
+  elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
+    exec gtimeout "$seconds" "$@"
+  else
+    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$owned" "$@"
+  fi
+}
+
 run_check_process() {
   local c=$1
   shift
-  if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
-    exec timeout "$CHECK_TIMEOUT" bash "$c" "$@"
-  elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
-  else
-    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
-  fi
+  fm_backend_run_bounded "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
 }
 
 run_check() {
@@ -2828,33 +2816,10 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
-  # A due sweep runs one check here, then resumes at the next check on the next
-  # poll. This keeps a serial set of slow checks from delaying signal scans for
-  # the duration of the whole sweep.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     contribution_check_output=
-    check_cursor=
-    if [ -f "$CHECK_SWEEP_CURSOR" ]; then
-      IFS= read -r check_cursor < "$CHECK_SWEEP_CURSOR" || check_cursor=
-    fi
-    selected_check=
     for c in "$STATE"/*.check.sh; do
-      [ -e "$c" ] || continue
-      check_id=${c##*/}
-      if [ -z "$check_cursor" ] || [[ "$check_id" > "$check_cursor" ]]; then
-        selected_check=$c
-        break
-      fi
-    done
-    CHECK_SWEEP_LAST=1
-    if [ -n "$selected_check" ]; then
-      check_id=${selected_check##*/}
-      printf '%s\n' "$check_id" > "$CHECK_SWEEP_CURSOR"
-      check_sweep_has_next "$check_id" && CHECK_SWEEP_LAST=0
-    fi
-    # shellcheck disable=SC2066 # The selected path is one deliberate iteration.
-    for c in "$selected_check"; do
       [ -e "$c" ] || continue
       beat
       is_pr_poll=0
@@ -2928,6 +2893,7 @@ EOF
             # outcome and no wake; bin/fm-pr-check.sh refuses to arm another.
             retire_merged_pr_poll "$id"
             pr_poll_control_release || exit 1
+            touch "$STATE/.last-check"
             triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
             continue
           fi
@@ -2953,16 +2919,16 @@ EOF
           fi
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
+          touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
-          check_sweep_finish_position
           wake "$reason"
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
-        check_sweep_finish_position
+        touch "$STATE/.last-check"
         wake "$reason"
       fi
       pr_poll_control_release || exit 1
@@ -2971,10 +2937,10 @@ EOF
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      check_sweep_finish_position
+      touch "$STATE/.last-check"
       wake "$reason"
     fi
-    check_sweep_finish_position
+    touch "$STATE/.last-check"
     if [ -n "$contribution_check_output" ]; then
       wake "$contribution_check_output"
     fi
@@ -2983,26 +2949,12 @@ EOF
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end
   # hook land seconds apart, and reporting them as separate actionable wakes
-  # costs a full firstmate turn each. Only turn-ended rows from the first scan
-  # survive the grace window; status rows are re-read from the post-grace scan
-  # so a self-announced close cannot mask a worker event appended afterward.
+  # costs a full firstmate turn each. The re-scan also picks up a newer
+  # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    first_turnends=$(printf '%s\n' "$pending" | while IFS=$(printf '\t') read -r sf sig f; do
-      case "$f" in
-        *.turn-ended) printf '%s\t%s\t%s\n' "$sf" "$sig" "$f" ;;
-      esac
-    done)
-    rescanned=$(scan_signals)
-    if [ -n "$first_turnends" ] && [ -n "$rescanned" ]; then
-      pending="${first_turnends}"$'\n'"${rescanned}"
-    elif [ -n "$first_turnends" ]; then
-      pending=$first_turnends
-    else
-      pending=$rescanned
-    fi
-    [ -n "$pending" ] || continue
+    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see

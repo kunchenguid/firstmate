@@ -384,6 +384,22 @@ fm_backend_herdr_workspace_label() {
 # compatible if a future herdr build honors it. Never used by
 # fm_backend_herdr_version_check, which is intentionally session-independent
 # (reads only .client.* fields).
+# fm_backend_herdr_exec: run one herdr client call, applying the watcher's
+# optional per-call bound while leaving ordinary backend consumers unchanged.
+# The watcher supplies fm_backend_run_bounded after sourcing this adapter; the
+# fallback keeps client selection and non-watcher callers byte-compatible.
+fm_backend_herdr_exec() {  # <session> <client> <args...>
+  local session=$1 client=$2
+  shift 2
+  if [ -n "${FM_BACKEND_HERDR_CLI_TIMEOUT:-}" ] \
+    && command -v fm_backend_run_bounded >/dev/null 2>&1; then
+    fm_backend_run_bounded "$FM_BACKEND_HERDR_CLI_TIMEOUT" 0 \
+      env HERDR_SESSION="$session" "$client" "$@"
+  else
+    HERDR_SESSION="$session" "$client" "$@"
+  fi
+}
+
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   local session=$1 rc=0 err failed_bin selected_bin client_bin=herdr
   shift
@@ -400,14 +416,14 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
     return $?
   fi
   failed_bin=$client_bin
-  { err=$(HERDR_SESSION="$session" "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
+  { err=$(fm_backend_herdr_exec "$session" "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
   if [ "$rc" -ne 0 ]; then
     case "$err" in
       *protocol_mismatch*)
         fm_backend_herdr_client_select "$session" force
         selected_bin=$(fm_backend_herdr_bin)
         if [ "$selected_bin" != "$failed_bin" ]; then
-          HERDR_SESSION="$session" "$selected_bin" "$@" --session "$session"
+          fm_backend_herdr_exec "$session" "$selected_bin" "$@" --session "$session"
           return $?
         fi
         ;;
@@ -468,7 +484,7 @@ fm_backend_herdr_client_candidates() {
 # client did not report. Never fails.
 fm_backend_herdr_client_status() {  # <bin> <session>
   local bin=$1 session=$2 out
-  out=$(HERDR_SESSION="$session" "$bin" status --json --session "$session" 2>/dev/null) || out=
+  out=$(fm_backend_herdr_exec "$session" "$bin" status --json --session "$session" 2>/dev/null) || out=
   printf '%s' "$out" | jq -r '
     [ (if (.server | type) == "object" and .server.running != null then (.server.running | tostring) else "" end),
       (if (.server | type) == "object" and (.server | has("compatible"))
@@ -3861,7 +3877,7 @@ fm_backend_herdr_list_live() {  # <session>
 # ~/.config/herdr/sessions/<name>/herdr.sock). Empty on any failure.
 fm_backend_herdr_socket_path() {  # <session>
   local session=$1
-  herdr session list --json 2>/dev/null \
+  fm_backend_herdr_exec "$session" herdr session list --json 2>/dev/null \
     | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .socket_path // empty' 2>/dev/null \
     | head -1
 }

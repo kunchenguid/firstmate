@@ -207,6 +207,9 @@ With `state/.afk` absent the daemon lock proves nothing and the strict watcher p
 ### Guard grace and the poll cadence
 
 `bin/fm-watch.sh` touches `state/.last-watcher-beat` at the top of each cycle and after each bounded fleet item or other proven-progress point, including immediately before and after its terminal wait (`event_wait_or_sleep`).
+Every Herdr CLI call reachable from a watcher cycle, including recorded-window capture, agent-state checks, and inbox ringing, is bounded by `HERDR_CLI_TIMEOUT` (default 30 seconds, configurable as `FM_HERDR_CLI_TIMEOUT`).
+A timed-out Herdr call is treated as an unknown result for that item, so the existing unreadable or unknown handling refuses recovery and teardown.
+The detached long-lived `herdr server` launch is the exception; it is not a cycle step and remains unbounded while its caller waits only on bounded status reads.
 A healthy watcher's beacon therefore tracks the longest individual bounded step rather than the aggregate cost of a recorded-window sweep.
 
 A fixed 300-second grace default stops correctly bounding staleness once a home's `FM_POLL` reaches or exceeds it.

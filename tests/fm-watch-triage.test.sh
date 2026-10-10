@@ -22,7 +22,7 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
 
-WATCH="$ROOT/bin/fm-watch.sh"
+WATCH="${FM_WATCH_OVERRIDE:-$ROOT/bin/fm-watch.sh}"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
@@ -1947,6 +1947,72 @@ test_actionable_signal_surfaced() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
+}
+
+# A herdr pane read can block after the worker appends a resolved line and then
+# a blocker. The watcher must bound that client call so the next signal scan can
+# surface the blocker; a timeout is an unknown endpoint result, not recovery
+# evidence.
+test_herdr_cli_timeout_surfaces_blocked_signal() {
+  local dir state fakebin out status_file marker worker pid rc i drained
+  dir=$(make_case herdr-cli-timeout); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; status_file="$state/task.status"; marker="$dir/herdr-pane-read.started"
+  mkdir -p "$dir/config"
+  fm_write_meta "$state/task.meta" \
+    "window=lab:w1:p1" "backend=herdr" "harness=claude" "kind=ship"
+  printf 'needs-decision [key=default]: choose the release target\nworking: setup\n' > "$status_file"
+  prime_status_seen "$state" "$status_file"
+
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    printf '%s\n' '{"client":{"protocol":20,"version":"0.9.0"},"server":{"running":true,"compatible":true,"protocol":20,"version":"0.9.0"}}'
+    ;;
+  pane)
+    if [ "${2:-}" = read ]; then
+      : > "$FM_HERDR_HANG_MARKER"
+      while :; do /bin/sleep 0.1; done
+    fi
+    printf '%s\n' '{}'
+    ;;
+  *)
+    printf '%s\n' '{}'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+
+  (
+    for ((i = 0; i < 100; i++)); do
+      [ -e "$marker" ] && break
+      /bin/sleep 0.1
+    done
+    [ -e "$marker" ] || exit 1
+    printf 'resolved [key=default]: release target accepted\n' >> "$status_file"
+    printf 'blocked: worker needs access to the release target\n' >> "$status_file"
+  ) &
+  worker=$!
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_HERDR_HANG_MARKER="$marker" \
+    FM_HERDR_CLI_TIMEOUT=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  wait_for_exit "$pid" 100 || rc=$?
+  rc=${rc:-0}
+  touch "$dir/release"
+  wait "$worker" || fail "the worker never appended resolved then blocked while herdr was hung"
+  [ "$rc" -eq 0 ] || fail "watcher stayed stuck in the herdr cycle (rc=$rc): $(cat "$out" 2>/dev/null)"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "the blocked status did not wake after the bounded herdr call: $(cat "$out")"
+  drained=$(FM_STATE_OVERRIDE="$state" "$DRAIN" 2>/dev/null || true)
+  assert_contains "$drained" 'blocked: worker needs access to the release target' \
+    "the blocked line appended after resolved [key=default] was not surfaced"
+  pass "a bounded herdr pane read cannot mask a later blocked signal"
 }
 
 # A needs-decision status append surfaced through this actionable signal path
@@ -6661,6 +6727,7 @@ test_separate_self_announced_answers_after_fold_wake_once
 test_self_announced_close_after_fold_still_surfaces_folded_worker_failure
 test_self_announced_close_after_fold_still_surfaces_folded_secondmate_lines
 test_actionable_signal_surfaced
+test_herdr_cli_timeout_surfaces_blocked_signal
 test_needs_decision_signal_payload_marked_for_branch_exclusion
 test_needs_decision_reconciliation_required_still_marked
 test_captain_held_signal_payload_marked_for_branch_exclusion
