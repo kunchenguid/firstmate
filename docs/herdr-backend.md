@@ -18,6 +18,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Install Herdr and select it | [Setup](#setup) |
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
+| Why the Agents pane does not show the fleet | [Missing agents](#missing-agents) |
 | The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
@@ -111,6 +112,40 @@ A secondmate launched by the primary receives a narrowly scoped home override du
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
 
+### Missing agents
+
+Herdr's Agents pane lists agents detected in Herdr terminal panes, not every agent process on the machine.
+It does not import Firstmate's task registry or enumerate workers running in tmux windows.
+Even attaching tmux inside a Herdr pane does not expose its individual agents to Herdr's detector ([upstream agent detection](https://herdr.dev/docs/agents/)).
+
+Check the task's recorded backend before investigating detection.
+The metadata rules in [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) distinguish new-spawn selection from existing endpoint ownership; a legacy record with no `backend` field means tmux.
+A tmux task missing from Herdr's Agents pane is therefore expected, even if another primary agent is visible there.
+
+For new tasks, inspect the environment of the Firstmate process issuing the spawn, rather than an unrelated shell or the terminal displaying it.
+Native Herdr auto-detection needs `HERDR_ENV=1`; an attaching viewer does not add that marker to an already-running Firstmate process.
+An absent marker, a nested tmux marker, or an explicit override can select a different backend according to the [selection order](configuration.md#backend-selection-order).
+When this home should always create Herdr endpoints, set its local `config/backend` to `herdr`, and check for a higher-priority environment or per-task override.
+This also lets a Firstmate running outside Herdr create visible workers through the [per-home workspace path](#firstmate-running-outside-herdr).
+An existing secondmate's future spawns resolve against that secondmate's own home and environment.
+
+Do not fabricate a launcher identity or clear a stale one to make a spawn pass.
+A native launcher must carry the identity of its actual, live Herdr pane; the [unresolvable-identity refusal](#unresolvable-launcher-identity) remains in force even when Herdr is explicitly selected.
+
+For a task already recorded on Herdr, inspect `agent list` and `agent get` in the task's recorded named session, then `agent explain` if the pane exists but detection or state is wrong.
+Confirm that the viewer is attached to that same session.
+Being present in the native agent inventory proves detection, but does not prove every busy or blocked state is classified correctly; [agent-status authority](#agent-status-authority-and-relaunch) covers that separate question.
+
+### Moving an existing tmux fleet
+
+Changing backend configuration affects new spawns only.
+The control plane's [`relaunch`](agent-control.md#transactional-relaunch) preserves the task's recorded backend and worktree; it cannot convert a tmux endpoint into a Herdr endpoint.
+Use that control plane for supported agent relaunches, but do not present a relaunch as backend migration or edit endpoint metadata to simulate one.
+
+The supported gradual transition is to select Herdr for future work, let existing tmux workers finish through their ordinary delivery path, and launch subsequent work on Herdr.
+Keep active worktrees, uncommitted changes, and task records intact throughout that transition.
+Moving an active worker or persistent secondmate across backends while retaining its task identity needs a separately supported migration path; current relaunch commands cannot perform that move.
+
 ### Focus
 
 Workspace and tab creation use `--no-focus`.
@@ -144,11 +179,16 @@ That covers:
 ### Firstmate running outside Herdr
 
 Firstmate running outside Herdr entirely has no launcher workspace to inherit, so its workers use this home's own labeled workspace, created on first use.
+With no `HERDR_SESSION` selector, Herdr operations target the `default` session.
+Selecting `config/backend=herdr` therefore works for a background Firstmate while a human watches that session, but does not choose the human's currently viewed workspace.
+The home-labeled workspace remains the parent, with individual task workspaces added when [presentation spaces](#presentation-spaces) are enabled.
 That path needs the home label to identify exactly one workspace.
 Two workspaces sharing it are an unresolvable placement and refuse rather than adopting either.
 
 Avoid naming a personal workspace `firstmate` or `2ndmate-<id>` for that reason.
 Also avoid it because the adapter cannot distinguish that label collision from its own container.
+
+A process that carries a stale pane identity still follows the [launcher-identity rule](#missing-agents).
 
 An older secondmate workspace using `firstmate-<id>` is not migrated automatically.
 Rename it manually before expecting new tasks or recovery to use it.
