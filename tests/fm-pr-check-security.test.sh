@@ -154,6 +154,11 @@ case "${1:-} ${2:-}" in
         printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0
         ;;
+      *" --json title,body "*)
+        [ "${FM_TEST_PUBLIC_UNREADABLE:-0}" = 0 ] || exit 1
+        jq -n --arg title "${FM_TEST_PUBLIC_TITLE:-Benchmark}" --arg body "${FM_TEST_PUBLIC_BODY:-Synthetic benchmark validation passed.}" '{title:$title,body:$body}'
+        exit 0
+        ;;
       *" --json isDraft "*)
         printf '%s\n' "{\"isDraft\":${FM_TEST_GH_DRAFT:-false}}"
         exit 0
@@ -268,6 +273,7 @@ fi
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi"
   chmod +x "$fakebin/no-mistakes"
+  ln -s "$REAL_JQ" "$fakebin/jq"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
@@ -277,14 +283,14 @@ SH
 }
 
 write_task_meta() {
-  local dir=$1 id=${2:-task-a}
+  local dir=$1 id=${2:-task-a} mode=${3:-no-mistakes}
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=$mode"
 }
 
 # Extra "field=value" arguments are written before pr=, because
@@ -630,6 +636,29 @@ test_invalid_entrypoints_have_zero_side_effects() {
 # A draft cannot be merged, so arming a merge poll on one would wait for an event
 # that cannot occur. Only a positive draft reading refuses, and it refuses before
 # anything is recorded or armed; a ready or unreadable one arms as before.
+test_public_evidence_readiness() {
+  local dir mode rc
+  for mode in direct-PR no-mistakes; do
+    dir=$(make_case "public-text-$mode")
+    write_task_meta "$dir" task-a "$mode"
+    cp "$dir/home/state/task-a.meta" "$dir/meta.before"
+    set +e
+    FM_TEST_PUBLIC_BODY='Private proof: /Users/example/private/report.md' \
+      run_check_entry "$dir" task-a https://github.com/example/repo/pull/37 > "$dir/stdout" 2> "$dir/stderr"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$mode accepted private public evidence"
+    cmp -s "$dir/meta.before" "$dir/home/state/task-a.meta" || fail "unsafe body changed metadata"
+    [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "unsafe body armed monitoring"
+    grep -q 'public PR text must be corrected' "$dir/stderr" || fail "missing useful publication diagnostic"
+    ! grep -q '/Users/example' "$dir/stderr" || fail "diagnostic echoed private evidence"
+    set +e
+    FM_TEST_PUBLIC_UNREADABLE=1 run_check_entry "$dir" task-a https://github.com/example/repo/pull/37 > "$dir/stdout" 2> "$dir/stderr"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$mode accepted unreadable publication text"
+  done
+  pass "both PR delivery modes refuse unsafe or unreadable public evidence before readiness"
+}
+
 test_draft_pull_request_is_not_armed() {
   local dir rc
   dir=$(make_case draft-refused)
@@ -3464,6 +3493,7 @@ test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
+test_public_evidence_readiness
 test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration

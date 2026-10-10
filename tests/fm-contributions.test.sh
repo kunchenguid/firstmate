@@ -119,6 +119,7 @@ forge_home() {
 #!/usr/bin/env bash
 set -eu
 case "$*" in
+  'pr view '*title,body*) printf '{"title":"change","body":"public explanation"}\n' ;;
   'pr view '*headRefOid,reviewDecision*)
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;

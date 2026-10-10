@@ -19,6 +19,10 @@
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
+# GitHub readiness also requires a readable complete title/body passing
+# bin/fm-public-text-check.sh, the public-evidence policy owner. This detects
+# publication failures after the fact; it never edits or redacts public text.
+# Other forges rely on the generated worker read-back instructions.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -108,6 +112,27 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
     echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
     exit 1
   fi
+fi
+
+if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo 'error: reading public PR text requires gh and jq before reporting ready' >&2
+    exit 1
+  fi
+  PUBLIC_JSON=$(gh pr view "$URL" --json title,body 2>/dev/null) || {
+    echo 'error: public PR text could not be read; readiness is unconfirmed' >&2
+    exit 1
+  }
+  PUBLIC_TEXT=$(printf '%s' "$PUBLIC_JSON" | jq -er '
+    if (.title | type) == "string" and (.body | type) == "string"
+    then .title + "\n" + .body else error("unreadable public text") end') || {
+    echo 'error: public PR title/body is unreadable; readiness is unconfirmed' >&2
+    exit 1
+  }
+  printf '%s\n' "$PUBLIC_TEXT" | "$SCRIPT_DIR/fm-public-text-check.sh" - || {
+    echo 'error: public PR text must be corrected before reporting ready; original evidence stays private' >&2
+    exit 1
+  }
 fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
