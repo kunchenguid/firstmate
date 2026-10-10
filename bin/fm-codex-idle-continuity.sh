@@ -36,10 +36,12 @@
 # The supervisor owns only the idle gap. bin/fm-watch-checkpoint.sh runs
 # `--handover` before it starts a watcher, and only when this process's
 # session owns state/.lock: that stops this home's supervisor, matched by its
-# recorded pid identity, and waits for the watcher lock to be free, so the
-# turn's checkpoint owns supervision until the next allowing stop starts a
-# fresh supervisor. A checkpoint from any other session leaves the owner's
-# supervisor running. The lock directory is written before the detached
+# recorded pid identity, and gives the watcher lock a bounded time to come
+# free, so the turn's checkpoint owns supervision until the next allowing
+# stop starts a fresh supervisor. Handover is finished once the supervisor
+# is dead: when another session's watcher still holds the lock, the
+# checkpoint reports that watcher as already running. A checkpoint from any
+# other session leaves the owner's supervisor running. The lock directory is written before the detached
 # supervisor exists, with the hook pid in `starting`, and neither a second
 # stop nor a handover treats that directory as stale until `pid` is recorded
 # or the hook pid is dead. Stops that overlap take
