@@ -285,6 +285,60 @@ trap 'fm_test_cleanup; exit 143' TERM
 trap 'fm_test_cleanup; exit 129' HUP
 trap 'fm_test_cleanup; exit 131' QUIT
 
+# Wrap only Codex's config-only server; preserve the existing worker probe.
+fm_test_fake_codex_config() { # <fakebin>
+  local fakebin=$1 original nodebin
+  mkdir -p "$fakebin"
+  if [ -f "$fakebin/codex" ] && grep -q 'FM_CODEX_CONFIG_FIXTURE' "$fakebin/codex"; then
+    return 0
+  fi
+  original=$(command -v codex || true)
+  if [ -e "$fakebin/codex" ]; then
+    mv "$fakebin/codex" "$fakebin/codex-worker"
+    original="$fakebin/codex-worker"
+  fi
+  nodebin=$(command -v node)
+  cat > "$fakebin/codex" <<SH
+#!/bin/sh
+# FM_CODEX_CONFIG_FIXTURE
+if [ "\${1:-}" = app-server ]; then
+  exec '$nodebin' '$ROOT/tests/codex-config-fixture.js'
+fi
+[ -n '$original' ] || exit 0
+exec '$original' "\$@"
+SH
+  chmod +x "$fakebin/codex"
+}
+
+# fm_test_remote_codex_config <remote-root>: the remote job runs every command
+# under env -i with the real account HOME, so neither the suite CODEX_HOME nor
+# PATH reaches it. Its child PATH starts at <remote-root>/bin; a codex there
+# answers app-server with the fixture, persisting into the suite store.
+fm_test_remote_codex_config() { # <remote-root>
+  local script="$1/bin/codex"
+  mkdir -p "$1/bin"
+  cat > "$script" <<SH
+#!/bin/sh
+if [ "\${1:-}" = app-server ]; then
+  FM_TEST_CODEX_STORE='$CODEX_HOME/config.toml' exec '$(command -v node)' '$ROOT/tests/codex-config-fixture.js'
+fi
+exit 0
+SH
+  chmod +x "$script"
+}
+
+# Every codex spawn pre-registers workspace trust through `codex app-server`
+# (bin/fm-codex-trust.sh). Give each suite a private CODEX_HOME and the
+# config-only fixture so no spawn under test needs an installed codex or writes
+# the operator's ~/.codex. fm_live_gate restores both for a live guard.
+FM_TEST_OPERATOR_CODEX_HOME=${CODEX_HOME-}
+FM_TEST_OPERATOR_CODEX_HOME_SET=${CODEX_HOME+1}
+FM_TEST_CODEX_ROOT=$(fm_test_tmproot fm-test-codex) || return 1
+fm_test_fake_codex_config "$FM_TEST_CODEX_ROOT/bin"
+mkdir -p "$FM_TEST_CODEX_ROOT/home"
+export CODEX_HOME="$FM_TEST_CODEX_ROOT/home"
+export PATH="$FM_TEST_CODEX_ROOT/bin:$PATH"
+
 # fm_test_reap_orphans: best-effort sweep for fixture roots left behind by a
 # prior run that was killed hard enough to skip the traps above (e.g. a
 # SIGKILL timeout). Only removes directories carrying the .fm-test-fixture
@@ -408,6 +462,17 @@ fm_live_gate() {
         fi
         ;;
     esac
+  fi
+
+  # A live guard drives the operator's real codex and Codex store.
+  PATH=":$PATH:"
+  PATH=${PATH//":$FM_TEST_CODEX_ROOT/bin:"/:}
+  PATH=${PATH#:}
+  PATH=${PATH%:}
+  if [ -n "$FM_TEST_OPERATOR_CODEX_HOME_SET" ]; then
+    export CODEX_HOME=$FM_TEST_OPERATOR_CODEX_HOME
+  else
+    unset CODEX_HOME
   fi
 
   for tool in "$@"; do

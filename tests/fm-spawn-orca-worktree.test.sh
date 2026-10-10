@@ -78,6 +78,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/orca"
+  fm_test_fake_codex_config "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -101,7 +102,7 @@ Confirm the launch enters the worktree Orca created for it.
 EOF
   fb=$(make_orca_fakebin "$case_dir")
 
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" CODEX_HOME="$case_dir/user-home/.codex" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" PATH="$fb:$PATH" \
@@ -151,7 +152,7 @@ EOF
     echo "terminal=term-1"
   } > "$home/state/$id.meta"
 
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" CODEX_HOME="$case_dir/user-home/.codex" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 \

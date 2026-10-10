@@ -104,7 +104,9 @@ EOF
 
 run_settle_spawn() {
   local id=$1
-  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  fm_test_fake_codex_config "$FAKEBIN_DIR"
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" \
+    CODEX_HOME="$HOME_DIR/user-home/.codex" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \

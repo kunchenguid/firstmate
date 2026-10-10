@@ -2494,3 +2494,29 @@ Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which
 This live proof covers the watcher and queue boundary; it does not establish live daemon-consumer delivery.
 `bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.
 Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
+
+## Codex workspace trust
+
+Verified on 2026-10-06 with codex-cli 0.159.3 on macOS.
+`bin/fm-codex-trust.sh` owns launch-directory registration through Codex's private stdio config API, and `tests/fm-codex-trust.test.sh` covers scope, protocol refusal and the spawn integration without an installed harness.
+The token-free live guard uses dummy API-key data and submits no prompt.
+It verifies Codex's native TOML preservation and idempotence, then opens the same repository's unregistered primary checkout and registered linked worktree without sending any input.
+Only the unregistered checkout displays the folder-trust gate; the registered worktree reaches the composer.
+Workspace trust does not approve hooks, and the worker hook-layer posture remains independently covered by `tests/fm-codex-hook-layer-live-e2e.test.sh`.
+
+Refresh command:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-codex-workspace-trust-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - codex codex-cli 0.159.3: unregistered checkout gates; registered worktree reaches composer without input
+ok - codex codex-cli 0.159.3: native config API preserves TOML, is idempotent and refuses malformed input
+# all fm-codex-workspace-trust-live-e2e checks passed
+```
+
+The registration point precedes backend launch and is shared by tmux, herdr, zellij, orca and cmux.
+Other harnesses do not enter the Codex registration branch.

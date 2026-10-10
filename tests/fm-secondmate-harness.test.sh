@@ -478,6 +478,9 @@ SH
   # registration below needs, so link the real one in rather than presenting a
   # node-less spawn host no real fleet member looks like.
   ln -sf "$(command -v node)" "$fakebin/node"
+  # The same minimal PATH drops lib.sh's config-only codex, which a codex
+  # spawn's trust registration (bin/fm-codex-trust.sh) runs.
+  cp "$FM_TEST_CODEX_ROOT/bin/codex" "$fakebin/codex"
   printf '%s\n' "$fakebin"
 }
 
@@ -728,6 +731,9 @@ SH
   # registration below needs, so link the real one in rather than presenting a
   # node-less spawn host no real fleet member looks like.
   ln -sf "$(command -v node)" "$fakebin/node"
+  # The same minimal PATH drops lib.sh's config-only codex, which a codex
+  # spawn's trust registration (bin/fm-codex-trust.sh) runs.
+  cp "$FM_TEST_CODEX_ROOT/bin/codex" "$fakebin/codex"
   printf '%s\n' "$fakebin"
 }
 

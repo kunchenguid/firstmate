@@ -454,9 +454,11 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# claude is the one harness whose pre-launch setup can REFUSE the spawn: before
-# any per-task state exists, and before its worktree .claude/settings.local.json
-# hooks are written, every claude launch pre-registers the directory the pane
+# Claude and Codex pre-register launch-directory trust and refuse on failure.
+# bin/fm-codex-trust.sh owns Codex registration for workers and secondmates.
+# Claude registration runs before any per-task state exists and before its
+# worktree .claude/settings.local.json hooks are written. Every claude launch
+# pre-registers the directory the pane
 # starts in - the task worktree, or the secondmate home for a --secondmate spawn -
 # in the launching user's own Claude trust store through bin/fm-claude-trust.sh,
 # because Claude's interactive workspace-trust dialog gates a folder it has never
@@ -4535,6 +4537,20 @@ spawn_assert_agent_worktree
 # only the worktree shape applies.
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
+codex)
+  # Trust only this launch directory, never the treehouse root. The helper
+  # uses Codex's config API and preserves existing configuration.
+  export CODEX_HOME=${CODEX_HOME:-${HOME:?}/.codex}
+  if [ "$KIND" = secondmate ]; then
+    spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+  else
+    spawn_trust_args=("$WT" "$PROJ_ABS")
+  fi
+  if ! "$FM_ROOT/bin/fm-codex-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+    echo "error: could not pre-register Codex workspace trust for $WT; refusing to launch a codex worker that would wedge on the trust dialog; inspect window $T" >&2
+    exit 1
+  fi
+  ;;
 claude*)
   if [ "$KIND" = secondmate ]; then
     spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
@@ -5337,6 +5353,9 @@ if [ -n "$WORKER_ACCOUNT" ]; then
   esac
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$HARNESS" = codex ]; then
+  LAUNCH="CODEX_HOME=$(shell_quote "$CODEX_HOME") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
