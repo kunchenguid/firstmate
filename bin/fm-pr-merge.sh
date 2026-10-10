@@ -88,8 +88,21 @@
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
 # blocking_discussions_resolved is true, and the head pipeline succeeded at the
-# exact current head commit. Every failing condition is reported, not just the
-# first. The verified head is then passed to glab as --sha, so a push that lands
+# exact current head commit, or is a verified merged-result pipeline. That
+# exception requires the requested MR's successful head pipeline in its target
+# project, source=merge_request_event, tag=false and its exact
+# refs/merge-requests/<iid>/merge ref. A separate pipeline read must agree, and
+# its commit must have exactly two ordered parents: current target, then current
+# source. Merge trains and arbitrary descendants are not accepted. The MR's
+# safety fields and target branch are re-read just before merging; unreadable,
+# changed or malformed evidence refuses. GitLab's merge API offers no target
+# SHA precondition: a target update or MR edit after those reads can still race
+# the merge, and attended auto-merge can outlive the snapshot. This is a fresh
+# preflight, not atomic target pinning; server merge checks remain authoritative.
+# See https://docs.gitlab.com/api/merge_requests/#merge-a-merge-request and
+# https://docs.gitlab.com/ci/pipelines/merged_results_pipelines/.
+# Every failing condition is reported, not just the first.
+# The verified source head is then passed to glab as --sha, so a push that lands
 # between that read and the merge fails the merge instead of landing commits
 # nothing verified. A recorded pr_head that disagrees with the live head is
 # reported rather than trusted, because a rebase moves the head and leaves the
@@ -447,11 +460,98 @@ if [ "$PROVIDER" = gitlab ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
-# Pre-merge conditions for a GitLab merge request, read from one live view of
-# the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
-# returns non-zero after reporting every condition that failed.
+# GitLab pre-merge verification follows the evidence contract in this header.
+# Sets FM_PR_MERGE_HEAD to the verified source head on success and returns
+# non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
+FM_PR_GITLAB_RESULT_MR=
+FM_PR_GITLAB_TARGET_HEAD=
+FM_PR_GITLAB_TARGET_ENDPOINT=
+
+# Keep only safety-relevant fields so harmless timestamp changes do not refuse
+# the final MR read. Missing fields remain null, distinct from explicit values.
+gitlab_merge_snapshot() {
+  jq -csS 'if length == 1 and (.[0] | type == "object") then .[0] else error("invalid MR") end
+    | {iid,web_url,project_id,source_project_id,target_project_id,
+    source_branch,target_branch,sha,state,detailed_merge_status,has_conflicts,
+    blocking_discussions_resolved,draft,work_in_progress,
+    merge_when_pipeline_succeeds,merge_after,
+    head_pipeline:(.head_pipeline | {id,project_id,sha,ref,source,status,tag})}'
+}
+
+gitlab_read_result_target() {
+  local branch_json target_branch
+  target_branch=$(printf '%s' "$FM_PR_GITLAB_RESULT_MR" | jq -r '.target_branch') || return 1
+  branch_json=$(GITLAB_HOST="$FM_PR_HOST" glab api "$FM_PR_GITLAB_TARGET_ENDPOINT" \
+    --hostname "$FM_PR_HOST" 2>/dev/null) || return 1
+  printf '%s' "$branch_json" | jq -ers --arg branch "$target_branch" '
+    select(length == 1) | .[0] | select(type == "object" and .name == $branch)
+    | .commit.id | select(type == "string" and test("^[0-9a-f]{40}$"))' 2>/dev/null
+}
+
+# Called only for a distinct pipeline SHA; the established source-SHA path
+# needs no additional API permissions. All REST reads are scoped to the parsed
+# URL's host/project, never to an ambient checkout or a response-supplied URL.
+gitlab_verify_merged_result() {
+  local json=$1 head=$2 sha=$3 project pipeline_id pipeline commit target
+  fm_pr_head_valid "$sha" || return 1
+  if ! printf '%s' "$json" | jq -es --arg url "$URL" --arg iid "$PR_NUMBER" '
+    def positive_id: type == "number" and . > 0 and floor == .;
+    length == 1 and (.[0] |
+    .web_url == $url and (.iid | positive_id) and (.iid | tostring) == $iid
+    and (.project_id | positive_id) and .target_project_id == .project_id
+    and (.source_project_id | positive_id)
+    and (.target_branch | type == "string" and length > 0 and (test("[[:cntrl:]]") | not))
+    and (.head_pipeline.id | positive_id)
+    and .head_pipeline.project_id == .target_project_id
+    and .head_pipeline.source == "merge_request_event"
+    and .head_pipeline.ref == ("refs/merge-requests/" + $iid + "/merge")
+    and .head_pipeline.tag == false and .head_pipeline.status == "success"
+    and (.head_pipeline.sha | type == "string" and test("^[0-9a-f]{40}$"))
+    and (.sha | type == "string" and test("^[0-9a-f]{40}$"))
+    and .state == "opened" and .detailed_merge_status == "mergeable"
+    and .has_conflicts == false and .blocking_discussions_resolved == true)
+  ' >/dev/null 2>&1; then
+    return 1
+  fi
+  project=$(printf '%s' "$PR_PATH" | jq -sRr '@uri') || return 1
+  pipeline_id=$(printf '%s' "$json" | jq -r '.head_pipeline.id') || return 1
+  pipeline=$(GITLAB_HOST="$FM_PR_HOST" glab api "projects/$project/pipelines/$pipeline_id" \
+    --hostname "$FM_PR_HOST" 2>/dev/null) || return 1
+  if ! printf '%s' "$pipeline" | jq -es --argjson mr "$json" '
+    length == 1 and ((.[0] | {id,project_id,sha,ref,source,status,tag})
+    == ($mr.head_pipeline | {id,project_id,sha,ref,source,status,tag}))
+  ' >/dev/null 2>&1; then
+    return 1
+  fi
+  commit=$(GITLAB_HOST="$FM_PR_HOST" glab api "projects/$project/repository/commits/$sha" \
+    --hostname "$FM_PR_HOST" 2>/dev/null) || return 1
+  FM_PR_GITLAB_RESULT_MR=$(printf '%s' "$json" | gitlab_merge_snapshot) || return 1
+  target=$(printf '%s' "$json" | jq -r '.target_branch | @uri') || return 1
+  FM_PR_GITLAB_TARGET_ENDPOINT="projects/$project/repository/branches/$target"
+  FM_PR_GITLAB_TARGET_HEAD=$(gitlab_read_result_target) || return 1
+  if ! printf '%s' "$commit" | jq -es --arg sha "$sha" --arg head "$head" \
+    --arg target "$FM_PR_GITLAB_TARGET_HEAD" '
+      length == 1 and (.[0] | .id == $sha and .parent_ids == [$target,$head])
+    ' >/dev/null 2>&1; then
+    return 1
+  fi
+}
+
+gitlab_recheck_merged_result() {
+  local json snapshot target
+  [ -n "$FM_PR_GITLAB_RESULT_MR" ] || return 0
+  if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) \
+    || ! snapshot=$(printf '%s' "$json" | gitlab_merge_snapshot 2>/dev/null) \
+    || [ "$snapshot" != "$FM_PR_GITLAB_RESULT_MR" ] \
+    || ! target=$(gitlab_read_result_target) \
+    || [ "$target" != "$FM_PR_GITLAB_TARGET_HEAD" ]; then
+    echo "error: merged-result MR or target changed or could not be re-read before merging; retry with fresh integration evidence" >&2
+    return 1
+  fi
+}
+
 gitlab_verify_mergeable() {
   local json fields line
   local total=0 named=0 refusals=''
@@ -537,17 +637,24 @@ FIELDS
   [ "$pipeline_status" = success ] \
     || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
 "
-  [ "$pipeline_sha" = "$live_head" ] \
-    || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+  if [ "$pipeline_sha" != "$live_head" ] \
+    && ! gitlab_verify_merged_result "$json" "$live_head" "$pipeline_sha"; then
+    refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head; current merged-result integration could not be verified
 "
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
-    "$URL" "$live_head" >&2
+  if [ "$pipeline_sha" = "$live_head" ]; then
+    printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
+      "$URL" "$live_head" >&2
+  else
+    printf 'verified: %s is open and mergeable, with a successful merged-result pipeline at %s validating source head %s\n' \
+      "$URL" "$pipeline_sha" "$live_head" >&2
+  fi
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
 }
@@ -1443,6 +1550,7 @@ case "$PROVIDER" in
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then
       gitlab_merge_args=(--auto-merge=false)
     fi
+    gitlab_recheck_merged_result || exit 1
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
     if [ "$merge_status" -ne 0 ]; then
