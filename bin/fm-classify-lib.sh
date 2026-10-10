@@ -2586,10 +2586,10 @@ FM_WORKTREE_WRITE_PRUNE=${FM_WORKTREE_WRITE_PRUNE-'.git node_modules .venv venv 
 FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 
 # Optional progress callback for bounded per-item loops whose caller publishes a
-# liveness beacon. The callback is best-effort and must never change a verdict.
+# liveness beacon. Callers that need a beacon redefine this no-op after sourcing
+# the library; the default keeps every other consumer free of callback evaluation.
 fm_classify_progress() {
-  [ -n "${FM_CLASSIFY_PROGRESS_HOOK:-}" ] || return 0
-  eval "$FM_CLASSIFY_PROGRESS_HOOK" >/dev/null 2>&1 || true
+  :
 }
 
 # Wall-clock seconds the probe's single walk may take. The walk runs synchronously

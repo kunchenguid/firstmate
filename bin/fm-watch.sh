@@ -396,12 +396,14 @@ _event_cap_ok=0
 _event_cap_fails=0
 
 # A fresh mtime means this watcher is alive and making progress. Bounded library
-# loops use the optional hook below to call the same function after each item.
+# loops use the callback below to call the same function after each item.
 beat() {
   touch "$STATE/.last-watcher-beat"
 }
 
-FM_CLASSIFY_PROGRESS_HOOK=beat
+fm_classify_progress() {
+  beat
+}
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -1992,6 +1994,29 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
+# A due sweep advances one registered check per poll. A persisted basename keeps
+# the sweep moving across actionable exits without making the next watcher repeat
+# the checks that already ran. The final check closes the sweep and starts the
+# normal CHECK_INTERVAL timer again.
+CHECK_SWEEP_CURSOR="$STATE/.check-cursor"
+CHECK_SWEEP_LAST=0
+
+check_sweep_has_next() {  # <current-basename>
+  local current=$1 c id
+  for c in "$STATE"/*.check.sh; do
+    [ -e "$c" ] || continue
+    id=${c##*/}
+    [[ "$id" > "$current" ]] && return 0
+  done
+  return 1
+}
+
+check_sweep_finish_position() {
+  [ "$CHECK_SWEEP_LAST" -eq 1 ] || return 0
+  rm -f "$CHECK_SWEEP_CURSOR"
+  touch "$STATE/.last-check"
+}
+
 # Layer 2 + 3 signal scan: status files and turn-end markers.
 # Each file is compared against its persisted reported signature in .seen-* rather
 # than mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -2803,10 +2828,33 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
+  # A due sweep runs one check here, then resumes at the next check on the next
+  # poll. This keeps a serial set of slow checks from delaying signal scans for
+  # the duration of the whole sweep.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     contribution_check_output=
+    check_cursor=
+    if [ -f "$CHECK_SWEEP_CURSOR" ]; then
+      IFS= read -r check_cursor < "$CHECK_SWEEP_CURSOR" || check_cursor=
+    fi
+    selected_check=
     for c in "$STATE"/*.check.sh; do
+      [ -e "$c" ] || continue
+      check_id=${c##*/}
+      if [ -z "$check_cursor" ] || [[ "$check_id" > "$check_cursor" ]]; then
+        selected_check=$c
+        break
+      fi
+    done
+    CHECK_SWEEP_LAST=1
+    if [ -n "$selected_check" ]; then
+      check_id=${selected_check##*/}
+      printf '%s\n' "$check_id" > "$CHECK_SWEEP_CURSOR"
+      check_sweep_has_next "$check_id" && CHECK_SWEEP_LAST=0
+    fi
+    # shellcheck disable=SC2066 # The selected path is one deliberate iteration.
+    for c in "$selected_check"; do
       [ -e "$c" ] || continue
       beat
       is_pr_poll=0
@@ -2880,7 +2928,6 @@ EOF
             # outcome and no wake; bin/fm-pr-check.sh refuses to arm another.
             retire_merged_pr_poll "$id"
             pr_poll_control_release || exit 1
-            touch "$STATE/.last-check"
             triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
             continue
           fi
@@ -2906,16 +2953,16 @@ EOF
           fi
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
-          touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
+          check_sweep_finish_position
           wake "$reason"
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
-        touch "$STATE/.last-check"
+        check_sweep_finish_position
         wake "$reason"
       fi
       pr_poll_control_release || exit 1
@@ -2924,10 +2971,10 @@ EOF
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      touch "$STATE/.last-check"
+      check_sweep_finish_position
       wake "$reason"
     fi
-    touch "$STATE/.last-check"
+    check_sweep_finish_position
     if [ -n "$contribution_check_output" ]; then
       wake "$contribution_check_output"
     fi

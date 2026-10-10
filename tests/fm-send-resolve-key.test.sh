@@ -244,59 +244,56 @@ test_separate_resolve_key_answers_do_not_rewake() {
   pass "fm-send --resolve-key: separate answers do not each re-wake; later lines still do"
 }
 
-# A keyless blocker is the default decision that `fm-send --resolve-key default`
-# closes. Hold the real sender after its append and let the real watcher scan
-# that transient close during the signal grace window, then append a new worker
-# blocker. The first scan must not survive the grace rescan as a self-wake, and
-# the later worker blocker must still surface.
-test_default_blocker_after_resolve_during_signal_grace() (
-  local dir fb home log status_file watcher sender i out
-  dir="$TMP_ROOT/default-blocker-race"; mkdir -p "$dir/watchbin"
+# Freeze the real sender after its close append but before its seen-marker
+# commit, then let the real watcher capture that transient state. The grace
+# rescan must drop it once the sender commits; a worker blocker still wakes.
+test_answer_close_during_signal_grace() (
+  local dir fb home log watcher sender i out
+  dir="$TMP_ROOT/self-announced-race"; mkdir -p "$dir/watchbin"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
-  home=$(setup_home default-blocker-race)
+  home=$(setup_home self-announced-race)
   fm_write_meta "$home/state/t9.meta" "window=sess:fm-t9" "kind=ship"
-  status_file="$home/state/t9.status"
-  printf 'blocked: first blocker\n' > "$status_file"
+  printf 'needs-decision [key=port-choice]: 8080 or 9090\n' > "$home/state/t9.status"
   FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$3"' _ \
-    "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status_file" \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t9.status" \
     || fail "could not prime the announced baseline"
+  drain_out "$home" >/dev/null
 
   # shellcheck disable=SC2016 # The fake scripts expand these variables in their own shells.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'if grep -q "^resolved " "$1" && [ ! -e "$FM_RACE_DIR/release" ]; then' \
-    '  : > "$FM_RACE_DIR/appended"' \
-    '  while [ ! -e "$FM_RACE_DIR/release" ]; do /bin/sleep 0.1; done' \
+    '  touch "$FM_RACE_DIR/appended"' \
+    '  for ((i=0; i<300; i++)); do' \
+    '    [ ! -e "$FM_RACE_DIR/release" ] || break' \
+    '    /bin/sleep 0.1' \
+    '  done' \
+    '  [ -e "$FM_RACE_DIR/release" ] || exit 1' \
     'fi' \
     'if [ "$(uname)" = Darwin ]; then /usr/bin/stat -f "%z" "$1"; else stat -c "%s" "$1"; fi' \
     > "$dir/size-reader"
   chmod +x "$dir/size-reader"
-  cp "$fb/tmux" "$dir/watchbin/tmux"
-  # shellcheck disable=SC2016 # The fake scripts expand these variables in their own shells.
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'printf "state: %s · source: pane · harness busy\\n" "${FM_FAKE_CREW_STATE:-working}"' \
-    > "$dir/fm-crew-state.sh"
-  chmod +x "$dir/fm-crew-state.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/watchbin/tmux"
   # shellcheck disable=SC2016 # The fake scripts expand these variables in their own shells.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'if [ "$1" = 7 ]; then' \
-    '  : > "$FM_RACE_DIR/grace"' \
-    '  while [ ! -e "$FM_RACE_DIR/sent" ]; do /bin/sleep 0.1; done' \
-    '  exit 0' \
+    '  touch "$FM_RACE_DIR/grace"' \
+    '  for ((i=0; i<300; i++)); do' \
+    '    [ ! -e "$FM_RACE_DIR/sent" ] || exit 0' \
+    '    /bin/sleep 0.1' \
+    '  done' \
+    '  exit 1' \
     'fi' \
-    ': > "$FM_RACE_DIR/poll"' \
+    '[ "$1" != 1 ] || touch "$FM_RACE_DIR/poll"' \
     'exec /bin/sleep "$@"' \
     > "$dir/watchbin/sleep"
-  chmod +x "$dir/watchbin/sleep"
+  chmod +x "$dir/watchbin/tmux" "$dir/watchbin/sleep"
   watcher=''; sender=''
   trap '[ -z "$sender" ] || kill "$sender" 2>/dev/null; [ -z "$watcher" ] || kill "$watcher" 2>/dev/null; wait 2>/dev/null || true' EXIT
 
-  (
-    export FM_RACE_DIR="$dir" FM_STATUS_SIZE_READER="$dir/size-reader"
-    run_send "$fb" "$home" "$log" t9 --resolve-key default "answer the first blocker"
-  ) > "$dir/send.out" 2>&1 &
+  FM_RACE_DIR="$dir" FM_STATUS_SIZE_READER="$dir/size-reader" \
+    run_send "$fb" "$home" "$log" t9 --resolve-key port-choice "use 9090" > "$dir/send.out" &
   sender=$!
   for ((i = 0; i < 300; i++)); do
     [ -e "$dir/appended" ] && break
@@ -304,9 +301,8 @@ test_default_blocker_after_resolve_during_signal_grace() (
   done
   [ -e "$dir/appended" ] || fail "sender never reached the post-append barrier"
 
-  PATH="$dir/watchbin:$PATH" FM_RACE_DIR="$dir" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_CREW_STATE_BIN="$dir/fm-crew-state.sh" \
-    FM_FAKE_CREW_STATE='working' FM_POLL=1 FM_SIGNAL_GRACE=7 \
+  FM_RACE_DIR="$dir" PATH="$dir/watchbin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_POLL=1 FM_SIGNAL_GRACE=7 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher=$!
@@ -316,8 +312,16 @@ test_default_blocker_after_resolve_during_signal_grace() (
   done
   [ -e "$dir/grace" ] || fail "watcher never scanned the uncommitted close"
   touch "$dir/release"
-  wait "$sender" || fail "answer send failed: $(cat "$dir/send.out")"
+  wait "$sender" || fail "answer send failed"
   sender=''
+  # The fake worker has accepted the answer; keep its unrelated inbox record
+  # out of the watcher's endpoint-liveness path while this test races status.
+  mkdir -p "$home/state/t9.inbox/handled"
+  for message in "$home/state/t9.inbox"/*.msg; do
+    [ -e "$message" ] || continue
+    mv "$message" "$home/state/t9.inbox/handled/"
+  done
+  rm -f "$dir/poll"
   touch "$dir/sent"
   for ((i = 0; i < 300; i++)); do
     [ -s "$dir/watch.out" ] && break
@@ -325,23 +329,23 @@ test_default_blocker_after_resolve_during_signal_grace() (
     /bin/sleep 0.1
   done
   if [ -s "$dir/watch.out" ] || [ -s "$home/state/.wake-queue" ]; then
-    out=$(FM_STATE_OVERRIDE="$home/state" "$DRAIN" 2>/dev/null || true)
-    fail "the committed default-key close survived the grace rescan: $(cat "$dir/watch.out")\n$out"
+    out=$(drain_out "$home")
+    fail "the committed close survived the grace rescan: $(cat "$dir/watch.out")\n$out"
   fi
-
-  printf 'blocked: second worker blocker\n' >> "$status_file"
+  [ -e "$dir/poll" ] || fail "watcher did not complete a quiet poll"
+  printf 'blocked [key=worker-access]: worker needs release access\n' >> "$home/state/t9.status"
   for ((i = 0; i < 300; i++)); do
     [ -s "$dir/watch.out" ] && break
     /bin/sleep 0.1
   done
-  grep -F "signal: $status_file" "$dir/watch.out" >/dev/null \
-    || fail "the later keyless worker blocker did not signal"
-  wait "$watcher" || fail "watcher failed: $(cat "$dir/watch.err")"
+  grep -F "signal: $home/state/t9.status" "$dir/watch.out" >/dev/null \
+    || fail "worker blocker after the self-close did not signal"
+  wait "$watcher" || fail "watcher failed"
   watcher=''
   out=$(FM_STATE_OVERRIDE="$home/state" "$DRAIN" 2>/dev/null || true)
-  assert_contains "$out" 'blocked: second worker blocker' \
+  assert_contains "$out" 'blocked [key=worker-access]: worker needs release access' \
     "the later keyless worker blocker must appear in the wake annotation"
-  pass "fm-send --resolve-key default: grace drops the self-close and preserves the later worker blocker"
+  pass "fm-send --resolve-key: grace rescan drops a self-close but preserves the next worker blocker"
 )
 
 # The reported failure behind issue #2109: a worker that put the colon first
@@ -1008,7 +1012,7 @@ test_decision_answer_partition_relocates_under_the_record() {
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
-test_default_blocker_after_resolve_during_signal_grace
+test_answer_close_during_signal_grace || exit 1
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
