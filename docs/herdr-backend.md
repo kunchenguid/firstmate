@@ -521,7 +521,9 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 
 ### Named server and session routing
 
-The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
+The adapter starts and polls a named server before workspace, tab, pane, or agent calls that act on a pane.
+Passive observation reads, the bounded capture and the busy-state read, only probe the server with `status --json` and never start it.
+When the session is stopped, the capture fails and the busy state reads `unknown`, so read-only dashboards cannot revive a deliberately stopped session.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
 

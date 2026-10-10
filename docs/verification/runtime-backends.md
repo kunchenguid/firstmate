@@ -1855,6 +1855,10 @@ The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.s
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### Observation reads on a stopped session
+
+Verified 2026-10-07 with the portable fake-herdr regressions in `tests/fm-backend-herdr.test.sh`: on a session whose `status --json` reports `running:false`, `fm_backend_herdr_capture` fails and `fm_backend_herdr_busy_state` reads `unknown` without any `herdr server` or `pane read` call, while `fm_backend_herdr_send_key` still starts the stopped server before acting on the pane.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
