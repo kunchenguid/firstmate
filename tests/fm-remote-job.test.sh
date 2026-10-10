@@ -27,6 +27,9 @@ STALL_REPLACEMENT_PID=
 STALL_JOB_GROUP=
 QUIET_WORKER_PID=
 SCAN_LANE_PID=
+DUP_OWNER=
+DUP_GROUP=
+DUP_INIT_BASE_PATH=$PATH
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -47,6 +50,8 @@ cleanup_remote_job_fixture() {
     wait "$stall_pid" 2>/dev/null || true
   done
   [ -z "$STALL_JOB_GROUP" ] || kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
+  [ -z "$DUP_GROUP" ] || kill -CONT -- "-$DUP_GROUP" 2>/dev/null || true
+  [ -z "$DUP_OWNER" ] || fm_remote_job_stop_worker_tree "$DUP_OWNER" || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -1513,5 +1518,180 @@ RESTART_SUPERVISOR_PID=
 assert_grep "remote job worker exited 3 times; stopping the supervisor" "$TMP_ROOT/restart-supervisor.err" \
   "the restart guard did not explain why it stopped"
 pass "barely healthy worker failures remain bounded by the restart guard"
+
+# A live lock owner is never duplicated. On a loaded host the owner's heartbeat
+# can age past the probe's bound while the owner still holds the lock and
+# serves, and the start path used to read that as a dead worker and launch
+# another restart supervisor beside it. Stopping the owner's whole group freezes
+# every writer the way a starved host does without ending the lock owner. The
+# fixture runs from its own root so its processes are distinguishable from the
+# other workers this file started.
+DUP_ROOT="$TMP_ROOT/dup-root"
+DUP_HOME="$TMP_ROOT/dup-account"
+DUP_STATE="$TMP_ROOT/dup-state"
+cp -R "$REMOTE_ROOT" "$DUP_ROOT"
+mkdir -p "$DUP_HOME"
+dup_lib() { # <command> [args...]; runs a library call against the fixture state
+  (
+    FM_REMOTE_JOB_STATE_ROOT="$DUP_STATE"
+    "$@"
+  )
+}
+dup_wait_fresh() { # <label>
+  for _ in $(seq 1 100); do
+    dup_lib fm_remote_job_probe "$DUP_HOME" && return 0
+    sleep 0.05
+  done
+  fail "$1"
+}
+dup_worker_groups() {
+  ps -eo pgid=,command= 2>/dev/null \
+    | awk -v worker="$DUP_ROOT/bin/fm-remote-job-worker.sh" '$3 == worker { print $1 }' | sort -u
+}
+# Pause the real worker at a publication rename after it has published lock
+# ownership: its code identity rename, or its public PID rename after the
+# identity. A concurrent start must accept that owner even when its identity is
+# unpublished or worker.pid is absent or still contains an unclean
+# predecessor's PID.
+DUP_INIT_SHIM="$TMP_ROOT/dup-init-shim"
+DUP_INIT_GATE="$TMP_ROOT/dup-init-gate"
+DUP_INIT_REAL_MV=$(command -v mv)
+mkdir -p "$DUP_INIT_SHIM" "$DUP_INIT_GATE"
+cat > "$DUP_INIT_SHIM/mv" <<'SH'
+#!/bin/bash
+for destination; do :; done
+if [ "$destination" = "$FM_TEST_INIT_STATE/$FM_TEST_INIT_TARGET" ]; then
+  : > "$FM_TEST_INIT_GATE/blocked"
+  deadline=$((SECONDS + ${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}))
+  while [ ! -f "$FM_TEST_INIT_GATE/release" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || exit 1
+    /bin/sleep 0.05
+  done
+fi
+exec "$FM_TEST_INIT_REAL_MV" "$@"
+SH
+chmod +x "$DUP_INIT_SHIM/mv"
+dup_initialization_case() { # <public-pid-state> [barrier-file]
+  local public_pid_state=$1 barrier=${2:-worker.pid} repaired groups
+  rm -f -- "$DUP_INIT_GATE/blocked" "$DUP_INIT_GATE/release"
+  dup_lib fm_remote_job_prepare_state "$DUP_HOME" || fail "cannot prepare initialization fixture"
+  if [ "$public_pid_state" = stale ]; then
+    printf '%s\n' "$$" > "$DUP_STATE/worker.pid"
+  fi
+  (
+    # shellcheck disable=SC2030,SC2031 # This PATH override is confined to the initializing worker fixture.
+    export PATH="$DUP_INIT_SHIM:$DUP_INIT_BASE_PATH"
+    export FM_TEST_INIT_STATE="$DUP_STATE" FM_TEST_INIT_GATE="$DUP_INIT_GATE" FM_TEST_INIT_TARGET="$barrier"
+    export FM_TEST_INIT_REAL_MV="$DUP_INIT_REAL_MV"
+    dup_lib fm_remote_job_start_linux_worker "$DUP_ROOT" "$DUP_HOME"
+  ) || fail "the initializing fixture worker did not start"
+  for _ in $(seq 1 200); do
+    [ -f "$DUP_INIT_GATE/blocked" ] && break
+    sleep 0.05
+  done
+  assert_present "$DUP_INIT_GATE/blocked" "the worker did not reach the $barrier publication barrier"
+  DUP_OWNER=$(cat "$DUP_STATE/worker.lock/pid")
+  DUP_GROUP=$(fm_remote_job_process_pgid "$DUP_OWNER") \
+    || fail "cannot resolve the initializing owner's group"
+  dup_lib fm_remote_job_lock_owner_matches_process "$DUP_HOME" \
+    || fail "the initializing fixture lacks verified live ownership"
+  if [ "$barrier" = worker.identity ]; then
+    assert_absent "$DUP_STATE/worker.identity" "the initializing fixture already published its code identity"
+  else
+    dup_lib fm_remote_job_worker_identity_matches "$DUP_ROOT" "$DUP_HOME" \
+      || fail "the initializing fixture has not published its code identity"
+  fi
+  assert_absent "$DUP_STATE/worker.ready" "the initializing fixture published readiness before its PID"
+  if [ "$public_pid_state" = stale ]; then
+    [ "$(cat "$DUP_STATE/worker.pid")" = "$$" ] || fail "the stale public PID was already replaced"
+  else
+    assert_absent "$DUP_STATE/worker.pid" "the initializing fixture already published its PID"
+  fi
+  repaired=$(
+    FM_REMOTE_JOB_STATE_ROOT="$DUP_STATE"
+    FM_REMOTE_JOB_REPAIRED=0
+    fm_remote_job_start_linux_worker "$DUP_ROOT" "$DUP_HOME" || exit 1
+    printf '%s\n' "$FM_REMOTE_JOB_REPAIRED"
+  ) || fail "the start path refused the initializing owner before $barrier publication"
+  groups=$(dup_worker_groups)
+  [ "$repaired" = 0 ] || fail "the start path stopped or duplicated the owner before $barrier publication"
+  [ "$groups" = "$DUP_GROUP" ] || fail "another worker group runs beside the initializing owner"
+  : > "$DUP_INIT_GATE/release"
+  dup_wait_fresh "the initializing owner did not become ready after $barrier publication"
+  [ "$(cat "$DUP_STATE/worker.pid")" = "$DUP_OWNER" ] \
+    || fail "the initializing owner was replaced instead of publishing its PID"
+  dup_lib fm_remote_job_worker_identity_matches "$DUP_ROOT" "$DUP_HOME" \
+    || fail "the initializing owner did not publish its code identity"
+  fm_remote_job_stop_worker_tree "$DUP_OWNER" || fail "the initializing fixture worker did not stop"
+  DUP_OWNER=
+  DUP_GROUP=
+  if [ "$barrier" = worker.identity ]; then
+    pass "a live lock owner is neither stopped nor duplicated before it publishes its code identity"
+  else
+    pass "a live lock owner is never duplicated before $public_pid_state public PID publication"
+  fi
+}
+dup_initialization_case absent
+dup_initialization_case stale
+dup_initialization_case absent worker.identity
+
+dup_lib fm_remote_job_start_linux_worker "$DUP_ROOT" "$DUP_HOME" \
+  || fail "the duplicate-owner fixture worker did not start"
+for _ in $(seq 1 200); do
+  [ -f "$DUP_STATE/worker.ready" ] && [ -f "$DUP_STATE/worker.pid" ] && break
+  sleep 0.05
+done
+assert_present "$DUP_STATE/worker.ready" "the duplicate-owner fixture worker did not become ready"
+DUP_OWNER=$(cat "$DUP_STATE/worker.pid")
+DUP_GROUP=$(fm_remote_job_process_pgid "$DUP_OWNER") \
+  || fail "the duplicate-owner fixture could not resolve its worker group"
+[ "$(cat "$DUP_STATE/worker.lock/pid")" = "$DUP_OWNER" ] \
+  || fail "the duplicate-owner fixture worker does not hold the ownership lock"
+kill -STOP -- "-$DUP_GROUP"
+sleep 0.2
+touch -t 200001010000 "$DUP_STATE/worker.ready"
+! dup_lib fm_remote_job_probe "$DUP_HOME" \
+  || fail "the frozen owner's aged heartbeat still read as ready"
+DUP_REPAIRED=$(
+  FM_REMOTE_JOB_STATE_ROOT="$DUP_STATE"
+  FM_REMOTE_JOB_REPAIRED=0
+  fm_remote_job_start_linux_worker "$DUP_ROOT" "$DUP_HOME" > /dev/null 2>&1 || exit 1
+  printf '%s\n' "$FM_REMOTE_JOB_REPAIRED"
+) || fail "the start path refused a live lock owner with an aged heartbeat"
+DUP_GROUPS=$(dup_worker_groups)
+kill -CONT -- "-$DUP_GROUP"
+[ "$DUP_REPAIRED" = 0 ] \
+  || fail "the start path launched a second supervisor beside a live lock owner with an aged heartbeat"
+[ "$DUP_GROUPS" = "$DUP_GROUP" ] \
+  || fail "a second worker group runs beside the live lock owner: $(printf '%s' "$DUP_GROUPS" | tr '\n' ' ')"
+dup_wait_fresh "the resumed owner did not refresh its heartbeat"
+[ "$(cat "$DUP_STATE/worker.lock/pid")" = "$DUP_OWNER" ] \
+  || fail "the live lock owner lost ownership after an aged heartbeat"
+pass "a live lock owner with an aged heartbeat is never duplicated"
+
+
+# A heartbeat refreshes only the readiness it opened or recreated, so a refresh
+# delayed past a loss of ownership cannot keep a replacement owner's readiness
+# fresh. Replacing the published object stands in for that replacement; the
+# heartbeat then recreates a removed ready file and keeps that one fresh.
+if [ -d /proc/self/fd ]; then
+  printf 'replacement\n' > "$DUP_STATE/.ready.replacement"
+  touch -t 200001010000 "$DUP_STATE/.ready.replacement"
+  mv -f -- "$DUP_STATE/.ready.replacement" "$DUP_STATE/worker.ready"
+  DUP_REPLACED_MTIME=$(fm_remote_job_path_mtime "$DUP_STATE/worker.ready")
+  sleep 2.5
+  [ "$(fm_remote_job_path_mtime "$DUP_STATE/worker.ready")" = "$DUP_REPLACED_MTIME" ] \
+    || fail "the heartbeat refreshed a ready file it did not open or recreate"
+  rm -f -- "$DUP_STATE/worker.ready"
+  dup_wait_fresh "the heartbeat did not recreate a removed ready file"
+  [ "$(cat "$DUP_STATE/worker.ready")" = "$DUP_OWNER" ] \
+    || fail "the recreated ready file does not name the serving process"
+  sleep 2.5
+  dup_wait_fresh "the heartbeat did not keep refreshing the ready file it recreated"
+  pass "the readiness heartbeat refreshes only the ready file it opened or recreated"
+fi
+fm_remote_job_stop_worker_tree "$DUP_OWNER" || fail "the duplicate-owner fixture worker did not stop"
+DUP_OWNER=
+DUP_GROUP=
 
 echo "ALL TESTS PASSED"

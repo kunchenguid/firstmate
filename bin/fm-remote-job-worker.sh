@@ -33,6 +33,10 @@
 # serving process is alive and its recorded lock ownership still verifies.
 # The heartbeat recreates a missing ready file with the serving process's PID
 # and mode 0600 after verifying ownership, without waiting for the serving loop.
+# It never replaces a ready file another process published after that check,
+# and where a Linux fd path is available it refreshes only the ready file it
+# opened or recreated, so a refresh delayed past a loss of ownership cannot
+# refresh or overwrite a replacement owner's readiness.
 # Losing lock ownership stops heartbeat refresh; losing the heartbeat process
 # while still owning the lock stops the serving loop on its next pass.
 # The stale sweep, whose state preparation also re-applies the queue directories' 0700
@@ -112,9 +116,29 @@ worker_write_heartbeat() { # <owner-pid>
   mv -f -- "$tmp" "$ready"
 }
 
+# Bind later refreshes to the ready file open on fd 3 where a Linux fd path
+# reaches it across unlink or replacement; otherwise refresh by pathname.
+worker_heartbeat_bind() { # <file>
+  exec 3< "$1" || return 1
+  if [ -e /proc/self/fd/3 ]; then bound=/proc/self/fd/3; else bound=$ready; fi
+}
+
+# Recreate missing readiness through a no-clobber link, so a ready file another
+# process published after the ownership check is never replaced.
+worker_recreate_heartbeat() { # <owner-pid>
+  local owner=$1 tmp status=0
+  tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.ready.XXXXXX") || return 1
+  { printf '%s\n' "$owner" > "$tmp" && chmod 600 "$tmp" &&
+    worker_heartbeat_bind "$tmp" && ln -- "$tmp" "$ready"; } || status=1
+  rm -f -- "$tmp"
+  return "$status"
+}
+
 worker_heartbeat_loop() { # <account-home> <owner-pid>
-  local account_home=$1 owner=$2 ready owner_state
+  local account_home=$1 owner=$2 ready bound owner_state
   ready=$(fm_remote_job_worker_ready_path)
+  bound=$ready
+  worker_heartbeat_bind "$ready" 2>/dev/null || bound=$ready
   trap 'exit 0' HUP INT TERM
   while kill -0 "$owner" 2>/dev/null &&
     owner_state=$(/bin/ps -p "$owner" -o state= 2>/dev/null) &&
@@ -122,9 +146,9 @@ worker_heartbeat_loop() { # <account-home> <owner-pid>
     fm_remote_job_lock_owner_matches_process "$account_home" &&
     [ "$FM_REMOTE_JOB_OWNER_PID" = "$owner" ]; do
     if [ ! -e "$ready" ] && [ ! -L "$ready" ]; then
-      worker_write_heartbeat "$owner" || exit 1
+      worker_recreate_heartbeat "$owner" || exit 1
     else
-      touch -c -- "$ready" || exit 1
+      touch -c -- "$bound" || exit 1
     fi
     /bin/sleep 1
   done

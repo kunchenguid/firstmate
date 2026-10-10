@@ -91,7 +91,13 @@
 # just killed. fm_remote_job_stop_worker_tree owns that stop and refuses to
 # signal a group whose leader is not itself a worker, so a worker inherited
 # from an older build or from launchd's own session is still stopped safely as
-# a single process. fm_remote_job_root_is_live is the shared predicate for
+# a single process. The start path never launches a supervisor beside a live
+# lock owner whose recorded pid, start time, and command still match: such an
+# owner counts as running whatever its heartbeat age, so a loaded host that
+# delays the heartbeat past the probe's bound cannot pile duplicate supervisors
+# up beside it. Before it publishes worker.pid or its code identity it also
+# counts as running, and is never stopped as stale code until that identity is
+# published. fm_remote_job_root_is_live is the shared predicate for
 # whether a worker's code root still exists; bin/fm-remote-job-worker.sh uses
 # it to stop itself once its root is pruned, and
 # bin/fm-remote-job-reap-orphans.sh uses it to reap workers that were already
@@ -1098,16 +1104,16 @@ fm_remote_job_worker_owned_alive() {
   lock=$(fm_remote_job_worker_lock_path)
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
   [ ! -e "$lock/quarantine" ] && [ ! -L "$lock/quarantine" ] || return 1
+  # A verified live lock owner counts as running before public PID publication
+  # and whatever its heartbeat age: see the header on never duplicating a live
+  # owner. Readiness and code identity are checked separately by the caller.
+  if fm_remote_job_lock_owner_matches_process "$account_home"; then return 0; fi
   pid_file=$(fm_remote_job_worker_pid_path)
   pid=$(fm_remote_job_read_single_line "$pid_file" 64) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   identity_file=$(fm_remote_job_worker_identity_path)
   fm_remote_job_regular_bounded "$identity_file" 256 || return 1
   fm_remote_job_probe "$account_home" || return 1
-  if fm_remote_job_lock_owner_matches_process "$account_home"; then
-    [ "$pid" = "$FM_REMOTE_JOB_OWNER_PID" ] || return 1
-    return 0
-  fi
   [ ! -e "$lock/pid" ] && [ ! -L "$lock/pid" ] &&
     [ ! -e "$lock/start" ] && [ ! -L "$lock/start" ] &&
     [ ! -e "$lock/command" ] && [ ! -L "$lock/command" ] || return 1
@@ -1398,7 +1404,7 @@ fm_remote_job_ensure_launchagent() { # <remote-root> <account-home> <uid>
 }
 
 fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 worker pid
+  local root=$1 account_home=$2 worker pid identity
   worker="$root/bin/fm-remote-job-worker.sh"
   [ -f "$worker" ] && [ ! -L "$worker" ] && [ -x "$worker" ] || {
     FM_REMOTE_JOB_ERROR="remote job worker is not a genuine executable in the configured code root"
@@ -1406,6 +1412,10 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
   }
   fm_remote_job_prepare_state "$account_home" || return 1
   if fm_remote_job_worker_owned_alive "$root" "$account_home"; then
+    # A verified owner that has not published its code identity yet is still
+    # initializing and counts as running; a mismatch acts only once published.
+    identity=$(fm_remote_job_worker_identity_path)
+    if [ ! -e "$identity" ] && [ ! -L "$identity" ]; then return 0; fi
     if fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
     # The owner pid is the serving child; its restart supervisor sits above it
     # and would immediately replace a lone process kill, so stop the whole

@@ -47,12 +47,14 @@ esac
 exec "$FM_TEST_REAL_RMDIR" "$@"
 SH
 # Fault injection keeps the heartbeat process alive but prevents timestamp
-# refresh, so ensure must handle a genuinely stale live owner's readiness.
+# refresh, so ensure must handle a genuinely stale live owner's readiness. The
+# heartbeat may refresh through an fd path bound to the ready file, so match the
+# file rather than its pathname.
 REAL_TOUCH=$(command -v touch)
 cat > "$STUB_BIN/touch" <<'SH'
 #!/bin/bash
 last=${!#}
-if [ "$last" = "$FM_TEST_STATE/worker.ready" ] && [ -f "$FM_TEST_STALE_GATE" ]; then
+if [ "$last" -ef "$FM_TEST_STATE/worker.ready" ] && [ -f "$FM_TEST_STALE_GATE" ]; then
   : > "$FM_TEST_STALE_GATE.observed"
   exit 0
 fi
