@@ -22,6 +22,13 @@
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe; a failed return warns because the lease may still be held.
+#       A "-" seed holds the firstmate repo's Treehouse project lock
+#       (bin/fm-wake-lib.sh's fm_treehouse_project_lock_path) from before the
+#       lease until the leased home, once validated and proved leased to <id> in
+#       the pool state, carries the slot-owner claim naming <id> and this home;
+#       a contended lock refuses before leasing. Rollback re-takes that lock
+#       (waiting up to 30 seconds) to return the home and drop that claim, and
+#       warns and leaves the lease held when it cannot.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -30,6 +37,18 @@
 #       Refuse records that operational consumers cannot parse, unavailable or
 #       unsafe registry files when present, non-absolute or unresolvable homes,
 #       duplicate ids or homes, and nested or overlapping homes.
+#   fm-home-seed.sh claim-slot <id>
+#       Publish, for a local secondmate this home already registers, the
+#       slot-owner claim a "-" seed now writes, so a home seeded before seeding
+#       did is reconciled rather than left naming whichever task used the slot
+#       before it. Under this home's registry lock and then the firstmate repo's
+#       Treehouse project lock, it refuses without writing unless
+#       fm_treehouse_secondmate_slot_proof proves the registered home is a pool
+#       slot of this code root leased to <id>, marked <id>, and bound to this
+#       home as its local parent, and unless the current claim is readable.
+#       The replaced claim is kept at <claim>.prior; a claim already naming <id>
+#       and this home is reported unchanged, so a retry after an interruption
+#       converges. It never returns, resets, or reseeds the slot.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +72,7 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
+  echo "       fm-home-seed.sh claim-slot <id>" >&2
 }
 
 validate_registry_home_text() {
@@ -519,6 +539,9 @@ SEED_ROLLBACK_ACTIVE=0
 SEED_COMMITTED=0
 SEED_REGISTRY_LOCK=
 SEED_REGISTRY_LOCK_HELD=0
+SEED_TREEHOUSE_LOCK=
+SEED_TREEHOUSE_LOCK_HELD=0
+SEED_ID=
 
 seed_registry_lock_release() {
   if [ "$SEED_REGISTRY_LOCK_HELD" -eq 1 ]; then
@@ -527,9 +550,47 @@ seed_registry_lock_release() {
   fi
 }
 
+seed_treehouse_lock_acquire() {
+  SEED_TREEHOUSE_LOCK=$(fm_treehouse_project_lock_path "$FM_ROOT") || {
+    echo "error: cannot resolve the Treehouse project lock for $FM_ROOT; nothing was changed" >&2
+    return 1
+  }
+  fm_lock_try_acquire "$SEED_TREEHOUSE_LOCK" || {
+    echo "error: another Treehouse slot allocation or return is in progress for $FM_ROOT; nothing was changed - retry" >&2
+    return 1
+  }
+  SEED_TREEHOUSE_LOCK_HELD=1
+}
+
+seed_treehouse_lock_release() {
+  if [ "$SEED_TREEHOUSE_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$SEED_TREEHOUSE_LOCK"
+    SEED_TREEHOUSE_LOCK_HELD=0
+  fi
+}
+
 seed_exit_cleanup() {
   seed_rollback
+  seed_treehouse_lock_release
   seed_registry_lock_release
+}
+
+# A leased home that is a pool slot of this code root carries the slot-owner
+# claim naming this secondmate and home (bin/fm-wake-lib.sh owns the claim),
+# published under the project lock only once the pool state records the lease
+# this seed just took. A leased home outside such a pool has no claim to carry.
+seed_claim_leased_slot() {  # <id> <home>
+  local id=$1 home=$2 holder
+  fm_treehouse_pool_slot "$FM_ROOT" "$home" || return 0
+  holder=$(fm_treehouse_slot_lease_holder "$home") || holder=
+  if [ "$holder" != "$id" ]; then
+    echo "error: treehouse leased $home, but its pool state does not record a durable lease held by $id; refusing to seed a home whose ownership cannot be proved" >&2
+    return 1
+  fi
+  fm_treehouse_slot_owner_transfer "$home" "$id" "$(resolved_path "$FM_HOME")" || {
+    echo "error: could not publish the slot-owner claim for $id beside $home; inspect that slot's .fm-slot-owner" >&2
+    return 1
+  }
 }
 SEED_HOME=
 SEED_HOME_ACQUIRED=0
@@ -591,16 +652,30 @@ seed_rollback_target() {
 }
 
 seed_return_treehouse_home() {
-  local home=$1 abs_home
+  local home=$1 abs_home marker='' claimed=0
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
+  if [ "$SEED_TREEHOUSE_LOCK_HELD" -ne 1 ]; then
+    if [ -z "$SEED_TREEHOUSE_LOCK" ] || ! fm_lock_acquire_wait_max "$SEED_TREEHOUSE_LOCK" 30; then
+      echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; the Treehouse project lock stayed held elsewhere, so the lease is still held" >&2
+      return 0
+    fi
+    SEED_TREEHOUSE_LOCK_HELD=1
+  fi
+  # Read before the return, which may remove the checkout the path names; the
+  # claim beside it is this seed's only while it names this secondmate.
+  fm_treehouse_slot_owner_state "$abs_home" "$SEED_ID"
+  if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then
+    marker=$(fm_treehouse_slot_owner_marker "$abs_home") && claimed=1
+  fi
   ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
+  [ "$claimed" -eq 0 ] || rm -f -- "$marker" 2>/dev/null || true
 }
 
 seed_remove_created_home() {
@@ -875,7 +950,9 @@ seed_home() {
     cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
   fi
 
+  SEED_ID=$id
   if [ "$requested_home" = "-" ]; then
+    seed_treehouse_lock_acquire || return 1
     SEED_HOME_ACQUIRED=1
     home=$(acquire_treehouse_home "$id")
     SEED_HOME="$home"
@@ -894,6 +971,10 @@ seed_home() {
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
   validate_existing_parent_binding "$home" || return 1
+  if [ "$SEED_TREEHOUSE_LOCK_HELD" -eq 1 ]; then
+    seed_claim_leased_slot "$id" "$home" || return 1
+    seed_treehouse_lock_release
+  fi
   if [ "$no_projects" -eq 1 ]; then
     refuse_populated_projectless_home "$home" || return 1
     if [ -f "$SEED_PARENT_BRIEF" ]; then
@@ -987,10 +1068,65 @@ seed_home() {
   printf 'home=%s\n' "$home"
 }
 
+claim_slot_exit_cleanup() {
+  seed_treehouse_lock_release
+  seed_registry_lock_release
+}
+
+# The header's claim-slot contract: re-publish a registered local secondmate's
+# slot-owner claim once its persistent ownership is proved again.
+claim_slot() {  # <id>
+  local id=$1 home parent marker
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*) echo "error: invalid secondmate id: $id" >&2; return 1 ;;
+  esac
+  [ -d "$STATE" ] || { echo "error: this home has no state directory: $STATE" >&2; return 1; }
+  SEED_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$SEED_REGISTRY_LOCK" || return 1
+  SEED_REGISTRY_LOCK_HELD=1
+  trap claim_slot_exit_cleanup EXIT
+  validate_registry
+  if ! secondmate_registry_validate_bindings "$REG" resolved_path "$id"; then
+    echo "REFUSED: $SECONDMATE_REGISTRY_ERROR; nothing was changed" >&2
+    return 1
+  fi
+  if [ "$SECONDMATE_REGISTRY_MATCH_REMOTE" -ne 0 ]; then
+    echo "REFUSED: secondmate $id is a remote route; its home has no local Treehouse slot to claim; nothing was changed" >&2
+    return 1
+  fi
+  home=$SECONDMATE_REGISTRY_MATCH_HOME
+  if ! fm_treehouse_pool_slot "$FM_ROOT" "$home"; then
+    echo "REFUSED: secondmate $id's registered home $home is not a Treehouse pool slot of $FM_ROOT, so it has no slot-owner claim to reconcile; nothing was changed" >&2
+    return 1
+  fi
+  seed_treehouse_lock_acquire || return 1
+  if ! fm_treehouse_secondmate_slot_proof "$FM_ROOT" "$home"; then
+    echo "REFUSED: cannot prove $home is secondmate $id's persistent home: $FM_TREEHOUSE_SECONDMATE_SLOT_ERROR; nothing was changed" >&2
+    return 1
+  fi
+  parent=$(resolved_path "$FM_HOME")
+  if [ "$FM_TREEHOUSE_SECONDMATE_SLOT_ID" != "$id" ] \
+     || [ "$FM_TREEHOUSE_SECONDMATE_SLOT_PARENT" != "$parent" ]; then
+    echo "REFUSED: $home is proved to be secondmate $FM_TREEHOUSE_SECONDMATE_SLOT_ID's home under parent $FM_TREEHOUSE_SECONDMATE_SLOT_PARENT, not $id's under this home ($parent); nothing was changed" >&2
+    return 1
+  fi
+  marker=$(fm_treehouse_slot_owner_marker "$home")
+  if ! fm_treehouse_slot_owner_transfer "$home" "$id" "$parent"; then
+    echo "REFUSED: the slot-owner claim at $marker cannot be read, or its prior claim cannot be kept at $marker.prior; the claim was not replaced - inspect both paths" >&2
+    return 1
+  fi
+  printf 'slot-owner claim %s: %s names task=%s home=%s\n' \
+    "$FM_TREEHOUSE_SLOT_OWNER_TRANSFER" "$marker" "$id" "$parent"
+}
+
 case "${1:-}" in
   validate)
     [ $# -eq 1 ] || { usage; exit 1; }
     validate_registry
+    ;;
+  claim-slot)
+    [ $# -eq 2 ] || { usage; exit 1; }
+    claim_slot "$2"
     ;;
   -h|--help|'')
     usage
