@@ -341,6 +341,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/lane-placement.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/process-event-extension/file-signal.mjs",
       "audience": "operator-example"
     },
