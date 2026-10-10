@@ -2,7 +2,7 @@
 # fm-bearings-board.sh - build and arm the /bearings lavish fleet board.
 #
 # The board is the captain-facing interactive surface of /bearings lavish: the
-# shipped template (.agents/skills/bearings/assets/board-template.html) plus one
+# selected template (shipped by default) plus one
 # injected fm-bearings-board.v1 JSON payload. This script owns the mechanics so
 # the invoking agent's per-run work stays "compose the JSON, run build" - the
 # agent never authors board UI at invocation time.
@@ -14,7 +14,7 @@
 # build      Validate the payload, drop the Captain's Call cards whose subject
 #            already landed, give every surviving decision card the standard
 #            reconcile choice, and inject the result into a fresh copy of the
-#            shipped template at the stable board path. Establish the Lavish
+#            selected template at the stable board path. Establish the Lavish
 #            session on that board and PROVE it is live BEFORE binding and
 #            arming its answer source, so a registered poll can never race a
 #            session that does not exist or attach to one that has ended.
@@ -85,14 +85,30 @@
 # every `<` in the compact JSON as the \u003c string escape, so a payload string
 # containing "</script>" can never terminate the data block early.
 #
-# FM_BEARINGS_BOARD_TEMPLATE overrides the shipped template path (tests only).
+# Template selection for build: FM_BEARINGS_BOARD_TEMPLATE (tests only), then
+# bearings-board-template in the config directory
+# (${FM_CONFIG_OVERRIDE:-$FM_HOME/config}, like every other config reader),
+# then the shipped .agents/skills/bearings/assets/board-template.html. The
+# optional config is a readable regular file containing exactly one non-empty
+# path line (a final newline is optional); relative paths resolve against
+# FM_HOME even when FM_CONFIG_OVERRIDE selects the config directory, without
+# shell expansion. It is home-local, gitignored, and not inherited by
+# secondmates. An absent config file, or an absent $FM_HOME/config, means the
+# shipped template; an explicitly selected FM_CONFIG_OVERRIDE that is not a
+# readable directory refuses instead, naming the variable and the resolved
+# directory, so an unusable override can never silently publish the shipped
+# template.
+# Selected templates must be readable regular files, not symlinks, with exactly
+# one data slot. Invalid configuration or templates refuse before publication;
+# configured-template errors name both the config file and resolved path.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 
-TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
+TEMPLATE=
+TEMPLATE_SOURCE=
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
 BOARD_SCHEMA=fm-bearings-board.v1
 
@@ -107,6 +123,35 @@ usage() {
 fail() {
   printf 'fm-bearings-board: %s\n' "$*" >&2
   exit 1
+}
+
+resolve_template() {
+  local config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" config configured
+  config="$config_dir/bearings-board-template"
+  TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-}"
+  TEMPLATE_SOURCE=
+  if [ -n "$TEMPLATE" ]; then
+    return 0
+  fi
+  if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+    [ -d "$config_dir" ] && [ -r "$config_dir" ] && [ -x "$config_dir" ] \
+      || fail "FM_CONFIG_OVERRIDE must name a readable directory (resolved config directory: $config_dir)"
+  fi
+  TEMPLATE="$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html"
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    [ -f "$config" ] && [ -r "$config" ] \
+      || fail "$config must be a readable regular file (resolved template path: unavailable)"
+    configured=$(awk '
+      NR != 1 || $0 !~ /[^[:space:]]/ { invalid = 1 }
+      { value = $0 }
+      END { if (NR != 1 || invalid) exit 1; print value }
+    ' "$config") || fail "$config must contain exactly one non-empty path line (resolved template path: unavailable)"
+    case "$configured" in
+      /*) TEMPLATE=$configured ;;
+      *) TEMPLATE="$FM_HOME/$configured" ;;
+    esac
+    TEMPLATE_SOURCE=" (configured by $config)"
+  fi
 }
 
 board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
@@ -364,9 +409,11 @@ command_build() {
   [ -f "$data" ] || fail "board data does not exist: $data"
   jq empty "$data" 2>/dev/null || fail "board data is not valid JSON: $data"
   validate_payload "$data" || fail "board data does not satisfy $BOARD_SCHEMA: $data"
-  [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] || fail "board template is missing: $TEMPLATE"
+  resolve_template
+  [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] && [ -r "$TEMPLATE" ] \
+    || fail "board template must be a readable regular file, not a symlink: $TEMPLATE$TEMPLATE_SOURCE"
   [ "$(grep -cxF "$PLACEHOLDER" "$TEMPLATE")" -eq 1 ] \
-    || fail "board template does not carry exactly one data slot: $TEMPLATE"
+    || fail "board template does not carry exactly one data slot: $TEMPLATE$TEMPLATE_SOURCE"
 
   effective=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-payload.XXXXXX") \
     || fail "cannot stage the board payload"
@@ -385,11 +432,11 @@ command_build() {
   tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") || fail "cannot stage the board"
   if ! BOARD_JSON="$json" perl -pe "s/^\\Q$PLACEHOLDER\\E\$/\$ENV{BOARD_JSON}/" "$TEMPLATE" > "$tmp"; then
     rm -f -- "$tmp"
-    fail "cannot inject the board data"
+    fail "cannot inject the board data: $TEMPLATE$TEMPLATE_SOURCE"
   fi
   if grep -qxF "$PLACEHOLDER" "$tmp"; then
     rm -f -- "$tmp"
-    fail "the board data slot survived injection"
+    fail "the board data slot survived injection: $TEMPLATE$TEMPLATE_SOURCE"
   fi
   # Round-trip the injected payload back out of the built page, so a board that
   # would fail to parse in the browser fails here instead.
@@ -397,7 +444,7 @@ command_build() {
     | sed '1d;$d')
   if ! printf '%s\n' "$extracted" | jq -e --arg schema "$BOARD_SCHEMA" '.schema == $schema' >/dev/null 2>&1; then
     rm -f -- "$tmp"
-    fail "the built board does not carry a readable $BOARD_SCHEMA payload"
+    fail "the built board does not carry a readable $BOARD_SCHEMA payload: $TEMPLATE$TEMPLATE_SOURCE"
   fi
   if ! { chmod 0600 "$tmp" && mv -f -- "$tmp" "$board"; }; then
     rm -f -- "$tmp"
