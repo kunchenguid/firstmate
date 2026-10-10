@@ -487,18 +487,18 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # fix bugs, or work on your code` as dim text after its `❭` glyph (verified
 # live, devin 3000.11.1). omp 18.8.7 right-aligns a learn-once hint on its
 # `╰─` prompt row until the feature has been used three times: the keybinding
-# cell in accent colour, then the label in dim italics (`󰘶 󰌒 to change
-# thinking effort` until the conversation starts, `<key> to see N running
-# agents` while subagents run; verified live through tmux, both hints read
-# from omp's composer-hints table). Ghost stripping removes the dim label but
-# keeps the bright key cell, so the key cell is judged as the remnant of the
-# anchored hint. Only the captured nerd pair `󰘶 󰌒` and a single-token key
-# cell are accepted: a free second token would let one typed word before a
-# one-token key cell read as the hint, and a false `empty` is the dangerous
-# direction.
+# cell in accent colour, then the label in dim italics. Ghost stripping
+# removes the dim label but keeps the bright key cell, so the key cell is
+# judged as the remnant of the anchored hint. Only the one rendering captured
+# live through tmux is accepted, byte for byte: the nerd pair `󰘶 󰌒` before
+# `to change thinking effort`. omp's composer-hints table lists other hints
+# (`<key> to see N running agents` while subagents run), but no key cell for
+# them has been captured, and a free key-cell token would let a typed word
+# read as the hint; a false `empty` is the dangerous direction, so an
+# uncaptured hint degrades to `pending`/`unknown` until it is captured.
 # FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^(󰘶 󰌒|[^[:space:]]+)[[:space:]]+to change thinking effort$|^[^[:space:]]+[[:space:]]+to see [0-9]+ running agents?$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^󰘶 󰌒 to change thinking effort$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
