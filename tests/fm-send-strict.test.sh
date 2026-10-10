@@ -231,8 +231,41 @@ test_key_send_exit_status_follows_delivery() {
   pass "fm-send --key: exit status follows delivery, and an undelivered key never reports success"
 }
 
+test_herdr_send_refuses_during_tab_close() {
+  local dir fb home err log lock holder rc i
+  dir="$TMP_ROOT/close-lock"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home close-lock)
+  err="$dir/send.err"; log="$dir/herdr.log"; : > "$log"
+  fm_write_meta "$home/state/worker.meta" \
+    "window=lab:w:p" "backend=herdr" "harness=pi" "kind=scout"
+  lock="$home/state/.control-worker.lock"
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 10
+  ) &
+  holder=$!
+  i=0
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || fail 'could not stage closing task lock'
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_HERDR_LOG="$log" FM_TMUX_LOG="$dir/tmux.log" FM_SEND_SETTLE=0 \
+    "$SEND" worker --key Enter >/dev/null 2>"$err"; rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail 'send succeeded during tab close'
+  assert_contains "$(cat "$err")" 'lifecycle action is already running' \
+    'send reports a closing task'
+  [ ! -s "$log" ] || fail 'send touched Herdr during tab close'
+  pass 'fm-send refuses Herdr delivery while tab close owns the task lock'
+}
+
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
+test_herdr_send_refuses_during_tab_close
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
