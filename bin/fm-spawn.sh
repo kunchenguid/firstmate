@@ -3356,8 +3356,7 @@ if [ "$RELAUNCH" -eq 0 ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } &&
   VALIDATED_BRIEF=$(mktemp "$BRIEF_DIR_REAL/.validated-brief.XXXXXX") || exit 1
   if ! bash "$SCRIPT_DIR/fm-dispatch-validation.sh" \
     "$CONFIG/dispatch-validator" "$VALIDATED_BRIEF" "$FM_HOME" "$STATE" "$DATA" "$CONFIG" \
-    "$ID" "$KIND" "$PROJ_ABS_REAL" "${MODE:-}" "${YOLO:-}" "${BRANCH:-}" "${BASE_BRANCH:-}" \
-    "$HARNESS" "$MODEL" "$EFFORT" "$BACKEND" "${RAW_COMMAND:-}" "$SOURCE_BRIEF" "$BRIEF_REAL"; then
+    "$ID" "$KIND" "$PROJ_ABS_REAL" "${MODE:-}" "${BASE_BRANCH:-}" "$BRIEF_REAL"; then
     rm -f -- "$VALIDATED_BRIEF"
     exit 1
   fi

@@ -1088,8 +1088,8 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 
 An optional local, gitignored `config/dispatch-validator` adds synchronous home policy to fresh ship and scout dispatches after brief and delivery validation, before endpoint or worktree allocation.
 The file belongs to the effective home's config directory, including `FM_CONFIG_OVERRIDE`, and is not inherited into secondmate homes.
-With no file present, spawn behavior and dependencies are unchanged.
-A present file must be a readable executable regular file or the dispatch refuses.
+Only a truly absent path leaves spawn behavior and dependencies unchanged.
+Any present path must be a readable executable regular file; a non-executable or unreadable file or a dangling symlink refuses every fresh ship or scout dispatch.
 Configured validation requires Python 3, and a refusal leaves the backlog queued without allocating a worker.
 The earlier capacity check and advisory `fm-guard.sh` keep their existing behavior.
 Each batch pair is checked independently, including when `FM_SPAWN_NO_GUARD=1`.

@@ -174,17 +174,12 @@ test_absent_and_home_scope() {
 
 test_typed_allow_and_snapshot() {
   local kind out id snapshot
-  for kind in modern legacy scout raw base; do
+  for kind in ship scout raw base; do
     id=task
     make_case "allow-$kind" "$id"
     validator allow
-    if [ "$kind" = legacy ]; then
-      printf '# Task\n[captain] legacy "quoted" words\ncontinued words\n' > "$HOME_DIR/data/$id/brief.md"
-    else
-      fm_test_spawn_brief "$HOME_DIR" "$id" $'Use "quotes", a backslash \\ and\nmore words.\n```markdown\n## Firstmate spec\nnot a real heading\n```\n    ## Firstmate spec\nnot an ATX heading'
-    fi
     if [ "$kind" = base ]; then
-      printf '\n# Setup\nBase branch: main\n' >> "$HOME_DIR/data/$id/brief.md"
+      printf '\n# Setup\nYou are in a disposable git worktree of project, at a detached HEAD on a clean copy of its base branch.\nBase branch: main\n' >> "$HOME_DIR/data/$id/brief.md"
     fi
     case "$kind" in
       scout) out=$(run_spawn "$id" "$PROJ_DIR" codex --scout --model model-x --effort high) || fail "$out" ;;
@@ -201,6 +196,8 @@ case, home, project, snapshot, kind = sys.argv[1:]
 r = json.loads(pathlib.Path(case, 'requests').read_text())
 digest = r.pop('request_sha256')
 assert digest == hashlib.sha256(json.dumps(r, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+assert set(r) == {'schema_version', 'home', 'state_dir', 'data_dir', 'config_dir', 'task_id', 'kind',
+                  'project', 'delivery_mode', 'base_branch', 'relaunch', 'effective_brief_path', 'brief_sha256'}
 assert r['schema_version'] == 1 and r['relaunch'] is False
 assert r['home'] == str(pathlib.Path(home).resolve()) and r['task_id'] == 'task'
 assert r['state_dir'] == str(pathlib.Path(home, 'state').resolve())
@@ -209,38 +206,19 @@ assert r['config_dir'] == str(pathlib.Path(home, 'config'))
 assert r['project'] == str(pathlib.Path(project).resolve())
 assert r['kind'] == ('scout' if kind == 'scout' else 'ship')
 assert r['delivery_mode'] == (None if kind == 'scout' else 'no-mistakes')
-assert r['yolo'] == (None if kind == 'scout' else 'off')
-assert r['branch'] == (None if kind == 'scout' else 'fm/task')
 assert r['base_branch'] == ('main' if kind == 'base' else None)
 meta = dict(line.split('=', 1) for line in pathlib.Path(home, 'state/task.meta').read_text().splitlines() if '=' in line)
 assert meta['kind'] == r['kind'] and meta['project'] == r['project']
-assert meta.get('mode') == r['delivery_mode'] and meta.get('yolo') == r['yolo']
-assert meta.get('branch') == r['branch'] and meta.get('base_branch') == r['base_branch']
-assert meta.get('backend', 'tmux') == r['dispatch']['backend']
-assert meta['harness'] == r['dispatch'].get('harness', 'codex')
-assert meta['model'] == (r['dispatch'].get('model') or 'default')
-assert meta['effort'] == (r['dispatch'].get('effort') or 'default')
-assert r['source_brief_path'] == str(pathlib.Path(home, 'data/task/brief.md'))
+assert meta.get('mode') == r['delivery_mode'] and meta.get('base_branch') == r['base_branch']
 assert r['effective_brief_path'] == str(pathlib.Path(home, 'data/task/launch-brief.md').resolve())
 accepted = pathlib.Path(snapshot).read_bytes()
 assert r['brief_sha256'] == hashlib.sha256(accepted).hexdigest()
-assert r['effective_brief_text'].encode() == accepted
 assert os.stat(snapshot).st_mode & 0o777 == 0o400
 assert snapshot in pathlib.Path(case, 'launch').read_text() or kind == 'raw'
-if kind == 'raw':
-    assert r['dispatch'] == dict(type='raw', command='codex --help', backend='tmux')
-else:
-    assert r['dispatch'] == dict(type='harness', harness='codex', model='model-x', effort='high', backend='tmux')
-if kind == 'legacy':
-    assert '[captain] legacy "quoted" words\ncontinued words' in r['source_task']
-    assert r['captain_intent'] == '' and r['firstmate_spec'] == ''
-else:
-    assert 'not a real heading' in r['captain_intent']
-    assert r['firstmate_spec'] == 'Exercise the spawn behavior under test.'
 assert pathlib.Path(r['effective_brief_path']).read_bytes() == accepted
 PY
   done
-  pass 'T2 typed modern/legacy/scout/raw allow binds request and delivered snapshot'
+  pass 'T2 typed ship/scout/raw/base allow binds request and delivered snapshot'
 }
 
 test_refusals_and_retry() {

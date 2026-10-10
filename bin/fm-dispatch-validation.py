@@ -30,42 +30,14 @@ def unique_object(pairs):
 
 
 def main():
-    (scripts, validator, snapshot, home, state, data, config, task_id, kind,
-     project, mode, yolo, branch, base, harness, model, effort, backend,
-     raw, source, effective) = sys.argv[1:]
+    (validator, snapshot, home, state, data, config, task_id, kind, project,
+     mode, base, effective) = sys.argv[1:]
     brief = Path(effective).read_bytes()
-    source_bytes = Path(source).read_bytes()
-    # Give the existing parser a stable source rather than a second Markdown
-    # implementation. This file is private to this process and removed on exit.
-    with tempfile.TemporaryFile() as source_file:
-        source_file.write(source_bytes)
-        source_file.flush()
-
-        def section(heading, task=False):
-            source_file.seek(0)
-            reader = "fm_brief_task_heading_body" if task else "fm_brief_heading_body"
-            result = subprocess.run(
-                ["bash", "-c", '. "$1/fm-brief-heading-lib.sh"; "$2" /dev/stdin "$3"',
-                 "dispatch-sections", scripts, reader, heading], stdin=source_file,
-                stdout=subprocess.PIPE, check=True)
-            return result.stdout.decode("utf-8").rstrip("\n")
-
-        request = dict(
-            schema_version=1, home=home, state_dir=state, data_dir=data,
-            config_dir=config, task_id=task_id, kind=kind, project=project,
-            delivery_mode=mode or None, yolo=yolo or None, branch=branch or None,
-            base_branch=base or None, relaunch=False,
-            source_brief_path=source, source_task=section("# Task"),
-            captain_intent=section("## Captain's intent", True),
-            firstmate_spec=section("## Firstmate spec", True),
-            effective_brief_path=effective, effective_brief_text=brief.decode("utf-8"),
-            brief_sha256=sha256(brief))
-    if raw:
-        request["dispatch"] = dict(type="raw", command=raw, backend=backend)
-    else:
-        request["dispatch"] = dict(type="harness", harness=harness,
-                                   model=model or None, effort=effort or None,
-                                   backend=backend)
+    request = dict(
+        schema_version=1, home=home, state_dir=state, data_dir=data,
+        config_dir=config, task_id=task_id, kind=kind, project=project,
+        delivery_mode=mode or None, base_branch=base or None, relaunch=False,
+        effective_brief_path=effective, brief_sha256=sha256(brief))
     request["request_sha256"] = sha256(encode(request))
     # A file for stdin avoids blocking on a validator that never reads its input.
     with tempfile.TemporaryFile() as stdin:
