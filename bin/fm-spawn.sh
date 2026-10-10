@@ -96,7 +96,10 @@
 #   OpenCode has no interactive effort flag, so its effort is written as the
 #   build agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
-#   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   verified on opencode 1.18.32); the variant is written only for an effort the
+#   model actually exposes - from the verified anthropic/openai lists or from the
+#   installed catalog for every other provider - and an unexposed effort or
+#   unresolved model is omitted from the launch but still recorded in task meta.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -2672,6 +2675,42 @@ relaunch_resume_args() {  # <harness> <backend> <target>
   printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
 }
 
+# Read one model's exposed variants from OpenCode's own catalog.
+#
+# `opencode models <provider> --verbose` prints, per model of that provider, one
+# bare "provider/model" line followed by a metadata JSON object whose `variants`
+# map names every variant the installed catalog exposes for that model.
+# The interactive `opencode --prompt` launch has no --variant flag, so a resolved
+# effort can only ride the launch's OPENCODE_CONFIG_CONTENT JSON as the build
+# agent's variant; OpenCode refuses model resolution for a variant the model does
+# not expose, so a variant is written only when this read proves the model lists
+# it (record-and-omit otherwise, as codex and grok do). The read is best-effort:
+# an absent `opencode`, a failed or slow listing, and a model missing from the
+# listing all print nothing, and the caller then omits the variant.
+opencode_model_variants() { # <provider/model>
+  local model=$1 provider block bound=${FM_OPENCODE_MODELS_TIMEOUT:-15}
+  provider=${model%%/*}
+  case "$bound" in ''|*[!0-9]*|0*) bound=15 ;; esac
+  command -v opencode >/dev/null 2>&1 || return 0
+  block=$(fm_run_timed "$bound" opencode models "$provider" --verbose < /dev/null 2>/dev/null |
+    awk -v model="$model" '
+      $0 == model { grab = 1; next }
+      grab && $0 ~ /^[A-Za-z0-9][A-Za-z0-9._+-]*\// { exit }
+      grab { print }
+    ') || return 0
+  [ -n "$block" ] || return 0
+  printf '%s' "$block" | jq -r '.variants // {} | keys[]?' 2>/dev/null || true
+}
+
+# True when the OpenCode catalog lists <variant> for <provider/model>.
+opencode_model_has_variant() { # <provider/model> <variant>
+  local variant=$2 listed
+  while IFS= read -r listed; do
+    [ "$listed" = "$variant" ] && return 0
+  done < <(opencode_model_variants "$1")
+  return 1
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
@@ -2746,20 +2785,23 @@ effort_flag_for_harness() {
     # model)", so the effort rides the OPENCODE_CONFIG_CONTENT JSON the launch
     # already writes: the default build agent is pinned to the resolved model
     # and the effort named as its variant, which OpenCode resolves against that
-    # model's own variant list. Those lists are per-provider (anthropic/* expose
-    # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
-    # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
-    # permission-only launch and omits the variant (record-and-omit, as codex
-    # and grok do). Without a resolved model the variant has nothing to key to
-    # and is likewise omitted. The fragment lands inside the launch's
-    # single-quoted assignment, so a literal quote in the model id must close and
-    # reopen that quoting.
+    # model's own variant list. The anthropic and openai families keep their
+    # verified lists (anthropic/* expose high|max, openai/* expose
+    # low|medium|high|xhigh); every other provider is proven against the
+    # installed catalog through opencode_model_has_variant, so a model that does
+    # not expose the effort keeps the permission-only launch and omits the
+    # variant (record-and-omit, as codex and grok do). Without a resolved model
+    # the variant has nothing to key to and is likewise omitted. The fragment
+    # lands inside the launch's single-quoted assignment, so a literal quote in
+    # the model id must close and reopen that quoting.
     [ -n "$model" ] && [ "$model" != default ] || return 0
     case "${model%%/*}:$effort" in
     anthropic:high | anthropic:max) ;;
     openai:low | openai:medium | openai:high | openai:xhigh) ;;
-    *) return 0 ;;
+    # The verified anthropic and openai lists stay authoritative: an effort
+    # outside them is omitted even if a newer catalog entry would expose it.
+    anthropic:* | openai:*) return 0 ;;
+    *) opencode_model_has_variant "$model" "$effort" || return 0 ;;
     esac
     local model_json
     model_json=$(json_escape "$model")

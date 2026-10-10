@@ -1080,7 +1080,11 @@ crew_dispatch_validate() {
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "rovo" then (["low","medium","high","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
+      # OpenCode exposes a per-model variant list from its installed catalog, so
+      # an opencode effort cannot be judged statically here. bin/fm-spawn.sh
+      # checks it against that catalog at launch and omits an effort the model
+      # does not expose (record-and-omit), so any effort string is accepted here.
+      elif $h == "kimi" or $h == "cursor" then false
       else true
       end;
     def profiles($value):

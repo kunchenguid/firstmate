@@ -37,9 +37,20 @@ SH
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
+  # GNU-timeout-shaped stub: drop the -k/--kill-after option and its value, then
+  # the duration, and run the command so fm_run_timed's bounded probes work.
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
-shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+  -k | --kill-after) shift 2 ;;
+  -*) shift ;;
+  *)
+    shift
+    break
+    ;;
+  esac
+done
 exec "$@"
 SH
   cat > "$fakebin/cursor-agent" <<'SH'
@@ -50,7 +61,17 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  # The OpenCode variant lookup reads `opencode models <provider> --verbose`.
+  # The stub replays a fixture catalog and can simulate a failed probe.
+  cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = models ]; then
+  [ "${FM_FAKE_OPENCODE_MODELS_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_OPENCODE_MODELS_STATUS}"
+  printf '%s\n' "${FM_FAKE_OPENCODE_MODELS:-}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/opencode"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -114,6 +135,8 @@ run_spawn() {
     FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_FAKE_OPENCODE_MODELS="${FM_TEST_OPENCODE_MODELS:-}" \
+    FM_FAKE_OPENCODE_MODELS_STATUS="${FM_TEST_OPENCODE_MODELS_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
@@ -820,6 +843,114 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
     "opencode must keep the permission-only config when the model family lacks the effort"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
   pass "opencode omits the variant for an effort outside the model family's list"
+}
+
+test_opencode_emits_variant_for_catalog_model_effort() {
+  local rec id out status launch fixture
+  id=profile-opencode-catalog-z7e
+  rec=$(make_spawn_case profile-opencode-catalog opencode "$id")
+  read_case_record "$rec"
+
+  fixture=$(cat <<'JSON'
+opencode-go/deepseek-v4.1-flash
+{
+  "variants": {
+    "low": {},
+    "high": {},
+    "max": {}
+  }
+}
+JSON
+)
+  FM_TEST_OPENCODE_MODELS="$fixture"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model opencode-go/deepseek-v4.1-flash --effort high)
+  status=$?
+  unset FM_TEST_OPENCODE_MODELS
+  expect_code 0 "$status" "opencode spawn with a catalog-backed effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode-go/deepseek-v4.1-flash high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"opencode-go/deepseek-v4.1-flash\",\"variant\":\"high\"}}}' opencode --model 'opencode-go/deepseek-v4.1-flash' --prompt" \
+    "opencode did not write a catalog-backed effort as the build agent's variant"
+  pass "opencode writes the variant for an effort its installed catalog lists"
+}
+
+test_opencode_omits_variant_when_catalog_model_lacks_effort() {
+  local rec id out status launch fixture
+  id=profile-opencode-nohigh-z7f
+  rec=$(make_spawn_case profile-opencode-nohigh opencode "$id")
+  read_case_record "$rec"
+
+  fixture=$(cat <<'JSON'
+opencode-go/qwen3.8-flash
+{
+  "variants": {
+    "low": {},
+    "medium": {},
+    "xhigh": {}
+  }
+}
+JSON
+)
+  FM_TEST_OPENCODE_MODELS="$fixture"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model opencode-go/qwen3.8-flash --effort high)
+  status=$?
+  unset FM_TEST_OPENCODE_MODELS
+  expect_code 0 "$status" "opencode spawn with a catalog model that lacks high should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode-go/qwen3.8-flash high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'opencode-go/qwen3.8-flash' --prompt" \
+    "opencode must keep the permission-only config when the catalog model lacks the effort"
+  assert_not_contains "$launch" '"variant"' "opencode must omit a variant the catalog model does not list"
+  pass "opencode omits the variant when its installed catalog lacks the effort"
+}
+
+test_opencode_omits_variant_for_catalog_model_without_variants() {
+  local rec id out status launch fixture
+  id=profile-opencode-novariants-z7g
+  rec=$(make_spawn_case profile-opencode-novariants opencode "$id")
+  read_case_record "$rec"
+
+  fixture=$(cat <<'JSON'
+opencode-go/mimo-v2.6-pro
+{
+  "variants": {}
+}
+JSON
+)
+  FM_TEST_OPENCODE_MODELS="$fixture"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model opencode-go/mimo-v2.6-pro --effort high)
+  status=$?
+  unset FM_TEST_OPENCODE_MODELS
+  expect_code 0 "$status" "opencode spawn with a model that exposes no variants should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode-go/mimo-v2.6-pro high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'opencode-go/mimo-v2.6-pro' --prompt" \
+    "opencode must keep the permission-only config when the model exposes no variants"
+  assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model exposes no variants"
+  pass "opencode omits the variant for a catalog model with no variants"
+}
+
+test_opencode_failed_catalog_probe_keeps_permission_only() {
+  local rec id out status launch
+  id=profile-opencode-probefail-z7h
+  rec=$(make_spawn_case profile-opencode-probefail opencode "$id")
+  read_case_record "$rec"
+
+  FM_TEST_OPENCODE_MODELS_STATUS=124
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model opencode-go/deepseek-v4.1-flash --effort high)
+  status=$?
+  unset FM_TEST_OPENCODE_MODELS_STATUS
+  expect_code 0 "$status" "opencode spawn should keep the permission-only launch when the catalog probe fails"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode-go/deepseek-v4.1-flash high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'opencode-go/deepseek-v4.1-flash' --prompt" \
+    "a failed catalog probe must keep the permission-only launch"
+  assert_not_contains "$launch" '"variant"' "a failed catalog probe must not write a variant"
+  pass "opencode omits the variant when the catalog probe fails"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -2217,6 +2348,10 @@ test_opencode_threads_model_and_effort_variant
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
 test_opencode_omits_variant_when_model_family_lacks_effort
+test_opencode_emits_variant_for_catalog_model_effort
+test_opencode_omits_variant_when_catalog_model_lacks_effort
+test_opencode_omits_variant_for_catalog_model_without_variants
+test_opencode_failed_catalog_probe_keeps_permission_only
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
