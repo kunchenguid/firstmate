@@ -382,6 +382,81 @@ SH
   pass "a compound raw launch-command still starts its agent with the compact-adviser switch on"
 }
 
+# A native Herdr session restore resumes the agent with `claude --resume` in a
+# fresh pane shell, where neither the pane export nor the launch command's own
+# assignment exists. Claude applies the "env" of a project's settings.local.json
+# to its own process on every start, so that file is the one carrier a resume
+# cannot lose. Read it the way Claude does: as JSON, not as text.
+settings_switch() {  # <settings-file>
+  jq -r '.env.COMPACT_ADVISER_DISABLE // "unset"' "$1"
+}
+
+test_claude_worktree_settings_carry_the_switch() {
+  local rec out status settings
+  rec=$(make_case claude-ship claude claude-ship-a1)
+  read_case "$rec"
+  out=$(run_case_spawn claude-ship-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "claude ship spawn should succeed: $out"
+  settings="$WT_DIR/.claude/settings.local.json"
+  assert_equals 1 "$(settings_switch "$settings")" \
+    "a claude worker's settings.local.json must carry the switch so a resumed session still has it"
+  assert_equals Stop "$(jq -r '.hooks | keys[] | select(. == "Stop")' "$settings")" \
+    "the switch must sit beside the busy-state hooks, not replace them"
+  [ -z "$(git -C "$WT_DIR" status --porcelain -- .claude)" ] \
+    || fail "the settings file must stay out of git's view"
+  pass "a claude worker's settings carry the compact-adviser switch for resumed sessions"
+}
+
+make_claude_secondmate_home() {  # <case-dir> <id>
+  local sm="$1/secondmate-home"
+  mkdir -p "$sm"
+  fm_git_init_commit "$sm"
+  mkdir -p "$sm/bin" "$sm/data" "$sm/state" "$sm/config" "$sm/projects"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf '%s\n' "$2" > "$sm/.fm-secondmate-home"
+  printf 'charter for %s\n' "$2" > "$sm/data/charter.md"
+  printf '%s\n' "$sm"
+}
+
+test_claude_secondmate_settings_carry_the_switch() {
+  local rec sm out status settings
+  rec=$(make_case claude-sm claude claude-sm-a1)
+  read_case "$rec"
+  sm=$(make_claude_secondmate_home "$CASE_DIR" claude-sm-a1)
+  out=$(FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" FM_FAKE_PANE_LOG="$PANE_LOG" \
+    fm_test_run_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" claude-sm-a1 "$sm" claude --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn should succeed: $out"
+  settings="$sm/.claude/settings.local.json"
+  assert_equals 1 "$(settings_switch "$settings")" \
+    "a claude secondmate home must carry the switch so a restart that resumes it keeps the adviser off"
+  [ -z "$(git -C "$sm" status --porcelain -- .claude)" ] \
+    || fail "the secondmate settings file must stay out of git's view"
+  pass "a claude secondmate's settings carry the compact-adviser switch for resumed sessions"
+}
+
+test_claude_secondmate_settings_merge_existing_file() {
+  local rec sm out status settings
+  rec=$(make_case claude-sm-merge claude claude-sm-merge-a1)
+  read_case "$rec"
+  sm=$(make_claude_secondmate_home "$CASE_DIR" claude-sm-merge-a1)
+  mkdir -p "$sm/.claude"
+  printf '%s\n' '{"autoCompactWindow":120000,"env":{"KEEP_ME":"yes"}}' > "$sm/.claude/settings.local.json"
+  out=$(FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" FM_FAKE_PANE_LOG="$PANE_LOG" \
+    fm_test_run_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" claude-sm-merge-a1 "$sm" claude --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn over an existing settings file should succeed: $out"
+  settings="$sm/.claude/settings.local.json"
+  assert_equals 1 "$(settings_switch "$settings")" \
+    "the switch must be added to an existing settings file"
+  assert_equals yes "$(jq -r '.env.KEEP_ME' "$settings")" \
+    "an existing env entry must survive the merge"
+  assert_equals 120000 "$(jq -r '.autoCompactWindow' "$settings")" \
+    "an existing setting must survive the merge"
+  pass "a claude secondmate's existing settings keep their entries when the switch is added"
+}
+
 test_ship_allowlist_absent
 test_ship_allowlist_enabled
 test_launch_command_carries_the_switch_without_the_pane_export
@@ -389,3 +464,6 @@ test_secondmate_launch
 test_launch_exports_task_inbox
 test_relaunch_rebuilds_the_switch
 test_raw_compound_launch_command_carries_the_switch
+test_claude_worktree_settings_carry_the_switch
+test_claude_secondmate_settings_carry_the_switch
+test_claude_secondmate_settings_merge_existing_file

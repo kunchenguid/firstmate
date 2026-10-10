@@ -1100,6 +1100,45 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   pass "fm-control relaunch: explicit secondmate harness resets unnamed profile axes"
 }
 
+test_claude_secondmate_relaunch_keeps_home_settings_entries() {
+  local dir home settings out rc
+  dir=$(new_case smsettings sm8)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm8"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm8/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin" "$dir/smhome/.claude"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  settings="$dir/smhome/.claude/settings.local.json"
+  printf '%s\n' '{"autoCompactWindow":120000,"env":{"KEEP_ME":"yes"}}' > "$settings"
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm8.meta"
+  printf '%s\n' "fm-sm8" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  out=$(run_control "$dir" sm8 relaunch); rc=$?
+  expect_code 0 "$rc" "a claude secondmate should relaunch"$'\n'"$out"
+  [ "$(jq -r '.env.COMPACT_ADVISER_DISABLE' "$settings")" = 1 ] \
+    || fail "the relaunched secondmate home must carry the compact-adviser switch"
+  [ "$(jq -r '.env.KEEP_ME' "$settings")" = yes ] \
+    || fail "a secondmate relaunch must keep the home's own env entries"
+  [ "$(jq -r '.autoCompactWindow' "$settings")" = 120000 ] \
+    || fail "a secondmate relaunch must keep the home's own settings"
+  pass "fm-control relaunch: a claude secondmate relaunch merges the switch into the home's existing settings"
+}
+
 test_ship_relaunch_ignores_the_crew_harness_config() {
   local dir out
   dir=$(new_case crewcfg rl20)
@@ -2516,6 +2555,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
+test_claude_secondmate_relaunch_keeps_home_settings_entries
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch

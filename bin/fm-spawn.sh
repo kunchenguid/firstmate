@@ -454,6 +454,12 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# A native session restore (Herdr resume_agents_on_restore runs `claude --resume`
+# in a fresh pane shell) loses the launch-time COMPACT_ADVISER_DISABLE export, so
+# every claude launch also writes it into the "env" of the worktree's (or the
+# secondmate home's) untracked .claude/settings.local.json, which Claude applies
+# on every start. Pi and Codex native restores have no such carrier: an open gap
+# (docs/configuration.md "Compact adviser setting").
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
 # hooks are written, every claude launch pre-registers the directory the pane
@@ -1514,6 +1520,12 @@ clear_relaunch_harness_wiring() {
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    # A secondmate home's settings.local.json is not firstmate wiring: it holds
+    # no busy hooks, only the merged compact-adviser switch beside the home's
+    # own entries, so a relaunch keeps it and merges into it again.
+    if [ "$KIND" = secondmate ] && [ "$path" = "$wt/.claude/settings.local.json" ]; then
+      continue
+    fi
     rm -f -- "$path" || return 1
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
@@ -4589,6 +4601,8 @@ exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
+  # A standalone clone (a secondmate home) answers with a path relative to $WT.
+  case "$EXCL" in /*) ;; *) EXCL="$WT/$EXCL" ;; esac
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >>"$EXCL"
 }
@@ -4672,8 +4686,12 @@ if [ "$KIND" != secondmate ]; then
     j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    # The same file carries the compact-adviser kill switch as "env". Claude
+    # applies project settings env to its own process on every start, including
+    # the `claude --resume` a native Herdr session restore types into a fresh
+    # pane shell, where the launch-time export no longer exists.
     cat >"$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"env":{"COMPACT_ADVISER_DISABLE":"1"},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
     ;;
@@ -4995,6 +5013,29 @@ EOF
     exclude_path '.fm-kimi-turnend'
     ;;
   esac
+elif [ "${HARNESS#claude}" != "$HARNESS" ]; then
+  # A claude secondmate takes no busy hooks (its home runs its own project
+  # settings), but it still needs the compact-adviser kill switch in a place a
+  # native session restore reads: the home's settings.local.json "env". The
+  # home is a worktree of this repo, where the file is untracked and absent
+  # unless an earlier launch of this fleet wrote it, so it is excluded from git
+  # like the task-worktree copy and merged rather than overwritten.
+  mkdir -p "$WT/.claude"
+  sm_settings="$WT/.claude/settings.local.json"
+  if [ -s "$sm_settings" ]; then
+    sm_merged=
+    if command -v jq >/dev/null 2>&1; then
+      sm_merged=$(jq -c '.env = ((.env // {}) + {"COMPACT_ADVISER_DISABLE": "1"})' "$sm_settings" 2>/dev/null) || sm_merged=
+    fi
+    if [ -z "$sm_merged" ]; then
+      echo "error: could not add the compact-adviser kill switch to $sm_settings; refusing to launch a secondmate that a restart would resume with it off" >&2
+      exit 1
+    fi
+    printf '%s\n' "$sm_merged" >"$sm_settings"
+  else
+    printf '%s\n' '{"env":{"COMPACT_ADVISER_DISABLE":"1"}}' >"$sm_settings"
+  fi
+  exclude_path '.claude/settings.local.json'
 fi
 
 # Per-task git hooksPath that strips AI commit trailers at the commit object.

@@ -1045,6 +1045,11 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 Every crewmate, scout, and secondmate Firstmate launches starts with `COMPACT_ADVISER_DISABLE=1` in its environment, on a fresh spawn and on a relaunch alike, so an unattended session never activates the compact adviser.
 This guarantee also covers raw launch commands, remote secondmates, and launches filtered by `config/launch-env-allowlist`; it does not depend on the destination environment already containing the variable.
 
+A launch-time export does not survive a native session restore.
+After a terminal server restart, Herdr opens a fresh pane shell and runs `claude --resume <id>` in it, so the variable the spawn exported is gone.
+For a Claude worker, the spawn therefore also writes the variable into the `env` of the worktree's untracked `.claude/settings.local.json`, or of the secondmate home's, which Claude applies to its own process on every start, resumed sessions included.
+Pi and Codex sessions that Herdr restores natively have no such project-local carrier, so a restart can resume them without the variable.
+
 Firstmate provides no configuration or flag to change this value.
 This applies only to agents Firstmate launches; the captain's own primary Firstmate session is never given the variable.
 
