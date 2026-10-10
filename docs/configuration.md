@@ -2386,6 +2386,7 @@ FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may 
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_TASK_INBOX_BUSY_MAX=2      # consecutive busy-deferred due polls before a stuck-busy stale wake; 1..999999999, at most 9 decimal digits, otherwise 2; policy: bin/fm-task-inbox-lib.sh
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_HERDR_CLI_TIMEOUT=30   # seconds allowed per Herdr CLI call made inside a watcher poll cycle; invalid or zero values use 30; a timed-out call is an unknown result, never a recovery trigger, the detached herdr server launch is not bounded, and non-watcher callers are unaffected (docs/turnend-guard.md "Guard grace and the poll cadence")
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
 FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
 FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid or non-positive values become 20
