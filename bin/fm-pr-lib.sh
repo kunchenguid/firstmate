@@ -390,6 +390,12 @@ fm_pr_metadata_identity_parse() {
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         ;;
+      control_relaunch_tx=*)
+        # A control relaunch preserves the record's pr identity block and
+        # appends its transaction id after it (bin/fm-spawn.sh), so the tx
+        # line may follow pr=. It is control bookkeeping, never identity
+        # data; any other unrecognized key after pr= is still refused.
+        ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
         ;;

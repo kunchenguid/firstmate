@@ -868,6 +868,64 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+# A control relaunch (bin/fm-spawn.sh) preserves the record's pr identity block
+# and appends control_relaunch_tx=<tx> after it, so merged-PR detection must
+# keep authenticating that layout instead of rejecting every later watcher
+# cycle. The post-pr region stays a closed set: any other unrecognized key,
+# including other control-prefixed names, is still refused.
+test_relaunched_meta_control_tx_keeps_poll_authenticated() {
+  local dir state
+  dir=$(make_case relaunch-tx-after-pr)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/19
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/19
+  fm_write_meta "$state/task-a.meta" \
+    "window=firstmate:fm-task-a" \
+    "endpoint_task_id=task-a" \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=s1759000000.123.4567" \
+    "pr=https://github.com/o/r/pull/19" \
+    "pr_head=0123456789abcdef0123456789abcdef01234567" \
+    "x_request=request-19" \
+    "control_relaunch_tx=tx-2026-10-01T00:00:00Z-0001"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a relaunched record with control_relaunch_tx after pr= was not authenticated"
+  fm_write_meta "$state/task-a.meta" \
+    "window=firstmate:fm-task-a" \
+    "endpoint_task_id=task-a" \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=s1759000000.123.4567" \
+    "pr=https://github.com/o/r/pull/19" \
+    "pr_head=0123456789abcdef0123456789abcdef01234567" \
+    "x_request=request-19" \
+    "control_relaunch_tx=tx-2026-10-01T00:00:00Z-0001" \
+    "decisions_reviewed=1"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an unrecognized key after pr= was accepted"
+  fm_write_meta "$state/task-a.meta" \
+    "window=firstmate:fm-task-a" \
+    "endpoint_task_id=task-a" \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=s1759000000.123.4567" \
+    "pr=https://github.com/o/r/pull/19" \
+    "pr_head=0123456789abcdef0123456789abcdef01234567" \
+    "x_request=request-19" \
+    "control_relaunch_tx=tx-2026-10-01T00:00:00Z-0001" \
+    "control_other=1"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an unrecognized control-prefixed key after pr= was accepted"
+  pass "a relaunched record stays authenticated and unknown post-pr keys stay refused"
+}
+
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
 # used sixty seconds of its own time. The guard pauses while the file named by
 # FM_TEST_WATCH_BOUND_PAUSE exists, so a case that holds the watcher on work it
@@ -3469,6 +3527,7 @@ test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
+test_relaunched_meta_control_tx_keeps_poll_authenticated
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
