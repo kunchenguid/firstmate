@@ -1405,6 +1405,42 @@ test_dispatch_rolls_back_before_a_failed_launch_delivery() {
   pass "dispatch commits neither record nor backlog state before launch delivery succeeds"
 }
 
+# A pane that never leaves the project for an isolated worktree times out the
+# treehouse wait. Ship and scout share that wait, and neither may strand its
+# item In flight with no worker or record behind it.
+test_dispatch_leaves_the_item_queued_when_treehouse_times_out() {
+  local kind case_dir id out rc
+  for kind in ship scout; do
+    id="atomic-dispatch-treehouse-timeout-$kind-b5"
+    case_dir=$(make_home "dispatch-treehouse-timeout-$kind" "$id")
+    add_item "$case_dir" "$id" "$kind"
+    cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in *"#{pane_current_path}"*) printf '%s\n' "$case_dir/project"; exit 0 ;; esac
+case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/tmux"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/fakebin/sleep"
+    chmod +x "$case_dir/fakebin/sleep"
+
+    rc=0
+    if [ "$kind" = scout ]; then
+      out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --scout) || rc=$?
+    else
+      out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+    fi
+    [ "$rc" -ne 0 ] || fail "$kind spawn reported success though the pane never entered a worktree"$'\n'"$out"
+    assert_contains "$out" "treehouse get did not enter an isolated worktree" \
+      "$kind spawn did not refuse at the treehouse wait"
+    assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+      "a $kind treehouse timeout left a task record behind"
+    [ "$(row_state "$case_dir" "$id")" = queued ] \
+      || fail "a $kind treehouse timeout left its backlog item $(row_state "$case_dir" "$id")"
+  done
+  pass "a treehouse wait timeout leaves ship and scout items queued with no record"
+}
+
 test_dispatch_defers_interruption_across_backlog_commit() {
   local timing case_dir id out rc
   for timing in before after; do
@@ -3064,6 +3100,7 @@ test_dispatch_leaves_no_record_when_the_transition_fails
 test_dispatch_reports_an_incomplete_record_rollback
 test_dispatch_reports_an_incomplete_busy_rollback
 test_dispatch_rolls_back_before_a_failed_launch_delivery
+test_dispatch_leaves_the_item_queued_when_treehouse_times_out
 test_dispatch_defers_interruption_across_backlog_commit
 test_deferred_signal_reads_back_preserved_state
 test_deferred_signal_never_claims_unverified_preservation
