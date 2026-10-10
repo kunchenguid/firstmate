@@ -2320,7 +2320,9 @@ test_return_during_a_failed_turn_still_hands_its_outcomes_to_main() {
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "return-fail: the host never started a watcher cycle"
   append_status "$home" 'mid-task, then a crash'
-  wait_until 250 host_exited "$home" || fail "return-fail: the host did not hand the wake to main"
+  # Successor readiness may consume its full 25-second budget before the
+  # failed-turn handoff stops that successor, so leave time for both.
+  wait_until 500 host_exited "$home" || fail "return-fail: the host did not hand the wake to main"
   expect_code 0 "$(cat "$home/host.rc")" "a failed turn's handback must exit 0 for the owner to deliver"
   assert_absent "$home/state/.afk-contract" "fixture: the stub's return did not archive the record"
   assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); .*captain returned during its turn.*store rows 1[,)]' "$home/host.out" \
@@ -2328,6 +2330,7 @@ test_return_during_a_failed_turn_still_hands_its_outcomes_to_main() {
   assert_re '^supervision-host: outcome 1 for demo \[routine\]: stub handled demo$' "$home/host.out" \
     "the handback must carry the failed turn's outcome for main to relay"
   assert_re '	failed	turn=' "$home/state/.supervision-host.log" "the turn itself failed"
+  ! watcher_live "$home" || fail "a failed-turn handback left its successor watcher running"
   pass "host: a captain return during a failed engine turn still hands that turn's outcomes to main"
 }
 
@@ -2349,6 +2352,7 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
   assert_re '	failed	turn=.*	error=1 ' "$home/state/.supervision-host.log" "the ledger must record the turn as failed"
   assert_no_re '	handled	turn=' "$home/state/.supervision-host.log" "an incomplete result must never count as handled"
   assert_absent "$home/state/.supervision-host-engine" "a turn that did not handle its wake must not keep its conversation"
+  ! watcher_live "$home" || fail "an incomplete-result handback left its successor watcher running"
   pass "host: an engine turn whose result is incomplete hands its wake to main"
 }
 
