@@ -43,8 +43,8 @@
 # (main/master) to the base and leaves the working-copy commit an empty child
 # of it - jj's clean state - under the same never-force/merge/stash guards and
 # the same status vocabulary. A diverged jj home is skipped and reported rather
-# than reconciled: the content-equivalent divergence proof is git-index-specific
-# and deliberately not extended to jj.
+# than reconciled, with no durable reconciliation record: the content-equivalent
+# divergence proof is git-index-specific and deliberately not extended to jj.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
