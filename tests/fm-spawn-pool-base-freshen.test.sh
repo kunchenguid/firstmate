@@ -678,12 +678,14 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
 
 # Re-lay a case's pooled worktree as a managed Treehouse slot: <pool>/<slot>/<repo>
 # with the pool's state file beside the slot, which is the shape fm-spawn claims
-# for its task. Rewrites POOL_DIR to the relocated checkout.
+# for its task. The state records this test's own live process as the slot's
+# owner, as `treehouse get` does once it has handed the slot out. Rewrites
+# POOL_DIR to the relocated checkout.
 lay_out_as_pool_slot() {
   local slot_root="$CASE_DIR/slots"
   mkdir -p "$slot_root/1"
   git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
-  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
+  printf '{"worktrees":[{"name":"1","path":"%s","owner_pid":%s}]}\n' "$slot_root/1/project" "$$" \
     > "$slot_root/treehouse-state.json"
   POOL_DIR="$slot_root/1/project"
   SLOT_CLAIM="$slot_root/1/.fm-slot-owner"
