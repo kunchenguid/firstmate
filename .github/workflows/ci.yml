@@ -213,6 +213,14 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      # The jj colocated-home fast-forward tests need the real pinned jj binary,
+      # not a floating package-manager latest. Same pin/checksum discipline as
+      # the Herdr and Treehouse installers.
+      - name: Install pinned jj
+        run: |
+          set -eu
+          bin/fm-install-jj.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       # The Pi extension tests read the installed Pi package's own types and
       # runtime, so without it they gate-skip and pass silently. It is a public
       # npm package and needs no credential, so CI can hold the real thing.
