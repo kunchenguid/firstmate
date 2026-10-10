@@ -42,6 +42,12 @@
 #      spawn only when the harness also resolves from that file, so the pin is
 #      durable across every respawn while explicit per-spawn harness/model/effort
 #      flags still win.
+#   D) Per-mate override. A "mate <secondmate-id>: <harness> [<model>] [<effort>]"
+#      line in config/secondmate-harness replaces the default line for exactly
+#      that id, so a mate with its own pin cannot be migrated by a later change
+#      to the default pin. A file without mate lines resolves byte-for-byte as
+#      before, and a malformed line is refused with its line number rather than
+#      skipped.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -171,6 +177,83 @@ extra whitespace between tokens is tolerated^grok   grok-4    xhigh^grok^grok-4^
 leading/trailing blank lines and a comment are skipped^# a comment\n\nclaude opus low\n^claude^opus^low
 ROWS
   pass "C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)"
+}
+
+# ===========================================================================
+# D) Per-mate override lines in config/secondmate-harness
+# ===========================================================================
+# A "mate <secondmate-id>: <harness> [<model>] [<effort>]" line replaces the
+# default line for exactly that id, so one mate cannot silently inherit another
+# mate's runtime when the default pin moves. A file with no mate lines must
+# resolve exactly as it always did, both for a caller that passes an id and for
+# one that does not.
+#   <label>^<file-lines, \n for a newline, ABSENT for no file>^<id>^<exp-harness>^<exp-model>^<exp-effort>
+test_secondmate_per_mate_override_lines() {
+  local label file id exp_harness exp_model exp_effort case_dir cfg got_h got_m got_e n
+  n=0
+  while IFS='^' read -r label file id exp_harness exp_model exp_effort; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/permate-$n"
+    cfg="$case_dir/config"
+    mkdir -p "$cfg"
+    [ "$file" = ABSENT ] || printf '%b\n' "$file" > "$cfg/secondmate-harness"
+    got_h=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate "$id")
+    got_m=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-model "$id")
+    got_e=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-effort "$id")
+    [ "$got_h" = "$exp_harness" ] || fail "$label: harness resolved '$got_h', expected '$exp_harness'"
+    [ "$got_m" = "$exp_model" ] || fail "$label: model resolved '$got_m', expected '$exp_model'"
+    [ "$got_e" = "$exp_effort" ] || fail "$label: effort resolved '$got_e', expected '$exp_effort'"
+  done <<'ROWS'
+default-only file with an id resolves the default (backward-compat)^pi john-remote/x xhigh^android^pi^john-remote/x^xhigh
+default-only file with no id resolves the default (backward-compat)^pi john-remote/x xhigh^^pi^john-remote/x^xhigh
+mate line wins for that exact id^pi def-m xhigh\nmate alpha: claude opus max^alpha^claude^opus^max
+mate line leaves every other id on the default^pi def-m xhigh\nmate alpha: claude opus max^beta^pi^def-m^xhigh
+mate line is ignored when no id is passed^pi def-m xhigh\nmate alpha: claude opus max^^pi^def-m^xhigh
+harness-only mate line yields empty model and effort^pi def-m xhigh\nmate alpha: grok^alpha^grok^^
+mate line listed above the default line is honored^mate alpha: muse m1 low\npi def-m xhigh^alpha^muse^m1^low
+mate line whose harness is default defers to the crew chain^claude opus high\nmate alpha: default^alpha^claude^^
+comments and blank lines stay legal between the lines^# pinned by the captain\n\n  \npi def-m xhigh\n\n# exception\nmate alpha: grok g1 max^alpha^grok^g1^max
+override with no default line governs its own id^mate alpha: grok g1 max^alpha^grok^g1^max
+id with no override and no default line falls through to own^mate alpha: grok g1 max^beta^claude^^
+ROWS
+  pass "D1 fm-harness.sh honors a mate override line for its id and changes nothing else"
+}
+
+# Malformed pin config is an actionable error, never a fallback: every read verb
+# must refuse with the line number and print no token on stdout, so a mistyped
+# override cannot land a mate on the default runtime in silence.
+test_secondmate_malformed_pin_refuses_with_line_number() {
+  local label file case_dir cfg out got_stdout rc verb n
+  n=0
+  while IFS='^' read -r label file; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/badpin-$n"
+    cfg="$case_dir/config"
+    mkdir -p "$cfg"
+    printf '%b\n' "$file" > "$cfg/secondmate-harness"
+    for verb in secondmate secondmate-model secondmate-effort; do
+      out=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" \
+        "$ROOT/bin/fm-harness.sh" "$verb" alpha 2>&1); rc=$?
+      [ "$rc" -ne 0 ] || fail "$label: fm-harness.sh $verb accepted the malformed pin: $out"
+      assert_contains "$out" "config/secondmate-harness line " \
+        "$label: fm-harness.sh $verb refused without naming the offending line"
+      got_stdout=$(PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" \
+        "$ROOT/bin/fm-harness.sh" "$verb" alpha 2>/dev/null)
+      [ -z "$got_stdout" ] \
+        || fail "$label: a refused pin must print no token on stdout, got '$got_stdout'"
+    done
+  done <<'ROWS'
+duplicate override for the same mate^pi def-m xhigh\nmate alpha: grok g1 max\nmate alpha: muse m2 low
+unknown line that is not the default and not an override^pi def-m xhigh\npi def-m low
+mate keyword with no id^pi def-m xhigh\nmate: grok g1 max
+mate id containing a space^pi def-m xhigh\nmate an alpha: grok
+override with no tokens after the colon^pi def-m xhigh\nmate alpha:
+override with too many tokens^pi def-m xhigh\nmate alpha: grok g1 max extra
+default line with too many tokens^pi def-m xhigh extra
+ROWS
+  pass "D2 malformed config/secondmate-harness refuses with its line number on every read verb"
 }
 
 # ===========================================================================
@@ -2734,6 +2817,8 @@ SH
 test_harness_resolution
 test_cursor_marker_detection
 test_secondmate_model_effort_tokens
+test_secondmate_per_mate_override_lines
+test_secondmate_malformed_pin_refuses_with_line_number
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
