@@ -430,7 +430,7 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   # row from the 18.1.2 investigation. Without the status-row rule the bare
   # wrap region swallows that row and an idle omp pane reads `pending`, which
   # skipped the doorbell on the first live omp worker.
-  local idle_unicode idle_nerd busy typed wrapped
+  local idle_unicode idle_nerd idle_m busy typed wrapped
   idle_unicode=$'transcript line
 
 ❯
@@ -439,6 +439,10 @@ test_matrix_omp_status_row_bounds_bare_composer() {
 
 ❯
  󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K'
+  idle_m=$'transcript line
+
+❯
+ π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 5.8%/1M ⟲ · (sub)'
   busy=$'transcript line
 
   ⎋ Working…
@@ -455,6 +459,11 @@ test_matrix_omp_status_row_bounds_bare_composer() {
     || fail "the unicode-preset omp status row must be recognized as furniture"
   _fm_composer_row_is_omp_status ' 󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K' \
     || fail "the nerd-preset omp status row must be recognized as furniture"
+  # A narrow pane wraps the long status line, so the M-unit context cell lands
+  # on a continuation row that carries no identity cell: only the context-cell
+  # alternative recognizes it, which is the fixed behavior.
+  _fm_composer_row_is_omp_status '…-workspace · ⑂ detached · ◫ 5.8%/1M ⟲ · (sub)' \
+    || fail "the wrapped M-unit omp status row must be recognized as furniture"
   _fm_composer_row_is_omp_status ' ⠧ 11s  · ◔ GPT-6-Astra' \
     || fail "the busy omp spinner row must be recognized as furniture"
   _fm_composer_row_is_omp_status 'fix the flaky test' \
@@ -473,6 +482,7 @@ test_matrix_omp_status_row_bounds_bare_composer() {
     || fail "the status-set omp spinner row must be recognized as furniture"
   assert_screen "idle omp (unicode preset)" empty "$CAPS_STYLED" "$idle_unicode"
   assert_screen "idle omp (nerd preset)" empty "$CAPS_STYLED" "$idle_nerd"
+  assert_screen "idle omp (M-unit context)" empty "$CAPS_STYLED" "$idle_m"
   assert_screen "busy omp keeps an empty composer" empty "$CAPS_STYLED" "$busy"
   assert_screen "typed omp text is pending" pending "$CAPS_STYLED" "$typed"
   assert_screen "idle omp on a plain capture" empty "$CAPS_PLAIN" "$idle_unicode"
