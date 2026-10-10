@@ -1143,9 +1143,43 @@ The CLI matrix was checked directly:
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
+| Agent naming | `herdr agent rename <pane> <name> --session <name>` | Verified on 2026-10-01 against Herdr 0.9.3 in an `fm-lab-` session: the call refused `agent_not_found` for a pane with no registered agent and kept refusing for about a second after the harness process started, then succeeded; `invalid_agent_name` refuses any name that does not start with a lowercase letter, holds anything but lowercase letters, digits, `-` or `_`, or runs past 32 characters. The rename is presentation only - it writes `.result.agent.name` and leaves `.result.agent.agent` alone (see "Agent rename writes a separate name field" below) - so `fm_backend_herdr_name_agent_best_effort` folds the task id to that alphabet, retries over a bounded settle window (see "Agent registration timing on a reused pane" below), and silently keeps the harness label instead of failing a spawn. |
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+#### Agent rename writes a separate name field
+
+Measured 2026-10-01 on Herdr 0.9.3 with a real Claude Code agent in an isolated `fm-lab-` session, the premise `fm_backend_herdr_name_agent_best_effort` rests on: `herdr agent get <pane>` before and after `herdr agent rename <pane> crew-probe-label-authority`.
+
+Before:
+
+```json
+{"result":{"agent":{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"ac03ad0d-17d3-4a70-a6ab-591e9dc0d43a"},"agent_status":"unknown","pane_id":"w1:p2","terminal_title":"✳ Claude Code","terminal_title_stripped":"Claude Code"}}}
+```
+
+After: identical except for one ADDED field, `"name":"crew-probe-label-authority"`. `.result.agent.agent` is still `claude` and `.result.agent.agent_session` is byte-identical. `fm_backend_herdr_pane_agent_session_ref` returned the identical `claude\tac03ad0d-17d3-4a70-a6ab-591e9dc0d43a` before and after.
+
+So the rename writes a SEPARATE `.result.agent.name` and never touches `.result.agent.agent` or `.result.agent.agent_session`, which is what keeps the harness-label consumers unaffected: the Claude composer truncation proof in `fm_backend_herdr_send_text_submit`, the pi separated-composer verdict in `bin/fm-composer-lib.sh`, and pi's `--session` resume identity through `bin/fm-control-lib.sh`. Naming every worker is therefore presentation-only and stays unconditional.
+
+#### Agent registration timing on a reused pane
+
+Measured 2026-10-01 on Herdr 0.9.3 with real Claude Code agents in an isolated `fm-lab-` session. One pane, two successive agents, read through `fm_backend_herdr_pane_agent_session_ref`:
+
+| Step | State | Reading |
+| --- | --- | --- |
+| 0 | Fresh pane, no agent yet | empty |
+| 1 | First agent registered | `claude\te79f82b9-922b-43cc-990f-e78078f1d96d` |
+| 2 | That agent's process killed | empty (`agent get` returned `agent_not_found`, pane read no-agent) |
+| 3 | `agent rename` against the pane in state 2 | refused, `agent_not_found` |
+| 4 | Second agent launched into the SAME pane | empty right after Enter, then `claude\tb689e641-2b6f-4628-ad53-2a7e86cf4c54` about a second later |
+| 5 | `agent rename` after step 4 | accepted; `.result.agent.name` = `crew-successor-test` over `agent_session.value` `b689e641-...` |
+
+This is what the bounded settle retry in `fm_backend_herdr_name_agent_best_effort` exists for: the rename is refused until the launched harness registers, about a second after its launch line runs.
+
+What this does NOT cover: the lingering-registration case. For Claude on Herdr 0.9.3 herdr RELEASED the registration when the agent process died (step 2), so no predecessor record survived for a rename to land on. The stale-agent shape - `agent get` still reporting a registered `agent_status` over a bare shell - is documented for the pi nested-worktree-shell crew shape (`bin/fm-spawn.sh`'s recovery notes, `fm_backend_herdr_pane_agent_state`, `tests/fm-control-herdr-smoke.test.sh`) and is not exercised here. Where it occurs, the rename can name the predecessor's record and the replacement keeps its bare harness label; that limitation is recorded in `docs/herdr-backend.md` and is not handled.
+
+The pi path is NOT measured at all. A probe was attempted in an isolated `fm-lab-` session on 2026-10-01 and did not produce a reading: pi 0.87.1 registered with herdr as agent `pi` but reported `agent_session` as null at every step, so `fm_backend_herdr_pane_agent_session_ref` returned nothing. This is not a missing integration - `herdr integration status` reported `pi: current (v9)` on that host, with the extension at `~/.pi/agent/extensions/herdr-agent-state.ts`. Pi appears to publish a session identity only once it actually holds a session, which requires a submitted prompt; staging that was not done. The rename itself does not depend on that reading.
 
 ### fm-remote server birth and login-keychain access
 
