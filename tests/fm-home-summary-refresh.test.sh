@@ -666,6 +666,64 @@ jq -e --arg home "$COST_HOME" '
   || fail "the accumulated home published a ledger missing its open decision"
 pass "publication completes on a home carrying accumulated status history"
 
+# Composition must keep up with a home carrying many task records. Delay only
+# the public producer's per-task JSON assembly, so a serial fold exceeds the
+# writer deadline while bounded concurrent assembly still publishes every row.
+COMPOSE_HOME="$TMP_ROOT/compose-home"
+COMPOSE_FAKEBIN="$TMP_ROOT/compose-fakebin"
+mkdir -p "$COMPOSE_HOME/state" "$COMPOSE_HOME/data" "$COMPOSE_HOME/config" \
+  "$COMPOSE_HOME/projects/task" "$COMPOSE_FAKEBIN"
+printf '# Seeded Firstmate home\n' > "$COMPOSE_HOME/AGENTS.md"
+printf 'compose\n' > "$COMPOSE_HOME/.fm-secondmate-home"
+fm_git_init_commit "$COMPOSE_HOME/projects/task"
+printf '## In flight\n' > "$COMPOSE_HOME/data/backlog.md"
+compose_n=1
+while [ "$compose_n" -le 20 ]; do
+  compose_id="compose-$compose_n"
+  printf '%s\n' "- [ ] $compose_id - Publish a busy home (repo: firstmate) (kind: scout) (since 2026-08-28)" \
+    >> "$COMPOSE_HOME/data/backlog.md"
+  fm_write_meta "$COMPOSE_HOME/state/$compose_id.meta" \
+    "window=fmtest:fm-$compose_id" \
+    "worktree=$COMPOSE_HOME/projects/task" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=local-only" \
+    "spawn_gen=fm.compose$compose_n"
+  printf 'working: task %s is active\n' "$compose_n" > "$COMPOSE_HOME/state/$compose_id.status"
+  compose_n=$((compose_n + 1))
+done
+printf '\n## Queued\n\n## Done\n' >> "$COMPOSE_HOME/data/backlog.md"
+cat > "$COMPOSE_FAKEBIN/jq" <<'SH'
+#!/usr/bin/env bash
+previous=
+for argument in "$@"; do
+  if [ "$previous" = --argjson ] && [ "$argument" = current_state ]; then
+    printf 'row\n' >> "$FM_TEST_JQ_DELAY_MARKER"
+    sleep 1
+    break
+  fi
+  previous=$argument
+done
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+chmod +x "$COMPOSE_FAKEBIN/jq"
+FM_TEST_REAL_JQ=$(command -v jq) \
+  FM_TEST_JQ_DELAY_MARKER="$TMP_ROOT/compose-delays.log" \
+  PATH="$COMPOSE_FAKEBIN:$FAKEBIN:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$COMPOSE_HOME" \
+  FM_HOME_SUMMARY_TIMEOUT=15 "$WRITER" \
+  || fail "busy-home composition missed its deadline"
+[ "$(wc -l < "$TMP_ROOT/compose-delays.log")" -eq 20 ] \
+  || fail "busy-home fixture did not delay every task row"
+jq -e '
+  .schema == "fm-secondmate-home-summary.v1"
+  and .counts.endpoints == 20
+  and (.endpoints | length) == 20
+' "$COMPOSE_HOME/state/home-summary.json" >/dev/null \
+  || fail "busy-home publication lost task rows"
+pass "busy-home publication overlaps per-task composition within its deadline"
+
 # One unreachable home must not extend publication without limit. A remote
 # secondmate's current state is read over ssh, and ssh's own dead-peer detection
 # deliberately never kills a slow-but-alive remote command, so nothing under the
