@@ -15,8 +15,8 @@ set -u
 # which the no-mistakes gate runs from a gate worktree, must be exempt).
 export FM_GATE_REFUSE_BYPASS=1
 
-# Suites reaching this file drive the real bin/fm-teardown.sh, which deletes
-# the task-owned fm-<task-id> Simulator; install the shared fake xcrun on PATH
+# Suites reaching this file drive the real bin/fm-teardown.sh; its header owns
+# the Simulator cleanup contract. Install the shared fake xcrun on PATH
 # so a fixture run never touches the host's real Simulator set. A suite that
 # already sourced tests/lib.sh keeps that library's registry-cleaned install
 # instead of adding a second, unregistered one.
