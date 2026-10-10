@@ -177,11 +177,78 @@ fm_backend_orca_send_literal() {  # <terminal-id> <text>
   fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --json
 }
 
-fm_backend_orca_remove_worktree() {  # <worktree-id>
-  local worktree_id=${1:-}
+fm_backend_orca_recorded_path_state() {  # <recorded-worktree-path> -> present|absent
+  # shellcheck disable=SC2016  # Single quotes are deliberate: ${...} belongs to the Node snippet.
+  node -e '
+const fs = require("fs");
+const path = process.argv[1];
+try {
+  fs.lstatSync(path);
+  process.stdout.write("present");
+} catch (err) {
+  if (err && err.code === "ENOENT") {
+    process.stdout.write("absent");
+    process.exit(0);
+  }
+  const code = err && err.code ? err.code : "UNKNOWN";
+  const message = err && err.message ? err.message : String(err);
+  console.error(`${code}: ${message}`);
+  process.exit(1);
+}
+' "$1"
+}
+
+fm_backend_orca_remove_worktree() {  # <worktree-id> [recorded-worktree-path]
+  local worktree_id=${1:-} worktree_path=${2:-} out orca_rc=0 json_error='' json_rc=0 error_code='' path_inspection path_state path_error
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca worktree rm --worktree "id:$worktree_id" --force --json
+  out=$(orca worktree rm --worktree "id:$worktree_id" --force --json 2>&1) || orca_rc=$?
+  json_error=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1) || json_rc=$?
+  if [ "$orca_rc" -eq 0 ] && [ "$json_rc" -eq 0 ]; then
+    return 0
+  fi
+  error_code=$(printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (_) {
+  process.exit(1);
+}
+const code = data.error && data.error.code;
+if (!code) process.exit(1);
+process.stdout.write(String(code));
+' 2>/dev/null || true)
+  if [ "$error_code" = selector_not_found ]; then
+    if [ -z "$worktree_path" ]; then
+      echo "error: Orca no longer lists worktree $worktree_id, but no recorded path was provided to prove it is absent; refusing removal" >&2
+      return 1
+    fi
+    path_inspection=$(fm_backend_orca_recorded_path_state "$worktree_path" 2>&1) || {
+      path_error=$path_inspection
+      echo "error: Orca no longer lists worktree $worktree_id, but its recorded path $worktree_path could not be inspected: $path_error; refusing removal" >&2
+      return 1
+    }
+    path_state=$path_inspection
+    if [ "$path_state" = absent ]; then
+      echo "warning: Orca no longer lists worktree $worktree_id and its recorded path $worktree_path is confirmed absent; treating it as already removed" >&2
+      return 0
+    fi
+    if [ "$path_state" = present ]; then
+      echo "error: Orca no longer lists worktree $worktree_id, but its recorded path still exists at $worktree_path; refusing removal" >&2
+    else
+      echo "error: Orca no longer lists worktree $worktree_id, but inspection of its recorded path $worktree_path returned unknown state $path_state; refusing removal" >&2
+    fi
+    return 1
+  fi
+  if [ -n "$error_code" ] && [ -n "$json_error" ]; then
+    printf '%s\n' "$json_error" >&2
+  elif [ -n "$out" ]; then
+    printf '%s\n' "$out" >&2
+  else
+    echo "error: orca worktree rm failed for $worktree_id without error text" >&2
+  fi
+  return 1
 }
 
 fm_backend_orca_worktree_path() {

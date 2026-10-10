@@ -637,6 +637,119 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
+configure_orca_teardown_case() {  # <case-dir>
+  local case_dir=$1
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'endpoint_task_id=task-x1' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    'harness=claude' \
+    'kind=ship' \
+    'mode=local-only' \
+    'yolo=off' \
+    'spawn_gen=teardown-test-task-x1' \
+    'backend=orca' \
+    'terminal=term-task-x1' \
+    'orca_worktree_id=wt-task-x1::/orca/wt-task-x1'
+  printf '%s\n' 'working [at=1]: fixture record' > "$case_dir/state/task-x1.status"
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-task-x1::/orca/wt-task-x1","path":"%s"}}}\n' "${FM_ORCA_RECORDED_PATH:?}"
+    ;;
+  "terminal close")
+    printf '{"ok":true,"result":{}}\n'
+    ;;
+  "worktree rm")
+    case "${FM_ORCA_REMOVE_RESULT:?}" in
+      selector-not-found)
+        printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n'
+        ;;
+      backend-error)
+        printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"Orca runtime unavailable"}}\n'
+        ;;
+      *)
+        printf 'unexpected remove result: %s\n' "$FM_ORCA_REMOVE_RESULT" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    printf 'unexpected Orca command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
+test_orca_selector_not_found_with_absent_path_completes_cleanup() {
+  local case_dir rc=0
+  case_dir=$(make_case orca-selector-absent)
+  write_meta "$case_dir" local-only ship
+  configure_orca_teardown_case "$case_dir"
+  rm -rf "$case_dir/wt"
+
+  FM_ORCA_RECORDED_PATH="$case_dir/wt" FM_ORCA_REMOVE_RESULT=selector-not-found \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "orca-selector-absent: teardown should accept an already-removed Orca worktree"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "treating it as already removed" "$case_dir/stderr" \
+    "orca-selector-absent: teardown did not report the already-removed worktree"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "orca-selector-absent: successful teardown retained task metadata"
+  assert_absent "$case_dir/state/task-x1.status" \
+    "orca-selector-absent: successful teardown retained task status"
+  pass "Orca selector_not_found with an absent recorded path completes teardown record cleanup"
+}
+
+test_orca_selector_not_found_with_present_path_refuses_and_retains_records() {
+  local case_dir rc=0 meta_before status_before
+  case_dir=$(make_case orca-selector-present)
+  write_meta "$case_dir" local-only ship
+  configure_orca_teardown_case "$case_dir"
+  meta_before=$(cat "$case_dir/state/task-x1.meta")
+  status_before=$(cat "$case_dir/state/task-x1.status")
+
+  FM_ORCA_RECORDED_PATH="$case_dir/wt" FM_ORCA_REMOVE_RESULT=selector-not-found \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "orca-selector-present: teardown accepted selector_not_found for a present path"
+  assert_grep "REFUSED: Orca worktree removal failed for task task-x1" "$case_dir/stderr" \
+    "orca-selector-present: backend failure did not become a visible teardown refusal"
+  assert_grep "recorded path still exists at $case_dir/wt" "$case_dir/stderr" \
+    "orca-selector-present: refusal did not name the retained directory"
+  [ "$(cat "$case_dir/state/task-x1.meta")" = "$meta_before" ] \
+    || fail "orca-selector-present: refusal changed task metadata"
+  [ "$(cat "$case_dir/state/task-x1.status")" = "$status_before" ] \
+    || fail "orca-selector-present: refusal changed task status"
+  pass "Orca selector_not_found with a present recorded path refuses and retains records"
+}
+
+test_orca_other_remove_error_is_visible_and_retains_records() {
+  local case_dir rc=0 meta_before status_before refusal
+  case_dir=$(make_case orca-remove-error-visible)
+  write_meta "$case_dir" local-only ship
+  configure_orca_teardown_case "$case_dir"
+  meta_before=$(cat "$case_dir/state/task-x1.meta")
+  status_before=$(cat "$case_dir/state/task-x1.status")
+
+  FM_ORCA_RECORDED_PATH="$case_dir/wt" FM_ORCA_REMOVE_RESULT=backend-error \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "orca-remove-error-visible: teardown accepted another Orca removal error"
+  refusal=$(grep -F "REFUSED: Orca worktree removal failed for task task-x1" "$case_dir/stderr" || true)
+  assert_contains "$refusal" "Orca runtime unavailable" \
+    "orca-remove-error-visible: refusal did not include Orca's error text: $(cat "$case_dir/stderr")"
+  [ "$(cat "$case_dir/state/task-x1.meta")" = "$meta_before" ] \
+    || fail "orca-remove-error-visible: refusal changed task metadata"
+  [ "$(cat "$case_dir/state/task-x1.status")" = "$status_before" ] \
+    || fail "orca-remove-error-visible: refusal changed task status"
+  pass "other Orca removal errors produce a visible refusal and retain records"
+}
+
 # Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
 # has a row to close. Uses the real tasks-axi (the fixture's default fakebin has
 # no tasks-axi stub, so PATH resolves the installed one).
@@ -4643,6 +4756,9 @@ test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
+test_orca_selector_not_found_with_absent_path_completes_cleanup
+test_orca_selector_not_found_with_present_path_refuses_and_retains_records
+test_orca_other_remove_error_is_visible_and_retains_records
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note

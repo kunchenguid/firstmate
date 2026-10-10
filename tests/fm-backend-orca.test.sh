@@ -396,7 +396,60 @@ test_remove_worktree_refuses_empty_id() {
   pass "fm_backend_orca_remove_worktree: refuses empty worktree ids"
 }
 
-test_remove_worktree_rejects_orca_error_json() {
+test_remove_worktree_accepts_missing_selector_when_recorded_path_is_absent() {
+  local out status missing_path
+  orca_case remove-missing-selector-absent-path
+  missing_path="$CASE_DIR/already-gone"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree wt-gone "$1"' "$ROOT" "$missing_path" 2>&1 )
+  status=$?
+  expect_code 0 "$status" "remove_worktree should accept selector_not_found when the recorded path is absent"
+  assert_contains "$out" "treating it as already removed" \
+    "remove_worktree should explain why selector_not_found is safe for an absent recorded path"
+  pass "fm_backend_orca_remove_worktree: accepts selector_not_found only when the recorded path is absent"
+}
+
+test_remove_worktree_refuses_missing_selector_when_recorded_path_exists() {
+  local out status present_path
+  orca_case remove-missing-selector-present-path
+  present_path="$CASE_DIR/still-present"
+  mkdir -p "$present_path"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree wt-lost "$1"' "$ROOT" "$present_path" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "remove_worktree should refuse selector_not_found when the recorded path exists"
+  assert_contains "$out" "recorded path still exists at $present_path" \
+    "remove_worktree should name the existing recorded path in its refusal"
+  pass "fm_backend_orca_remove_worktree: refuses selector_not_found while the recorded path exists"
+}
+
+test_remove_worktree_refuses_missing_selector_when_recorded_path_is_inaccessible() {
+  local out status restricted_parent worktree_path
+  if [ "$(id -u)" -eq 0 ]; then
+    printf '# skip - inaccessible recorded paths require a non-root user\n'
+    return 0
+  fi
+  orca_case remove-missing-selector-inaccessible-path
+  restricted_parent="$CASE_DIR/restricted-parent"
+  worktree_path="$restricted_parent/still-present"
+  mkdir -p "$worktree_path"
+  chmod 000 "$restricted_parent"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree wt-inaccessible "$1"' "$ROOT" "$worktree_path" 2>&1 )
+  status=$?
+  chmod 700 "$restricted_parent"
+  [ "$status" -ne 0 ] || fail "remove_worktree should refuse selector_not_found when the recorded path is inaccessible"
+  assert_contains "$out" "$worktree_path" \
+    "remove_worktree should name the inaccessible recorded path"
+  assert_contains "$out" "EACCES" \
+    "remove_worktree should surface the path lookup error"
+  pass "fm_backend_orca_remove_worktree: refuses selector_not_found when the recorded path is inaccessible"
+}
+
+test_remove_worktree_rejects_other_orca_error_json() {
   local out status
   orca_case remove-error-json
   printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
@@ -405,7 +458,7 @@ test_remove_worktree_rejects_orca_error_json() {
   status=$?
   [ "$status" -ne 0 ] || fail "remove_worktree should fail on Orca ok:false JSON"
   assert_contains "$out" "worktree not found" "remove_worktree should surface the Orca removal error"
-  pass "fm_backend_orca_remove_worktree: fails closed on ok:false JSON"
+  pass "fm_backend_orca_remove_worktree: surfaces other Orca errors and fails closed"
 }
 
 test_worktree_path_resolves_id() {
@@ -1259,6 +1312,48 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
   pass "fm-teardown.sh --force: removes Orca secondmate children through Orca"
 }
 
+test_secondmate_force_teardown_surfaces_orca_child_remove_failure() {
+  local home subhome childproj childwt child_id neutral out rc refusal
+  home="$TMP_ROOT/orca-child-remove-error-parent"
+  subhome="$TMP_ROOT/orca-child-remove-error-secondmate"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/orca-child-remove-error-worktree"
+  child_id="orcachilderrorz4"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' "- domain - Orca child cleanup failure (home: $subhome; scope: orca cleanup; projects: alpha; added 2026-09-30)" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/$child_id.meta" \
+    "window=fm-$child_id" "endpoint_task_id=$child_id" \
+    "terminal=term-child-remove-error" "worktree=$childwt" "project=$childproj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-child-remove-error::/orca/wt-child-remove-error"
+  orca_case secondmate-child-remove-error
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-remove-error::/orca/wt-child-remove-error","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-remove-error::/orca/wt-child-remove-error","path":"%s"}}}\n' "$childwt" > "$RESP/2.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"Orca child removal unavailable"}}\n' > "$RESP/4.out"
+  add_tmux_fake "$FB"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown accepted a failed Orca child removal"
+  refusal=$(printf '%s\n' "$out" | grep -F "REFUSED: Orca worktree removal failed for child $child_id" || true)
+  assert_contains "$refusal" "Orca child removal unavailable" \
+    "child cleanup refusal did not include Orca's own error text: $out"
+  assert_present "$home/state/domain.meta" "child removal failure erased parent metadata"
+  assert_present "$subhome/state/$child_id.meta" "child removal failure erased child metadata"
+  pass "fm-teardown.sh --force: surfaces Orca child removal errors and retains identity records"
+}
+
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
   local home subhome childproj childwt other_wt child_id neutral out rc
   home="$TMP_ROOT/orca-child-mismatch-parent"
@@ -1370,7 +1465,10 @@ test_send_key_refuses_escape_until_supported
 test_kill_is_best_effort_close
 test_kill_refuses_when_the_orca_cli_is_absent
 test_remove_worktree_refuses_empty_id
-test_remove_worktree_rejects_orca_error_json
+test_remove_worktree_accepts_missing_selector_when_recorded_path_is_absent
+test_remove_worktree_refuses_missing_selector_when_recorded_path_exists
+test_remove_worktree_refuses_missing_selector_when_recorded_path_is_inaccessible
+test_remove_worktree_rejects_other_orca_error_json
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes
@@ -1399,5 +1497,6 @@ test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
+test_secondmate_force_teardown_surfaces_orca_child_remove_failure
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child
