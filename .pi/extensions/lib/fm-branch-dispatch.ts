@@ -141,6 +141,17 @@ export interface UnreadWakeScope {
    * non-heartbeat wake claims it in the away posture.
    */
   heartbeatSeqs: string[];
+  /**
+   * Wake keys of signal rows whose newly presented status span is still a
+   * completion the supervisor must act on (a validation handoff, a failed
+   * task, or any other done/needs-validation/failed event with no later
+   * explicit hold in that span). Excluded from eligibleSeqs
+   * while attended. Empty in the away posture, where the branch takes the row.
+   * docs/pi-supervision-branch.md "Completion-owned rows" owns the contract.
+   */
+  completionKeys: string[];
+  /** Queue sequence numbers of the rows named by completionKeys. */
+  completionSeqs: string[];
   taskByWakeKey: Record<string, string>;
 }
 
@@ -154,6 +165,8 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   needsDecisionKeys: [],
   checkSeqs: [],
   heartbeatSeqs: [],
+  completionKeys: [],
+  completionSeqs: [],
   taskByWakeKey: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
@@ -166,6 +179,8 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   needsDecisionKeys: [],
   checkSeqs: [],
   heartbeatSeqs: [],
+  completionKeys: [],
+  completionSeqs: [],
   taskByWakeKey: {},
 };
 
@@ -271,6 +286,37 @@ interface StaleDecisionCacheEntry {
 
 const staleDecisionCache = new Map<string, StaleDecisionCacheEntry>();
 
+interface StatusBytesCacheEntry {
+  version: string;
+  contents: Buffer;
+}
+
+// One status file at one version, shared by the decision fold and the
+// completion span. A scan that classifies both reads the file once. A changed
+// version misses. A read that races a rewrite is not stored.
+const statusBytesCache = new Map<string, StatusBytesCacheEntry>();
+
+function readStatusBytes(path: string, version: string): Buffer | null {
+  const cached = statusBytesCache.get(path);
+  if (cached?.version === version) return cached.contents;
+  let contents: Buffer;
+  try {
+    contents = readFileSync(path);
+    if (statusFileVersion(path) !== version) {
+      statusBytesCache.delete(path);
+      return null;
+    }
+  } catch {
+    statusBytesCache.delete(path);
+    return null;
+  }
+  statusBytesCache.set(path, { version, contents });
+  if (statusBytesCache.size > 512) {
+    statusBytesCache.delete(statusBytesCache.keys().next().value!);
+  }
+  return contents;
+}
+
 function statusFileVersion(path: string): string | null {
   try {
     const stat = lstatSync(path);
@@ -369,6 +415,134 @@ function spanIsDecisionOwned(
   return false;
 }
 
+// A recognized status verb, matching bin/fm-classify-lib.sh's
+// _fm_status_verb_recognized, plus the nonterminal needs-validation handoff.
+// An unrecognized line is continuation prose and does not move ownership.
+function recognizedStatusVerb(line: string): string | null {
+  const verb = statusLineVerb(line);
+  const paused = process.env.FM_CLASSIFY_PAUSED_VERB || "paused";
+  const resolved = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
+  const held = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
+  if (
+    verb === "working" || verb === paused || verb === resolved || verb === held ||
+    verb === "done" || verb === "needs-validation" || verb === "failed" ||
+    verb === "needs-decision" || verb === "blocked" || verb === "note"
+  ) {
+    return verb;
+  }
+  return null;
+}
+
+// owned: the span still ends on a completion the supervisor must continue.
+// continued: later continuation evidence cleared that completion.
+// none: the span has no such completion and no continuation
+// (empty, prose, a generic working or paused line, or a note).
+export type PresentedCompletion = "owned" | "continued" | "none" | "unreadable";
+
+// Proof a caller has already established. This function does not infer it
+// from a working or paused line.
+export type ContinuationProof =
+  | "none"
+  | "attributed-run"
+  | "review-started"
+  | "verified-delivery"
+  | "hold";
+
+// The one continuation-evidence predicate for a pending handoff.
+// True only for an attributed no-mistakes run for this task incarnation,
+// an acknowledged and started follow-up review, verified final delivery,
+// or an explicit legitimate hold.
+// A generic working or paused status is not that evidence.
+export function continuationEvidence(line: string, proof: ContinuationProof): boolean {
+  if (proof === "attributed-run" || proof === "review-started") return true;
+  const verb = recognizedStatusVerb(line);
+  if (!verb) return false;
+  const held = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
+  if (proof === "hold" && (verb === "needs-decision" || verb === "blocked" || verb === held)) return true;
+  if (proof === "verified-delivery" && verb === "done") return true;
+  return false;
+}
+
+function classifySpanCompletion(lines: readonly string[]): Exclude<PresentedCompletion, "unreadable"> {
+  const held = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
+  let pending = false;
+  let continued = false;
+  for (const line of lines) {
+    const verb = recognizedStatusVerb(line);
+    if (!verb) continue;
+    const proof: ContinuationProof =
+      verb === "needs-decision" || verb === "blocked" || verb === held ? "hold" : "none";
+    if (continuationEvidence(line, proof)) {
+      pending = false;
+      continued = true;
+    } else if (verb === "done" || verb === "needs-validation" || verb === "failed") {
+      pending = true;
+      continued = false;
+    }
+  }
+  if (pending) return "owned";
+  if (continued) return "continued";
+  return "none";
+}
+
+interface PresentedSpan {
+  classification: PresentedCompletion;
+  version: string;
+  cursor: string;
+}
+
+// File version plus the presentation-cursor identity, so a rescan of an
+// unchanged span does not re-read it. Separate from the decision cache.
+const completionSpanCache = new Map<string, PresentedSpan>();
+
+// The newly presented status span for one task. A missing or unmatched
+// presentation cursor is the whole log, the same fallback the second-mate
+// decision rule uses. A missing file is an empty span (a turn-ended signal
+// has nothing to classify). A symlink or a file that cannot be read is
+// unreadable, and the offer path fails closed on that.
+function presentedCompletion(state: string, task: string): PresentedSpan {
+  const statusPath = `${state}/${task}.status`;
+  const absent: PresentedSpan = { classification: "none", version: "", cursor: "missing" };
+  let version: string | null;
+  try {
+    version = statusFileVersion(statusPath);
+  } catch {
+    return { classification: "unreadable", version: "", cursor: "unreadable" };
+  }
+  if (!version) return absent;
+  let cursorKey = "whole";
+  let spanOffset = 0;
+  const cursorMap = readPresentationCursor(state);
+  const cursor = cursorMap?.get(task);
+  if (cursor) cursorKey = `${cursor.ident}:${cursor.offset}`;
+  const cacheKey = statusPath;
+  const cached = completionSpanCache.get(cacheKey);
+  if (cached && cached.version === version && cached.cursor === cursorKey) return cached;
+  const contents = readStatusBytes(statusPath, version);
+  if (!contents) return { classification: "unreadable", version: "", cursor: "unreadable" };
+  if (cursor && cursor.offset <= contents.length) {
+    try {
+      if (cursor.ident === statusFileIdentity(statusPath)) spanOffset = cursor.offset;
+      else cursorKey = "whole";
+    } catch {
+      cursorKey = "whole";
+    }
+  } else if (cursor) {
+    cursorKey = "whole";
+  }
+  const span = nonBlankLines(contents.subarray(spanOffset).toString("utf8"));
+  const result: PresentedSpan = {
+    classification: classifySpanCompletion(span),
+    version,
+    cursor: cursorKey,
+  };
+  completionSpanCache.set(cacheKey, result);
+  if (completionSpanCache.size > 512) {
+    completionSpanCache.delete(completionSpanCache.keys().next().value!);
+  }
+  return result;
+}
+
 export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false, attendedHost = false): UnreadWakeScope {
   let queue = "";
   try {
@@ -414,6 +588,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
   const needsDecisionKeys: string[] = [];
   const checkSeqs: string[] = [];
   const heartbeatSeqs: string[] = [];
+  const completionKeys: string[] = [];
+  const completionSeqs: string[] = [];
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -499,20 +675,15 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
           if (cached?.version === version && cached.config === config) {
             decisionOwned = cached.decisionOwned;
           } else {
-            let contents: Buffer;
+            const contents = readStatusBytes(statusPath, version);
+            if (!contents) return UNSAFE_SCOPE;
             let spanOffset = 0;
-            try {
-              contents = readFileSync(statusPath);
-              if (cursor && cursor.offset <= contents.length) {
-                try {
-                  if (cursor.ident === statusFileIdentity(statusPath)) spanOffset = cursor.offset;
-                } catch {
-                  // No identity to match: the span is the whole log.
-                }
+            if (cursor && cursor.offset <= contents.length) {
+              try {
+                if (cursor.ident === statusFileIdentity(statusPath)) spanOffset = cursor.offset;
+              } catch {
+                // No identity to match: the span is the whole log.
               }
-              if (statusFileVersion(statusPath) !== version) return UNSAFE_SCOPE;
-            } catch {
-              return UNSAFE_SCOPE;
             }
             const statusLines = nonBlankLines(contents.toString("utf8"));
             const open = openDecisions(statusLines, resolveVerb, heldVerb, reservedPrefixes);
@@ -541,6 +712,21 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
         if (!afk) continue;
       }
     }
+    // A signal's newly presented span is completion-owned even when this
+    // caller did not ask for the attended-host decision fold. Pi's offer
+    // passes attendedHost false, and a completion must still stay on main.
+    // Stale rows are observations, not completions. Away, the branch takes
+    // the row and the report path keeps the obligation durable.
+    if (!afk && kind === "signal" && task) {
+      const presented = presentedCompletion(state, task);
+      if (presented.classification === "unreadable") return UNSAFE_SCOPE;
+      if (presented.classification === "owned") {
+        if (!project || !task) return UNSAFE_SCOPE;
+        completionKeys.push(key);
+        completionSeqs.push(seq);
+        continue;
+      }
+    }
     if (!project || !task) return UNSAFE_SCOPE;
     projects.add(project);
     eligibleTasks.add(task);
@@ -564,6 +750,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     needsDecisionKeys,
     checkSeqs,
     heartbeatSeqs,
+    completionKeys,
+    completionSeqs,
     taskByWakeKey: Object.fromEntries(taskByKey),
   };
 }
@@ -620,11 +808,93 @@ export function branchOfferForWake(state: string, message: string, afk: boolean,
     scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
   const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
   const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
-  const attendedEligible = !isCheckTrigger && !isNeedsDecisionTrigger && (
+  // A completion inside THIS close goes wholly to main, the same stranding
+  // avoidance a decision uses. A completion sitting unread beside a different
+  // task's progress signal, or beside a heartbeat, does not: it stays queued,
+  // excluded from eligibleSeqs, until its own trigger.
+  const completionTasks = new Set(scope.completionKeys.map(taskIdentity));
+  const isCompletionTrigger = !afk && triggerKeys.some((key) => completionTasks.has(taskIdentity(key)));
+  const attendedEligible = !isCheckTrigger && !isNeedsDecisionTrigger && !isCompletionTrigger && (
     afk ? scopeForUnreadWake(state, heartbeat, false).eligible : scope.eligible
   );
   const eligible = afk ? scope.eligible : attendedEligible;
   return { scope, heartbeat, eligible, awayOnly: Boolean(eligible && !attendedEligible) };
+}
+
+// True when this close's own signal or stale trigger names a completion-owned
+// task. Heartbeats and other tasks' rows are not triggers. The Pi branch
+// recheck uses the same predicate the offer uses, so a span that becomes a
+// completion after the close was accepted still falls back to main.
+export function wakeTriggerOwnsCompletion(scope: UnreadWakeScope, message: string): boolean {
+  if (scope.completionKeys.length === 0) return false;
+  const triggerKeys = /^signal:/.test(message)
+    ? message.slice("signal:".length).split(/\s+/).filter(Boolean).map((path) => path.split("/").pop() ?? path)
+    : /^stale:/.test(message)
+      ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
+      : [];
+  const taskIdentity = (key: string): string =>
+    scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
+  const completionTasks = new Set(scope.completionKeys.map(taskIdentity));
+  return triggerKeys.some((key) => completionTasks.has(taskIdentity(key)));
+}
+
+// The newly presented span for one task, for the report path. This does not
+// consult the away record: a pending completion is still pending while away.
+export function presentedTaskCompletion(state: string, task: string): PresentedCompletion {
+  if (!/^[A-Za-z0-9._-]+$/.test(task)) return "none";
+  return presentedCompletion(state, task).classification;
+}
+
+// Sequence numbers a branch acknowledgement must not consume. Only granted
+// signal rows whose span is now unreadable or completion-owned. An unrelated
+// corrupt queue row is skipped rather than withholding the whole grant. Away,
+// the branch keeps the rows and the report path carries the obligation.
+// Throws when the queue or an existing grant snapshot cannot be read, so the
+// acknowledgement fails closed instead of retiring a row it could not judge.
+export function completionSeqsToWithhold(state: string): string[] {
+  if (afkPostureRecordPresent(state)) return [];
+  const snapshotPath = join(state, BRANCH_ELIGIBLE_ROWS_FILE);
+  let grantedText = "";
+  try {
+    const stat = lstatSync(snapshotPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error("branch grant snapshot is not a regular file");
+    }
+    grantedText = readFileSync(snapshotPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const granted = new Set(grantedText.split(/\r?\n/).filter((line) => /^[0-9]+$/.test(line)));
+  if (granted.size === 0) return [];
+  let queue = "";
+  try {
+    const queueStat = lstatSync(`${state}/.wake-queue`);
+    if (queueStat.isSymbolicLink() || !queueStat.isFile()) {
+      throw new Error("wake queue is not a regular file");
+    }
+    queue = readFileSync(`${state}/.wake-queue`, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const withhold: string[] = [];
+  for (const line of queue.split(/\r?\n/)) {
+    if (!line) continue;
+    const fields = line.split("\t");
+    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) continue;
+    const seq = fields[1];
+    if (!granted.has(seq) || fields[2] !== "signal") continue;
+    const key = fields[3] ?? "";
+    if (!/\.(?:status|turn-ended)$/.test(key)) continue;
+    const task = key.replace(/\.(?:status|turn-ended)$/, "");
+    if (!/^[A-Za-z0-9._-]+$/.test(task)) continue;
+    const presented = presentedCompletion(state, task);
+    if (presented.classification === "unreadable" || presented.classification === "owned") {
+      withhold.push(seq);
+    }
+  }
+  return withhold;
 }
 
 // The exact state-relative filename bin/fm-wake-drain.sh reads for a

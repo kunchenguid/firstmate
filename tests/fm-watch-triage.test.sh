@@ -399,6 +399,10 @@ resolved [key=phase7]: Phase 7 completed and moved to Done
 paused [key=legal]: awaiting external counsel
 resolved [key=legal]: legal item returned to the queue
 working [key=phase8]: Phase 8 started
+working [key=validation-working]: implementation started
+paused [key=validation-paused]: implementation paused
+needs-validation [key=validation-working]: committed c118078, 706 tests
+needs-validation [key=validation-paused]: committed c118079, 707 tests
 EOF
   activity=$(status_open_activities "$state/activity.status")
   printf '%s' "$activity" | grep -F $'phase8\tworking\tPhase 8 started' >/dev/null \
@@ -409,6 +413,10 @@ EOF
     && fail "a same-key terminal event did not supersede the older working phase"
   printf '%s' "$activity" | grep -F $'legal\t' >/dev/null \
     && fail "a keyed resolved event did not close the declared pause"
+  printf '%s' "$activity" | grep -F $'validation-working\t' >/dev/null \
+    && fail "a keyed validation handoff did not close the implementation phase"
+  printf '%s' "$activity" | grep -F $'validation-paused\t' >/dev/null \
+    && fail "a keyed validation handoff did not close the paused implementation phase"
   printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
@@ -833,6 +841,7 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
   # blockers, terminal outcomes, notes, correlation-marked lines (both forms the
   # fleet writes), and any verb the classifier does not know.
   for line in 'needs-decision [key=k2]: pick one' 'blocked [key=k3]: need access' \
+      'needs-validation [at=1]: committed c118078, 706 tests' \
       'done [at=1]: shipped' 'failed [at=1]: broke' 'note: routed reply for the parent' \
       'resolved corr=0123456789abcdef [key=k4]: answered' \
       'working [corr=0123456789abcdef]: mirrored remote line' \
@@ -4738,25 +4747,23 @@ test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
   pass "TERM stops a watcher whose downtime-marker lock is held, retaining stale evidence"
 }
 
-# The cleanup bound is decimal seconds: a zero spelled with leading zeros falls
-# back to the 2s default instead of giving up at its first contended attempt,
-# so it retries after that failed attempt, and a leading-zero value such as 08
-# is an 8s bound rather than an invalid octal literal or the 2s default, so it
-# still outwaits a marker lock freed 3s after the cleanup's contended retry.
+# The cleanup bound is decimal seconds. Prove normalization at the executable
+# lock interface instead of racing a three-second lock release against a busy
+# host scheduler. The preceding TERM test keeps the real cleanup-timeout path
+# covered with a held live lock.
 test_cleanup_marker_lock_bound_is_decimal_with_zero_default() {
-  local bound ticks dir state
-  for bound in 00:0 08:30; do
-    ticks=${bound#*:}; bound=${bound%%:*}
-    dir=$(make_case "term-marker-lock-bound-$bound"); state="$dir/state"
-    FM_WATCHER_CLEANUP_LOCK_BOUND=$bound term_watcher_with_held_marker_lock "$dir" "$ticks"
-    [ "$HELD_MARKER_LOCK_RC" -ne 124 ] \
-      || fail "TERM did not stop a watcher with cleanup lock bound $bound"
-    [ -e "$dir/marker-lock-contended" ] \
-      || fail "cleanup lock bound $bound never contended on the held marker lock"
-    [ ! -e "$state/.watch.lock" ] \
-      || fail "cleanup lock bound $bound gave up before the marker lock freed"
-    ack_stopped_cycle "$state" \
-      || fail "could not acknowledge the stop under cleanup lock bound $bound"
+  local requested expected actual
+  for requested in '' 00 08 15 garbage; do
+    case "$requested" in
+      08) expected=8 ;;
+      15) expected=15 ;;
+      *) expected=2 ;;
+    esac
+    actual=$(bash -c '. "$1" && fm_watcher_cleanup_lock_bound "$2"' _ \
+      "$ROOT/bin/fm-wake-lib.sh" "$requested") \
+      || fail "cleanup lock bound normalization failed for ${requested:-empty}"
+    [ "$actual" = "$expected" ] \
+      || fail "cleanup lock bound ${requested:-empty} normalized to $actual, expected $expected"
   done
   pass "the cleanup marker-lock bound is decimal and zero falls back to the default"
 }

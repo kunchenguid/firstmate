@@ -90,7 +90,7 @@ unset _fm_classify_nounset
 # declaration cannot disappear behind an earlier recognized line. Continuation
 # prose is not a prefix and stays off that path. Recognized verbs keep the
 # classification below.
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-validation:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The declared-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -173,7 +173,7 @@ last_status_line() {  # <status-file> [<previous-event-var>]
 # 0 when <verb> is exactly one recognized status verb, with no leftover token.
 _fm_status_verb_recognized() {  # <verb>
   case "$1" in
-    working|needs-decision|blocked|done|failed|note|\
+    working|needs-decision|blocked|done|needs-validation|failed|note|\
     "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
     "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
     "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}")
@@ -288,6 +288,16 @@ status_is_terminal_verb() {
   esac
 }
 
+# 0 when the line is the nonterminal no-mistakes implementation handoff.
+# Legacy pre-validation done lines stay done; routing and the idle-after-handoff
+# record treat those as the same handoff without remapping current state.
+status_is_validation_handoff() {  # <status-line>
+  local verb
+  [ -n "${1:-}" ] || return 1
+  verb=$(status_line_verb "$1")
+  [ "$verb" = "needs-validation" ]
+}
+
 # 0 if the given (last) status line matches a captain-relevant verb.
 # Verb-aware by default: terminal verbs always match; nonterminal progress verbs
 # (working, resolved, captain-held) and paused never match from free-text prose;
@@ -305,6 +315,10 @@ status_is_captain_relevant() {
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
+    # The validation handoff is captain-relevant even when a home overrides
+    # FM_CAPTAIN_RE, and it is not a terminal verb. A custom regex that was
+    # written before the verb existed must not hide it.
+    needs-validation) return 0 ;;
   esac
   # An unrecognized prefix is surfaced as itself. The check sits after the
   # recognized nonterminal verbs, so working, paused, resolved, and captain-held
@@ -2113,7 +2127,7 @@ _fm_status_open_activities_stream() {
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      done|failed|needs-decision|blocked|"$resolve"|"$held")
+      done|needs-validation|failed|needs-decision|blocked|"$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;

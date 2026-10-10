@@ -117,6 +117,37 @@ fi
 
 [ "$WAKE_SET" -eq 1 ] || WAKE=$(turn_field wake)
 
+# A routine verdict must not retire a completion the supervisor still has to
+# continue. The dispatch owner reads the newly presented span. An open handoff
+# marker covers the same completion after that span has already been consumed.
+# continuationEvidence is the only continuation that wins over a stale marker.
+# A generic working or paused line does not.
+# Any failure to read the span upgrades, so a routine success cannot
+# be the outcome of an unreadable record. This holds in both postures: while
+# away the upgraded captain outcome stays in the store for the return, and
+# main stays parked.
+if [ "$VERDICT" = routine ] && [ "$TASK" != fleet ]; then
+  COMPLETION_OUT=''
+  COMPLETION_RC=0
+  COMPLETION_OUT=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" completion-owned --task "$TASK" 2>/dev/null) || COMPLETION_RC=$?
+  case "$COMPLETION_OUT" in
+    continued) ;;
+    owned|unreadable) VERDICT=captain ;;
+    *)
+      HANDOFF_MARK="$STATE/handoff-continuations/$TASK.open"
+      case "$TASK" in
+        *[!A-Za-z0-9._-]*) HANDOFF_MARK='' ;;
+      esac
+      if [ "$COMPLETION_RC" -ne 1 ] || { [ -n "$HANDOFF_MARK" ] && [ -f "$HANDOFF_MARK" ] && [ ! -L "$HANDOFF_MARK" ]; }; then
+        VERDICT=captain
+      fi
+      ;;
+  esac
+  if [ "$VERDICT" = captain ] && [ "$SILENT" = true ]; then
+    SILENT=false
+  fi
+fi
+
 set -- append --task "$TASK" --verdict "$VERDICT" --summary "$SUMMARY" --silent "$SILENT"
 [ -z "$WAKE" ] || set -- "$@" --wake "$WAKE"
 if ! SEQ=$("$SCRIPT_DIR/fm-branch-outcome.sh" "$@"); then

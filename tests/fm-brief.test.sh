@@ -831,7 +831,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief append now epoch templates template line signals
+  local home kind id brief append now epoch event_id templates template line signals status_state
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -853,23 +853,22 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     esac
     brief="$home/data/$id/brief.md"
     # Fill the scaffold's generated status-append command the way a worker does
-    # and run it. The stamp must be a value the worker supplies, so the command
-    # may not carry an unevaluated substitution that a file-write tool would
-    # copy through verbatim.
+    # and run it.
     # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
-    append=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$brief")
+    append=$(sed -n '/`event_id=/s/.*`\(event_id=.*\)`.*/\1/p' "$brief")
     now=$(date +%s)
-    append=${append//\{state\}/done}
+    status_state="done"
+    [ "$kind" = ship:no-mistakes ] && status_state=needs-validation
+    append=${append//\{state\}/$status_state}
     append=${append//\{one short line\}/test event}
     append=${append//<epoch>/$now}
-    case "$append" in
-      *"\$("*) fail "$kind scaffold left an unevaluated command in its status-append line" ;;
-    esac
     mkdir -p "$home/state"
     bash -c "$append" || fail "generated status command failed"
     epoch=$(bash -c '. "$1"; status_line_at_epoch "$(cat "$2")"' _ \
       "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
     [ "$epoch" = "$now" ] || fail "$kind scaffold did not record the worker's event time"
+    event_id=$(sed -n 's/.*\[event=\([0-9A-Fa-f]*\)\].*/\1/p' "$home/state/$id.status")
+    [ "${#event_id}" -eq 32 ] || fail "$kind scaffold did not record a stable event identity"
     # Every status signal the brief instructs a worker to append is a template
     # the worker fills in and writes verbatim, with or without a shell, not only
     # rule 4's echo: substitute each one's named placeholders and read the stamp
@@ -883,6 +882,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       [ -n "$template" ] || continue
       case "$template" in
         'echo "'*) template=${template#echo \"}; template=${template%%\" >>*} ;;
+        event_id=*) continue ;;
       esac
       case "$template" in
         *"\$("*) fail "$kind signal embeds an unevaluated command: $template" ;;
@@ -901,8 +901,18 @@ $templates
 SIGNALS
     [ "$signals" -ge 4 ] \
       || fail "$kind brief instructed only $signals stamped status signals"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
-      "$kind brief did not render the configured pause verb in its states list"
+    if [ "$kind" = ship:no-mistakes ]; then
+      assert_grep "States: working, needs-decision, blocked, awaiting, needs-validation, done, failed." "$brief" \
+        "$kind brief did not list the validation handoff beside the configured pause verb"
+      # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
+      assert_grep 'use the status command from your brief with state `needs-validation`' "$brief" \
+        "$kind brief did not route the validation handoff through its generated status command"
+      assert_no_grep 'append `needs-validation \[at=<epoch>\]' "$brief" \
+        "$kind brief still teaches an untagged validation handoff"
+    else
+      assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+        "$kind brief did not render the configured pause verb in its states list"
+    fi
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
       "$kind brief did not instruct the configured pause status"

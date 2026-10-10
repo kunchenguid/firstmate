@@ -322,7 +322,7 @@ For the full `stuck-crewmate-recovery` trigger, including a live worker claiming
 - teardown -> cleanup.
 - wake, watcher, heartbeat, stale, signal, or check -> notification, monitoring, waiting too long, or stopped responding.
 - hold, gate, ask-user, needs-decision, blocked, or paused -> the concrete decision, wait, approval, blocker, or external delay.
-- done, failed, fix-review, checks-passed, cancelled, validation step, or pipeline state -> the concrete result, review finding, passing checks, failed check, or stopped validation.
+- done, needs-validation, failed, fix-review, checks-passed, cancelled, validation step, or pipeline state -> the concrete result, required next validation, review finding, passing checks, failed check, or stopped validation.
 - brief -> instructions.
 - crewmate -> worker, only when naming the helper matters.
 - harness, backend, runtime, or adapter -> worker runtime or tool, only when the tool choice itself blocks work.

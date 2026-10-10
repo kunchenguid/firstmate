@@ -24,7 +24,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|needs-validation|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -256,12 +256,13 @@ map_log_state() {  # <line>
     return
   fi
   case "$(status_line_verb "$1")" in
-    working)        echo working ;;
-    needs-decision) echo parked ;;
-    blocked)        echo blocked ;;
-    done)           echo "done" ;;
-    failed)         echo failed ;;
-    *)              echo unknown ;;
+    working)           echo working ;;
+    needs-decision)    echo parked ;;
+    blocked)           echo blocked ;;
+    done)              echo "done" ;;
+    needs-validation)  echo needs-validation ;;
+    failed)            echo failed ;;
+    *)                 echo unknown ;;
   esac
 }
 

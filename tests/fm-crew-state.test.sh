@@ -2421,6 +2421,28 @@ test_no_mistakes_prevalidation_done_stays_done() {
   pass "no-mistakes pre-validation done: stays current-state done"
 }
 
+test_needs_validation_reads_as_its_own_state() {
+  reset_fakes
+  local d out
+  d=$(new_case needs-validation)
+  make_repo_on_branch "$d/wt" fm/needs-validation
+  git -C "$d/wt" commit -q --allow-empty -m 'fix only in the worktree'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/handoff.meta" \
+    "window=fm:fm-handoff" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'needs-validation: committed c118078, 706 tests\n' > "$d/state/handoff.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" handoff
+  out=$(run_crew_state "$d" handoff)
+  assert_contains "$out" "state: needs-validation" "a validation handoff must read as needs-validation"
+  assert_not_contains "$out" "state: done" "a validation handoff must not be remapped to done"
+  assert_not_contains "$out" "state: blocked" "a validation handoff must not hit the named-head gate"
+  pass "needs-validation stays a nonterminal current state"
+}
+
 test_moved_remote_branch_without_named_head_is_blocked() {
   reset_fakes
   local d main_sha fix_sha out
@@ -5577,6 +5599,7 @@ test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
+test_needs_validation_reads_as_its_own_state
 test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane
 test_no_run_launch_prompt_parked_is_not_working
