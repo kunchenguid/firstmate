@@ -170,7 +170,7 @@ test_goodnight_hold() {
   [ ! -e "$home/data/ship" ] || fail 'hold created task material'
 
   rm "$home/state/.goodnight"
-  out=$(goodnight_spawn "$home" morning projects/none --scout)
+  out=$(goodnight_spawn "$home" morning projects/none codex --scout)
   assert_contains "$out" 'task morning has no brief' 'lifting marker did not restore ordinary validation'
   pass 'goodnight defers new spawns and batches before backend allocation until the hold is lifted'
 }
