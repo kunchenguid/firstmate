@@ -675,6 +675,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -1264,6 +1266,9 @@ SPAWN_CONTROL_LOCK_HELD=0
 SPAWN_CONTROL_PARENT=0
 SPAWN_META_TMP=
 SPAWN_META_LOCK=
+TREEHOUSE_ORIGINAL_HOME=${HOME-}
+TREEHOUSE_ORIGINAL_HOME_SET=0
+[ "${HOME+x}" = x ] && TREEHOUSE_ORIGINAL_HOME_SET=1
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
@@ -4087,6 +4092,16 @@ spawn_assert_agent_worktree() {
   exit 1
 }
 
+spawn_restore_home() {
+  local command
+  if [ "$TREEHOUSE_ORIGINAL_HOME_SET" = 1 ]; then
+    command="export HOME=$(printf '%q' "$TREEHOUSE_ORIGINAL_HOME")"
+  else
+    command='unset HOME'
+  fi
+  spawn_send_text_line "$WT_TARGET" "$command"
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -4417,7 +4432,19 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fm_treehouse_require_config_free_project "$PROJ_ABS_REAL" || exit 1
+  TREEHOUSE_POOL_ROOT=$(fm_treehouse_pool_root "$FM_HOME") || {
+    echo "error: could not resolve the per-home Treehouse root from FM_HOME '$FM_HOME'" >&2
+    exit 1
+  }
+  fm_treehouse_prepare_root "$FM_HOME" "$TREEHOUSE_POOL_ROOT" || {
+    echo "error: could not prepare the per-home Treehouse root '$TREEHOUSE_POOL_ROOT'" >&2
+    exit 1
+  }
+  # Treehouse v2.0.0 uses HOME as its default root; keep this assignment on the
+  # acquisition command only, then restore the launching home's HOME before the
+  # worker starts so harness credentials still resolve normally.
+  spawn_send_text_line "$WT_TARGET" "$(fm_treehouse_get_command "$TREEHOUSE_POOL_ROOT" "$PROJ_ABS_REAL")"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -4477,6 +4504,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  spawn_restore_home
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable

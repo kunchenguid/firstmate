@@ -57,6 +57,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$ROOT/bin/fm-treehouse-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -193,13 +195,14 @@ SH
   printf '%s\n' "$case_dir"
 }
 
-# Write a meta file for the task. Args: case_dir mode kind
+# Write a meta file for the task. Args: case_dir mode kind [worktree]
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
+  local worktree=${4:-$case_dir/wt}
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \
     "endpoint_task_id=task-x1" \
-    "worktree=$case_dir/wt" \
+    "worktree=$worktree" \
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode" \
@@ -662,7 +665,7 @@ make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sha1sum shasum sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -4421,6 +4424,54 @@ EOF
   pass "a process exiting during identity lookup does not block teardown"
 }
 
+test_return_uses_per_home_treehouse_root() {
+  local case_dir rc expected_root
+  case_dir=$(make_case per-home-treehouse-root)
+  write_meta "$case_dir" local-only ship
+  land_shippable_commit "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s|%s\\n' "\${HOME:-}" "\${TREEHOUSE_ROOT:-}" > "$case_dir/treehouse-home.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  mkdir -p "$case_dir/user-home"
+  HOME="$case_dir/user-home" TREEHOUSE_ROOT="$case_dir/shared-treehouse" FM_HOME="$case_dir" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "per-home-treehouse-root: teardown should succeed"
+  expected_root=$(HOME="$case_dir/user-home" fm_treehouse_pool_root "$case_dir")
+  assert_present "$case_dir/treehouse-home.log" \
+    "per-home-treehouse-root: teardown did not call treehouse return"
+  [ "$(cat "$case_dir/treehouse-home.log")" = "$expected_root|$expected_root" ] || \
+    fail "per-home-treehouse-root: treehouse return used roots '$(cat "$case_dir/treehouse-home.log")', expected '$expected_root'"
+  pass "fm-teardown.sh scopes treehouse return to the launching home's pool"
+}
+
+test_return_uses_legacy_treehouse_root() {
+  local case_dir rc legacy_wt expected_root
+  case_dir=$(make_case legacy-treehouse-root)
+  legacy_wt="$case_dir/legacy-pool/.treehouse/legacy-project/1/legacy-project"
+  mkdir -p "$(dirname "$legacy_wt")"
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1-legacy "$legacy_wt" main
+  write_meta "$case_dir" local-only ship "$legacy_wt"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\${HOME:-}" > "$case_dir/treehouse-home.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "legacy-treehouse-root: teardown should succeed"
+  expected_root="$case_dir/legacy-pool"
+  assert_present "$case_dir/treehouse-home.log" \
+    "legacy-treehouse-root: treehouse return did not run"
+  [ "$(cat "$case_dir/treehouse-home.log")" = "$expected_root" ] || \
+    fail "legacy-treehouse-root: treehouse return used HOME '$(cat "$case_dir/treehouse-home.log")', expected '$expected_root'"
+  pass "teardown derives the legacy Treehouse root from the recorded worktree path"
+}
+
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   local case_dir rc head pid abort_log
   case_dir=$(make_case abort-then-reap-then-remove-order)
@@ -4524,6 +4575,18 @@ test_missing_startup_source_refuses_before_cleanup() {
   run_copied_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   assert_source_refusal_preserved_state "$case_dir" "missing-startup-source" "required source fm-nm-run-lib.sh"
   pass "a missing teardown startup source refuses before cleanup"
+}
+
+test_missing_treehouse_source_refuses_before_cleanup() {
+  local case_dir rc
+  case_dir=$(make_case missing-treehouse-source)
+  write_meta "$case_dir" local-only ship
+  prepare_teardown_source_copy "$case_dir"
+  rm -f "$case_dir/test-root/bin/fm-treehouse-lib.sh"
+  rc=0
+  run_copied_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  assert_source_refusal_preserved_state "$case_dir" "missing-treehouse-source" "required source fm-treehouse-lib.sh"
+  pass "a missing Treehouse helper refuses before cleanup"
 }
 
 test_unreadable_startup_source_refuses_before_cleanup() {
@@ -4638,6 +4701,7 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
 }
 
 test_missing_startup_source_refuses_before_cleanup
+test_missing_treehouse_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
@@ -4747,4 +4811,6 @@ test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
+test_return_uses_per_home_treehouse_root
+test_return_uses_legacy_treehouse_root
 test_run_abort_precedes_process_reap_precedes_worktree_removal
