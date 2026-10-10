@@ -28,6 +28,8 @@
 #          deny object on stdout unless --claude was supplied.
 #   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
 #          reads the returned object rather than the exit status.
+#   DENY, --devin - exit 0 and Devin's own {"decision":"block","reason":...}
+#          object on stdout, verified on devin 3000.11.3 to reach the model.
 #   INERT - not the real primary checkout (a crewmate/scout task worktree or a
 #           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
@@ -44,10 +46,11 @@ CMD=""
 CMD_SET=0
 CLAUDE_MODE=0
 CURSOR_MODE=0
+DEVIN_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor]
+Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor|--devin]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex tool_input.command).
@@ -58,6 +61,7 @@ The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
 With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
 because Cursor reads the returned object rather than the exit status.
+With --devin, a deny is Devin's own decision object on stdout and exit 0.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -83,6 +87,10 @@ while [ "$#" -gt 0 ]; do
       CURSOR_MODE=1
       shift
       ;;
+    --devin)
+      DEVIN_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -101,10 +109,11 @@ if [ "$CMD_SET" -eq 0 ]; then
   command -v jq >/dev/null 2>&1 || exit 0
   # shellcheck source=bin/fm-hook-host-lib.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
-  # Cursor's own registration passes --cursor. Without it a Cursor-delivered
-  # payload is the Claude-settings duplicate Cursor also loads, already
-  # evaluated by that registration, so this copy allows without re-classifying.
-  if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  # Cursor's own registration passes --cursor, and Devin's passes --devin.
+  # Without the matching flag a foreign-delivered payload is the
+  # Claude-settings duplicate that host also loads, already evaluated by that
+  # registration, so this copy allows without re-classifying.
+  if [ "$CURSOR_MODE" -eq 0 ] && [ "$DEVIN_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
   CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
@@ -183,6 +192,10 @@ DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 if [ "$CURSOR_MODE" -eq 1 ]; then
   printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
+if [ "$DEVIN_MODE" -eq 1 ]; then
+  printf '{"decision":"block","reason":"%s"}\n' "$ESCAPED"
   exit 0
 fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2

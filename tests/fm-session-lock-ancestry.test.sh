@@ -187,6 +187,71 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+test_devin_session_is_identified_by_exact_name_only() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/devin"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_DEVIN_SHAPE:-live}" in
+  # Devin's real shape (verified, devin 3000.11.3): hook/tool shell ->
+  # `devin acp` -> `devin` front-end -> zsh. The innermost non-Claude match is
+  # the per-session acp pid, which is the lock anchor.
+  950:comm=:live) printf '%s\n' devin ;;
+  950:args=:live) printf '%s\n' '/Users/u/.local/bin/devin acp' ;;
+  950:ppid=:live) printf '%s\n' 960 ;;
+  960:comm=:live) printf '%s\n' devin ;;
+  960:args=:live) printf '%s\n' '/Users/u/.local/bin/devin' ;;
+  960:ppid=:live) printf '%s\n' 970 ;;
+  970:comm=:live) printf '%s\n' zsh ;;
+  970:args=:live) printf '%s\n' '-zsh' ;;
+  970:ppid=:live) printf '%s\n' 1 ;;
+  # A name that merely starts with devin is not the harness.
+  950:comm=:prefixed) printf '%s\n' devin-foo ;;
+  950:args=:prefixed) printf '%s\n' 'devin-foo serve' ;;
+  950:ppid=:prefixed) printf '%s\n' 1 ;;
+  # A helper under Devin's install tree carries `devin` path components but an
+  # unrelated executable name: path-component evidence must not claim it.
+  950:comm=:helper) printf '%s\n' rg ;;
+  950:args=:helper) printf '%s\n' '/Users/u/.local/share/devin/cli/_versions/3000.11.3/vendor/devin/rg needle' ;;
+  950:ppid=:helper) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-turnend-guard-devin.sh' ;;
+  *:ppid=:*) printf '%s\n' 950 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '950\n' > "$dir/state/.lock"
+
+  got=$(FM_TEST_DEVIN_SHAPE=live lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "live: the devin acp session was not found in the ancestry at all"
+  [ "$got" = 950 ] || fail "live: ancestry resolved '$got', expected the devin acp pid 950"
+  FM_TEST_DEVIN_SHAPE=live lib_eval "$fakebin" 'fm_harness_pid_alive 950' \
+    || fail "live: a live devin acp process was not recognized as a harness"
+  FM_TEST_DEVIN_SHAPE=live lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "live: the devin session holding the lock did not recognize itself as the owner"
+
+  for shape in prefixed helper; do
+    if FM_TEST_DEVIN_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+      fail "$shape: a non-devin process was treated as a harness process"
+    fi
+    if FM_TEST_DEVIN_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 950'; then
+      fail "$shape: a non-devin process passed the harness-liveness predicate"
+    fi
+  done
+  pass "session-lock: a Devin session is identified by the exact name devin, never a prefix or install-path component"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -1052,10 +1117,15 @@ test_failed_lock_write_restores_previous_sidecar() {
 # A failed line-1 write that had no previous sidecar must not leave the new id
 # behind; the lock stays ancestry-only.
 test_failed_lock_write_removes_new_sidecar_when_none_existed() {
-  local dir
+  local dir stale_pid
   dir="$TMP_ROOT/restore-absent-sidecar"
   mkdir -p "$dir/state"
-  printf '1\n' > "$dir/state/.lock"
+  # PID 1 can itself be a live harness in a container. Use a reaped fixture.
+  sleep 0 &
+  stale_pid=$!
+  wait "$stale_pid"
+  kill -0 "$stale_pid" 2>/dev/null && fail "the stale-pid fixture is still alive"
+  printf '%s\n' "$stale_pid" > "$dir/state/.lock"
   chmod a-w "$dir/state/.lock" || fail "could not make the stale lock read-only"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
@@ -1070,7 +1140,7 @@ test_failed_lock_write_removes_new_sidecar_when_none_existed() {
     || fail "the reclaim did not fail on the lock write: $(cat "$dir/state/reclaim.out")"
   [ ! -e "$dir/state/.lock-session" ] \
     || fail "the failed reclaim left sidecar $(cat "$dir/state/.lock-session"), expected none"
-  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = 1 ] \
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$stale_pid" ] \
     || fail "the failed reclaim rewrote lock line 1"
   pass "session-lock: a failed lock write removes a newly created sidecar"
 }
@@ -1078,10 +1148,15 @@ test_failed_lock_write_removes_new_sidecar_when_none_existed() {
 # A completed reclaim must keep the new id beside the new pid after the writer
 # exits, so a late signal cannot unwind a verified publication.
 test_verified_reclaim_keeps_new_sidecar() {
-  local dir
+  local dir stale_pid
   dir="$TMP_ROOT/verified-reclaim"
   mkdir -p "$dir/state"
-  printf '1\n' > "$dir/state/.lock"
+  # PID 1 can itself be a live harness in a container. Use a reaped fixture.
+  sleep 0 &
+  stale_pid=$!
+  wait "$stale_pid"
+  kill -0 "$stale_pid" 2>/dev/null && fail "the stale-pid fixture is still alive"
+  printf '%s\n' "$stale_pid" > "$dir/state/.lock"
   printf 'S1\n' > "$dir/state/.lock-session"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
@@ -1102,6 +1177,7 @@ test_verified_reclaim_keeps_new_sidecar() {
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
+test_devin_session_is_identified_by_exact_name_only
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain

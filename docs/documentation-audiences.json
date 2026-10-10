@@ -429,6 +429,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/devin.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/grok.md",
       "audience": "agent-runtime"
     },

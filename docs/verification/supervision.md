@@ -257,7 +257,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-21, with Claude's replacement Stop-owned path revalidated on 2026-09-21, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.
+The blocking and bounded-follow-up mechanisms were validated across eight harnesses on 2026-07-08 through 2026-09-26, with Claude's replacement Stop-owned path revalidated on 2026-09-21, Cursor's stop-hook park validated on 2026-08-13, omp's blocking `session_stop` hook validated on 2026-09-05, and Devin's awaited `Stop` park validated on 2026-09-26.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -268,6 +268,49 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | omp | 18.1.11 | Blocking `session_stop` hook returning `{ continue: true, additionalContext }` | In the isolated rpc lab (2026-09-05), the successor watcher was frozen with `SIGSTOP` until its beacon passed the lab `FM_GUARD_GRACE` of 20s while its arm child stayed attached (a killed watcher closes its arm child and the extension re-arms before the guard can fire); the next turn end raised the guard, the guard spy recorded `rc=2` followed by a stop carrying `stop_hook_active: true`, omp compelled a continuation carrying the `turn-end-guard` operational text, the `fm_watch_arm_omp` invocation count then rose to at least two, and a live watcher held the home lock after the thaw; the flagged stop was allowed, so exactly one continuation ran. `session_stop` never fired for an interrupted turn. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
+| Devin | 3000.11.3 | Awaited `Stop` hook park printing one `{"decision":"block","reason":...}` object | A block decision ran a genuine same-turn continuation carrying the reason text; a sleeping hook held the boundary open for its full configured timeout and the wake landed after it; a queued captain message stands the park down and drains as its own turn once the hook exits without a block. |
+
+### Devin primary park, 2026-09-26
+
+Devin was validated as a primary on 2026-09-26 against `devin 3000.11.3 (9c803229faa4)` on macOS arm64 with tmux 3.x, in a throwaway firstmate home on private tmux sockets, never against a live home and never with a user-scope hook.
+Mechanism facts were established first in isolated scratch workspaces:
+
+| Question | Method | Result |
+| --- | --- | --- |
+| Can `Stop` block? | hook prints `{"decision":"block","reason":...}`; separately, hook exits 2 with stderr | Both block. The reason or stderr reaches the model verbatim and the continuation is the same turn (`stop_hook_active: true`, same `prompt_id`, no `UserPromptSubmit`). |
+| Is the hook awaited? | `Stop` hook sleeps 300s under `timeout: 28800` | Yes; the turn stays open the full sleep with the spinner running and the deferred block is then delivered. |
+| What is the default timeout? | no-`timeout` hook sleeping 700s | 60s. The hook's own shell is killed, its `sleep` child is orphaned, and the turn ends with no block delivered. The tracked registration therefore sets `timeout: 28800`. |
+| Does a typed captain message interrupt the park? | text + Enter during a 90s park | No. Devin renders a `─ N queued ─` row and `Press Enter to send queued messages now`; when the hook exits without a block, each queued message drains as its own turn with a fresh `prompt_id`. The park polls its own pane for those markers and stands down silently so the queue drains. |
+| Does Escape render a park-visible marker? | one Esc during a 90s parked `Stop` hook | Yes: `⠠⠤ Typing · 15s (esc again to interrupt)` appeared on the spinner row at +0.3s and +1.5s, reverting to `esc twice` by about +5s. The hook is not killed; the cancel is deferred to hook exit, so standing the park down is what lets it take effect. |
+| Is there a `loop_count`? | payload inspection across block continuations | No; only boolean `stop_hook_active`. `prompt_id` is constant across continuations and rotates per real message, so the guard keeps a prompt-keyed counter in `state/.devin-park-loops`. |
+| Process tree | ancestry of hook and tool shells | `zsh → devin (front-end) → devin acp → hook/tool shell`; the `devin acp` pid is the stable per-session lock anchor. `AI_AGENT=devin_3000-11-3_agent` and `DEVIN_PROJECT_DIR` are set by Devin; the latter is hook-only, which anchors the foreign-host predicate. |
+| Claude import isolation | project `.claude/settings.json` loggers plus `read_config_from.claude=false` | With the tracked `.devin/config.json` no Claude-shaped hook fired; `asyncRewake` is ignored by Devin so the imported Claude auto-arm would otherwise have parked the turn synchronously. |
+
+The integration itself is exercised by the opt-in guard:
+
+```sh
+FM_DEVIN_PRIMARY_LIVE=1 bin/fm-test-run.sh tests/fm-devin-primary-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+harness: devin 3000.11.3 (9c803229faa4)
+ok - devin primary: the SessionStart hook takes the fleet lock as the devin acp process
+ok - devin primary: the run-tier session start completes every stage
+ok - devin primary: SessionStart additionalContext reaches model context before the first turn
+ok - devin primary: the Stop-hook park delivers a real watcher wake as one block continuation
+ok - devin primary: the park owns an arm cycle with a live watcher beacon
+ok - devin primary: queued captain input stands the park down, drains as its own turn, and the next stop re-parks
+ok - devin primary: read_config_from.claude=false held - no Claude-shaped hook or auto-arm ran
+```
+
+One live-run divergence from the Cursor shape: Devin does not echo the block reason back to the pane, so the guard proves wake delivery through the durable loop record plus the model visibly running `bin/fm-wake-drain.sh`, not through a rendered `FIRSTMATE_OP` line.
+The captain-activity markers are matched only in the bottom composer region of the own-pane capture (trailing blank rows dropped, last 12 rows, line-anchored patterns), because the transcript above can legitimately print the same strings inside tool output; `tests/fm-devin-primary.test.sh` carries the transcript-region and above-region negative cases beside the positive stand-down cases.
+The Herdr own-pane read the park relies on was exercised from a live Herdr-hosted Devin session on 2026-09-26: target discovery selected the live Devin pane, backend discovery returned `herdr`, and `fm_backend_visible_capture` exited 0 with the composer rows visible; the live end-to-end guard itself ran on tmux.
+The portable regression `tests/fm-devin-primary.test.sh` covers the foreign-host predicate, the prompt-keyed loop counter and ceiling, the queue and Esc stand-down markers, the bounded repair follow-up on an unreadable pane, supersession, AFK, lock ownership, child worktrees, and the SessionStart transport shape.
+Away mode follows the generic non-Pi path unchanged: the park exits silently while `state/.afk` is present.
+Devin is deliberately not a secondmate harness, and no `UserPromptSubmit` or host-mirror registration ships.
 
 ### Cursor primary park, 2026-08-13
 

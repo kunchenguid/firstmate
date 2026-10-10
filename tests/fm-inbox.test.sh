@@ -469,32 +469,57 @@ assert_equals "supervision-model-unknown-for-home" \
 can=$(printf '%s' "$no_override" | json_get can_receive)
 assert_equals "unknown" "$can" "unknown lock plus unknown consumer is not can_receive true"
 
-# A live lock holder whose ancestry names a known harness, plus a fresh
-# beacon, is the yes path: the inspected home can receive work.
-home=$(make_home ready-holder)
-# A process whose ps comm is the harness name, so lock inspect and
-# fm-harness.sh ancestry both classify it without PATH tricks.
-perl -e '$0="claude"; sleep 60' &
-holder_pid=$!
-# Give ps a moment to report the renamed comm.
-sleep 0.2
+# Autoarm holders remain healthy between watcher cycles; persistent holders
+# cannot use the same fresh beacon as proof of a live watcher. Classify the
+# inspected holder without any supervision-model override from the caller.
 kill_holder() {
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
 }
-trap 'kill_holder; fm_test_cleanup' EXIT
-printf '%s\n' "$holder_pid" > "$home/state/.lock"
-touch "$home/state/.last-watcher-beat"
-held=$(run_inbox "$home" ready) || fail "ready should succeed for a lock-holder harness"
-assert_equals "held" "$(printf '%s' "$held" | python3 -c 'import json,sys; print(json.load(sys.stdin)["lock"]["state"])')" \
-  "a live claude-named holder is a held lock"
-assert_equals "healthy" "$(printf '%s' "$held" | json_get wake_consumer state)" \
-  "lock-holder ancestry plus a fresh beacon is a healthy wake consumer"
-assert_equals "True" "$(printf '%s' "$held" | json_get can_receive)" \
-  "a held lock with a healthy wake consumer can receive work"
-kill_holder
-trap fm_test_cleanup EXIT
-pass "readiness says unknown (or not-receivable) instead of inferring liveness from a lock"
+for holder_name in claude devin codex; do
+  home=$(make_home "ready-holder-$holder_name")
+  # Real process identity, rather than a stub of either readiness classifier.
+  perl -e '$0=$ARGV[0]; sleep 120' "$holder_name" &
+  holder_pid=$!
+  trap 'kill_holder; fm_test_cleanup' EXIT
+  for _ in $(seq 1 50); do
+    case "$("$ROOT/bin/fm-harness.sh" ancestry "$holder_pid")" in
+      *" $holder_name") break ;;
+    esac
+    sleep 0.1
+  done
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  touch "$home/state/.last-watcher-beat"
+  held=$(FM_SUPERVISION_MODEL='' run_inbox "$home" ready) \
+    || fail "ready should succeed for a $holder_name lock holder"
+  assert_equals "held" "$(printf '%s' "$held" | json_get lock state)" \
+    "a live $holder_name holder is a held lock"
+  assert_absent "$home/state/.watch.lock" \
+    "the $holder_name fixture has a fresh beacon but no watcher"
+  if [ "$holder_name" = codex ]; then
+    assert_equals "unknown" "$(printf '%s' "$held" | json_get wake_consumer state)" \
+      "a persistent primary still requires its live watcher"
+    assert_equals "no-watcher" "$(printf '%s' "$held" | json_get wake_consumer reason)" \
+      "a persistent primary cannot treat a fresh beacon as a watcher"
+    assert_equals "unknown" "$(printf '%s' "$held" | json_get can_receive)" \
+      "a persistent primary without a watcher cannot claim readiness"
+  else
+    assert_equals "healthy" "$(printf '%s' "$held" | json_get wake_consumer state)" \
+      "a $holder_name primary with a fresh beacon is healthy mid-turn"
+    assert_equals "True" "$(printf '%s' "$held" | json_get can_receive)" \
+      "a held $holder_name lock with a healthy wake consumer can receive work"
+  fi
+  fm_touch_epoch "$(( $(date +%s) - 600 ))" "$home/state/.last-watcher-beat"
+  stale=$(FM_SUPERVISION_MODEL='' run_inbox "$home" ready) \
+    || fail "ready should succeed for a $holder_name holder with a stale beacon"
+  assert_equals "down" "$(printf '%s' "$stale" | json_get wake_consumer state)" \
+    "a $holder_name holder alone cannot make a stale beacon healthy"
+  assert_equals "False" "$(printf '%s' "$stale" | json_get can_receive)" \
+    "a $holder_name primary with stale supervision cannot receive work"
+  kill_holder
+  trap fm_test_cleanup EXIT
+done
+pass "readiness uses the inspected holder's supervision model and rejects stale supervision"
 
 # --- invalid input ----------------------------------------------------------
 
