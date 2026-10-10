@@ -92,14 +92,15 @@ require_listener_reached_poll() {  # <home>
   fail "the board listener did not reach the Lavish poll (owner: ${owner:-none})"
 }
 
-# Build the board from <underway-json> plus <charted-json> and return what the
+# Build the board from row JSON plus optional Captain's Call items and return what the
 # renderer produced.
-render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [captains-call-json]
   local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
+  local calls=${6:-'[]'}
   jq -n --argjson underway "$underway" --argjson charted "$charted" \
-    --argjson more "$more" --argjson warning_more "$warning_more" '{
+    --argjson calls "$calls" --argjson more "$more" --argjson warning_more "$warning_more" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:$underway, landed:[],
+    prs_live:false, captains_call:$calls, underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -265,6 +266,32 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   ' >/dev/null || fail "undated charted rows did not keep a stable trailing order: $out"
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
+
+test_decision_context_renders_optional_detail_as_literal_text() {
+  local home out
+  home=$(make_home decision-detail)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"open-with-detail","type":"decision","repo":"sample","title":"With detail",
+     "about":"The work","decide":"Choose a path","detail":"<b>Literal</b> & context",
+     "options":[{"value":"yes","label":"Yes"}]},
+    {"key":"open-without-detail","type":"decision","repo":"sample","title":"Without detail",
+     "about":"The work","decide":"Choose a path",
+     "options":[{"value":"yes","label":"Yes"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == "" and (.captains_call | length) == 2
+      and (.captains_call[0] | .title == "With detail" and .context == [
+        {"label":"about","value":"The work"},
+        {"label":"decide","value":"Choose a path"},
+        {"label":"detail","value":"<b>Literal</b> & context"}])
+      and (.captains_call[1] | .title == "Without detail" and .context == [
+        {"label":"about","value":"The work"},
+        {"label":"decide","value":"Choose a path"}])
+  ' >/dev/null || fail "decision context lost detail or changed its original rows: $out"
+  pass "decision context renders literal detail after decide and keeps absent detail unchanged"
+}
+
+test_decision_context_renders_optional_detail_as_literal_text
 
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
