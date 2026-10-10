@@ -153,6 +153,102 @@ delta_cadence_case default '' 0.5
 delta_cadence_case override 0.07 0.07
 
 ADAPTER="$ROOT/bin/fm-procevent-remote-reply.sh"
+
+# Temporary-path hygiene, in its own home with a private TMPDIR: the continuity
+# return, a die after staging, a lifecycle-locked handle, and a signal during a
+# document fetch must each leave TMPDIR empty and release the lifecycle lock.
+LEAK_HOME="$TMP_ROOT/leak-home"
+LEAK_TMPDIR="$TMP_ROOT/leak-tmpdir"
+mkdir -p "$LEAK_HOME/data" "$LEAK_HOME/state" "$LEAK_TMPDIR"
+printf -- '- ios - iOS delivery (host: remote-mac; root: %s; home: %s; scope: iOS work; projects: alpha; added 2026-08-02)\n' \
+  "$ROOT" "$REMOTE" > "$LEAK_HOME/data/secondmates.md"
+# A document fetch that hangs until signalled, recording its own pid.
+cat > "$FAKEBIN/fake-ssh-hang" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_LEAK_FETCH_STARTED"
+exec sleep 30
+SH
+chmod +x "$FAKEBIN/fake-ssh-hang"
+leak_env() {
+  TMPDIR="$LEAK_TMPDIR" FM_HOME="$LEAK_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SSH_BIN="$FAKEBIN/fake-ssh-hang" FM_LEAK_FETCH_STARTED="$TMP_ROOT/leak-fetch-started" "$@"
+}
+leak_result() { # <status> <payload-file> <destination>
+  local empty to to_hash bytes
+  empty=$(sha256_file /dev/null)
+  bytes=$(LC_ALL=C wc -c < "$2" | tr -d ' ')
+  to=$bytes
+  to_hash=$(sha256_file "$2")
+  [ "$1" = delta ] || { to=0; to_hash=$empty; }
+  {
+    printf 'schema=fm-remote-delta.v1\nstatus=%s\npath=state/parent-replies.status\n' "$1"
+    printf 'from_offset=0\nto_offset=%s\nfrom_prefix_sha256=%s\nto_prefix_sha256=%s\n' "$to" "$empty" "$to_hash"
+    printf 'payload_sha256=%s\npayload_bytes=%s\nreason=leak-check\n\n' "$(sha256_file "$2")" "$bytes"
+    cat "$2"
+  } > "$3"
+}
+assert_no_leak() { # <path-description>
+  local left
+  left=$(ls -A "$LEAK_TMPDIR")
+  [ -z "$left" ] || fail "$1 left temporary paths behind: $left"
+  [ -z "$(find "$LEAK_HOME/data" -name '.remote-doc.*' -print -quit)" ] \
+    || fail "$1 left a staged document behind"
+  [ -z "$(find "$LEAK_HOME/state" -maxdepth 1 -name '.remote-reply-lifecycle-*' -print -quit)" ] \
+    || fail "$1 left the lifecycle lock held"
+}
+: > "$TMP_ROOT/leak-empty"
+leak_result continuity-broken "$TMP_ROOT/leak-empty" "$TMP_ROOT/leak-continuity.result"
+leak_rc=0
+leak_env "$ADAPTER" ingest ios "$TMP_ROOT/leak-continuity.result" > "$TMP_ROOT/leak.out" 2>&1 || leak_rc=$?
+[ "$leak_rc" -eq 3 ] || fail "continuity ingest returned an unexpected status: $leak_rc"
+assert_no_grep 'unbound variable' "$TMP_ROOT/leak.out" "continuity ingest cleanup tripped on an unbound variable"
+assert_no_leak "continuity ingest"
+leak_env "$ADAPTER" handle ios 1 "$TMP_ROOT/leak-continuity.result" > "$TMP_ROOT/leak.out" 2>&1 || true
+assert_no_leak "continuity handle"
+printf 'working: leak check\n' > "$TMP_ROOT/leak-payload"
+leak_result delta "$TMP_ROOT/leak-payload" "$TMP_ROOT/leak-delta.result"
+sed 's/^payload_bytes=.*/payload_bytes=99/' "$TMP_ROOT/leak-delta.result" > "$TMP_ROOT/leak-bad.result"
+leak_rc=0
+leak_env "$ADAPTER" ingest ios "$TMP_ROOT/leak-bad.result" > "$TMP_ROOT/leak.out" 2>&1 || leak_rc=$?
+[ "$leak_rc" -eq 1 ] || fail "a payload digest mismatch returned an unexpected status: $leak_rc"
+assert_no_leak "die after staging"
+leak_rc=0
+leak_env "$ADAPTER" handle ios 2 "$TMP_ROOT/leak-bad.result" > "$TMP_ROOT/leak.out" 2>&1 || leak_rc=$?
+[ "$leak_rc" -eq 1 ] || fail "a handled payload digest mismatch returned an unexpected status: $leak_rc"
+assert_no_leak "die inside a lifecycle-locked handle"
+leak_env "$ADAPTER" handle ios 3 "$TMP_ROOT/leak-delta.result" > "$TMP_ROOT/leak.out" 2>&1 || true
+assert_grep 'ingested: ios appended=1' "$TMP_ROOT/leak.out" "the leak-check delta was not ingested"
+assert_no_leak "ingested lifecycle-locked handle"
+rm -rf "$LEAK_HOME/state/remote-replies"
+printf 'done: leak check report=data/leak/report.md\n' > "$TMP_ROOT/leak-doc-payload"
+leak_result delta "$TMP_ROOT/leak-doc-payload" "$TMP_ROOT/leak-doc.result"
+rm -f "$TMP_ROOT/leak-fetch-started"
+# A plain background command, not the leak_env function, so the signal reaches
+# the adapter process itself rather than a wrapping subshell.
+TMPDIR="$LEAK_TMPDIR" FM_HOME="$LEAK_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_SSH_BIN="$FAKEBIN/fake-ssh-hang" FM_LEAK_FETCH_STARTED="$TMP_ROOT/leak-fetch-started" \
+  "$ADAPTER" ingest ios "$TMP_ROOT/leak-doc.result" > "$TMP_ROOT/leak.out" 2>&1 &
+leak_pid=$!
+wait_for_content() {
+  local _
+  for _ in $(seq 1 200); do
+    [ -s "$1" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+wait_for_content "$TMP_ROOT/leak-fetch-started" || fail "the leak-check document fetch never started"
+kill -TERM "$leak_pid"
+# Bash can defer TERM until its foreground fetch exits. Interrupt that fetch
+# before waiting so normal completion cannot satisfy the cleanup assertion.
+kill -TERM "$(cat "$TMP_ROOT/leak-fetch-started")" 2>/dev/null \
+  || fail "the leak-check fetch exited before it could be interrupted"
+leak_rc=0
+wait "$leak_pid" 2>/dev/null || leak_rc=$?
+[ "$leak_rc" -eq 143 ] || fail "interrupted ingest returned an unexpected status: $leak_rc"
+assert_no_leak "signal during a document fetch"
+pass "remote reply ingest leaves no temporary path or lifecycle lock behind on any exit"
+
 SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
 assert_contains "$out" "armed: $SID offset=0" "remote reply source was not armed at the empty cursor"
