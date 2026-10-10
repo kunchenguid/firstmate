@@ -758,7 +758,7 @@ test_bootstrap_sweep_surfaces_skipped_home() {
 
 # --- T10: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
-  local w c1 c2 fakebin
+  local w c1 c2 fakebin real_git tracking_log
   w=$(new_world spawn-ff)
   c1=$(head_of "$w/main")
   git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
@@ -768,6 +768,9 @@ test_spawn_fast_forwards_before_launch() {
   bump_primary "$w" instr
   c2=$(head_of "$w/main")
   [ "$(head_of "$w/sm")" = "$c1" ] || fail "precondition: home should start behind the primary"
+  git -C "$w/main" remote add origin "file://$w/missing-origin.git"
+  git -C "$w/main" update-ref refs/remotes/origin/main "$c1"
+  git -C "$w/main" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
 
   # tmux stub: accept every subcommand, print nothing (so no window pre-exists).
   fakebin="$w/fakebin"
@@ -777,6 +780,16 @@ test_spawn_fast_forwards_before_launch() {
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  real_git=$(command -v git)
+  tracking_log="$w/spawn-tracking-commands.log"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in fetch|set-head) printf '%s\\n' "\$arg" >> '$tracking_log' ;; esac
+done
+exec '$real_git' "\$@"
+SH
+  chmod +x "$fakebin/git"
 
   PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
@@ -787,7 +800,12 @@ SH
 
   [ "$(head_of "$w/sm")" = "$c2" ] \
     || fail "spawn did not fast-forward the secondmate worktree to the primary's HEAD"
-  pass "T10 spawn fast-forwards a secondmate worktree to the primary's local HEAD before launch"
+  [ ! -e "$tracking_log" ] || fail "local-HEAD spawn sync touched origin tracking refs"
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" = "$c1" ] \
+    || fail "local-HEAD spawn sync changed origin/main"
+  [ "$(git -C "$w/sm" symbolic-ref --quiet refs/remotes/origin/HEAD)" = refs/remotes/origin/main ] \
+    || fail "local-HEAD spawn sync changed origin/HEAD"
+  pass "T10 spawn fast-forwards locally without contacting origin or changing tracking refs"
 }
 
 # --- T11: spawn warns when pre-launch sync is skipped ------------------------
@@ -970,6 +988,11 @@ if [ "${FM_TEST_REMOTE_LEG_REJECT_SYNC:-0}" = 1 ] \
   printf 'Host-local lifecycle control for the remote secondmate home selected by fm-on.\n'
   exit 2
 fi
+# A host on the previous release accepts only `sync <id> [<commit>]`, so a
+# parent that still converges such hosts never sends more.
+if [ "$cmd" = fm-remote-secondmate-control.sh ] && [ "${rargs[1]:-}" = sync ] && [ "${#rargs[@]}" -gt 4 ]; then
+  exit 2
+fi
 rc=0
 env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
   "$FM_TEST_REPO_ROOT/bin/$cmd" "${rargs[@]:1}" || rc=$?
@@ -989,6 +1012,15 @@ remote_sync() {
   REMOTE_SYNC_RC=0
   REMOTE_SYNC_OUT=$(FM_HOME="$w/$id" FM_ROOT_OVERRIDE="$w/coderoot" \
     "$ROOT/bin/fm-remote-secondmate-control.sh" sync "$id" "$@" 2>&1) || REMOTE_SYNC_RC=$?
+}
+
+REMOTE_UPDATE_OUT=""
+REMOTE_UPDATE_RC=0
+remote_update() {
+  local w=$1 id=$2
+  REMOTE_UPDATE_RC=0
+  REMOTE_UPDATE_OUT=$(FM_HOME="$w/$id" FM_ROOT_OVERRIDE="$w/coderoot" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" update "$id" 2>&1) || REMOTE_UPDATE_RC=$?
 }
 
 # --- R1: a remote home follows the PARENT primary, not the host's own copy ----
@@ -1209,13 +1241,285 @@ test_remote_sync_without_target_follows_host_copy() {
   pass "R7 a sync with no target still follows the host's own refreshed Firstmate copy"
 }
 
-# --- R8: session start hands the remote host the PRIMARY's commit --------------
-# The deferred network stage is the only startup path that reaches a remote home,
-# so this drives the real bin/fm-bootstrap.sh network phase across the real
-# transport boundary and reads back where the home actually landed.
-test_bootstrap_syncs_remote_home_to_primary_commit() {
-  local w c1 c2 home fakebin out coderoot_before
-  w=$(new_remote_world remote-bootstrap)
+# --- R7b: release update refreshes remote-home tracking refs ------------------
+test_remote_update_refreshes_tracking_refs() {
+  local w c1 c2 c3 branch_base local_tip tracking_head
+  w=$(new_remote_world remote-update-tracking)
+  c1=$(head_of "$w/coderoot")
+  add_remote_home "$w" sm "$w/coderoot" "$c1"
+
+  bump_primary "$w" readme
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" != "$c2" ] \
+    || fail "precondition: remote home origin/main should be stale"
+  git -C "$w/sm" symbolic-ref --delete refs/remotes/origin/HEAD \
+    || fail "could not remove remote home origin/HEAD"
+
+  remote_update "$w" sm
+
+  [ "$REMOTE_UPDATE_RC" -eq 0 ] || fail "remote release update failed: $REMOTE_UPDATE_OUT"
+  assert_contains "$REMOTE_UPDATE_OUT" "synced: $c2" "remote update did not report the release commit"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "remote home did not converge to the release commit"
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" = "$c2" ] \
+    || fail "remote update left origin/main stale"
+  tracking_head=$(git -C "$w/sm" symbolic-ref --quiet refs/remotes/origin/HEAD) \
+    || fail "remote update did not restore origin/HEAD"
+  [ "$tracking_head" = refs/remotes/origin/main ] \
+    || fail "remote update restored origin/HEAD to '$tracking_head'"
+
+  git -C "$w/sm" update-ref refs/remotes/origin/main "$c1"
+  git -C "$w/sm" symbolic-ref --delete refs/remotes/origin/HEAD \
+    || fail "could not remove origin/HEAD before the already-current remote update"
+  remote_update "$w" sm
+  [ "$REMOTE_UPDATE_RC" -eq 0 ] || fail "already-current remote update failed: $REMOTE_UPDATE_OUT"
+  assert_contains "$REMOTE_UPDATE_OUT" "current: $c2" \
+    "already-current remote home was not reported as current"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "already-current remote update moved HEAD"
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" = "$c2" ] \
+    || fail "already-current remote update left origin/main stale"
+  tracking_head=$(git -C "$w/sm" symbolic-ref --quiet refs/remotes/origin/HEAD) \
+    || fail "already-current remote update did not restore origin/HEAD"
+  [ "$tracking_head" = refs/remotes/origin/main ] \
+    || fail "already-current remote update restored origin/HEAD to '$tracking_head'"
+
+  bump_primary "$w" readme
+  c3=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  git -C "$w/sm" remote remove origin
+  remote_update "$w" sm
+  [ "$REMOTE_UPDATE_RC" -eq 0 ] || fail "a missing home origin changed update success: $REMOTE_UPDATE_OUT"
+  [ "$(head_of "$w/sm")" = "$c3" ] || fail "remote home did not converge without its optional origin"
+
+  git -C "$w/sm" remote add origin "$w/coderoot"
+  branch_base=$(head_of "$w/sm")
+  printf 'squash-landed local contribution\n' > "$w/sm/LOCAL.md"
+  git -C "$w/sm" add LOCAL.md
+  git -C "$w/sm" commit -qm local-contribution
+  local_tip=$(head_of "$w/sm")
+  git -C "$w/sm" diff "$branch_base" "$local_tip" | git -C "$w/main" apply
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm squash-local-contribution
+  git -C "$w/main" push -q origin main
+  c3=$(head_of "$w/main")
+
+  remote_update "$w" sm
+
+  [ "$REMOTE_UPDATE_RC" -eq 0 ] || fail "remote redundant-divergence update failed: $REMOTE_UPDATE_OUT"
+  assert_contains "$REMOTE_UPDATE_OUT" "synced: $c3" "remote reconcile did not report the release commit"
+  [ "$(head_of "$w/sm")" = "$c3" ] || fail "remote reconcile did not land the release commit"
+  if git -C "$w/sm" merge-base --is-ancestor "$local_tip" "$c3" 2>/dev/null; then
+    fail "remote redundant reconcile retained the local commit instead of resetting to the release tip"
+  fi
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" = "$c3" ] \
+    || fail "remote reconcile left origin/main stale"
+  pass "remote release updates refresh origin tracking after fast-forward and reset; a missing origin stays optional"
+}
+
+test_remote_update_fetches_resolved_default_branch() {
+  local w c1 c2 tracking_head
+  w=$(new_remote_world remote-update-default-branch)
+  c1=$(head_of "$w/coderoot")
+  add_remote_home "$w" sm "$w/coderoot" "$c1"
+  bump_primary "$w" readme
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  git -C "$w/main" push -q origin main:master
+  git --git-dir="$w/forge.git" symbolic-ref HEAD refs/heads/master
+  git -C "$w/sm" remote set-url origin "$w/forge.git"
+  git -C "$w/sm" update-ref refs/remotes/origin/master "$c1"
+  git -C "$w/sm" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master
+
+  remote_update "$w" sm
+
+  [ "$REMOTE_UPDATE_RC" -eq 0 ] || fail "master-default remote update failed: $REMOTE_UPDATE_OUT"
+  assert_contains "$REMOTE_UPDATE_OUT" "synced: $c2" "master-default update did not report the release commit"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "master-default home did not converge"
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/master)" = "$c2" ] \
+    || fail "refresh did not fetch the resolved master branch"
+  tracking_head=$(git -C "$w/sm" symbolic-ref --quiet refs/remotes/origin/HEAD) \
+    || fail "master-default update did not restore origin/HEAD"
+  [ "$tracking_head" = refs/remotes/origin/master ] \
+    || fail "master-default update restored origin/HEAD to '$tracking_head'"
+  pass "remote release update fetches and repairs the resolved default branch"
+}
+
+test_remote_update_follows_changed_remote_default_branch() {
+  local w c1 c2 c3 tracking_head
+  w=$(new_remote_world remote-update-changed-default)
+  c1=$(head_of "$w/coderoot")
+  add_remote_home "$w" sm "$w/coderoot" "$c1"
+  bump_primary "$w" readme
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  git -C "$w/main" push -q origin main:master
+  git --git-dir="$w/forge.git" symbolic-ref HEAD refs/heads/master
+  git -C "$w/sm" remote set-url origin "$w/forge.git"
+  git -C "$w/sm" update-ref refs/remotes/origin/main "$c1"
+  git -C "$w/sm" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  git -C "$w/sm" update-ref -d refs/remotes/origin/master 2>/dev/null || true
+
+  remote_update "$w" sm
+
+  [ "$REMOTE_UPDATE_RC" -eq 0 ] || fail "changed-default remote update failed: $REMOTE_UPDATE_OUT"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "changed-default home did not converge"
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" = "$c2" ] \
+    || fail "refresh did not refresh the home's own default branch"
+  tracking_head=$(git -C "$w/sm" symbolic-ref --quiet refs/remotes/origin/HEAD) \
+    || fail "changed-default update left origin/HEAD missing"
+  [ "$tracking_head" = refs/remotes/origin/main ] \
+    || fail "changed-default update retargeted origin/HEAD to '$tracking_head'"
+
+  bump_primary "$w" readme
+  c3=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main main:master
+  remote_update "$w" sm
+  [ "$REMOTE_UPDATE_RC" -eq 0 ] || fail "second changed-default update failed: $REMOTE_UPDATE_OUT"
+  [ "$(head_of "$w/sm")" = "$c3" ] || fail "second changed-default update did not converge: $REMOTE_UPDATE_OUT"
+  pass "a home whose remote renamed its default keeps converging on its own default branch"
+}
+
+test_remote_tracking_refresh_bounds_each_network_step() {
+  local w c1 c2 fakebin real_git tracking_log start elapsed
+  w=$(new_remote_world remote-update-bounded-tracking)
+  c1=$(head_of "$w/coderoot")
+  add_remote_home "$w" sm "$w/coderoot" "$c1"
+  bump_primary "$w" readme
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  fakebin="$w/fakebin"
+  tracking_log="$w/tracking-operations.log"
+  real_git=$(command -v git)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ] && [ "\${2:-}" = "$w/sm" ]; then
+  if [ "\${3:-}" = fetch ]; then
+    for arg in "\$@"; do
+      case "\$arg" in
+        +refs/heads/*:refs/remotes/origin/*)
+          printf 'fetch\\n' >> '$tracking_log'
+          sleep 3
+          break
+          ;;
+      esac
+    done
+  elif [ "\${3:-}" = remote ] && [ "\${4:-}" = set-head ]; then
+    printf 'set-head\\n' >> '$tracking_log'
+    sleep 30
+    exit 91
+  fi
+fi
+exec '$real_git' "\$@"
+SH
+  chmod +x "$fakebin/git"
+
+  start=$(date +%s)
+  PATH="$fakebin:$BASE_PATH" remote_update "$w" sm
+  elapsed=$(( $(date +%s) - start ))
+
+  [ "$REMOTE_UPDATE_RC" -eq 0 ] || fail "bounded tracking refresh changed remote update success: $REMOTE_UPDATE_OUT"
+  assert_contains "$REMOTE_UPDATE_OUT" "synced: $c2" "bounded refresh did not report the release commit"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "bounded refresh changed the home convergence target"
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" = "$c2" ] \
+    || fail "the completed fetch did not refresh origin/main"
+  [ -f "$tracking_log" ] || fail "bounded tracking commands were not intercepted"
+  [ "$elapsed" -ge 7 ] && [ "$elapsed" -lt 25 ] \
+    || fail "separate tracking bounds took ${elapsed}s, expected 7-24s"
+  pass "a slow fetch and hanging remote-head query are independently bounded without changing convergence"
+}
+
+# --- R7d: a prompting configured transport cannot block the refresh ----------
+test_remote_tracking_refresh_never_prompts() {
+  local w c2 fakebin ssh_log pid
+  w=$(new_remote_world remote-tracking-prompt)
+  add_remote_home "$w" sm "$w/coderoot" "$(head_of "$w/coderoot")"
+  git -C "$w/sm" remote set-url origin "git@forge.invalid:fleet/firstmate.git"
+  bump_primary "$w" readme
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  git -C "$w/coderoot" pull -q --ff-only
+  fakebin=$(fm_fakebin "$w/promptssh")
+  ssh_log="$w/prompt.log"
+  # A password prompt that never gets an answer: it hangs past the 5s bound.
+  cat > "$fakebin/prompting-ssh" <<SH
+#!/usr/bin/env bash
+printf 'askpass=%s pid=%s\\n' "\${SSH_ASKPASS_REQUIRE:-}" "\$\$" >> '$ssh_log'
+sleep 20
+exit 1
+SH
+  chmod +x "$fakebin/prompting-ssh"
+  git -C "$w/sm" config core.sshCommand "$fakebin/prompting-ssh"
+
+  (unset GIT_SSH_COMMAND GIT_SSH; remote_sync "$w" sm "$c2"; [ "$REMOTE_SYNC_RC" -eq 0 ]) \
+    || fail "a prompting transport changed sync success"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "the home did not converge behind a prompting transport"
+  grep -q '^askpass=never ' "$ssh_log" \
+    || fail "the refresh left SSH askpass enabled (log: $(cat "$ssh_log" 2>/dev/null))"
+  pid=$(sed -n 's/.* pid=//p' "$ssh_log" | head -n 1)
+  [ -n "$pid" ] || fail "the prompting transport was never invoked"
+  ! kill -0 "$pid" 2>/dev/null \
+    || fail "the prompting transport survived the refresh bound (pid $pid)"
+  pass "R7d a prompting configured transport is killed at the refresh bound and the sync still converges"
+}
+
+# --- R7c: the tracking refresh keeps the home's configured SSH command ---------
+test_remote_tracking_refresh_keeps_configured_ssh() {
+  local w c2 fakebin ssh_log
+  w=$(new_remote_world remote-tracking-ssh)
+  add_remote_home "$w" sm "$w/coderoot" "$(head_of "$w/coderoot")"
+  git -C "$w/sm" remote set-url origin "git@forge.invalid:fleet/firstmate.git"
+  bump_primary "$w" readme
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  git -C "$w/coderoot" pull -q --ff-only
+  fakebin=$(fm_fakebin "$w/sshcmd")
+  ssh_log="$w/ssh.log"
+  for name in configured-ssh env-ssh ssh; do
+    cat > "$fakebin/$name" <<SH
+#!/usr/bin/env bash
+printf '$name %s\\n' "\$*" >> '$ssh_log'
+exit 1
+SH
+    chmod +x "$fakebin/$name"
+  done
+
+  git -C "$w/sm" config core.sshCommand "$fakebin/configured-ssh"
+  (unset GIT_SSH_COMMAND GIT_SSH; remote_sync "$w" sm "$c2"; [ "$REMOTE_SYNC_RC" -eq 0 ]) \
+    || fail "an unreachable origin changed sync success"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "the home did not converge with an unreachable origin"
+  grep -q '^configured-ssh ' "$ssh_log" \
+    || fail "the tracking refresh bypassed core.sshCommand (log: $(cat "$ssh_log" 2>/dev/null))"
+  ! grep -q 'BatchMode' "$ssh_log" \
+    || fail "the tracking refresh injected options into core.sshCommand (log: $(cat "$ssh_log"))"
+
+  : > "$ssh_log"
+  git -C "$w/sm" config --unset core.sshCommand
+  git -C "$w/sm" update-ref refs/remotes/origin/main "$c2~1"
+  (unset GIT_SSH_COMMAND; export GIT_SSH="$fakebin/env-ssh"; remote_sync "$w" sm "$c2"; [ "$REMOTE_SYNC_RC" -eq 0 ]) \
+    || fail "an unreachable origin changed sync success under GIT_SSH"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "the home left its release commit under GIT_SSH"
+  grep -q '^env-ssh ' "$ssh_log" \
+    || fail "the tracking refresh bypassed GIT_SSH (log: $(cat "$ssh_log" 2>/dev/null))"
+  ! grep -q 'BatchMode' "$ssh_log" \
+    || fail "the tracking refresh injected options into GIT_SSH (log: $(cat "$ssh_log"))"
+
+  : > "$ssh_log"
+  git -C "$w/sm" update-ref refs/remotes/origin/main "$c2~1"
+  (unset GIT_SSH_COMMAND GIT_SSH; PATH="$fakebin:$PATH"; remote_sync "$w" sm "$c2"; [ "$REMOTE_SYNC_RC" -eq 0 ]) \
+    || fail "an unreachable origin changed sync success under plain ssh"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "the home left its release commit under plain ssh"
+  grep -q '^ssh .*BatchMode=yes' "$ssh_log" \
+    || fail "the tracking refresh did not run plain ssh noninteractively (log: $(cat "$ssh_log" 2>/dev/null))"
+  pass "R7c the tracking refresh keeps a configured SSH transport untouched and makes plain ssh noninteractive"
+}
+
+# seed_remote_parent <w>: the parent side of a remote secondmate route in world
+# <w>: a primary carrying the real remote tooling, a remote home "sm" one commit
+# behind it with stale origin tracking refs, and the parent's registry entry.
+# Echoes the primary commit the home must converge on.
+seed_remote_parent() {
+  local w=$1 c1 home
   # fm-on.sh only routes commands this primary checkout genuinely tracks, so the
   # fixture primary carries the real tooling the parent legs invoke.
   cp "$ROOT"/bin/fm-remote-*.sh "$w/main/bin/"
@@ -1224,16 +1528,40 @@ test_bootstrap_syncs_remote_home_to_primary_commit() {
   git -C "$w/main" push -q origin main
   c1=$(head_of "$w/main")
   add_remote_home "$w" sm "$w/forge.git" "$c1"
+  git -C "$w/sm" symbolic-ref --delete refs/remotes/origin/HEAD
   bump_primary "$w" instr
-  c2=$(head_of "$w/main")
   git -C "$w/main" push -q origin main
-  coderoot_before=$(head_of "$w/coderoot")
   home="$w/home"
   mkdir -p "$home/config" "$home/projects"
   printf -- '- sm - remote fixture (host: host-sm; root: %s; home: %s; scope: remote work; projects: alpha; added 2026-08-02)\n' \
     "$w/coderoot" "$w/sm" > "$home/data/secondmates.md"
-  fm_write_secondmate_meta "$home/state/sm.meta" "$w/sm"
-  printf 'remote_host=host-sm\n' >> "$home/state/sm.meta"
+  head_of "$w/main"
+}
+
+# assert_remote_tracking_refreshed <w> <commit> <label>
+assert_remote_tracking_refreshed() {
+  local w=$1 commit=$2 label=$3 tracking_head
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" = "$commit" ] \
+    || fail "$label left the remote home's origin/main stale"
+  tracking_head=$(git -C "$w/sm" symbolic-ref --quiet refs/remotes/origin/HEAD) \
+    || fail "$label did not restore the remote home's origin/HEAD"
+  [ "$tracking_head" = refs/remotes/origin/main ] \
+    || fail "$label restored origin/HEAD to '$tracking_head'"
+}
+
+# --- R8: session start hands the remote host the PRIMARY's commit --------------
+# The deferred network stage is the only startup path that reaches a remote home,
+# so this drives the real bin/fm-bootstrap.sh network phase across the real
+# transport boundary and reads back where the home actually landed.
+test_bootstrap_syncs_remote_home_to_primary_commit() {
+  local w c2 fakebin out coderoot_before
+  w=$(new_remote_world remote-bootstrap)
+  c2=$(seed_remote_parent "$w")
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" != "$c2" ] \
+    || fail "precondition: remote home origin/main should be stale"
+  coderoot_before=$(head_of "$w/coderoot")
+  fm_write_secondmate_meta "$w/home/state/sm.meta" "$w/sm"
+  printf 'remote_host=host-sm\n' >> "$w/home/state/sm.meta"
   mkdir -p "$w/sm/state/parent-route"
   fm_write_meta "$w/sm/state/parent-route/sm.meta" \
     'window=fm-remote:p1' 'endpoint_task_id=sm' 'worktree=-' 'project=-' \
@@ -1243,7 +1571,7 @@ test_bootstrap_syncs_remote_home_to_primary_commit() {
   fakebin=$(make_remote_leg_ssh_stub "$w")
   fm_fake_exit0 "$fakebin" gh treehouse tmux node
   out=$(PATH="$fakebin:$BASE_PATH" \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_BOOTSTRAP_NETWORK=only \
     FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
     FM_TEST_REPO_ROOT="$ROOT" \
@@ -1254,7 +1582,30 @@ test_bootstrap_syncs_remote_home_to_primary_commit() {
     || fail "session start left the remote home off the primary's commit (out: $out)"
   [ "$(head_of "$w/coderoot")" = "$coderoot_before" ] \
     || fail "session start moved the host's own Firstmate copy"
-  pass "R8 session start converges a remote home on the primary's default-branch commit"
+  assert_remote_tracking_refreshed "$w" "$c2" "session start"
+  pass "R8 session start converges a remote home on the primary's default-branch commit and refreshes its tracking refs"
+}
+
+# --- R8b: a remote pre-launch sync refreshes the home's tracking refs ----------
+test_spawn_remote_sync_refreshes_tracking_refs() {
+  local w c2 fakebin out
+  w=$(new_remote_world remote-spawn-tracking)
+  c2=$(seed_remote_parent "$w")
+  [ "$(git -C "$w/sm" rev-parse refs/remotes/origin/main)" != "$c2" ] \
+    || fail "precondition: remote home origin/main should be stale"
+
+  fakebin=$(make_remote_leg_ssh_stub "$w")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_SPAWN_NO_GUARD=1 \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
+    FM_TEST_REPO_ROOT="$ROOT" FM_INHERITABLE_CONFIG='' \
+    "$ROOT/bin/fm-spawn.sh" sm --secondmate --harness codex 2>&1) || true
+
+  [ "$(head_of "$w/sm")" = "$c2" ] \
+    || fail "remote pre-launch sync left the home off the primary's commit (out: $out)"
+  assert_remote_tracking_refreshed "$w" "$c2" "remote pre-launch sync"
+  pass "R8b a remote pre-launch sync converges the home and refreshes its tracking refs"
 }
 
 # --- R10: an outdated host refuses, and the report says how to fix it ----------
@@ -1371,7 +1722,14 @@ test_remote_sync_uses_present_objects
 test_remote_sync_skips_unimportable_target
 test_remote_sync_skips_dirty_diverged_and_feature_branch
 test_remote_sync_without_target_follows_host_copy
+test_remote_update_refreshes_tracking_refs
+test_remote_update_fetches_resolved_default_branch
+test_remote_update_follows_changed_remote_default_branch
+test_remote_tracking_refresh_bounds_each_network_step
+test_remote_tracking_refresh_keeps_configured_ssh
+test_remote_tracking_refresh_never_prompts
 test_bootstrap_syncs_remote_home_to_primary_commit
+test_spawn_remote_sync_refreshes_tracking_refs
 test_bootstrap_reports_outdated_host_actionably
 test_remote_launch_does_not_retarget_host_copy
 
