@@ -211,7 +211,9 @@ test_lab_home_private_tmux_socket_survives_deep_paths() {
   [ "${socket_dir#/tmp/fml.}" != "$socket_dir" ] || fail "socket directory is not under the short /tmp/fml prefix"
 
   cleanup_deep_lab() {
-    env TMUX_TMPDIR="$socket_dir" "$real_tmux" -L fm-lab kill-server >/dev/null 2>&1 || true
+    # The explicit socket, only while it exists: TMUX_TMPDIR alone falls back
+    # to /tmp/tmux-<uid> once the private directory is gone.
+    [ ! -S "$socket_path" ] || "$real_tmux" -S "$socket_path" kill-server >/dev/null 2>&1 || true
     "$LABHOME" teardown "$lab" >/dev/null 2>&1 || true
     fm_test_cleanup
   }
@@ -224,13 +226,13 @@ test_lab_home_private_tmux_socket_survives_deep_paths() {
   local attempts=0
   while [ ! -f "$ready" ] && [ "$attempts" -lt 20 ]; do sleep 0.05; attempts=$((attempts + 1)); done
   [ -f "$ready" ] || fail "fake primary did not start"
-  env TMUX_TMPDIR="$socket_dir" "$real_tmux" -L fm-lab has-session -t primary \
-    || fail "primary session is not reachable through the lab's TMUX_TMPDIR"
+  "$real_tmux" -S "$socket_path" has-session -t primary \
+    || fail "primary session is not reachable through the lab socket"
   if "$LABHOME" teardown "$lab" >/dev/null 2>&1; then
     fail "lab teardown removed the directory while its server was running"
   fi
   [ -d "$socket_dir" ] || fail "refused active-server teardown removed the socket directory"
-  env TMUX_TMPDIR="$socket_dir" "$real_tmux" -L fm-lab kill-server \
+  "$real_tmux" -S "$socket_path" kill-server \
     || fail "could not stop the isolated lab tmux server"
   mkdir -p "$TMP/failing-tmux-bin"
   printf '#!/bin/sh\necho "tmux: probe failed" >&2\nexit 1\n' > "$TMP/failing-tmux-bin/tmux"
