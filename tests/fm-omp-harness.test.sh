@@ -28,7 +28,8 @@
 #   6. The turn-end guard extension compels one continuation on exit 2 and
 #      stands down when the payload already carries stop_hook_active.
 #   7. The watch extension arms through fm_watch_arm_omp and delivers an
-#      actionable close as one follow-up.
+#      actionable close as one follow-up; while state/.afk exists it stands
+#      down for the daemon and re-arms itself once the flag is gone.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -578,6 +579,90 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+# While state/.afk exists the daemon owns supervision: an arm request launches
+# no child, a child armed before the flag appeared stands down at its one-shot
+# close without delivering that wake to main or starting a successor, and the
+# extension re-arms by itself at the next session event once the flag is gone.
+test_watch_extension_stands_down_for_the_daemon_and_rearms() {
+  local repo home log out status
+  repo="$TMP_ROOT/watch-daemon/repo"; home="$TMP_ROOT/watch-daemon/home"; log="$TMP_ROOT/watch-daemon/arm.log"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  # Every arm reports a ready watcher; one that sees state/.afk appear exits
+  # one-shot with the wake it queued for the daemon, as bin/fm-watch.sh does.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+i=0
+while [ "$i" -lt 300 ]; do
+  if [ -e "${FM_HOME:?}/state/.afk" ]; then
+    printf 'signal: omp-quiet handoff\n'
+    exit 0
+  fi
+  sleep 0.1
+  i=$((i + 1))
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, unlinkSync, existsSync, readFileSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const arms = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm=")).length : 0);
+const daemonOwned = /^watcher: unchanged - the daemon owns supervision while state\/\.afk exists/;
+const waitFor = async (check, what) => {
+  for (let i = 0; i < 50; i += 1) {
+    if (await check()) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(what);
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+// Armed under the flag: the daemon owns supervision and no child starts.
+writeFileSync(`${state}/.afk`, "quiet\n");
+const under = await tool.execute();
+if (!daemonOwned.test(under.content[0].text)) throw new Error(`arm under state/.afk did not stand down: ${under.content[0].text}`);
+if (arms() !== 0) throw new Error(`arm under state/.afk launched ${arms()} child(ren)`);
+// Quiet ends: the next session event re-arms without a tool call.
+unlinkSync(`${state}/.afk`);
+await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "captain: carry on" }, {});
+await waitFor(() => arms() === 1, "removing state/.afk did not re-arm at before_agent_start");
+const armed = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(armed.content[0].text)) throw new Error(`the re-armed child was not owned: ${armed.content[0].text}`);
+// Quiet begins while armed: the one-shot close of that child is a stand-down,
+// not a continuity failure, and the wake it queued stays with the daemon.
+writeFileSync(`${state}/.afk`, "quiet\n");
+await waitFor(async () => daemonOwned.test((await tool.execute()).content[0].text), "the armed child did not stand down after state/.afk appeared");
+await new Promise((r) => setTimeout(r, 500));
+if (sent.length !== 0) throw new Error(`a daemon-owned wake reached main: ${JSON.stringify(sent)}`);
+if (arms() !== 1) throw new Error(`a successor was launched beside the daemon: ${arms()} arms`);
+// Quiet ends again: the assistant message after the return tool call re-arms.
+unlinkSync(`${state}/.afk`);
+await handlers.get("message_start")({ type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "quiet mode is off" }] } }, {});
+await waitFor(() => arms() === 2, "removing state/.afk did not re-arm at message_start");
+await handlers.get("session_shutdown")({}, {});
+if (sent.length !== 0) throw new Error(`shutdown delivered a daemon-owned wake: ${JSON.stringify(sent)}`);
+if (existsSync(`${state}/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a daemon-owned wake must not ride the replacement handoff");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension daemon stand-down: $out"
+  [ -z "$out" ] || fail "omp watch extension daemon stand-down test printed output: $out"
+  pass ".omp watch extension: stands down while state/.afk exists, leaves the one-shot wake to the daemon, and re-arms once the flag is gone"
+}
+
 # An opted-in home spawns the supervision host in the arm's place; its streamed
 # status line drives readiness and the handling handoff, and a handed-back
 # wake is delivered with every host line and the away note.
@@ -871,6 +956,7 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_stands_down_for_the_daemon_and_rearms
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off
