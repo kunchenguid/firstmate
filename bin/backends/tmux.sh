@@ -258,6 +258,104 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
+# Pair each foreground name with its pid, so a terminal wrapper holding the tty
+# can be proven from its executable rather than its writable process title.
+fm_backend_tmux_foreground_pid_comms() {  # <target>
+  local tty pid pgid tpgid comm
+  tty=$(tmux display-message -p -t "$1" '#{pane_tty}' 2>/dev/null) || return 1
+  [ -n "$tty" ] || return 1
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        printf '%s\t%s\n' "$pid" "$comm"
+      done
+}
+
+fm_backend_tmux_pid_executable() {  # <pid> -> resolved executable path
+  local path
+  if [ -e "/proc/$1/exe" ]; then
+    readlink "/proc/$1/exe" 2>/dev/null && return 0
+  fi
+  command -v lsof >/dev/null 2>&1 || return 1
+  path=$(LC_ALL=C lsof -a -p "$1" -d txt -Fn 2>/dev/null | awk '
+    /^ftxt$/ { executable = 1; next }
+    executable && /^n/ { print substr($0, 2); exit }
+  ') || return 1
+  [ -n "$path" ] || return 1
+  printf '%s\n' "$path"
+}
+
+# The Kiro CLI shell integration runs each shell through a copy of its
+# kiro-cli-term binary named `<shell> (kiro-cli-term)`. That copy holds the
+# pane's tty and runs the real shell on a pty of its own. Its name is not proof,
+# so the executable must also be the kiro-cli-term installed beside it.
+fm_backend_tmux_pid_is_kiro_wrapper() {  # <pid>
+  local executable base term
+  executable=$(fm_backend_tmux_pid_executable "$1") || return 1
+  base=${executable##*/}
+  case "$base" in
+    *' (kiro-cli-term)') ;;
+    *) return 1 ;;
+  esac
+  [ "$(fm_agent_process_classify_name "${base% (kiro-cli-term)}")" = shell ] || return 1
+  term="${executable%/*}/kiro-cli-term"
+  [ -f "$term" ] || return 1
+  [ "$executable" -ef "$term" ] && return 0
+  [ "$(fm_backend_tmux_file_size "$executable")" = "$(fm_backend_tmux_file_size "$term")" ] || return 1
+  cmp -s "$executable" "$term"
+}
+
+fm_backend_tmux_file_size() {  # <path>
+  stat -L -c %s "$1" 2>/dev/null || stat -L -f %z "$1" 2>/dev/null
+}
+
+# A verified wrapper is judged from below. Any harness descendant reads
+# `alive`. Only a tree of verified shells, plus the waiting `treehouse get`
+# process fm-spawn leaves below the shell, reads `dead`, because `dead` licenses
+# a relaunch onto the worktree. Both are proven from the resolved executable.
+fm_backend_tmux_kiro_wrapper_state() {  # <wrapper pid> -> dead|alive|ambiguous
+  local treehouse rows pids pid comm args argv0 executable other=0
+  treehouse=$(command -v treehouse 2>/dev/null) || treehouse=
+  rows=$(LC_ALL=C ps -axo pid=,ppid= 2>/dev/null) || { printf ambiguous; return; }
+  pids=$(printf '%s\n' "$rows" | awk -v root="$1" '
+    { parent[$1] = $2; pid[NR] = $1 }
+    END {
+      if (!(root in parent)) exit 1
+      seen[root] = 1
+      do {
+        changed = 0
+        for (i = 1; i <= NR; i++) {
+          if (!seen[pid[i]] && seen[parent[pid[i]]]) {
+            seen[pid[i]] = 1
+            print pid[i]
+            changed = 1
+          }
+        }
+      } while (changed)
+    }
+  ') || { printf ambiguous; return; }
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || { other=1; continue; }
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || { other=1; continue; }
+    argv0=${args%%[[:space:]]*}
+    if [ "$(fm_agent_process_classify_name "$comm" "$argv0")" = agent ] \
+      || [ "$(fm_agent_process_classify_name "$argv0" "$argv0")" = agent ] \
+      || fm_gemini_pid_is_gemini "$pid"; then
+      printf alive
+      return
+    fi
+    executable=$(fm_backend_tmux_pid_executable "$pid") || { other=1; continue; }
+    [ "$(fm_agent_process_classify_name "$executable")" = shell ] && continue
+    [ -n "$treehouse" ] && [ "$executable" -ef "$treehouse" ] && continue
+    other=1
+  done <<EOF
+$pids
+EOF
+  if [ "$other" -eq 0 ]; then printf dead; else printf ambiguous; fi
+}
+
 # The foreground group's full command lines. Needed because a node-bundle
 # harness carries its identity in argv[1] rather than in its command name or
 # argv[0]; bin/fm-gemini-lib.sh owns what counts as evidence inside one.
@@ -321,7 +419,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
+  local foreground argv0s name pid wrapper='' wrapper_state fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -344,14 +442,20 @@ fm_backend_tmux_agent_state() {  # <target>
     return 0
   fi
 
-  foreground=$(fm_backend_tmux_foreground_comms "$target")
-  while IFS= read -r name; do
+  foreground=$(fm_backend_tmux_foreground_pid_comms "$target")
+  while IFS=$'\t' read -r pid name; do
     [ -n "$name" ] || continue
     fg_seen=1
     case "$(fm_agent_process_classify_name "$name")" in
       agent) printf 'alive'; return 0 ;;
       shell) fg_shell=1 ;;
-      *) fg_other=1 ;;
+      *)
+        if fm_backend_tmux_pid_is_kiro_wrapper "$pid"; then
+          wrapper=$pid
+        else
+          fg_other=1
+        fi
+        ;;
     esac
   done <<EOF
 $foreground
@@ -405,7 +509,16 @@ EOF
   # A readable foreground process group settles the negative verdicts: only a
   # group that is nothing but shells is confidently agent-free.
   if [ "$fg_seen" -eq 1 ]; then
-    if [ "$fg_other" -eq 0 ] && [ "$fg_shell" -eq 1 ]; then
+    if [ -n "$wrapper" ]; then
+      wrapper_state=$(fm_backend_tmux_kiro_wrapper_state "$wrapper")
+      if [ "$wrapper_state" = alive ]; then
+        printf alive
+      elif [ "$fg_other" -eq 1 ]; then
+        printf ambiguous
+      else
+        printf '%s' "$wrapper_state"
+      fi
+    elif [ "$fg_other" -eq 0 ] && [ "$fg_shell" -eq 1 ]; then
       printf 'dead'
     else
       printf 'ambiguous'
