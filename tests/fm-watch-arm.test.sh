@@ -1663,8 +1663,22 @@ if (existsSync(`${state}/.afk`)) {
 }
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+// OpenCode 2 loads a plugin by default-exporting a definition whose setup(ctx)
+// registers the hooks; the v1 named-export hooks object a test used to call
+// directly is no longer the shape the loader accepts. The shared host models
+// that subscription so the coordinator global below is set up exactly as it is
+// in a real session.
+const { loadPlugin } = await import(pathToFileURL(process.env.FM_PLUGIN_HOST).href);
 const client = { session: { promptAsync: async () => {} } };
-await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+await loadPlugin(process.env.PLUGIN, {
+  directory: process.env.WORKTREE,
+  canonical: process.env.WORKTREE,
+  onPrompt: async () => {},
+});
+if (!globalThis.__firstmateOpenCodeWatchArm) {
+  console.error("the plugin did not publish its arm coordinator");
+  process.exit(1);
+}
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
 const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
 if (expected === "no-arm") {
@@ -1705,6 +1719,7 @@ EOF
     esac
     out=$(FM_ROOT_OVERRIDE="$dir/repo" WORKTREE="$dir/repo" FM_HOME="$dir/home" \
       FM_ARM_LOG="$dir/arm.log" NODE_NO_WARNINGS=1 \
+      FM_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" \
       PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" node "$driver" 2>&1)
     status=$?
     expect_code 0 "$status" "OpenCode arm plugin must decide with the shared predicate ($case_name): $out"
