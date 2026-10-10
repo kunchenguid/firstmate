@@ -2682,6 +2682,40 @@ model_flag_for_harness() {
   esac
 }
 
+# The models_cache.json the launched codex will read. The pane, not this
+# process, supplies the launch environment: under config/launch-env-allowlist
+# the launch runs through `env -i`, so a CODEX_HOME that is not allowlisted is
+# unset there and codex falls back to $HOME/.codex (HOME is in the fixed floor).
+codex_catalog_path() {
+  local codex_home=${CODEX_HOME:-}
+  if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+    case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
+    *$'\nCODEX_HOME\n'*) ;;
+    *) codex_home= ;;
+    esac
+  fi
+  printf '%s\n' "${codex_home:-${HOME:-}/.codex}/models_cache.json"
+}
+
+# True when the codex catalog is readable, jq is available, and the catalog
+# parses with a models array, so its answer about any model is authoritative.
+codex_catalog_usable() { # <cache>
+  command -v jq >/dev/null 2>&1 && [ -r "$1" ] &&
+    jq -e '.models | type == "array"' "$1" >/dev/null 2>&1
+}
+
+# True when the usable codex catalog <cache> lists <effort> in the
+# supported_reasoning_levels of the model whose slug is <model>. An unusable
+# catalog, an unlisted model, or the default model answers false.
+codex_model_advertises_effort() { # <cache> <model> <effort>
+  local cache=$1 model=$2 effort=$3
+  [ -n "$model" ] && [ "$model" != default ] || return 1
+  codex_catalog_usable "$cache" || return 1
+  jq -e --arg m "$model" --arg e "$effort" \
+    'any(.models[]? | select(.slug == $m) | .supported_reasoning_levels[]?; (.effort? // .) == $e)' \
+    "$cache" >/dev/null 2>&1
+}
+
 effort_flag_for_harness() {
   local harness=$1 effort=$2 model=${3:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
@@ -2692,14 +2726,22 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The installed codex config schema uses model_reasoning_effort. The
-    # installed model catalog supports max for gpt-5.6-luna; keep that level
-    # scoped to the model whose catalog entry advertises it.
+    # The installed codex config schema uses model_reasoning_effort. Only some
+    # models accept max, so pass it only when the requested model's entry in
+    # codex's own catalog advertises it; otherwise omit it with a warning
+    # (record-and-omit). gpt-5.6-luna keeps its long-standing max as a fallback
+    # when the catalog is unreadable, unparsable, or jq is unavailable.
     case "$effort" in
     low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     max)
-      [ "$model" = gpt-5.6-luna ] || return 0
-      printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+      local cache
+      cache=$(codex_catalog_path)
+      if codex_model_advertises_effort "$cache" "$model" max ||
+        { [ "$model" = gpt-5.6-luna ] && ! codex_catalog_usable "$cache"; }; then
+        printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+      else
+        echo "warning: codex model '${model:-default}' does not advertise max reasoning effort in $cache; launching at codex's default effort" >&2
+      fi
       ;;
     esac
     ;;
