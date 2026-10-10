@@ -52,9 +52,10 @@
 #     that is unsafe or holds nothing for the branch) stay main's. That
 #     pass-through starts the successor watcher cycle and leaves it running
 #     before the close is printed, so supervision continues when the session
-#     drops the handoff. It confirms no handling handoff, so the recovery
-#     marker still reads downtime and the re-arm owner delivers the close to
-#     main. The host records that successor's arm before relinquishing it
+#     drops the handoff. It confirms no handling handoff and republishes the
+#     recovery marker as downtime, even over handling an earlier engine turn
+#     left, so the re-arm owner delivers the close to main; a failed publish
+#     prints a watcher FAILED line instead of the close. The host records that successor's arm before relinquishing it
 #     (detach_successor owns the persistence check and failure path). The
 #     session's next park without --restart requests a take-over of its cycle
 #     rather than an ordinary attach; bin/fm-watch-arm.sh's --take-over header owns the
@@ -702,15 +703,18 @@ detach_successor() {
   SUCCESSOR_PID=
 }
 
-# Start the same successor a handled wake starts and leave it running. It
-# confirms no handling handoff: main, not the engine, handles this close, and
-# the re-arm owner delivers it only while the recovery marker still reads
-# downtime (autoarm_commit in bin/fm-claude-stop-autoarm.sh). A failed start
-# returns 1; the caller still prints the close unchanged.
+# Main receives this close only on downtime, even when a preceding engine
+# turn left handling behind (autoarm_commit in bin/fm-claude-stop-autoarm.sh)
+# Return 1 on successor failure, 2 on an undeliverable recovery marker
 leave_successor_for_main() {
   if ! ARM_OWN_GROUP=1 start_successor "$CLOSED_ARM_PID"; then
     log_line "pass-through	successor-unverified	$(printf '%s\n' "$REASON" | head -n 1)"
     return 1
+  fi
+  if [ -n "$SUCCESSOR_GENERATION" ] \
+    && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+    log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
+    return 2
   fi
   detach_successor
 }
@@ -1095,7 +1099,13 @@ while :; do
     if ! attended_acceptor "$(printf '%s\n' "$REASON" | head -n 1)"; then
       log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
       if [ "$ATTENDED_WHY" = main-only ]; then
-        leave_successor_for_main || true
+        leave_successor_for_main
+        PASS_THROUGH_RC=$?
+        if [ "$PASS_THROUGH_RC" -eq 2 ]; then
+          # An actionable banner cannot commit while the marker is handling
+          printf 'watcher: FAILED - the main-only hand-back could not restore watcher downtime\n'
+          exit 1
+        fi
       fi
       emit
       exit 0
