@@ -397,6 +397,7 @@ test_no_mistakes_dod_uses_generated_status_command() {
   for forge in none gerrit; do
     out="$TMP_ROOT/dod-status-$forge.md"
     fm_dod_block no-mistakes dod-status-task fm/dod-status-task "$forge" > "$out"
+    # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
     assert_grep 'use the status command from your brief with state `needs-validation`' "$out" \
       "$forge: no-mistakes DoD did not route validation through the generated status command"
     assert_no_grep 'append `needs-validation \[at=<epoch>\]' "$out" \

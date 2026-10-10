@@ -857,7 +857,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
     append=$(sed -n '/`event_id=/s/.*`\(event_id=.*\)`.*/\1/p' "$brief")
     now=$(date +%s)
-    status_state=done
+    status_state="done"
     [ "$kind" = ship:no-mistakes ] && status_state=needs-validation
     append=${append//\{state\}/$status_state}
     append=${append//\{one short line\}/test event}
@@ -904,6 +904,7 @@ SIGNALS
     if [ "$kind" = ship:no-mistakes ]; then
       assert_grep "States: working, needs-decision, blocked, awaiting, needs-validation, done, failed." "$brief" \
         "$kind brief did not list the validation handoff beside the configured pause verb"
+      # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
       assert_grep 'use the status command from your brief with state `needs-validation`' "$brief" \
         "$kind brief did not route the validation handoff through its generated status command"
       assert_no_grep 'append `needs-validation \[at=<epoch>\]' "$brief" \
