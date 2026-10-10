@@ -951,6 +951,54 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds declare a validation-round pause once, then hold it"
 }
 
+# A waiting worker must test for terminality, not for one expected value, and a
+# parked pipeline gate advances only when the worker responds. Both are the
+# always-emitted contract (no config/wait-no-turns), so they reach every home.
+test_waiting_tests_terminality_not_a_value() {
+  local home kind id brief
+  home="$TMP_ROOT/terminality-home"
+  mkdir -p "$home/data"
+  [ ! -e "$home/config/wait-no-turns" ]
+
+  for kind in ship scout; do
+    id="brief-terminality-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "test that condition for ANY terminal state" "$brief" \
+      "$kind brief did not require the resume condition to test terminality"
+    assert_grep "a different terminal outcome loops forever against a condition that already resolved" "$brief" \
+      "$kind brief did not warn that a value match loops forever on a different terminal outcome"
+    assert_grep "an unrecognised terminal state is still terminal" "$brief" \
+      "$kind brief did not treat an unrecognised terminal state as terminal"
+    assert_grep "resume on it rather than a hand-written value match" "$brief" \
+      "$kind brief did not steer to a command that blocks until terminality"
+    assert_grep "\`gh pr checks <pr> --watch --fail-fast\` for PR checks" "$brief" \
+      "$kind brief did not end the PR-checks wait on the first failed conclusion"
+    assert_grep "the drive call's own return for the pipeline (\`no-mistakes axi run --wait\`" "$brief" \
+      "$kind brief did not block the pipeline wait on the drive call's own return"
+    assert_no_grep "axi status\`'s own \`outcome\`" "$brief" \
+      "$kind brief still waits on a one-shot axi status snapshot"
+    assert_grep "a declared wait with nothing watching it does not resume by itself" "$brief" \
+      "$kind brief did not require a declared wait to be watched or handed to firstmate"
+    assert_grep "say in that line that you need firstmate to wake you" "$brief" \
+      "$kind brief did not let an unwatched declared wait ask firstmate to wake it"
+  done
+
+  id="brief-terminality-ship"
+  brief="$home/data/$id/brief.md"
+  assert_grep "never leave a parked gate across the end of your turn" "$brief" \
+    "no-mistakes DOD did not forbid ending the turn with a gate parked on the worker"
+  assert_grep "and so is any status" "$brief" \
+    "ship brief did not extend turn discipline to a status naming unblocked remaining work"
+  assert_grep 'an honest "what is left" note is not a stopping' "$brief" \
+    "ship brief did not say a what-is-left note is not a stopping point"
+  pass "fm-brief.sh: waiting tests terminality and never leaves a parked gate across turn-end"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -1050,7 +1098,7 @@ test_workers_wait_without_spending_turns() {
     assert_grep "end your turn at once" "$brief" "$id: a decision wait must end the turn"
     assert_grep "with ONE blocking shell command that returns when the state changes" "$brief" \
       "$id: an external wait must sleep in one blocking shell command"
-    assert_grep "gh pr checks <pr> --watch" "$brief" "$id: the CI wait primitive is missing"
+    assert_grep "gh pr checks <pr> --watch --fail-fast" "$brief" "$id: the CI wait primitive is missing"
     assert_grep "a \`timeout\` of at most 2700 seconds" "$brief" "$id: the Pi ceiling is missing"
     assert_grep "its maximum \`timeout\` of 600000 ms" "$brief" "$id: the Claude Code ceiling is missing"
     assert_grep "empty \`write_stdin\` polls of up to 300000 ms" "$brief" "$id: the Codex ceiling is missing"
@@ -1488,6 +1536,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_waiting_tests_terminality_not_a_value
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
