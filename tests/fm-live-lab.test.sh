@@ -24,8 +24,9 @@ live_lab_cleanup() {
   done
   while read -r pid; do [ -n "$pid" ] && { pkill -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; }; done < "$TMP_ROOT/pids"
   while read -r dir; do
-    [ -n "$dir" ] || continue
-    env -u TMUX TMUX_TMPDIR="$dir" tmux kill-server 2>/dev/null
+    # down already removed some of these; never fall back to the default server.
+    [ -n "$dir" ] && [ -d "$dir" ] || continue
+    tmux -S "$dir/tmux-$(id -u)/default" kill-server 2>/dev/null
     case "$dir" in /tmp/fml.*) rm -rf "$dir" ;; esac
   done < "$TMP_ROOT/tmux-dirs"
   rm -rf "/tmp/fm-labt$$-mate" "/tmp/fm-labt$$-worker" "/tmp/fm-labt$$-other" /tmp/fm-labt"$$"-*+*
@@ -116,11 +117,13 @@ record_pid() {  # <root> <pid>
   printf 'launch_pid=%s\nlaunch_start=%s\n' "$2" "$(ps -o lstart= -p "$2" | awk '{$1=$1; print}')" >> "$1/.fm-live-lab"
 }
 
-lab_tmux() {  # <root> <tmux args...>
+lab_tmux() {  # <root> <tmux args...>: by explicit socket, as bin/fm-live-lab.sh does
   local dir
   dir=$(sed -n 's/^tmux_dir=//p' "$1/.fm-live-lab")
   shift
-  env -u TMUX TMUX_TMPDIR="$dir" tmux "$@"
+  [ -n "$dir" ] && [ -d "$dir" ] || fail "lab tmux directory is gone: '$dir'"
+  [ -d "$dir/tmux-$(id -u)" ] || mkdir -m 700 "$dir/tmux-$(id -u)"
+  env -u TMUX TMUX_TMPDIR="$dir" tmux -S "$dir/tmux-$(id -u)/default" "$@"
 }
 
 start_sleeper() {
@@ -403,6 +406,43 @@ kept=$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[
 assert_equals '[1,["/elsewhere/project"]]' "$kept" "down rewrites the symlink's target"
 assert_equals "$HOME_STORE_BEFORE" "$(digest "$HOME/.claude.json")" "down leaves the default store alone"
 pass "check and down use the recorded Claude store and keep a symlinked store linked"
+
+# tmux 3.6a treats a TMUX_TMPDIR that does not exist as unset and falls back
+# to /tmp, where the user's default server lives. down on a lab whose private
+# directory is already gone must address no such fallback socket: a tmux shim
+# resolves each call the way tmux does and routes the default-server fallback
+# to a private sentinel server, never the real one.
+REAL_TMUX=$(command -v tmux)
+SENTINEL_DIR=$(mktemp -d /tmp/fml.XXXXXX)
+printf '%s\n' "$SENTINEL_DIR" >> "$TMP_ROOT/tmux-dirs"
+mkdir -m 700 "$SENTINEL_DIR/tmux-$(id -u)"
+SENTINEL="$SENTINEL_DIR/tmux-$(id -u)/default"
+"$REAL_TMUX" -S "$SENTINEL" -f /dev/null new-session -d -s sentinel 'exec sleep 600' || fail "cannot start the sentinel server"
+mkdir -p "$TMP_ROOT/socket-shim-bin"
+cat > "$TMP_ROOT/socket-shim-bin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -S ]; then
+  printf 'explicit %s %s\n' "$2" "${3:-}" >> "$SHIM_LOG"
+  exec "$REAL_TMUX" "$@"
+fi
+if [ -n "${TMUX:-}" ] || [ -z "${TMUX_TMPDIR:-}" ] || [ ! -d "$TMUX_TMPDIR" ]; then
+  printf 'fallback %s\n' "${1:-}" >> "$SHIM_LOG"
+  exec "$REAL_TMUX" -S "$SHIM_SENTINEL" "$@"
+fi
+printf 'private %s %s\n' "$TMUX_TMPDIR" "${1:-}" >> "$SHIM_LOG"
+exec "$REAL_TMUX" "$@"
+SH
+chmod +x "$TMP_ROOT/socket-shim-bin/tmux"
+G=$(make_lab gone claude)
+G_TMUX=$(sed -n 's/^tmux_dir=//p' "$G/.fm-live-lab")
+lab_tmux "$G" kill-server
+rm -rf "$G_TMUX"
+: > "$TMP_ROOT/shim.log"
+out=$(SHIM_LOG="$TMP_ROOT/shim.log" SHIM_SENTINEL="$SENTINEL" REAL_TMUX="$REAL_TMUX" \
+  PATH="$TMP_ROOT/socket-shim-bin:$PATH" "$LIVE_LAB" down "$G" 2>&1)
+assert_not_contains "$(cat "$TMP_ROOT/shim.log")" "fallback" "down with a removed tmux directory addresses no fallback socket: $out"
+"$REAL_TMUX" -S "$SENTINEL" has-session -t sentinel 2>/dev/null || fail "down with a removed tmux directory killed the sentinel server"
+pass "down never reaches the default tmux server through a removed private directory"
 
 # TERM handlers may write trust again, and an uncooperative lab process must
 # be killed before the store or lab directory is removed.
