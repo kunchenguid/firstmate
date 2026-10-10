@@ -392,6 +392,19 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+test_no_mistakes_dod_uses_generated_status_command() {
+  local forge out
+  for forge in none gerrit; do
+    out="$TMP_ROOT/dod-status-$forge.md"
+    fm_dod_block no-mistakes dod-status-task fm/dod-status-task "$forge" > "$out"
+    assert_grep 'use the status command from your brief with state `needs-validation`' "$out" \
+      "$forge: no-mistakes DoD did not route validation through the generated status command"
+    assert_no_grep 'append `needs-validation \[at=<epoch>\]' "$out" \
+      "$forge: no-mistakes DoD still teaches an untagged validation handoff"
+  done
+  pass "no-mistakes DoD uses the generated status command for validation handoffs"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -453,6 +466,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_no_mistakes_dod_uses_generated_status_command
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the

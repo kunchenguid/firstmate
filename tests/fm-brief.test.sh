@@ -831,7 +831,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief append now epoch event_id templates template line signals
+  local home kind id brief append now epoch event_id templates template line signals status_state
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -857,7 +857,9 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
     append=$(sed -n '/`event_id=/s/.*`\(event_id=.*\)`.*/\1/p' "$brief")
     now=$(date +%s)
-    append=${append//\{state\}/done}
+    status_state=done
+    [ "$kind" = ship:no-mistakes ] && status_state=needs-validation
+    append=${append//\{state\}/$status_state}
     append=${append//\{one short line\}/test event}
     append=${append//<epoch>/$now}
     mkdir -p "$home/state"
@@ -902,6 +904,10 @@ SIGNALS
     if [ "$kind" = ship:no-mistakes ]; then
       assert_grep "States: working, needs-decision, blocked, awaiting, needs-validation, done, failed." "$brief" \
         "$kind brief did not list the validation handoff beside the configured pause verb"
+      assert_grep 'use the status command from your brief with state `needs-validation`' "$brief" \
+        "$kind brief did not route the validation handoff through its generated status command"
+      assert_no_grep 'append `needs-validation \[at=<epoch>\]' "$brief" \
+        "$kind brief still teaches an untagged validation handoff"
     else
       assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
         "$kind brief did not render the configured pause verb in its states list"
