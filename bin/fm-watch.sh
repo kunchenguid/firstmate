@@ -32,7 +32,11 @@
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's latest recognized status event decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
+#                          both surfaced at once, except a `done:` delivery with
+#                          no open captain call, no steer written since its
+#                          status file's last write, and an authenticated PR
+#                          merge poll, which never alarms from a new pane hash
+#                          (merge_poll_stale_bound). A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
@@ -1884,6 +1888,40 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
+# Bound a due captain-relevant stale alarm for a delivered task firstmate is
+# already watching for merge: the latest status event is `done:`, no
+# steering-inbox record (pending or handled) is as new as the status file's last
+# write, and an authenticated PR merge poll is registered (bin/fm-pr-lib.sh's
+# fm_pr_poll_artifacts_valid owns that proof). firstmate arms that poll only
+# after reading the delivery, the poll itself reports the PR's merge (a PR
+# closed without merge is not reported), and a new status event or completed
+# turn still arrives as a signal, so a new pane hash has nothing to add. An
+# idle finished pane still churns its hash (a repainted footer), and each new
+# hash re-alarmed here for as long as the PR waited on someone else. A steer
+# delivered after the delivery is new work a worker need not answer with a
+# status line, so it may stall without a turn end; the status file's mtime
+# bounds the latest `done:` from above, and any record at or past it alarms as
+# before. Callers decide a provably-working crew and an open captain call
+# first, so a wedged run still escalates and a held decision keeps its own
+# re-surface cadence; any other latest event, or a missing, retired, or
+# unauthenticated poll, alarms exactly as before. The proof runs in a subshell
+# so its parsed FM_PR_* records cannot leak into the poll checks.
+merge_poll_stale_bound() {  # <task>
+  local task=$1 verb status_mtime rec rec_mtime
+  [ -n "$task" ] || return 1
+  status_line_verb "$(last_status_line "$STATE/$task.status")" verb
+  [ "$verb" = "done" ] || return 1
+  status_mtime=$(stat_mtime "$STATE/$task.status")
+  [ -n "$status_mtime" ] || return 1
+  for rec in "$(fm_task_inbox_dir "$STATE" "$task")"/*.msg \
+             "$(fm_task_inbox_handled_dir "$STATE" "$task")"/*.msg; do
+    [ -e "$rec" ] || continue
+    rec_mtime=$(stat_mtime "$rec")
+    [ -n "$rec_mtime" ] && [ "$rec_mtime" -lt "$status_mtime" ] || return 1
+  done
+  (fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh")
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -3140,6 +3178,13 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && merge_poll_stale_bound "$task"; then
+              # Delivered and already watched for merge: no new hash of this
+              # finished pane is news, so it never alarms from churn alone.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (finished delivery awaiting its registered PR merge poll): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"

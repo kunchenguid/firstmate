@@ -21,6 +21,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -3994,8 +3996,8 @@ HOLD_WATCH_PID=
 hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
-    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND="${FM_HOLD_PANE_COMMAND:-zsh}" \
+    FM_FAKE_CREW_STATE="${FM_HOLD_CREW_STATE:-state: stopped · source: pane · bare shell}" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
@@ -4194,6 +4196,191 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
   [ "$wakes" -eq 1 ] \
     || fail "the second captain call produced $wakes first wakes instead of one"
   pass "a released-then-re-held task is a distinct captain call whose first sight still alarms"
+}
+
+
+# --- delivered work already watched for merge: pane churn must not re-alarm ---
+# A finished worker whose PR waits on an upstream maintainer keeps its `done:`
+# line while its idle pane still repaints, and each new pane hash re-entered the
+# captain-relevant stale branch as a bare `stale: <window>` wake, every few
+# minutes for as long as the PR stayed open (the 2026-10 loop on an unheld
+# upstream contribution). firstmate arms the merge poll only after reading that
+# delivery, so with an authenticated poll registered no new hash is news.
+# Pinned in both directions: the delivery with a registered poll absorbs its
+# whole churn, first sight included; the same fixture with no poll, with a
+# non-`done` latest event, or with a crew still provably working keeps today's
+# behavior; and an open captain call keeps its own re-surface cadence.
+#
+# The poll is published through bin/fm-pr-lib.sh's real preparation and
+# publication path, so the fixture is the record fm_pr_poll_artifacts_valid
+# authenticates rather than this test's idea of one. A fresh .last-check keeps
+# the check sweep from running that poll against a real forge.
+
+MERGE_POLL_URL=https://github.com/example/repo/pull/7
+
+register_merge_poll() {  # <state>
+  local state=$1
+  printf 'pr=%s\n' "$MERGE_POLL_URL" >> "$state/held-merge.meta"
+  ( fm_pr_url_parse "$MERGE_POLL_URL" \
+    && fm_pr_poll_prepare "$state" held-merge "$FM_PR_PROVIDER" "$MERGE_POLL_URL" \
+      "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" \
+    && fm_pr_poll_publish_prepared \
+    && fm_pr_poll_artifacts_valid "$state" held-merge "$ROOT/bin/fm-pr-poll.sh" ) || return 1
+  touch "$state/.last-check"
+}
+
+# The hold fixture's home without a backlog, so it needs no tasks-axi: the
+# captain-call read finds no call and the merge-poll bound alone decides.
+make_merge_poll_home() {  # <name> <status-line> <poll|nopoll>
+  local name=$1 line=$2 poll=$3 dir state
+  dir=$(make_case "$name"); state="$dir/state"
+  mkdir -p "$dir/data" "$dir/config"
+  printf 'window=test:fm-held-merge\nkind=ship\nharness=grok\nbackend=tmux\n' \
+    > "$state/held-merge.meta"
+  printf '%s\n' "$line" > "$state/held-merge.status"
+  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+  if [ "$poll" = poll ]; then
+    register_merge_poll "$state" || return 1
+  else
+    touch "$state/.last-check"
+  fi
+  printf '%s\n' "$dir"
+}
+
+test_merge_poll_bounds_finished_stale_churn() {
+  local dir state out capture wakes
+  dir=$(make_merge_poll_home merge-poll-done \
+    "done [at=$(date +%s)]: PR $MERGE_POLL_URL checks green" poll) \
+    || fail "could not build a delivered fixture with a registered merge poll"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  hold_watch_churn "$dir" "$out" "$capture" 'idle footer, repaint' 3 \
+    || fail "a delivered task with a registered merge poll exited on pane churn instead of absorbing it: $(cat "$out")"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] \
+    || fail "pane churn on a delivered task with a registered merge poll queued $wakes stale wake(s)"
+  [ ! -s "$out" ] || fail "an absorbed merge-poll stale printed a wake reason: $(cat "$out")"
+  grep -F 'absorbed stale (finished delivery awaiting its registered PR merge poll): test:fm-held-merge' \
+    "$state/.watch-triage.log" >/dev/null \
+    || fail "the merge-poll absorb was not recorded in the triage log"
+  [ ! -e "$state/.stale-since-$(hold_key)" ] \
+    || fail "a finished delivery started a wedge timer it can never clear"
+  pass "a delivered task with a registered PR merge poll absorbs every new pane hash"
+}
+
+# The controls that decide whether the bound is safe: without the poll the
+# delivery alarms on every new hash exactly as before, and a latest event other
+# than `done:` alarms even with the poll registered.
+test_stale_churn_without_a_merge_poll_bound_still_alarms() {
+  local spec name line poll dir state out capture round wakes
+  for spec in \
+    "unpolled-delivery|done: PR $MERGE_POLL_URL checks green|nopoll" \
+    "polled-blocker|blocked: the PR's CI needs a credential|poll" \
+    "polled-failure|failed: the PR branch cannot be rebased|poll"
+  do
+    name=${spec%%|*}; line=${spec#*|}; poll=${line##*|}; line=${line%|*}
+    dir=$(make_merge_poll_home "$name" "$line" "$poll") \
+      || fail "[$name] could not build the merge-poll control fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    round=1
+    while [ "$round" -le 2 ]; do
+      hold_watch_surface "$dir" "$out" "$capture" "idle footer, repaint $round" \
+        || fail "[$name] stopped alarming on new pane hash $round"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] || fail "[$name] round $round produced $wakes wakes instead of one"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
+      round=$((round + 1))
+    done
+  done
+  pass "a delivery without a registered merge poll, or a non-done event with one, still alarms on every new hash"
+}
+
+# A steer delivered after the `done:` line is new work the worker need not
+# answer with a status line, so a stall on it would otherwise go unsurfaced
+# until the PR merged. A handled or pending record at or past the status file's
+# last write alarms the first new hash as before; one older than it (the worker
+# delivered again after handling it) leaves the bound in force.
+test_merge_poll_bound_alarms_after_a_delivered_steer() {
+  local spec name where age expect dir state out capture rec wakes
+  for spec in \
+    "steer-handled|handled|60|1" \
+    "steer-pending|pending|60|1" \
+    "steer-older|handled|-600|0"
+  do
+    IFS='|' read -r name where age expect <<< "$spec"
+    dir=$(make_merge_poll_home "merge-poll-$name" \
+      "done: PR $MERGE_POLL_URL checks green" poll) \
+      || fail "[$name] could not build a delivered fixture with a registered merge poll"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    mkdir -p "$state/held-merge.inbox/handled"
+    if [ "$where" = handled ]; then
+      rec="$state/held-merge.inbox/handled/001.msg"
+    else
+      rec="$state/held-merge.inbox/001.msg"
+    fi
+    printf 'address the maintainer review\n' > "$rec"
+    set_mtime "$(( $(date +%s) + age ))" "$rec"
+    if [ "$expect" = 1 ]; then
+      hold_watch_surface "$dir" "$out" "$capture" 'idle after the steer, repaint 1' \
+        || fail "[$name] a delivered task stalled on a newer steer did not alarm on its first new hash"
+    else
+      hold_watch_churn "$dir" "$out" "$capture" 'idle after the steer, repaint' 2 \
+        || fail "[$name] a delivered task with only an older steer exited on pane churn: $(cat "$out")"
+    fi
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq "$expect" ] \
+      || fail "[$name] produced $wakes stale wake(s) instead of $expect"
+  done
+  pass "a steer at or past a delivered task's status write lifts the merge-poll bound; an older one does not"
+}
+
+# A crew still provably working outranks the bound: a validation re-run on a
+# delivered task keeps its wedge timer and still escalates once it freezes.
+test_merge_poll_bound_keeps_a_working_crew_wedge_timer() {
+  local dir state out capture ssf i
+  dir=$(make_merge_poll_home merge-poll-working \
+    "done: PR $MERGE_POLL_URL checks green" poll) \
+    || fail "could not build a working fixture with a registered merge poll"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  ssf="$state/.stale-since-$(hold_key)"
+  printf 'validating, idle\n' > "$capture"
+  FM_HOLD_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_HOLD_PANE_COMMAND=grok hold_watch_launch "$dir" "$out" "$capture"
+  i=0
+  while [ ! -s "$ssf" ] && [ "$i" -lt 10 ]; do
+    wait_poll_cycle "$state" "$HOLD_WATCH_PID" 300 \
+      || fail "a provably-working delivered task exited before its wedge timer started: $(cat "$out")"
+    i=$((i + 1))
+  done
+  [ -s "$ssf" ] || { reap "$HOLD_WATCH_PID"; fail "the merge-poll bound swallowed a provably-working crew's wedge timer"; }
+  echo $(( $(date +%s) - 500 )) > "$ssf"
+  wait_for_exit "$HOLD_WATCH_PID" 100 \
+    || { reap "$HOLD_WATCH_PID"; fail "a wedged run on a delivered task with a merge poll never escalated"; }
+  grep -F 'possible wedge' "$out" >/dev/null \
+    || fail "the wedged run's escalation did not flag a possible wedge: $(cat "$out")"
+  pass "a provably-working crew on a delivered task with a merge poll still wedge-escalates"
+}
+
+# An open captain call is a decision the merge poll cannot report, so it keeps
+# its own bounded re-surface cadence even with the poll registered.
+test_open_captain_call_with_merge_poll_still_resurfaces() {
+  local dir state out capture throttle wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (captain call with merge poll)"; return 0; }
+  dir=$(make_hold_home held-merge-poll "done: PR $MERGE_POLL_URL checks green" hold) \
+    || fail "could not build a captain-held backlog fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  register_merge_poll "$state" || fail "could not register the held task's merge poll"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of held work with a merge poll did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the held first sight"
+  [ -e "$throttle" ] || fail "the held first sight recorded no re-surface cadence"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "held work with a merge poll did not re-surface once its window elapsed"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "the elapsed held window produced $wakes wakes instead of one"
+  pass "an open captain call keeps its re-surface cadence with a merge poll registered"
 }
 
 
@@ -6714,6 +6901,11 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_merge_poll_bounds_finished_stale_churn
+test_stale_churn_without_a_merge_poll_bound_still_alarms
+test_merge_poll_bound_alarms_after_a_delivered_steer
+test_merge_poll_bound_keeps_a_working_crew_wedge_timer
+test_open_captain_call_with_merge_poll_still_resurfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
