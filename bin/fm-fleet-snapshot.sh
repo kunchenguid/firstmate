@@ -46,6 +46,10 @@
 #     project it as a Charted Next gate stating why, and disclose it in
 #     omitted[]; --all-decisions reveals every captain hold available within the
 #     bounded snapshot.
+#   tasks[].admission_origin and admission_committed_at/generation project the
+#     immutable origin from captured metadata, never infer admission from a row.
+#   task_inventory_complete=true identifies this complete task capture; consumers
+#     must treat absent/omitted/unavailable inventory as unknown, not retirement.
 #   tasks[]: one row per task metadata record captured at snapshot start, sorted
 #     by id. A record removed before capture is omitted. If a captured task's
 #     generation changes while observations run, its selected metadata remains
@@ -683,8 +687,9 @@ prefetch_task_observations() {  # <meta> <id>
       > "$current_file" || current_rc=1
     endpoint_exists=null
     agent_alive=unknown
+    generation_current=0
   fi
-  printf 'endpoint_exists=%s\nagent_alive=%s\n' "$endpoint_exists" "$agent_alive" > "$endpoint_file" || current_rc=1
+  printf 'endpoint_exists=%s\nagent_alive=%s\ngeneration_current=%s\n' "$endpoint_exists" "$agent_alive" "$generation_current" > "$endpoint_file" || current_rc=1
   return "$current_rc"
 }
 
@@ -744,7 +749,7 @@ prefetch_task_current_states() {
 
 task_json_lines() {
   local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
-  local remote_host remote_root current_file endpoint_file observation_line index=0
+  local remote_host remote_root current_file endpoint_file observation_line generation_current index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
@@ -833,10 +838,12 @@ task_json_lines() {
     endpoint_exists=null
     agent_alive=not_checked
     endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
+    generation_current=0
     while IFS= read -r observation_line || [ -n "$observation_line" ]; do
       case "$observation_line" in
         endpoint_exists=*) endpoint_exists=${observation_line#*=} ;;
         agent_alive=*) agent_alive=${observation_line#*=} ;;
+        generation_current=*) generation_current=${observation_line#*=} ;;
       esac
     done < "$endpoint_file" || {
       snapshot_task_cleanup
@@ -866,6 +873,9 @@ task_json_lines() {
       --arg worktree "$worktree" \
       --arg home "$home" \
       --arg projects "$projects" \
+      --arg admission_origin "$(meta_value "$meta" admission_origin)" \
+      --arg admission_committed_at "$(meta_value "$meta" admission_committed_at)" \
+      --arg admission_committed_generation "$(meta_value "$meta" admission_committed_generation)" \
       --arg spawn_gen "$spawn_gen" \
       --arg backend "$backend" \
       --arg target "$target" \
@@ -877,6 +887,7 @@ task_json_lines() {
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
+      --argjson generation_current "$(bool_json "$generation_current")" \
       --argjson current_state "$current_json" \
       --argjson meta_path "$meta_json" \
       --argjson status_log "$status_json" \
@@ -896,6 +907,10 @@ task_json_lines() {
         yolo:($yolo // ""),
         branch:($branch | if . == "" then null else . end),
         project:($project // ""),
+        generation_current:$generation_current,
+        admission_origin:(try ($admission_origin | fromjson) catch null),
+        admission_committed_at:($admission_committed_at | if . == "" then null else . end),
+        admission_committed_generation:($admission_committed_generation | if . == "" then null else . end),
         spawn_gen:($spawn_gen | if . == "" then null else . end),
         backend:$backend,
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
@@ -2069,6 +2084,7 @@ jq -n \
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,
+     task_inventory_complete:true,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
      contributions:$contributions[0],

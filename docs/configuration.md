@@ -28,6 +28,8 @@ Start with the directory layout, then use the setting reference for the behavior
 When `FM_HOME` is unset, most scripts use the repo root as the home.
 When it is set, scripts still run from this repo's `bin/`, while `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 
+The Workforce integration requires an explicit absolute `FM_HOME`; its home-scoping rules are owned by the [`fm-workforce.py` header and help](../bin/fm-workforce.py).
+
 ### Root and directory overrides
 
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
@@ -1194,10 +1196,20 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Workforce integration
+
+Workforce clients can submit Assistant or Autonomy job, policy, prospective-default, and supported window requests, observe fleet and preference status, and read durable Firstmate answers through a trusted local CLI.
+The interface supplies no graphical controls or VM, snapshot, or cloud-backup management.
+Submission queues a request for Firstmate rather than applying policy or performing the requested action.
+Assistant validation requests identify the exact completed batch and revision for Firstmate's decision; merge autonomy remains a request subject to the existing project authority.
+The [`fm-workforce.py` header and `--help`](../bin/fm-workforce.py) own the typed schemas, supported actions, scope checks, retry semantics, and supervisor-only answer publisher.
+[`tests/fm-workforce.test.sh`](../tests/fm-workforce.test.sh) exercises that public interface with synthetic records.
+
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
-It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+Brief resolution is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+Local configuration validation is available independently of that opt-in and makes no network or quota call; the script header owns its invocation.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.

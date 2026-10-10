@@ -53,6 +53,20 @@
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#   --origin-note <note-id> reserves one captured Workforce job-request for a
+#   fresh, single local ship/scout with a paired backlog. Requires explicit
+#   FM_HOME and canonical roots. The inbox reservation precedes allocation;
+#   provisional admission_origin metadata is not execution evidence. Final
+#   admission_committed_at/admission_committed_generation are published only
+#   after verified launch delivery and backlog In flight read-back, under the
+#   task meta lock. Inbox publication follows; failure reports spawned-but-
+#   binding-pending and must never be retried as a fresh spawn.
+#   --recover-admission <task-id> verifies the committed origin and replays the
+#   inbox attachment under the task lock, without endpoint/worktree lifecycle.
+#   A crash before the final marker remains prepared, even if backlog recovery
+#   moves its row; only committed evidence licenses binding. Relaunch preserves
+#   the original origin/generation/commit fields through preserve_relaunch_meta.
+#
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -533,6 +547,7 @@ case "${1:-}" in
 esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_SPAWN_HOME_EXPLICIT=${FM_HOME:-}
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-tasks-axi-lib.sh
@@ -686,9 +701,32 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+if [ "${1:-}" = --recover-admission ]; then
+  [ "$#" -eq 2 ] && [ -n "$FM_SPAWN_HOME_EXPLICIT" ] || {
+    echo "error: --recover-admission requires explicit FM_HOME and one task" >&2
+    exit 1
+  }
+  recover_id=$2
+  case "$recover_id" in ''|*[!A-Za-z0-9_-]*) exit 1 ;; esac
+  [ "$STATE" = "$FM_HOME/state" ] && [ "$DATA" = "$FM_HOME/data" ] &&
+    [ "$CONFIG" = "$FM_HOME/config" ] || exit 1
+  recover_lock=$(fm_meta_lock_path "$STATE/$recover_id.meta") || exit 1
+  fm_lock_acquire_wait "$recover_lock" || exit 1
+  recover_status=0
+  if ! fm_backlog_row_probe "$DATA" "$recover_id" || [ "$FM_BACKLOG_ROW_STATE" != "in_flight no no" ]; then
+    echo "error: admission recovery requires paired In flight custody" >&2
+    recover_status=1
+  else
+    FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-inbox.sh" publish-admission "$recover_id" || recover_status=$?
+  fi
+  fm_lock_release "$recover_lock"
+  exit "$recover_status"
+fi
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+ORIGIN_NOTE=
+ORIGIN_NOTE_SET=0
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -724,6 +762,7 @@ for a in "$@"; do
       ;;
     esac
     case "$want_value" in
+    origin-note) ORIGIN_NOTE=$a; ORIGIN_NOTE_SET=1 ;;
     harness)
       HARNESS_ARG=$a
       HARNESS_SET=1
@@ -777,6 +816,8 @@ for a in "$@"; do
     KIND=secondmate
     KIND_SET=1
     ;;
+  --origin-note) want_value="origin-note" ;;
+  --origin-note=*) ORIGIN_NOTE=${a#--origin-note=}; ORIGIN_NOTE_SET=1 ;;
   --relaunch) RELAUNCH=1 ;;
   --herdr-resume-lock-wait) HERDR_RESUME_LOCK_WAIT=1 ;;
   --harness) want_value=harness ;;
@@ -879,6 +920,16 @@ case "$EFFORT" in
   exit 1
   ;;
 esac
+
+if [ "$ORIGIN_NOTE_SET" -eq 1 ]; then
+  [ -n "$ORIGIN_NOTE" ] && [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
+    [ "${#POS[@]}" -eq 2 ] && [ -n "$FM_SPAWN_HOME_EXPLICIT" ] &&
+    [ "$STATE" = "$FM_HOME/state" ] && [ "$DATA" = "$FM_HOME/data" ] &&
+    [ "$CONFIG" = "$FM_HOME/config" ] && [ "$PROJECTS" = "$FM_HOME/projects" ] || {
+    echo "error: --origin-note requires one fresh local task and explicit canonical FM_HOME" >&2
+    exit 1
+  }
+fi
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
@@ -3671,6 +3722,14 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
+if [ -n "$ORIGIN_NOTE" ]; then
+  [ "$BACKLOG_TRANSITION" = 1 ] || {
+    echo "error: origin admission requires a paired backlog" >&2
+    exit 1
+  }
+  FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-inbox.sh" prepare-admission "$ORIGIN_NOTE" "$ID" "$PROJ_ABS" "$KIND" >/dev/null || exit 1
+fi
+
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
@@ -5103,6 +5162,10 @@ preserve_relaunch_meta() {
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ -n "$ORIGIN_NOTE" ]; then
+    origin_record=$(FM_HOME=$FM_HOME python3 "$SCRIPT_DIR/fm_inbox_admission.py" origin "$ORIGIN_NOTE" "$ID" "$SPAWN_GEN") || exit 1
+    printf 'admission_origin=%s\n' "$origin_record"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -5674,6 +5737,25 @@ fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
+fi
+if [ -n "$ORIGIN_NOTE" ]; then
+  # A successful dispatch return alone is not custody evidence.
+  if ! fm_backlog_row_probe "$DATA" "$ID" || [ "$FM_BACKLOG_ROW_STATE" != "in_flight no no" ]; then
+    echo "error: spawned-but-binding-pending: $ID backlog commit did not verify; no admission marker published" >&2
+    exit 1
+  fi
+  SPAWN_META_TMP="$STATE/.$ID.meta.admission.${BASHPID:-$$}"
+  if ! cat "$STATE/$ID.meta" >"$SPAWN_META_TMP" ||
+    ! printf 'admission_committed_at=%s\nadmission_committed_generation=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SPAWN_GEN" >>"$SPAWN_META_TMP" ||
+    ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
+    echo "error: spawned-but-binding-pending: $ID final marker unavailable; reconcile without fresh spawn" >&2
+    exit 1
+  fi
+  SPAWN_META_TMP=
+  if ! FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-inbox.sh" publish-admission "$ID"; then
+    echo "error: spawned-but-binding-pending: $ID; recover with FM_HOME='$FM_HOME' bin/fm-spawn.sh --recover-admission '$ID', never fresh spawn" >&2
+    exit 1
+  fi
 fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
