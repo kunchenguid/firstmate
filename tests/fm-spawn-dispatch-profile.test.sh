@@ -790,13 +790,82 @@ test_opencode_pins_model_in_worktree_config() {
 
   cfg="$WT_DIR/.opencode/opencode.json"
   [ -f "$cfg" ] || fail "opencode spawn did not write the model pin to $cfg"
-  assert_contains "$(cat "$cfg")" '"model":"opencode/space-bunny-free"' \
-    "worktree config did not pin the resolved model"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    die "wrong effective model" unless $config->{model} eq "opencode/space-bunny-free";
+    die "missing Firstmate ownership marker" unless $config->{"x-firstmate-model-pin"}{managedModel} eq $config->{model};
+  ' "$cfg" || fail "worktree config did not contain the resolved Firstmate model pin"
   if git -C "$WT_DIR" check-ignore -q .opencode/opencode.json; then
     pass "opencode pins the model in an untracked, git-excluded worktree config"
   else
     fail "the generated .opencode/opencode.json is not git-excluded and would dirty the project"
   fi
+}
+
+test_opencode_merges_and_clears_its_model_pin() {
+  local rec id1 id2 id3 out status cfg
+  id1=profile-opencode-merge-z7h
+  id2=profile-opencode-update-z7i
+  id3=profile-opencode-clear-z7j
+  rec=$(make_spawn_case profile-opencode-merge opencode "$id1" "$id2" "$id3")
+  read_case_record "$rec"
+  cfg="$WT_DIR/.opencode/opencode.json"
+  printf '%s\n' '.opencode/opencode.json' >> "$PROJ_DIR/.git/info/exclude"
+  mkdir -p "$WT_DIR/.opencode"
+  printf '%s\n' '{"model":"opencode-go/qwen3.8-flash","permission":{"*":"ask"},"provider":{"custom":{"npm":"custom/provider"}}}' > "$cfg"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id1" "$PROJ_DIR" \
+    --model opencode/space-bunny-free)
+  status=$?
+  expect_code 0 "$status" "opencode spawn should merge a pin into existing user config: $out"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    my $marker = $config->{"x-firstmate-model-pin"};
+    die "wrong pin" unless $config->{model} eq "opencode/space-bunny-free";
+    die "permission settings changed" unless $config->{permission}{"*"} eq "ask";
+    die "provider settings changed" unless $config->{provider}{custom}{npm} eq "custom/provider";
+    die "prior model was not recorded" unless $marker->{previousModelPresent} && $marker->{previousModel} eq "opencode-go/qwen3.8-flash";
+  ' "$cfg" || fail "OpenCode pin did not preserve and record existing settings"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id2" "$PROJ_DIR" \
+    --model opencode-go/space-bunny)
+  status=$?
+  expect_code 0 "$status" "a later OpenCode launch should update its existing pin"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id3" "$PROJ_DIR" \
+    --model default)
+  status=$?
+  expect_code 0 "$status" "default model should clear only Firstmate's pin"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    die "prior model was not restored" unless $config->{model} eq "opencode-go/qwen3.8-flash";
+    die "permission settings changed" unless $config->{permission}{"*"} eq "ask";
+    die "provider settings changed" unless $config->{provider}{custom}{npm} eq "custom/provider";
+    die "Firstmate marker remains" if exists $config->{"x-firstmate-model-pin"};
+  ' "$cfg" || fail "clearing the Firstmate pin did not restore and preserve the original config"
+  pass "opencode merges, updates, and clears only its own model pin"
+}
+
+test_opencode_refuses_unparseable_worktree_config() {
+  local rec id out status cfg before
+  id=profile-opencode-invalid-z7k
+  rec=$(make_spawn_case profile-opencode-invalid opencode "$id")
+  read_case_record "$rec"
+  cfg="$WT_DIR/.opencode/opencode.json"
+  printf '%s\n' '.opencode/opencode.json' >> "$PROJ_DIR/.git/info/exclude"
+  mkdir -p "$WT_DIR/.opencode"
+  printf '%s\n' '{invalid json' > "$cfg"
+  before=$(cat "$cfg")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model opencode/space-bunny-free 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "opencode must refuse to overwrite unparseable config"
+  assert_contains "$out" "cannot safely update OpenCode config $cfg: invalid JSON" \
+    "unparseable-config refusal must name the conflicting file"
+  [ "$(cat "$cfg")" = "$before" ] || fail "opencode changed unparseable user config"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode" "refused launch must not start OpenCode"
+  pass "opencode refuses unparseable config without changing or launching"
 }
 
 # A project that ships its own committed .opencode/opencode.json owns that
@@ -2315,6 +2384,8 @@ test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_effort_variant
 test_opencode_pins_model_in_worktree_config
+test_opencode_merges_and_clears_its_model_pin
+test_opencode_refuses_unparseable_worktree_config
 test_opencode_refuses_a_tracked_project_config
 test_opencode_default_model_writes_no_worktree_config
 test_opencode_without_effort_keeps_launch_config_unchanged

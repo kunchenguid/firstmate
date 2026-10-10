@@ -2734,35 +2734,124 @@ model_flag_for_harness() {
 #   * OPENCODE_CONFIG_CONTENT is NOT honored for `model` in v2 (it does not even
 #     appear as a configuration source), so the launch's existing env overlay
 #     cannot carry the pin and the file route is the supported one.
-# The generated file is untracked and git-excluded: it is per-worktree launch
-# scaffolding in the same class as the busy-state plugin written beside it, not
-# a tracked change to the project.
+# A pin in a new file is git-excluded per-worktree launch scaffolding; an
+# existing untracked config is merged in place without changing its other keys.
 write_opencode_worktree_model() {  # <model>
-  local model=$1 target
-  [ -n "$model" ] && [ "$model" != default ] || return 0
+  local model=$1 target default_model=0 target_existed=0
+  if [ -z "$model" ] || [ "$model" = default ]; then
+    default_model=1
+  fi
   # `opencode run --model` documents a provider/model#variant spelling, but the
   # config's model key is the bare provider/model pair. The variant is a
   # separate firstmate axis that effort_flag_for_harness already maps onto the
   # build agent, so the suffix is dropped rather than written into the config,
   # where opencode would not resolve it.
-  model=${model%%#*}
-  # Only a <provider>/<id> pair is a pin; anything else is not a model this can
-  # name, and silently writing it would produce a config opencode cannot use.
-  case "$model" in
-  */*) ;;
-  *) return 0 ;;
-  esac
+  if [ "$default_model" -eq 0 ]; then
+    model=${model%%#*}
+    # Only a <provider>/<id> pair is a pin; anything else is not a model this can
+    # name, and silently writing it would produce a config opencode cannot use.
+    case "$model" in
+    */*) ;;
+    *) return 0 ;;
+    esac
+  fi
   target="$WT/.opencode/opencode.json"
   # A project that ships its own committed .opencode/opencode.json owns that
   # file. Never overwrite it or launch on an unverified model instead.
-  if [ -e "$target" ] && git -C "$WT" ls-files --error-unmatch .opencode/opencode.json >/dev/null 2>&1; then
+  if [ "$default_model" -eq 0 ] && [ -e "$target" ] && git -C "$WT" ls-files --error-unmatch .opencode/opencode.json >/dev/null 2>&1; then
     printf 'fm-spawn: cannot select OpenCode model %s: tracked project config %s takes precedence and must not be modified\n' \
       "$model" "$target" >&2
     return 1
   fi
+  if [ ! -e "$target" ] && [ "$default_model" -eq 1 ]; then
+    return 0
+  fi
+  [ ! -e "$target" ] || target_existed=1
   mkdir -p "$WT/.opencode"
-  printf '{"model":"%s"}\n' "$(json_escape "$model")" > "$target"
-  exclude_path '.opencode/opencode.json'
+  perl - "$target" "$model" "$default_model" <<'PERL' || return 1
+use strict;
+use warnings;
+use JSON::PP;
+
+my ($path, $model, $is_default) = @ARGV;
+my $marker_key = 'x-firstmate-model-pin';
+my $raw = '';
+my $file_exists = -e $path;
+if ($file_exists) {
+  open my $input, '<:raw', $path or die "fm-spawn: cannot read OpenCode config $path: $!\n";
+  local $/;
+  $raw = <$input>;
+  close $input or die "fm-spawn: cannot close OpenCode config $path: $!\n";
+}
+
+my $config = {};
+if ($file_exists) {
+  eval { $config = JSON::PP->new->utf8->decode($raw); 1 }
+    or die "fm-spawn: cannot safely update OpenCode config $path: invalid JSON\n";
+  ref($config) eq 'HASH'
+    or die "fm-spawn: cannot safely update OpenCode config $path: top-level JSON value must be an object\n";
+}
+
+my $encoder = JSON::PP->new->utf8->canonical;
+my $has_model = exists $config->{model};
+my $legacy_owned = 0;
+if (!exists $config->{$marker_key} && $has_model && keys(%$config) == 1
+    && !ref($config->{model})
+    && $raw eq $encoder->encode({ model => $config->{model} }) . "\n") {
+  $legacy_owned = 1;
+  delete $config->{model};
+  $has_model = 0;
+}
+
+if (exists $config->{$marker_key}) {
+  my $marker = $config->{$marker_key};
+  ref($marker) eq 'HASH'
+    && defined($marker->{managedModel}) && !ref($marker->{managedModel})
+    && exists($marker->{previousModelPresent})
+    && ($marker->{previousModelPresent} eq JSON::PP::true || $marker->{previousModelPresent} eq JSON::PP::false)
+    or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate pin marker\n";
+  my $still_ours = $has_model && !ref($config->{model}) && $config->{model} eq $marker->{managedModel};
+  $still_ours or die "fm-spawn: cannot safely update OpenCode config $path: model changed since Firstmate pinned it\n";
+  if ($is_default) {
+    if ($marker->{previousModelPresent}) {
+      exists $marker->{previousModel}
+        or die "fm-spawn: cannot safely update OpenCode config $path: Firstmate pin has no saved model\n";
+      $config->{model} = $marker->{previousModel};
+    } else {
+      delete $config->{model};
+    }
+    delete $config->{$marker_key};
+  } else {
+    $config->{model} = $model;
+    $marker->{managedModel} = $model;
+  }
+} elsif (!$is_default) {
+  my %marker = (managedModel => $model, previousModelPresent => $has_model ? JSON::PP::true : JSON::PP::false);
+  $marker{previousModel} = $config->{model} if $has_model;
+  $config->{model} = $model;
+  $config->{$marker_key} = \%marker;
+} else {
+  if ($legacy_owned) {
+    unlink $path or die "fm-spawn: cannot remove cleared OpenCode model pin $path: $!\n";
+  }
+  exit 0;
+}
+
+if (!keys %$config) {
+  unlink $path or die "fm-spawn: cannot remove cleared OpenCode model pin $path: $!\n";
+  exit 0;
+}
+
+my $temporary = "$path.tmp.$$";
+open my $output, '>:raw', $temporary or die "fm-spawn: cannot write OpenCode config $temporary: $!\n";
+print {$output} JSON::PP->new->utf8->encode($config), "\n"
+  or die "fm-spawn: cannot write OpenCode config $temporary: $!\n";
+close $output or die "fm-spawn: cannot close OpenCode config $temporary: $!\n";
+rename $temporary, $path or die "fm-spawn: cannot replace OpenCode config $path: $!\n";
+PERL
+  if [ "$default_model" -eq 0 ] && [ "$target_existed" -eq 0 ]; then
+    exclude_path '.opencode/opencode.json'
+  fi
 }
 
 effort_flag_for_harness() {
