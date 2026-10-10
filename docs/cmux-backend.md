@@ -11,7 +11,7 @@ cmux is macOS-only, GUI-first, and unsuitable for a headless or SSH-only Firstma
 
 Prerequisites:
 
-- cmux 0.64 or newer, installed from [cmux.com](https://cmux.com) or with `brew install --cask cmux`.
+- cmux 0.64.25 or newer, installed from [cmux.com](https://cmux.com) or with `brew install --cask cmux`.
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
@@ -70,6 +70,12 @@ The caller-facing label remains `fm-<id>`, while the visible workspace title is 
 The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Firstmate root.
 cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
 Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
+
+Spawn resolves the new workspace only from the `OK workspace:<n>` ref that `new-workspace` prints, retrying that ref lookup up to 15 times, 0.2s apart, while cmux registers the workspace.
+Spawn never falls back to a scoped-title lookup after creation: titles are not unique in cmux, so resolving by the printed ref avoids binding another client's workspace with the same title, and on cmux 0.64.25 a lookup right after creation also raced cmux's title registration (not reproduced on 0.65.0).
+If a printed ref never resolves, spawn fails after a best-effort `close-workspace` on that ref, and names the leftover workspace title for manual cleanup only if that close does not report success.
+If no ref is printed, spawn fails, closes nothing, and names the leftover workspace title for manual cleanup.
+If the workspace resolves but its default surface does not, spawn closes it through the normal uuid close path described under "Current operation and safety".
 
 ```text
 backend=cmux
