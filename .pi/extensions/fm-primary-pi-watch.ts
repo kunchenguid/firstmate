@@ -14,7 +14,7 @@
 // Stale callbacks from a prior generation are no-ops against the active replacement.
 //
 // Delivery versus consumption (stated once here):
-// A main follow-up is delivered once Pi accepts it (sendUserMessage resolves).
+// A main wake (steering or follow-up) is delivered once Pi accepts it.
 // The successor pipeline never waits for the model to read it: a follow-up
 // queued while main is streaming joins the running run without ever raising
 // before_agent_start, so waiting on that event stalls every later close.
@@ -35,7 +35,7 @@
 // consumption changes.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -73,6 +73,7 @@ type PendingActionableClose = {
   message: string;
   predecessorArmPid: string;
   delivered?: true;
+  captainNotes?: string[];
 };
 
 type ReplacementActionableHandoff = {
@@ -94,6 +95,7 @@ type WatchToolRenderContext = {
 type UnconsumedWake = {
   content: string;
   pending: PendingActionableClose;
+  captainNotes: string[];
 };
 
 type SessionGeneration = {
@@ -391,6 +393,9 @@ function validatePendingActionable(value: unknown): PendingActionableClose {
     !actionableLine((value as { message: string }).message) ||
     typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
     !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
+    ((value as { captainNotes?: unknown }).captainNotes !== undefined &&
+      (!Array.isArray((value as PendingActionableClose).captainNotes) ||
+       !(value as PendingActionableClose).captainNotes!.every((id) => typeof id === "string" && /^\d{10}-[A-Za-z0-9]+$/.test(id)))) ||
     ((value as { delivered?: unknown }).delivered !== undefined &&
       (value as { delivered?: unknown }).delivered !== true)
   ) {
@@ -626,19 +631,54 @@ export default function (pi: ExtensionAPI) {
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
 
+  function priorityCaptainNotes(owner: SessionGeneration, pending?: PendingActionableClose): string[] {
+    // Away posture retains its existing branch ownership. Queue keys, not
+    // arbitrary watcher output or note text, identify human inbox messages.
+    if (afkPostureRecordPresent(state)) return [];
+    const alreadyQueued = new Set([...owner.unconsumedWakes.values()].flatMap((wake) => wake.captainNotes));
+    try {
+      const candidates = new Set(pending?.captainNotes ?? []);
+      let rows = "";
+      try { rows = readFileSync(`${state}/.wake-queue`, "utf8"); } catch { /* Recovery may already have drained the row. */ }
+      for (const row of rows.split("\n")) {
+        const fields = row.split("\t");
+        if (fields.length < 5 || !/^\d+$/.test(fields[1]) || fields[2] !== "check") continue;
+        const id = /^inbox:(\d{10}-[A-Za-z0-9]+)$/.exec(fields[3])?.[1];
+        if (id) candidates.add(id);
+      }
+      const ids = new Set<string>();
+      for (const id of candidates) {
+        if (alreadyQueued.has(id) || existsSync(`${state}/inbox/.replies/${id}`)) continue;
+        try {
+          const path = `${state}/inbox/${id}.note`;
+          if (!lstatSync(path).isFile()) continue;
+          const note = readFileSync(path, "utf8");
+          const split = note.indexOf("\n--\n");
+          if (split >= 0 && note.slice(0, split).split("\n").includes(`id=${id}`)) ids.add(id);
+        } catch { /* Handled or missing notes do not justify a priority wake. */ }
+      }
+      return [...ids];
+    } catch { return []; }
+  }
+
   async function sendWake(
     owner: SessionGeneration,
     message: string,
     pending?: PendingActionableClose,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
+    const captainNotes = priorityCaptainNotes(owner, pending);
+    if (pending) pending.captainNotes = captainNotes;
+    const priority = captainNotes.length
+      ? `\n\nPRIORITY CAPTAIN INBOX: ${captainNotes.join(", ")}. Read these inbox notes and respond before unrelated background checks. Answer a quick question directly; for a larger request, acknowledge it and arrange the work, then resume the interrupted supervision. Do not cancel running workers. Use the normal inbox reply and acknowledgement flow; this changes scheduling, not authority.`
+      : "";
     const content = encodeFirstmateOperationalInput(
       "watcher",
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.${priority}`,
     );
-    if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
+    if (pending) owner.unconsumedWakes.set(pending.token, { content, pending, captainNotes });
     try {
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      await pi.sendUserMessage(content, { deliverAs: captainNotes.length ? "steer" : "followUp" });
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       throw error;
@@ -754,7 +794,7 @@ export default function (pi: ExtensionAPI) {
         return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
       }
     }
-    if (!repairFailed) {
+    if (!repairFailed && priorityCaptainNotes(owner, pending).length === 0) {
       const branchDelivery = offerWakeToBranch(message);
       if (branchDelivery) {
         try {

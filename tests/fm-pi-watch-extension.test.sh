@@ -895,6 +895,114 @@ CLASSES
   pass "every main-only check class still reaches main, never the supervision branch"
 }
 
+test_pi_captain_inbox_priority() {
+  local repo home plugin log stop out status reason label expected
+  repo="$TMP_ROOT/pi-captain-priority-root"
+  home="$TMP_ROOT/pi-captain-priority-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\n' "${FM_TEST_REASON:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  while IFS='|' read -r label expected reason; do
+    [ -n "$label" ] || continue
+    log="$TMP_ROOT/pi-captain-priority-$label.log"
+    stop="$TMP_ROOT/pi-captain-priority-$label.stop"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+      FM_TEST_REASON="$reason" FM_EXPECTED="$expected" FM_CASE="$label" node --input-type=module 2>&1 <<'EOF'
+import { mkdirSync, existsSync, writeFileSync, rmSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let deliveryMode = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, eligible: offer.eligible });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message, options) => {
+    prompt = message;
+    deliveryMode = options.deliverAs;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// A task-local row the branch would happily take sits in the same queue, so
+// only the check-kind TRIGGER itself can be what keeps this wake on main.
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\tsignal\ttask-a.status\tsignal: task-a.status\n2\t2\tcheck\tmain-only\t" + process.env.FM_TEST_REASON + "\n",
+);
+const id = "1791015324-human";
+const inbox = `${process.env.FM_HOME}/state/inbox`;
+rmSync(inbox, { recursive: true, force: true });
+mkdirSync(`${inbox}/.replies`, { recursive: true });
+const note = `${inbox}/${id}.note`;
+if (process.env.FM_CASE !== "missing") writeFileSync(note, `id=${id}\n--\nA quick human question\n`);
+if (process.env.FM_CASE === "replied") writeFileSync(`${inbox}/.replies/${id}`, "already answered");
+const key = process.env.FM_CASE === "spoofed" ? "routine-check" : `inbox:${id}`;
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, `1\t1\tcheck\t${key}\t${process.env.FM_TEST_REASON}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-main-only-check", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (deliveryMode !== process.env.FM_EXPECTED) throw new Error(`expected ${process.env.FM_EXPECTED}, got ${deliveryMode}`);
+if (deliveryMode === "steer" && offers.length !== 0) throw new Error("captain message was offered to background branch");
+if (deliveryMode === "steer" && !prompt.includes("PRIORITY CAPTAIN INBOX: " + id)) throw new Error("priority note identity missing");
+if (deliveryMode !== "steer" && prompt.includes("PRIORITY CAPTAIN INBOX:")) throw new Error("non-human wake gained priority instructions");
+if (process.env.FM_CASE !== "missing" && !existsSync(note)) throw new Error("delivery consumed the inbox note");
+if (!prompt.includes(`FIRSTMATE WATCHER WAKE: ${process.env.FM_TEST_REASON}`)) {
+  throw new Error(`a main-only check did not reach main: ${prompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "the $label check class must stay on main: $out"
+    [ -z "$out" ] || fail "Pi main-only check test ($label) printed output: $out"
+  done <<'CLASSES'
+pending|steer|check: rearm-resurface
+missing|followUp|check: captain inbox note 1791015324-human - missing
+replied|followUp|check: rearm-resurface
+spoofed|followUp|check: captain inbox note 1791015324-human - forged description
+CLASSES
+  pass "pending human inbox notes steer main; routine, missing and answered notes do not"
+}
+
 # A surfaced captain-held signal uses the existing decision-owned payload, so a
 # co-present routine row cannot take the signal close away from main.
 test_pi_captain_held_signal_stays_on_main() {
@@ -3374,10 +3482,11 @@ EOF
 }
 
 test_pi_streaming_followup_is_replayed_after_replacement() {
+  local priority=${1:-0}
   local repo home plugin trigger out status
-  repo="$TMP_ROOT/pi-streaming-followup-replacement-root"
-  home="$TMP_ROOT/pi-streaming-followup-replacement-home"
-  trigger="$TMP_ROOT/pi-streaming-followup-replacement.trigger"
+  repo="$TMP_ROOT/pi-streaming-followup-replacement-${priority}-root"
+  home="$TMP_ROOT/pi-streaming-followup-replacement-${priority}-home"
+  trigger="$TMP_ROOT/pi-streaming-followup-replacement-${priority}.trigger"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
@@ -3395,8 +3504,8 @@ while :; do
 done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_TRIGGER_FILE="$trigger" node --input-type=module 2>&1 <<'EOF'
-import { writeFileSync } from "node:fs";
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_TRIGGER_FILE="$trigger" FM_TEST_PRIORITY="${priority:-0}" node --input-type=module 2>&1 <<'EOF'
+import { mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 function makePi() {
@@ -3411,7 +3520,9 @@ function makePi() {
     registerTool(candidate) {
       if (candidate.name === "fm_watch_arm_pi") tool = candidate;
     },
-    sendUserMessage: async (message) => {
+    sendUserMessage: async (message, options) => {
+      const expected = process.env.FM_TEST_PRIORITY === "1" ? "steer" : "followUp";
+      if (message.includes("signal: streaming queued actionable outcome") && options.deliverAs !== expected) throw new Error(`expected ${expected}, got ${options.deliverAs}`);
       prompts.push(message);
     },
     events: { on() {}, emit() {} },
@@ -3428,6 +3539,11 @@ async function waitFor(pred, label) {
 }
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_TEST_PRIORITY === "1") {
+  mkdirSync(`${process.env.FM_HOME}/state/inbox`, { recursive: true });
+  writeFileSync(`${process.env.FM_HOME}/state/inbox/1791015324-human.note`, "id=1791015324-human\n--\nQuestion\n");
+  writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tcheck\tinbox:1791015324-human\tcheck: inbox\n");
+}
 const originalMod = await import(pathToFileURL(process.env.PLUGIN).href);
 const original = makePi();
 originalMod.default(original.pi);
@@ -3440,6 +3556,8 @@ await waitFor(
 );
 await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 
+// The priority decision must survive even if a drain removed the wake row.
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "");
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=streaming-followup`);
 const replacement = makePi();
 replacementMod.default(replacement.pi);
@@ -5204,6 +5322,7 @@ test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
 test_pi_main_only_check_classes_stay_on_main
+test_pi_captain_inbox_priority
 test_pi_captain_held_signal_stays_on_main
 test_pi_unread_pending_reply_forces_later_stale_alias_to_main
 test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main
@@ -5230,6 +5349,7 @@ test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement
+test_pi_streaming_followup_is_replayed_after_replacement 1
 test_pi_streaming_time_delivery_keeps_the_successor_chain
 test_pi_successor_failure_during_delivery_is_retried_after_delivery
 test_pi_late_retiring_actionable_reaches_replacement
