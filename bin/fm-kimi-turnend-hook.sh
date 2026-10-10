@@ -79,7 +79,9 @@ exec >/dev/null 2>&1
 payload=
 IFS= read -r payload || [ -n "$payload" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
-workspace=$(jq -er 'select(.hook_event_name == "Stop") | .cwd | strings | select(length > 0)' <<< "$payload" 2>/dev/null) || exit 0
+jq_binary=
+[ ! -r "/proc/$$/winpid" ] || jq_binary=-b
+workspace=$(jq ${jq_binary:+"$jq_binary"} -er 'select(.hook_event_name == "Stop") | .cwd | strings | select(length > 0)' <<< "$payload" 2>/dev/null) || exit 0
 pointer="$workspace/.fm-kimi-turnend"
 [ -f "$pointer" ] || exit 0
 first=

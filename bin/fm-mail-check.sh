@@ -266,9 +266,7 @@ shim_write() {
   device=$(fm_pr_file_device "$STATE") || return 1
   [ -n "$device" ] || return 1
   fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" || return 1
-  # Windows (captain-approved): noacl mounts report fixed modes, so the shim's
-  # mode is not compared there; fm_pr_private_file_valid checks its owner.
-  if [ -e "$CHECK_SHIM" ] && { fm_pr_win_host || [ "$(fm_pr_file_mode "$CHECK_SHIM")" = 700 ]; } \
+  if [ -e "$CHECK_SHIM" ] && [ "$(fm_pr_file_mode "$CHECK_SHIM")" = 700 ] \
     && [ "$(cat "$CHECK_SHIM" 2>/dev/null)" = "$want" ]; then
     return 0
   fi
