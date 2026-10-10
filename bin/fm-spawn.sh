@@ -419,14 +419,21 @@
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
-# Its launch-readiness loop reads the visible viewport - so the spawn refuses at
+# When the worktree's .kimi-code/mcp.json declares any project MCP server,
+# including one marked disabled, the launch is refused before Kimi starts.
+# Answering that prompt can start the listed targets without a consent decision
+# that covers them, and Kimi's per-folder trust is not that decision.
+# A directory with no project servers still answers a complete folder prompt.
+# The readiness loop reads the visible viewport - so the spawn refuses at
 # preflight on a backend with no viewport-bounded capture - recognizes the
 # complete dialog, re-selects the already highlighted affirmative option on
-# every poll the complete dialog is still there, refuses any ready verdict while
-# dialog text is on that pane, and requires two consecutive captures that are
-# each ready and dialog-free before the ordinary readiness gates can pass. A
-# blank viewport read proves nothing either way: it costs the poll and restarts
-# that count. A viewport read that fails outright fails readiness at once.
+# every poll the complete dialog is still there, and never presses a key when
+# the pane lists project MCP targets or shows only part of the dialog.
+# It refuses any ready verdict while dialog text is on that pane, and requires
+# two consecutive captures that are each ready and dialog-free before the
+# ordinary readiness gates can pass. A blank viewport read proves nothing
+# either way: it costs the poll and restarts that count. A viewport read that
+# fails outright fails readiness at once.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -2249,6 +2256,8 @@ launch_template() {
   devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
+  # A project MCP declaration refuses that launch before the process starts;
+  # this line stays `kimi --auto` and does not switch to `-p`.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
   # per-task worktree token, so no launch placeholder belongs here.
   kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
@@ -4115,6 +4124,53 @@ kimi_composer_is_empty() {
   [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
 
+# The listing header is the line Kimi prints only when project servers are
+# present. The folder prompt's explanatory sentence mentions project MCP
+# targets even when the directory declares none, and that sentence is not this
+# header.
+kimi_pane_lists_project_mcp_targets() { # <plain-pane-capture>
+  case "$1" in
+    *'Project MCP targets:'*) return 0 ;;
+  esac
+  return 1
+}
+
+# Count declared project servers in the worktree Kimi would start in.
+# `enabled: false` still counts: the prompt can list that command, so the
+# declaration has not gone away. A missing file declares nothing. A file that
+# cannot be parsed, or whose `mcpServers` is anything but an object, declares
+# an unknown set, which is refused.
+# Kimi's per-folder trust is not a substitute for this read.
+kimi_project_mcp_blocks_launch() { # <worktree>
+  local wt=$1 decl count
+  decl=$wt/.kimi-code/mcp.json
+  KIMI_PROJECT_MCP_REASON=''
+  if [ ! -e "$decl" ] && [ ! -L "$decl" ]; then
+    return 1
+  fi
+  KIMI_PROJECT_MCP_REASON='refusing Kimi launch: .kimi-code/mcp.json in this directory could not be read. Firstmate cannot prove it declares no project MCP servers, so Kimi was not started. Fix or remove that file, or wait for a later consent design.'
+  if [ ! -f "$decl" ] || [ ! -r "$decl" ]; then
+    return 0
+  fi
+  command -v jq >/dev/null 2>&1 || return 0
+  count=$(jq -r '
+    if type != "object" then error("not an object")
+    elif has("mcpServers") | not then 0
+    elif (.mcpServers | type) == "object" then (.mcpServers | length)
+    else error("not a server map")
+    end
+  ' "$decl" 2>/dev/null) || return 0
+  case "$count" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  if [ "$count" -eq 0 ]; then
+    KIMI_PROJECT_MCP_REASON=''
+    return 1
+  fi
+  KIMI_PROJECT_MCP_REASON='refusing Kimi launch: .kimi-code/mcp.json in this directory declares project MCP servers. Firstmate will not start Kimi, because answering the folder prompt can start those targets without a consent decision that covers them. Remove the project servers from that file, or wait for a later consent design. This directory cannot use Kimi until then.'
+  return 0
+}
+
 # The navigation hint is matched as its two distinctive tokens rather than as
 # one row: a pane narrower than the row wraps it, and a wrapped hint is still
 # the complete dialog waiting for an answer.
@@ -4164,6 +4220,12 @@ kimi_wait_for_ready() {
       [ "$i" -ge "$max" ] || sleep "$interval"
       continue
     fi
+    # Listed targets are refused before any key, including when the declaration
+    # read found no servers and including when the dialog is only partly shown.
+    if kimi_pane_lists_project_mcp_targets "$pane"; then
+      KIMI_READY_FAILURE_DETAIL="kimi's folder prompt lists project MCP targets, so Firstmate did not answer it and did not send the brief. That answer can start those targets without a consent decision that covers them. Remove the project servers from .kimi-code/mcp.json, or wait for a later consent design."
+      return 1
+    fi
     if kimi_trust_dialog_is_visible "$pane"; then
       trust_seen=1
       trust_still_visible=1
@@ -4206,7 +4268,7 @@ kimi_wait_for_ready() {
   elif [ "$trust_seen" -eq 1 ]; then
     KIMI_READY_FAILURE_DETAIL="kimi trust dialog was answered but the pane never advanced to a verified ready signal; saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option"
   elif [ "$trust_markers_pending" -eq 1 ]; then
-    KIMI_READY_FAILURE_DETAIL="kimi did not show a verified ready signal before brief delivery; trust dialog text stayed on screen without the complete dialog, so the pane was never safe to answer or to treat as ready"
+    KIMI_READY_FAILURE_DETAIL="kimi did not show a verified ready signal before brief delivery; trust dialog text stayed on screen without the complete dialog, so the pane was never safe to answer or to treat as ready. No key was sent."
   fi
   return 1
 }
@@ -5546,6 +5608,10 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
   rm -f "$LAUNCH_STAGE"
   echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
+  exit 1
+fi
+if [ "$HARNESS" = kimi ] && kimi_project_mcp_blocks_launch "$WT"; then
+  kimi_spawn_fail "$KIMI_PROJECT_MCP_REASON"
   exit 1
 fi
 sleep 0.3
