@@ -55,6 +55,9 @@
 # closes a row that reads as an open captain call. An answer that closes the row
 # first applies any supported retained artifact from the validated record, then
 # replay simply retires the record.
+# A remaining cmux task record must be retired by teardown after confirmed
+# endpoint closure; its prepared marker alone does not authorize replay to
+# remove that record, even when the task incarnation matches.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -1166,6 +1169,10 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
+    fi
+    if grep -Fxq 'backend=cmux' "$meta"; then
+      FM_BACKLOG_TRANSITION_ERROR="cmux cleanup for $id must finish through fm-teardown.sh before its backlog transition can replay; preserving the endpoint record and pending close"
+      return 1
     fi
     fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
       "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
