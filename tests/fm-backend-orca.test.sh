@@ -2124,7 +2124,7 @@ JS
       [ "$out" = "$expected" ] || fail "$code $mode: expected ring status $expected, got '$out'"
       events=$(cat "$CASE_DIR/inputs")
       if [[ "$mode" =~ ^(initial-empty|initial-own|retry-own|second-own)$ ]]; then
-        [ "$(printf "%s\n" "$events" | rg -c "^live Enter$")" = 1 ] || fail "$mode retried Enter on replacement"
+        [ "$(printf "%s\n" "$events" | grep -Fxc 'live Enter')" = 1 ] || fail "$mode retried Enter on replacement"
         if [ -s "$CASE_DIR/submitted" ]; then
           [ "$(cat "$CASE_DIR/submitted")" = "$bell" ] || fail "$mode submitted other content"
         else

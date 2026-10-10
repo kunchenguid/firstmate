@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-orca-submit-restart)
@@ -141,9 +142,9 @@ for order in before-text before-text-fresh before-enter pending second-enter ori
     if [ "$expected" = 0 ]; then
       [ "$(cat "$evidence/submitted")" = doorbell ] || fail "$order/$mode: own doorbell was not submitted exactly once"
       [ ! -s "$evidence/composer" ] || fail "$order/$mode: composer did not clear"
-      [ "$(rg -c '^old Enter$' "$evidence/inputs")" = 2 ] || fail "$order/$mode: original two-Enter budget changed"
+      [ "$(grep -Fxc 'old Enter' "$evidence/inputs")" = 2 ] || fail "$order/$mode: original two-Enter budget changed"
     else
-      enters=$(rg -c '^live Enter$' "$evidence/inputs" || true)
+      enters=$(grep -Fxc 'live Enter' "$evidence/inputs" || true)
       limit=1
       [ "$mode" != pending-after ] || limit=2
       [ "${enters:-0}" -le "$limit" ] || fail "$order/$mode: retried Enter on replacement in the same send"
