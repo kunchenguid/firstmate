@@ -145,7 +145,7 @@ export interface UnreadWakeScope {
    * Wake keys of signal rows whose newly presented status span is still a
    * completion the supervisor must act on (a validation handoff, a failed
    * task, or any other done/needs-validation/failed event with no later
-   * working or paused continuation in that span). Excluded from eligibleSeqs
+   * explicit hold in that span). Excluded from eligibleSeqs
    * while attended. Empty in the away posture, where the branch takes the row.
    * docs/pi-supervision-branch.md "Completion-owned rows" owns the contract.
    */

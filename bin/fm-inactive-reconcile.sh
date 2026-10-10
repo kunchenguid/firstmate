@@ -38,6 +38,10 @@
 # start's deferred worker. Each scan uses an aggregate
 # FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
 # resumes after its last visited child on the next scan.
+# When a terminal-outcome scan is due, the handoff pass stops with up to five
+# seconds of that aggregate budget reserved for the terminal pass.
+# That reservation preserves the terminal scan's first bounded visit when
+# slow handoff reads would otherwise consume the complete shared deadline.
 # The scan enforces that budget itself through a whole-second deadline, and the
 # first due child of every scan is always visited with at least a one-second
 # state-read bound: whole-second arithmetic can otherwise round a small budget
