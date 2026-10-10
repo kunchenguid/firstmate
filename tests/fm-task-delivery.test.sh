@@ -1001,6 +1001,9 @@ EOF
       assert_grep "$home/state/$id.inbox" "$brief" "$project_kind $kind omitted its exact steering inbox"
       assert_grep 'When this task works on Firstmate itself' "$brief" "$project_kind $kind made the exception unconditional"
       assert_grep 'Project instructions still govern the work wherever they do not conflict with this worker identity' "$brief" "$project_kind $kind displaced project guidance"
+      assert_grep "Activate the Zeta-distributed \`caveman\` skill at \`full\`" "$brief" "$project_kind $kind omitted the caveman activation directive"
+      assert_grep "read \`~/.agents/skills/caveman/SKILL.md\` (the canonical source, not the renamed \`pi-caveman\` vendored copy; if absent, continue without it, still at \`full\`)" "$brief" "$project_kind $kind lost the canonical caveman source"
+      assert_grep 'Caveman compresses communication only: code, comments, commits, docs, issue and PR text, memory files, third-party messages, safety-critical explanations' "$brief" "$project_kind $kind lost the caveman communication-only boundary"
       ! grep -q '^This section supersedes every earlier brief instruction about your role' "$brief" ||
         fail "$project_kind $kind revoked the brief's own role for a task that is not Firstmate"
       assert_no_grep '# Current worker role contract' "$home/data/$id/brief.md" "spawn rewrote the source brief"
