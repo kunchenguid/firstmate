@@ -616,6 +616,18 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 [`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
 
+## Busy-pane pauses across a Firstmate update
+
+A `paused:` declaration on a provably-busy pane takes the long `FM_PAUSE_RESURFACE_SECS` recheck only when it is bound to that pane's exact current validated busy generation and sequence.
+The binding is written by `bin/fm-status-append.sh`, which newly generated worker instructions invoke in place of the former direct status append.
+
+A worker that keeps running across an update to this repository still holds the instructions it already read, so a new parked wait it declares while its pane reads busy carries no binding and stays on the ordinary wedge timer until that worker is relaunched.
+Every spawn, including a relaunch, re-renders those instructions from source, so the condition clears on its own at the next relaunch and needs no migration step; a supervisor can also clear it sooner by steering the live worker onto `bin/fm-status-append.sh`.
+An idle parked pane is unaffected, because the idle declared-wait paths still accept any `paused:` line exactly as before.
+The exposure is extra alerting rather than suppressed alerting: an unbound pause keeps wedge detection.
+
+[`architecture.md`](architecture.md) owns the wait-evidence contract and `bin/fm-busy-lib.sh`'s `fm_busy_declared_pause_valid` owns the exact binding check and its fail-closed boundaries.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
