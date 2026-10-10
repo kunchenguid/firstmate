@@ -213,6 +213,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
+# shellcheck source=bin/fm-jq-lib.sh
+. "$SCRIPT_DIR/fm-jq-lib.sh"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091

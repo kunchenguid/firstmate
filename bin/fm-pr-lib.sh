@@ -29,15 +29,8 @@ fm_pr_win_host() {
   fi
 }
 
-# Windows (captain-approved): native jq.exe ends output lines with CRLF, which
-# corrupts every captured field; -b (Windows-only) keeps LF.
-fm_pr_jq() {
-  if fm_pr_win_host; then
-    jq -b "$@"
-  else
-    jq "$@"
-  fi
-}
+# shellcheck source=bin/fm-jq-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-jq-lib.sh"
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -291,7 +284,7 @@ fm_pr_head_valid() {
 # a merge unless this prints "false"; bin/fm-pr-check.sh refuses to arm a merge
 # poll only when it prints "true".
 fm_pr_json_draft_state() {  # <pull-request-json>
-  printf '%s' "${1-}" | fm_pr_jq -r '
+  printf '%s' "${1-}" | jq -r '
     if type == "object" and (.isDraft | type) == "boolean" then (.isDraft | tostring) else "" end
   ' 2>/dev/null || true
 }
@@ -360,8 +353,10 @@ fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   # Windows (captain-approved): noacl mounts report fixed modes and ignore
-  # chmod, so the mode is not checked there (see bin/backends/herdr.sh).
-  if ! fm_pr_win_host; then
+  # chmod, so ownership alone decides there (see bin/backends/herdr.sh).
+  if fm_pr_win_host; then
+    [ "$(stat -c %u "$path" 2>/dev/null)" = "$(id -u)" ] || return 1
+  else
     [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
   fi
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
@@ -1038,7 +1033,7 @@ fm_pr_gitlab_read_record() {  # <host> <path> <number>
     || [ -z "$json" ]; then
     return 1
   fi
-  if ! fields=$(printf '%s' "$json" | fm_pr_jq -r '
+  if ! fields=$(printf '%s' "$json" | jq -r '
       if type == "object" and (.state | type == "string") and .state != "" then
         "state=" + .state,
         "merged=" + (if .state == "merged" then "true" else "false" end)
@@ -1092,8 +1087,7 @@ fm_pr_gerrit_read_change() {  # <host> <number>
     || [ -z "$json" ]; then
     return 1
   fi
-  # shellcheck disable=SC2016  # jq program text: $-names are jq variables.
-  printf '%s' "$json" | fm_pr_jq -c --argjson change "$number" '
+  printf '%s' "$json" | jq -c --argjson change "$number" '
     if type == "object" and .ok == true and (.changes | type) == "array" then
       [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
       | if ($match | length) == 1 and ($match[0] | type) == "object"
@@ -1113,7 +1107,7 @@ fm_pr_gerrit_read_record() {  # <host> <number>
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
   record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
-  state=$(printf '%s' "$record" | fm_pr_jq -r '
+  state=$(printf '%s' "$record" | jq -r '
     if (.status | type) == "string" and .status != "" and (.status | test("\n") | not)
     then .status
     else error("no status")
@@ -1138,7 +1132,7 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
   local record revision
   FM_PR_RECORD_REVISION=
   record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
-  revision=$(printf '%s' "$record" | fm_pr_jq -r '
+  revision=$(printf '%s' "$record" | jq -r '
     if (.revision | type) == "string" then .revision else error("no revision") end' 2>/dev/null) \
     || return 1
   fm_pr_head_valid "$revision" || return 1

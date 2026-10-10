@@ -108,8 +108,7 @@ The session-start summary must not show a read-only banner; if it does, the bann
 ## Current limits
 
 - Herdr is the only backend with Windows support; the tmux, Zellij, Orca, and cmux backends have none.
-- Git Bash mounts drives without POSIX permission bits, so the herdr presentation lock and process-event state directories are accepted on ownership alone there, relying on the per-user `%TEMP%` ACL, and pull-request poll sidecars skip their file-mode check; the other trusted-file permission checks still refuse, which keeps custom monitoring checks off.
-- There is no `lsof`, so an abandoned lock or worktree is not reclaimed automatically and needs manual cleanup.
+- Git Bash mounts drives without POSIX permission bits, so the herdr presentation lock and process-event state directories are accepted on ownership alone there, relying on the per-user `%TEMP%` ACL, and so are custom monitoring check shims, such as the mail check, and pull-request poll sidecars; Relay's private artifact and poll shim mode checks still refuse.- There is no `lsof`, so an abandoned lock or worktree is not reclaimed automatically and needs manual cleanup.
 - no-mistakes runs the repository's lint command through `cmd.exe`, which cannot run `bin/fm-lint.sh`, so its lint step reports a failure on Windows; run `bin/fm-lint.sh` in Git Bash and approve the step only when it passes.
 - `bin/fm-install-actionlint.sh` refuses Windows; install actionlint's Windows release archive by hand.
 - Only Claude Code is exercised as the primary harness on Windows; the Pi and OpenCode Windows timeouts are listed in [the configuration reference](configuration.md).

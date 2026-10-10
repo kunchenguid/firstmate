@@ -214,6 +214,8 @@ esac
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
+# shellcheck source=bin/fm-jq-lib.sh
+. "$SCRIPT_DIR/fm-jq-lib.sh"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091

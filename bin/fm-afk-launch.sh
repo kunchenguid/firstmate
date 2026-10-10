@@ -141,6 +141,8 @@ FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 
+# shellcheck source=bin/fm-jq-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-jq-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-supervisor-target-lib.sh

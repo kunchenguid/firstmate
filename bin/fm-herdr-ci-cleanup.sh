@@ -34,6 +34,8 @@ if ! command -v herdr >/dev/null 2>&1; then
   exit 0
 fi
 command -v jq >/dev/null 2>&1 || die "jq is required"
+# shellcheck source=bin/fm-jq-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-jq-lib.sh"
 
 list_sessions_json() {
   herdr session list --json 2>/dev/null \

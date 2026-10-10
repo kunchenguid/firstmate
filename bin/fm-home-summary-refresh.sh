@@ -50,6 +50,8 @@ HOME_SUMMARY_LOCK_HELD=0
 
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
+# shellcheck source=bin/fm-jq-lib.sh
+. "$SCRIPT_DIR/fm-jq-lib.sh"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 usage() {

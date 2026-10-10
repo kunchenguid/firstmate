@@ -97,6 +97,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
+# shellcheck source=bin/fm-jq-lib.sh
+. "$SCRIPT_DIR/fm-jq-lib.sh"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091

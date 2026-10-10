@@ -68,6 +68,8 @@ RETURN_GRACE=${FM_GUARD_GRACE:-300}
 # The posture-record owner: path helpers only; every read goes through its
 # subcommands. It sources fm-classify-lib.sh, which has no side effects, so the
 # advertised read-only guard stays literal.
+# shellcheck source=bin/fm-jq-lib.sh
+. "$SCRIPT_DIR/fm-jq-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 CONTRACT="$SCRIPT_DIR/fm-afk-contract.sh"

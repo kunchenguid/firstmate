@@ -14,6 +14,8 @@
 # finish unless the binary reports the exact pin version and a client protocol
 # at or above the required floor (16 for the real-Herdr family).
 set -eu
+# shellcheck source=bin/fm-jq-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-jq-lib.sh"
 
 # Exact pin - change only with a re-verified real-Herdr matrix.
 FM_HERDR_CI_VERSION=0.7.4

@@ -109,6 +109,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=bin/fm-jq-lib.sh
+. "$SCRIPT_DIR/fm-jq-lib.sh"
 BUILDER_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 LAB_HOME_HELPER="$SCRIPT_DIR/fm-lab-home.sh"
 CLAUDE_TRUST="$SCRIPT_DIR/fm-claude-trust.sh"

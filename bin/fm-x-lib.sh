@@ -58,6 +58,8 @@ if ! command -v fm_backlog_atomic_transition >/dev/null 2>&1; then
 fi
 
 # fmx_env_get lives in bin/fm-env-lib.sh, the single owner of .env parsing.
+# shellcheck source=bin/fm-jq-lib.sh
+. "$_FM_X_LIB_DIR/fm-jq-lib.sh"
 # shellcheck source=bin/fm-env-lib.sh
 . "$_FM_X_LIB_DIR/fm-env-lib.sh"
 

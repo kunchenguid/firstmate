@@ -125,6 +125,9 @@
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
+# shellcheck source=bin/fm-jq-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-jq-lib.sh"
+
 FM_BUSY_LIB_VERSION=v1
 
 # Standalone-Kimi verification gate. Empty means no installed Kimi version
