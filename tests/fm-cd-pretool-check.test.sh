@@ -355,6 +355,121 @@ EOF
   pass "cd-guard: prefilter fast-allows (skips node) when no cd/pushd/popd substring is present"
 }
 
+# A fakebin whose node and jq record each call before deferring to the real
+# tool, so a test can prove which stage decided without changing the decision.
+make_recording_fakebin() {  # <dir> <marker-prefix>
+  local dir=$1 marker=$2 tool tool_path
+  fakebin=$(fm_fakebin "$dir")
+  for tool in bash sh git dirname cat printf sed tr; do
+    tool_path=$(command -v "$tool") || continue
+    ln -s "$tool_path" "$fakebin/$tool"
+  done
+  for tool in node jq; do
+    tool_path=$(command -v "$tool") || fail "test needs $tool to wrap"
+    cat > "$fakebin/$tool" <<EOF
+#!/usr/bin/env bash
+printf 'called\n' >> "$marker-$tool"
+exec "$tool_path" "\$@"
+EOF
+    chmod +x "$fakebin/$tool"
+  done
+  printf '%s\n' "$fakebin"
+}
+
+test_raw_stdin_fast_path_skips_jq() {
+  local fakebin marker="$TMP_ROOT/rawpath" payload rc
+  fakebin=$(make_recording_fakebin "$TMP_ROOT/rawpath-fake" "$marker")
+  for payload in \
+    '{"tool_name":"Bash","tool_input":{"command":"git status && ls -la"}}' \
+    '{"toolName":"run_terminal_command","toolInput":{"command":"tasks-axi list"}}' \
+    '{"tool_name":"Bash","tool_input":{"command":"printf \"a\\nb\" | wc -l"}}'; do
+    rm -f "$marker-jq" "$marker-node"
+    rc=0; printf '%s' "$payload" | PATH="$fakebin" "$CHECK" --claude >/dev/null 2>&1 || rc=$?
+    expect_code 0 "$rc" "cd-free payload must allow: $payload"
+    [ ! -e "$marker-jq" ] || fail "cd-free payload still started jq: $payload"
+  done
+  # Each of these hides cd from a plain substring search through a JSON escape
+  # or a quote, so the raw search must hand it to jq and the policy still denies.
+  for payload in \
+    '{"tool_name":"Bash","tool_input":{"command":"cd projects/foo"}}' \
+    '{"tool_name":"Bash","tool_input":{"command":"c\\d projects/foo"}}' \
+    '{"tool_name":"Bash","tool_input":{"command":"c\"d\" projects/foo"}}' \
+    '{"tool_name":"Bash","tool_input":{"command":"echo\ncd projects/foo"}}' \
+    '{"tool_name":"Bash","tool_input":{"command":"$'"'"'\\143d'"'"' projects/foo"}}'; do
+    rm -f "$marker-jq"
+    rc=0; printf '%s' "$payload" | PATH="$fakebin" "$CHECK" --claude >/dev/null 2>&1 || rc=$?
+    expect_code 2 "$rc" "escaped cd payload must still deny: $payload"
+    [ -e "$marker-jq" ] || fail "escaped cd payload skipped jq: $payload"
+  done
+  pass "cd-guard: raw stdin fast path allows cd-free payloads without jq and still denies escaped cd"
+}
+
+# Model of the original prefilter: strip quotes, backslashes, CR, and LF, then
+# look for a cd/pushd/popd substring unless a quoting-decoder marker is present.
+original_prefilter_passes() {  # <command>
+  local cmd=$1 stripped
+  case "$cmd" in *"\$'"*|*'$"'*) return 0 ;; esac
+  stripped=${cmd//\\/}
+  stripped=${stripped//\"/}
+  stripped=${stripped//\'/}
+  stripped=${stripped//$'\n'/}
+  stripped=${stripped//$'\r'/}
+  case "$stripped" in *cd*|*pushd*|*popd*) return 0 ;; esac
+  return 1
+}
+
+test_generated_commands_match_policy() {
+  local frags words corpus i k cmd expected rc got count=0 denies=0 payload
+  local -a cmds=() verdicts=()
+  frags=(cd pushd popd c d p u s h o ' ' $'\t' $'\n' $'\r' ';' '&&' '|' '&' '(' ')' '{' '}' '$(' '`' '"' "'" "\\" $'\\\n' "\$'" '$"' x abc 1 '>&1' '>' '#' 'X=1 ' 'command ' 'builtin ' 'env ' / . - _ projects/foo cdk $'\xc3\xa9' '$x' '${x}' :)
+  words=(cd pushd popd "c'd'" 'c"d"' 'c\d' 'builtin cd' 'command cd' 'X=1 cd' '"cd"')
+  RANDOM=1717
+  for ((i = 0; i < 220; i++)); do
+    cmd=""
+    # Half the commands open with a deniable word so the corpus exercises
+    # denies as well as allows.
+    if [ $((RANDOM % 2)) -eq 0 ]; then cmd="${words[RANDOM % ${#words[@]}]} "; fi
+    for ((k = RANDOM % 5 + 1; k > 0; k--)); do
+      cmd+=${frags[RANDOM % ${#frags[@]}]}
+    done
+    cmds+=("$cmd")
+  done
+  # The stdin transport extracts through a command substitution, which drops
+  # trailing newlines, so each command is judged a second time in that form.
+  corpus="$TMP_ROOT/generated-corpus"
+  for cmd in "${cmds[@]}"; do
+    printf '%s\0%s\0' "$cmd" "$(printf '%s' "$cmd")"
+  done > "$corpus"
+  # One Node process evaluates the policy owner over the whole corpus.
+  while IFS= read -r got; do verdicts+=("$got"); done < <(FM_POLICY="$PRIMARY/bin/fm-cd-command-policy.mjs" FM_CORPUS="$corpus" node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const { decision } = await import(process.env.FM_POLICY);
+    for (const command of readFileSync(process.env.FM_CORPUS, "utf8").split("\0").slice(0, -1)) {
+      console.log(command && decision(command).decision === "deny" ? "deny" : "allow");
+    }')
+  [ "${#verdicts[@]}" -eq $((2 * ${#cmds[@]})) ] || fail "policy reference returned ${#verdicts[@]} verdicts for ${#cmds[@]} commands"
+  for ((i = 0; i < ${#cmds[@]}; i++)); do
+    cmd=${cmds[$i]}
+    expected=allow
+    if [ "${verdicts[2 * i]}" = deny ] && original_prefilter_passes "$cmd"; then
+      expected=deny
+      denies=$((denies + 1))
+    fi
+    rc=0; "$CHECK" --claude --command "$cmd" >/dev/null 2>&1 || rc=$?
+    got=allow; [ "$rc" -ne 2 ] || got=deny
+    [ "$got" = "$expected" ] || fail "--command $(printf '%q' "$cmd") gave $got, expected $expected"
+    expected=allow
+    if [ "${verdicts[2 * i + 1]}" = deny ] && original_prefilter_passes "$(printf '%s' "$cmd")"; then expected=deny; fi
+    payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
+    rc=0; printf '%s' "$payload" | "$CHECK" --claude >/dev/null 2>&1 || rc=$?
+    got=allow; [ "$rc" -ne 2 ] || got=deny
+    [ "$got" = "$expected" ] || fail "stdin $(printf '%q' "$cmd") gave $got, expected $expected"
+    count=$((count + 1))
+  done
+  [ "$denies" -gt 0 ] && [ "$denies" -lt "$count" ] || fail "generated corpus must mix allows and denies, got $denies denies of $count"
+  pass "cd-guard: $count generated commands ($denies denies) decide exactly as the original prefilter plus policy on both transports"
+}
+
 # --- policy CLI contract ----------------------------------------------------
 
 test_policy_cli_direct() {
@@ -396,5 +511,7 @@ test_fail_open_unparseable_json
 test_fail_open_missing_node
 test_fail_open_missing_jq_on_stdin
 test_prefilter_skips_node_without_cd_substring
+test_raw_stdin_fast_path_skips_jq
+test_generated_commands_match_policy
 test_policy_cli_direct
 test_scripts_are_shellcheck_clean

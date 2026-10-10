@@ -66,6 +66,7 @@ Folding the two lists together would be the drift risk, because the observe-or-s
 
 The shipped guard fires on every delegation-shaped name that reaches it, including future names that no deny list knows about yet.
 That future-name behavior is the reason the tracked matcher must match all tools and let the script filter.
+On the stdin path the guard first searches a raw JSON payload of at most 64 KiB for any stem, allowing for the bytes normalization drops, and allows at once when none appears, so most tool calls are allowed before any `jq` process starts; a larger payload goes straight to `jq`, which costs less than the scan at that size.
 
 ## Recommended Local Claude Deny List
 
@@ -354,7 +355,7 @@ The live consequence is confirmed by the shipped-guard result above: Claude hono
 ## Automated validation
 
 `tests/fm-subagent-pretool-check.test.sh` owns the acceptance matrix and is registered in the `pure-contract-unit` family in `bin/fm-test-run.sh`.
-It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of twelve hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release; the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
+It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of twelve hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release; the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the raw stdin fast path and a generated-name equivalence check against a reference model; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
 
 Run:
 
