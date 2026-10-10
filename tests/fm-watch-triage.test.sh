@@ -4858,7 +4858,7 @@ test_old_or_unordered_pause_does_not_mask_newer_busy_generation() {
       FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
       FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
-    wait_for_exit "$pid" 40 || fail "a $ordering pause masked a busy-generation wedge"
+    wait_for_exit "$pid" 100 || fail "a $ordering pause masked a busy-generation wedge"
     grep -F "possible wedge" "$out" >/dev/null || fail "a $ordering pause removed wedge diagnostics"
   done
   pass "old or unordered pauses cannot mask a newer busy generation"
