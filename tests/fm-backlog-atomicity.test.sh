@@ -2069,6 +2069,39 @@ SH
   pass "session start replays a recorded Gerrit close with its change URL as a note"
 }
 
+test_recovery_replays_gitlab_closes_with_their_merge_request_urls_as_notes() {
+  local case_dir id url out nested_id=atomic-heal-gitlab-nested-b9 hosted_id=atomic-heal-gitlab-hosted-b9
+  local nested_url=https://gitlab.com/group/subgroup/project/-/merge_requests/42
+  local hosted_url=https://git.example.org/team/project/-/merge_requests/6
+  case_dir=$(make_home heal-pending-gitlab-close)
+  # The records a pre-fix teardown left: each merge request URL as a --pr link,
+  # which the installed tasks-axi refuses.
+  for id in "$nested_id" "$hosted_id"; do
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+  done
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gitlab\ncleanup_incomplete=0\narg=--pr\narg=%s\n' \
+    "$nested_id" "$(home_of "$case_dir")/data" "$nested_url" \
+    > "$(home_of "$case_dir")/state/$nested_id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gitlab\ncleanup_incomplete=0\narg=--pr\narg=%s\n' \
+    "$hosted_id" "$(home_of "$case_dir")/data" "$hosted_url" \
+    > "$(home_of "$case_dir")/state/$hosted_id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  for id in "$nested_id" "$hosted_id"; do
+    url=$nested_url
+    [ "$id" = "$hosted_id" ] && url=$hosted_url
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "session start left the recorded close of $url at $(row_state "$case_dir" "$id"): $out"
+    tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+      | grep -F "body: \"GitLab merge request $url\"" >/dev/null \
+      || fail "the replayed close did not record $url as a note"
+    assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+      "the replayed close of $url left its record behind"
+  done
+  pass "session start replays recorded GitLab closes with their merge request URLs as notes"
+}
+
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   local case_dir id marker out
   id=atomic-heal-done-backfill-b9
@@ -3096,6 +3129,7 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
+test_recovery_replays_gitlab_closes_with_their_merge_request_urls_as_notes
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
