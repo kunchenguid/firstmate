@@ -122,9 +122,29 @@ done
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
-# Read the whole turn-end hook payload once; never block on unreadable/absent
-# stdin.
-PAYLOAD=$(cat 2>/dev/null || true)
+# Read in chunks with a two-second idle wait and a separate twenty-second hard
+# cap, so buffered large payloads do not spend their budget in a per-byte loop.
+# Hook callers can leave stdin open. Bash 3.2 discards a partial timed-out read,
+# so use } as the delimiter: every complete JSON object ends a successful read
+# even without EOF. Restore delimiters (including those inside strings) exactly;
+# EOF retains its partial chunk, while jq rejects an incomplete payload.
+read_hook_payload() {
+  local deadline=$((SECONDS + 20)) remaining chunk status LC_ALL=C
+  PAYLOAD=
+  while :; do
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    [ "$remaining" -le 2 ] || remaining=2
+    chunk=
+    status=0
+    IFS= read -r -d '}' -n 4096 -t "$remaining" chunk 2>/dev/null || status=$?
+    PAYLOAD+=$chunk
+    [ "$status" -eq 0 ] || break
+    # A full chunk hit the size limit; a shorter successful chunk hit }.
+    [ "${#chunk}" -eq 4096 ] || PAYLOAD+='}'
+  done
+}
+read_hook_payload
 [ -n "$PAYLOAD" ] || exit 0
 
 # jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
