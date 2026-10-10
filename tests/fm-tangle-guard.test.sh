@@ -228,6 +228,9 @@ make_spawn_record_fakebin() {
 set -u
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
 case "$*" in
+  *"export TREEHOUSE_ROOT="*) [ "${FM_FAIL_ROOT_EXPORT:-0}" = 0 ] || exit 1 ;;
+esac
+case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
@@ -287,9 +290,90 @@ test_spawn_tmux_window_construction() {
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }
 
+test_spawn_treehouse_root() {
+  local home proj fakebin rec wt out status root command export_line get_line
+  home="$TMP_ROOT/root-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/root-proj")
+  fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/root-fake")
+  rec="$TMP_ROOT/root.log"
+  wt="$TMP_ROOT/root-wt"
+  git -C "$proj" worktree add -q --detach "$wt"
+  # Literal quotes, substitutions, backslashes and spaces must survive typing.
+  # shellcheck disable=SC2016
+  root="$TMP_ROOT/"'pool '\''$HOME $(touch should-not-exist); `false` \ end'
+  : > "$rec"
+  out=$(TREEHOUSE_ROOT="$root" run_spawn_record "$home" root-set "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 0 "$status" "root forwarding spawn should succeed"
+  command=$(sed -n 's/^tmux send-keys -t @spawnwid \(export TREEHOUSE_ROOT=.*\) Enter$/\1/p' "$rec")
+  [ -n "$command" ] || fail "root export did not target the stable worktree pane"
+  [ "$(bash -c "$command; printf '%s' \"\$TREEHOUSE_ROOT\"")" = "$root" ] || fail "root export changed shell-special characters"
+  export_line=$(grep -n 'export TREEHOUSE_ROOT=' "$rec" | head -1 | cut -d: -f1)
+  get_line=$(grep -n 'treehouse get Enter' "$rec" | head -1 | cut -d: -f1)
+  [ "$export_line" -lt "$get_line" ] || fail "root export must precede acquisition"
+
+  : > "$rec"
+  out=$(unset TREEHOUSE_ROOT; run_spawn_record "$home" root-unset "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 0 "$status" "spawn without a root should succeed"
+  assert_no_grep 'export TREEHOUSE_ROOT=' "$rec" "unset root must not be forwarded"
+
+  : > "$rec"
+  out=$(TREEHOUSE_ROOT='' run_spawn_record "$home" root-empty "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 0 "$status" "spawn with an empty root should succeed"
+  assert_no_grep 'export TREEHOUSE_ROOT=' "$rec" "empty root must not be forwarded"
+
+  : > "$rec"
+  out=$(TREEHOUSE_ROOT="$root" FM_FAIL_ROOT_EXPORT=1 run_spawn_record "$home" root-fail "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 1 "$status" "failed root delivery must abort spawn"
+  assert_no_grep 'treehouse get' "$rec" "failed root delivery must prevent acquisition"
+  pass "fm-spawn: forwards a literal root before acquisition and fails closed"
+}
+
+test_treehouse_cleanup_registration() {
+  local meta escaped out status
+  meta="$TMP_ROOT/cleanup.meta"
+  escaped="$TMP_ROOT/escaped-pool"
+  printf 'worktree=%s\n' "$escaped" > "$meta"
+  # Run the real helpers with a failure handler that exposes cleanup ownership.
+  out=$(
+    . "$ROOT/tests/treehouse-test-cleanup.sh"
+    # This failure fixture deliberately keeps its root local to the subshell.
+    # shellcheck disable=SC2030
+    TREEHOUSE_ROOT="$TMP_ROOT/isolated"
+    WORKTREES=()
+    fail() { printf '%s' "${WORKTREES[0]:-}"; exit 1; }
+    record_worktree "$meta"
+  ); status=$?
+  expect_code 1 "$status" "launcher must reject an escaped pool"
+  [ "$out" = "$escaped" ] || fail "launcher failed before recording the escaped pool"
+  out=$(
+    . "$ROOT/tests/treehouse-test-cleanup.sh"
+    # This failure fixture deliberately keeps its root local to the subshell.
+    # shellcheck disable=SC2030
+    TREEHOUSE_ROOT="$TMP_ROOT/isolated"
+    RECORDED_WORKTREES=""
+    fail() { printf '%s' "$RECORDED_WORKTREES"; exit 1; }
+    remember_meta_worktree "$meta"
+  ); status=$?
+  expect_code 1 "$status" "presentation must reject an escaped pool"
+  [ "$out" = "$escaped" ] || fail "presentation failed before recording the escaped pool"
+  (
+    . "$ROOT/tests/treehouse-test-cleanup.sh"
+    TREEHOUSE_ROOT="$TMP_ROOT"
+    RECORDED_WORKTREES=""
+    remember_meta_worktree "$meta" >/dev/null
+    result=$REMEMBERED_WORKTREE
+    [ "$result" = "$escaped" ] && [ "$RECORDED_WORKTREES" = "$escaped"$'\n' ]
+  ) || fail "presentation result retrieval lost cleanup registration"
+  pass "Treehouse cleanup owns escaped pools and survives result retrieval"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction
+
+test_spawn_treehouse_root
+test_treehouse_cleanup_registration

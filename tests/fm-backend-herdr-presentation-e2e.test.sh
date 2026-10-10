@@ -23,6 +23,7 @@ REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
+export TREEHOUSE_ROOT="$TMP_ROOT/treehouse"
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
@@ -381,13 +382,8 @@ assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
   fi
 }
 
-remember_meta_worktree() {  # <meta>
-  local wt
-  wt=$(grep '^worktree=' "$1" | cut -d= -f2-)
-  [ -n "$wt" ] || fail "metadata did not record a worktree"
-  RECORDED_WORKTREES="${RECORDED_WORKTREES}${wt}"$'\n'
-  printf '%s' "$wt"
-}
+# shellcheck source=tests/treehouse-test-cleanup.sh
+. "$ROOT/tests/treehouse-test-cleanup.sh"
 
 make_project() {  # <dir>
   local dir=$1
@@ -564,7 +560,8 @@ spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/off.out" 2> "$TMP_ROOT/
 OFF_HERDR_END=$(log_line_count)
 OFF_META="$TMP_ROOT/off.meta"
 cp "$HOME_DIR/state/shape.meta" "$OFF_META"
-OFF_WT=$(remember_meta_worktree "$OFF_META")
+remember_meta_worktree "$OFF_META" >/dev/null
+OFF_WT=$REMEMBERED_WORKTREE
 cp "$TREEHOUSE_CALL_LOG" "$TMP_ROOT/off-treehouse.log"
 [ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$OFF_MOVE_START" ] \
   || fail "opted-out spawn invoked the presentation-only workspace mover"
@@ -652,7 +649,8 @@ assert_focus_is "$CAPTAIN_FOCUS" "projected spawn"
 assert_raw_presentation_mutations_preserved_since "$SHAPE_FOCUS_AUDIT_START" "projected spawn"
 ON_META="$TMP_ROOT/on.meta"
 cp "$HOME_DIR/state/shape.meta" "$ON_META"
-ON_WT=$(remember_meta_worktree "$ON_META")
+remember_meta_worktree "$ON_META" >/dev/null
+ON_WT=$REMEMBERED_WORKTREE
 cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
   || fail "Treehouse command sequence changed between opted-out and projected spawns"
 JOURNAL="$HOME_DIR/state/shape.herdr-presentation"
@@ -1195,7 +1193,8 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   spawn_task "$RESTART_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-first.out" 2> "$TMP_ROOT/$RESTART_ID-first.err" \
     || fail "$RESTART_ID fixture's projected spawn failed: $(cat "$TMP_ROOT/$RESTART_ID-first.err")"
   RESTART_META="$HOME_DIR/state/$RESTART_ID.meta"
-  OLD_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
+  remember_meta_worktree "$RESTART_META" >/dev/null
+  OLD_RESTART_WT=$REMEMBERED_WORKTREE
   OLD_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   OLD_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
   OLD_RESTART_LABEL=$(lab workspace get "$OLD_RESTART_WSID" | jq -r '.result.workspace.label')
@@ -1224,7 +1223,8 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   RECLAIM_FOCUS=$(focus_snapshot)
   spawn_task "$RESTART_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
     || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
-  NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
+  remember_meta_worktree "$RESTART_META" >/dev/null
+  NEW_RESTART_WT=$REMEMBERED_WORKTREE
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
   [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
@@ -1249,7 +1249,8 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     PRIOR_RESTART_PANE=$NEW_RESTART_PANE
     spawn_task "$RESTART_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-idempotent.out" 2> "$TMP_ROOT/$RESTART_ID-idempotent.err" \
       || fail "$RESTART_ID repeated reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-idempotent.err")"
-    NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
+    remember_meta_worktree "$RESTART_META" >/dev/null
+    NEW_RESTART_WT=$REMEMBERED_WORKTREE
     NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
     NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
     [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
@@ -1277,7 +1278,8 @@ write_ship_brief "$SECOND_HOME_A" "$CROSS_RESTART_ID" 'Cross-home restart fixtur
 spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/cross-restart-first.out" 2> "$TMP_ROOT/cross-restart-first.err" \
   || fail "cross-home restart fixture failed: $(cat "$TMP_ROOT/cross-restart-first.err")"
 CROSS_RESTART_META="$SECOND_HOME_A/state/$CROSS_RESTART_ID.meta"
-CROSS_OLD_WT=$(remember_meta_worktree "$CROSS_RESTART_META")
+remember_meta_worktree "$CROSS_RESTART_META" >/dev/null
+CROSS_OLD_WT=$REMEMBERED_WORKTREE
 CROSS_OLD_WSID=$(grep '^herdr_workspace_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
 CROSS_OLD_PANE=$(grep '^herdr_pane_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
 CROSS_OLD_LABEL=$(lab workspace get "$CROSS_OLD_WSID" | jq -r '.result.workspace.label')
@@ -1292,7 +1294,8 @@ PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for cross-home restart"
 spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/cross-restart-resume.out" 2> "$TMP_ROOT/cross-restart-resume.err" \
   || fail "cross-home same-identity reclaim failed: $(cat "$TMP_ROOT/cross-restart-resume.err")"
-CROSS_NEW_WT=$(remember_meta_worktree "$CROSS_RESTART_META")
+remember_meta_worktree "$CROSS_RESTART_META" >/dev/null
+CROSS_NEW_WT=$REMEMBERED_WORKTREE
 CROSS_NEW_WSID=$(grep '^herdr_workspace_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
 CROSS_NEW_PANE=$(grep '^herdr_pane_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
 [ "$CROSS_NEW_WSID" = "$CROSS_OLD_WSID" ] && [ "$CROSS_NEW_PANE" != "$CROSS_OLD_PANE" ] \
@@ -1318,8 +1321,10 @@ spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROO
   || fail "secondmate recovery-wave fixture failed: $(cat "$TMP_ROOT/bravo-wave-first.err")"
 PRIMARY_WAVE_META="$HOME_DIR/state/$PRIMARY_WAVE_ID.meta"
 BRAVO_WAVE_META="$SECOND_HOME_B/state/$BRAVO_WAVE_ID.meta"
-PRIMARY_WAVE_OLD_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
-BRAVO_WAVE_OLD_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
+remember_meta_worktree "$PRIMARY_WAVE_META" >/dev/null
+PRIMARY_WAVE_OLD_WT=$REMEMBERED_WORKTREE
+remember_meta_worktree "$BRAVO_WAVE_META" >/dev/null
+BRAVO_WAVE_OLD_WT=$REMEMBERED_WORKTREE
 PRIMARY_WAVE_WSID=$(grep '^herdr_workspace_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
 BRAVO_WAVE_WSID=$(grep '^herdr_workspace_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
 PRIMARY_WAVE_OLD_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
@@ -1335,8 +1340,10 @@ spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROO
 BRAVO_WAVE_PID=$!
 wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
 wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
-PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
-BRAVO_WAVE_NEW_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
+remember_meta_worktree "$PRIMARY_WAVE_META" >/dev/null
+PRIMARY_WAVE_NEW_WT=$REMEMBERED_WORKTREE
+remember_meta_worktree "$BRAVO_WAVE_META" >/dev/null
+BRAVO_WAVE_NEW_WT=$REMEMBERED_WORKTREE
 PRIMARY_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
 BRAVO_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
 [ "$(grep '^herdr_workspace_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)" = "$PRIMARY_WAVE_WSID" ] \
@@ -1369,7 +1376,8 @@ write_ship_brief "$HOME_DIR" "$LOCK_REFUSE_ID" 'Resume lock-refuse fixture.'
 spawn_task "$LOCK_REFUSE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/lock-refuse-first.out" 2> "$TMP_ROOT/lock-refuse-first.err" \
   || fail "lock-refuse recovery fixture failed: $(cat "$TMP_ROOT/lock-refuse-first.err")"
 LOCK_REFUSE_META="$HOME_DIR/state/$LOCK_REFUSE_ID.meta"
-LOCK_REFUSE_OLD_WT=$(remember_meta_worktree "$LOCK_REFUSE_META")
+remember_meta_worktree "$LOCK_REFUSE_META" >/dev/null
+LOCK_REFUSE_OLD_WT=$REMEMBERED_WORKTREE
 LOCK_REFUSE_OLD_PANE=$(grep '^herdr_pane_id=' "$LOCK_REFUSE_META" | cut -d= -f2-)
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
   || fail "could not stop the isolated session for resume lock-refuse"
@@ -1467,7 +1475,8 @@ fi
   || fail "opt-in resumed identity refused instead of waiting out session lock contention: $(cat "$TMP_ROOT/lock-wait-resume.err")"
 [ "$LOCK_WAIT_ELAPSED" -ge $((LOCK_WAIT_HOLD_SECONDS - 5)) ] \
   || fail "opt-in resumed recovery returned after ${LOCK_WAIT_ELAPSED}s, too soon to have genuinely waited out a ${LOCK_WAIT_HOLD_SECONDS}s hold"
-LOCK_WAIT_NEW_WT=$(remember_meta_worktree "$LOCK_WAIT_META")
+remember_meta_worktree "$LOCK_WAIT_META" >/dev/null
+LOCK_WAIT_NEW_WT=$REMEMBERED_WORKTREE
 [ "$(grep '^herdr_workspace_id=' "$LOCK_WAIT_META" | cut -d= -f2-)" = "$LOCK_WAIT_WSID" ] \
   || fail "opt-in resume lock-wait flattened the task into a different workspace"
 LOCK_WAIT_NEW_PANE=$(grep '^herdr_pane_id=' "$LOCK_WAIT_META" | cut -d= -f2-)

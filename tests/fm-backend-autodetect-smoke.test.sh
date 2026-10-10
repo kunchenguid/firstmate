@@ -65,6 +65,7 @@ herdr_forget_inherited_pane
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
+export TREEHOUSE_ROOT="$TMP_ROOT/treehouse"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3) || {
   rm -rf "$TMP_ROOT"
@@ -146,6 +147,10 @@ TAB=$(grep '^herdr_tab_id=' "$META" | cut -d= -f2-)
 [ -n "$TAB" ] || fail "auto-detected spawn meta is missing herdr_tab_id"
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
+case "$WT" in
+  "$TREEHOUSE_ROOT"/*) : ;;
+  *) fail "worktree escaped the test Treehouse root: $WT" ;;
+esac
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
   fail "auto-detected spawn did not report a real worktree path"
 fi

@@ -4417,6 +4417,14 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # The pane may belong to a server started with a different environment.
+  # Forward the pool root before acquisition, rather than at worker launch.
+  if [ -n "${TREEHOUSE_ROOT:-}" ]; then
+    spawn_send_text_line "$WT_TARGET" "export TREEHOUSE_ROOT=$(shell_quote "$TREEHOUSE_ROOT")" || {
+      echo "error: could not forward TREEHOUSE_ROOT to the worktree pane; refusing acquisition" >&2
+      exit 1
+    }
+  fi
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
