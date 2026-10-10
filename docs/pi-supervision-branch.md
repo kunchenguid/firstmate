@@ -140,8 +140,8 @@ The wake message itself retains its existing shape, so other harness-arm scripts
 
 A newly presented ordinary worker completion that still needs a supervisor is main-owned while attended, the same way a decision-owned signal is.
 The span is the status lines after the presentation cursor, and a missing or unmatched cursor is the whole log.
-The row is completion-owned when the last completion in that span is `done`, `needs-validation`, or `failed` and no later continuation evidence clears it.
-`continuationEvidence` in `.pi/extensions/lib/fm-branch-dispatch.ts` is that predicate.
+The row is completion-owned when the last completion in that span is `done`, `needs-validation`, or `failed` and no later explicit hold clears it.
+The local span classifier cannot establish attributed activity, a started review, or verified delivery, so those otherwise valid `continuationEvidence` proofs do not clear it there.
 A generic `working` or `paused` line does not clear it.
 A `note` after that completion does not clear it.
 Progress, an unchanged stale observation, and a verified active-run wait stay branch-owned.
