@@ -6,7 +6,7 @@
 #   fm-lane-liveness.sh read        one reading line per lane, with its verdict
 #   fm-lane-liveness.sh routes      routing-verification measurement
 #   fm-lane-liveness.sh classes     the error-signature class vocabulary this rail emits
-#   fm-lane-liveness.sh check       watcher poll: report a lane whose verdict changed
+#   fm-lane-liveness.sh check       watcher poll: report a changed verdict, re-fire a standing failure
 #   fm-lane-liveness.sh selfcheck   watcher poll: report rail silence
 #   fm-lane-liveness.sh arm         write and register both check shims
 #   fm-lane-liveness.sh disarm      retire both check shims and their records
@@ -96,6 +96,7 @@ D=1800
 E=600
 M=50
 SELF=900
+REFIRE=21600
 SSH_TIMEOUT=10
 CAPTURE_TIMEOUT=8
 
@@ -109,7 +110,7 @@ fm-lane-liveness.sh - read-only liveness rail for firstmate response lanes.
   read        one reading line per lane, with its verdict
   routes      routing-verification measurement (routed vs routed_unverified)
   classes     the error-signature class vocabulary this rail emits
-  check       watcher poll: report a lane whose verdict changed
+  check       watcher poll: report a changed verdict, re-fire a standing failure
   selfcheck   watcher poll: report rail silence
   arm         write and register both check shims
   disarm      retire both check shims and their records
@@ -193,7 +194,7 @@ config_load() {
         esac
         case "$key" in
           W) W=$value ;; D) D=$value ;; E) E=$value ;; M) M=$value ;;
-          SELF) SELF=$value ;; SSH_TIMEOUT) SSH_TIMEOUT=$value ;;
+          SELF) SELF=$value ;; REFIRE) REFIRE=$value ;; SSH_TIMEOUT) SSH_TIMEOUT=$value ;;
           CAPTURE_TIMEOUT) CAPTURE_TIMEOUT=$value ;;
           *) die "response-lanes.conf line $lineno: unknown setting $key" ;;
         esac
@@ -227,9 +228,9 @@ record_replace() {  # <file> <key> <line>
   mv -f -- "$tmp" "$1" 2>/dev/null || rm -f -- "$tmp"
 }
 
-reported_read() {  # <lane>
+reported_read() {  # <lane>; prints <verdict> <reported-at-epoch>
   [ -f "$REPORTED" ] || return 0
-  awk -v l="$1" '$1==l {print $2; exit}' "$REPORTED" 2>/dev/null
+  awk -v l="$1" '$1==l {print $2, $3; exit}' "$REPORTED" 2>/dev/null
 }
 
 # --- per-lane probe and reading ---------------------------------------------
@@ -633,20 +634,25 @@ EOF
 }
 
 action_check() {
-  local lane override prior
+  local lane override prior reported_at
   config_load || return 0
   while IFS='	' read -r lane override; do
     [ -n "$lane" ] || continue
     lane_read "$lane" "$override"
-    prior=$(reported_read "$lane")
+    read -r prior reported_at <<EOR
+$(reported_read "$lane")
+EOR
     [ -n "$prior" ] || prior=alive
-    if [ "$LANE_VERDICT" != "$prior" ]; then
+    # An unchanged unhealthy verdict re-fires once per REFIRE window, because a
+    # check that stops reporting a standing failure reads exactly like health.
+    if [ "$LANE_VERDICT" != "$prior" ] || { [ "$LANE_VERDICT" != alive ] \
+        && ! { is_int "$reported_at" && [ $(( NOW - reported_at )) -lt "$REFIRE" ]; }; }; then
       if [ "$LANE_VERDICT" = alive ]; then
         printf 'lane-liveness: %s recovered to alive\n' "$lane"
       else
         printf 'lane-liveness: %s\n' "$(lane_line "$lane")"
       fi
-      record_replace "$REPORTED" "$lane" "$lane $LANE_VERDICT"
+      record_replace "$REPORTED" "$lane" "$lane $LANE_VERDICT $NOW"
     fi
   done <<EOF
 $LANES

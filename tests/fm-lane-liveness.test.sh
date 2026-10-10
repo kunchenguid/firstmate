@@ -584,6 +584,21 @@ assert_equals '' "$OUT" 'the same verdict does not wake the supervisor again'
 OUT=$(rail "$ROOT_C" check)
 assert_contains "$OUT" 'flapper recovered to alive' 'a recovery is reported once'
 
+# --- an unchanged failure re-fires once per REFIRE window ------------------
+ROOT_RF=$(home_fixture refire)
+lane_fixture "$ROOT_RF" stuck
+conf_add "$ROOT_RF" 'lane stuck'
+fm_touch_epoch "$(( NOW - 4000 ))" "$ROOT_RF/lanes/stuck/state/.last-watcher-beat"
+OUT=$(rail "$ROOT_RF" check)
+assert_contains "$OUT" 'lane-liveness: lane=stuck' 'a newly dead lane wakes the supervisor'
+OUT=$(rail "$ROOT_RF" check)
+assert_equals '' "$OUT" 'an unchanged failure stays quiet while its report is fresh'
+printf 'stuck dead %s\n' "$(( NOW - 21601 ))" > "$ROOT_RF/state/.lane-liveness-reported"
+OUT=$(rail "$ROOT_RF" check)
+assert_contains "$OUT" 'lane-liveness: lane=stuck' 'an unchanged failure older than REFIRE re-fires'
+OUT=$(rail "$ROOT_RF" check)
+assert_equals '' "$OUT" 'the re-fire refreshes its time so it repeats once per window'
+
 # --- malformed config is an actionable error, not a silent pass -------------
 ROOT_BAD=$(home_fixture badconf)
 conf_add "$ROOT_BAD" 'W=soon'

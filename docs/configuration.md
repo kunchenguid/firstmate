@@ -1522,6 +1522,7 @@ D=1800
 E=600
 M=50
 SELF=900
+REFIRE=21600
 SSH_TIMEOUT=10
 CAPTURE_TIMEOUT=8
 
@@ -1540,6 +1541,7 @@ lane <name> [inbox-path]
 - `E=600` is how long a transport or budget error class must hold before it counts as dead rather than a passing blip. Ten minutes outlasts a provider retry window and a rate-limit cooldown.
 - `M=50` is the percentage of a lane's tracked requests that may stand unanswered before the lane reads `degraded` while its agent is still alive. Above half means the lane receives more than it answers.
 - `SELF=900` is how long the rail may go without completing a sweep before rail silence is reported. It matches `W` because a rail that stopped reporting is as serious as a lane whose supervision stopped.
+- `REFIRE=21600` is how long an unchanged unhealthy verdict stays quiet before `check` reports it again. A wake check that reports a failure once and then falls silent reads exactly like a healthy one, so a standing failure re-fires every six hours until it changes.
 - `SSH_TIMEOUT=10` bounds one remote lane read, in the rail and in the ladder's redispatch read of a remote inbox alike, and `CAPTURE_TIMEOUT=8` bounds one pane read. The watcher allows 30 seconds per check, so both stay small enough that one unreachable host cannot consume a whole sweep.
 
 `SSH_TIMEOUT`, `CAPTURE_TIMEOUT`, `COOLDOWN`, and `RELAUNCH_TIMEOUT` must each be a whole number greater than zero, and a zero is refused as a configuration error, because zero would disable the bound instead of applying it.
@@ -1571,7 +1573,8 @@ An inbox the rail cannot read is reported `unknown` with every count as `-`, nev
 
 **Generated state**
 
-The rail writes only three records, all under this home's own `state/`: `.lane-liveness-beat` is the heartbeat, `.lane-liveness-lanes` carries how long each lane's error class has held and what its handled count was last sweep, which is the movement baseline the dead rule reads, and `.lane-liveness-reported` holds the last verdict reported for each lane so an unchanged verdict does not wake the supervisor again.
+The rail writes only three records, all under this home's own `state/`: `.lane-liveness-beat` is the heartbeat, `.lane-liveness-lanes` carries how long each lane's error class has held and what its handled count was last sweep, which is the movement baseline the dead rule reads, and `.lane-liveness-reported` holds the last verdict reported for each lane and when it was reported.
+`check` wakes the supervisor when a lane's verdict changes, stays quiet on an unchanged verdict while its report is younger than `REFIRE`, and reports an unchanged verdict other than `alive` again once its report is older than `REFIRE`, refreshing that time so the re-fire repeats once per window rather than every sweep.
 The error class and its clock in `.lane-liveness-lanes` are written only by a sweep that read a pane.
 `routes`, which never reads one, and a sweep whose pane could not be read both leave the established class and its clock in place, because an unreadable pane is not evidence that the error ended.
 The handled count in that same record comes from the inbox rather than the pane, so it advances on every reading, and a baseline frozen behind an unread pane would let a stalled lane read as healthy.
