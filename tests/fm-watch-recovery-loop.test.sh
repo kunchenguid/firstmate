@@ -222,5 +222,84 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: a handling successor skips only the generation handed off at its start.
+# A note appended by fm-inbox.sh after that handoff was acknowledged publishes a
+# new pending generation with no wake on the way, so the successor must surface
+# it within a poll; the handed-off generation itself must stay quiet.
+run_successor_with_marker() {
+  local name=$1 marker=$2 dir home state child now
+  dir=$(make_case "$name")
+  home="$dir/home"
+  state="$dir/state"
+  mkdir -p "$home/data"
+  : > "$state/crew.meta"
+  printf '%s\n' "$marker" > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$dir/watch.out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  sleep 0.4
+  SUCCESSOR_CASE_DIR=$dir SUCCESSOR_CASE_HOME=$home SUCCESSOR_CASE_STATE=$state SUCCESSOR_CASE_PID=$child
+}
+
+test_handling_successor_resurfaces_later_generation() {
+  local dir home state child now
+  run_successor_with_marker recovery-later-generation 'acked:handling:prev.1.aaa'
+  dir=$SUCCESSOR_CASE_DIR home=$SUCCESSOR_CASE_HOME state=$SUCCESSOR_CASE_STATE child=$SUCCESSOR_CASE_PID
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-inbox.sh" note "successor counterfactual note" >/dev/null 2>&1 \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "fm-inbox.sh note failed"; }
+  case "$(cat "$state/.watcher-down")" in
+    pending:downtime:prev.1.aaa|acked:*) kill -TERM "$child" 2>/dev/null || true; fail "note did not publish a new recovery generation: $(cat "$state/.watcher-down")" ;;
+    pending:downtime:*) ;;
+    *) kill -TERM "$child" 2>/dev/null || true; fail "unexpected recovery marker after note: $(cat "$state/.watcher-down")" ;;
+  esac
+  now=0
+  while [ "$now" -lt 20 ]; do
+    grep -qF 'check: rearm-resurface' "$dir/watch.out" 2>/dev/null && break
+    sleep 0.5
+    now=$((now + 1))
+  done
+  if ! grep -qF 'check: rearm-resurface' "$dir/watch.out" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "handling successor did not surface a note appended after its handoff: $(cat "$dir/watch.out")"
+  fi
+  grep -q "$(printf '\tcheck\tinbox:')" "$state/.wake-queue" \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "note row missing from the durable queue"; }
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  pass "a handling successor resurfaces a note appended after its handoff generation"
+}
+
+test_handling_successor_stays_quiet_for_handed_off_generation() {
+  local dir state child now
+  run_successor_with_marker recovery-same-generation 'pending:downtime:gap.1.aaa'
+  dir=$SUCCESSOR_CASE_DIR state=$SUCCESSOR_CASE_STATE child=$SUCCESSOR_CASE_PID
+  # Re-publish the handed-off generation, as a lost handshake would.
+  printf 'pending:downtime:gap.1.aaa\n' > "$state/.watcher-down"
+  now=0
+  while [ "$now" -lt 6 ]; do
+    if ! kill -0 "$child" 2>/dev/null || grep -qF 'check: rearm-resurface' "$dir/watch.out" 2>/dev/null; then
+      fail "handling successor re-announced its handed-off generation: $(cat "$dir/watch.out")"
+    fi
+    sleep 0.5
+    now=$((now + 1))
+  done
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  pass "a handling successor stays quiet for the generation handed off at its start"
+}
+
 test_handling_successor_does_not_go_blind
+test_handling_successor_resurfaces_later_generation
+test_handling_successor_stays_quiet_for_handed_off_generation
 test_unacknowledged_recovery_is_announced_once_per_generation
