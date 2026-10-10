@@ -34,7 +34,7 @@ Once a Pi primary session owns this home's fleet lock, the branch handles two ki
 
 - Eligible task-local rows from ordinary actionable wakes.
   A row is one queued wake entry.
-- Heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant.
+- Heartbeat reviews emitted under the watcher header's policy in `bin/fm-watch.sh`.
 
 The branch then merges each outcome back into the captain conversation's transcript.
 
@@ -417,7 +417,8 @@ The other half is processing, because a blocker, a decision, or a ready PR needs
    Summaries over 1024 characters are abbreviated within that bound and point to `bin/fm-branch-outcome.sh lookup --seqs <N>` for the full outcome.
    Main must read the full outcome for any abbreviated line before acting on, relaying, or acknowledging it.
    It says each outcome was recorded earlier and may already have been seen or handled, rather than claiming a visible entry in this transcript, because an outcome carried over from before a restart or a switch of primary has none here.
-   Main sorts the outcomes by that state, and its reply to the captain covers only the still-open ones, as if the settled ones had never been listed; a settled one needs only the acknowledgement below.
+   Main sorts the outcomes by that state, and its reply to the captain covers only the still-open ones, as if the settled ones had never been listed; a settled one needs only the acknowledgement below apart from any ready-work handoff.
+   Before acknowledging, main follows the ready-work handoff contract owned by `AGENTS.md` section 10.
    A listed row without a valid age breaks the store's contract, so the extension reports it to main as a visible note and sends no request; every row stays unprocessed and is presented once the store is healthy.
 2. That request opens exactly one main turn.
 3. Main closes it only by calling `fm_branch_processed` with the highest sequence the request listed.
@@ -465,8 +466,7 @@ Main can read the durable outcome store on demand through its `fm_branch_outcome
 
 ## Heartbeat routing
 
-The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi, unchanged from before.
-Only a scan already flagged as possibly captain-relevant emits the bare `heartbeat` wake.
+The watcher header in `bin/fm-watch.sh` owns when the bash-level scan emits the bare `heartbeat` wake rather than absorbing it.
 `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`.
 The branch accepts it without a project only when every branch-ownable row observed in the unread-queue eligibility check is one of these:
 
@@ -592,22 +592,15 @@ A leftover `state/.afk` flag declines nothing.
 It does so only while `bin/fm-afk-contract.sh validate` succeeds on a complete, readable, live away record (`mode` is not quiet).
 An archived, incomplete, invalid, or quiet record restores the attended refusal byte for byte.
 
-The captain's away words are the whole mandate:
-
-- The branch reads them at the tail.
-- It decides by its own judgment whether the event in front of it is the moment they name.
-- It acts on them only through the guarded scripts, never by analogy.
-- It holds with verdict captain on doubt.
-
-`bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
-It requires every action taken under the words to open its outcome summary with "per your away instructions:".
+`bin/fm-branch-prompt.sh` owns the branch's ready-work check and "Postures" execution rules, including dispatch scope, durable stop notes, and startup confirmation.
+The opt-in development evaluation `FM_READY_QUEUE_AWAY_LIVE=1 bash tests/development/ready-queue-away.sh` exercises the real supervision engine's recorded scope stop and retry condition; it requires existing environment-based Claude authentication and runs outside deterministic CI.
 
 Each relocated script keeps its own gate, enforcing exactly what a script can check without reading words:
 
 | Script | Gate while away |
 | --- | --- |
 | `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red` and `--allow-missing` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
-| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
+| `bin/fm-spawn.sh` | Admits only queued dispatchable work and enforces the record's spend cap (relaunches and secondmates exempt); `bin/fm-branch-prompt.sh` owns the branch's dispatch and new-filing rules. |
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
 

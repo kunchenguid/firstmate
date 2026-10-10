@@ -108,8 +108,11 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
-#   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#   heartbeat              fleet-scan backstop found ready queued work, could not
+#                          read backlog readiness, or found an unsurfaced
+#                          captain-relevant status; a present state/.afk emits every
+#                          heartbeat. The backlog consumer owns readiness;
+#                          supervision rechecks current stops and worker capacity.
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -2298,6 +2301,9 @@ EOF
   return "$rc"
 }
 
+# shellcheck source=bin/fm-ready-queue-lib.sh
+. "$SCRIPT_DIR/fm-ready-queue-lib.sh"
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any status log carries a captain-relevant event past the position already
 # surfaced to firstmate (.hb-surfaced-<task>). It walks every log rather than only
@@ -3275,11 +3281,11 @@ EOF
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
-    # no-change case (advance the schedule and back off exactly as wake() would,
+    # turns up ready queued work or a captain-relevant status the per-wake path
+    # missed. Absorb the no-change case (advance the schedule and back off as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
+    if afk_present || fm_ready_queue_needs_review; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"

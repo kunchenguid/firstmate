@@ -640,6 +640,7 @@ Deterministic entry points:
 
 ```sh
 tests/fm-supervision-host.test.sh
+tests/fm-supervision-host-late.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-afk-launch.test.sh
 tests/fm-supervision-instructions.test.sh
@@ -693,6 +694,7 @@ Deterministic entry points:
 
 ```sh
 tests/fm-supervision-host.test.sh
+tests/fm-supervision-host-late.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-cursor-primary.test.sh
 tests/fm-pi-watch-extension.test.sh
@@ -740,7 +742,7 @@ tests/fm-host-mirror.test.sh
 
 ### Attended posture
 
-This supports [Postures](../supervision-host.md#postures) and [Captain outcomes](../supervision-host.md#captain-outcomes): on a Claude primary the attended engine keeps routine outcomes off main, a captain outcome reaches main once and waits in the drain until acknowledged, a fresh captain outcome is never hidden behind a routine backlog, and the first drain after a return does not replay the away window.
+This supports [Postures](../supervision-host.md#postures) and [Captain outcomes](../supervision-host.md#captain-outcomes): on a Claude primary the attended engine keeps routine outcomes off main, a captain outcome reaches main once and waits in the drain until acknowledged, and a fresh captain outcome is never hidden behind a routine backlog.
 It was measured on 2026-09-25 on macOS arm64 with Claude Code 2.1.283 as primary and engine (`sonnet`) and Pi 0.82.0 workers on `openai-codex/gpt-5.6-sol`, in a disposable lab home on a private tmux socket.
 The routine backlog and most of the away window's rows were appended to the store through `bin/fm-branch-outcome.sh append` to reach the shape of a real long window; the engine recorded the rest, including every captain outcome that woke main.
 
@@ -749,9 +751,8 @@ The routine backlog and most of the away window's rows were appended to the stor
 | Routine outcome | `handled ... posture=attended`, no host exit, the host kept its pid, and main's pane was byte-identical before and after |
 | Captain outcome (a finished local-only worker) | `to-main branch-outcome: ... (store rows 3)`; main drained `BRANCH OUTCOMES`, landed the branch, and ran `mark-processed --through 3` |
 | Twelve waiting routine rows, then a fresh captain outcome | main's one drain printed `[seq 16]` first, then the four newest routine rows and `(8 earlier routine outcome(s) not shown; bin/fm-branch-outcome.sh list keeps them)` |
-| Return after an away window of 130 outcomes (123 routine, 7 captain over two tasks) | the first drain printed one line per task (`[seq 146, newest of 4 for this task]`, `[seq 147, newest of 3 for this task]`) and no routine rows; main processed through 147 in its return turn |
 
-Counted on a copy of that window's store, draining as main until the section is empty and running each printed acknowledgement, the drain before this change took 21 drains and 46,439 bytes of section text, and this one takes 1 drain (742 bytes after the return's drain advanced the read cursor).
+Current return-window batching and preservation of older and oversized ready-work handoffs are covered by `tests/fm-supervision-host.test.sh`; the drain header in `bin/fm-wake-drain.sh` owns presentation bounds.
 A Pi primary without `config/supervision-host` ran the same gated-worker session with the changed branch prompt: routine row 1, captain row 2 for the finished work, landing, and `fm_branch_processed` through 2, with no `BRANCH OUTCOMES` line in either conversation.
 
 ```text
@@ -765,6 +766,7 @@ Deterministic entry points:
 
 ```sh
 tests/fm-supervision-host.test.sh
+tests/fm-supervision-host-late.test.sh
 tests/fm-afk-return.test.sh
 tests/fm-branch-supervision.test.sh
 ```

@@ -98,7 +98,7 @@ Its later sights are still held to that same bounded cadence rather than re-alar
 The pause path still never reads a secondmate's endpoint liveness - dead-or-missing recovery belongs to the dedicated liveness tick above - and a mate is admitted to that same cadence only to serve a status-declared wait's bounded re-surface, so a forgotten `paused:` declaration, or an attended `captain-held` declaration, cannot rot invisibly.
 Its initial normal-mode status signal still surfaces through the no-verb path, while a daemon-backed away posture self-handles that routine signal and owns later external-wait rechecks.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
-No-change heartbeats are also benign.
+Heartbeat absorption follows the readiness and status checks owned by the header of `bin/fm-watch.sh`; `tests/fm-watch-ready-queue.test.sh` covers ready, unreadable, empty, and captain-held queues.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start sends the same bounded local scan through `bin/fm-startup-network.sh`'s deferred worker so current-state reads never block the digest.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
@@ -208,6 +208,7 @@ The always-on watcher also uses that library's absorb classification on no-verb 
 The daemon's stale-routing precedence, declared-wait aging, and steering-inbox exception are owned by [Classification policy](../.agents/skills/afk/SKILL.md#classification-policy).
 In away mode, seen-status dedupe does not clear possible-wedge aging for nonterminal progress, so housekeeping still re-escalates an unchanged idle pane at the configured bound.
 Away-mode housekeeping has no worktree-write deferral of its own, so while `state/.afk` exists a quiet crew that is writing its own worktree still escalates as a possible wedge at that bound.
+The daemon's heartbeat readiness and durable-handoff policy is owned by [Classification policy](../.agents/skills/afk/SKILL.md#classification-policy) and covered by `tests/fm-watch-ready-queue.test.sh`.
 The daemon batches the escalations selected by that policy into a single-line digest using the canonical `away-supervisor` kind from `bin/fm-operational-input.sh`; a Claude Code primary receives that owner's record-backed doorbell instead of the stripped invisible marker, so firstmate can distinguish the escalation from ordinary captain messages.
 Captain-held transfers remain silent until return while the away record exists.
 Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
