@@ -138,9 +138,9 @@
 # engine turn. It also reads the record of a successor a pass-through left for
 # main: while that arm still runs under its recorded identity, the first cycle
 # without --restart requests a take-over rather than an ordinary attach.
-# Activation removes the
-# record only once that identity is no longer alive, so a later host retries a
-# take-over that left it running.
+# Activation removes a record whose arm identity is no longer alive; the
+# arm's --take-over header owns bounded settlement of a live record and retries
+# after an interrupted attempt.
 #
 # STATE (all under state/, owned here): .supervision-host (this host's pid and
 # the processes it runs), .supervision-host-engine (the engine conversation:
@@ -149,8 +149,10 @@
 # report scope and the reports it recorded), .supervision-host-prompt and
 # .supervision-host-wake (the prompt and wake text of the current turn),
 # .supervision-host-mirror (the dialog-mirror feed while an attended wake is
-# rendered), .supervision-host-left (the pid and identity of the successor arm a
-# pass-through left running for main, until that arm is gone),
+# rendered), .supervision-host-left (one tab-separated line: successor arm pid,
+# arm identity, watcher pid, locked watcher identity, and status-line origin
+# started or attached; detach_successor verifies persistence before relinquishing
+# the cycle for main),
 # .supervision-host-health (the latch: errors, cooldown, and probe time, keyed
 # to the main session, engine, and model), and .supervision-host.log (a bounded
 # ledger of where every close went, with each engine turn's usage and
@@ -263,6 +265,7 @@ SUCCESSOR_PID=
 SUCCESSOR_OUT=
 SUCCESSOR_WATCHER=
 SUCCESSOR_GENERATION=
+SUCCESSOR_ORIGIN=
 ENGINE_RUNNING=0
 # The successor arm a predecessor's pass-through left for main, which the
 # first cycle takes over.
@@ -382,7 +385,7 @@ activate() {
   # once it does not.
   if [ -f "$LEFT_RECORD" ]; then
     pid='' identity=''
-    IFS="$(printf '\t')" read -r pid identity < "$LEFT_RECORD" || true
+    IFS="$(printf '\t')" read -r pid identity _ < "$LEFT_RECORD" || true
     if fm_pid_alive "$pid" && [ -n "$identity" ] && [ "$(identity_of "$pid")" = "$identity" ]; then
       LEFT_ARM=$pid
     else
@@ -656,6 +659,7 @@ start_successor() {  # <predecessor-arm-pid>
   local deadline line
   SUCCESSOR_WATCHER=
   SUCCESSOR_GENERATION=
+  SUCCESSOR_ORIGIN=
   start_arm "$1" || return 1
   SUCCESSOR_PID=$STARTED_ARM_PID
   SUCCESSOR_OUT=$STARTED_ARM_OUT
@@ -663,6 +667,8 @@ start_successor() {  # <predecessor-arm-pid>
   while :; do
     line=$(grep -E '^watcher: (started|attached) pid=[0-9]+' "$SUCCESSOR_OUT" 2>/dev/null | head -n 1)
     if [ -n "$line" ]; then
+      SUCCESSOR_ORIGIN=${line#watcher: }
+      SUCCESSOR_ORIGIN=${SUCCESSOR_ORIGIN%% *}
       SUCCESSOR_WATCHER=$(printf '%s\n' "$line" | sed -E 's/^watcher: (started|attached) pid=([0-9]+).*/\2/')
       case "$line" in
         *' recovery-generation='*) SUCCESSOR_GENERATION=${line##* recovery-generation=} ;;
@@ -678,21 +684,27 @@ start_successor() {  # <predecessor-arm-pid>
 
 # Record the successor for the next host to take over, then drop it from this
 # host's cleanup without stopping it. A successor whose record does not read
-# back as a regular file holding exactly its pid and identity stays tracked,
+# back as a regular file holding exactly the STATE record above stays tracked,
 # so the cleanup stops it and main's next turn end arms a fresh cycle; that
 # returns 1. The shell signals background jobs when it exits, and this arm's
 # handler would then stop the watcher, so disown it first. The capture file
 # stays tracked so the EXIT trap unlinks it; the arm already holds that
 # descriptor and keeps waiting on the watcher.
 detach_successor() {
-  local identity tmp=
+  local identity watcher_identity tmp='' record
   [ -n "${SUCCESSOR_PID:-}" ] || return 0
   identity=$(identity_of "$SUCCESSOR_PID")
-  if [ -z "$identity" ] || ! tmp=$(mktemp "$LEFT_RECORD.tmp.XXXXXX" 2>/dev/null) \
-    || ! printf '%s\t%s\n' "$SUCCESSOR_PID" "$identity" > "$tmp" 2>/dev/null \
+  watcher_identity=
+  if fm_watcher_lock_matches_pid "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$SUCCESSOR_WATCHER" "$FM_HOME"; then
+    watcher_identity=$FM_WATCHER_MATCHED_IDENTITY
+  fi
+  record=$(printf '%s\t%s\t%s\t%s\t%s' "$SUCCESSOR_PID" "$identity" "$SUCCESSOR_WATCHER" "$watcher_identity" "$SUCCESSOR_ORIGIN")
+  if [ -z "$identity" ] || [ -z "$watcher_identity" ] \
+    || ! tmp=$(mktemp "$LEFT_RECORD.tmp.XXXXXX" 2>/dev/null) \
+    || ! printf '%s\n' "$record" > "$tmp" 2>/dev/null \
     || ! mv -f "$tmp" "$LEFT_RECORD" 2>/dev/null \
     || [ -L "$LEFT_RECORD" ] || [ ! -f "$LEFT_RECORD" ] \
-    || [ "$(cat "$LEFT_RECORD" 2>/dev/null)" != "$SUCCESSOR_PID"$'\t'"$identity" ]; then
+    || [ "$(cat "$LEFT_RECORD" 2>/dev/null)" != "$record" ]; then
     [ -z "$tmp" ] || rm -f "$tmp" "$LEFT_RECORD/${tmp##*/}" 2>/dev/null || true
     log_line "pass-through	successor-unrecorded	$(printf '%s\n' "$REASON" | head -n 1)"
     return 1
