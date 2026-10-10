@@ -221,9 +221,31 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+test_unborn_head_project_is_refused_at_once() {
+  local rec id out status started elapsed
+  id=settle-unborn-head-z5
+  rec=$(make_settle_case settle-unborn "$id" 0)
+  read_settle_record "$rec"
+  PROJ_DIR="$TMP_ROOT/settle-unborn/unborn-project"
+  git init -q "$PROJ_DIR"
+
+  started=$SECONDS
+  out=$(run_settle_spawn "$id")
+  status=$?
+  elapsed=$((SECONDS - started))
+  expect_code 1 "$status" "spawn into a project with no commit should be refused"
+  assert_contains "$out" "unborn HEAD" "the refusal did not name the unborn HEAD cause"
+  assert_contains "$out" "make one commit" "the refusal did not name the remedy"
+  [ "$elapsed" -lt 30 ] || fail "refusal took ${elapsed}s instead of failing before the treehouse wait"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  [ -z "$(git -C "$PROJ_DIR" rev-list --all 2>/dev/null)" ] || fail "spawn committed into the project"
+  pass "a project with an unborn HEAD is refused at once with its cause named"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_unborn_head_project_is_refused_at_once
 
 echo "# all fm-spawn-worktree-settle tests passed"
