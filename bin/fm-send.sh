@@ -1152,6 +1152,10 @@ else
   case "$verdict" in
   empty)
     ;;
+  endpoint-changed)
+    echo "fm-send: submission to $T is unconfirmed because Enter changed terminal endpoints; do not retype or blindly resend - inspect the replacement with fm-peek.sh before deciding whether to resend" >&2
+    exit 3
+    ;;
   send-failed)
     fm_send_known_undelivered_cleanup ||
       echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2

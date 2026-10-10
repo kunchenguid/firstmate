@@ -1860,23 +1860,42 @@ EOF
 # stays a loud refusal rather than a blind retry into an unreadable pane.
 # tmux and herdr keep richer cores that consume this same shared verdict plus
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
-fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
+fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [resolved-target-var]
   local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
+  local resolved_target_var=${7:-} key_rc
   while :; do
-    "$send_key_fn" "$target" Enter "$expected_label" || true
+    key_rc=0
+    "$send_key_fn" "$target" Enter "$expected_label" || key_rc=$?
+    if [ -n "$resolved_target_var" ] && [ -n "${!resolved_target_var}" ] && [ "${!resolved_target_var}" != "$target" ]; then
+      if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+        printf 'inbox-deferred'
+      else
+        printf 'endpoint-changed'
+      fi
+      return 0
+    fi
+    if [ "$key_rc" -ne 0 ]; then
+      if [ "$key_rc" -eq 4 ] && [ -n "$resolved_target_var" ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+        printf 'inbox-deferred'
+      else
+        printf 'send-failed'
+      fi
+      return 0
+    fi
     sleep "$sleep_s"
     state=$("$state_fn" "$target" "$expected_label")
     # The first Enter can open a picker. A later Enter would confirm it.
     if fm_composer_blocking_dialog_noted >/dev/null; then
-      printf 'unknown'
-      return 0
+      state=unknown
     fi
     case "$state" in
-      pending|pending-unproven) ;;
-      *) printf '%s' "$state"; return 0 ;;
+      pending|pending-unproven)
+        i=$((i + 1))
+        [ "$i" -ge "$retries" ] || continue
+        ;;
     esac
-    i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf '%s' "$state"; return 0; }
+    printf '%s' "$state"
+    return 0
   done
 }
 

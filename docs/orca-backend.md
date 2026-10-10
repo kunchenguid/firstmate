@@ -41,7 +41,13 @@ worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
-`terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+`terminal=` and `orca_worktree_id=` are the backend authority used by cleanup, and by send while the recorded terminal handle is live.
+A hand restart can replace the terminal handle while preserving `window=`, the Orca worktree name.
+After Orca rejects a send or send-key because the recorded handle is stale or not writable, Firstmate retries through the native recorded-worktree name selector without editing metadata.
+Resolution requires exactly one usable live pane in a non-truncated result; a missing or ambiguous window preserves the original failure and never falls back to a global terminal-title search.
+Healthy handles keep the same command sequence, and unrelated failures do not trigger retargeting.
+For an inbox steer, a failed doorbell leaves the durable record available for the watcher's re-ring policy in [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh).
+[`bin/backends/orca.sh`](../bin/backends/orca.sh) owns the exact selector, rejection classification, and retry mechanics.
 Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the worktree path, and cleanup validation requires both halves rather than treating the value as a simple name.
 
 ## Current lifecycle and safety
@@ -51,7 +57,18 @@ Exact command flags and response parsing are owned by `bin/backends/orca.sh` and
 
 `fm-peek.sh` reads with `orca terminal read`.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
+Replacement panes showing a blocking dialog refuse text and Enter; an explicit Ctrl-C remains available.
+After resolving a replacement pane, an inbox ring defers if its composer is unreadable or unproven, holds other input, or shows delivery-busy state; a proven pending own doorbell is reused without appending another copy.
+An empty replacement may receive the doorbell text, but never a bare inbox Enter.
+Immediately before Enter on a replacement, including after the settle delay, the inbox gate requires the pane to still hold its own doorbell and refuses empty, foreign draft, busy, unreadable, or blocking-dialog states without pressing Enter.
+Any inbox Enter on a replacement leaves the ring deferred and stops further Enter attempts in that send, even if the Enter was accepted.
+The durable steer remains recorded; the watcher's retry-mark policy is owned by [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh).
+Inbox rings on the original handle retain their two-Enter budget.
+Duplicate retries are an accepted cost.
+Draft and busy deferral applies to inbox rings; explicit typed text and Enter retain their existing semantics subject to the dialog guard and typed submission rule below.
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
+If typed submission Enter changes the endpoint from the one that received the literal text, verification stops without retyping or further Enter attempts; an empty replacement composer cannot confirm text typed elsewhere.
+`fm-send.sh` exits 3 with an unconfirmed-submission message directing the caller to inspect the replacement before deciding whether to resend.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
@@ -81,6 +98,8 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-orca-submit-restart.test.sh
+tests/fm-orca-typed-restart.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 tests/fm-teardown-endpoint-safety.test.sh

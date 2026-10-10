@@ -1339,6 +1339,230 @@ test_secondmate_force_teardown_refuses_partial_orca_child() {
   pass "fm-teardown.sh --force: refuses partial Orca secondmate children before runtime dispatch"
 }
 
+# --- send-time live-window resolution (task fm-send-orca-window-target) -----
+#
+# A human restart hands a window a FRESH Orca handle while window= (the Orca
+# worktree name) stays stable, so the recorded terminal= goes stale and every
+# send on it is rejected (live evidence: android-compare-slice3, recorded
+# term_67a6b02e exited, live term_33db5d3e, both under window
+# fm-android-compare-slice3). The submit and send-key cores must re-resolve
+# window= at send time through Orca's native `--worktree name:<window>`
+# selector, write NO meta file, keep a healthy terminal's command sequence
+# byte-identical (resolution runs only after an endpoint-identity rejection),
+# and fall back to today's recorded-handle failure - the durable doorbell
+# notice plus the watcher re-ring - whenever the window cannot be resolved.
+
+write_orca_window_meta() {  # <state-dir> <id> <terminal> <worktree>
+  local state=$1 id=$2 terminal=$3 wt=$4
+  mkdir -p "$state"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=$terminal" \
+    "worktree=$wt" "project=$wt" "harness=claude" "kind=ship" "backend=orca"
+}
+
+test_send_text_submit_resolves_live_window_when_terminal_stale() {
+  local state out log_text
+  orca_case submit-stale-window
+  state=$CASE_DIR/state
+  write_orca_window_meta "$state" stalewinz1 term-stale "$CASE_DIR/worktree"
+  printf '{"ok":false,"error":{"code":"terminal_not_writable","message":"terminal_not_writable"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-live-9","writable":true,"connected":true}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/6.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-stale "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "stale-terminal submit should confirm through the live window, got '$out'"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1fterminal\x1flist\x1f--worktree\x1fname:fm-stalewinz1\x1f--limit\x1f200\x1f--json' \
+    "submit did not re-resolve the recorded window through Orca's name: selector"
+  assert_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-live-9\x1f--text\x1fhello captain\x1f--json' \
+    "submit did not deliver the text through the live terminal handle"
+  assert_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-live-9\x1f--text\x1f\x1f--enter\x1f--json' \
+    "submit did not send Enter through the live terminal handle"
+  assert_contains "$log_text" $'orca\x1fterminal\x1fread\x1f--terminal\x1fterm-live-9' \
+    "submit did not verify the composer on the live terminal handle"
+  assert_grep "terminal=term-stale" "$state/stalewinz1.meta" \
+    "send-time resolution must leave the producer-owned terminal field untouched"
+  [ "$(grep -c '^terminal=' "$state/stalewinz1.meta")" -eq 1 ] \
+    || fail "resolution must never write or duplicate meta fields"
+  pass "fm_backend_orca_send_text_submit: stale terminal re-resolves window= to the live handle with zero meta writes"
+}
+
+test_send_key_resolves_live_window_for_enter_and_interrupt() {
+  local state log_text count
+  orca_case key-stale-window
+  state=$CASE_DIR/state
+  write_orca_window_meta "$state" stalekeyz2 term-stale "$CASE_DIR/worktree"
+  printf '{"ok":false,"error":{"code":"terminal_not_writable","message":"terminal_not_writable"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-live-9","writable":true,"connected":true}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal_handle_stale"}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-live-9","writable":true,"connected":true}]}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/7.out"
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/orca.sh"; fm_backend_orca_send_key term-stale Enter; fm_backend_orca_send_key term-stale C-c' "$ROOT"
+  expect_code 0 $? "--key Enter and C-c should both deliver through the live window"
+  log_text=$(cat "$LOG")
+  count=$(printf '%s\n' "$log_text" | grep -c $'orca\x1fterminal\x1flist\x1f--worktree\x1fname:fm-stalekeyz2\x1f--limit\x1f200\x1f--json')
+  [ "$count" -eq 2 ] || fail "each key should re-resolve the window once, got $count resolutions"
+  assert_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-live-9\x1f--text\x1f\x1f--enter\x1f--json' \
+    "Enter did not land on the live terminal handle"
+  assert_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-live-9\x1f--interrupt\x1f--json' \
+    "C-c did not land on the live terminal handle"
+  pass "fm_backend_orca_send_key: Enter and C-c both re-resolve a stale terminal through window="
+}
+
+test_healthy_terminal_send_keeps_the_recorded_byte_path() {
+  local state log_text out status
+  orca_case healthy-no-retarget
+  state=$CASE_DIR/state
+  write_orca_window_meta "$state" healthyz3 term-healthy "$CASE_DIR/worktree"
+  # Success responses in the pre-existing order: 1 Enter, 2 literal, 3 Enter, 4 read.
+  printf '{"ok":true,"result":{"send":{"handle":"term-healthy","accepted":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-healthy","accepted":true}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-healthy","accepted":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/orca.sh"; fm_backend_orca_send_key term-healthy Enter; fm_backend_orca_send_text_submit term-healthy "plain steer" 3 0.01 0.01' "$ROOT" )
+  expect_code 0 $? "healthy sends should succeed as before"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-healthy\x1f--text\x1f\x1f--enter\x1f--json' \
+    "healthy Enter left the recorded path"
+  assert_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-healthy\x1f--text\x1fplain steer\x1f--json' \
+    "healthy literal left the recorded path"
+  assert_not_contains "$log_text" $'orca\x1fterminal\x1flist' \
+    "a healthy terminal must never trigger a window re-resolution - the pre-existing byte path is the regression pin"
+  # The non-identity failure class is gated out too: no resolution, original
+  # stderr replayed, original exit code preserved.
+  orca_case healthy-non-identity
+  state=$CASE_DIR/state
+  write_orca_window_meta "$state" healthyz3 term-healthy "$CASE_DIR/worktree"
+  printf '{"ok":false,"error":{"code":"runtime_busy","message":"runtime_busy"}}\n' > "$RESP/1.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/orca.sh"; fm_backend_orca_send_key term-healthy Enter' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 2 "$status" "a non-identity rejection keeps today's exit code"
+  assert_contains "$out" "runtime_busy" "the original failure stderr must be replayed unchanged"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1fterminal\x1flist' \
+    "a non-identity failure must not re-resolve the window"
+  pass "fm_backend_orca_send_key/submit: a healthy terminal keeps today's exact command sequence and failure bytes"
+}
+
+test_send_key_falls_back_when_window_unresolvable() {
+  local state out status log_text
+  orca_case key-unresolvable-window
+  state=$CASE_DIR/state
+  write_orca_window_meta "$state" gonewt4 term-stale "$CASE_DIR/worktree"
+  # 1: identity rejection on the recorded handle.
+  printf '{"ok":false,"error":{"code":"terminal_not_writable","message":"terminal_not_writable"}}\n' > "$RESP/1.out"
+  # 2: the window itself is gone from Orca (renamed/removed worktree).
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector_not_found"}}\n' > "$RESP/2.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/orca.sh"; fm_backend_orca_send_key term-stale Enter' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unresolvable window must keep the recorded-handle failure nonzero"
+  expect_code 2 "$status" "an unresolvable window preserves today's exit code"
+  assert_contains "$out" "terminal_not_writable" \
+    "an unresolvable window must replay the original recorded-handle failure, got '$out'"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1fterminal\x1flist\x1f--worktree\x1fname:fm-gonewt4\x1f--limit\x1f200\x1f--json' \
+    "the window resolution attempt should be visible in the CLI log"
+  assert_not_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-live' \
+    "no send may be retried on a handle the window path never proved"
+  pass "fm_backend_orca_send_key: an unresolvable window falls back to the recorded-handle failure unchanged"
+}
+
+test_fm_send_doorbell_and_key_reach_live_window_when_terminal_stale() {
+  local state id out status neutral record body log_text
+  id="oracawinz5"
+  state="$TMP_ROOT/winz5-state"
+  write_orca_window_meta "$state" "$id" term-stale "$state/worktree"
+  touch "$state/.last-watcher-beat"
+  orca_case winz5-doorbell
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_writable","message":"terminal_not_writable"}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-live-9","writable":true,"connected":true}]}}\n' > "$RESP/4.out"
+  # Replacement inbox input requires a positively identified empty composer.
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/6.out"
+  # The settled replacement has lost the doorbell: defer without bare Enter.
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/7.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "$id" "steer through the window" 2>&1 )
+  status=$?
+  expect_code 0 "$status" "a stale terminal with a live window must still enqueue its steer"$'\n'"$out"
+  assert_not_contains "$out" "doorbell did not reach" \
+    "the doorbell reached the live pane; the stale-handle refusal must not fire"
+  record="$state/$id.inbox/001.msg"
+  [ -f "$record" ] || fail "the steer must still be durably recorded in the task inbox"
+  body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$record")
+  [ "$body" = "steer through the window" ] || fail "inbox record body corrupted, got '$body'"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1fterminal\x1flist\x1f--worktree\x1fname:fm-'"$id"$'\x1f--limit\x1f200\x1f--json' \
+    "the doorbell path did not resolve the recorded window"
+  assert_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-live-9\x1f--text\x1f: Firstmate instruction waiting:' \
+    "the doorbell did not ring through the live terminal handle"
+  assert_grep "terminal=term-stale" "$state/$id.meta" \
+    "fm-send must not rewrite the producer-owned terminal field"
+  assert_not_contains "$log_text" $'--terminal\x1fterm-live-9\x1f--text\x1f\x1f--enter' \
+    "an empty replacement must not receive bare inbox Enter"
+  # Keep explicit key delivery independent of the inbox response budget.
+  orca_case winz5-key
+  printf '{"ok":false,"error":{"code":"terminal_not_writable","message":"terminal_not_writable"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-live-9","writable":true,"connected":true}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-live-9","accepted":true}}}\n' > "$RESP/4.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-send.sh" "$id" --key Enter 2>&1 )
+  status=$?
+  expect_code 0 "$status" "--key Enter must deliver through the live window"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-live-9\x1f--text\x1f\x1f--enter\x1f--json' \
+    "--key Enter did not land on the live terminal handle"
+  assert_grep "terminal=term-stale" "$state/$id.meta" \
+    "the --key path must not rewrite the producer-owned terminal field either"
+  pass "fm-send.sh: a stale terminal's doorbell, steer record, and --key Enter all reach the live window with zero meta edits"
+}
+
+test_fm_send_doorbell_falls_back_when_window_unresolvable() {
+  local state id out status neutral record
+  id="oracawinz6"
+  state="$TMP_ROOT/winz6-state"
+  write_orca_window_meta "$state" "$id" term-stale "$state/worktree"
+  touch "$state/.last-watcher-beat"
+  orca_case winz6-doorbell
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_writable","message":"terminal_not_writable"}}\n' > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector_not_found"}}\n' > "$RESP/4.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "$id" "steer into the void" 2>&1 )
+  status=$?
+  expect_code 0 "$status" "a failed doorbell never fails a durably recorded steer"$'\n'"$out"
+  assert_contains "$out" "doorbell did not reach term-stale" \
+    "the unresolvable-window fallback must record today's exact durable refusal"
+  assert_contains "$out" "the watcher will re-ring" \
+    "the fallback must keep the re-rung doctrine visible"
+  record="$state/$id.inbox/001.msg"
+  [ -f "$record" ] || fail "the steer must remain durably recorded for the re-ring ladder"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-live' \
+    "no send may go out on an unproven handle when the window is unresolvable"
+  pass "fm-send.sh: an unresolvable window keeps the exact durable doorbell refusal and the re-ring contract"
+}
+
 test_dispatcher_sources_orca_and_routes_primitives() {
   local out
   orca_case dispatch
@@ -1347,6 +1571,590 @@ test_dispatcher_sources_orca_and_routes_primitives() {
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate orca; fm_backend_capture orca term-123 9' "$ROOT" )
   [ "$out" = "via dispatch" ] || fail "dispatcher should route capture to the Orca adapter, got '$out'"
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
+}
+
+orca_stale_json() {
+  printf '%s\n' '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}'
+}
+
+orca_live_list_json() {  # <handle> <title>
+  printf '{"ok":true,"result":{"terminals":[{"handle":"%s","title":"%s","connected":true,"writable":true,"orphaned":false}],"truncated":false}}\n' "$1" "$2"
+}
+
+test_send_text_submit_healthy_terminal_does_not_list_windows() {
+  local state id wt err out before
+  id="orcawinhealthy"
+  wt="$TMP_ROOT/win-healthy-wt"
+  state="$TMP_ROOT/win-healthy-state"
+  write_orca_window_meta "$state" "$id" "term-healthy" "$wt"
+  before=$(cat "$state/$id.meta")
+  orca_case window-healthy
+  printf '{"ok":true,"result":{"send":{"handle":"term-healthy","accepted":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-healthy","accepted":true}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/3.out"
+  err="$CASE_DIR/err"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-healthy "hello captain" 3 0.01 0.01' "$ROOT" 2>"$err" )
+  [ "$out" = empty ] || fail "healthy terminal should still confirm empty, got '$out'"
+  [ ! -s "$err" ] || fail "healthy terminal should not print a resolution error: $(cat "$err")"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-healthy'$'\x1f''--text'$'\x1f''hello captain'$'\x1f''--json' \
+    "healthy submit did not type through the recorded terminal"
+  assert_not_contains "$(cat "$LOG")" $'terminal'$'\x1f''list' \
+    "a live terminal id must not consult the window inventory"
+  [ "$(cat "$state/$id.meta")" = "$before" ] || fail "healthy submit rewrote meta"
+  pass "fm_backend_orca_send_text_submit: a healthy terminal id is byte-identical and does not list windows"
+}
+
+test_send_text_submit_stale_terminal_uses_window_name() {
+  local state id wt err out before
+  id="orcawinstale"
+  wt="$TMP_ROOT/win-stale-wt"
+  state="$TMP_ROOT/win-stale-state"
+  write_orca_window_meta "$state" "$id" "term-stale-win" "$wt"
+  before=$(cat "$state/$id.meta")
+  orca_case window-stale-named
+  orca_stale_json > "$RESP/1.out"
+  orca_live_list_json "term-live-win" "pi - fm-$id" > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-live-win","accepted":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-live-win","accepted":true}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/6.out"
+  err="$CASE_DIR/err"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-stale-win "hello captain" 3 0.01 0.01' "$ROOT" 2>"$err" )
+  [ "$out" = empty ] || fail "stale terminal with a live window should confirm empty, got '$out' log=$(cat "$LOG" | tr '\037' '|')"
+  assert_not_contains "$(cat "$err")" "terminal handle stale" \
+    "a recovered window send must not surface the stale-handle refusal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''list'$'\x1f''--worktree'$'\x1f''name:fm-'$id$'\x1f''--limit'$'\x1f''200'$'\x1f''--json' \
+    "stale submit did not ask Orca for the window by its native name selector"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-live-win'$'\x1f''--text'$'\x1f''hello captain'$'\x1f''--json' \
+    "stale submit did not type through the live window handle"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-live-win'$'\x1f''--text'$'\x1f\x1f''--enter'$'\x1f''--json' \
+    "stale submit did not send Enter to the live window"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-live-win' \
+    "composer read after a window retry must use the live handle"
+  [ "$(cat "$state/$id.meta")" = "$before" ] || fail "window resolution rewrote meta"
+  pass "fm_backend_orca_send_text_submit: a stale terminal id delivers through the recorded window name"
+}
+
+test_send_text_submit_missing_named_window_refuses_other_title() {
+  local state id wt out
+  id="orcawintitle"
+  wt="$TMP_ROOT/win-title-wt"
+  state="$TMP_ROOT/win-title-state"
+  write_orca_window_meta "$state" "$id" "term-stale-title" "$wt"
+  orca_case window-stale-title
+  orca_stale_json > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector_not_found"}}\n' > "$RESP/2.out"
+  orca_live_list_json "term-other-home" "Follow worker | fm-$id" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-stale-title "typed once" 1 0.01 0.01' "$ROOT" 2>"$CASE_DIR/err" )
+  [ "$out" = send-failed ] || fail "a missing named window must refuse, got '$out'"
+  [ "$(cat "$RESP/.count")" -eq 2 ] || fail "a missing named window must stop after its selector fails"
+  assert_not_contains "$(cat "$LOG")" $'--terminal\x1fterm-other-home' \
+    "a title in another home must not receive input"
+  pass "fm_backend_orca_send_text_submit: a missing named window never scans other homes"
+}
+
+test_send_key_stale_terminal_uses_window_for_enter_and_interrupt() {
+  local state id wt
+  id="orcawinkey"
+  wt="$TMP_ROOT/win-key-wt"
+  state="$TMP_ROOT/win-key-state"
+  write_orca_window_meta "$state" "$id" "term-stale-key" "$wt"
+  orca_case window-stale-key
+  orca_stale_json > "$RESP/1.out"
+  orca_live_list_json "term-live-key" "fm-$id" > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/4.out"
+  orca_stale_json > "$RESP/5.out"
+  orca_live_list_json "term-live-key" "fm-$id" > "$RESP/6.out"
+  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/7.out"
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_key term-stale-key Enter; fm_backend_orca_send_key term-stale-key C-c' "$ROOT" \
+    || fail "Enter and C-c should succeed once the window resolves"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-live-key'$'\x1f''--text'$'\x1f\x1f''--enter'$'\x1f''--json' \
+    "Enter did not follow the live window handle"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-live-key'$'\x1f''--interrupt'$'\x1f''--json' \
+    "C-c did not follow the live window handle"
+  pass "fm_backend_orca_send_key: Enter and C-c resolve a stale terminal through the same window"
+}
+
+test_send_refuses_when_window_is_also_missing() {
+  local state id wt out err status
+  id="orcawinmiss"
+  wt="$TMP_ROOT/win-miss-wt"
+  state="$TMP_ROOT/win-miss-state"
+  write_orca_window_meta "$state" "$id" "term-stale-miss" "$wt"
+  orca_case window-missing
+  orca_stale_json > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector_not_found"}}\n' > "$RESP/2.out"
+  err="$CASE_DIR/err"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-stale-miss "hello" 1 0.01 0.01' "$ROOT" 2>"$err" )
+  [ "$out" = send-failed ] || fail "a missing window should keep today's send-failed verdict, got '$out'"
+  assert_contains "$(cat "$err")" "terminal handle stale" \
+    "a missing window should replay the original stale-handle refusal"
+  if grep -q $'terminal\x1fsend\x1f--terminal\x1fterm-live' "$LOG"; then
+    fail "a missing window must not send to a guessed terminal"
+  fi
+  orca_stale_json > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"selector_not_found"}}\n' > "$RESP/4.out"
+  set +e
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_key term-stale-miss Enter' "$ROOT" >"$CASE_DIR/key.out" 2>"$CASE_DIR/key.err"
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a missing window should keep today's nonzero --key failure"
+  assert_contains "$(cat "$CASE_DIR/key.err")" "terminal handle stale" \
+    "a missing window key should replay the stale-handle refusal"
+  pass "Orca send: a stale terminal whose window is also missing keeps today's refusal"
+}
+
+test_send_does_not_retarget_on_a_non_stale_failure() {
+  local state id wt out
+  id="orcawinother"
+  wt="$TMP_ROOT/win-other-wt"
+  state="$TMP_ROOT/win-other-state"
+  write_orca_window_meta "$state" "$id" "term-other-fail" "$wt"
+  orca_case window-other-fail
+  printf '1\n' > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-other-fail "hello" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "a non-stale send failure should stay send-failed, got '$out'"
+  assert_not_contains "$(cat "$LOG")" $'terminal'$'\x1f''list' \
+    "only a stale handle may consult the window inventory"
+  pass "fm_backend_orca_send_text_submit: a non-stale failure is not retargeted"
+}
+
+test_ambiguous_window_does_not_guess_a_terminal() {
+  local state id wt out err
+  id="orcawinambig"
+  wt="$TMP_ROOT/win-ambig-wt"
+  state="$TMP_ROOT/win-ambig-state"
+  write_orca_window_meta "$state" "$id" "term-stale-ambig" "$wt"
+  orca_case window-ambiguous
+  orca_stale_json > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-a","title":"fm-orcawinambig","connected":true,"writable":true},{"handle":"term-b","title":"other-b","connected":true,"writable":true}],"truncated":false}}\n' > "$RESP/2.out"
+  err="$CASE_DIR/err"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-stale-ambig "hello" 1 0.01 0.01' "$ROOT" 2>"$err" )
+  [ "$out" = send-failed ] || fail "an ambiguous window must not guess, got '$out'"
+  assert_contains "$(cat "$err")" "terminal handle stale" "ambiguous window should keep the original refusal"
+  assert_not_contains "$(cat "$LOG")" $'--terminal'$'\x1f''term-a' "ambiguous window sent to term-a"
+  assert_not_contains "$(cat "$LOG")" $'--terminal'$'\x1f''term-b' "ambiguous window sent to term-b"
+  assert_not_contains "$(cat "$LOG")" $'terminal'$'\x1f''list'$'\x1f''--limit' \
+    "an ambiguous named workspace must not fall through to a global title scan"
+  pass "fm_backend_orca_send_text_submit: an ambiguous named window is not guessed"
+}
+
+test_fm_send_doorbell_reaches_live_window_and_missing_window_rering() {
+  local state id wt neutral err rc record body
+  id="orcawinring"
+  wt="$TMP_ROOT/win-ring-wt"
+  state="$TMP_ROOT/win-ring-state"
+  write_orca_window_meta "$state" "$id" "term-stale-ring" "$wt"
+  touch "$state/.last-watcher-beat"
+  orca_case window-ring
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  # Two composer pre-reads see the stale id, then the typed doorbell does too,
+  # then the native name selector returns the live pane.
+  orca_stale_json > "$RESP/1.out"
+  orca_stale_json > "$RESP/2.out"
+  orca_stale_json > "$RESP/3.out"
+  orca_live_list_json "term-live-ring" "fm-$id" > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/7.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/8.out"
+  err="$CASE_DIR/send.err"
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "fm-$id" "hello window" >"$CASE_DIR/send.out" 2>"$err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a doorbell that reaches the live window should still be a sent steer, rc=$rc err=$(cat "$err") log=$(tr '\037' '|' < "$LOG")"
+  assert_not_contains "$(cat "$err")" "doorbell did not reach" \
+    "a resolved window must not record a missed doorbell"
+  record="$state/$id.inbox/001.msg"
+  [ -f "$record" ] || fail "window delivery did not keep the durable inbox record"
+  body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$record")
+  [ "$body" = "hello window" ] || fail "inbox body changed, got '$body'"
+  assert_contains "$(cat "$LOG")" $'--terminal'$'\x1f''term-live-ring'$'\x1f''--text'$'\x1f'': Firstmate instruction waiting:' \
+    "the doorbell was not typed into the live window"
+  assert_grep "terminal=term-stale-ring" "$state/$id.meta" "doorbell delivery rewrote the recorded terminal"
+
+  # Same record shape, but the window cannot be found: today's refusal, and the watcher re-rings.
+  id="orcawinmissring"
+  write_orca_window_meta "$state" "$id" "term-stale-missring" "$wt"
+  : > "$LOG"
+  rm -f "$RESP"/.count "$RESP"/*.out "$RESP"/*.exit
+  orca_stale_json > "$RESP/1.out"
+  orca_stale_json > "$RESP/2.out"
+  orca_stale_json > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector_not_found"}}\n' > "$RESP/4.out"
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "fm-$id" "hello missing" >"$CASE_DIR/miss.out" 2>"$err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a missed doorbell is still a durably sent steer, rc=$rc err=$(cat "$err")"
+  assert_contains "$(cat "$err")" "doorbell did not reach term-stale-missring" \
+    "the refusal must name the recorded terminal, not a guessed handle"
+  assert_contains "$(cat "$err")" "the watcher will re-ring" \
+    "a missed window must keep the re-ring contract"
+  [ -f "$state/$id.inbox/001.msg" ] || fail "the missed doorbell dropped the durable steer"
+  if grep -q $'terminal\x1fsend\x1f--terminal\x1fterm-live' "$LOG"; then
+    fail "a missing window doorbell guessed a terminal: $(tr '\037' '|' < "$LOG")"
+  fi
+  pass "fm-send: a stale Orca window receives the doorbell, and a missing window keeps the re-ring refusal"
+}
+
+test_send_stale_exit_status_still_resolves_window() {
+  local state id wt out fb code channel
+  id="orcawinexit"
+  wt="$TMP_ROOT/win-exit-wt"
+  state="$TMP_ROOT/win-exit-state"
+  write_orca_window_meta "$state" "$id" "term-stale-exit" "$wt"
+  for code in terminal_handle_stale terminal_not_writable runtime_busy; do
+    for channel in stdout stderr; do
+      orca_case "window-stale-exit-$code-$channel"
+      fb="$FB"
+      cat > "$fb/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_ORCA_LOG:?}"
+{
+  printf 'orca'
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+if [ "${1:-}" = terminal ] && [ "${2:-}" = send ] && [ "${4:-}" = term-stale-exit ]; then
+  if [ "$FM_ORCA_RESTART_CHANNEL" = stderr ]; then
+    printf '%s\n' "$FM_ORCA_RESTART_ERROR" >&2
+  else
+    printf '{"ok":false,"error":{"code":"%s","message":"%s"}}\n' "$FM_ORCA_RESTART_ERROR" "$FM_ORCA_RESTART_ERROR"
+  fi
+  exit 1
+fi
+if [ "${1:-}" = terminal ] && [ "${2:-}" = list ]; then
+  printf '%s\n' '{"ok":true,"result":{"terminals":[{"handle":"term-live-exit","title":"fm-orcawinexit","connected":true,"writable":true}],"truncated":false}}'
+  exit 0
+fi
+if [ "${1:-}" = terminal ] && [ "${2:-}" = send ]; then
+  printf '%s\n' '{"ok":true,"result":{"send":{"accepted":true}}}'
+  exit 0
+fi
+if [ "${1:-}" = terminal ] && [ "${2:-}" = read ]; then
+  printf '%s\n' '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}'
+  exit 0
+fi
+exit 1
+SH
+      chmod +x "$fb/orca"
+      out=$( FM_ORCA_RESTART_ERROR="$code" FM_ORCA_RESTART_CHANNEL="$channel" PATH="$fb:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+        FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+        bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-stale-exit "hello captain" 1 0.01 0.01' "$ROOT" 2>"$CASE_DIR/err" )
+      if [ "$code" = runtime_busy ]; then
+        [ "$out" = send-failed ] || fail "unrelated $channel error must refuse, got '$out'"
+        if [ "$channel" = stderr ]; then
+          assert_contains "$(cat "$CASE_DIR/err")" runtime_busy "unrelated stderr errors must be replayed"
+        else
+          [ ! -s "$CASE_DIR/err" ] || fail "unrelated stdout errors must preserve the original empty stderr"
+        fi
+        assert_not_contains "$(cat "$LOG")" $'terminal\x1flist' "unrelated errors must not retarget"
+      else
+        [ "$out" = empty ] || fail "exit-1 $code on $channel should deliver, got '$out' err=$(cat "$CASE_DIR/err")"
+        assert_contains "$(cat "$LOG")" $'--terminal\x1fterm-live-exit\x1f--text\x1fhello captain' \
+          "exit-1 $code on $channel did not retry through the live window"
+      fi
+    done
+  done
+  pass "Orca submit: nonzero restart errors resolve from stdout or stderr, unrelated errors refuse"
+}
+
+test_fm_send_key_uses_live_window() {
+  local state id wt neutral err rc
+  id="orcawinsendkey"
+  wt="$TMP_ROOT/win-sendkey-wt"
+  state="$TMP_ROOT/win-sendkey-state"
+  write_orca_window_meta "$state" "$id" "term-stale-sendkey" "$wt"
+  touch "$state/.last-watcher-beat"
+  orca_case window-send-key
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  orca_stale_json > "$RESP/1.out"
+  orca_live_list_json "term-live-sendkey" "fm-$id" > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/4.out"
+  err="$CASE_DIR/err"
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-send.sh" "fm-$id" --key Enter >"$CASE_DIR/out" 2>"$err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-send --key Enter should reach the live window, rc=$rc err=$(cat "$err") log=$(tr '\037' '|' < "$LOG")"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-live-sendkey'$'\x1f''--text'$'\x1f\x1f''--enter'$'\x1f''--json' \
+    "fm-send --key Enter did not use the live window handle"
+  : > "$LOG"
+  orca_stale_json > "$RESP/5.out"
+  orca_live_list_json "term-live-sendkey" "fm-$id" > "$RESP/6.out"
+  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/7.out"
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-send.sh" "fm-$id" --key C-c >"$CASE_DIR/out" 2>"$err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-send --key C-c should reach the live window, rc=$rc err=$(cat "$err") log=$(tr '\037' '|' < "$LOG")"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-live-sendkey'$'\x1f''--interrupt'$'\x1f''--json' \
+    "fm-send --key C-c did not use the live window handle"
+  pass "fm-send --key: Enter and C-c reach the live window without editing meta"
+}
+
+test_retargeted_dialog_blocks_text_and_enter_but_allows_interrupt() {
+  local code mode state id before out status neutral n
+  for code in terminal_handle_stale terminal_not_writable; do
+    for mode in literal submit doorbell enter interrupt; do
+      orca_case "window-dialog-$mode-$code"
+      state="$CASE_DIR/state"
+      id="orcawindialog"
+      write_orca_window_meta "$state" "$id" term-stale "$CASE_DIR/worktree"
+      before=$(cat "$state/$id.meta")
+      n=1
+      case "$mode" in
+        submit|doorbell)
+          printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/$n.out"
+          n=$((n + 1))
+          ;;
+      esac
+      if [ "$mode" = doorbell ]; then
+        printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/$n.out"
+        n=$((n + 1))
+      fi
+      printf '{"ok":false,"error":{"code":"%s","message":"%s"}}\n' "$code" "$code" > "$RESP/$n.out"
+      n=$((n + 1))
+      orca_live_list_json term-live-dialog "fm-$id" > "$RESP/$n.out"
+      n=$((n + 1))
+      if [ "$mode" = interrupt ]; then
+        printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' > "$RESP/$n.out"
+      else
+        printf '{"ok":true,"result":{"terminal":{"tail":["Background work is running","❯ 1. Exit and stop tasks","Enter to confirm · Esc to cancel"]}}}\n' > "$RESP/$n.out"
+      fi
+      if [ "$mode" = doorbell ]; then
+        touch "$state/.last-watcher-beat"
+        neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+        if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+          FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
+          "$ROOT/bin/fm-send.sh" "$id" "keep this steer" 2>&1 ); then status=0; else status=$?; fi
+        expect_code 0 "$status" "a blocked doorbell must keep the durable steer"
+        assert_contains "$out" "doorbell did not reach term-stale" "a blocked doorbell must report non-delivery"
+        [ -f "$state/$id.inbox/001.msg" ] || fail "a blocked doorbell lost the steer"
+      else
+        if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+          FM_HOME="$CASE_DIR" FM_STATE_OVERRIDE="$state" \
+          bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/orca.sh";
+            case "$1" in
+              literal) fm_backend_orca_send_literal term-stale hello ;;
+              submit) fm_backend_send_text_submit orca term-stale hello 1 0 0 ;;
+              enter) fm_backend_send_key orca term-stale Enter ;;
+              interrupt) fm_backend_send_key orca term-stale C-c ;;
+            esac' "$ROOT" "$mode" 2>"$CASE_DIR/err" ); then status=0; else status=$?; fi
+        case "$mode" in
+          submit) [ "$out" = send-failed ] || fail "blocked submit must report send-failed, got '$out'" ;;
+          interrupt) expect_code 0 "$status" "C-c must remain available" ;;
+          *) [ "$status" -ne 0 ] || fail "$mode must refuse the replacement dialog" ;;
+        esac
+        if [ "$mode" != interrupt ]; then
+          assert_contains "$(cat "$CASE_DIR/err")" "blocked on a prompt" "$mode must report the blocking dialog"
+        fi
+      fi
+      if [ "$mode" = interrupt ]; then
+        assert_contains "$(cat "$LOG")" $'--terminal\x1fterm-live-dialog\x1f--interrupt' "C-c must reach the live pane"
+        assert_not_contains "$(cat "$LOG")" $'terminal\x1fread\x1f--terminal\x1fterm-live-dialog' "C-c must remain independent of dialog checks"
+      else
+        assert_not_contains "$(cat "$LOG")" $'terminal\x1fsend\x1f--terminal\x1fterm-live-dialog' "$mode must never type or confirm the dialog"
+      fi
+      [ "$(cat "$state/$id.meta")" = "$before" ] || fail "$mode rewrote metadata"
+    done
+  done
+  pass "Orca retargeting: blocking dialogs refuse text and Enter while C-c stays available"
+}
+
+test_inbox_retarget_preserves_pending_content_and_explicit_input() {
+  local code mode state id rec bell before out expected events held drops busy
+  for code in terminal_handle_stale terminal_not_writable; do
+    for mode in cursor-draft cursor-own cursor-busy unreadable initial-draft initial-own initial-busy initial-empty initial-empty-busy retry-draft retry-own retry-busy second-draft second-own second-busy rering-draft typed Enter C-c scope; do
+      orca_case "inbox-retarget-$code-$mode"
+      state="$CASE_DIR/state"
+      id=orcainboxdraft
+      write_orca_window_meta "$state" "$id" term-stale "$CASE_DIR/worktree"
+      before=$(cat "$state/$id.meta")
+      rec=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_write "$1" "$2" "durable steer" fire-and-forget' "$ROOT" "$state" "$id")
+      bell=$(bash -c '. "$0/bin/fm-task-inbox-lib.sh"; fm_task_inbox_doorbell_line "$1"' "$ROOT" "$rec")
+      expected=0
+      drops=0
+      busy=unknown
+      held='human unfinished draft'
+      case "$mode" in
+        *-own) held=$bell ;;
+        *-busy) held=$bell; busy=busy; expected=1 ;;
+        initial-empty) held= ;;
+        *-draft) expected=1 ;;
+      esac
+      case "$mode" in
+        cursor-*|unreadable) expected=1 ;;
+        initial-empty-busy) held=; busy=unknown; expected=1 ;;
+      esac
+      case "$mode" in
+        initial-empty|initial-own|retry-own|second-own) expected=1 ;;
+      esac
+      case "$mode" in initial-own|retry-own) drops=1 ;; esac
+      printf '%s' "$held" > "$CASE_DIR/composer"
+      printf '%s' "$bell" > "$CASE_DIR/old-composer"
+      printf '%s' "$drops" > "$CASE_DIR/drops"
+      : > "$CASE_DIR/inputs"
+      : > "$CASE_DIR/submitted"
+      cat > "$FB/orca" <<'JS'
+#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+const dir = process.env.FM_ORCA_TEST_DIR;
+const mode = process.env.FM_ORCA_TEST_MODE;
+const terminal = args[args.indexOf('--terminal') + 1];
+const enter = args.includes('--enter');
+fs.appendFileSync(process.env.FM_ORCA_LOG, ['orca', ...args].join('\x1f') + '\n');
+function reply(data) { process.stdout.write(JSON.stringify(data) + '\n'); }
+function stale() {
+  reply({ok:false, error:{code:process.env.FM_ORCA_TEST_CODE, message:process.env.FM_ORCA_TEST_CODE}});
+  process.exitCode = 1;
+}
+function accepted() { reply({ok:true, result:{send:{accepted:true}}}); }
+if (args[1] === 'list') {
+  reply({ok:true, result:{terminals:[{handle:'term-live', writable:true, connected:true}]}});
+} else if (args[1] === 'read') {
+  if (terminal === 'term-live' && mode === 'unreadable') {
+    process.exitCode = 1;
+  } else if (terminal === 'term-stale' && !/^(retry|second)-/.test(mode)) {
+    stale();
+  } else {
+    const body = fs.readFileSync(dir + (terminal === 'term-stale' ? '/old-composer' : '/composer'), 'utf8');
+    const rule = '─'.repeat(body.length + 4);
+    // Cursor's captured plain-text screen has no composer border, and its
+    // footer includes the worktree path. Preserve this real shape rather
+    // than replacing it with the boxed composer the classifier understands.
+    const tail = mode.startsWith('cursor-')
+      ? ['  → ' + body, '  Ask (shift+tab to cycle)', '  Auto · 11.6%',
+         '  ' + dir + '/worktree', '  · fm-orcainboxdraft']
+      : ['╭' + rule + '╮', '│ > ' + body + ' │', '╰' + rule + '╯'];
+    if (mode === 'cursor-busy') tail.unshift(' ⠠⠛ Working');
+    if (mode === 'initial-empty-busy') tail.unshift('ctrl+c to stop');
+    reply({ok:true, result:{terminal:{tail}}});
+  }
+} else if (args[1] === 'send') {
+  if (terminal === 'term-stale') {
+    if (mode.startsWith('second-') && enter && !fs.existsSync(dir + '/old-enter')) {
+      fs.writeFileSync(dir + '/old-enter', '1');
+      fs.appendFileSync(dir + '/inputs', 'old Enter\n');
+      accepted();
+    } else {
+      stale();
+    }
+  } else {
+    if (args.includes('--interrupt')) {
+      fs.appendFileSync(dir + '/inputs', 'live C-c\n');
+    } else if (enter) {
+      fs.appendFileSync(dir + '/inputs', 'live Enter\n');
+      const drops = Number(fs.readFileSync(dir + '/drops', 'utf8'));
+      if (drops > 0) {
+        fs.writeFileSync(dir + '/drops', String(drops - 1));
+      } else {
+        fs.writeFileSync(dir + '/submitted', fs.readFileSync(dir + '/composer', 'utf8'));
+        fs.writeFileSync(dir + '/composer', '');
+      }
+    } else {
+      const text = args[args.indexOf('--text') + 1];
+      fs.appendFileSync(dir + '/inputs', 'live text\n');
+      fs.appendFileSync(dir + '/composer', text);
+    }
+    accepted();
+  }
+} else {
+  process.exitCode = 1;
+}
+JS
+      chmod +x "$FB/orca"
+      out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_TEST_DIR="$CASE_DIR" \
+        FM_ORCA_TEST_MODE="$mode" FM_ORCA_TEST_CODE="$code" FM_ORCA_TEST_BUSY="$busy" \
+        FM_STATE_OVERRIDE="$state" FM_HOME="$CASE_DIR" \
+        bash -c '. "$0/bin/fm-task-inbox-lib.sh";
+          fm_backend_busy_state() {
+            if [ "$2" = term-live ]; then printf "%s" "$FM_ORCA_TEST_BUSY"; else printf unknown; fi
+          }
+          case "$1" in
+            cursor-*)
+              [ "$(fm_backend_composer_state orca term-live)" = unknown ] || exit 1 ;;
+            initial-empty-busy)
+              [ "$(fm_backend_composer_state orca term-live)" = empty ] || exit 1
+              [ "$(fm_backend_busy_state orca term-live)" = unknown ] || exit 1 ;;
+          esac
+          rc=0
+          case "$1" in
+            typed)
+              verdict=$(fm_backend_send_text_submit orca term-stale "explicit steer" 2 0 0)
+              [ "$verdict" = empty ] || exit 1 ;;
+            Enter|C-c) fm_backend_send_key orca term-stale "$1" || rc=$? ;;
+            *)
+              fm_task_inbox_ring orca term-stale "$2" || rc=$?
+              case "$1" in
+                rering-draft)
+                  [ "$rc" -eq 1 ] || exit 1
+                  rc=0
+                  fm_task_inbox_ring orca term-stale "$2" || rc=$? ;;
+                scope)
+                  [ "$rc" -eq 1 ] || exit 1
+                  rc=0
+                  fm_backend_send_key orca term-stale Enter || rc=$? ;;
+              esac ;;
+          esac
+          printf "%s" "$rc"' "$ROOT" "$mode" "$rec" 2>"$CASE_DIR/err" ) \
+        || fail "$mode failed: $(cat "$CASE_DIR/err")"
+      [ "$out" = "$expected" ] || fail "$code $mode: expected ring status $expected, got '$out'"
+      events=$(cat "$CASE_DIR/inputs")
+      if [[ "$mode" =~ ^(initial-empty|initial-own|retry-own|second-own)$ ]]; then
+        [ "$(printf "%s\n" "$events" | grep -Fxc 'live Enter')" = 1 ] || fail "$mode retried Enter on replacement"
+        if [ -s "$CASE_DIR/submitted" ]; then
+          [ "$(cat "$CASE_DIR/submitted")" = "$bell" ] || fail "$mode submitted other content"
+        else
+          [ "$(cat "$CASE_DIR/composer")" = "$bell" ] || fail "$mode lost the pending doorbell"
+        fi
+      elif [ "$expected" -eq 1 ]; then
+        assert_not_contains "$events" live "$mode sent replacement input despite pending content"
+        [ "$(cat "$CASE_DIR/composer")" = "$held" ] || fail "$mode changed the protected composer"
+        [ ! -s "$CASE_DIR/submitted" ] || fail "$mode submitted pending content"
+      else
+        case "$mode" in
+          typed) [ "$(cat "$CASE_DIR/submitted")" = "${held}explicit steer" ] || fail "explicit typed semantics changed" ;;
+          Enter|scope) [ "$(cat "$CASE_DIR/submitted")" = "$held" ] || fail "explicit Enter semantics changed" ;;
+          C-c) [ "$events" = 'live C-c' ] || fail "explicit C-c did not reach the live pane" ;;
+          *)
+            [ "$(cat "$CASE_DIR/submitted")" = "$bell" ] || fail "$mode did not submit exactly its own doorbell"
+            if [ "$mode" = initial-empty ]; then
+              assert_contains "$events" 'live text' "an empty live composer must receive the doorbell"
+            else
+              assert_not_contains "$events" 'live text' "$mode duplicated a pending own doorbell"
+            fi
+            [ ! -s "$CASE_DIR/composer" ] || fail "$mode left its doorbell pending"
+            ;;
+        esac
+      fi
+      [ -f "$rec" ] || fail "$mode removed the durable steer"
+      [ "$(cat "$state/$id.meta")" = "$before" ] || fail "$mode rewrote metadata"
+    done
+  done
+  pass "Orca inbox: replacement panes preserve drafts, busy deferrals, own-doorbell retries, and explicit input"
 }
 
 test_capture_reads_terminal_tail_json
@@ -1367,6 +2175,12 @@ test_send_helpers_reject_orca_error_json
 test_send_key_enter_and_interrupt
 test_send_key_refuses_unknown_key
 test_send_key_refuses_escape_until_supported
+test_send_text_submit_resolves_live_window_when_terminal_stale
+test_send_key_resolves_live_window_for_enter_and_interrupt
+test_healthy_terminal_send_keeps_the_recorded_byte_path
+test_send_key_falls_back_when_window_unresolvable
+test_fm_send_doorbell_and_key_reach_live_window_when_terminal_stale
+test_fm_send_doorbell_falls_back_when_window_unresolvable
 test_kill_is_best_effort_close
 test_kill_refuses_when_the_orca_cli_is_absent
 test_remove_worktree_refuses_empty_id
@@ -1401,3 +2215,15 @@ test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child
+test_send_text_submit_healthy_terminal_does_not_list_windows
+test_send_text_submit_stale_terminal_uses_window_name
+test_send_text_submit_missing_named_window_refuses_other_title
+test_send_key_stale_terminal_uses_window_for_enter_and_interrupt
+test_send_refuses_when_window_is_also_missing
+test_send_does_not_retarget_on_a_non_stale_failure
+test_ambiguous_window_does_not_guess_a_terminal
+test_fm_send_doorbell_reaches_live_window_and_missing_window_rering
+test_fm_send_key_uses_live_window
+test_send_stale_exit_status_still_resolves_window
+test_retargeted_dialog_blocks_text_and_enter_but_allows_interrupt
+test_inbox_retarget_preserves_pending_content_and_explicit_input

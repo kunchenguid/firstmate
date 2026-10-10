@@ -1903,6 +1903,15 @@ result.runtime.state=ready
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
 
+Restart-error and worktree-selector behavior were observed on 2026-09-22 against the Orca 1.4.206 runtime with a window that had been restarted by hand: the recorded `term_*` handle read back `result.terminal.status=exited`, and every `orca terminal send` on it failed with `error.code=terminal_not_writable`, while the same worktree's live terminal was a different `term_*` handle.
+
+```sh
+orca terminal list --worktree name:<window> --json
+```
+
+Returned `result.terminals[0]` with the fresh handle, `writable=true`, `connected=true` for the recorded `window=`; the bare name without the `name:` prefix was refused with `selector_not_found`, and `path:<absolute worktree path>` resolved the same pane.
+The accepted selector forms Orca reports are `id:<repo-id>::<absolute-path>` and `path:<absolute path>`; `name:<worktree name>` is accepted live.
+
 ```sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
@@ -1910,6 +1919,14 @@ tests/fm-bootstrap.test.sh
 ```
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+
+On 2026-10-08, Orca CLI 1.4.222 did not accept a window title as a terminal handle.
+`orca terminal show --terminal title:fm-android-compare-slice3 --json`, the same call with `name:` and `window:` prefixes, and the bare title all exited 1 with `error.code=terminal_handle_stale`.
+`orca terminal list --worktree name:fm-sparkdash-deploy-macnode --json` returned the one live terminal whose handle matched that task's recorded `terminal=`, and `name:fm-does-not-exist-probe` exited 1 with `selector_not_found`.
+The current send-time contract is owned by [`orca-backend.md`](../orca-backend.md#task-shape-and-metadata).
+`tests/fm-backend-orca.test.sh` pins fake-CLI delivery for both restart errors, unchanged healthy-handle commands, missing and ambiguous selector refusal, replacement-dialog guards, inbox draft and busy deferral, exact-own-doorbell retries, and explicit typed and key semantics.
+`tests/fm-orca-submit-restart.test.sh` covers inbox restarts before typing and before Enter, replacement content changing during settle, retained watcher retry marks, and the original endpoint's two-Enter budget.
+`tests/fm-orca-typed-restart.test.sh` covers a typed slash command lost during restart, unconfirmed exit 3 without retyping or further Enter attempts, and unchanged original-endpoint submission.
 
 ## cmux
 
