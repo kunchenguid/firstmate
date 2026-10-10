@@ -5643,6 +5643,7 @@ if [ "$BACKLOG_TRANSITION" = 1 ]; then
   trap 'SPAWN_DEFERRED_SIGNAL=TERM' TERM
 fi
 SPAWN_BACKLOG_COMMIT_STATUS=0
+SPAWN_ROLLBACK_REFRESH=0
 # Both the commit and its preservation read-back run under this task's meta
 # lock, so an unresponsive tasks-axi there would hold the lock - and every
 # lifecycle operation waiting on it - open ended, with even the deferred
@@ -5663,6 +5664,7 @@ fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
     if spawn_fresh_commit_rollback; then
+      SPAWN_ROLLBACK_REFRESH=1
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
     else
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
@@ -5673,6 +5675,11 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
 fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
+  if [ "$SPAWN_ROLLBACK_REFRESH" = 1 ]; then
+    fm_lock_release "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=0
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+  fi
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
@@ -5693,6 +5700,11 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+# The refresh before launch delivery ran while the record existed but its backlog
+# item was still Queued, so the ledger it published reads that live child as
+# unowned. Republish now that the In-flight commit is durable; no other trigger
+# is guaranteed to run soon in a home whose foreground turn is not supervising.
+"$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

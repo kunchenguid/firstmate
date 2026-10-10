@@ -667,6 +667,35 @@ test_catchall_scan_surfaces_a_masked_event() {
   pass "the away-mode catch-all scan surfaces a masked event once"
 }
 
+# A fresh away session has no daemon marker of its own. The primary session's
+# presentation cursor already records what it was shown, so the first catch-all
+# scan must start there: replaying every historical outcome as a new escalation
+# floods the away digest, while anything appended past the cursor still surfaces.
+test_catchall_first_scan_starts_at_the_presented_cursor() {
+  local dir state ident presented out
+  dir=$(make_supercase catchall-presented-cursor)
+  state="$dir/state"
+  printf 'done: historical outcome one\ndone: historical outcome two\n' > "$state/cursor-c1.status"
+  ident=$(_fm_open_decisions_file_ident "$state/cursor-c1.status")
+  presented=$(log_size "$state/cursor-c1.status")
+  printf 'cursor-c1\t%s\t%s\t0\n' "$ident" "$presented" > "$state/.status-presentation-cursor"
+  [ ! -e "$state/.subsuper-seen-status-cursor-c1" ] || fail "fixture must start without a daemon marker"
+  [ "$(status_seen_offset "$state" cursor-c1)" = "$presented" ] \
+    || fail "a marker-less daemon did not start at the presented cursor"
+  printf 'needs-decision [key=fresh]: appended after the cursor\n' >> "$state/cursor-c1.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"appended after the cursor"*) ;; *) fail "an event past the presented cursor did not surface: $out" ;; esac
+  case "$out" in *"historical outcome"*) fail "the first scan replayed history the primary session already presented: $out" ;; esac
+  # A log whose identity changed is not the presented log, so nothing is assumed.
+  printf 'cursor-c2\tother-ident\t10\t0\n' > "$state/.status-presentation-cursor"
+  printf 'done: unrelated\n' > "$state/cursor-c2.status"
+  [ "$(status_seen_offset "$state" cursor-c2)" = 0 ] \
+    || fail "a cursor row for a different log identity moved the daemon position"
+  pass "the catch-all's first scan starts at the primary session's presented cursor"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -3319,6 +3348,7 @@ test_transient_unreadable_signal_recovers_without_advancing
 test_permission_recovery_reclassifies_catchall_status
 test_permanent_classification_failure_is_reported_and_acknowledged
 test_catchall_scan_surfaces_a_masked_event
+test_catchall_first_scan_starts_at_the_presented_cursor
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale
