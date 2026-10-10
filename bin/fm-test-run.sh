@@ -27,6 +27,12 @@
 #
 # Aggregation (no suite execution):
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
+#   stdout: FM_TEST_AGGREGATE lanes=<n> total=<n> failed=<n> skipped_gate=<n>
+#           critical_path_duration_ms=<n>
+#   When both portable parallel artifacts are present, that line also includes
+#   portable_parallel_1_ms=<n> portable_parallel_2_ms=<n> imbalance_ms=<n>
+#   without failing.
+#   docs/fm-test-portable-shards.md owns why that observation stays non-failing.
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run. Each
@@ -1233,9 +1239,14 @@ failed = 0
 skipped = 0
 total = 0
 wall_ms = 0
+parallel_ms = {}
 for path in inputs:
     doc = json.loads(path.read_text(encoding="utf-8"))
     summary = doc.get("summary") or {}
+    duration_ms = int(summary.get("duration_ms") or 0)
+    selection = str(doc.get("selection") or "").split(";", 1)[0]
+    if selection in ("lane=portable-parallel-1", "lane=portable-parallel-2"):
+        parallel_ms[selection] = duration_ms
     lane = {
         "path": str(path),
         "run_id": doc.get("run_id"),
@@ -1248,7 +1259,7 @@ for path in inputs:
     total += int(summary.get("total") or 0)
     failed += int(summary.get("failed") or 0)
     skipped += int(summary.get("skipped_gate") or 0)
-    wall_ms = max(wall_ms, int(summary.get("duration_ms") or 0))
+    wall_ms = max(wall_ms, duration_ms)
     for s in doc.get("scripts") or []:
         row = dict(s)
         row["lane_selection"] = doc.get("selection")
@@ -1271,7 +1282,12 @@ agg = {
 }
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(agg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms}")
+imbalance = ""
+if len(parallel_ms) == 2:
+    lane_1_ms = parallel_ms["lane=portable-parallel-1"]
+    lane_2_ms = parallel_ms["lane=portable-parallel-2"]
+    imbalance = f" portable_parallel_1_ms={lane_1_ms} portable_parallel_2_ms={lane_2_ms} imbalance_ms={abs(lane_1_ms - lane_2_ms)}"
+print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms}{imbalance}")
 PY
 }
 
