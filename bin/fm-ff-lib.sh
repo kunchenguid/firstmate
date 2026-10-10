@@ -21,9 +21,10 @@
 # never touches the network. A local standalone clone moves through that path
 # only when it already has the target; otherwise it is skipped until the origin
 # path updates it.
-# A tracked-files fast-forward never touches the gitignored operational dirs
-# (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
-# secondmate's backlog, projects, or in-flight work.
+# After a fast-forward or redundant-divergence reconciliation,
+# fm-pr-poll-refresh.sh republishes authenticated merge watches for the updated
+# home when its committed template changed.
+# Other gitignored operational data is left untouched.
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
 # linked-worktree homes.
@@ -342,6 +343,22 @@ divergence_is_redundant() { # <dir> <local-commit> <target-commit>
   return "$result"
 }
 
+refresh_updated_polls() {
+  local dir=$1 label=$2 local_rev=$3
+  # Scope state to the checkout that actually moved, never an inherited parent
+  # state override when updating a secondmate on this or a remote host.
+  if [ -x "$dir/bin/fm-pr-poll-refresh.sh" ]; then
+    local poll_home="$dir" poll_state="$dir/state"
+    if [ "$(resolve_path "$dir")" = "$(resolve_path "$FM_ROOT")" ]; then
+      poll_home=$FM_HOME
+      poll_state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+    fi
+    FM_ROOT_OVERRIDE="$dir" FM_HOME="$poll_home" FM_STATE_OVERRIDE="$poll_state" \
+      "$dir/bin/fm-pr-poll-refresh.sh" "$local_rev" \
+      || echo "$label: merge watch refresh incomplete; see pr-poll-refresh diagnostics" >&2
+  fi
+}
+
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.
 # The meta file is the liveness signal; data/secondmates.md is only the fallback
 # for durable fields such as home= when an older/incomplete meta lacks them.
@@ -457,6 +474,7 @@ ff_target() {
       instr=$(changed_instr "$dir" "$base")
       before=$(git -C "$dir" rev-parse --short HEAD)
       if git -C "$dir" reset --keep "$base" >/dev/null 2>&1; then
+        refresh_updated_polls "$dir" "$label" "$local_rev"
         after=$(git -C "$dir" rev-parse --short HEAD)
         FF_STATUS="updated"
         FF_INSTR="$instr"
@@ -490,6 +508,7 @@ ff_target() {
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
     return 0
   fi
+  refresh_updated_polls "$dir" "$label" "$local_rev"
   after=$(git -C "$dir" rev-parse --short HEAD)
   FF_STATUS="updated"
   FF_INSTR="$instr"
