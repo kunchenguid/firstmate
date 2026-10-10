@@ -54,17 +54,20 @@
 # Decision log: state/lane-placement.jsonl, one JSON object per line, mode
 #   0600, append-only, rotated to state/lane-placement.jsonl.1 past 5 MB.
 #   Each decision appends one {"v":1,"event":"place.advice",...} line naming
-#   every candidate, its class, its reasons, and its score terms. A log that
+#   every candidate, its class, its reasons, and its score terms. Reasons are
+#   fixed codes with ids and numbers; ssh and fm-on.sh error text goes to
+#   stderr only. A log that
 #   cannot be written leaves the advice printed with "log: unwritten (<why>)".
 #
 # outcome records the home firstmate actually chose as one place.outcome line:
 #   followed is true or false against the latest advice for that task (null
-#   with no advice), --by captain marks the captain's direction, --reason says
-#   why the advice was overridden. Recent outcomes whose task is not yet among
+#   with no advice) and outcome is the fixed code followed, override, or
+#   no-advice; --by captain marks the captain's direction, and --reason text
+#   goes to stderr only, never to the log. Recent outcomes whose task is not yet among
 #   that home's published lanes count as pending lanes there for pending_ttl_s.
 #
 # review summarizes the log over the span (default 14d): advice by status,
-#   agreement of outcomes with advice, every override and its reason, and per
+#   agreement of outcomes with advice, every override and who made it, and per
 #   home how often it was advised, chosen, unknown, unreachable, and refused,
 #   with the refusal reasons.
 #
@@ -193,12 +196,14 @@ cmd_outcome() {
   case "$by" in firstmate|captain) ;; *) die "--by must be firstmate or captain" ;; esac
   command -v jq >/dev/null 2>&1 || die "jq required"
   reason=$(flat "$reason" 300)
+  [ -z "$reason" ] || printf 'fm-place: outcome reason (not logged): %s\n' "$reason" >&2
   advice=$(log_lines | jq -c --arg t "$task" '[.[] | select(.event == "place.advice" and .task == $t)] | last // null')
   line=$(jq -cn --argjson now "$NOW" --arg task "$task" --arg home "$home" --arg by "$by" \
-    --arg reason "$reason" --argjson advice "${advice:-null}" '
+    --argjson advice "${advice:-null}" '
+    (if $advice == null or ($advice.place // null) == null then null else $advice.place == $home end) as $followed |
     {v: 1, ts: $now, event: "place.outcome", id: ($advice.id // null), task: $task, home: $home, by: $by,
-     followed: (if $advice == null or ($advice.place // null) == null then null else $advice.place == $home end),
-     reason: (if $reason == "" then null else $reason end)}') || die "could not assemble the outcome"
+     followed: $followed,
+     outcome: (if $followed == null then "no-advice" elif $followed then "followed" else "override" end)}') || die "could not assemble the outcome"
   if ! why=$(append_log "$line"); then
     printf 'fm-place: outcome not recorded: %s\n' "$why" >&2
     exit 1
@@ -240,7 +245,7 @@ cmd_review() {
      agreement: {judged: ([$out[] | select(.followed != null)] | length),
                  followed: ([$out[] | select(.followed == true)] | length)},
      overrides: [$out[] | select(.followed == false) | . as $o |
-       {task, chose: .home, by, reason,
+       {task, chose: .home, by,
         advised: ([$adv[] | select(.id == $o.id)] | last | .place // null)}],
      homes: [$homes[] as $h |
        [$adv[].candidates[]? | select(.home == $h)] as $c |
@@ -262,7 +267,7 @@ cmd_review() {
     (if (.status | length) > 0 then "  status: \(.status | pairs)" else empty end),
     "  agreement: \(.agreement.followed) of \(.agreement.judged) followed" +
       (if .agreement.judged > 0 then " (\((.agreement.followed * 100 / .agreement.judged) | floor)%)" else "" end),
-    (.overrides[] | "  override: \(.task) advised \(.advised // "nothing") chose \(.chose) by \(.by)\(if .reason then ": \(.reason)" else "" end)"),
+    (.overrides[] | "  override: \(.task) advised \(.advised // "nothing") chose \(.chose) by \(.by)"),
     (.homes[] | "  home: \(.home)   advised \(.advised)   chosen \(.chosen)   listed \(.listed)   unknown \(.unknown) (unreachable \(.unreachable))" +
       (if (.refused | length) > 0 then "   refused: \(.refused | pairs)" else "" end))'
   exit 0
@@ -444,10 +449,11 @@ read_remote() {  # <slot> <id>
   err=$(head -n 1 "$WORK/$slot.err" 2>/dev/null)
   err=$(flat "${err#error: }" 160)
   case "$rc" in
-    124) printf 'facts unreachable: fm-on.sh %s: no answer within %s s\n' "$id" "$BUDGET" > "$WORK/$slot.unreachable" ;;
-    255) printf 'facts unreachable: fm-on.sh %s: exit 255%s\n' "$id" "${err:+ ($err)}" > "$WORK/$slot.unreachable" ;;
-    *) printf 'no published facts (fm-on.sh %s: exit %s%s)\n' "$id" "$rc" "${err:+: $err}" > "$WORK/$slot.missing" ;;
+    124) printf 'facts unreachable: timeout after %s s (exit 124)\n' "$BUDGET" > "$WORK/$slot.unreachable" ;;
+    255) printf 'facts unreachable (exit 255)\n' > "$WORK/$slot.unreachable" ;;
+    *) printf 'no published facts: missing (exit %s)\n' "$rc" > "$WORK/$slot.missing" ;;
   esac
+  printf 'fm-place: %s: fm-on.sh exit %s%s\n' "$id" "$rc" "${err:+: $err}" >&2
 }
 
 T0=$(fm_timing_now_ms)
@@ -544,7 +550,7 @@ def evaluate($h; $group):
     ([
       (if ((($d.projects // []) | index($project)) == null) then {t: "perm", m: "no \($project) clone in this home"} else empty end),
       ($req[] as $tag | if ((($hc.tags // []) | index($tag)) == null) then {t: "perm", m: "lacks \($tag)"} else empty end),
-      (if $d.reserve.flag == "present" then {t: "temp", m: "captain reserve: \($d.reserve.label // "reserved")"} else empty end),
+      (if $d.reserve.flag == "present" then {t: "temp", m: "captain-reserve"} else empty end),
       (if (($d.uptime_s | type) == "number" and $d.uptime_s < ($c.min_uptime_s // 1800)) then {t: "temp", m: "booted \(($d.uptime_s / 60) | floor) min ago (warming)"} else empty end),
       (if $restarts >= 2 then {t: "temp", m: "unstable: restarted \($restarts) times in \($win / 3600 | num) h"} else empty end),
       (if $p.on_battery == true then {t: "temp", m: "on battery"} else empty end),
@@ -566,7 +572,7 @@ def evaluate($h; $group):
       (if ($p.runq_per_core | type) != "number" then null else ((25 * ((1 - $p.runq_per_core / 3) | clamp(0; 1))) | floor) end) as $cpu |
       (if $cap == null or $cap == 0 then null else ((20 * (($cap - $d.lanes.count - $pending) / $cap)) | floor) end) as $room |
       (if ($hc.captain_machine // false) then (if ($d.captain == "idle" or $d.captain == "away") then -5 else -15 end) else 0 end) as $capt |
-      (if ($d.quota.runway // "") == "exhausts_before_reset" then -10 else 0 end) as $quota |
+      (if ($d.quota.runway // "") == "projected_exhaustion" then -10 else 0 end) as $quota |
       (if ($recent_fail > 0 or $restarts == 1) then -10 else 0 end) as $unstable |
       if $p.level != "ok" or $mem == null or $cpu == null or $room == null then
         $base + $ev + {class: "unranked", reasons: [
@@ -588,7 +594,10 @@ def best($g): [$cs[] | select(.group == $g and .class == "eligible")] | sort_by(
 def has($g; $cls): any($cs[]; .group == $g and .class == $cls);
 def named($cls): [$cs[] | select(.group != "captain" and (.class | IN($cls[]))) | "\(.home): \(.reasons[0])"] | join("; ");
 def tie($o): if ($o | length) > 1 and $o[1].score == $o[0].score
-  then "tie at \($o[0].score) broken by the fixed rank in config/lane-placement (\($o[0].home) rank \($o[0].rank), \($o[1].home) rank \($o[1].rank))" else null end;
+  then (if $o[0].rank == $o[1].rank
+    then "tie at \($o[0].score) broken by the home id (\($o[0].home) and \($o[1].home) both rank \($o[0].rank))"
+    else "tie at \($o[0].score) broken by the fixed rank in config/lane-placement (\($o[0].home) rank \($o[0].rank), \($o[1].home) rank \($o[1].rank))" end)
+  else null end;
 (best("fitting")) as $ok |
 (best("fallback")) as $okf |
 ([$cs[] | select(.group != "captain" and .class == "error")]) as $err |

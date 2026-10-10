@@ -680,12 +680,12 @@ mem      = floor(40 * clamp((avail_gb - kept_gb - footprint_gb) / (total_gb * 0.
 cpu      = floor(25 * clamp(1 - runq_per_core / 3, 0, 1))
 room     = floor(20 * (cap - lanes - pending) / cap)
 captain  = -15 on a captain_machine home unless its captain presence is idle or away, then -5
-quota    = -10 when the home's quota runway exhausts before reset
+quota    = -10 when the home's quota runway is projected_exhaustion (projected to run out before reset)
 unstable = -10 after one restart or one failed read of that home within unstable_window_s
 ```
 
 The best fitting home wins; the fallback homes are considered only when no fitting home is eligible or unranked.
-Equal scores go to the lower `rank`, then the lower home id, never to list order or chance.
+Equal scores go to the lower `rank`, then the lower home id, never to list order or chance; the `note:` line says which of the two broke the tie.
 
 | Status | Means | Firstmate does |
 | --- | --- | --- |
@@ -701,10 +701,10 @@ Every outcome exits 0, so intake is never blocked.
 **Decision log, outcomes, and review**
 
 Each decision appends one `place.advice` JSON line to `state/lane-placement.jsonl` naming every candidate, its class, its reasons, and its score terms, so "why this home?" is answerable from one line.
-The log is private (mode 0600), holds home ids, task ids, project names, and numbers only, and is renamed to `state/lane-placement.jsonl.1` once it passes 5 MB.
+The log is private (mode 0600), holds home ids, task ids, project names, numbers, fixed reason codes (such as `captain-reserve`, `facts unreachable (exit 255)`, or `facts unreachable: timeout after 5 s (exit 124)`), and exit statuses only, and is renamed to `state/lane-placement.jsonl.1` once it passes 5 MB.
 A log that cannot be written leaves the advice printed with `log: unwritten (<why>)`.
-`outcome` appends one `place.outcome` line recording the home firstmate chose, whether that followed the latest advice for the task, and why when it did not; a recent outcome whose task the chosen home has not yet published as a lane counts there as a pending place for `pending_ttl_s`, so two intakes in one turn do not both take the same free place.
-`review` summarizes a span of the log: advice by status, how often outcomes followed advice, every override and its reason, and per home how often it was advised, chosen, unknown, unreachable, and refused.
+`outcome` appends one `place.outcome` line recording the home firstmate chose, whether that followed the latest advice for the task, and the fixed code `followed`, `override`, or `no-advice`; `--reason` text and ssh or `fm-on.sh` error text go to stderr only, never to the log; a recent outcome whose task the chosen home has not yet published as a lane counts there as a pending place for `pending_ttl_s`, so two intakes in one turn do not both take the same free place.
+`review` summarizes a span of the log: advice by status, how often outcomes followed advice, every override and who made it, and per home how often it was advised, chosen, unknown, unreachable, and refused.
 
 The script's header owns the exact flags, output lines, and exit codes.
 
