@@ -65,7 +65,10 @@ Nothing reaches the captain in that case.
 
 Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
-Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
+Only positive socket refusal or absence is a daemon-down finding.
+Once `no-mistakes daemon status` answers, a failed run record whose error is `daemon shutting down`, `daemon crashed during execution`, or `interrupted by daemon restart`, or an earlier socket-refused block, is routine.
+Steer the crewmate in one line to start its one fresh run under brief rule 7, and nothing reaches the captain.
+Escalate to the captain only when the daemon still refuses, or when the crewmate's blocked line says `fresh run after daemon cut`.
 
 ## Live-endpoint escalation
 

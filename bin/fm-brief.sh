@@ -567,8 +567,18 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
      Before you append `blocked:` about the pipeline, run `no-mistakes daemon status` and
      `no-mistakes axi status`. If the daemon socket refuses connections or is missing, append
      `blocked [at=<epoch>]: {the daemon error}` and stop even when the local run record still says running or
-     fixing, because that record can be stale after the daemon exits. A run record failed with a
-     daemon error is also a real block.
+     fixing, because that record can be stale after the daemon exits. A run record failed with
+     `daemon shutting down`, `daemon crashed during execution`, or `interrupted by daemon restart`
+     was cut by the daemon, not by your change: once `no-mistakes daemon status` answers, start one
+     fresh run for the same HEAD unless firstmate told you to stop that run, or unless the cut run
+     had already reported all CI checks passed; then the PR is ready: append the done line with its
+     URL and stop. First run
+     `no-mistakes axi sync --recover` if `no-mistakes axi status` shows `branch_sync.next_action`
+     `recover_custody`, then confirm `axi status` shows no active run on the branch (reattach
+     instead if a crash restart resumed one), then start `no-mistakes axi run` the way the cut run
+     was started and drive it as usual. If that fresh run is refused, ends with a daemon error, or
+     loses the daemon socket while you drive it, append
+     `blocked [at=<epoch>]: fresh run after daemon cut: {the error}` and stop.
      Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
      going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
      the daemon accepts `respond` immediately and runs the round in the background, so a killed or
