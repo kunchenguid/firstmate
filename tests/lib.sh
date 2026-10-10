@@ -761,6 +761,22 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- YAML parsing -----------------------------------------------------------
+
+# fm_require_yq <purpose>: fail unless `yq` is mikefarah's Go yq v4, the YAML
+# parser contract tests use to read workflow and config files as data. The
+# unrelated Python `yq` jq wrapper shares the command name and is rejected.
+fm_require_yq() {
+  local version
+  command -v yq >/dev/null 2>&1 \
+    || fail "mikefarah yq v4 (https://github.com/mikefarah/yq) is required to $1"
+  version=$(yq --version 2>&1) || version=
+  case "$version" in
+    *mikefarah/yq*' version v4.'*|*mikefarah/yq*' version 4.'*|'yq version 4.'*) ;;
+    *) fail "mikefarah yq v4 (https://github.com/mikefarah/yq) is required to $1; found: ${version:-an unidentified yq}" ;;
+  esac
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_equals <expected> <actual> <msg>

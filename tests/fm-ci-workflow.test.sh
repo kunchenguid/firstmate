@@ -20,54 +20,63 @@ set -u
 CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
 
 assert_present "$CI_WORKFLOW" ".github/workflows/ci.yml is missing"
-command -v ruby >/dev/null 2>&1 \
-  || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
+fm_require_yq "parse .github/workflows/ci.yml as YAML"
+CI_JSON=$(yq -o=json '.' "$CI_WORKFLOW") \
+  || fail "could not parse .github/workflows/ci.yml as YAML"
+
+# jq prelude shared by every workflow read: fetch mirrors a strict mapping
+# lookup that errors on a missing key instead of yielding null, and strip trims
+# surrounding whitespace.
+# shellcheck disable=SC2016 # jq expands these references itself.
+CI_JQ_LIB='
+def fetch($key):
+  if type == "object" and has($key) then .[$key]
+  else error("key not found: \($key)") end;
+def strip: sub("^\\s+"; "") | sub("\\s+$"; "");
+'
 
 # Resolve the workflow's concurrency contract under one simulated event and
 # print "<group><TAB><cancel-in-progress>". Only the two expression constructs
 # this workflow uses are resolved: an `a || b` fallback and an `==` comparison.
 resolve_concurrency() {
   local event=$1 pr_number=$2 run_id=$3
-  ruby -ryaml -e '
-doc = YAML.load_file(ARGV[0])
-concurrency = doc.fetch("concurrency")
-context = {
-  "github.workflow" => doc.fetch("name"),
-  "github.event_name" => ARGV[1],
-  "github.event.pull_request.number" => ARGV[2],
-  "github.run_id" => ARGV[3],
-}
-
-value = lambda do |token|
-  token = token.strip
-  next token[1..-2] if token.start_with?("\x27") && token.end_with?("\x27")
-  raise "unresolvable context reference: #{token}" unless context.key?(token)
-  context.fetch(token)
-end
-
-evaluate = lambda do |expression|
-  expression = expression.strip
-  if expression.include?("==")
-    left, right = expression.split("==", 2)
-    next value.call(left) == value.call(right) ? "true" : "false"
-  end
-  resolved = expression.split("||").map { |token| value.call(token) }.find { |v| !v.empty? }
-  resolved.to_s
-end
-
-interpolate = lambda do |raw|
-  raw.to_s.gsub(/\$\{\{(.+?)\}\}/) { evaluate.call(Regexp.last_match(1)) }
-end
-
-puts [interpolate.call(concurrency.fetch("group")),
-      interpolate.call(concurrency.fetch("cancel-in-progress"))].join("\t")
-' "$CI_WORKFLOW" "$event" "$pr_number" "$run_id"
+  jq -r --arg event "$event" --arg pr_number "$pr_number" --arg run_id "$run_id" "$CI_JQ_LIB"'
+fetch("concurrency") as $concurrency
+| {
+    "github.workflow": fetch("name"),
+    "github.event_name": $event,
+    "github.event.pull_request.number": $pr_number,
+    "github.run_id": $run_id
+  } as $context
+| def value:
+    strip as $token
+    | if ($token | startswith("\u0027")) and ($token | endswith("\u0027")) then $token[1:-1]
+      elif $context | has($token) then $context[$token]
+      else error("unresolvable context reference: \($token)") end;
+  # Split like a fallback chain, dropping trailing empty operands.
+  def operands: split("||") | until(length == 0 or .[-1] != ""; .[:-1]);
+  def evaluate:
+    strip as $expression
+    | if $expression | contains("==") then
+        ($expression | split("==")) as $sides
+        | if ($sides[0] | value) == ($sides[1:] | join("==") | value) then "true" else "false" end
+      else
+        ([$expression | operands[] | value] | map(select(. != "")) | first) // "" | tostring
+      end;
+  def interpolate:
+    (if . == null then "" else tostring end)
+    | gsub("\\$\\{\\{(?<expression>.+?)\\}\\}"; .expression | evaluate);
+  [($concurrency | fetch("group") | interpolate),
+   ($concurrency | fetch("cancel-in-progress") | interpolate)]
+  | join("\t")
+' <<<"$CI_JSON"
 }
 
 job_timeout() {
-  ruby -ryaml -e '
-puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes", "none")
-' "$CI_WORKFLOW" "$1"
+  jq -r --arg job "$1" "$CI_JQ_LIB"'
+fetch("jobs") | fetch($job)
+| if has("timeout-minutes") then .["timeout-minutes"] // "" else "none" end
+' <<<"$CI_JSON"
 }
 
 # Tier membership is the executable inventory of the timeout policy: a new job
@@ -96,7 +105,7 @@ tier_timeout() {  # <tier> <job>...
 
 # Print every job id in the workflow, one per line.
 workflow_jobs() {
-  ruby -ryaml -e 'puts YAML.load_file(ARGV[0]).fetch("jobs").keys' "$CI_WORKFLOW"
+  jq -r "$CI_JQ_LIB"'fetch("jobs") | keys_unsorted[]' <<<"$CI_JSON"
 }
 
 group_of() { printf '%s\n' "$1" | cut -f1; }
@@ -134,14 +143,15 @@ test_main_pushes_are_never_cancelled() {
 }
 
 test_every_job_has_a_finite_timeout() {
-  local reported
-  reported=$(ruby -ryaml -e '
-YAML.load_file(ARGV[0]).fetch("jobs").each do |name, job|
-  timeout = job["timeout-minutes"]
-  next if timeout.is_a?(Integer) && timeout > 0
-  puts "#{name}: #{timeout.inspect}"
-end
-' "$CI_WORKFLOW") || fail "could not read job timeouts from ci.yml"
+  local timeouts reported
+  # Annotate each timeout with its YAML tag so an integer-valued float such as
+  # 30.0 is still rejected after the JSON conversion.
+  timeouts=$(yq -o=json '.jobs | map_values(.["timeout-minutes"] | {"tag": tag, "value": .})' "$CI_WORKFLOW") \
+    || fail "could not read job timeouts from ci.yml"
+  reported=$(jq -r 'to_entries[]
+    | select(.value.tag != "!!int" or .value.value <= 0)
+    | "\(.key): \(.value.value | tojson)"' <<<"$timeouts") \
+    || fail "could not read job timeouts from ci.yml"
   [ -z "$reported" ] || fail "these CI jobs have no finite hang tripwire:"$'\n'"$reported"
   pass "every ci.yml job carries a finite timeout"
 }
@@ -201,16 +211,19 @@ test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
     || fail "heavy tier backstop ($heavy) must exceed the normal tier ($normal)"
   [ "$heavy" -ge 60 ] && [ "$heavy" -le 75 ] \
     || fail "heavy tier backstop must stay a 60-75 minute last resort, got $heavy"
-  step=$(ruby -ryaml -e '
-steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("steps")
-index = steps.index { |s| s["id"] == "run-real-herdr-family" }
-raise "no run-real-herdr-family step" unless index
-teardown = steps.index { |s| s["id"] == "cleanup-herdr-lab-sessions" }
-raise "no cleanup-herdr-lab-sessions step" unless teardown
-raise "teardown must follow the family-run step" unless teardown > index
-raise "teardown must run under always()" unless steps[teardown]["if"].to_s.strip == "always()"
-puts steps[index].fetch("timeout-minutes", "none")
-' "$CI_WORKFLOW" tests-herdr) || fail "could not read the Herdr family-run step"
+  step=$(jq -r --arg job tests-herdr "$CI_JQ_LIB"'
+def step_index($id): [to_entries[] | select((.value | objects | .id) == $id) | .key] | first;
+fetch("jobs") | fetch($job) | fetch("steps")
+| step_index("run-real-herdr-family") as $index
+| step_index("cleanup-herdr-lab-sessions") as $teardown
+| if $index == null then error("no run-real-herdr-family step")
+  elif $teardown == null then error("no cleanup-herdr-lab-sessions step")
+  elif $teardown <= $index then error("teardown must follow the family-run step")
+  elif (.[$teardown].if | if . == null then "" else tostring end | strip) != "always()" then
+    error("teardown must run under always()")
+  else .[$index] | if has("timeout-minutes") then .["timeout-minutes"] // "" else "none" end
+  end
+' <<<"$CI_JSON") || fail "could not read the Herdr family-run step"
   case "$step" in ''|*[!0-9]*) fail "the Herdr family-run step needs its own timeout-minutes, got $step" ;; esac
   [ "$step" = 20 ] \
     || fail "the Herdr family-run step must be the 20-minute tripwire, got $step"
@@ -219,33 +232,45 @@ puts steps[index].fetch("timeout-minutes", "none")
   pass "Herdr keeps a $step minute step tripwire under a $heavy minute job backstop"
 }
 
+# Trim surrounding whitespace from every line of a command's listing.
+strip_lines() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+
 test_ci_matrices_match_executable_partitions() {
-  ruby -ryaml -ropen3 - "$CI_WORKFLOW" "$ROOT" <<'RUBY' || fail "CI partition contract"
-jobs = YAML.load_file(ARGV[0]).fetch("jobs")
-root = ARGV[1]
-serial = jobs.fetch("tests-portable-serial").fetch("strategy")
-raise "serial failures must not cancel other shards" unless serial.fetch("fail-fast") == false
-matrix = serial.fetch("matrix")
-raise "unexpected serial dimensions" unless matrix.keys == ["shard"]
-shards = matrix.fetch("shard")
-lanes, status = Open3.capture2(File.join(root, "bin/fm-test-run.sh"), "--list-lanes")
-raise "cannot list runner lanes" unless status.success?
-actual = lanes.lines.map(&:strip).select { |l| l.match?(/\Aportable-serial-\d+of\d+\z/) }
-expected = shards.map { |s| "portable-serial-#{s}of#{shards.length}" }
-raise "CI matrix and runner disagree" unless actual.sort == expected.sort
-lint = jobs.fetch("lint").fetch("strategy")
-raise "lint failures must not cancel another partition" unless lint.fetch("fail-fast") == false
-matrix = lint.fetch("matrix")
-raise "unexpected lint dimensions" unless matrix.keys == ["partition"]
-parts = matrix.fetch("partition")
-roots = parts.flat_map do |p|
-  output, result = Open3.capture2(File.join(root, "bin/fm-lint.sh"), "--partition", "#{p}of#{parts.length}", "--list-files")
-  raise "unsupported lint partition" unless result.success?
-  output.lines.map(&:strip)
-end
-canonical, result = Open3.capture2({"CI" => "true"}, File.join(root, "bin/fm-lint.sh"), "--list-files")
-raise "lint matrix loses or duplicates canonical roots" unless result.success? && roots.sort == canonical.lines.map(&:strip).sort
-RUBY
+  local expected parts lanes actual roots canonical part out
+  expected=$(jq -r "$CI_JQ_LIB"'
+fetch("jobs") | fetch("tests-portable-serial") | fetch("strategy")
+| if fetch("fail-fast") != false then error("serial failures must not cancel other shards") else . end
+| fetch("matrix")
+| if (keys_unsorted) != ["shard"] then error("unexpected serial dimensions") else . end
+| fetch("shard") as $shards
+| $shards[] | "portable-serial-\(.)of\($shards | length)"
+' <<<"$CI_JSON") || fail "CI partition contract"
+  expected=$(printf '%s' "$expected" | LC_ALL=C sort)
+  lanes=$("$ROOT/bin/fm-test-run.sh" --list-lanes) || fail "CI partition contract: cannot list runner lanes"
+  actual=$(printf '%s\n' "$lanes" | strip_lines | grep -E '^portable-serial-[0-9]+of[0-9]+$' | LC_ALL=C sort)
+  [ "$actual" = "$expected" ] || fail "CI partition contract: CI matrix and runner disagree"
+
+  parts=$(jq -r "$CI_JQ_LIB"'
+fetch("jobs") | fetch("lint") | fetch("strategy")
+| if fetch("fail-fast") != false then error("lint failures must not cancel another partition") else . end
+| fetch("matrix")
+| if (keys_unsorted) != ["partition"] then error("unexpected lint dimensions") else . end
+| fetch("partition") as $parts
+| $parts[] | "\(.)of\($parts | length)"
+' <<<"$CI_JSON") || fail "CI partition contract"
+  roots=
+  while IFS= read -r part; do
+    [ -n "$part" ] || continue
+    out=$("$ROOT/bin/fm-lint.sh" --partition "$part" --list-files) \
+      || fail "CI partition contract: unsupported lint partition"
+    [ -z "$out" ] || roots+=$out$'\n'
+  done <<<"$parts"
+  roots=$(printf '%s' "$roots" | strip_lines | LC_ALL=C sort)
+  canonical=$(CI=true "$ROOT/bin/fm-lint.sh" --list-files) \
+    || fail "CI partition contract: lint matrix loses or duplicates canonical roots"
+  canonical=$(printf '%s\n' "$canonical" | strip_lines | LC_ALL=C sort)
+  [ "$roots" = "$canonical" ] \
+    || fail "CI partition contract: lint matrix loses or duplicates canonical roots"
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
