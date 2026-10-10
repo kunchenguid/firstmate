@@ -1312,6 +1312,157 @@ test_bootstrap_leaves_unauthenticated_checks() {
   pass "bootstrap does not rewrite unauthenticated checks or emit retired migration diagnostics"
 }
 
+test_watcher_classifies_rejected_checks_truthfully() {
+  local dir state rc hash
+
+  dir=$(make_case incomplete-pr-publication-diagnostic)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/49
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/49
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/50
+  set +e
+  FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "incomplete PR publication diagnostic watcher cycle failed"
+  assert_grep 'PR poll publication incomplete, not run' "$dir/watch.out" \
+    "coherent metadata and poll generations that disagree were not identified as incomplete publication"
+  assert_grep 'run bin/fm-pr-check.sh again if it persists' "$dir/watch.out" \
+    "incomplete PR publication did not give a valid persistent-state repair"
+  assert_no_grep 'authentication failed' "$dir/watch.out" \
+    "an incomplete PR publication was mislabeled as an authentication failure"
+
+  dir=$(make_case malformed-pr-metadata-diagnostic)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/51
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/51
+  printf 'unexpected=value\n' >> "$state/task-a.meta"
+  set +e
+  FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "malformed PR metadata diagnostic watcher cycle failed"
+  assert_grep 'malformed or unsupported registration, not run' "$dir/watch.out" \
+    "malformed PR metadata was not identified as an invalid record"
+  assert_no_grep 'authentication failed' "$dir/watch.out" \
+    "malformed PR metadata was mislabeled as an authentication failure"
+
+  dir=$(make_case unsupported-custom-trust-diagnostic)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf "must-not-run\\n"\n' > "$state/custom.check.sh"
+  chmod 0700 "$state/custom.check.sh"
+  hash=$(fm_custom_check_sha256 "$state/custom.check.sh") || fail "could not hash unsupported trust fixture"
+  printf '%s\n%s\n' fm-custom-check-v999 "$hash" > "$state/custom.check-trust"
+  chmod 0600 "$state/custom.check-trust"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "unsupported custom trust diagnostic watcher cycle failed"
+  assert_grep 'malformed or unsupported registration, not run' "$dir/watch.out" \
+    "an unknown trust schema was not identified as unsupported"
+  assert_no_grep 'authentication failed' "$dir/watch.out" \
+    "an unknown trust schema was mislabeled as an authentication failure"
+  assert_no_grep 're-arm' "$dir/watch.out" \
+    "an unknown trust schema incorrectly prescribed re-arm as its repair"
+
+  dir=$(make_case custom-check-authentication-failure)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf "must-not-run\\n"\n' > "$state/custom.check.sh"
+  chmod 0700 "$state/custom.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+    || fail "could not register tampering fixture"
+  printf '# changed after registration\n' >> "$state/custom.check.sh"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "tampered custom check diagnostic watcher cycle failed"
+  assert_grep 'authentication failed, not run' "$dir/watch.out" \
+    "genuine check tampering did not produce an authentication failure"
+  assert_no_grep 'malformed or unsupported registration' "$dir/watch.out" \
+    "genuine check tampering was mislabeled as a malformed record"
+  assert_no_grep 'must-not-run' "$dir/watch.out" \
+    "a rejected custom check was executed"
+
+  pass "watcher diagnostics distinguish malformed, unsupported, and authentication failures"
+}
+
+test_rejected_check_does_not_starve_a_status_diagnostic() {
+  local dir state rc
+  dir=$(make_case rejected-check-status-starvation)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  printf '#!/usr/bin/env bash\nprintf "must-not-run\\n"\n' > "$state/broken.check.sh"
+  chmod 0700 "$state/broken.check.sh"
+  printf 'done: actionable completion\n' > "$state/task-a.status"
+
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/first.out" 2> "$dir/first.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first persistent rejection cycle failed"
+  assert_grep 'malformed or unsupported registration, not run' "$dir/first.out" \
+    "persistent rejection did not produce its initial diagnostic"
+  ack_watcher_cycle "$state" || fail "could not acknowledge initial rejection diagnostic"
+
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/second.out" 2> "$dir/second.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "second persistent rejection cycle failed"
+  assert_grep 'signal:' "$dir/second.out" \
+    "an unchanged rejected check permanently starved a distinct status diagnostic"
+  assert_grep 'task-a.status' "$dir/second.out" \
+    "the surfaced signal did not name the distinct status diagnostic"
+  assert_no_grep 'rejected state checks' "$dir/second.out" \
+    "an unchanged rejected check was emitted again before the distinct diagnostic"
+  pass "an unchanged rejected check does not starve a distinct actionable diagnostic"
+}
+
+test_pr_rearm_publication_is_not_misreported() {
+  local dir state url_a url_b rearm_pid watcher_pid rc
+  dir=$(make_case pr-rearm-publication-diagnostic)
+  state="$dir/home/state"
+  url_a=https://github.com/o/r/pull/61
+  url_b=https://github.com/o/r/pull/62
+  write_poll_meta "$state" task-a "$url_a"
+  seed_canonical_poll "$dir" task-a "$url_a"
+  add_stop_custom_check "$dir"
+  start_poll_publish_holder "$dir" "$state" task-a
+
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "$url_b" \
+    > "$dir/rearm.out" 2> "$dir/rearm.err" &
+  rearm_pid=$!
+  sleep 1
+  process_is_live_non_zombie "$rearm_pid" || fail "re-arm did not wait for the held publication"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" || fail "blocked re-arm left malformed metadata"
+  [ "$FM_PR_META_URL" = "$url_a" ] \
+    || fail "re-arm published metadata for the new PR before its matching poll artifacts"
+
+  FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  sleep 1
+  process_is_live_non_zombie "$watcher_pid" || fail "watcher rejected an ordinary in-progress re-arm"
+  release_poll_publish_holder
+  wait "$rearm_pid" || fail "released re-arm failed: $(cat "$dir/rearm.err")"
+  rc=0
+  wait "$watcher_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "watcher failed after successful re-arm: $(cat "$dir/watch.err")"
+  assert_grep 'z-stop.check.sh: stop-cycle' "$dir/watch.out" \
+    "watcher did not continue through the successfully re-armed poll"
+  assert_no_grep 'rejected state checks' "$dir/watch.out" \
+    "ordinary successful re-arm produced a rejected-check diagnostic"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "ordinary re-arm did not leave an authenticated poll"
+  [ "$FM_PR_DATA_URL" = "$url_b" ] || fail "ordinary re-arm did not publish the replacement PR"
+  pass "ordinary PR re-arm publishes one matched generation without a false trust alert"
+}
+
 test_custom_snapshot_cleanup_on_signal() {
   local dir state child_pid_file pid child_pid i rc
   dir=$(make_case custom-snapshot-signal)
@@ -3170,7 +3321,7 @@ test_device_renumbered_poll_stays_armed() {
   [ "$rc" -eq 0 ] || fail "renumbered poll watcher failed: $(cat "$dir/watch.err")"
   out=$(cat "$dir/watch.out")
   case "$out" in
-    *'rejected unauthenticated state checks'*) fail "watcher refused a poll whose only change was a renumbered volume: $out" ;;
+    *'rejected state checks'*) fail "watcher refused a poll whose only change was a renumbered volume: $out" ;;
   esac
   [ "$(grep -c '^check: .*task-a\.check\.sh: merged$' "$dir/watch.out")" -eq 1 ] \
     || fail "renumbered poll did not surface its merge exactly once: $out"
@@ -3291,7 +3442,7 @@ SH
     [ "$rc" -eq 0 ] || fail "$mutation watcher failed: $(cat "$dir/watch.err")"
     out=$(cat "$dir/watch.out")
     case "$out" in
-      "check: rejected unauthenticated state checks:"*"task-a.check.sh"*) ;;
+      "check: rejected state checks: authentication failed, not run;"*"task-a.check.sh"*) ;;
       *) fail "$mutation on a renumbered registration was not refused: $out" ;;
     esac
     [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$registration_sha" ] \
@@ -3352,7 +3503,7 @@ release_poll_publish_holder() {
 }
 
 test_device_rerecord_serializes_direct_rearm() {
-  local dir state url_a url_b i rearm_pid
+  local dir state url_a url_b rearm_pid
   url_a=https://github.com/o/r/pull/1
   url_b=https://github.com/o/r/pull/2
   dir=$(make_case device-rerecord-serialized-direct-rearm)
@@ -3366,15 +3517,11 @@ test_device_rerecord_serializes_direct_rearm() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" \
     PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "$url_b" > "$dir/rearm.out" 2> "$dir/rearm.err" &
   rearm_pid=$!
-  for i in $(seq 1 100); do
-    if fm_pr_metadata_identity_parse "$state/task-a.meta" && [ "$FM_PR_META_URL" = "$url_b" ]; then
-      break
-    fi
-    sleep 0.02
-  done
-  [ "$FM_PR_META_URL" = "$url_b" ] || fail "direct re-arm did not rewrite metadata before publication"
   sleep 1
   process_is_live_non_zombie "$rearm_pid" || fail "direct re-arm did not wait for poll publication"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" || fail "blocked direct re-arm left malformed metadata"
+  [ "$FM_PR_META_URL" = "$url_a" ] \
+    || fail "blocked direct re-arm published replacement metadata before its poll artifacts"
   cmp -s "$dir/published.pr-poll" "$state/task-a.pr-poll" \
     || fail "blocked direct re-arm replaced the published sidecar"
   cmp -s "$dir/published.registration" "$state/task-a.pr-poll-registration" \
@@ -3383,6 +3530,8 @@ test_device_rerecord_serializes_direct_rearm() {
     || fail "blocked direct re-arm replaced the published check"
   release_poll_publish_holder
   wait "$rearm_pid" || fail "direct re-arm failed after poll publication release: $(cat "$dir/rearm.err")"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" || fail "released direct re-arm left malformed metadata"
+  [ "$FM_PR_META_URL" = "$url_b" ] || fail "released direct re-arm did not publish replacement metadata"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "released direct re-arm did not publish a strict poll"
   [ "$(sed -n 4p "$state/task-a.pr-poll-registration")" = "$url_b" ] \
     || fail "released direct re-arm registration does not name its PR"
@@ -3390,7 +3539,7 @@ test_device_rerecord_serializes_direct_rearm() {
 }
 
 test_device_rerecord_serializes_rerecord() {
-  local dir state original rc watcher_pid i
+  local dir state original rc watcher_pid
   dir=$(make_case device-rerecord-serialized-rerecord)
   state="$dir/home/state"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/1
@@ -3418,13 +3567,10 @@ SH
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher_pid=$!
-  for i in $(seq 1 100); do
-    [ -d "$state/.control-task-a.lock" ] && break
-    sleep 0.02
-  done
-  [ -d "$state/.control-task-a.lock" ] || fail "watcher did not reach its device re-record"
   sleep 1
   process_is_live_non_zombie "$watcher_pid" || fail "watcher did not wait for poll publication"
+  [ ! -d "$state/.control-task-a.lock" ] \
+    || fail "watcher acquired the lifecycle lock while still waiting for poll publication"
   [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$original" ] \
     || fail "blocked watcher rewrote a device-shifted registration"
   [ ! -e "$dir/registration-renamed" ] || fail "blocked watcher renamed the registration"
@@ -3481,6 +3627,9 @@ test_device_rerecord_serializes_direct_rearm
 test_device_rerecord_serializes_rerecord
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
+test_watcher_classifies_rejected_checks_truthfully
+test_rejected_check_does_not_starve_a_status_diagnostic
+test_pr_rearm_publication_is_not_misreported
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
