@@ -726,7 +726,7 @@ The process-level proof only decides whether that registration is backed by a ru
 `tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh` pins the live-Pi versus leftover-shell distinction.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#agent-lifecycle-control) owns the versioned evidence.
 
-The session-start sweep and the watcher's dedicated secondmate liveness tick use this probe.
+The session-start sweep, the watcher's dedicated secondmate liveness tick, and the response-lane rail, ladder, and seat-state advice use this probe.
 Idle secondmates remain exempt from stale-pane escalation.
 [Secondmate endpoint recovery](architecture.md) owns the shared supervision mechanism.
 

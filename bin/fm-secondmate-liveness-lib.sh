@@ -4,7 +4,10 @@
 # probing and recovery. bin/fm-bootstrap.sh owns the session-start sweep and
 # bin/fm-watch.sh owns the ordinary-supervision poll tick; both drive this
 # library so classification handling and the guarded relaunch path stay
-# single-sourced here.
+# single-sourced here. The response-lane ladder in bin/fm-lane-recover.sh is
+# the third driver of this path - it probes, locks, and relaunches through this
+# library - and the read-only response-lane rail and seat-state advice consult
+# this library too; docs/architecture.md names every driver and consumer.
 #
 # A secondmate's recorded endpoint is the tmux window, herdr pane, or remote
 # peer it runs in. Probing classifies that endpoint through the owning backend
@@ -42,8 +45,8 @@
 #          when a relaunch is actually authorized.
 #
 # Concurrency: fm_secondmate_liveness_lock serializes probe+kill+relaunch per
-# task across the bootstrap sweep and the watcher tick, so a concurrent
-# relaunch can never be observed mid-flight as a dead endpoint and killed.
+# task across all three recovery drivers, so a concurrent relaunch can never be
+# observed mid-flight as a dead endpoint and killed.
 # The attempt ledger (.secondmate-relaunch-<id>, one line per attempt plus one
 # per outcome) is both the durable relaunch record and the input to the
 # watcher's relaunch bound; teardown removes it.
