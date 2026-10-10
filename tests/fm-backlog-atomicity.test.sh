@@ -2030,8 +2030,9 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
-test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note() {
+test_recovery_replays_gerrit_and_gitlab_closes_with_their_urls_as_notes() {
   local case_dir id out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
+  local gitlab_url=https://gitlab.com/group/sub/project/-/merge_requests/719
   id=atomic-heal-gerrit-b9
   case_dir=$(make_home heal-pending-gerrit-close)
   add_item "$case_dir" "$id"
@@ -2066,7 +2067,23 @@ SH
     || fail "the replayed Gerrit close did not record its change URL as a note"
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "a replayed Gerrit close left its record behind"
-  pass "session start replays a recorded Gerrit close with its change URL as a note"
+
+  # A GitLab merge request is refused as a --pr link the same way.
+  id=atomic-heal-gitlab-b9
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gitlab\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$gitlab_url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded GitLab close at $(row_state "$case_dir" "$id"): $out"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "body: \"GitLab merge request $gitlab_url\"" >/dev/null \
+    || fail "the replayed GitLab close did not record its merge request URL as a note"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed GitLab close left its record behind"
+  pass "session start replays recorded Gerrit and GitLab closes with their URLs as notes"
 }
 
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
@@ -3095,7 +3112,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
-test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
+test_recovery_replays_gerrit_and_gitlab_closes_with_their_urls_as_notes
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
