@@ -752,7 +752,11 @@ INBOX_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-inbox.sh" list --max-notes 20 --max-lines 12 2>&1) || true
 printf '%s\n' "$INBOX_OUT"
 if [ -n "$INBOX_OUT" ] && [ "$INBOX_OUT" != '(inbox empty)' ]; then
-  printf 'Each note above is a captain ask still owed: handle it, then fm-inbox.sh drain --ack <id>.\n'
+  if [ "$READ_ONLY" -eq 0 ]; then
+    printf 'Each note above is a captain ask still owed: handle it, then fm-inbox.sh drain --ack <id>.\n'
+  else
+    printf 'Each note above is a captain ask owed by the lock holder: do not handle or ack it here; pick it up only after taking over the lock.\n'
+  fi
 fi
 
 # --- 2. bootstrap --------------------------------------------------------

@@ -834,6 +834,8 @@ EOF
   fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
   git -C "$root" checkout -q -B fm/read-only-tangle
+  FM_HOME="$home" "$ROOT/bin/fm-inbox.sh" note "ship the winter banner on the site" >/dev/null \
+    || fail "seed note failed"
 
   sleep 300 &
   holder_pid=$!
@@ -855,6 +857,9 @@ EOF
   assert_contains "$out" "TANGLE: primary checkout on feature branch 'fm/read-only-tangle'" "read-only bootstrap did not surface the tangle diagnostic"
   assert_contains "$out" "read-only session must leave restore work" "read-only tangle diagnostic did not explain restore ownership"
   assert_contains "$out" "Stay read-only: do not arm" "read-only next step did not block direct watcher repair"
+  assert_contains "$out" "ship the winter banner on the site" "read-only digest did not list the unacknowledged captain note"
+  assert_contains "$out" "owed by the lock holder" "read-only digest did not say the captain notes belong to the lock holder"
+  assert_not_contains "$out" "fm-inbox.sh drain --ack" "read-only digest told the session to acknowledge captain notes"
   assert_not_contains "$out" "drain them with bin/fm-wake-drain.sh" "read-only guard printed a mutating drain instruction"
   assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
@@ -1677,6 +1682,7 @@ EOF
   assert_contains "$out" "CAPTAIN INBOX - UNACKNOWLEDGED NOTES" "the digest has no captain inbox section"
   assert_contains "$out" "$note_id" "the digest did not name the unacknowledged captain note"
   assert_contains "$out" "ship the winter banner on the site" "the digest did not print the captain note body"
+  assert_contains "$out" "handle it, then fm-inbox.sh drain --ack <id>" "the lock holder's digest did not say to handle and ack the notes"
   [ "$(printf '%s\n' "$out" | grep -n '^CAPTAIN INBOX' | cut -d: -f1)" -lt "$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP' | cut -d: -f1)" ] \
     || fail "the handover and captain inbox sections must precede bootstrap so a truncated digest keeps them"
 

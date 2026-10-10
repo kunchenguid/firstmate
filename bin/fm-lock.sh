@@ -322,7 +322,7 @@ handover_write_or_release() {  # <write|release> <record-file>
 # Queue the request's one captain-inbox note, which is what wakes the live
 # session. A repeat with the same request id replays the original note.
 handover_request_note() {  # <kind> <request-id> <requester-pid>
-  local body
+  local body out
   if [ "$1" = takeover ]; then
     body="firstmate handover requested: another session (harness pid $3) is taking control of this home.
 Run bin/fm-lock.sh handover template, save it to a file, and fill every section: what is being worked on with its files and local copy, open captain asks including every unacknowledged inbox note, promises, facts not yet in durable records, and steers not yet reflected in status.
@@ -331,7 +331,8 @@ Then run bin/fm-lock.sh handover release <file>; it refuses until the record is 
     body="firstmate handover snapshot requested: publish the current handover record without giving up control.
 Run bin/fm-lock.sh handover template, save it to a file, fill every section, then run bin/fm-lock.sh handover write <file>; this session keeps the lock."
   fi
-  handover_inbox note --request-id "$2" -- "$body" 2>/dev/null | awk 'NR == 1 { print $2 }'
+  out=$(handover_inbox note --request-id "$2" -- "$body") || return 1
+  printf '%s\n' "$out" | awk 'NR == 1 { print $2 }'
 }
 
 handover_record_request() {  # <kind> <requester-pid> <requester-session> <holder> <now> <request-id>
@@ -339,8 +340,10 @@ handover_record_request() {  # <kind> <requester-pid> <requester-session> <holde
   [ ! -f "$HANDOVER_REQUEST" ] || handover_close_request
   printf 'kind=%s\nrequester_pid=%s\nrequester_session=%s\nholder_pid=%s\nrequested_at=%s\nrequest_id=%s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" > "$HANDOVER_REQUEST.tmp" || handover_die "cannot record the request"
-  note=$(handover_request_note "$1" "$6" "$2")
-  [ -n "$note" ] || { rm -f "$HANDOVER_REQUEST.tmp"; handover_die "cannot queue the request note for the live session"; }
+  if ! note=$(handover_request_note "$1" "$6" "$2") || [ -z "$note" ]; then
+    rm -f "$HANDOVER_REQUEST.tmp"
+    handover_die "the request note was not saved or did not wake the live session (harness pid $4), so it would never act on the request; not waiting"
+  fi
   if ! { printf 'note=%s\n' "$note" >> "$HANDOVER_REQUEST.tmp" && mv -f "$HANDOVER_REQUEST.tmp" "$HANDOVER_REQUEST"; }; then
     handover_die "cannot record the request"
   fi

@@ -213,6 +213,31 @@ test_request_wait_expires_and_rerun_queues_no_second_note() {
   pass "an unanswered request expires without moving the lock, stays pending, and reruns idempotently"
 }
 
+test_request_fails_when_note_cannot_wake_the_holder() {
+  local home a b out status
+  home=$(make_home unwoken)
+  a=$(new_harness "$home")
+  b=$(new_harness "$home")
+  as_session "$home" "$a" "$LOCK_BIN" >/dev/null || fail "session A could not take the lock"
+  # A wake queue that cannot be appended to: the note saves, but its wake never lands.
+  mkdir "$home/state/.wake-queue"
+  status=0
+  out=$(as_session "$home" "$b" "$LOCK_BIN" handover request --no-start --wait 30 2>&1) || status=$?
+  expect_code 1 "$status" "a request whose note never woke the holder must fail"
+  assert_contains "$out" "did not wake the live session" "the failed request did not say the holder was not woken"
+  assert_not_contains "$out" "handover requested from harness pid" "the failed request claimed it was requested"
+  assert_absent "$home/state/.handover-request" "the failed request was still recorded"
+  assert_absent "$home/state/.handover-request.tmp" "the failed request left a staged record"
+  assert_equals "$a" "$(cat "$home/state/.lock")" "the failed request moved the lock"
+  status=0
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_HOME="$home" FM_FAKE_HARNESS_DIR="$home/harness" \
+    PATH="$FAKEBIN:$PATH" "$LOCK_BIN" handover request --snapshot 2>&1) || status=$?
+  expect_code 1 "$status" "a snapshot request whose note never woke the holder must fail"
+  assert_contains "$out" "did not wake the live session" "the failed snapshot request did not say the holder was not woken"
+  assert_absent "$home/state/.handover-request" "the failed snapshot request was still recorded"
+  pass "a request whose note cannot wake the holder fails at once instead of waiting"
+}
+
 test_snapshot_is_requestable_and_readable_from_outside() {
   local home a out record
   home=$(make_home snapshot)
@@ -278,6 +303,7 @@ test_template_names_notes_registry_and_clones
 test_takeover_writes_record_then_moves_lock
 test_request_takes_free_or_stale_lock_directly
 test_request_wait_expires_and_rerun_queues_no_second_note
+test_request_fails_when_note_cannot_wake_the_holder
 test_snapshot_is_requestable_and_readable_from_outside
 test_digest_names_old_unaddressed_record_without_printing_it
 test_inbox_list_ids_and_bounds
