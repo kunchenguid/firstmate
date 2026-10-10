@@ -813,6 +813,7 @@ test_opencode_merges_and_clears_its_model_pin() {
   printf '%s\n' '.opencode/opencode.json' >> "$PROJ_DIR/.git/info/exclude"
   mkdir -p "$WT_DIR/.opencode"
   printf '%s\n' '{"model":"opencode-go/qwen3.8-flash","permission":{"*":"ask"},"provider":{"custom":{"npm":"custom/provider"}}}' > "$cfg"
+  chmod 600 "$cfg"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id1" "$PROJ_DIR" \
     --model opencode/space-bunny-free)
@@ -826,6 +827,8 @@ test_opencode_merges_and_clears_its_model_pin() {
     die "provider settings changed" unless $config->{provider}{custom}{npm} eq "custom/provider";
     die "prior model was not recorded" unless $marker->{previousModelPresent} && $marker->{previousModel} eq "opencode-go/qwen3.8-flash";
   ' "$cfg" || fail "OpenCode pin did not preserve and record existing settings"
+  [ "$(perl -e 'printf "%04o", (stat($ARGV[0]))[2] & 07777' "$cfg")" = "0600" ] \
+    || fail "updating an existing OpenCode config changed its file mode"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id2" "$PROJ_DIR" \
     --model opencode-go/space-bunny)
@@ -843,6 +846,8 @@ test_opencode_merges_and_clears_its_model_pin() {
     die "provider settings changed" unless $config->{provider}{custom}{npm} eq "custom/provider";
     die "Firstmate marker remains" if exists $config->{"x-firstmate-model-pin"};
   ' "$cfg" || fail "clearing the Firstmate pin did not restore and preserve the original config"
+  [ "$(perl -e 'printf "%04o", (stat($ARGV[0]))[2] & 07777' "$cfg")" = "0600" ] \
+    || fail "clearing a Firstmate pin changed the OpenCode config file mode"
   pass "opencode merges, updates, and clears only its own model pin"
 }
 
@@ -872,8 +877,9 @@ test_opencode_refuses_unparseable_worktree_config() {
 # file. Overwriting it would clobber the project's tracked configuration, which
 # is not a pin.
 test_opencode_refuses_a_tracked_project_config() {
-  local case_dir home proj wt fakebin launchlog id out status cfg existing
+  local case_dir home proj wt fakebin launchlog id deleted_id out status cfg existing
   id=profile-opencode-tracked-z7f
+  deleted_id=profile-opencode-tracked-deleted-z7l
   case_dir="$TMP_ROOT/profile-opencode-tracked"
   home="$case_dir/home"; proj="$case_dir/project"; wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
@@ -907,7 +913,19 @@ test_opencode_refuses_a_tracked_project_config() {
   cfg=$(cat "$wt/.opencode/opencode.json")
   [ "$cfg" = "$existing" ] || fail "opencode overwrote the project's tracked config"$'\n'"before: $existing"$'\n'"after:  $cfg"
   assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode" "refused launch must not start OpenCode"
-  pass "opencode refuses rather than selecting a tracked project model"
+
+  fm_test_spawn_brief "$home" "$deleted_id"
+  git -C "$wt" update-index --assume-unchanged .opencode/opencode.json
+  rm "$wt/.opencode/opencode.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$deleted_id" "$PROJ_DIR" \
+    --model opencode/space-bunny-free 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "opencode spawn beside a deleted tracked config must refuse"
+  assert_contains "$out" "cannot select OpenCode model opencode/space-bunny-free: tracked project config $wt/.opencode/opencode.json takes precedence" \
+    "deleted tracked-config refusal must identify the indexed path"
+  [ ! -e "$wt/.opencode/opencode.json" ] || fail "opencode recreated a tracked config deleted from the worktree"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode" "refused deleted-config launch must not start OpenCode"
+  pass "opencode refuses tracked configs whether present or locally deleted"
 }
 
 # The default model axis records itself in metadata and pins nothing: there is

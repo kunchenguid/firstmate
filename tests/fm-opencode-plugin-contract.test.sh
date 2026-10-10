@@ -349,6 +349,52 @@ DRIVER
   pass "the contract helpers classify v2 turn ends and location scoping correctly"
 }
 
+test_turnend_guard_skips_only_prompted_session() {
+  local repo out
+  repo="$TMP_ROOT/turnend-guard-session-scope"
+  make_primary_fixture "$repo"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard requires a wake\n' >&2
+exit 2
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh"
+
+  out=$(PLUGIN="$PLUGIN_DIR/fm-primary-turnend-guard.js" REPO="$repo" \
+    node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const plugin = (await import(pathToFileURL(process.env.PLUGIN).href)).default;
+const repo = process.env.REPO;
+const sessionIDs = [];
+let consumed = false;
+globalThis.__firstmateOpenCodeWatchArm = { ensureArmed: async () => "not-needed" };
+const events = ["ses_a", "ses_b", "ses_a", "ses_b"].map((sessionID) => ({
+  type: "session.step.ended",
+  data: { sessionID, finish: "stop" },
+  location: { directory: repo },
+}));
+const cleanup = await plugin.setup({
+  location: { directory: repo, project: { canonical: repo } },
+  session: { prompt: async ({ sessionID }) => { sessionIDs.push(sessionID); } },
+  event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {
+    try {
+      for (const event of events) yield event;
+    } finally {
+      consumed = true;
+    }
+  } }) },
+});
+for (let i = 0; i < 300 && !consumed; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+await cleanup();
+console.log(JSON.stringify(sessionIDs));
+EOF
+  ) || fail "turn-end guard session-scope drive failed: $out"
+  printf '%s' "$out" | grep -q '\["ses_a","ses_b"\]' \
+    || fail "each session's prompt follow-up must be skipped only for itself: $out"
+  pass "the turn-end guard skips follow-ups by prompted session id"
+}
+
 # An actionable close can leave restoration waiting for a successor's
 # readiness. Unload during that wait must stop the retry loop from launching
 # another arm.
@@ -427,4 +473,5 @@ test_cd_seatbelt_denies_stray_persistent_cd
 test_root_resolution_follows_the_instance_location
 test_event_handling_is_scoped_to_this_location
 test_contract_helpers_classify_turn_end
+test_turnend_guard_skips_only_prompted_session
 test_watch_arm_cleanup_stops_actionable_restoration

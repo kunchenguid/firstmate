@@ -19,7 +19,7 @@ import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
-let skipNextIdle = false;
+const promptedSessionIDs = new Set();
 
 // The guard reads its whole turn-end payload from stdin and exits 0 when stdin
 // is empty, so the payload the v1 adapter sent is still sent here; dropping it
@@ -47,8 +47,7 @@ export default {
       const sessionID = turnEndedSessionID(event);
       if (!sessionID) return;
 
-      if (skipNextIdle) {
-        skipNextIdle = false;
+      if (promptedSessionIDs.delete(sessionID)) {
         return;
       }
 
@@ -66,10 +65,8 @@ export default {
             result.stderr,
         );
         await ctx.session.prompt({ sessionID, text });
-        skipNextIdle = true;
-      } catch {
-        skipNextIdle = false;
-      }
+        promptedSessionIDs.add(sessionID);
+      } catch {}
     });
   },
 };

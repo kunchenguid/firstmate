@@ -2736,6 +2736,18 @@ model_flag_for_harness() {
 #     cannot carry the pin and the file route is the supported one.
 # A pin in a new file is git-excluded per-worktree launch scaffolding; an
 # existing untracked config is merged in place without changing its other keys.
+refuse_tracked_opencode_model_config() {  # <model>
+  local model=$1 target="$WT/.opencode/opencode.json"
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  model=${model%%#*}
+  case "$model" in */*) ;; *) return 0 ;; esac
+  if git -C "$WT" ls-files --error-unmatch .opencode/opencode.json >/dev/null 2>&1; then
+    printf 'fm-spawn: cannot select OpenCode model %s: tracked project config %s takes precedence and must not be modified\n' \
+      "$model" "$target" >&2
+    return 1
+  fi
+}
+
 write_opencode_worktree_model() {  # <model>
   local model=$1 target default_model=0 target_existed=0
   if [ -z "$model" ] || [ "$model" = default ]; then
@@ -2756,13 +2768,6 @@ write_opencode_worktree_model() {  # <model>
     esac
   fi
   target="$WT/.opencode/opencode.json"
-  # A project that ships its own committed .opencode/opencode.json owns that
-  # file. Never overwrite it or launch on an unverified model instead.
-  if [ "$default_model" -eq 0 ] && [ -e "$target" ] && git -C "$WT" ls-files --error-unmatch .opencode/opencode.json >/dev/null 2>&1; then
-    printf 'fm-spawn: cannot select OpenCode model %s: tracked project config %s takes precedence and must not be modified\n' \
-      "$model" "$target" >&2
-    return 1
-  fi
   if [ ! -e "$target" ] && [ "$default_model" -eq 1 ]; then
     return 0
   fi
@@ -2777,6 +2782,7 @@ my ($path, $model, $is_default) = @ARGV;
 my $marker_key = 'x-firstmate-model-pin';
 my $raw = '';
 my $file_exists = -e $path;
+my $file_mode = $file_exists ? ((stat($path))[2] & 07777) : undef;
 if ($file_exists) {
   open my $input, '<:raw', $path or die "fm-spawn: cannot read OpenCode config $path: $!\n";
   local $/;
@@ -2847,6 +2853,10 @@ open my $output, '>:raw', $temporary or die "fm-spawn: cannot write OpenCode con
 print {$output} JSON::PP->new->utf8->encode($config), "\n"
   or die "fm-spawn: cannot write OpenCode config $temporary: $!\n";
 close $output or die "fm-spawn: cannot close OpenCode config $temporary: $!\n";
+if (defined $file_mode) {
+  chmod($file_mode, $temporary) == 1
+    or die "fm-spawn: cannot preserve OpenCode config permissions on $path: $!\n";
+}
 rename $temporary, $path or die "fm-spawn: cannot replace OpenCode config $path: $!\n";
 PERL
   if [ "$default_model" -eq 0 ] && [ "$target_existed" -eq 0 ]; then
@@ -4670,6 +4680,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
+case "$HARNESS" in
+opencode*) refuse_tracked_opencode_model_config "$MODEL" || exit 1 ;;
+esac
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
 fi
