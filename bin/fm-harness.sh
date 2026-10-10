@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -13,6 +13,13 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
+#        fm-harness.sh crew-configured     print the harness config/crew-harness names
+#                                        explicitly, or nothing when the choice is
+#                                        absent or "default" (the mirrored-own default).
+#        fm-harness.sh secondmate-configured
+#                                        the same for the secondmate chain:
+#                                        config/secondmate-harness, else config/crew-harness,
+#                                        else nothing.
 #        fm-harness.sh validate-native-effort <harness> <model> <effort>
 #                                        Refuse ultra unless the harness is pi or
 #                                        pi-signed and the model explicitly names
@@ -143,7 +150,28 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # codex, opencode, kimi, muse, agy, and devin publish no harness-identity marker at all, so
+  # commandcode (Command Code Desktop) publishes COMMANDCODE_SCRATCHPAD to every
+  # tool subprocess (verified live, Command Code Desktop 1.72.4 on Windows: a
+  # shell-tool child carries COMMANDCODE_SCRATCHPAD and COMMAND_CODE_RIPGREP_PATH,
+  # and hook processes carry COMMANDCODE_PROJECT_DIR/COMMANDCODE_SESSION_ID/
+  # COMMANDCODE_HOOK_EVENT). It is deliberately tested AFTER every other marker:
+  # that desktop-app environment is inherited by every worker this home spawns,
+  # exactly like CLAUDECODE, so a worker's own marker must decide first, and
+  # bin/fm-spawn.sh clears the variable at each worker launch boundary as
+  # defense in depth. Command Code neither publishes nor scrubs CLAUDECODE, so a
+  # Command Code session nested under another harness still resolves through
+  # that harness's own marker here and through the structural ancestor in
+  # detect_own.
+  [ -n "${COMMANDCODE_SCRATCHPAD:-}" ] && { echo commandcode; return; }
+  # The agy CLI publishes no harness-identity marker of its own (see the
+  # markerless note below). The Antigravity desktop app exports
+  # ANTIGRAVITY_AGENT=1 to its tool children, so it is tested after every
+  # harness's own marker for the same reason as commandcode above: a session
+  # running inside that desktop app inherits the environment, and a worker's
+  # own marker must decide first. detect_own's ancestry layer settles any
+  # disagreement between the two.
+  [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo agy; return; }
+  # codex, opencode, kimi, muse, and devin publish no harness-identity marker at all, so
   # they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
   # unconditionally, any retained CLAUDECODE would silently rename one of them.
@@ -237,7 +265,24 @@ harness_process_verdict() {  # <pid>
     # carries no AGY_* or ANTIGRAVITY_* variable; AGENT=1 seen there is an
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
-    agy) echo "comm agy"; return ;;
+    agy|agy.exe|[Aa]ntigravity|[Aa]ntigravity.exe) echo "comm agy"; return ;;
+    language_server|language_server.exe)
+      # Read the arguments here rather than reusing the interpreter branch's
+      # later read: this arm runs before that assignment, and expanding an
+      # unassigned local under set -u aborted the verdict with "unbound
+      # variable", so the Antigravity evidence could never match.
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      case "$args" in
+        *[Aa]ntigravity*|*antigravity*) echo "comm agy"; return ;;
+      esac
+      ;;
+    # Command Code Desktop's app process name is exactly `Command Code`
+    # (verified live, Command Code Desktop 1.72.4 on Windows: the native
+    # process table reports "Command Code.exe", the direct parent of a
+    # tool-call shell). Anchored with explicit case and .exe forms, never a
+    # loose *command* glob, so ordinary cmd shells and command-shaped names
+    # are not misread as this harness.
+    [Cc]ommand\ [Cc]ode|[Cc]ommand\ [Cc]ode.exe) echo "comm commandcode"; return ;;
     devin) echo "comm devin"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
@@ -451,6 +496,25 @@ resolve_crew() {
   if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
 }
 
+# Print the harness config/crew-harness names explicitly, or nothing when the
+# choice is absent or "default" (the mirrored-own default). This is the
+# explicit-choice signal a caller uses to tell authority from a fallback.
+resolve_configured_crew() {
+  local crew=
+  [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
+  case "$crew" in ''|default) return 0 ;; esac
+  printf '%s\n' "$crew"
+}
+
+# Print the explicitly configured secondmate harness: the
+# config/secondmate-harness token when it names one, otherwise whatever
+# config/crew-harness names explicitly, or nothing when neither does.
+resolve_configured_secondmate() {
+  local sm
+  sm=$(secondmate_field 1)
+  case "$sm" in ''|default) resolve_configured_crew ;; *) printf '%s\n' "$sm" ;; esac
+}
+
 # Print the first non-empty, non-comment line of config/secondmate-harness
 # (leading/trailing whitespace trimmed), or nothing when the file is absent or
 # holds only blank/comment lines.
@@ -548,7 +612,9 @@ case "${1:-}" in
     harness_ancestry_descent "$descent_pid" ${1+"$@"}
     ;;
   crew) resolve_crew ;;
+  crew-configured) resolve_configured_crew ;;
   secondmate) resolve_secondmate ;;
+  secondmate-configured) resolve_configured_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
   secondmate-effort) resolve_secondmate_effort ;;
   *) detect_own ;;
