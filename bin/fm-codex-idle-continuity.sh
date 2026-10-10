@@ -50,10 +50,12 @@
 # failure even when an earlier line said `watcher: attached`.
 #
 # When the recorded Codex owner exits, or this supervisor receives TERM or
-# INT, it stops a watcher only when this supervisor's own arm printed
-# `watcher: started`. An arm that only attached is following a watcher
-# someone else started, and a home-wide `--stop` would take that watcher
-# down with the supervisor.
+# INT, it stops a watcher only when the last `watcher: started` or
+# `watcher: attached` line says this supervisor started that watcher. An arm
+# that attached, including after its own watcher gave the lock away, is
+# following a watcher someone else holds, and a home-wide `--stop` would
+# take that watcher down with the supervisor. An arm that has not printed
+# either line is left to exit on its own.
 #
 # The arm after a queued close is a handling successor
 # (FM_WATCH_PREDECESSOR_ARM_PID, as bin/fm-claude-stop-autoarm.sh passes): the
@@ -157,7 +159,9 @@ stop_home_supervisor() {
     sleep 0.1
     i=$((i + 1))
   done
-  ! fm_pid_alive "$pid" && ! fm_pid_alive "$(cat "$STATE/.watch.lock/pid" 2>/dev/null)"
+  # Another session's watcher may still hold the lock. Handover is finished
+  # once this supervisor is dead; the checkpoint then reports that watcher.
+  ! fm_pid_alive "$pid"
 }
 
 claim_lock() {  # <owner-pid> <session-id>
@@ -259,14 +263,17 @@ handed_over() {
   '
 }
 
-attached_only() {
+arm_started_watcher() {
   [ -f "$LOCK/arm.out" ] || return 1
-  grep -q '^watcher: attached ' "$LOCK/arm.out" || return 1
-  ! grep -q '^watcher: started ' "$LOCK/arm.out"
+  awk '
+    /^watcher: started / { own = 1 }
+    /^watcher: attached / { own = 0 }
+    END { exit own ? 0 : 1 }
+  ' "$LOCK/arm.out"
 }
 
 stop_our_watcher() {
-  if ! attached_only; then
+  if arm_started_watcher; then
     "$ARM" --stop >/dev/null 2>&1 || true
   fi
   if [ -n "${arm_pid:-}" ]; then

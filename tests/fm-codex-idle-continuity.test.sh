@@ -271,6 +271,7 @@ case "\$(cat '$STUB/mode')" in
   started-fail) printf 'watcher: started pid=1 (beacon fresh)\nwatcher: FAILED - cycle ended without an actionable reason\n' ;;
   hold) printf 'watcher: attached pid=1 (beacon 0s)\n'; exec sleep 600 ;;
   hold-started) printf 'watcher: started pid=1 (beacon fresh)\n'; exec sleep 600 ;;
+  hold-yielded) printf 'watcher: started pid=1 (beacon fresh)\nwatcher: attached pid=2 (beacon 0s)\n'; exec sleep 600 ;;
   broken) printf 'watcher: FAILED - no live watcher with a fresh beacon\n' ;;
 esac
 exit 1
@@ -506,3 +507,40 @@ wait_until 50 test ! -d "$SLOCK" || fail "the supervisor survived TERM after it 
 kill "$owner" 2>/dev/null || true
 wait "$owner" 2>/dev/null || true
 printf 'ok - TERM stops a watcher only when this supervisor started it\n'
+
+sleep 600 &
+owner=$!
+rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
+printf 'hold-yielded\n' > "$STUB/mode"
+: > "$STUB/arms"
+: > "$STUB/stops"
+: > "$STUB/queue"
+stub_stop
+wait_until 75 grep -q '^watcher: attached ' "$SLOCK/arm.out" \
+  || fail "the yielded arm never reported attached before TERM: $(cat "$SLOCK/arm.out" 2>/dev/null)"
+kill -TERM "$(cat "$SLOCK/pid")" 2>/dev/null || true
+wait_until 50 test ! -d "$SLOCK" || fail "the supervisor survived TERM after yielding the watcher"
+[ ! -s "$STUB/stops" ] || fail "TERM stopped a watcher after the arm had yielded it"
+printf 'ok - TERM does not stop a watcher the arm yielded after starting one\n'
+
+sleep 600 &
+foreign=$!
+mkdir -p "$SSTATE/.watch.lock"
+printf '%s\n' "$foreign" > "$SSTATE/.watch.lock/pid"
+printf 'hold\n' > "$STUB/mode"
+: > "$STUB/arms"
+: > "$STUB/stops"
+stub_stop
+wait_until 75 grep -q '^watcher: attached ' "$SLOCK/arm.out" \
+  || fail "the held arm never reported attached before handover: $(cat "$SLOCK/arm.out" 2>/dev/null)"
+handover_rc=0
+FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
+  || handover_rc=$?
+[ "$handover_rc" -eq 0 ] || fail "handover reported failure while another session's watcher stayed up (rc=$handover_rc)"
+[ ! -d "$SLOCK" ] || fail "handover left the idle supervisor in place"
+kill -0 "$foreign" 2>/dev/null || fail "handover stopped the other session's watcher"
+kill "$foreign" 2>/dev/null || true
+wait "$foreign" 2>/dev/null || true
+kill "$owner" 2>/dev/null || true
+wait "$owner" 2>/dev/null || true
+printf 'ok - handover finishes when another session still holds the watcher\n'
