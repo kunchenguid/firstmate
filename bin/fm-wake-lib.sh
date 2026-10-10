@@ -2202,6 +2202,73 @@ fm_wake_queued_keys_locked() {
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
+# fm_wake_seq_read <output-variable>
+# Store the highest sequence fm_wake_append_locked has issued, or 0 when none is
+# recorded. Uses only the read builtin, so a per-poll caller forks nothing.
+fm_wake_seq_read() {
+  local _fm_seq=0
+  IFS= read -r _fm_seq 2>/dev/null < "$STATE/.wake-queue.seq" || true
+  case "$_fm_seq" in ''|*[!0-9]*) _fm_seq=0 ;; esac
+  printf -v "$1" '%s' "$((10#$_fm_seq))"
+}
+
+# The wake-queue sequence this home's watchers have already handed to
+# firstmate. Only a check: close advances it (wake(),
+# bin/fm-push-transition-lib.sh), recording the queue's sequence counter just
+# before it prints: a check trigger is never offered to a supervision branch
+# while the captain is attended, so main's drain presents every row it can
+# claim, and in the away posture the branch takes check rows itself. A signal,
+# stale, or heartbeat close may be taken by a branch that presents only its
+# granted rows, so it leaves the record alone. bin/fm-watch.sh
+# (queue_handover_surface) surfaces a queued check row above the record once.
+# The record only moves forward. A counter read of 0 is unknown rather than a
+# reset: .wake-queue.seq is rewritten in place, so a read outside
+# FM_WAKE_QUEUE_LOCK can see it empty mid-append. Only a positive counter below
+# the record is a real reset (the counter file was recreated), and then the
+# record reads as 0, which errs toward surfacing a still-queued row once more
+# rather than holding it. A missing or malformed record also reads as 0.
+watch_queue_handed_read() {  # <output-variable> [counter]
+  local _handed=0 _last=${2-}
+  IFS= read -r _handed 2>/dev/null < "$STATE/.watch-queue-handed" || true
+  case "$_handed" in ''|*[!0-9]*) _handed=0 ;; esac
+  _handed=$((10#$_handed))
+  case "$_last" in ''|*[!0-9]*) fm_wake_seq_read _last ;; esac
+  if [ "$((10#$_last))" -gt 0 ] && [ "$_handed" -gt "$((10#$_last))" ]; then
+    _handed=0
+  fi
+  printf -v "$1" '%s' "$_handed"
+}
+
+watch_queue_handed_write() {  # <sequence>
+  local current tmp
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  watch_queue_handed_read current "$1"
+  [ "$((10#$1))" -gt "$current" ] || return 0
+  tmp=$(mktemp "$STATE/.watch-queue-handed.XXXXXX") || return 1
+  if ! printf '%s\n' "$((10#$1))" > "$tmp" || ! mv -f -- "$tmp" "$STATE/.watch-queue-handed"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# fm_wake_keys_after_locked <kind> <sequence>
+# Print the distinct keys of queued <kind> rows whose sequence is above
+# <sequence>, oldest first, under an already-held FM_WAKE_QUEUE_LOCK. Rows a
+# live branch grant holds or main's last drain already claimed have reached an
+# actor, so they are left out.
+fm_wake_keys_after_locked() {
+  local grant=
+  ! fm_wake_branch_grant_live "$STATE/.branch-eligible-rows" "$STATE/.branch-eligible-owner" \
+    || grant="$STATE/.branch-eligible-rows"
+  awk -F '\t' -v kind="$1" -v after="$2" -v branch="$grant" -v main="$STATE/.main-eligible-rows" '
+    BEGIN {
+      if (branch != "") while ((getline line < branch) > 0) held[line]=1
+      while ((getline line < main) > 0) held[line]=1
+    }
+    NF >= 5 && $3 == kind && $2 ~ /^[0-9]+$/ && $2 + 0 > after + 0 && !($2 in held) && !seen[$4]++ { print $4 }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null || true
+}
+
 fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-key>
   local task=$1 observed_at=$2 oldest_row_key=$3 marker tmp
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac

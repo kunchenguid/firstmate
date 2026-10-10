@@ -193,6 +193,9 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+It also surfaces, once, any check row another writer appended to the home's own queue that has not reached an actor, such as a captain inbox note, unless the away-mode daemon owns triage.
+Only a `check:` close records the queue sequence it handed over in `state/.watch-queue-handed`, because a check trigger always reaches main while the captain is attended and main's drain presents every row it can claim; a signal, stale, or heartbeat close may be taken by a supervision branch that presents only its granted rows, so it leaves the record alone.
+The successor surfaces a check row above the record unless a live branch grant holds it or main's last drain already claimed it, and the record only moves forward, so each row is surfaced at most once ([`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) `watch_queue_handed_read` owns the rule).
 
 ### Manual recovery and other harnesses
 
@@ -464,6 +467,9 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
+- A handling successor that must surface a foreign queue append, such as a captain inbox note, exactly once and leave it to the daemon while away mode owns triage.
+- A handling successor that must surface, once, a captain inbox note queued just before a signal close, never name the watcher's own queued signal row, and never surface a note main's last drain already claimed.
+- A check close that reads an empty, mid-append queue counter and must not lower the handover record, so a successor never re-surfaces a row its predecessor handed over.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.
