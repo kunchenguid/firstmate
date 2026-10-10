@@ -1466,6 +1466,38 @@ test_handoff_idle_reconciles_a_compacted_completion() {
   pass "a compacted completion keeps one durable handoff episode"
 }
 
+test_handoff_idle_distinguishes_compacted_long_completions() {
+  local home prefix common first second first_record second_record record display
+  make_world handoff-compacted-long-completions
+  install_handoff_fakes
+  home=$MAIN
+  prefix="needs-validation [at=$HANDOFF_OLD]: committed "
+  common=$(printf '%*s' 1300 '' | tr ' ' x)
+  first="${prefix}${common}A"
+  second="${prefix}${common}B"
+  write_child "$home" intake "$first" inc-compacted-long-1
+  scan_handoff "$home"
+  first_record=$(one_record "$home" intake) || fail "the first long completion was not recorded"
+  printf '%s\n' "$second" > "$home/state/intake.status"
+  scan_handoff "$home"
+  [ "$(records_for_count "$home" intake)" = 2 ] \
+    || fail "compacted long completions sharing a display field collapsed into one record"
+  second_record=
+  while IFS= read -r record; do
+    [ "$record" = "$first_record" ] || second_record=$record
+  done < <(records_for "$home" intake)
+  [ -n "$second_record" ] || fail "the later long completion did not create its own record"
+  display=$(handoff_field "$first_record" completion_line)
+  [ "${#display}" = 1200 ] || fail "the bounded completion display changed length"
+  [ "$display" = "$(handoff_field "$second_record" completion_line)" ] \
+    || fail "the fixture did not retain the same bounded display for both completions"
+  [ "$(handoff_field "$first_record" completion_digest)" != "$(handoff_field "$second_record" completion_digest)" ] \
+    || fail "distinct full completion lines shared a durable digest"
+  [ "$(handoff_wake_count "$home")" = 2 ] \
+    || fail "the later long completion did not receive its own idle alert"
+  pass "compaction keeps distinct long completion handoffs separate"
+}
+
 test_handoff_idle_compacted_duplicate_hold_clears_pending() {
   local home completion record saved_now=$HANDOFF_NOW
   make_world handoff-compacted-duplicates
@@ -2046,6 +2078,7 @@ test_handoff_idle_survives_a_replaced_status_log
 test_handoff_idle_replay_keeps_later_completion_open
 test_handoff_idle_records_repeated_identical_completions
 test_handoff_idle_reconciles_a_compacted_completion
+test_handoff_idle_distinguishes_compacted_long_completions
 test_handoff_idle_compacted_duplicate_hold_clears_pending
 test_handoff_idle_compacted_distinct_hold_clears_earlier
 test_handoff_idle_compacted_duplicate_hold_without_prefix_clears_pending

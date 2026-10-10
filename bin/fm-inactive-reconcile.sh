@@ -746,6 +746,7 @@ handoff_ensure() { # <fingerprint> <task> <incarnation> <line> <event-ordinal> <
     printf 'task_id=%s\n' "$task"
     printf 'incarnation=%s\n' "$incarnation"
     printf 'completion_line=%s\n' "$(clean_field "$line")"
+    printf 'completion_digest=%s\n' "$(sha256_text "$line")"
     printf 'completion_ordinal=%s\n' "$ordinal"
     printf 'observed_epoch=%s\n' "$observed"
     printf 'bound_secs=%s\n' "$FM_HANDOFF_IDLE_SECS"
@@ -807,7 +808,7 @@ handoff_write_cursor() {
 
 handoff_one() {
   local id=$1 meta=$2 timeout=$3 status kind mode incarnation line verb fingerprint observed record known ordinal=0
-  local line_clean matching_fp matching_count candidate_claimed collision line_count status_line
+  local line_digest matching_fp matching_count candidate_claimed collision line_count status_line
   local matched_ordinal earlier_ordinal
   local -a open_fps=() stored_fps=() claimed_fps=() matching_fps=() status_lines=()
   local now age key alerted last_alert state_line state_rc path item fp
@@ -845,7 +846,7 @@ handoff_one() {
         for item in "${claimed_fps[@]+"${claimed_fps[@]}"}"; do
           [ "$item" = "$fingerprint" ] && candidate_claimed=1
         done
-        line_clean=$(clean_field "$line")
+        line_digest=$(sha256_text "$line")
         matching_fp=''
         matching_count=0
         matching_fps=()
@@ -856,7 +857,7 @@ handoff_one() {
             [ "$record" = "$fp" ] && known=1
           done
           [ "$known" -eq 0 ] || continue
-          [ "$(handoff_value "$(handoff_record_path "$fp")" completion_line)" = "$line_clean" ] || continue
+          [ "$(handoff_value "$(handoff_record_path "$fp")" completion_digest)" = "$line_digest" ] || continue
           matching_fp=$fp
           matching_count=$((matching_count + 1))
           matching_fps+=("$item")
