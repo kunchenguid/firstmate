@@ -1080,7 +1080,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # than turn state (a long foreground tool call reads idle) and stays
   # unknown here.
   if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
-    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+    native=$(fm_backend_busy_state "$backend" "$target" "fm-$id" 2>/dev/null || true)
     if [ "$native" = busy ]; then
       printf 'busy herdr-native'
       return 0

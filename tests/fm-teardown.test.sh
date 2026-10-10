@@ -2732,6 +2732,7 @@ case "\${1:-} \${2:-}" in
       printf '%s\n' '{"sessions":[{"name":"childsession","running":true,"socket_path":"$case_dir/child.sock"}]}'
     fi
     ;;
+  "status --json") printf '%s\n' '{"server":{"running":true}}' ;;
   "workspace list") exit 1 ;;
   "pane get")
     if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
@@ -2932,6 +2933,7 @@ case "\${1:-} \${2:-}" in
   "session list")
     printf '%s\n' '{"sessions":[{"name":"grandchildsession","running":true,"socket_path":"$case_dir/grandchild.sock"}]}'
     ;;
+  "status --json") printf '%s\n' '{"server":{"running":true}}' ;;
   "workspace list") exit 1 ;;
   "pane get")
     if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then

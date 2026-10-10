@@ -665,7 +665,7 @@ prefetch_task_observations() {  # <meta> <id>
         endpoint_exists=false
       fi
       if [ "$kind" = secondmate ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+        agent_alive=$(fm_backend_agent_alive "$backend" "$target" "fm-$id" 2>/dev/null || printf unknown)
       fi
     fi
   else

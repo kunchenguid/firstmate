@@ -1241,8 +1241,10 @@ if ! pane_readable "$BACKEND_TARGET"; then
   # box would otherwise score dozens of live claims dead. Both backends own a
   # recovery-grade classifier (fm_backend_agent_state), which separates the
   # outcomes:
-  #   missing - the endpoint is authoritatively absent: herdr's pane get
-  #             answered pane_not_found; tmux's successful window inventory
+  #   missing - the task's endpoint is authoritatively absent. Herdr's
+  #             recorded-endpoint ownership and absence policy is owned by
+  #             docs/herdr-backend.md "Restart and liveness behavior";
+  #             tmux's successful window inventory
   #             omitted the exact recorded window, or tmux gave one of its
   #             definitive no-session/no-server/no-socket responses (which
   #             fm_backend_tmux_agent_state owns as death, since fm-bootstrap
@@ -1262,7 +1264,7 @@ if ! pane_readable "$BACKEND_TARGET"; then
   # Backends with no classifier (orca, zellij, and cmux all report unverified)
   # keep their historical capture-failure-means-gone reading.
   case "$TASK_BACKEND" in
-    tmux|herdr) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
+    tmux|herdr) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" "$EXPECTED_LABEL") ;;
     *) AGENT_STATE=none ;;
   esac
   case "$TASK_BACKEND:$AGENT_STATE" in

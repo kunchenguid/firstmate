@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Fixture exports intentionally stay in their subshells; later tests use the
+# unchanged parent environment, not assignments from earlier fixtures.
+# shellcheck disable=SC2030,SC2031
 # tests/fm-backend-herdr.test.sh - fake-herdr-CLI unit tests for the herdr
 # session-provider adapter (bin/backends/herdr.sh), P2 of
 # data/fm-backend-design-d7 (herdr-addendum.md). Mirrors tests/fm-backend.test.sh's
@@ -1328,7 +1331,11 @@ test_create_task_closes_and_replaces_dead_pane_husk() {
   printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/3.out"
   # 4: tab create -> the replacement tab (created BEFORE the husk is closed)
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
+  # 5-6: pre-close pane lookup and reclassification -> still a dead husk
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/5.out"
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/6.out"
+  # 7: tab close; 8: verify only the replacement remains
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk1 /tmp/proj' "$ROOT" ) \
@@ -1356,7 +1363,12 @@ test_create_task_closes_and_replaces_no_agent_husk() {
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   # 5: tab create -> the replacement tab (created BEFORE the husk is closed)
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  # 6-8: pre-close pane lookup and reclassification -> still agent-free
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/8.out"
+  # 9: tab close; 10: verify only the replacement remains
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj' "$ROOT" ) \
@@ -1384,7 +1396,15 @@ test_create_task_closes_all_duplicate_husks_after_replacement() {
   printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}\n' > "$resp/7.out"
   printf '{"result":{"tab":{"tab_id":"w1:t4"},"root_pane":{"pane_id":"w1:p4"}}}\n' > "$resp/8.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/11.out"
+  # 9-11: recheck the first husk before closing it at call 12
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/9.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/10.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/11.out"
+  # 13-15: recheck the second husk before closing it at call 16
+  printf '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/13.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/14.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}\n' > "$resp/15.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/17.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj' "$ROOT" ) \
@@ -1415,8 +1435,12 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '1\n' > "$resp/6.exit"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  # 6-8: pre-close pane lookup and reclassification -> still agent-free
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/8.out"
+  printf '1\n' > "$resp/9.exit"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
@@ -1464,7 +1488,11 @@ test_create_task_husk_replacement_creates_before_closing() {
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
   printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/3.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
+  # 5-6: pre-close pane lookup and reclassification -> still a dead husk
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/5.out"
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/6.out"
+  # 7: tab close; 8: verify only the replacement remains
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-order1 /tmp/proj' "$ROOT" ) \
@@ -3605,7 +3633,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   [ -n "$agent_line" ] && [ "$agent_line" -lt "$close_line" ] \
     || fail "reclaim did not recheck the old pane agent state before the close"
   boundary_mutations=$(sed -n "$((agent_line + 1)),$((close_line - 1))p" "$log" \
-    | grep -Ev $'\x1f(tab\x1flist|pane\x1flist|workspace\x1flist|terminal\x1ftitle\x1fclear)' || true)
+    | grep -Ev $'\x1f(status\x1f--json|tab\x1flist|pane\x1flist|workspace\x1flist|terminal\x1ftitle\x1fclear)' || true)
   [ -z "$boundary_mutations" ] \
     || fail "reclaim mutated between the old pane agent recheck and the close: $boundary_mutations"
   assert_not_contains "$calls" $'workspace\x1fclose' "reclaim introduced workspace-close authority"
@@ -5293,6 +5321,724 @@ test_dispatch_busy_state_unknown_for_tmux() {
   pass "fm_backend_busy_state: tmux (no native primitive) always reports unknown, preserving the P1 regex-only path"
 }
 
+# --- recorded endpoints that outlive their herdr session ---------------------
+#
+# Herdr pane ids are per-server counters, so after a server restart or
+# container rebuild a fresh session reuses w1, w2, ... while surviving task
+# records still name the old ids. The recorded id then belongs to whatever the new session put there:
+# another task's live agent, or a plain shell. The classifier used to read the
+# pane alone, so a foreign live agent read `alive` (steered, never relaunched)
+# and a foreign shell read `dead` (adopted, so a relaunch typed into it).
+# This stateful fake serves each pane, tab and agent from fixture files, so one
+# world can hold the task's own pane and an alias at the recorded id.
+make_stateful_herdr() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb" "$dir/world"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+W="${FM_FAKE_WORLD:?}"
+id=${3:-}; key=${id//:/_}
+if [ -e "$W/stopped" ] && [ "${1:-}" != status ] && [ "${1:-}" != server ]; then
+  exit 1
+fi
+case "${1:-} ${2:-}" in
+  "status --json")
+    running=true; [ ! -e "$W/stopped" ] || running=false
+    printf '{"client":{"version":"0.9.3","protocol":22},"server":{"running":%s}}\n' "$running"
+    ;;
+  "server "*) rm -f "$W/stopped" ;;
+  "session list") printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"%s/fmtest.sock"}]}\n' "$W" ;;
+  "pane get") [ -f "$W/pane-$key.json" ] && cat "$W/pane-$key.json" \
+    || { printf '{"error":{"code":"pane_not_found"}}\n'; exit 1; } ;;
+  "pane process-info") key=${4//:/_}; cat "$W/process-$key.json" ;;
+  "pane list") cat "$W/panes.json" ;;
+  "tab list") cat "$W/tabs.json" ;;
+  "tab create") cat "$W/created.json" ;;
+  "tab get") [ -f "$W/tab-$key.json" ] && cat "$W/tab-$key.json" \
+    || { printf '{"error":{"code":"tab_not_found"}}\n'; exit 1; } ;;
+  "agent get") [ -f "$W/agent-$key.json" ] && cat "$W/agent-$key.json" \
+    || { printf '{"error":{"code":"agent_not_found"}}\n'; exit 1; } ;;
+  "pane send-text" | "pane send-keys" | "pane run" | "pane close" | "tab close")
+    printf '%s\n' "$*" >> "$W/typed.log"
+    if [ "${FM_FAKE_CLOSE_REMOVES:-0}" = 1 ] && [ "$2" = close ]; then
+      rm -f "$W/pane-$key.json" "$W/process-$key.json" "$W/agent-$key.json"
+    fi
+    ;;
+  "pane read") printf '%s\n' "$*" >> "$W/read.log"; printf 'FOREIGN-SCREEN\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+test_recorded_endpoint_from_a_previous_session_is_never_the_tasks_agent() {
+  local dir="$TMP_ROOT/foreign-endpoint" fb world state out wt
+  mkdir -p "$dir"
+  fb=$(make_stateful_herdr "$dir")
+  world="$dir/world"; state="$dir/state"; wt="$dir/wt/mine"
+  mkdir -p "$state" "$wt"
+  # Task `mine` recorded w1:p1 in the previous session.
+  printf 'backend=herdr\nwindow=fmtest:w1:p1\nworktree=%s\n' "$wt" > "$state/mine.meta"
+  # A second record that names a different pane must never influence w1:p1.
+  printf 'backend=herdr\nwindow=fmtest:w2:p1\nworktree=%s\n' "$wt" > "$state/other.meta"
+
+  alias_world() {  # <cwd> <tab-label> <agent-json|->
+    printf '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"%s","cwd":"%s"}}}\n' "$1" "$1" > "$world/pane-w1_p1.json"
+    printf '{"result":{"tab":{"tab_id":"w1:t1","label":"%s"}}}\n' "$2" > "$world/tab-w1_t1.json"
+    rm -f "$world/agent-w1_p1.json"
+    [ "$3" = - ] || printf '%s\n' "$3" > "$world/agent-w1_p1.json"
+    : > "$world/typed.log"
+  }
+  probe() {  # <expected-label|-> -> "<agent_state> <backend agent_state> <target_exists> <capture> <send>"
+    local label=$1
+    [ "$label" != - ] || label=
+    PATH="$fb:$PATH" FM_FAKE_WORLD="$world" FM_STATE_OVERRIDE="$state" FM_HOME="$dir" \
+      FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 bash -c '
+        . "$0/bin/fm-backend.sh"
+        fm_backend_source herdr
+        fm_backend_herdr_pane_process_state() { printf agent; }
+        label=$1
+        printf "%s " "$(fm_backend_agent_state herdr fmtest:w1:p1 "$label")"
+        fm_backend_target_exists herdr fmtest:w1:p1 "$label" && printf "exists " || printf "gone "
+        [ -z "$(fm_backend_capture herdr fmtest:w1:p1 5 "$label")" ] && printf "no-read " || printf "READ "
+        fm_backend_send_key herdr fmtest:w1:p1 Enter "$label" && printf "SENT" || printf "refused"
+        fm_backend_herdr_kill_serialized fmtest w1:p1 "$label"
+        fm_backend_herdr_endpoint_confirmed_gone fmtest:w1:p1 "$label" && printf " confirmed-gone" || printf " present"
+      ' "$ROOT" "$label"
+  }
+  local live='{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}'
+
+  # 1. A pane in another workspace running another task's live Pi.
+  alias_world "$dir/wt/other" "fm-other" "$live"
+  out=$(probe fm-mine)
+  [ "$out" = "missing gone no-read refused confirmed-gone" ] \
+    || fail "a foreign live agent at the recorded id must read missing, absent, unread and unsteered; got '$out'"
+  [ ! -s "$world/typed.log" ] || fail "nothing may be typed into or closed on a foreign pane: $(cat "$world/typed.log")"
+  out=$(probe -)
+  case "$out" in "missing gone no-read refused"*) ;; *) fail "the same must hold when the caller supplies no label (record lookup), got '$out'" ;; esac
+
+  # 2. A captain's plain shell at the recorded id: agent-free, but still not the task's.
+  alias_world "$dir/elsewhere" "1" -
+  out=$(probe fm-mine)
+  case "$out" in "missing gone no-read refused"*) ;; *) fail "a foreign agent-less shell must read missing (so recovery rebinds instead of adopting it), got '$out'" ;; esac
+  [ ! -s "$world/typed.log" ] || fail "nothing may be typed into or closed on a foreign shell: $(cat "$world/typed.log")"
+
+  # 3. The task's own pane is untouched by the check: cwd in the worktree.
+  alias_world "$wt" "fm-mine" "$live"
+  out=$(probe fm-mine)
+  case "$out" in "alive exists READ"*) ;; *) fail "the task's own live pane must still read alive and readable, got '$out'" ;; esac
+
+  # 4. Old record, restored husk after a server restart: label survives, cwd differs.
+  alias_world "$dir/saved-cwd" "fm-mine" -
+  out=$(probe fm-mine)
+  case "$out" in "dead exists"*) ;; *) fail "a restart husk (same label) must stay an adoptable dead pane, got '$out'" ;; esac
+
+  # 5. A renamed tab whose agent still runs in the worktree is not foreign.
+  alias_world "$wt" "renamed" "$live"
+  out=$(probe fm-mine)
+  case "$out" in "alive exists"*) ;; *) fail "a renamed tab still running in the worktree must stay alive, got '$out'" ;; esac
+
+  # 6. A record with no worktree or no matching claim proves nothing: unchanged behavior.
+  alias_world "$dir/wt/other" "fm-other" "$live"
+  rm -f "$state/mine.meta"
+  out=$(probe -)
+  case "$out" in "alive exists READ"*) ;; *) fail "with no record claiming the target nothing may be judged foreign, got '$out'" ;; esac
+  pass "herdr recorded endpoint from a previous session: a foreign live agent or shell at the id is missing, unread, unsteered and unclosed; the task's own, restored, and renamed panes are unchanged"
+}
+
+test_process_bound_endpoint_rejects_matching_labels_and_worktrees() {
+  (
+    local dir="$TMP_ROOT/process-bound-endpoint" fb world state wt old_pid new_pid identity out
+    mkdir -p "$dir"
+    fb=$(make_stateful_herdr "$dir")
+    world="$dir/world"; state="$dir/state"; wt="$dir/wt/mine"
+    mkdir -p "$state" "$wt"
+    sleep 300 & old_pid=$!
+    sleep 300 & new_pid=$!
+    trap 'kill "$old_pid" "$new_pid" 2>/dev/null; wait "$old_pid" "$new_pid" 2>/dev/null || true' EXIT
+    export PATH="$fb:$PATH" FM_FAKE_WORLD="$world" FM_STATE_OVERRIDE="$state" FM_HOME="$dir"
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source herdr
+    # shellcheck disable=SC2329 # Adapter callback invoked by the sourced backend.
+    fm_backend_herdr_pane_process_state() { printf agent; }
+
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":%s}}}\n' "$old_pid" > "$world/process-w1_p1.json"
+    identity=$(fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "cannot read the original pane process identity"
+    printf 'backend=herdr\nwindow=fmtest:w1:p1\nworktree=%s\nherdr_process_identity=%s\n' "$wt" "$identity" > "$state/mine.meta"
+    printf '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"%s","terminal_id":1}}}\n' "$wt" > "$world/pane-w1_p1.json"
+    printf '{"result":{"tab":{"tab_id":"w1:t1","label":"fm-mine"}}}\n' > "$world/tab-w1_t1.json"
+    printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$world/agent-w1_p1.json"
+    [ "$(fm_backend_agent_state herdr fmtest:w1:p1 fm-mine)" = alive ] || fail "the original process must remain alive"
+    fm_backend_send_key herdr fmtest:w1:p1 Enter fm-mine || fail "the original process must accept input"
+    [ -s "$world/typed.log" ] || fail "input never reached the owned pane"
+    printf '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"%s","terminal_id":99}}}\n' "$dir/renamed-cwd" > "$world/pane-w1_p1.json"
+    printf '{"result":{"tab":{"tab_id":"w1:t1","label":"renamed"}}}\n' > "$world/tab-w1_t1.json"
+    [ "$(fm_backend_herdr_pane_process_identity fmtest w1:p1)" = "$identity" ] || fail "Herdr internal IDs must not affect process identity"
+    [ "$(fm_backend_agent_state herdr fmtest:w1:p1 fm-mine)" = alive ] || fail "a process-preserving handoff or rename must keep the agent alive"
+
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":%s}}}\n' "$new_pid" > "$world/process-w1_p1.json"
+    printf '{"result":{"tab":{"tab_id":"w1:t1","label":"fm-mine"}}}\n' > "$world/tab-w1_t1.json"
+    for cwd in "$dir/another-home/mine" "$wt"; do
+      printf '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"%s"}}}\n' "$cwd" > "$world/pane-w1_p1.json"
+      [ "$cwd" != "$wt" ] || rm -f "$world/agent-w1_p1.json"
+      : > "$world/typed.log"
+      for label in fm-mine ''; do
+        [ "$(fm_backend_agent_state herdr fmtest:w1:p1 "$label")" = missing ] || fail "a new process with a matching label or worktree must be missing"
+        ! fm_backend_target_exists herdr fmtest:w1:p1 "$label" || fail "the recycled target must be absent"
+        ! fm_backend_capture herdr fmtest:w1:p1 5 "$label" || fail "capture must refuse the recycled target"
+        ! fm_backend_visible_capture herdr fmtest:w1:p1 "$label" || fail "visible capture must refuse the recycled target"
+        ! fm_backend_send_key herdr fmtest:w1:p1 C-c "$label" || fail "interrupt must refuse the recycled target"
+        ! fm_backend_send_text_submit herdr fmtest:w1:p1 exit 1 0 0 "$label" || fail "text must refuse the recycled target"
+        [ "$(fm_backend_busy_state herdr fmtest:w1:p1)" = unknown ] || fail "busy classification must not read another process"
+        [ "$(fm_backend_composer_state herdr fmtest:w1:p1 "$label")" = unknown ] || fail "composer classification must not read another process"
+        fm_backend_herdr_kill_serialized fmtest w1:p1 "$label"
+        fm_backend_herdr_endpoint_confirmed_gone fmtest:w1:p1 "$label" || fail "the foreign endpoint must count as gone for the task"
+        ! fm_backend_herdr_projection_close_pane_focus_preserving fmtest w1:p1 "" fm-mine || fail "recorded projection cleanup must not close a foreign endpoint"
+      done
+      [ ! -s "$world/typed.log" ] || fail "input or closure reached an unrelated process"
+    done
+
+    printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-mine"}]}}\n' > "$world/tabs.json"
+    printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$world/panes.json"
+    printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$world/created.json"
+    out=$(fm_backend_herdr_create_task fmtest:w1 fm-mine "$wt") || fail "recovery must create a replacement without adopting the foreign shell"
+    [ "$out" = 'w1:t2 w1:p2' ] || fail "recovery did not return the replacement endpoint"
+    [ ! -s "$world/typed.log" ] || fail "recovery closed the foreign same-label husk"
+
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s}}}\n' "$new_pid" > "$world/process-w1_p2.json"
+    identity=$(fm_backend_herdr_pane_process_identity fmtest w1:p2) || fail "cannot bind the replacement process"
+    printf 'backend=herdr\nwindow=fmtest:w1:p2\nherdr_process_identity=%s\n' "$identity" > "$state/mine.meta"
+    ! fm_backend_herdr_endpoint_foreign fmtest w1:p2 fm-mine || fail "the new binding must authorize the replacement without a label or cwd"
+    printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$world/created.json"
+    for label_home in "$dir" "$dir/child-home"; do
+      out=$(FM_HOME="$label_home" FM_STATE_OVERRIDE="$state" fm_backend_herdr_create_task fmtest:w1 fm-mine "$wt") || fail "a later replacement must preserve the unclaimed same-label shell"
+      [ "$out" = 'w1:t3 w1:p3' ] || fail "later recovery did not return its new endpoint"
+      [ ! -s "$world/typed.log" ] || fail "later recovery closed the surviving unclaimed shell"
+    done
+    printf '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2"}}}\n' > "$world/pane-w1_p2.json"
+    rm -f "$world/process-w1_p2.json"
+    out=0
+    fm_backend_herdr_endpoint_foreign fmtest w1:p2 fm-mine || out=$?
+    [ "$out" -eq 2 ] || fail "an unreadable bound identity must not fall back to heuristics or claim foreign ownership"
+    [ "$(fm_backend_agent_state herdr fmtest:w1:p2 fm-mine)" = unreadable ] || fail "an identity read failure must not authorize duplicate recovery"
+    ! fm_backend_capture herdr fmtest:w1:p2 5 fm-mine || fail "an unreadable identity must block capture"
+    ! fm_backend_target_exists herdr fmtest:w1:p2 fm-mine || fail "an unreadable identity must block target use"
+    ! fm_backend_send_key herdr fmtest:w1:p2 C-c fm-mine || fail "an unreadable identity must block input"
+    ! fm_backend_herdr_kill_serialized fmtest w1:p2 fm-mine || fail "an unreadable identity must block closure"
+    ! fm_backend_herdr_endpoint_confirmed_gone fmtest:w1:p2 fm-mine || fail "an unreadable identity must not authorize record removal"
+    rm "$world/pane-w1_p2.json"
+    [ "$(fm_backend_agent_state herdr fmtest:w1:p2 fm-mine)" = missing ] || fail "a genuinely absent bound pane must still be missing"
+    fm_backend_herdr_endpoint_confirmed_gone fmtest:w1:p2 fm-mine || fail "structured pane absence must permit removal of an identity-bearing record"
+  ) || fail "process-bound endpoint regression failed"
+  pass "process-bound endpoints reject same-label other-home agents and same-worktree shells while preserving live processes and replacement bindings"
+}
+
+make_process_identity_ps() {
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  '-o lstart= -p '*)
+    [ "${LC_ALL:-}" = C ] && [ "${TZ:-}" = UTC0 ] || exit 1
+    [ "${FM_FAKE_PROCESS_PS_FAIL:-0}" != 1 ] || exit 1
+    printf '%s\n' "${FM_FAKE_PROCESS_LSTART-Wed Mar 19 10:11:12 2025}"
+    ;;
+  *) exec "$FM_TEST_REAL_PS" "$@" ;;
+esac
+SH
+  chmod +x "$1/ps"
+}
+
+test_process_identity_is_portable_and_distinguishes_pid_reuse() {
+  (
+    local dir="$TMP_ROOT/process-incarnations" fb world identity changed out
+    mkdir -p "$dir"
+    fb=$(make_stateful_herdr "$dir"); world="$dir/world"
+    FM_TEST_REAL_PS=$(command -v ps)
+    export FM_TEST_REAL_PS
+    make_process_identity_ps "$fb"
+    export PATH="$fb:$PATH" FM_FAKE_WORLD="$world" FM_PROC_ROOT_OVERRIDE="$dir/no-proc"
+    export FM_FAKE_PROCESS_LSTART='  Wed Mar 19 10:11:12 2025  '
+    . "$ROOT/bin/backends/herdr.sh"
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":42}}}\n' > "$world/process-w1_p1.json"
+    identity=$(TZ=Pacific/Honolulu fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "portable ps identity read failed without /proc"
+    [ "$identity" = 'ps:42:Wed Mar 19 10:11:12 2025' ] || fail "portable identity did not normalize the ps output"
+    export FM_FAKE_PROCESS_LSTART='Wed Mar 19 10:11:12 2025'
+    [ "$(TZ=Europe/London fm_backend_herdr_pane_process_identity fmtest w1:p1)" = "$identity" ] || fail "timezone or padding changed a live process identity"
+    export FM_FAKE_PROCESS_LSTART='Thu Mar 20 10:11:12 2025'
+    changed=$(fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "could not read changed process start time"
+    [ "$identity" != "$changed" ] || fail "a recycled PID matched its old process start time"
+    export FM_FAKE_PROCESS_LSTART='Wed Mar 19 10:11:12 2025'
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":43}}}\n' > "$world/process-w1_p1.json"
+    changed=$(fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "could not read changed process PID"
+    [ "$identity" != "$changed" ] || fail "different PIDs with the same start time matched"
+    out=$(FM_FAKE_PROCESS_PS_FAIL=1 fm_backend_herdr_pane_process_identity fmtest w1:p1) && fail "a failed ps read must not produce an identity"
+    [ -z "$out" ] || fail "a failed ps read produced partial identity output"
+    ! FM_FAKE_PROCESS_LSTART='' fm_backend_herdr_pane_process_identity fmtest w1:p1 || fail "an empty ps read must not produce an identity"
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w9:p9","shell_pid":42}}}\n' > "$world/process-w1_p1.json"
+    ! fm_backend_herdr_pane_process_identity fmtest w1:p1 || fail "a response for another pane must not bind"
+  ) || fail "portable process identity regression failed"
+  pass "portable ps identities work without /proc and distinguish process PIDs and start times"
+}
+
+# write_fake_proc: a fake /proc root with one process's stat line (field 22 is
+# the start time in ticks) and a boot id, for FM_PROC_ROOT_OVERRIDE.
+write_fake_proc() {  # <proc-root> <pid> <starttime-ticks> [boot-id]
+  mkdir -p "$1/$2" "$1/sys/kernel/random"
+  printf '%s (sh) S 1 %s %s 0 -1 4194304 100 0 0 0 0 0 0 0 20 0 1 0 %s 1000 100 18446744073709551615\n' \
+    "$2" "$2" "$2" "$3" > "$1/$2/stat"
+  printf '%s\n' "${4:-3f2a9c1e-0000-4000-8000-0123456789ab}" > "$1/sys/kernel/random/boot_id"
+}
+
+test_process_identity_is_stable_across_ps_lstart_drift() {
+  (
+    local dir="$TMP_ROOT/process-identity-stable" fb world proc identity again lstart
+    mkdir -p "$dir"
+    fb=$(make_stateful_herdr "$dir")
+    world="$dir/world"; proc="$dir/proc"
+    FM_TEST_REAL_PS=$(command -v ps)
+    export FM_TEST_REAL_PS
+    make_process_identity_ps "$fb"
+    export PATH="$fb:$PATH" FM_FAKE_WORLD="$world" FM_PROC_ROOT_OVERRIDE="$proc"
+    . "$ROOT/bin/backends/herdr.sh"
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":1408408}}}\n' > "$world/process-w1_p1.json"
+    write_fake_proc "$proc" 1408408 43800329
+    identity=$(fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "cannot read a /proc identity"
+    [ "$identity" = 'proc:1408408:3f2a9c1e-0000-4000-8000-0123456789ab:43800329' ] || fail "unexpected /proc identity '$identity'"
+    # ps lstart drifts by a second between calls; the identity must not follow it.
+    for lstart in 'Wed Oct  7 02:03:32 2026' 'Wed Oct  7 02:03:31 2026' 'Wed Oct  7 02:03:33 2026'; do
+      again=$(FM_FAKE_PROCESS_LSTART=$lstart fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "repeat identity read failed"
+      [ "$again" = "$identity" ] || fail "ps lstart drift changed the identity: '$again'"
+    done
+    # A replaced process (pid reuse with another start, or the same pid after a reboot) is a different identity.
+    write_fake_proc "$proc" 1408408 43800330
+    again=$(fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "changed start time unreadable"
+    [ "$again" != "$identity" ] || fail "a different start time must change the identity"
+    write_fake_proc "$proc" 1408408 43800329 aaaaaaaa-0000-4000-8000-0123456789ab
+    again=$(fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "changed boot id unreadable"
+    [ "$again" != "$identity" ] || fail "a different boot must change the identity"
+    write_fake_proc "$proc" 1408409 43800329
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":1408409}}}\n' > "$world/process-w1_p1.json"
+    again=$(fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "changed pid unreadable"
+    [ "$again" != "$identity" ] || fail "a different pid must change the identity"
+  ) || fail "stable process identity regression failed"
+  pass "the Herdr process identity derives from /proc start ticks and boot id, ignoring ps lstart drift but changing with the process"
+}
+
+test_lstart_drift_does_not_make_a_live_pane_foreign() {
+  (
+    local dir="$TMP_ROOT/process-identity-drift" fb world state wt proc out mode recorded current
+    mkdir -p "$dir"
+    fb=$(make_stateful_herdr "$dir")
+    world="$dir/world"; state="$dir/state"; wt="$dir/wt/mine"; proc="$dir/proc"
+    mkdir -p "$state" "$wt"
+    FM_TEST_REAL_PS=$(command -v ps)
+    export FM_TEST_REAL_PS
+    make_process_identity_ps "$fb"
+    export PATH="$fb:$PATH" FM_FAKE_WORLD="$world" FM_STATE_OVERRIDE="$state" FM_HOME="$dir"
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source herdr
+    # shellcheck disable=SC2329 # Adapter callback invoked by the sourced backend.
+    fm_backend_herdr_pane_process_state() { printf agent; }
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":42}}}\n' > "$world/process-w1_p1.json"
+    write_ownership_pane "$world" w1:p1 w1:t1 "$dir/elsewhere" fm-other
+    printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$world/agent-w1_p1.json"
+    # The cwd and label would say foreign, so only the process identity can keep the pane the task's.
+    for mode in proc noproc; do
+      if [ "$mode" = proc ]; then
+        write_fake_proc "$proc" 42 5000
+        export FM_PROC_ROOT_OVERRIDE="$proc"
+      else
+        export FM_PROC_ROOT_OVERRIDE="$dir/no-proc"
+      fi
+      # Legacy ps:<pid>:<lstart> records as the previous release wrote them.
+      recorded='Wed Oct  7 02:03:32 2026'
+      printf 'backend=herdr\nwindow=fmtest:w1:p1\nworktree=%s\nherdr_process_identity=ps:42:%s\n' "$wt" "$recorded" > "$state/mine.meta"
+      for current in 'Wed Oct  7 02:03:32 2026' 'Wed Oct  7 02:03:31 2026' 'Wed Oct  7 02:03:33 2026'; do
+        export FM_FAKE_PROCESS_LSTART=$current
+        ! fm_backend_herdr_endpoint_foreign fmtest w1:p1 fm-mine || fail "($mode) a live pane read foreign at lstart '$current' against '$recorded'"
+        [ "$(fm_backend_agent_state herdr fmtest:w1:p1 fm-mine)" = alive ] || fail "($mode) a live pane read missing at lstart '$current'"
+        fm_backend_send_key herdr fmtest:w1:p1 Enter fm-mine || fail "($mode) a live pane refused input at lstart '$current'"
+      done
+      # A different process behind the same pid, or another pid, is still foreign.
+      for current in 'Wed Oct  7 02:03:34 2026' 'Wed Oct  7 02:03:30 2026' 'Thu Oct  8 02:03:32 2026' 'Wed Oct  7 02:03:32 2025'; do
+        export FM_FAKE_PROCESS_LSTART=$current
+        fm_backend_herdr_endpoint_foreign fmtest w1:p1 fm-mine || fail "($mode) a different start '$current' must read foreign"
+        [ "$(fm_backend_agent_state herdr fmtest:w1:p1 fm-mine)" = missing ] || fail "($mode) a different start '$current' must read missing"
+      done
+      export FM_FAKE_PROCESS_LSTART='Wed Oct  7 02:03:32 2026'
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":43}}}\n' > "$world/process-w1_p1.json"
+      fm_backend_herdr_endpoint_foreign fmtest w1:p1 fm-mine || fail "($mode) a different pid must read foreign"
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":42}}}\n' > "$world/process-w1_p1.json"
+    done
+    # A minute boundary crossed by the drift is still one second.
+    export FM_PROC_ROOT_OVERRIDE="$dir/no-proc"
+    printf 'backend=herdr\nwindow=fmtest:w1:p1\nworktree=%s\nherdr_process_identity=ps:42:Wed Oct  7 02:03:59 2026\n' "$wt" > "$state/mine.meta"
+    export FM_FAKE_PROCESS_LSTART='Wed Oct  7 02:04:00 2026'
+    ! fm_backend_herdr_endpoint_foreign fmtest w1:p1 fm-mine || fail "drift across a minute boundary read foreign"
+    printf 'backend=herdr\nwindow=fmtest:w1:p1\nworktree=%s\nherdr_process_identity=ps:42:Fri Dec 31 23:59:59 2027\n' "$wt" > "$state/mine.meta"
+    export FM_FAKE_PROCESS_LSTART='Sat Jan  1 00:00:00 2028'
+    ! fm_backend_herdr_endpoint_foreign fmtest w1:p1 fm-mine || fail "drift across a year boundary read foreign"
+    # An unreadable current process stays unreadable, never foreign.
+    export FM_FAKE_PROCESS_PS_FAIL=1
+    out=0
+    fm_backend_herdr_endpoint_foreign fmtest w1:p1 fm-mine || out=$?
+    [ "$out" -eq 2 ] || fail "an unreadable legacy comparison must not claim foreign ownership (rc $out)"
+    unset FM_FAKE_PROCESS_PS_FAIL
+    # A current-format record is exact: the same ticks match and a replaced process does not.
+    write_fake_proc "$proc" 42 5000
+    export FM_PROC_ROOT_OVERRIDE="$proc"
+    recorded=$(fm_backend_herdr_pane_process_identity fmtest w1:p1) || fail "cannot read a current-format identity"
+    printf 'backend=herdr\nwindow=fmtest:w1:p1\nworktree=%s\nherdr_process_identity=%s\n' "$wt" "$recorded" > "$state/mine.meta"
+    export FM_FAKE_PROCESS_LSTART='Wed Oct  7 02:03:31 2026'
+    ! fm_backend_herdr_endpoint_foreign fmtest w1:p1 fm-mine || fail "a current-format record read foreign under ps drift"
+    write_fake_proc "$proc" 42 5001
+    fm_backend_herdr_endpoint_foreign fmtest w1:p1 fm-mine || fail "a replaced process must read foreign against a current-format record"
+  ) || fail "lstart drift regression failed"
+  pass "a plus or minus one second ps lstart drift (legacy record, with or without /proc) no longer reads a live pane foreign or missing, while a different process still does"
+}
+
+test_relaunch_refreshes_the_recorded_process_identity() {
+  (
+    . "$ROOT/tests/fixtures.sh"
+    local dir="$TMP_ROOT/relaunch-refreshes-identity" home proj wt fb layout out proc before
+    home="$dir/home"; proj="$dir/project"; wt="$dir/wt"; proc="$dir/proc"
+    fb=$(fm_test_make_spawn_fakebin "$dir/fake" codex)
+    layout=$(make_herdr_statefake "$dir/layout")
+    cp "$layout/herdr" "$fb/herdr-layout"
+    FM_TEST_REAL_PS=$(command -v ps)
+    export FM_TEST_REAL_PS
+    make_process_identity_ps "$fb"
+    fm_test_fake_sleep_noop "$fb"
+    fm_test_spawn_home "$home" codex
+    printf 'off\n' > "$home/config/herdr-presentation-spaces"
+    fm_git_worktree "$proj" "$wt" refresh-identity
+    fm_test_spawn_brief "$home" refresh-identity
+    write_fake_proc "$proc" 42 7000
+    export FM_FAKE_HERDR_STATE="$dir/layout/state.json" FM_HERDR_LOG="$dir/herdr.log"
+    export FM_FAKE_LAUNCH_LOG="$dir/launch.log" FM_PROC_ROOT_OVERRIDE="$proc"
+    : > "$FM_HERDR_LOG"
+    cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'pane get')
+    jq --arg pane "$3" --arg cwd "$FM_FAKE_PANE_PATH" '
+      .tabs[] | select(.pane_id == $pane)
+      | {result:{pane:{pane_id,tab_id,workspace_id,foreground_cwd:$cwd,cwd:$cwd}}}
+    ' "$FM_FAKE_HERDR_STATE"
+    ;;
+  'pane process-info')
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":42}}}\n' "$4"
+    ;;
+  'pane send-text')
+    case "$4" in
+      ". '"*"'")
+        staged=${4#". '"}; staged=${staged%"'"}
+        cat "$staged" > "$FM_FAKE_LAUNCH_LOG"
+        ;;
+    esac
+    ;;
+  'pane run' | 'pane send-keys') exit 0 ;;
+  *) exec "${0%/*}/herdr-layout" "$@" ;;
+esac
+SH
+    chmod +x "$fb/herdr"
+    out=$(HERDR_SESSION=fmtest fm_test_run_spawn "$home" "$wt" "$fb" refresh-identity "$proj" --backend herdr --mode no-mistakes --yolo off) || fail "spawn failed: $out"
+    before=$(grep '^herdr_process_identity=' "$home/state/refresh-identity.meta" | tail -1)
+    [ "$before" = 'herdr_process_identity=proc:42:3f2a9c1e-0000-4000-8000-0123456789ab:7000' ] || fail "spawn recorded '$before'"
+    # A legacy record as the previous release wrote it is replaced by the stable form on relaunch.
+    sed 's/^herdr_process_identity=.*/herdr_process_identity=ps:42:Wed Oct  7 02:03:32 2026/' "$home/state/refresh-identity.meta" > "$dir/legacy.meta" \
+      && mv "$dir/legacy.meta" "$home/state/refresh-identity.meta" || fail "cannot write the legacy identity fixture"
+    [ "$(grep '^herdr_process_identity=' "$home/state/refresh-identity.meta")" = 'herdr_process_identity=ps:42:Wed Oct  7 02:03:32 2026' ] \
+      || fail "legacy identity fixture was not persisted"
+    out=$(HERDR_SESSION=fmtest fm_test_run_spawn "$home" "$wt" "$fb" refresh-identity --relaunch) || fail "relaunch failed: $out"
+    [ "$(grep -c '^herdr_process_identity=' "$home/state/refresh-identity.meta")" = 1 ] || fail "relaunch must leave exactly one identity line"
+    [ "$(grep '^herdr_process_identity=' "$home/state/refresh-identity.meta")" = "$before" ] || fail "relaunch did not refresh a legacy identity"
+    # A changed pane process (new start time) is recorded on the next relaunch.
+    write_fake_proc "$proc" 42 7100
+    out=$(HERDR_SESSION=fmtest fm_test_run_spawn "$home" "$wt" "$fb" refresh-identity --relaunch) || fail "second relaunch failed: $out"
+    [ "$(grep '^herdr_process_identity=' "$home/state/refresh-identity.meta")" = 'herdr_process_identity=proc:42:3f2a9c1e-0000-4000-8000-0123456789ab:7100' ] \
+      || fail "relaunch kept the replaced process's identity"
+  ) || fail "relaunch identity refresh regression failed"
+  pass "relaunch (the fm-control and fm-secondmate-restart launch path) replaces a legacy or stale recorded identity with the current process's"
+}
+
+test_spawn_and_relaunch_continue_without_process_identity() {
+  (
+    . "$ROOT/tests/fixtures.sh"
+    local dir="$TMP_ROOT/optional-process-identity" home proj wt fb layout out identity target generation
+    home="$dir/home"; proj="$dir/project"; wt="$dir/wt"
+    fb=$(fm_test_make_spawn_fakebin "$dir/fake" codex)
+    layout=$(make_herdr_statefake "$dir/layout")
+    cp "$layout/herdr" "$fb/herdr-layout"
+    FM_TEST_REAL_PS=$(command -v ps)
+    export FM_TEST_REAL_PS
+    make_process_identity_ps "$fb"
+    fm_test_fake_sleep_noop "$fb"
+    fm_test_spawn_home "$home" codex
+    printf 'off\n' > "$home/config/herdr-presentation-spaces"
+    fm_git_worktree "$proj" "$wt" optional-identity
+    fm_test_spawn_brief "$home" optional-identity
+    export FM_FAKE_HERDR_STATE="$dir/layout/state.json" FM_HERDR_LOG="$dir/herdr.log"
+    export FM_FAKE_LAUNCH_LOG="$dir/launch.log" FM_FAKE_PROCESS_PS_FAIL=1 FM_PROC_ROOT_OVERRIDE="$dir/no-proc"
+    : > "$FM_HERDR_LOG"
+    cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'pane get')
+    jq --arg pane "$3" --arg cwd "$FM_FAKE_PANE_PATH" '
+      .tabs[] | select(.pane_id == $pane)
+      | {result:{pane:{pane_id,tab_id,workspace_id,foreground_cwd:$cwd,cwd:$cwd}}}
+    ' "$FM_FAKE_HERDR_STATE"
+    ;;
+  'pane process-info')
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":42}}}\n' "$4"
+    ;;
+  'pane send-text')
+    case "$4" in
+      ". '"*"'")
+        staged=${4#". '"}; staged=${staged%"'"}
+        cat "$staged" > "$FM_FAKE_LAUNCH_LOG"
+        ;;
+    esac
+    ;;
+  'pane run' | 'pane send-keys') exit 0 ;;
+  *) exec "${0%/*}/herdr-layout" "$@" ;;
+esac
+SH
+    chmod +x "$fb/herdr"
+    out=$(HERDR_SESSION=fmtest fm_test_run_spawn "$home" "$wt" "$fb" optional-identity "$proj" --backend herdr --mode no-mistakes --yolo off) || fail "an unavailable identity aborted spawn: $out"
+    [ -s "$FM_FAKE_LAUNCH_LOG" ] || fail "spawn never delivered the staged agent launch"
+    export FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_FAKE_PANE_PATH="$wt" PATH="$fb:$PATH"
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source herdr
+    identity=$(fm_backend_herdr_meta_value "$home/state/optional-identity.meta" herdr_process_identity)
+    [ -z "$identity" ] || fail "spawn must omit an unavailable identity"
+    target=$(fm_backend_target_of_meta "$home/state/optional-identity.meta")
+    generation=$(fm_backend_herdr_meta_value "$home/state/optional-identity.meta" spawn_gen)
+    [ "$(fm_backend_agent_state herdr "$target" fm-optional-identity)" = dead ] || fail "the no-identity record did not retain legacy liveness"
+    fm_backend_send_key herdr "$target" Enter fm-optional-identity || fail "the no-identity record did not retain legacy input"
+    : > "$FM_FAKE_LAUNCH_LOG"
+    out=$(HERDR_SESSION=fmtest fm_test_run_spawn "$home" "$wt" "$fb" optional-identity --relaunch) || fail "an unavailable identity aborted relaunch: $out"
+    [ -s "$FM_FAKE_LAUNCH_LOG" ] || fail "relaunch never delivered the staged agent launch"
+    [ "$(fm_backend_herdr_meta_value "$home/state/optional-identity.meta" herdr_process_identity)" = '' ] || fail "relaunch must omit an unavailable identity"
+    [ "$(fm_backend_target_of_meta "$home/state/optional-identity.meta")" = "$target" ] || fail "legacy relaunch unexpectedly rebound the owned endpoint"
+    [ "$(fm_backend_herdr_meta_value "$home/state/optional-identity.meta" spawn_gen)" != "$generation" ] || fail "relaunch did not republish the task record"
+  ) || fail "optional process identity launch regression failed"
+  pass "Herdr spawn and relaunch deliver their agent launch with legacy ownership fallback when ps fails"
+}
+
+write_ownership_pane() {
+  local world=$1 pane=$2 tab=$3 cwd=$4 label=$5 key=${2//:/_} tab_key=${3//:/_}
+  jq -n --arg pane "$pane" --arg tab "$tab" --arg cwd "$cwd" \
+    '{result:{pane:{pane_id:$pane,tab_id:$tab,foreground_cwd:$cwd,cwd:$cwd}}}' > "$world/pane-$key.json"
+  jq -n --arg tab "$tab" --arg label "$label" \
+    '{result:{tab:{tab_id:$tab,label:$label}}}' > "$world/tab-$tab_key.json"
+  jq -n --arg pane "$pane" \
+    '{result:{type:"pane_process_info",process_info:{pane_id:$pane,shell_pid:42}}}' > "$world/process-$key.json"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$world/agent-$key.json"
+}
+
+test_projection_abort_cleans_response_owned_pane_despite_stale_record() {
+  (
+    . "$ROOT/tests/fixtures.sh"
+    local dir="$TMP_ROOT/response-owned-projection" home proj fb layout out
+    home="$dir/home"; proj="$dir/project"
+    fb=$(fm_test_make_spawn_fakebin "$dir/fake" codex)
+    layout=$(make_herdr_statefake "$dir/layout")
+    cp "$layout/herdr" "$fb/herdr-layout"
+    FM_TEST_REAL_PS=$(command -v ps)
+    export FM_TEST_REAL_PS
+    make_process_identity_ps "$fb"
+    fm_test_fake_sleep_noop "$fb"
+    fm_test_spawn_home "$home" codex
+    printf 'on\n' > "$home/config/herdr-presentation-spaces"
+    fm_git_init_commit "$proj"
+    fm_test_spawn_brief "$home" b
+    fm_write_meta "$home/state/a.meta" backend=herdr window=fmtest:w3:p2 \
+      "worktree=$proj" 'herdr_process_identity=ps:42:Tue Mar 19 10:11:12 2024'
+    export FM_FAKE_HERDR_STATE="$dir/layout/state.json" FM_HERDR_LOG="$dir/herdr.log"
+    : > "$FM_HERDR_LOG"
+    jq '.workspaces=[{workspace_id:"w1",label:"firstmate",focused:true,active_tab_id:"w1:t1"}]
+        | .tabs=[{workspace_id:"w1",tab_id:"w1:t1",pane_id:"w1:p1",label:"1",focused:true}]' \
+      "$FM_FAKE_HERDR_STATE" > "$dir/initial.json"
+    mv "$dir/initial.json" "$FM_FAKE_HERDR_STATE"
+    cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+state=$FM_FAKE_HERDR_STATE
+ws= label=
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --workspace) ws=${args[$((i+1))]} ;;
+    --label) label=${args[$((i+1))]} ;;
+  esac
+done
+save() { local tmp="$state.tmp.$$"; cat > "$tmp" && mv "$tmp" "$state"; }
+case "${1:-} ${2:-}" in
+  'status --json') printf '{"client":{"version":"0.9.3","protocol":22},"server":{"version":"0.9.3","protocol":22,"compatible":true,"running":true}}\n' ;;
+  'session list') printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"%s/fmtest.sock"}]}\n' "${state%/*}" ;;
+  'workspace create')
+    jq --arg label "$label" '.workspaces += [{workspace_id:"w3",label:$label,focused:false,active_tab_id:"w3:t1"}]
+      | .tabs += [{workspace_id:"w3",tab_id:"w3:t1",pane_id:"w3:p1",label:"1",focused:false}]' "$state" | save
+    printf '{"result":{"workspace":{"workspace_id":"w3"},"tab":{"tab_id":"w3:t1"},"root_pane":{"pane_id":"w3:p1"}}}\n'
+    ;;
+  'tab create')
+    jq --arg label "$label" --arg ws "$ws" '.tabs += [{workspace_id:$ws,tab_id:"w3:t2",pane_id:"w3:p2",label:$label,focused:false}]' "$state" | save
+    printf '{"result":{"tab":{"tab_id":"w3:t2"},"root_pane":{"pane_id":"w3:p2"}}}\n'
+    ;;
+  'pane get')
+    pane=$3
+    if jq -e --arg pane "$pane" 'any(.tabs[]; .pane_id == $pane)' "$state" >/dev/null; then
+      jq --arg pane "$pane" --arg cwd "$FM_FAKE_PANE_PATH" '.tabs[] | select(.pane_id==$pane)
+        | {result:{pane:{pane_id,tab_id,workspace_id,foreground_cwd:$cwd,cwd:$cwd}}}' "$state"
+    else
+      printf '{"error":{"code":"pane_not_found"}}\n'; exit 1
+    fi
+    ;;
+  'pane process-info') printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":42}}}\n' "$4" ;;
+  'pane close')
+    jq --arg pane "$3" '.tabs |= [.[] | select(.pane_id != $pane)]
+      | .tabs as $tabs | .workspaces |= [.[] | select(.workspace_id as $ws | any($tabs[]; .workspace_id==$ws))]' "$state" | save
+    ;;
+  'pane run' | 'pane send-text' | 'pane send-keys') exit 0 ;;
+  *) exec "${0%/*}/herdr-layout" "$@" ;;
+esac
+SH
+    chmod +x "$fb/herdr"
+    out=$(HERDR_SESSION=fmtest fm_test_run_spawn "$home" "$proj" "$fb" b "$proj" --backend herdr --mode no-mistakes --yolo off) \
+      && fail "spawn unexpectedly acquired an isolated worktree"
+    assert_contains "$out" 'did not enter an isolated worktree' "spawn did not abort at worktree acquisition"
+    [ ! -e "$home/state/b.meta" ] || fail "failed spawn published B's task record"
+    [ -f "$home/state/a.meta" ] || fail "abort cleanup removed stale task A's record"
+    jq -e '[.workspaces[].workspace_id]==["w1"] and [.tabs[].pane_id]==["w1:p1"]' "$FM_FAKE_HERDR_STATE" >/dev/null \
+      || fail "response-owned abort cleanup left B's pane or disposable workspace behind"
+  ) || fail "response-owned projection cleanup regression failed"
+  pass "a stale task record cannot block cleanup of a fresh projected spawn that aborts before publication"
+}
+
+test_active_operations_check_ownership_after_server_restore() {
+  (
+    local dir="$TMP_ROOT/restored-foreign-endpoint" fb world state operation out
+    fb=$(make_stateful_herdr "$dir"); world="$dir/world"; state="$dir/state"
+    mkdir -p "$state"
+    printf 'backend=herdr\nwindow=fmtest:w1:p1\nworktree=%s\n' "$dir/owned" > "$state/mine.meta"
+    write_ownership_pane "$world" w1:p1 w1:t1 "$dir/unrelated" fm-other
+    export PATH="$fb:$PATH" FM_FAKE_WORLD="$world" FM_STATE_OVERRIDE="$state" FM_HOME="$dir"
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source herdr
+    # shellcheck disable=SC2329 # Adapter callback invoked by the sourced backend.
+    fm_backend_herdr_pane_process_state() { printf agent; }
+    for operation in capture visible key text busy composer; do
+      : > "$world/stopped"; : > "$world/typed.log"; : > "$world/read.log"
+      case "$operation" in
+        capture) ! fm_backend_capture herdr fmtest:w1:p1 5 fm-mine || fail "capture reached a restored foreign pane" ;;
+        visible) ! fm_backend_visible_capture herdr fmtest:w1:p1 fm-mine || fail "visible capture reached a restored foreign pane" ;;
+        key) ! fm_backend_send_key herdr fmtest:w1:p1 C-c fm-mine || fail "interrupt reached a restored foreign pane" ;;
+        text) ! fm_backend_send_text_submit herdr fmtest:w1:p1 exit 1 0 0 fm-mine || fail "text reached a restored foreign pane" ;;
+        busy) out=$(fm_backend_busy_state herdr fmtest:w1:p1); [ "$out" = unknown ] || fail "busy classification trusted a restored foreign pane" ;;
+        composer) out=$(fm_backend_composer_state herdr fmtest:w1:p1 fm-mine); [ "$out" = unknown ] || fail "composer classification trusted a restored foreign pane" ;;
+      esac
+      [ ! -e "$world/stopped" ] || fail "$operation did not establish server readiness before checking ownership"
+      [ ! -s "$world/typed.log" ] && [ ! -s "$world/read.log" ] || fail "$operation used the unrelated restored pane"
+    done
+    write_ownership_pane "$world" w1:p1 w1:t1 "$dir/owned" fm-mine
+    : > "$world/stopped"
+    fm_backend_send_key herdr fmtest:w1:p1 Enter fm-mine || fail "restoring an owned endpoint must still permit input"
+    [ -s "$world/typed.log" ] || fail "owned input was not delivered after restore"
+    : > "$world/stopped"
+    [ "$(fm_backend_agent_state herdr fmtest:w1:p1 fm-mine)" = missing ] || fail "passive stopped-server liveness changed"
+    [ -e "$world/stopped" ] || fail "passive liveness started the server"
+  ) || fail "restored endpoint ownership regression failed"
+  pass "every active dispatcher checks restored ownership while passive liveness stays read-only"
+}
+
+test_secondmate_probe_cannot_borrow_another_tasks_binding() {
+  (
+    local dir="$TMP_ROOT/secondmate-claimants" fb world state
+    fb=$(make_stateful_herdr "$dir"); world="$dir/world"; state="$dir/state"
+    mkdir -p "$state"
+    FM_TEST_REAL_PS=$(command -v ps)
+    export FM_TEST_REAL_PS
+    make_process_identity_ps "$fb"
+    write_ownership_pane "$world" w1:p1 w1:t1 "$dir/a" fm-a
+    for id in a b; do
+      printf 'backend=herdr\nwindow=fmtest:w1:p1\nharness=pi\nkind=secondmate\nworktree=%s\n' "$dir/$id" > "$state/$id.meta"
+    done
+    printf 'herdr_process_identity=ps:42:Wed Mar 19 10:11:12 2025\n' >> "$state/a.meta"
+    printf 'herdr_process_identity=ps:42:Tue Mar 19 10:11:12 2024\n' >> "$state/b.meta"
+    export PATH="$fb:$PATH" FM_FAKE_WORLD="$world" FM_STATE_OVERRIDE="$state" FM_HOME="$dir"
+    . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+    fm_backend_source herdr
+    # shellcheck disable=SC2329 # Adapter callback invoked by the sourced backend.
+    fm_backend_herdr_pane_process_state() { printf agent; }
+    fm_secondmate_liveness_probe "$state/b.meta" b full
+    [ "$FM_SM_LIVE_STATE" = missing ] && [ "$FM_SM_LIVE_STATUS" = relaunchable ] || fail "bootstrap-style recovery borrowed task A's live binding for B"
+    fm_secondmate_liveness_probe "$state/b.meta" b poll
+    [ "$FM_SM_LIVE_STATE" = missing ] && [ "$FM_SM_LIVE_STATUS" = relaunchable ] || fail "watcher-style recovery borrowed task A's live binding for B"
+    fm_secondmate_liveness_probe "$state/a.meta" a full
+    [ "$FM_SM_LIVE_STATE" = alive ] && [ "$FM_SM_LIVE_STATUS" = alive ] || fail "the recovered owner's binding must remain alive"
+    [ "$(fm_backend_agent_alive herdr fmtest:w1:p1 fm-b)" = dead ] || fail "compatibility liveness lost the selected task identity"
+  ) || fail "task-specific secondmate liveness regression failed"
+  pass "bootstrap and watcher secondmate probes cannot borrow another task's live endpoint binding"
+}
+
+test_teardown_uses_descendant_state_and_confirms_closed_bound_panes() {
+  (
+    . "$ROOT/tests/fixtures.sh"
+    local dir fb world home mate nested out scenario
+    for scenario in flat descendants; do
+      dir="$TMP_ROOT/bound-teardown-$scenario"; home="$dir/home"
+      fb=$(make_stateful_herdr "$dir"); world="$dir/world"
+      FM_TEST_REAL_PS=$(command -v ps)
+      export FM_TEST_REAL_PS
+      make_process_identity_ps "$fb"
+      fm_fake_exit0 "$fb" lsof treehouse
+      mkdir -p "$home/state" "$home/data" "$home/config" "$dir/user-home"
+      : > "$world/typed.log"
+      if [ "$scenario" = flat ]; then
+        fm_write_meta "$home/state/mine.meta" backend=herdr window=fmtest:w1:p1 endpoint_task_id=mine \
+          "worktree=$dir/missing-worktree" "project=$dir/missing-project" kind=scout harness=pi \
+          herdr_session=fmtest herdr_workspace_id=w1 herdr_tab_id=w1:t1 herdr_pane_id=w1:p1 \
+          'herdr_process_identity=ps:42:Wed Mar 19 10:11:12 2025'
+        write_ownership_pane "$world" w1:p1 w1:t1 "$dir/missing-worktree" fm-mine
+      else
+        mate="$dir/mate"; nested="$dir/nested"
+        mkdir -p "$mate/state" "$mate/data" "$mate/config" "$nested/state" "$nested/data" "$nested/config"
+        printf 'mine\n' > "$mate/.fm-secondmate-home"
+        printf 'branch\n' > "$nested/.fm-secondmate-home"
+        fm_write_meta "$home/state/mine.meta" backend=herdr window=fmtest:w1:p1 endpoint_task_id=mine \
+          "worktree=$mate" "project=$mate" "home=$mate" kind=secondmate harness=pi mode=secondmate yolo=off \
+          herdr_session=fmtest herdr_workspace_id=w1 herdr_tab_id=w1:t1 herdr_pane_id=w1:p1 \
+          'herdr_process_identity=ps:42:Tue Mar 19 10:11:12 2024'
+        fm_write_meta "$mate/state/branch.meta" backend=herdr window=fmtest:w1:p2 endpoint_task_id=branch \
+          "worktree=$nested" "project=$nested" "home=$nested" kind=secondmate harness=pi mode=secondmate yolo=off \
+          herdr_session=fmtest herdr_workspace_id=w1 herdr_tab_id=w1:t2 herdr_pane_id=w1:p2 \
+          'herdr_process_identity=ps:42:Tue Mar 19 10:11:12 2024'
+        fm_write_meta "$nested/state/leaf.meta" backend=herdr window=fmtest:w1:p3 endpoint_task_id=leaf \
+          "worktree=$dir/missing-worktree" "project=$dir/missing-project" kind=scout harness=pi \
+          herdr_session=fmtest herdr_workspace_id=w1 herdr_tab_id=w1:t3 herdr_pane_id=w1:p3 \
+          'herdr_process_identity=ps:42:Tue Mar 19 10:11:12 2024'
+        for number in 1 2 3; do
+          write_ownership_pane "$world" "w1:p$number" "w1:t$number" "$dir/unrelated" fm-unrelated
+        done
+      fi
+      out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" HOME="$dir/user-home" \
+        FM_FAKE_WORLD="$world" FM_FAKE_CLOSE_REMOVES=1 PATH="$fb:$PATH" \
+        "$ROOT/bin/fm-teardown.sh" mine --force 2>&1) || fail "$scenario teardown failed: $out"
+      [ ! -e "$home/state/mine.meta" ] || fail "$scenario teardown retained its completed task record"
+      if [ "$scenario" = flat ]; then
+        [ -s "$world/typed.log" ] && [ ! -e "$world/pane-w1_p1.json" ] || fail "owned teardown never closed its pane"
+      else
+        [ ! -s "$world/typed.log" ] || fail "recursive cleanup closed a foreign pane using the parent's state"
+        [ ! -e "$mate" ] && [ ! -e "$nested" ] || fail "recursive stale records did not finish cleanup"
+        [ -f "$world/pane-w1_p2.json" ] && [ -f "$world/pane-w1_p3.json" ] || fail "recursive cleanup removed unrelated descendants' addresses"
+      fi
+    done
+  ) || fail "bound endpoint teardown regression failed"
+  pass "owned pane closure permits record removal and recursive cleanup respects each descendant's state"
+}
+
 test_dispatch_composer_state_routes_by_backend() {
   # fm_backend_composer_state (the generic per-backend composer/pending-input
   # classifier the away-mode daemon dispatches through - bin/fm-supervise-daemon.sh's
@@ -5310,6 +6056,7 @@ test_dispatch_composer_state_routes_by_backend() {
     _FM_BACKEND_ORCA_SOURCED=1
     _FM_BACKEND_ZELLIJ_SOURCED=1
     fm_tmux_composer_state() { [ "$1" = "sess:win" ] || fail "tmux composer_state got wrong target: $1"; printf 'pending'; }
+    fm_backend_herdr_target_ready() { return 0; }
     fm_backend_herdr_composer_state() { [ "$1" = "default:w1:p2" ] || fail "herdr composer_state got wrong target: $1"; printf 'empty'; }
     fm_backend_orca_composer_state() { [ "$1" = "term-1" ] || fail "orca composer_state got wrong target: $1"; printf 'empty'; }
     fm_backend_zellij_composer_state() { [ "$1" = "sess:7" ] || fail "zellij composer_state got wrong target: $1"; printf 'empty'; }
@@ -6095,6 +6842,17 @@ test_send_text_submit_non_claude_skips_the_payload_proof
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
+test_recorded_endpoint_from_a_previous_session_is_never_the_tasks_agent
+test_process_bound_endpoint_rejects_matching_labels_and_worktrees
+test_process_identity_is_portable_and_distinguishes_pid_reuse
+test_process_identity_is_stable_across_ps_lstart_drift
+test_lstart_drift_does_not_make_a_live_pane_foreign
+test_relaunch_refreshes_the_recorded_process_identity
+test_spawn_and_relaunch_continue_without_process_identity
+test_projection_abort_cleans_response_owned_pane_despite_stale_record
+test_active_operations_check_ownership_after_server_restore
+test_secondmate_probe_cannot_borrow_another_tasks_binding
+test_teardown_uses_descendant_state_and_confirms_closed_bound_panes
 test_scripts_route_explicit_target_through_meta_backend
 test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher

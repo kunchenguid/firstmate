@@ -156,8 +156,7 @@ Rename it manually before expecting new tasks or recovery to use it.
 ### Recovery and existing tasks
 
 Recovery and list-live still scan the first workspace matching the home label, because they address panes they already recorded rather than choosing where new work goes.
-The one recovery that does place new work is the control plane's reclaim of a destroyed endpoint.
-It mints a replacement tab through this section's ordinary placement rules while pinning the herdr session the task's record names ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
+[Reclaiming a task whose endpoint is gone](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns recovery that needs a replacement endpoint, including its session and placement constraints.
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
@@ -347,16 +346,16 @@ Task cleanup acquires that session lock before the task's isolated copy is retur
 So a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
 
 Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child.
-It then retains each child's durable identity unless that exact pane returns structured not-found after its close.
+It checks each child in the state directory that owns its record and applies [When task records are erased](#when-task-records-are-erased) before removing that child's durable identity.
 
 ### When task records are erased
 
-Durable task records are erased only once the exact pane is confirmed gone through its structured presence.
-After every close path, only a structured not-found response counts as gone.
-A present or unknown result retains every record with a visible, retryable error.
+Durable task records are erased only once `fm_backend_herdr_endpoint_confirmed_gone` proves the recorded endpoint is absent for that task.
+A structured not-found response proves physical absence; an [ownership check](#endpoints-from-a-previous-session) proving the pane foreign establishes that the task's endpoint is gone without closing the unrelated pane.
+If neither proof succeeds, every record is retained with a visible, retryable error.
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
 If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
-Once the exact pane is confirmed gone, teardown retires the task's own journal when it binds that same pane, or when it is a version 1 attempt whose token-bearing projected workspace is itself confirmed gone, because nothing then remains for the session-start sweep to correlate; a journal bound to any other pane, or a version 1 attempt whose workspace is still present or unreadable, stays for that sweep.
+Journal retirement separately requires physical absence: once the exact pane is confirmed gone, teardown retires the task's own journal when it binds that same pane, or when it is a version 1 attempt whose token-bearing projected workspace is itself confirmed gone, because nothing then remains for the session-start sweep to correlate; a journal bound to any other pane, or a version 1 attempt whose workspace is still present or unreadable, stays for that sweep.
 
 ### Restart recovery
 
@@ -366,7 +365,7 @@ Before any recovery mutation, Firstmate holds both the task spawn lock and the n
 That presentation lock lives in a namespace private to the OS account, so another account on the same host running its own Firstmate on Herdr cannot block this account's spawn, recovery, or teardown.
 A namespace at this account's name that another account owns, or that is not mode 700, is still refused and is never adopted, chowned, or removed.
 
-A same-identity version 2 binding may replace one exact agent-free restart husk in place.
+A same-identity version 2 binding may replace one exact agent-free restart husk in place only when the [recorded-endpoint ownership policy](#endpoints-from-a-previous-session) permits closing that pane.
 A husk is a restored same-labeled tab with a missing pane or no registered agent, as [Restart and liveness behavior](#restart-and-liveness-behavior) describes.
 The replacement is allowed only when all of these agree:
 
@@ -455,7 +454,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 ### Operational compromises
 
-- Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.
+- Grouping is best-effort; [Restart recovery](#restart-recovery) owns the conditions for retaining a projection in place.
 - A failed journal publication or projected workspace create stops that spawn instead of falling back flat.
   So a Herdr create failure surfaces as a spawn failure in every Herdr home, rather than only in homes that opted in.
   Every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
@@ -479,7 +478,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 | Test | What it covers |
 | --- | --- |
-| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
+| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, process-bound restored-pane rejection, exact restart replacement for legacy records, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
 | `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
@@ -511,17 +510,20 @@ herdr_session=<session>
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
 herdr_pane_id=<pane-id>
+herdr_process_identity=<identity>   # optional; see below
 ```
 
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
+[Endpoints from a previous session](#endpoints-from-a-previous-session) owns process-bound endpoint checks and the compatibility fallback for records without a process identity.
 
 ## Current transport behavior
 
 ### Named server and session routing
 
-The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
+Active operations start and poll the named server before workspace, tab, pane, or agent calls.
+[Restart and liveness behavior](#restart-and-liveness-behavior) owns passive probe semantics.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
 
@@ -668,11 +670,12 @@ No Herdr-specific copy of that protocol exists.
 
 ### Husks after a server restart
 
-Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids.
+Stopping and restarting a named Herdr server with its saved session state intact preserves workspace, tab, pane, and label ids.
 The underlying harness processes and live agent registrations do not survive.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
 
-Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
+Create first applies the [recorded-endpoint ownership policy](#endpoints-from-a-previous-session).
+For eligible husks, it replaces only a confidently dead or no-agent pane, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
 ### Stale agent registrations
@@ -708,7 +711,8 @@ An unreadable or unparseable process view reads `unknown`, which refuses lifecyc
 
 ### Agent-liveness probe
 
-The generic Herdr agent-liveness probe reuses that pane classifier, then applies one recovery-only exception.
+The generic Herdr agent-liveness probe first applies the [recorded-endpoint ownership check](#endpoints-from-a-previous-session).
+When that check permits classification, the probe reuses the pane classifier, then applies one recovery-only exception.
 
 | Pane read | Probe verdict |
 | --- | --- |
@@ -729,6 +733,60 @@ The process-level proof only decides whether that registration is backed by a ru
 The session-start sweep and the watcher's dedicated secondmate liveness tick use this probe.
 Idle secondmates remain exempt from stale-pane escalation.
 [Secondmate endpoint recovery](architecture.md) owns the shared supervision mechanism.
+
+### Endpoints from a previous session
+
+Pane ids are per-server counters, so a recorded id can outlive the Herdr server that issued it.
+When a Herdr server restart or container rebuild loses the saved session state, the fresh session's workspace and pane ids restart from `w1` and `p1`, and surviving task records can name ids now belonging to another task's live agent or a plain shell.
+The pane classifier alone would read the first as this task's live agent and the second as its adoptable dead pane.
+
+Herdr task records carry `herdr_process_identity=proc:<shell-pid>:<boot-id>:<start-ticks>` when both `/proc/<pid>/stat` start ticks and the kernel boot id are readable, or `ps:<shell-pid>:<start-time>` otherwise.
+Spawn records it at the shared metadata-publication boundary, including flat and projected spawns, relaunches that adopt a pane, and relaunches that bind a new pane.
+`pane process-info` exposes the pane's persistent `shell_pid`.
+The `proc:` identity uses field 22 of `/proc/<pid>/stat` (the start time in clock ticks) and the kernel boot id: start ticks stay fixed for a live process, and the boot id distinguishes the same PID and tick count across boots.
+When either start ticks or the boot id cannot be read or parsed, including on macOS/BSD without `/proc`, it falls back to `ps -o lstart= -p <pid>`, which gives the full start date and time.
+On Linux, `ps` derives `lstart` from boot time plus ticks divided by the clock rate, so it can read one second apart across calls for the same live process; strict equality alone is therefore not a reliable ownership check.
+The `ps` read pins `LC_ALL=C` and `TZ=UTC0` and trims surrounding whitespace so the serialized value has the same meaning regardless of the caller's locale or timezone.
+This binds the pane's root process rather than its changing foreground child: the shell stays alive while its agent runs, including while the agent runs tools, and an exec preserves the process start time.
+A Herdr live-handoff preserves that process and therefore this identity even if Herdr's internal terminal IDs change.
+A container rebuild destroys the old process; a newly launched process has its own PID/start-time pair rather than inheriting ownership from a recycled pane id.
+If the identity cannot be obtained during spawn or relaunch, publication omits the field and launch continues using the same best-effort label-plus-cwd fallback as a legacy record.
+A relaunch replaces any previously recorded identity with the newly read value, or removes it when the new read is unavailable; `fm-control relaunch` and `fm-secondmate-restart` both launch through that path, so a replaced pane process is re-recorded.
+An adopted relaunch revalidates its previous binding before identity refresh and metadata publication, and at each spawn read or input boundary; a process change refuses the launch rather than publishing ownership of the replacement.
+After publication, fresh and rebound launches also use the published binding for all subsequent reads and input, including exports, session-reference reads, launch text, and Enter.
+
+`fm_backend_herdr_endpoint_foreign`, also used by the data-plane dispatcher guard, compares the current process identity whenever a claiming record carries it.
+A `proc:` record compares its PID, boot id, and start ticks directly: a readable component mismatch proves foreign ownership, while an unavailable component without a proven mismatch is unreadable, even when `ps` can still serialize a new identity.
+A `ps:` record (written where start ticks or boot id cannot be read) matches when the pid is equal and the current `ps` start time is within one second of the recorded one, even if `/proc` is now readable.
+The `ps:` tolerance cannot distinguish PID reuse with a start time within that window.
+A mismatch is treated as foreign, regardless of matching cwd or `fm-<id>` label.
+An unreadable identity blocks active operations and closure but reports `unreadable` for liveness unless the pane or server is independently proven gone; it does not authorize a duplicate launch.
+A server restart that changes this identity invalidates the binding; a live-handoff that preserves it does not.
+A foreign pane reads `missing` in the recovery-grade view, so the relaunch path can bind a fresh endpoint in the recorded session.
+Active capture, key, text, and classifier operations check ownership after server readiness at each internal read or input boundary, including submit verification, clearing, and retries, so restoring a stopped server cannot bypass the check.
+Passive liveness and existence probes do not start the server.
+Native push transitions check ownership in the supplied state directory before surfacing a blocked edge or clearing its dedupe marker, both on reconnect and for streamed events; when records claim the address, at least one claimant must pass the ownership check for the event to be accepted.
+With no claiming record, the push path retains its compatibility behavior without requiring a process binding.
+Push handling uses the same ownership-aware claimant resolution for declared waits and status bookkeeping, so a stale paused record that sorts first cannot absorb the bound task's blocked alert or receive its status-presentation marker ([regression](../tests/fm-herdr-endpoint-boundaries.test.sh)).
+Task-specific liveness callers pass `fm-<id>` so another task claiming the same address cannot supply their ownership verdict.
+Teardown refuses destructive process or worktree cleanup when a proven foreign pane has processes in the directories being cleaned, retaining the task records for reconciliation.
+Guarded closes recheck ownership before each signal and explicit-close fallback, and Treehouse returns recheck before every attempt, including retries for an index lock, and the direct-removal fallback after a failed return repeats the same check before it deletes a worktree.
+Cleanup of panes obtained directly from a creation response remains creation-owned rather than adopting a stale task record.
+[When task records are erased](#when-task-records-are-erased) owns removal confirmation, including when identity cannot be read after a successful close.
+Replacement creation preserves both foreign and unclaimed same-label panes when the task has an identity-bearing record, including on repeated rebinds.
+Spawn passes the owning state directory separately from the home used to label a secondmate's workspace.
+Host-local remote control binds endpoint reads, input, observations, and lifecycle operations to `state/parent-route`, including the key subprocess; code-root updates keep the code root's own state directory.
+Projection teardown and recorded reclaim explicitly select their task record for the ownership check; same-process seeded-pane pruning, abort cleanup, and replacement rollback use their creation-response ownership and do not consult ambient records claiming recycled addresses.
+
+**Records without `herdr_process_identity`, whether legacy or newly launched after a failed identity read, use only a best-effort check, not an ownership guarantee.**
+For these records a pane is foreign only when its foreground cwd is outside the recorded worktree and its tab is not labeled `fm-<id>`.
+A restart husk keeps its label and a renamed tab keeps its cwd, so neither reads as foreign under that fallback.
+An unrelated task with the same id in another home, or an unrelated shell in the surviving worktree, can pass this legacy check.
+Unreadable legacy panes and records without a worktree are not proof of foreign ownership.
+When the caller has no label, every record in the state directory claiming the exact target is consulted; any matching claimant can allow the operation.
+The guarantee is therefore scoped to the task record selected by the caller and its owning state directory, not ambient or other-home records.
+
+`tests/fm-backend-herdr.test.sh` exercises stable `/proc` identities under `ps` drift, portable one-second `lstart` tolerance, portable identity reads without `/proc`, relaunch identity refresh, identity mismatches despite matching labels and worktrees, process-preserving handoffs, fresh process bindings, and successful spawn/relaunch with the legacy-record fallback when the identity read fails.
 
 ## Agent status authority and relaunch
 
@@ -843,6 +901,8 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 ```sh
 tests/fm-backend-herdr.test.sh
+tests/fm-herdr-endpoint-boundaries.test.sh
+tests/fm-remote-secondmate-control.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
