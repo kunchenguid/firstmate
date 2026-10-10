@@ -202,6 +202,10 @@ test_home_seed_refuses_broken_registry_symlink() {
 
 test_home_seed_refuses_unreadable_registry() {
   local home sub err registry
+  if [ "$(id -u)" = 0 ]; then
+    pass "home seeding: unreadable registry check skipped as root (mode 000 does not restrict root)"
+    return 0
+  fi
   home="$TMP_ROOT/unreadable-registry-home"
   sub="$TMP_ROOT/unreadable-registry-subhome"
   err="$TMP_ROOT/unreadable-registry.err"
@@ -735,6 +739,10 @@ EOF
 
 test_home_seed_refuses_projectless_home_with_uninspectable_projects() {
   local home sub err
+  if [ "$(id -u)" = 0 ]; then
+    pass "project-less seed: uninspectable projects check skipped as root (directory modes do not restrict root)"
+    return 0
+  fi
   home="$TMP_ROOT/no-projects-uninspectable-home"
   sub="$TMP_ROOT/no-projects-uninspectable-subhome"
   err="$TMP_ROOT/no-projects-uninspectable.err"
@@ -832,6 +840,10 @@ test_home_seed_refuses_projectless_home_with_non_directory_projects() {
 
 test_home_seed_refuses_projectless_home_with_uninspectable_registry() {
   local home sub err registry_before
+  if [ "$(id -u)" = 0 ]; then
+    pass "project-less seed: uninspectable registry check skipped as root (mode 000 does not restrict root)"
+    return 0
+  fi
   home="$TMP_ROOT/no-projects-uninspectable-registry-home"
   sub="$TMP_ROOT/no-projects-uninspectable-registry-subhome"
   err="$TMP_ROOT/no-projects-uninspectable-registry.err"
