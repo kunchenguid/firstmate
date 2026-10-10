@@ -19,6 +19,10 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+_FM_PR_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
+# shellcheck source=bin/fm-trace-context-lib.sh
+. "$_FM_PR_LIB_DIR/fm-trace-context-lib.sh"
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -265,6 +269,18 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# The relaunch transaction marker bin/fm-spawn.sh records when its parent is
+# bin/fm-control.sh, whose own shape is <pid>.<UTC stamp>.<random>. A relaunch
+# rewrites the task record with every field it owns first and preserves the
+# earlier pr= identity block after them, so this marker legitimately lands AFTER
+# pr=. Only its exact recorded shape is accepted there; a malformed value keeps
+# the identity block invalid.
+fm_pr_control_relaunch_tx_valid() {
+  local tx=${1-}
+  local LC_ALL=C
+  [[ "$tx" =~ ^[0-9]+\.[0-9]{8}T[0-9]{6}Z\.[0-9]+$ ]]
+}
+
 # The one reading of a GitHub pull request's draft state. Prints "true" or
 # "false" for a boolean isDraft and nothing for anything else, so a caller can
 # tell a positive draft from an unreadable payload. bin/fm-pr-merge.sh refuses
@@ -388,7 +404,18 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
+      # Known task-record fields that a later writer legitimately appends after
+      # the pr= identity block: the X-link fields, and the relaunch transaction
+      # marker (fm_pr_control_relaunch_tx_valid) and the trace-context carrier
+      # a relaunch re-appends last (fm_trace_context_valid in
+      # bin/fm-trace-context-lib.sh), whose values are still checked.
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+        ;;
+      control_relaunch_tx=*)
+        fm_pr_control_relaunch_tx_valid "${line#control_relaunch_tx=}" || post_pr_invalid=1
+        ;;
+      traceparent=*)
+        fm_trace_context_valid "${line#traceparent=}" || post_pr_invalid=1
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
