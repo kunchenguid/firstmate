@@ -305,6 +305,72 @@ SH
 # ===========================================================================
 # B) propagate_inheritable_config unit behavior
 # ===========================================================================
+test_destination_verdicts() {
+  local d report status phase
+  d="$TMP_ROOT/destination-verdicts"
+  mkdir -p "$d/src" "$d/dest"
+  report="$d/report"
+  for phase in creation replacement unchanged empty removal absent; do
+    case "$phase" in
+      creation) printf 'codex\n' > "$d/src/crew-harness" ;;
+      replacement) printf 'pi\n' > "$d/src/crew-harness" ;;
+      empty) : > "$d/src/crew-harness" ;;
+      removal) rm "$d/src/crew-harness" ;;
+    esac
+    : > "$report"
+    FM_INHERITABLE_CONFIG=crew-harness FM_CONFIG_INHERIT_REPORT="$report" \
+      propagate_inheritable_config "$d/src" "$d/dest" || fail "$phase propagation failed"
+    status=pushed
+    case "$phase" in unchanged|absent) status=unchanged ;; esac
+    assert_contains "$(cat "$report")" "$(printf 'crew-harness\t%s\t' "$status")" \
+      "$phase destination verdict wrong"
+    if [ -f "$d/src/crew-harness" ]; then
+      cmp -s "$d/src/crew-harness" "$d/dest/crew-harness" || fail "$phase bytes wrong"
+    else
+      [ ! -e "$d/dest/crew-harness" ] || fail "$phase destination still exists"
+    fi
+  done
+  printf 'pi\n' > "$d/src/crew-harness"
+  cp "$d/src/crew-harness" "$d/link-target"
+  ln -s "$d/link-target" "$d/dest/crew-harness"
+  : > "$report"
+  FM_INHERITABLE_CONFIG=crew-harness FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_inheritable_config "$d/src" "$d/dest" || fail "identical symlink propagation failed"
+  assert_contains "$(cat "$report")" $'crew-harness\tpushed\t' "identical symlink verdict wrong"
+  [ ! -L "$d/dest/crew-harness" ] && [ -f "$d/dest/crew-harness" ] || \
+    fail "identical destination symlink was not replaced with a regular file"
+  cmp -s "$d/src/crew-harness" "$d/dest/crew-harness" || fail "identical symlink replacement bytes wrong"
+  cmp -s "$d/src/crew-harness" "$d/link-target" || fail "identical symlink target was overwritten"
+  : > "$report"
+  FM_INHERITABLE_CONFIG=crew-harness FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_inheritable_config "$d/src" "$d/dest" || fail "symlink replacement repeat failed"
+  assert_contains "$(cat "$report")" $'crew-harness\tunchanged\t' "symlink replacement repeat verdict wrong"
+  printf 'old\n' > "$d/dest/crew-harness"
+  printf 'new\n' > "$d/src/crew-harness"
+  for phase in before after; do
+    : > "$report"
+    (
+      # Invoked indirectly by destination fingerprinting.
+      # shellcheck disable=SC2329
+      fm_inherit_sha256() {
+        if [ "$phase" = before ] || [ "$(cat "$1")" = new ]; then return 1; fi
+        printf 'old-digest\n'
+      }
+      FM_INHERITABLE_CONFIG=crew-harness FM_CONFIG_INHERIT_REPORT="$report" \
+        propagate_inheritable_config "$d/src" "$d/dest"
+    ) 2>"$d/error" && fail "$phase fingerprint failure succeeded"
+    assert_contains "$(cat "$report")" $'crew-harness\terror\t' "$phase fingerprint failure not reported"
+    assert_contains "$(cat "$d/error")" "cannot inspect destination $phase propagation" \
+      "$phase fingerprint failure lacked diagnostic"
+    if [ "$phase" = before ]; then
+      [ "$(cat "$d/dest/crew-harness")" = old ] || fail "failed pre-inspection changed bytes"
+    else
+      cmp -s "$d/src/crew-harness" "$d/dest/crew-harness" || fail "post-inspection fixture did not copy"
+    fi
+  done
+  pass "destination transitions and fingerprint failures report truthful verdicts"
+}
+
 test_propagate_lib() {
   local d src dest home m1 m2 outside stdout stderr guard_repo err_text
   d="$TMP_ROOT/prop-lib"
@@ -1688,7 +1754,7 @@ test_bootstrap_rereads_after_partial_propagation() {
 }
 
 test_config_push_propagates_reports_without_ff_or_nudge() {
-  local w c1 sm_real old_head out err status out2 tmp log instruction
+  local w c1 sm_real old_head out err status out2 tmp log instruction dispatch_mtime budget_mtime
   w=$(new_world config-push-basic)
   c1=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$c1"
@@ -1704,6 +1770,11 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   old_head=$(git -C "$w/sm" rev-parse HEAD)
 
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+  mkdir -p "$w/sm/config"
+  printf '{"default":{"harness":"pi"}}\n' > "$w/sm/config/crew-dispatch.json"
+  printf '4000\n' > "$w/sm/config/startup-memory-budget"
+  printf '5000\n' > "$w/home/config/startup-memory-budget"
+  printf 'codex\n' > "$w/sm/config/secondmate-harness"
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
@@ -1740,6 +1811,15 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   instruction=$(reread_instruction_path "$w/sm") || fail "config-push reread instruction missing"
   assert_contains "$(cat "$instruction")" $'-----BEGIN config/backend-----\ntmux\n-----END config/backend-----' \
     "config-push reread must include exact backend bytes"
+  assert_contains "$out" "startup-memory-budget: pushed" "stale budget not reported pushed"
+  cmp -s "$w/home/config/crew-dispatch.json" "$w/sm/config/crew-dispatch.json" || fail "stale dispatch bytes not replaced"
+  cmp -s "$w/home/config/startup-memory-budget" "$w/sm/config/startup-memory-budget" || fail "stale budget bytes not replaced"
+  assert_contains "$(cat "$instruction")" $'-----BEGIN config/crew-dispatch.json-----\n{"default":{"harness":"codex"}}\n-----END config/crew-dispatch.json-----' "reread missed exact dispatch bytes"
+  assert_contains "$(cat "$instruction")" $'-----BEGIN config/startup-memory-budget-----\n5000\n-----END config/startup-memory-budget-----' "reread missed exact budget bytes"
+  assert_not_contains "$(cat "$instruction")" "-----BEGIN config/supervision-host-off-----" "reread included unchanged item"
+  dispatch_mtime=$(date -r "$w/sm/config/crew-dispatch.json" +%s 2>/dev/null || stat -c %Y "$w/sm/config/crew-dispatch.json")
+  budget_mtime=$(date -r "$w/sm/config/startup-memory-budget" +%s 2>/dev/null || stat -c %Y "$w/sm/config/startup-memory-budget")
+  sleep 1
   [ ! -s "$err" ] || fail "clean config push wrote unexpected stderr: $(cat "$err")"
   assert_contains "$(inbox_stream "$w/home/state" sm)" "[fm-from-firstmate]" \
     "config reread must use the marked routed secondmate path"
@@ -1760,6 +1840,9 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   assert_not_contains "$out2" "config-reread: sent" \
     "unchanged config must not send a reread message"
   [ ! -s "$log" ] || fail "unchanged config push still invoked tmux send: $(cat "$log")"
+  assert_contains "$out2" "startup-memory-budget: unchanged" "repeat budget push not unchanged"
+  [ "$dispatch_mtime" = "$(date -r "$w/sm/config/crew-dispatch.json" +%s 2>/dev/null || stat -c %Y "$w/sm/config/crew-dispatch.json")" ] || fail "repeat push changed dispatch mtime"
+  [ "$budget_mtime" = "$(date -r "$w/sm/config/startup-memory-budget" +%s 2>/dev/null || stat -c %Y "$w/sm/config/startup-memory-budget")" ] || fail "repeat push changed budget mtime"
   pass "B12 config-push propagates via shared live discovery, reports items, rereads on change only, and does not fast-forward"
 }
 
@@ -2736,6 +2819,7 @@ test_cursor_marker_detection
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
+test_destination_verdicts
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
