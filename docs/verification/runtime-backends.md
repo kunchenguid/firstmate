@@ -6,6 +6,29 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Herdr shell execution before allocation
+
+Verified on 2026-10-03 with Herdr 0.9.3 and Bash 5.3.9 on Linux, including a real attached viewer and interactive Bazzite startup banner.
+The portable regression executes acknowledgement probes through Bash while deliberately dropping early input, accepting only echoed input, failing transport, and failing allocation delivery.
+The live regression uses fresh tabs and an independent append-file oracle to confirm one-shot preparation after execution acknowledgement.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-backend-herdr.test.sh
+bash bin/fm-test-run.sh tests/fm-herdr-attached-viewer-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Herdr shell preparation requires execution, bounds input-loss retries, and submits allocation exactly once
+ok - attached viewer: fresh shells acknowledge execution before one-shot preparation
+```
+
+This gate runs before the worker harness starts, so its acknowledgement depends on shell execution rather than vendor-rendered output.
+It applies to fresh Herdr task allocation across worker harnesses; secondmates and relaunches do not allocate a new Treehouse slot through this path.
+The tmux, Zellij, and cmux allocation dispatch remains unchanged, and Orca retains its own worktree-allocation API.
+The [Herdr guide](../herdr-backend.md#spawn-preflight-and-ci) owns the operator-facing behavior.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
