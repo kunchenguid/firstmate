@@ -1441,6 +1441,36 @@ test_handoff_idle_records_repeated_identical_completions() {
   pass "each identical completion occurrence retains its own handoff"
 }
 
+test_handoff_idle_keeps_new_event_after_duplicate_compaction() {
+  local home note first second third record saved_now=$HANDOFF_NOW
+  make_world handoff-compacted-event-identity
+  install_handoff_fakes
+  home=$MAIN
+  note="committed c118078, 706 tests"
+  first="needs-validation [at=$HANDOFF_OLD] [event=11111111111111111111111111111111]: $note"
+  second="needs-validation [at=$HANDOFF_OLD] [event=22222222222222222222222222222222]: $note"
+  third="needs-validation [at=$HANDOFF_OLD] [event=33333333333333333333333333333333]: $note"
+  write_child "$home" intake "$first"$'\n'"$second" inc-compacted-event-identity-1
+  HANDOFF_NOW=$HANDOFF_OLD
+  scan_handoff "$home"
+  HANDOFF_NOW=$saved_now
+  printf '%s\n' "$second" > "$home/state/intake.status"
+  scan_handoff "$home"
+  printf '%s\n' "$third" >> "$home/state/intake.status"
+  scan_handoff "$home"
+  [ "$(records_for_count "$home" intake)" = 3 ] \
+    || fail "a new event after duplicate compaction reused an older handoff record"
+  while IFS= read -r record; do
+    case "$(handoff_field "$record" completion_event_id)" in
+      11111111111111111111111111111111|22222222222222222222222222222222|33333333333333333333333333333333) ;;
+      *) fail "a handoff record lost its event identity" ;;
+    esac
+  done < <(records_for "$home" intake)
+  [ "$(handoff_wake_count "$home")" = 3 ] \
+    || fail "the new event after duplicate compaction did not receive its own idle check"
+  pass "a new event after duplicate compaction keeps its own handoff"
+}
+
 test_handoff_idle_reconciles_a_compacted_completion() {
   local home completion record fp8 key
   make_world handoff-compacted-completion
@@ -2077,6 +2107,7 @@ test_handoff_idle_generic_line_does_not_read_the_predicate
 test_handoff_idle_survives_a_replaced_status_log
 test_handoff_idle_replay_keeps_later_completion_open
 test_handoff_idle_records_repeated_identical_completions
+test_handoff_idle_keeps_new_event_after_duplicate_compaction
 test_handoff_idle_reconciles_a_compacted_completion
 test_handoff_idle_distinguishes_compacted_long_completions
 test_handoff_idle_compacted_duplicate_hold_clears_pending

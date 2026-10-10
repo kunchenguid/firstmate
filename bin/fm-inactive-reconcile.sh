@@ -709,6 +709,18 @@ handoff_line_epoch() { # <line>
   status_line_at_epoch "$1"
 }
 
+handoff_line_event_id() {
+  local head rest event
+  case "$1" in *:*) head=${1%%:*} ;; *) return 1 ;; esac
+  case "$head" in *'[event='*']'*) ;; *) return 1 ;; esac
+  rest=${head#*\[event=}
+  event=${rest%%\]*}
+  case "$event" in ''|*[!0-9A-Fa-f]*) return 1 ;; esac
+  [ "${#event}" -eq 32 ] || return 1
+  case "${rest#*\]}" in *'[event='*) return 1 ;; esac
+  printf '%s' "$event"
+}
+
 handoff_record_path() { # <fingerprint>
   printf '%s/%s.record\n' "$HANDOFF_DIR" "$1"
 }
@@ -733,8 +745,8 @@ handoff_set() { # <record> <key> <value>
   mv -f "$tmp" "$record" || { rm -f "$tmp"; return 1; }
 }
 
-handoff_ensure() { # <fingerprint> <task> <incarnation> <line> <event-ordinal> <observed-epoch>
-  local fingerprint=$1 task=$2 incarnation=$3 line=$4 ordinal=$5 observed=$6 path tmp
+handoff_ensure() {
+  local fingerprint=$1 task=$2 incarnation=$3 line=$4 ordinal=$5 observed=$6 event_id=$7 path tmp
   path=$(handoff_record_path "$fingerprint")
   if [ -f "$path" ] && [ ! -L "$path" ]; then
     return 0
@@ -747,6 +759,7 @@ handoff_ensure() { # <fingerprint> <task> <incarnation> <line> <event-ordinal> <
     printf 'incarnation=%s\n' "$incarnation"
     printf 'completion_line=%s\n' "$(clean_field "$line")"
     printf 'completion_digest=%s\n' "$(sha256_text "$line")"
+    printf 'completion_event_id=%s\n' "$event_id"
     printf 'completion_ordinal=%s\n' "$ordinal"
     printf 'observed_epoch=%s\n' "$observed"
     printf 'bound_secs=%s\n' "$FM_HANDOFF_IDLE_SECS"
@@ -808,6 +821,7 @@ handoff_write_cursor() {
 
 handoff_one() {
   local id=$1 meta=$2 timeout=$3 status kind mode incarnation line verb fingerprint observed record known ordinal=0
+  local event_id
   local line_digest matching_fp matching_count candidate_claimed collision line_count status_line
   local matched_ordinal earlier_ordinal
   local -a open_fps=() stored_fps=() claimed_fps=() matching_fps=() status_lines=()
@@ -841,7 +855,12 @@ handoff_one() {
       _fm_status_verb_recognized "$verb" || continue
       ordinal=$((ordinal + 1))
       if handoff_is_completion "$verb" "$line" "$kind" "$mode" "$id" "$meta"; then
-        fingerprint=$(sha256_text "$incarnation|$id|$ordinal|$line")
+        event_id=$(handoff_line_event_id "$line" || true)
+        if [ -n "$event_id" ]; then
+          fingerprint=$(sha256_text "$incarnation|$id|event=$event_id")
+        else
+          fingerprint=$(sha256_text "$incarnation|$id|$ordinal|$line")
+        fi
         candidate_claimed=0
         for item in "${claimed_fps[@]+"${claimed_fps[@]}"}"; do
           [ "$item" = "$fingerprint" ] && candidate_claimed=1
@@ -857,7 +876,11 @@ handoff_one() {
             [ "$record" = "$fp" ] && known=1
           done
           [ "$known" -eq 0 ] || continue
-          [ "$(handoff_value "$(handoff_record_path "$fp")" completion_digest)" = "$line_digest" ] || continue
+          if [ -n "$event_id" ]; then
+            [ "$(handoff_value "$(handoff_record_path "$fp")" completion_event_id)" = "$event_id" ] || continue
+          else
+            [ "$(handoff_value "$(handoff_record_path "$fp")" completion_digest)" = "$line_digest" ] || continue
+          fi
           matching_fp=$fp
           matching_count=$((matching_count + 1))
           matching_fps+=("$item")
@@ -929,7 +952,7 @@ handoff_one() {
         case "$observed" in
           ''|*[!0-9]*) observed=$(reconcile_now) ;;
         esac
-        handoff_ensure "$fingerprint" "$id" "$incarnation" "$line" "$ordinal" "$observed" || return 1
+        handoff_ensure "$fingerprint" "$id" "$incarnation" "$line" "$ordinal" "$observed" "$event_id" || return 1
         claimed_fps+=("$fingerprint")
         if [ -z "$(handoff_value "$(handoff_record_path "$fingerprint")" cleared_epoch)" ]; then
           known=0
