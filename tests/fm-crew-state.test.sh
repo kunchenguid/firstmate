@@ -49,6 +49,8 @@ set -u
 . "$ROOT/bin/fm-classify-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-dod-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
@@ -2369,6 +2371,72 @@ test_unpushed_ship_done_is_blocked() {
     "refusal must name the unpushed head"
   assert_not_contains "$out" "state: done" "unpushed ship done: must not remain done"
   pass "unpushed ship done: is current-state blocked"
+}
+
+# A no-mistakes done can name the pull request the review gate pushed while the
+# separate step that records pr= and pr_head= has yet to run. That reads as a
+# wait on the recording step, not as finished work possibly being lost, and the
+# same log reads done once the record exists.
+test_pr_ready_before_its_record_waits_then_reads_done() {
+  reset_fakes
+  local d sha out
+  d=$(new_case pr-record-wait)
+  make_repo_on_branch "$d/wt" fm/record-wait
+  git -C "$d/wt" commit -q --allow-empty -m 'the fix, pushed by the review gate'
+  sha=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/record-wait.meta" \
+    "window=fm:fm-record-wait" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'done [at=%s]: PR https://github.com/o/r/pull/4 checks green\n' "$(date +%s)" \
+    > "$d/state/record-wait.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" record-wait
+  out=$(run_crew_state "$d" record-wait)
+  assert_contains "$out" "state: paused" "a done awaiting its PR record must read as a wait"
+  assert_contains "$out" "waiting on the PR record for https://github.com/o/r/pull/4" \
+    "the wait must name the pull request and the step it waits on"
+  assert_not_contains "$out" "unreachable outside the worker copy" \
+    "an unrecorded pull request must not read as possibly lost work"
+  assert_not_contains "$out" "state: blocked" "the timing window must not read as blocked"
+  assert_not_contains "$out" "state: done" "the wait must not read as landed"
+  printf 'pr=https://github.com/o/r/pull/4\npr_head=%s\n' "$sha" >> "$d/state/record-wait.meta"
+  out=$(run_crew_state "$d" record-wait)
+  assert_contains "$out" "state: done" "the same log reads done once pr= and pr_head= exist"
+  assert_not_contains "$out" "waiting on the PR record" "a recorded pull request must not still wait"
+  pass "a done awaiting its PR record waits, then reads done on the next read"
+}
+
+# The recording step's refusal is what restores the preservation alarm, and it
+# carries the refusal's own reason rather than a bare timer verdict.
+test_recorded_recording_refusal_reads_blocked() {
+  reset_fakes
+  local d out url
+  d=$(new_case pr-record-refused)
+  make_repo_on_branch "$d/wt" fm/record-refused
+  git -C "$d/wt" commit -q --allow-empty -m 'the fix, never pushed'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/record-refused.meta" \
+    "window=fm:fm-record-refused" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  url=https://github.com/o/r/pull/4
+  printf 'done [at=%s]: PR %s checks green\n' "$(date +%s)" "$url" \
+    > "$d/state/record-refused.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" record-refused
+  fm_dod_pr_refusal_write "$d/state" record-refused "$url" "$url is a draft pull request" \
+    || fail "the recording refusal could not be written"
+  out=$(run_crew_state "$d" record-refused)
+  assert_contains "$out" "state: blocked" "a refused PR recording must read as blocked"
+  assert_contains "$out" "is unreachable outside the worker copy" \
+    "a refused PR recording must keep the preservation alarm"
+  assert_contains "$out" "is a draft pull request" "the alarm must carry the recording refusal's reason"
+  assert_not_contains "$out" "waiting on the PR record" "a refused recording must not read as a wait"
+  pass "the recording step's refusal reads as the preservation alarm"
 }
 
 # Fleet snapshot hands crew-state a captured meta copy outside state/. The
@@ -5575,6 +5643,8 @@ test_terminal_run_without_live_sibling_is_unchanged
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
+test_pr_ready_before_its_record_waits_then_reads_done
+test_recorded_recording_refusal_reads_blocked
 test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked

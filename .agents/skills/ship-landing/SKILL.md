@@ -12,6 +12,7 @@ For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports
 Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal or the resolved checks-green `fm-crew-state.sh` line - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 `bin/fm-dod-lib.sh` owns the named-head gate on that ready signal: a ship `done:` whose named head exists only in the worker's disposable copy is not ready (`bin/fm-crew-state.sh` reports blocked, `bin/fm-pr-check.sh` refuses to register, and a secondmate does not publish that done upstream).
 That blocked reading is the gate working, not a stuck worker, so steer the worker on the commit the refusal names rather than waiting.
+The gate's one wait verdict is the exception: a report naming a canonical pull request the task's record does not carry yet reads as a paused wait, so run `bin/fm-pr-check.sh` on that URL rather than steering, and only a refusal that step records of that pull request reads as lost work again (`bin/fm-dod-lib.sh`'s header owns the window).
 A direct-PR worker pushes that commit to its PR branch, and a local-only worker commits it on its ship branch.
 A no-mistakes worker re-validates it with /no-mistakes so the pipeline stays the one publisher; it never pushes from its copy.
 In no-mistakes mode the earlier `done [at=<epoch>]: {summary}` is the pipeline handoff and is not gated.
