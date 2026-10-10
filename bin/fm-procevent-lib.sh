@@ -1317,9 +1317,10 @@ fm_procevent_mark_handled() {
   [ ! -L "$marker" ] || return 2
   [ -f "$marker" ] && return 1
   # Record gate: with a home recorder configured, a built-in capture is never
-  # acknowledged before its record exists (status 3). Extension captures use
-  # the pinned inbox and are never fed to the recorder, so they are exempt.
-  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" != 1 ] \
+  # acknowledged before its record exists (status 3). Extension captures carry
+  # their .extension owner marker and are never fed to the recorder, so they
+  # are exempt on every path.
+  if [ ! -e "$inbox/$id.$seq.extension" ] && [ ! -L "$inbox/$id.$seq.extension" ] \
     && fm_procevent_recorder_configured "$state" \
     && ! fm_procevent_is_recorded "$state" "$id" "$seq"; then
     return 3

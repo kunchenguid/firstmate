@@ -1954,7 +1954,8 @@ After each built-in capture and before the result is announced, the runner runs 
 Exit 0 must mean the capture is in the record now, including a capture recorded earlier; the runner then writes `<result>.recorded` and prints `recorder-fed: <source-id>`.
 A nonzero exit, a hit time bound, or a recorder file that is not a private, single-link, mode-`0700` regular file is never treated as success: the runner writes `<result>.recorder-failed`, keeps the recorder's last 4 KB of output in `<result>.recorder-log`, prints `recorder-failed:` on stderr, and still announces the capture.
 While the recorder file exists, every acknowledgement path - `handled`, a worker's re-arm, and a silent no-op - refuses a capture without `<result>.recorded`, so failed recording can never hide feedback.
-`bin/fm-procevent.sh record <source-id> <sequence>` retries the recorder, and `handled <source-id> <sequence> --unrecorded <reason>` is the explicit way to acknowledge without a record; the reason stays in the marker.
+To recover, fix the recorder, then run `bin/fm-procevent.sh record <source-id> <sequence>` to retry it.
+Extension captures, which carry their `<result>.extension` owner marker, are never fed to the recorder and never gated by it.
 `bin/fm-procevent.sh`'s header owns the seam.
 
 ### Crew-hosted Lavish review boards

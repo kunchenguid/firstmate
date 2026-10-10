@@ -192,18 +192,27 @@ test_worker_rearm_refuses_an_unrecorded_round() {
   pass "a worker re-arm refuses to acknowledge an unrecorded round"
 }
 
-test_unrecorded_override_is_explicit_and_kept() {
-  local sid=lavish-rec0000000000010 home out base
-  home=$(make_source_home override "$sid" "$FEEDBACK_BODY")
+test_extension_capture_is_never_fed_or_gated() {
+  local sid=lavish-rec0000000000010 home out base digest
+  home="$TMP_ROOT/extension"
+  mkdir -p "$home/state" "$home/config"
+  fm_test_track_procevent_home "$home"
   write_recorder "$home" 'exit 1'
-  pe "$home" start "$sid" >/dev/null 2>&1 || fail "the runner did not complete"
-  out=$(pe "$home" handled "$sid" 1 --unrecorded "ledger offline, comment copied by hand" 2>&1) \
-    || fail "the explicit override was refused: $out"
-  assert_contains "$out" "unrecorded: $sid 1 (ledger offline, comment copied by hand)" "the override was not announced: $out"
-  assert_contains "$out" "handled: $sid 1" "the override did not acknowledge"
+  printf 'extension result\n' > "$home/out"
+  digest="sha256:$(printf '%064d' 0)"
+  # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+  (. "$ROOT/bin/fm-pr-lib.sh" && . "$ROOT/bin/fm-procevent-lib.sh" \
+    && fm_procevent_capture "$home/state" "$sid" lavish "$home/out" demo-ext 1.0.0 1 "$digest" "$digest") \
+    >/dev/null || fail "could not capture an extension result"
   base=$(inbox "$home" "$sid")
-  assert_contains "$(cat "$base.recorded")" "ledger offline, comment copied by hand" "the override reason was not kept"
-  pass "acknowledging without a record needs an explicit reason that stays on disk"
+  [ -f "$base.extension" ] || fail "the extension capture has no owner marker"
+  if out=$(pe "$home" record "$sid" 1 2>&1); then
+    fail "record fed an extension capture to the recorder: $out"
+  fi
+  [ ! -e "$home/recorded" ] || fail "the recorder ran on an extension capture"
+  out=$(pe "$home" handled "$sid" 1 2>&1) || fail "the record gate refused an extension capture: $out"
+  assert_contains "$out" "handled: $sid 1" "an extension capture was not acknowledged"
+  pass "an extension capture is never fed to the recorder and never gated by it"
 }
 
 test_absent_recorder_changes_nothing() {
@@ -225,6 +234,6 @@ test_hung_recorder_is_bounded
 test_untrusted_recorder_is_never_run_and_blocks
 test_empty_capture_is_not_silenced_past_a_failed_recorder
 test_worker_rearm_refuses_an_unrecorded_round
-test_unrecorded_override_is_explicit_and_kept
+test_extension_capture_is_never_fed_or_gated
 test_absent_recorder_changes_nothing
 printf '# all fm-procevent-recorder tests passed\n'
