@@ -37,9 +37,9 @@
 # constraint holds, in which case free_lanes=0 and reason names every
 # constraint, comma-separated, in this order:
 #   cpu       probe basis: 1-minute load average >= logical cores
-#   memory    probe basis: free-memory percentage < 10; or, on any basis,
-#             available memory minus min-avail-gb (0 when unset) is under the
-#             1 GB a default lane needs
+#   memory    probe basis: free-memory percentage < 10; or, with min-avail-gb
+#             set, available memory minus min-avail-gb is under the 1 GB a
+#             default lane needs
 #   disk      probe basis: free space on the filesystem holding FM_HOME
 #             < 5120 MB; or a disk row under min-disk-gb
 #   pressure  beat basis: the pressure level is warn or critical
@@ -58,6 +58,8 @@
 # fresh file the basis is probe, and the level is warn when a cpu, memory, or
 # disk probe constraint holds, else ok; with no probe at all it is none and
 # the level unknown. Reading beats needs jq; without jq every beat is skipped.
+# A fresh beat missing load, memory, or disk rows leaves max-load1,
+# min-avail-gb, and min-disk-gb judged on this host's own probes.
 #
 # Probes degrade gracefully: an unavailable probe prints unknown and its
 # constraint is not evaluated. Darwin reads sysctl (vm.loadavg,
@@ -91,7 +93,10 @@
 #   verdict {admit, free_lanes, reasons[]}.
 # verdict.admit is true only with a valid cap, lanes under it, and no
 # constraint; its reasons are the constraints in words. The document carries
-# labels and derived states only, never paths, addresses, commands, or tokens.
+# labels and derived states only, never paths, addresses, commands, or tokens:
+# a beat's own why and error text is published as counts (pressure_why=N,
+# beat_errors=N), and an invalid config line by its line number and a fixed
+# reason. --json and --publish print the full detail on stderr.
 #
 # --publish writes the document atomically (mode 0600) when config/lane-capacity
 # exists, skipping when state/lane-capacity.json is younger than
@@ -209,6 +214,11 @@ expand_path() {
     *) return 1 ;;
   esac
 }
+target_reason=
+config_error() {  # <lineno|-> <published reason> [stderr-only detail]
+  if [ "$1" = - ]; then target_reason=$2; else target_reason="line $1: $2"; fi
+  target_error="$target_reason${3:+ $3}"
+}
 parse_lane_config() {
   local line lineno=0 key value rest path seen=
   target=
@@ -218,7 +228,7 @@ parse_lane_config() {
     line=$(printf '%s' "$line" | tr '\t\r' '  ' | sed 's/^ *//; s/ *$//')
     [ -n "$line" ] || continue
     if [ -z "$target" ]; then
-      is_uint "$line" && [ "${#line}" -le 9 ] || { target_error="line $lineno: the first line must be the lane cap, one non-negative integer"; return 1; }
+      is_uint "$line" && [ "${#line}" -le 9 ] || { config_error "$lineno" "the first line must be the lane cap, one non-negative integer"; return 1; }
       target=$((10#$line))
       continue
     fi
@@ -227,16 +237,20 @@ parse_lane_config() {
     [ "$key" = "$line" ] || rest=$(printf '%s' "${line#* }" | sed 's/^ *//')
     value=${rest%% *}
     case "$key" in
+      min-avail-gb|min-disk-gb|max-load1|captain-idle|quota-provider|pressure-file|reserve-flag) ;;
+      *) config_error "$lineno" "unknown key" "'$key'"; return 1 ;;
+    esac
+    case "$key" in
       pressure-file|reserve-flag) ;;
       *)
-        case " $seen " in *" $key "*) target_error="line $lineno: $key appears more than once"; return 1 ;; esac
+        case " $seen " in *" $key "*) config_error "$lineno" "$key appears more than once"; return 1 ;; esac
         seen="$seen $key"
-        [ "$value" = "$rest" ] || { target_error="line $lineno: $key takes one value"; return 1 ;}
+        [ "$value" = "$rest" ] || { config_error "$lineno" "$key takes one value"; return 1 ;}
         ;;
     esac
     case "$key" in
       min-avail-gb|min-disk-gb|max-load1)
-        is_num "$value" || { target_error="line $lineno: $key needs a non-negative number"; return 1; }
+        is_num "$value" || { config_error "$lineno" "$key needs a non-negative number"; return 1; }
         case "$key" in
           min-avail-gb) min_avail_gb=$value ;;
           min-disk-gb) min_disk_gb=$value ;;
@@ -244,34 +258,34 @@ parse_lane_config() {
         esac
         ;;
       captain-idle)
-        is_uint "$value" && [ "${#value}" -le 9 ] && [ "$((10#$value))" -gt 0 ] || { target_error="line $lineno: captain-idle needs a positive number of seconds"; return 1; }
+        is_uint "$value" && [ "${#value}" -le 9 ] && [ "$((10#$value))" -gt 0 ] || { config_error "$lineno" "captain-idle needs a positive number of seconds"; return 1; }
         captain_idle=$((10#$value))
         ;;
       quota-provider)
-        case "$value" in ''|*[!a-z0-9-]*) target_error="line $lineno: quota-provider needs one provider name"; return 1 ;; esac
+        case "$value" in ''|*[!a-z0-9-]*) config_error "$lineno" "quota-provider needs one provider name"; return 1 ;; esac
         quota_provider=$value
         ;;
       pressure-file)
-        [ -n "$value" ] && [ "$value" = "$rest" ] || { target_error="line $lineno: pressure-file takes one absolute path"; return 1; }
-        path=$(expand_path "$value") || { target_error="line $lineno: pressure-file takes one absolute path"; return 1; }
+        [ -n "$value" ] && [ "$value" = "$rest" ] || { config_error "$lineno" "pressure-file takes one absolute path"; return 1; }
+        path=$(expand_path "$value") || { config_error "$lineno" "pressure-file takes one absolute path"; return 1; }
         pressure_files="$pressure_files$path
 "
         ;;
       reserve-flag)
-        path=$(expand_path "$value") || { target_error="line $lineno: reserve-flag needs an absolute path"; return 1; }
+        path=$(expand_path "$value") || { config_error "$lineno" "reserve-flag needs an absolute path"; return 1; }
         rest=$(printf '%s' "${rest#"$value"}" | sed 's/^ *//')
         reserve_flags="$reserve_flags$path	${rest:-reserved}
 "
         ;;
-      *) target_error="line $lineno: unknown key '$key'"; return 1 ;;
     esac
   done < "$LANE_CONFIG"
-  [ -n "$target" ] || { target_error="no lane cap: the first line must be one non-negative integer"; return 1; }
+  [ -n "$target" ] || { config_error - "no lane cap: the first line must be one non-negative integer"; return 1; }
 }
 if [ -e "$LANE_CONFIG" ]; then
   if [ ! -r "$LANE_CONFIG" ] || ! parse_lane_config; then
-    [ -n "$target_error" ] || target_error="unreadable"
+    [ -n "$target_error" ] || config_error - "unreadable"
     target_error="config/lane-capacity: $target_error"
+    target_reason="config/lane-capacity: $target_reason"
     target=invalid
     min_avail_gb='' min_disk_gb='' max_load1='' captain_idle='' quota_provider='' pressure_files='' reserve_flags=''
   fi
@@ -315,15 +329,23 @@ fi
 disk_free_mb=unknown
 v=$(df -Pk "$FM_HOME" 2>/dev/null | awk 'NR==2{print int($4 / 1024)}')
 is_uint "$v" && disk_free_mb=$v
+probe_disks=
+[ "$disk_free_mb" = unknown ] || probe_disks="home	$(awk -v m="$disk_free_mb" 'BEGIN{printf "%.1f", m / 1024}')
+"
 
 # --- pressure ---------------------------------------------------------------
 level_rank() {
   case "$1" in ok) echo 0 ;; warn) echo 1 ;; critical) echo 2 ;; *) echo -1 ;; esac
 }
 why=
+pub_why=
 pressure_why=
-add_why() { why="$why$1
-"; }
+add_why() {  # <detail> [published text, default the detail; empty publishes nothing]
+  why="$why$1
+"
+  pub_why="$pub_why${2-$1}
+"
+}
 basis=none
 level=unknown
 beat_age_s=
@@ -344,7 +366,7 @@ while IFS= read -r pfile; do
     add_why "$label: beat unreadable (jq missing)"; continue
   fi
   parsed=$(jq -r '
-    def s: tostring | gsub("[\t\n\r]"; " ");
+    def s: tostring | gsub("[\t\n\r\u001f]"; " ");
     def n: if type == "number" then tostring else "" end;
     if type == "object" and .schema == "lookout.beat"
        and ((.schema_version // "") | tostring | startswith("1."))
@@ -357,19 +379,20 @@ while IFS= read -r pfile; do
          (.machine.load.runq_per_core | n), (.machine.mem.swap_rate_pps_1m | n),
          (.machine.mem.psi_some10 | n), (.machine.load.l1 | n),
          (if .machine.on_battery == true then "true" elif .machine.on_battery == false then "false" else "" end)
-       ] | join("\t")),
-      ((.machine.pressure.why // [])[] | "why\t" + s),
-      ((.machine.beat.errors // [])[] | "error\t" + s),
-      ((.machine.disks // [])[] | select(type == "object") | "disk\t" + ((.label // "disk") | s) + "\t" + (.free_gb | n))
+       ] | join("\u001f")),
+      ((.machine.pressure.why // [])[] | "why\u001f" + s),
+      ((.machine.beat.errors // [])[] | "error\u001f" + s),
+      ((.machine.disks // [])[] | select(type == "object") | "disk\u001f" + ((.label // "disk") | s) + "\u001f" + (.free_gb | n))
     else "foreign" end' "$pfile" 2>/dev/null) || parsed=
   case "$parsed" in
     beat*) ;;
     foreign*) add_why "$label: not a lookout.beat 1.x document"; continue ;;
     *) add_why "$label: beat unreadable"; continue ;;
   esac
-  IFS='	' read -r _ host interval blevel b_avail b_total b_runq b_swap b_stall b_l1 b_batt <<EOF
+  IFS=$'\x1f' read -r _ host interval blevel b_avail b_total b_runq b_swap b_stall b_l1 b_batt <<EOF
 $(printf '%s\n' "$parsed" | head -1)
 EOF
+  case "$host" in *[!A-Za-z0-9._-]*) host= ;; esac
   [ -z "$host" ] || label=$host
   [ -n "$first_host" ] || first_host=$host
   is_num "$interval" && ! num_lt "$interval" 1 || interval=15
@@ -386,17 +409,25 @@ EOF
   prefix=
   [ "$nfiles" -le 1 ] || prefix="$label: "
   errs=
-  while IFS='	' read -r kind a b; do
+  nerrs=0
+  nwhy=0
+  while IFS=$'\x1f' read -r kind a b; do
     case "$kind" in
-      why) add_why "$prefix$a"; pressure_why="${pressure_why:+$pressure_why; }$prefix$a" ;;
-      error) errs="${errs:+$errs; }$a" ;;
+      why)
+        add_why "$prefix$a" ""
+        pressure_why="${pressure_why:+$pressure_why; }$prefix$a"
+        nwhy=$((nwhy + 1))
+        ;;
+      error) errs="${errs:+$errs; }$a"; nerrs=$((nerrs + 1)) ;;
       disk) disks="$disks${prefix:+$label }$a	$b
 " ;;
     esac
   done <<EOF
 $(printf '%s\n' "$parsed" | sed 1d)
 EOF
-  [ -z "$errs" ] || add_why "${prefix}beat errors: $errs"
+  [ "$nwhy" -eq 0 ] || pub_why="$pub_why${prefix}pressure_why=$nwhy
+"
+  [ -z "$errs" ] || add_why "${prefix}beat errors: $errs" "${prefix}beat_errors=$nerrs"
   [ "$b_batt" != true ] || on_battery=true
   [ "$rank" -le "$worst" ] || worst=$rank
   if [ "$basis" != beat ]; then
@@ -426,8 +457,7 @@ elif [ "$load1" != unknown ] || [ "$mem_free_pct" != unknown ] || [ "$disk_free_
   if [ "$load1" != unknown ] && [ "$cores" != unknown ]; then
     runq_per_core=$(awk -v l="$load1" -v c="$cores" 'BEGIN{printf "%.2f", l / c}')
   fi
-  [ "$disk_free_mb" = unknown ] || disks="home	$(awk -v m="$disk_free_mb" 'BEGIN{printf "%.1f", m / 1024}')
-"
+  disks=$probe_disks
   [ "$probe_cpu" -eq 0 ] || { level=warn; add_why "load $load1 on $cores cores"; }
   [ "$probe_mem" -eq 0 ] || { level=warn; add_why "memory $mem_free_pct% free"; }
   [ "$probe_disk" -eq 0 ] || { level=warn; add_why "disk $disk_free_mb MB free"; }
@@ -450,9 +480,12 @@ EOF
 # --- verdict ----------------------------------------------------------------
 constraints=
 reasons=
-add_constraint() {
+pub_reasons=
+add_constraint() {  # <name> <reason> [published reason, default the reason]
   case ",$constraints," in *",$1,"*) ;; *) constraints=${constraints:+$constraints,}$1 ;; esac
   reasons="$reasons$2
+"
+  pub_reasons="$pub_reasons${3-$2}
 "
 }
 if [ "$basis" = probe ]; then
@@ -460,10 +493,13 @@ if [ "$basis" = probe ]; then
   [ "$probe_mem" -eq 0 ] || add_constraint memory "memory: $mem_free_pct% free"
   [ "$probe_disk" -eq 0 ] || add_constraint disk "disk: $disk_free_mb MB free"
 fi
-if [ -n "$avail_gb" ]; then
-  keep=${min_avail_gb:-0}
-  if num_lt "$(awk -v a="$avail_gb" -v k="$keep" 'BEGIN{print a - k}')" "$LANE_FOOTPRINT_GB"; then
-    add_constraint memory "memory: no room for a $LANE_FOOTPRINT_GB GB lane: $avail_gb GB available, $keep GB kept"
+lim_avail=${avail_gb:-$probe_avail_gb}
+lim_load1=$p_load1
+[ -n "$lim_load1" ] || [ "$load1" = unknown ] || lim_load1=$load1
+lim_disks=${disks:-$probe_disks}
+if [ -n "$min_avail_gb" ] && [ -n "$lim_avail" ]; then
+  if num_lt "$(awk -v a="$lim_avail" -v k="$min_avail_gb" 'BEGIN{print a - k}')" "$LANE_FOOTPRINT_GB"; then
+    add_constraint memory "memory: no room for a $LANE_FOOTPRINT_GB GB lane: $lim_avail GB available, $min_avail_gb GB kept"
   fi
 fi
 if [ -n "$min_disk_gb" ]; then
@@ -471,16 +507,16 @@ if [ -n "$min_disk_gb" ]; then
     [ -n "$dfree" ] || continue
     num_lt "$dfree" "$min_disk_gb" && add_constraint disk "disk: $dlabel $dfree GB free, under $min_disk_gb GB"
   done <<EOF
-$disks
+$lim_disks
 EOF
 fi
 case "$level" in
   warn|critical)
-    [ "$basis" != beat ] || add_constraint pressure "pressure $level${pressure_why:+: $pressure_why}"
+    [ "$basis" != beat ] || add_constraint pressure "pressure $level${pressure_why:+: $pressure_why}" "pressure $level"
     ;;
 esac
-if [ -n "$max_load1" ] && [ -n "$p_load1" ] && ! num_lt "$p_load1" "$max_load1"; then
-  add_constraint load "load: $p_load1 over its max-load1 $max_load1"
+if [ -n "$max_load1" ] && [ -n "$lim_load1" ] && ! num_lt "$lim_load1" "$max_load1"; then
+  add_constraint load "load: $lim_load1 over its max-load1 $max_load1"
 fi
 [ "$reserve_flag" != present ] || add_constraint reserve "captain reserve: $reserve_label"
 [ "$on_battery" != true ] || add_constraint battery "on battery"
@@ -503,6 +539,7 @@ case "$target" in
       reason=full
       reasons="full: $lanes of $target lanes
 "
+      pub_reasons=$reasons
     fi
     ;;
 esac
@@ -625,17 +662,17 @@ fi
 
 cap_status=ok
 case "$target" in none) cap_status=none ;; invalid) cap_status=invalid ;; esac
-verdict_reasons=$reasons
+verdict_reasons=$pub_reasons
 [ "$target" != none ] || verdict_reasons="no lane cap declared (config/lane-capacity absent)
 "
-[ "$target" != invalid ] || verdict_reasons="$target_error
+[ "$target" != invalid ] || verdict_reasons="$target_reason
 "
 
 doc=$(jq -n \
   --argjson now "$now" --arg home "$home" --arg machine "$machine" \
   --arg lanes "$lanes" --arg pr_ready "$pr_ready" --arg lane_ids "$lane_ids" \
   --arg target "$target" --arg cap_status "$cap_status" --arg projects "$project_names" \
-  --arg level "$level" --arg why "$why" --arg basis "$basis" --arg beat_age "$beat_age_s" \
+  --arg level "$level" --arg why "$pub_why" --arg basis "$basis" --arg beat_age "$beat_age_s" \
   --arg avail "$avail_gb" --arg total "$total_gb" --arg runq "$runq_per_core" \
   --arg swap "$swap_rate" --arg stall "$mem_stall" --arg load1 "$p_load1" \
   --arg battery "$on_battery" --arg disks "$disks" \
@@ -669,6 +706,10 @@ doc=$(jq -n \
   exit 1
 }
 
+if [ "$why" != "$pub_why" ] || [ "$reasons" != "$pub_reasons" ]; then
+  printf '%s' "$why" | sed 's/^/fm-capacity: pressure: /' >&2
+  printf '%s' "$reasons" | sed 's/^/fm-capacity: reason: /' >&2
+fi
 if [ "$mode" = json ]; then
   printf '%s\n' "$doc"
   if [ -n "$target_error" ]; then
