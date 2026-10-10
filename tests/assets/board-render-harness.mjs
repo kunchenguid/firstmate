@@ -5,7 +5,8 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//     charted:[{title,sub,badges,pickable}], empty, more,
+//     call:[{title,repo}], stack, focus:{hidden,lines}, error }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -26,6 +27,8 @@ class Node {
     this.checked = false;
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" "); },
+      toggle: (c, on) => { if (on) this.classList.add(c); else this.classList.remove(c); },
       contains: (c) => this.className.split(/\s+/).includes(c),
     };
   }
@@ -122,5 +125,21 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
+const findClass = (n, cls) => {
+  if (n.className.split(/\s+/).includes(cls)) return n;
+  for (const c of n.children) { const f = findClass(c, cls); if (f) return f; }
+  return null;
+};
+const deck = byId.get("bb-call") || new Node("div");
+const call = deck.children
+  .filter((c) => c.className.split(/\s+/).includes("bb-decision"))
+  .map((card) => ({
+    title: findClass(card, "bb-decision__title")?.textContent ?? "",
+    repo: findClass(card, "bb-decision__repo")?.textContent ?? null,
+  }));
+const stack = (byId.get("bb-stack-count") || new Node("div")).textContent;
+const focusNode = byId.get("bb-focus") || new Node("div");
+const focus = { hidden: focusNode.hidden, lines: focusNode.children.map((c) => c.textContent) };
+
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, underway, charted, empty, more, call, stack, focus, error: errorText }) + "\n");
