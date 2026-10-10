@@ -100,6 +100,21 @@ fm_tasks_axi_update_has_archive_body() {
   printf '%s\n' "$output" | grep -F -- '--archive-body' >/dev/null
 }
 
+# Completion requires read-only previews even before their release number is
+# known. Probe at the operation boundary, not by guessing a numeric floor.
+# Ordinary dispatch compatibility remains independent of this capability.
+fm_tasks_axi_has_preview() {  # <done|update>
+  local verb=$1 output
+  case "$verb" in done|update) ;; *) return 1 ;; esac
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  if declare -F fm_tasks_axi >/dev/null 2>&1; then
+    output=$(fm_tasks_axi "$verb" --help 2>&1) || return 1
+  else
+    output=$(tasks-axi "$verb" --help 2>&1) || return 1
+  fi
+  printf '%s\n' "$output" | grep -Eq -- '(^|[[:space:],])--dry-run([[:space:],=]|$)'
+}
+
 fm_tasks_axi_mv_has_multi_id() {
   local output
   command -v tasks-axi >/dev/null 2>&1 || return 1

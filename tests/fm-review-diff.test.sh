@@ -81,6 +81,50 @@ run_review_diff() {
     "$REVIEW_DIFF" "$@"
 }
 
+test_gitlab_live_head_and_target() {
+  local case_dir out stale_sha variant
+  for variant in live unavailable wrong-head wrong-project; do
+    case_dir=$(make_case "gitlab-$variant")
+    stale_and_pr_commits "$case_dir"
+    stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+    git -C "$case_dir/wt" push -q origin pr-head-tmp:refs/merge-requests/9/head main:release
+    git -C "$case_dir/project" config remote.origin.url git@gitlab.example.test:group/sub/project.git
+    git -C "$case_dir/project" config "url.$case_dir/origin.git.insteadOf" git@gitlab.example.test:group/sub/project.git
+    mkdir -p "$case_dir/fakebin"
+    printf '%s\n' "{\"iid\":9,\"web_url\":\"https://gitlab.example.test/group/sub/project/-/merge_requests/9\",\"state\":\"opened\",\"sha\":\"$PR_SHA\",\"target_branch\":\"release\",\"target_project_id\":11}" > "$case_dir/mr.json"
+    cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  mr) cat '$case_dir/mr.json' ;;
+  api) printf '%s\\n' '{"id":11,"path_with_namespace":"group/sub/project","web_url":"https://gitlab.example.test/group/sub/project"}' ;;
+  *) exit 1 ;;
+esac
+SH
+    chmod +x "$case_dir/fakebin/glab"
+    write_task_meta "$case_dir" 'pr=https://gitlab.example.test/group/sub/project/-/merge_requests/9' "pr_head=$stale_sha" base_branch=deleted-source
+    # A different task-private ref must not be overwritten by this review.
+    git -C "$case_dir/wt" update-ref refs/fm-review/other/merge-request/9/head "$stale_sha"
+    case "$variant" in
+      unavailable) git -C "$case_dir/origin.git" update-ref -d refs/merge-requests/9/head ;;
+      wrong-head) git -C "$case_dir/origin.git" update-ref refs/merge-requests/9/head "$stale_sha" ;;
+      wrong-project) jq '.iid=8' "$case_dir/mr.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/mr.json"
+        # No verified target: the legitimate recorded named base still applies.
+        sed 's/base_branch=deleted-source/base_branch=release/' "$case_dir/state/task-x1.meta" > "$case_dir/new.meta"; mv "$case_dir/new.meta" "$case_dir/state/task-x1.meta" ;;
+    esac
+    out=$(PATH="$case_dir/fakebin:$PATH" run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr") || fail "GitLab $variant review failed"
+    assert_contains "$out" 'diff base: origin/release' 'GitLab review lost exact target'
+    if [ "$variant" = live ]; then
+      assert_contains "$out" '+pr-fixed' 'verified GitLab head lost to stale metadata'
+      assert_not_contains "$out" 'stale-local' 'verified GitLab head used stale local content'
+    else
+      assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' 'GitLab unavailable proof lacked local warning'
+      assert_contains "$out" '+stale-local' 'GitLab warning fallback did not use local branch'
+    fi
+    [ "$(git -C "$case_dir/wt" rev-parse refs/fm-review/other/merge-request/9/head)" = "$stale_sha" ] || fail 'GitLab review collided with other task ref'
+  done
+  pass 'GitLab review verifies live head and target, preserves private refs and warns on unavailable proof'
+}
+
 test_pr_meta_uses_pr_head_not_stale_local() {
   local case_dir out
   case_dir=$(make_case pr-head-sha)
@@ -238,6 +282,7 @@ test_recorded_base_branch_is_the_review_base() {
   pass "fm-review-diff compares a task against its recorded base branch"
 }
 
+test_gitlab_live_head_and_target
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head

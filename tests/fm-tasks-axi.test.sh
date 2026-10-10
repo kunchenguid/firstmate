@@ -29,6 +29,37 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND FM_HOME FM_ROOT_OVERRIDE \
 HAVE_TASKS_AXI=0
 command -v tasks-axi >/dev/null 2>&1 && HAVE_TASKS_AXI=1
 
+test_preview_capability_probes() {
+  local dir="$TMP_ROOT/preview-capabilities" caps
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${2:-}" = --help ] || exit 1
+case ",$FM_TEST_PREVIEW_CAPS," in
+  *",$1,"*) printf '  --dry-run  Read-only preview\n' ;;
+  *) printf '  --archive-body\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  # Capability is independent of a still-unpublished numeric release floor.
+  . "$ROOT/bin/fm-tasks-axi-lib.sh"
+  for caps in '' 'done' update done,update; do
+    if FM_TEST_PREVIEW_CAPS="$caps" PATH="$dir/fakebin:$BASE_PATH" fm_tasks_axi_has_preview 'done'; then
+      [[ ",$caps," = *',done,'* ]] || fail 'old consumer passed done preview probe'
+    else
+      [[ ",$caps," != *',done,'* ]] || fail 'done preview was not discovered'
+    fi
+    if FM_TEST_PREVIEW_CAPS="$caps" PATH="$dir/fakebin:$BASE_PATH" fm_tasks_axi_has_preview update; then
+      [[ ",$caps," = *',update,'* ]] || fail 'old consumer passed update preview probe'
+    else
+      [[ ",$caps," != *',update,'* ]] || fail 'update preview was not discovered'
+    fi
+  done
+  pass 'completion probes require the exact done/update preview capabilities without guessing a release floor'
+}
+
+test_preview_capability_probes
+
 empty_backlog() {  # <path>
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$1"
 }
