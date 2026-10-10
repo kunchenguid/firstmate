@@ -286,6 +286,8 @@ stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-startup-memory-budget-lib.sh
+. "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 
 if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   SESSION_START_BUDGET=${FM_SESSION_START_TIMEOUT:-120}
@@ -419,6 +421,40 @@ print_file_or_absent() {
   else
     printf 'ABSENT\n'
   fi
+}
+
+# Print a /stow trigger at the inclusive 90% threshold. Measure independently
+# and disclose failures without hiding a warning from the measured subtotal.
+# Fully measured healthy homes stay silent; bootstrap owns invalid budgets.
+print_startup_memory_budget_hint() {
+  local budget total=0 file pct='' failures='' count_prefix='' suffix=''
+  local scaled_total scaled_budget
+  fm_startup_memory_budget_read "$CONFIG" >/dev/null 2>&1 || return 0
+  budget=$FM_STARTUP_MEMORY_BUDGET_VALUE
+  for file in captain.md captain-shared.md learnings.md; do
+    if fm_startup_memory_measure_file "$DATA/$file" >/dev/null 2>&1; then
+      total=$((total + FM_STARTUP_MEMORY_MEASURE_TOKENS))
+    else
+      failures="${failures:+$failures, }data/$file"
+    fi
+  done
+  scaled_total=$(fm_startup_memory_decimal_multiply_small "$total" 10)
+  scaled_budget=$(fm_startup_memory_decimal_multiply_small "$budget" 9)
+  if ! fm_startup_memory_decimal_le "$scaled_budget" "$scaled_total"; then
+    [ -z "$failures" ] || printf '\nSTARTUP_MEMORY_BUDGET: could not measure %s\n' "$failures"
+    return 0
+  fi
+  # Only convert operands once both the multiplication and division are safe.
+  if fm_startup_memory_decimal_le "$total" 92233720368547758 \
+    && fm_startup_memory_decimal_le "$budget" 9223372036854775807; then
+    pct=" ($((total * 100 / budget))%)"
+  fi
+  if [ -n "$failures" ]; then
+    count_prefix='at least '
+    suffix="; could not measure $failures"
+  fi
+  printf '\nSTARTUP_MEMORY_BUDGET: %s%s of %s estimated tokens%s - run /stow%s\n' \
+    "$count_prefix" "$total" "$budget" "$pct" "$suffix"
 }
 
 print_backlog_pointer() {
@@ -1017,6 +1053,7 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_startup_memory_budget_hint
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

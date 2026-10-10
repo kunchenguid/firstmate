@@ -661,6 +661,10 @@ Malformed, multi-line, symlinked, hardlinked, special, or otherwise unsafe value
 
 Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective value, or `bin/fm-startup-memory-budget.sh report` to account for the three files.
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
+When the three files together reach at least 90% of the allowance, `bin/fm-session-start.sh` prints one `STARTUP_MEMORY_BUDGET:` line in the context digest so `/stow` has a mechanical trigger; healthy homes stay silent.
+Each file is measured independently; if measurement failures leave a subtotal that reaches the threshold, the warning labels it “at least” and names the unmeasured files on the same line.
+Otherwise, measurement failures produce one short `STARTUP_MEMORY_BUDGET: could not measure data/<file>` line listing the affected files; fully measured homes below threshold stay silent.
+Percentages are omitted when shell arithmetic cannot safely calculate them.
 
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.

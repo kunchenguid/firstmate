@@ -814,6 +814,96 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+# --- startup-memory budget hint in the context digest ------------------------
+
+test_startup_memory_budget_hint_at_threshold() {
+  local rec root home fakebin out
+  rec=$(new_world memory-budget-hint)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # 100-token budget; 270 bytes -> ceil(270/3)=90 tokens = exactly 90%.
+  printf '100\n' > "$home/config/startup-memory-budget"
+  # The final memory file has no trailing newline; the warning must own a line.
+  python3 -c 'open("'"$home"'/data/learnings.md","w").write("x"*270)'
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" $'\nSTARTUP_MEMORY_BUDGET: 90 of 100 estimated tokens (90%) - run /stow\n' \
+    "digest did not surface the /stow trigger at the 90% threshold"
+
+  # Below threshold stays silent.
+  printf '10\n' > "$home/config/startup-memory-budget"
+  printf 'hi\n' > "$home/data/learnings.md"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "STARTUP_MEMORY_BUDGET:" \
+    "digest printed a budget hint while well under the allowance"
+
+  pass "session-start prints STARTUP_MEMORY_BUDGET at or above 90%, stays silent below"
+}
+
+test_startup_memory_budget_hint_failures_and_large_values() {
+  local rec root home fakebin out budget
+  rec=$(new_world memory-budget-edge-cases)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  for budget in 1100000000000000000 110000000000000000000000000000000; do
+    printf '%s\n' "$budget" > "$home/config/startup-memory-budget"
+    out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+    assert_not_contains "$out" 'STARTUP_MEMORY_BUDGET:' 'huge budget warned for empty memory'
+    assert_not_contains "$out" 'arithmetic' 'huge budget caused arithmetic error'
+  done
+
+  printf '100\n' > "$home/config/startup-memory-budget"
+  ln -s "$home/data/absent.md" "$home/data/captain.md"
+  python3 -c 'open("'"$home"'/data/learnings.md","w").write("x"*270)'
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'STARTUP_MEMORY_BUDGET: at least 90 of 100 estimated tokens (90%) - run /stow; could not measure data/captain.md' 'symlink hid measured warning'
+  printf 'hi\n' > "$home/data/learnings.md"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" $'STARTUP_MEMORY_BUDGET: could not measure data/captain.md\n' 'missing partial-check diagnostic'
+  assert_not_contains "$out" ' - run /stow' 'partial subtotal below threshold warned'
+  rm "$home/data/captain.md"
+  mkdir "$home/data/captain.md"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'STARTUP_MEMORY_BUDGET: could not measure data/captain.md' 'non-regular file was silent'
+  rmdir "$home/data/captain.md"
+
+  # Fail only the memory measurement, even under root; other wc calls delegate.
+  printf 'unreadable-fixture' > "$home/data/captain.md"
+  cat > "$fakebin/wc" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = '-c' ]; then
+  input=$(cat)
+  case "$input" in
+    unreadable-fixture) exit 1 ;;
+    large-measurement-fixture) printf '6000000000000000000\n'; exit 0 ;;
+  esac
+  printf '%s' "$input" | /usr/bin/wc "$@"
+else
+  exec /usr/bin/wc "$@"
+fi
+SH
+  chmod +x "$fakebin/wc"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'STARTUP_MEMORY_BUDGET: could not measure data/captain.md' 'failed wc was silent'
+  python3 -c 'open("'"$home"'/data/learnings.md","w").write("x"*270)'
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" ' - run /stow; could not measure data/captain.md' 'failed wc hid measured warning'
+  rm "$home/data/captain.md"
+  printf 'large-measurement-fixture' > "$home/data/learnings.md"
+  printf '1100000000000000000\n' > "$home/config/startup-memory-budget"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'STARTUP_MEMORY_BUDGET: 2000000000000000000 of 1100000000000000000 estimated tokens - run /stow' 'large subtotal overflowed threshold or percentage'
+  assert_not_contains "$out" 'arithmetic' 'large subtotal caused arithmetic error'
+  pass 'session-start handles huge budgets and independent measurement failures'
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -3015,6 +3105,8 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_startup_memory_budget_hint_at_threshold
+test_startup_memory_budget_hint_failures_and_large_values
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
