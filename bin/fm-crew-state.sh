@@ -86,6 +86,13 @@
 #      worktree's run to report on: it leaves HAVE_RUN=0 so the pane and status
 #      log answer, because a stale record naming this branch must never override
 #      a crew that is visibly working.
+#      When the selected ACTIVE run's head does not resolve in this copy, the
+#      run-step detail keeps its standalone `run: <id>` component (the machine
+#      contract crew_gate_awaits_human_decision parses) and appends a separate
+#      `unknown-but-running; pipeline head <sha> not yet local` component, or
+#      only `pipeline head <sha> not yet local` when the daemon answered down
+#      (so the dead-instrument detail stays authoritative) or the run is not
+#      working (a parked run is waiting, not running).
 #      A run PARKED at a gate is exempt from the dead-instrument verdict: an
 #      open decision stays open when the instrument dies, so it keeps its gate
 #      and findings.
@@ -924,6 +931,8 @@ NM_DAEMON_ANSWER=""
 RUN_DEAD_DAEMON=""
 COARSE_STATUS=""
 SELECTED_RUN_ID=""
+RUN_HEAD=""
+RUN_HEAD_UNRESOLVED=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -965,6 +974,14 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         if fm_nm_run_is_active "$RUN_OUT"; then current_class=live; else current_class=terminal; fi
         if [ "$(fm_nm_run_status_class "$selected_status")" != "$current_class" ]; then
           emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
+        fi
+        RUN_HEAD=$(strip_quotes "$(nm_field head)")
+        if [ -n "$RUN_HEAD" ] && [ -z "$(fm_nm_resolve_commit "$WT" "$RUN_HEAD")" ] \
+          && fm_nm_run_is_active "$RUN_OUT"; then
+          # Keep the live row's attribution visible when its pipeline head has
+          # not reached this worker copy; otherwise a supervisor cannot tell a
+          # current unknown head from a row selected by a stale local sha.
+          RUN_HEAD_UNRESOLVED=1
         fi
         if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
           || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; then
@@ -1222,6 +1239,13 @@ if [ "$HAVE_RUN" = 1 ]; then
   esac
 
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
+  if [ "$RUN_HEAD_UNRESOLVED" = 1 ]; then
+    if [ -z "$RUN_DEAD_DAEMON" ] && [ "$RUN_STATE" = working ]; then
+      RUN_DETAIL="$RUN_DETAIL${SEP}unknown-but-running; pipeline head $RUN_HEAD not yet local"
+    else
+      RUN_DETAIL="$RUN_DETAIL${SEP}pipeline head $RUN_HEAD not yet local"
+    fi
+  fi
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 

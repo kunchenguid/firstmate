@@ -3470,6 +3470,60 @@ test_failed_run_with_no_later_run_still_surfaces() {
   pass "a genuinely failed run with no later run is not hidden"
 }
 
+# A current fixing row can name a pipeline head that this worker copy cannot
+# resolve while an older failed row still names the local head. The current row
+# must remain the selected attribution, and the output must explain the
+# unknown-but-running state instead of leaving a supervisor to infer it from a
+# plain working verdict.
+test_unresolved_active_head_names_current_row() {
+  reset_fakes
+  local d h1 h2 short run_id out
+  d=$(new_case unresolved-active-diagnostic)
+  make_repo_on_branch "$d/wt" fm/feat-unresolved
+  h1=$(git -C "$d/wt" rev-parse HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 "$h1")
+  h2=$(mint_unfetched_fix_head "$d/wt")
+  run_id=01KZZ8SK7S868VK2X9RXGMG1FA
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unresolved.meta" "window=fm:fm-unresolved" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$h2"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-unresolved | sed "s/01RUN/$run_id/")"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_AXI_HOME="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  $run_id,fm/feat-unresolved,running,$(git -C "$d/wt.pipe" rev-parse --short=8 HEAD),\"\"
+  01OLDFAIL,fm/feat-unresolved,failed,$short,\"\""
+  FM_FAKE_RUNS_LIST="  running    fm/feat-unresolved $(git -C "$d/wt.pipe" rev-parse --short=8 HEAD)  2026-09-30 13:00
+  failed     fm/feat-unresolved $short  2026-09-30 12:00"
+  out=$(run_crew_state "$d" unresolved)
+  assert_contains "$out" "state: working" "the active row is not reported as terminal failure"
+  assert_not_contains "$out" "state: failed" "the older failed row must not answer"
+  assert_contains "$out" "run: $run_id" "the selected live row is named"
+  assert_contains "$out" "unknown-but-running" "the active row's unresolved state is explicit"
+  assert_contains "$out" "pipeline head $h2 not yet local" "the unresolved head is explained"
+
+  FM_FAKE_DAEMON_DOWN=1
+  out=$(run_crew_state "$d" unresolved)
+  assert_contains "$out" "state: unknown" "a dead daemon leaves the unresolved row unverified"
+  assert_contains "$out" "no-mistakes daemon unreachable" "the dead instrument stays authoritative"
+  assert_contains "$out" "run: $run_id" "the selected row is still named"
+  assert_contains "$out" "pipeline head $h2 not yet local" "the unresolved head is still explained"
+  assert_not_contains "$out" "unknown-but-running" "a dead daemon never reads as running"
+  FM_FAKE_DAEMON_DOWN=0
+
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-unresolved | sed "s/01RUN/$run_id/")"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  out=$(run_crew_state "$d" unresolved)
+  assert_contains "$out" "state: parked" "a parked unresolved row keeps its gate"
+  assert_contains "$out" "pipeline head $h2 not yet local" "the parked row's unresolved head is explained"
+  assert_not_contains "$out" "unknown-but-running" "a parked row waits at its gate, it is not running"
+  local gate_run
+  gate_run=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_gate_awaits_human_decision unresolved) \
+    || fail "a parked ask-user gate at an unresolved head must still await a human decision"
+  [ "$gate_run" = "$run_id" ] || fail "human-decision consumer read run '$gate_run', want '$run_id'"
+  pass "an unresolved active head names the current row and why"
+}
+
 # The coarse runs-list rows: the branch's newest row is ACTIVE at an
 # unresolvable head and the row immediately before it ended at exactly this
 # worktree's head - the ledger proves this is this crew's own pipeline-owned
@@ -5613,6 +5667,7 @@ test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_pipeline_owned_active_run_beats_superseded_failed_row
 test_failed_run_with_no_later_run_still_surfaces
+test_unresolved_active_head_names_current_row
 test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_coarse_mismatched_anchor_falls_to_pane_not_older_row
 test_coarse_terminal_row_at_foreign_head_not_attributed
