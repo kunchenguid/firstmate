@@ -42,6 +42,11 @@ make_primary_fixture() {
   cp "$ROOT/bin/fm-arm-pretool-check.sh" "$dir/bin/fm-arm-pretool-check.sh"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  # The watch-arm plugin decides whether to arm through the shared supervision
+  # predicate, which it reaches by sourcing this lib out of the root it was
+  # given. Without it the source fails, the predicate never answers, and the
+  # plugin silently reports the arm as not needed instead of spawning one.
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   chmod +x "$dir/bin/fm-arm-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh" \
