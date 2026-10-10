@@ -5,8 +5,8 @@
 # instead of wedging on the trust dialog. In worktree mode it also carries
 # forward the external-CLAUDE.md-import approval, but only when the primary
 # checkout already holds standing consent for it - see the consent-gating
-# block below for why that dialog is otherwise left for the worker to wedge
-# on rather than answered on the human's behalf.
+# block below for why any such dialog is left for the worker to wedge on
+# rather than answered on the human's behalf.
 #
 # Usage: fm-claude-trust.sh <worktree> <project>
 #        fm-claude-trust.sh --secondmate-home <home> <id>
@@ -33,12 +33,12 @@
 # Code's separate "Allow external CLAUDE.md file imports?" dialog, which
 # `--setting-sources project,local` (firstmate PR 10's minimal worker tool
 # surface) stopped suppressing: it renders whenever a loaded CLAUDE.md chain
-# reaches outside the project tree - which every crewmate's does, through the
-# captain's own `~/.claude/CLAUDE.md` importing `~/.claude/RTK.md` - and it is
-# gated the same fail-closed way as trust: cursor on "No, disable", no arrow
-# navigation from firstmate's steering plane. Only worktree mode reaches this
-# second dialog's flags: a secondmate home has no separate "project" entry to
-# carry consent forward from, so its registration stays trust-only.
+# reaches outside the project tree - for example an import in the operator's own
+# `~/.claude/CLAUDE.md`, or a `CLAUDE.md` in a directory above the worktree -
+# and it is gated the same fail-closed way as trust: cursor on "No, disable", no
+# arrow navigation from firstmate's steering plane. Only worktree mode reaches
+# this second dialog's flags: a secondmate home has no separate "project" entry
+# to carry consent forward from, so its registration stays trust-only.
 #
 # TWO PROJECT-CONFIG ENTRIES IN WORKTREE MODE, NOT ONE. Registering both flags
 # on the worktree entry alone (the original trust-only design) leaves the
