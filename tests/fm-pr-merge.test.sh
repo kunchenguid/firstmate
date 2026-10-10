@@ -3507,6 +3507,46 @@ test_required_producer_identity() {
   pass "fm-pr-merge enforces required producer identity and named waivers"
 }
 
+# A check run GitHub reports with a null app belongs to no app at all: it can
+# never satisfy an app-bound required context, and reading it alongside the
+# other producers at the same head must not turn a green pull request into an
+# unreadable rollup.
+test_null_app_check_run_producer() {
+  local case_dir head variant
+  head=$(printf 'a4%.0s' $(seq 20))
+  for variant in satisfied absent; do
+    case_dir=$(make_case "null-app-producer-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    write_github_required "$case_dir" classic:ci
+    jq '.protection.required_status_checks.checks[0].app_id = 15368' \
+      "$case_dir/github-branch.json" > "$case_dir/updated.json"
+    mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+    if [ "$variant" = satisfied ]; then
+      printf '{"check_runs":[{"name":"ci","app":null,"head_sha":"%s"},{"name":"ci","app":{"id":15368},"head_sha":"%s"}]}\n' \
+        "$head" "$head" > "$case_dir/github-runs.json"
+    else
+      printf '{"check_runs":[{"name":"ci","app":null,"head_sha":"%s"}]}\n' \
+        "$head" > "$case_dir/github-runs.json"
+    fi
+    run_required_case "$case_dir" 112
+    if [ "$variant" = satisfied ]; then
+      expect_code 0 "$RC" "null-app-producer-satisfied: $(cat "$case_dir/stderr")"
+      assert_logged_gh_merge "$case_dir" 112 example/repo --squash
+      assert_no_grep 'check rollup could not be read' "$case_dir/stderr" \
+        "null-app-producer-satisfied: a null-app run made the rollup unreadable"
+      assert_no_grep 'producers at head' "$case_dir/stderr" \
+        "null-app-producer-satisfied: a null-app run made the producers unreadable"
+    else
+      expect_code 1 "$RC" "null-app-producer-absent: $(cat "$case_dir/stderr")"
+      assert_grep "required check 'ci' has not reported" "$case_dir/stderr" \
+        "null-app-producer-absent: the unreported app-bound check was not named"
+      assert_no_grep 'pr merge' "$case_dir/gh.log" \
+        "null-app-producer-absent: gh pr merge ran with the app-bound check unreported"
+    fi
+  done
+  pass "fm-pr-merge reads a check run whose app is null without failing the rollup"
+}
+
 # A commit status carries no app id to compare, so an app-bound required context
 # that arrives as a green status matches by name, while the same context left
 # unreported still refuses.
@@ -3884,5 +3924,6 @@ test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
+test_null_app_check_run_producer
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
