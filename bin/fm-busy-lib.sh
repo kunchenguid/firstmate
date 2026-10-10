@@ -1223,18 +1223,27 @@ fm_busy_is_busy() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
 # fm_busy_declared_pause_valid: a paused declaration is authoritative unless a
 # trusted busy lifecycle is current, in which case it must name that exact
 # generation and sequence. Requires fm-classify-lib.sh for status helpers.
-fm_busy_declared_pause_valid() {  # <state-dir> <id>
-  local state=$1 id=$2 meta statusf harness before after status_sig_before status_sig_after last
+fm_busy_declared_pause_valid() {  # <state-dir> <id> [require-bound]
+  local state=$1 id=$2 mode=${3:-} meta statusf harness before after status_sig_before status_sig_after last
   local pause_gen pause_seq busy_state busy_source busy_event busy_seq busy_ts busy_gen
   meta="$state/$id.meta"
   statusf="$state/$id.status"
   [ -f "$statusf" ] || return 1
-  last=$(last_status_line "$statusf")
+  last=$(status_declared_wait_line "$statusf")
   status_is_paused "$last" || return 1
-  [ -f "$meta" ] || return 0
+  if [ ! -f "$meta" ]; then
+    [ "$mode" != require-bound ]
+    return
+  fi
   harness=$(grep '^harness=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  [ -n "$harness" ] || return 0
-  [ -e "$state/$id.busy-state" ] || return 0
+  if [ -z "$harness" ]; then
+    [ "$mode" != require-bound ]
+    return
+  fi
+  if [ ! -e "$state/$id.busy-state" ]; then
+    [ "$mode" != require-bound ]
+    return
+  fi
   before=$(fm_busy_record_read "$state" "$id" snapshot) || return 1
   read -r busy_state busy_source busy_event busy_seq busy_ts busy_gen <<EOF
 $before

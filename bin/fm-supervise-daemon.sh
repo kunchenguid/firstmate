@@ -1607,11 +1607,17 @@ handle_wake() {  # <reason> <state>
               # Housekeeping (2b) then owns the re-surface, so the wait is still
               # bounded - by one recheck per PAUSE_RESURFACE_SECS instead.
               case "${decision%%|*}" in
-                pause) : ;;
+                escalate) : ;;
+                pause) case "$stale_detail" in
+                         idle\ *s,\ possible\ wedge,\ escalation\ *)
+                           fm_busy_declared_pause_valid "$state" "$task" require-bound \
+                             || decision="escalate|${reason#stale: }"
+                           ;;
+                       esac ;;
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
                        last=$(status_declared_wait_line "$state/$task.status")
-                       { status_is_captain_held "$last" || fm_busy_declared_pause_valid "$state" "$task"; } \
+                       { status_is_captain_held "$last" || fm_busy_declared_pause_valid "$state" "$task" require-bound; } \
                          || decision="escalate|${reason#stale: }"
                        ;;
                    esac ;;
