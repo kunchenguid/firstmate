@@ -58,6 +58,11 @@
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
 #                          verdict escalates unchanged.
+#                          Where config/wedge-evidence-guards lists operator
+#                          guards, a live pane about to escalate whose guard
+#                          answers CRITICAL defers a bounded run of windows
+#                          (wedge_guard_evidence, wedge_defer_guard) and the
+#                          escalation that ends the run names the guard.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -1150,6 +1155,13 @@ secondmate_liveness_tick() {
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+# Bounds for the opt-in operator guard consult (wedge_guard_evidence): seconds
+# one guard may run before it is treated as no answer, and consecutive windows
+# a CRITICAL answer may defer before the escalation fires anyway. Read only
+# where config/wedge-evidence-guards exists.
+FM_WEDGE_GUARD_TIMEOUT_SECS=${FM_WEDGE_GUARD_TIMEOUT_SECS:-5}
+FM_WEDGE_GUARD_DEFER_MAX=${FM_WEDGE_GUARD_DEFER_MAX:-3}
+
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
 # absorb can rot invisibly. <age> is how long the current absorb has held and
 # <throttle> is the per-window marker whose mtime records the last re-surface, so
@@ -1427,10 +1439,12 @@ EOF
 
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
 # the bounded re-surface cadence is measured from the CURRENT quiet stretch and a
-# long-finished one cannot make the next deferral resurface immediately.
+# long-finished one cannot make the next deferral resurface immediately. The
+# guard-deferral run (wedge_defer_guard) ends at the same resets, so its cap
+# counts only consecutive guard deferrals of one unbroken quiet stretch.
 clear_write_tracking() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
+  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key" "$STATE/.guard-deferrals-$key"
 }
 
 # The question the wedge timer never asked before it alarmed: is there still an
@@ -1500,6 +1514,103 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   wake "$reason"
 }
 
+# A guard file is trusted only when it is a regular file, not a symlink, owned
+# by the watcher's own user, and writable by nobody else, so no other account
+# can choose what this watcher executes.
+wedge_guard_file_trusted() {  # <path>
+  local f=$1 mode
+  [ -f "$f" ] && [ ! -L "$f" ] && [ -O "$f" ] || return 1
+  mode=$(fm_pr_file_mode "$f") || return 1
+  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+  [ $(( 8#$mode & 8#022 )) -eq 0 ]
+}
+
+# Opt-in operator evidence for a pane about to wedge-escalate: the caller
+# docs/jev-guards.md describes for a CRITICAL verdict. OFF unless the home
+# creates config/wedge-evidence-guards, and that one existence test is what
+# keeps an unconfigured home identical to having no consult at all: no guard
+# runs, no record is written, and the ladder, timing and wording are unchanged.
+# The file lists one absolute guard executable path per line; blank lines and
+# `#` comments are skipped. The file and every listed executable must pass
+# wedge_guard_file_trusted, so guard commands come only from trusted home
+# config; an untrusted file or entry is skipped with a triage line.
+# Each guard runs directly (no shell, no eval) as `<guard> --json`, with the
+# task id and endpoint in FM_GUARD_TASK and FM_GUARD_ENDPOINT, stdin closed and
+# stderr discarded, bounded by FM_WEDGE_GUARD_TIMEOUT_SECS. Its stdout must be
+# exactly one JSON object whose `status` is a string and whose `recommendation`
+# is a non-empty string. Only `status` CRITICAL counts; a timeout, non-zero
+# exit, malformed output, OK, WARNING or UNKNOWN is no answer, and the next
+# guard is asked. The first CRITICAL answer is printed as a record of the
+# guard's file name and the first line of its recommendation, joined with US
+# (\037) like wait_record, with control characters removed and capped at 160
+# characters so it fits one wake reason. The answer is evidence only: it can defer
+# one window through wedge_defer_guard and name itself in the wake, and it never
+# authorizes a decision, merge, cleanup or any other action.
+wedge_guard_evidence() {  # <task> <window> -> one guard record on stdout
+  local task=$1 win=$2 cfg guard out verdict timeout
+  cfg="$CONFIG/wedge-evidence-guards"
+  [ -e "$cfg" ] || return 1
+  if ! wedge_guard_file_trusted "$cfg"; then
+    triage_log "refused untrusted config/wedge-evidence-guards (must be a regular file owned by this user and not group or world writable)"
+    return 1
+  fi
+  timeout=$FM_WEDGE_GUARD_TIMEOUT_SECS
+  case "$timeout" in ''|*[!0-9]*|0) timeout=5 ;; esac
+  while IFS= read -r guard || [ -n "$guard" ]; do
+    case "$guard" in ''|'#'*) continue ;; esac
+    case "$guard" in
+      /*) ;;
+      *) triage_log "skipped wedge guard '$guard' (not an absolute path)"; continue ;;
+    esac
+    if ! wedge_guard_file_trusted "$guard" || [ ! -x "$guard" ]; then
+      triage_log "skipped wedge guard $guard (not a trusted executable owned by this user)"
+      continue
+    fi
+    out=$(fm_run_timed "$timeout" env "FM_GUARD_TASK=$task" "FM_GUARD_ENDPOINT=$win" \
+      "$guard" --json </dev/null 2>/dev/null) || continue
+    verdict=$(printf '%s' "$out" | jq -rs '
+      if length == 1 and (.[0] | type) == "object"
+         and (.[0].status | type) == "string"
+         and (.[0].recommendation | type) == "string"
+      then .[0].status + "\t"
+           + (.[0].recommendation | split("\n")[0] | gsub("[[:cntrl:]]"; " ") | .[0:160])
+      else empty end' 2>/dev/null) || continue
+    case "$verdict" in
+      CRITICAL$'\t'*[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    printf '%s\037%s' "${guard##*/}" "${verdict#*$'\t'}"
+    return 0
+  done < "$cfg"
+  return 1
+}
+
+# Defer ONE wedge escalation on a guard's CRITICAL answer, the same deferral
+# shape as wedge_defer_wait: the idle timer restarts so the next window asks
+# again, and the escalation counter is left alone. Unlike the waits above, a
+# guard is not the worker's own account of its silence, so the run of
+# consecutive guard deferrals is capped at FM_WEDGE_GUARD_DEFER_MAX and counted
+# in the .guard-deferrals-<key> record next to the other wedge-window records,
+# never in memory, so a watcher restart keeps the count. At the cap this
+# returns 1 and the caller escalates, naming the guard and its reason; that
+# escalation, like every other reset of the window, ends the run
+# (clear_write_tracking), so a guard that says CRITICAL forever still lets
+# the lane escalate once every cap+1 windows.
+wedge_defer_guard() {  # <window> <since-file> <triage-label> <idle-age> <guard-record>
+  local win=$1 since_file=$2 label=$3 age=$4 record=$5 key countf n max
+  key=$(window_key "$win")
+  countf="$STATE/.guard-deferrals-$key"
+  max=$FM_WEDGE_GUARD_DEFER_MAX
+  case "$max" in ''|*[!0-9]*) max=3 ;; esac
+  n=$(cat "$countf" 2>/dev/null || true)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  [ "$n" -lt "$max" ] || return 1
+  printf '%s\n' "$((n + 1))" > "$countf" || return 1
+  date +%s > "$since_file"
+  triage_log "absorbed $label (guard ${record%%$'\037'*} reports CRITICAL, deferral $((n + 1)) of $max, idle ${age}s): $win"
+  return 0
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1518,9 +1629,12 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # account for its own quiet has nothing to prove through its worktree. The dead-record probe
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would
-# otherwise alarm pays for a backend read.
+# otherwise alarm pays for a backend read. The opt-in operator guard consult
+# (wedge_guard_evidence) runs after all three, so a dead or missing endpoint is
+# never deferred by a guard, and a home without config/wedge-evidence-guards
+# never reaches it.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence guard guard_note
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1545,11 +1659,18 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
+        guard_note=''
+        if guard=$(wedge_guard_evidence "$task" "$win"); then
+          if wedge_defer_guard "$win" "$since_file" "$label" "$age" "$guard"; then
+            return 0
+          fi
+          guard_note="; guard ${guard%%$'\037'*} still reports CRITICAL (${guard#*$'\037'}) after its consecutive-deferral cap, so recheck the lane"
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$guard_note)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
