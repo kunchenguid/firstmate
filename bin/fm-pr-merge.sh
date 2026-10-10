@@ -1562,12 +1562,12 @@ forgejo_confirm_merged() {
   local json merged
   if ! json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
     "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$json" ]; then
-    return 1
+    return 2
   fi
   if ! merged=$(printf '%s' "$json" | jq -r \
     'if type == "object" and (.merged | type == "boolean") then .merged else error("invalid merged field") end' \
     2>/dev/null); then
-    return 1
+    return 2
   fi
   [ "$merged" = true ]
 }
@@ -1728,8 +1728,14 @@ case "$PROVIDER" in
     # verified against a real instance), so that output is kept only for the
     # failure report below; the merge is judged solely by reading the pull
     # request back through forgejo_confirm_merged.
-    forgejo_confirm_rc=0
-    forgejo_confirm_merged || forgejo_confirm_rc=$?
+    forgejo_confirm_attempt=1
+    while :; do
+      forgejo_confirm_rc=0
+      forgejo_confirm_merged || forgejo_confirm_rc=$?
+      [ "$forgejo_confirm_rc" -eq 2 ] && [ "$forgejo_confirm_attempt" -lt 5 ] || break
+      sleep 1
+      forgejo_confirm_attempt=$((forgejo_confirm_attempt + 1))
+    done
     if [ "$forgejo_confirm_rc" -ne 0 ]; then
       fm_afk_contract_lock_release || true
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
