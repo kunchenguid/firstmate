@@ -441,12 +441,10 @@
 # grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
 # agy installs no hook either - it exposes no hook surface at all - so it
 # carries no busy-source wiring and no turn-end hook. Its brief rides the launch
-# command, but a fresh worktree would park it on a folder-trust dialog, so the
-# spawn pre-registers the worktree in agy's own trust store through
-# bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits for a
-# busy turn - answering the dialog first if it renders anyway - before
-# reporting success (the rovo/kimi launch-then-confirm shape). Its busy state
-# is a screen-scrape fallback like grok and rovo, and it is crewmate/scout only.
+# command; bin/fm-agy-trust.sh owns pre-registration in the selected executable's
+# profile, and agy_wait_for_working below owns the post-launch trust backstop.
+# Its busy state is a screen-scrape fallback like grok and rovo, and it is
+# crewmate/scout only.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -2170,16 +2168,8 @@ launch_template() {
   # (gemini-3.8-flash-high, never the unlisted bare gemini-3.8-flash).
   # --effort takes low|medium|high. --dangerously-skip-permissions
   # auto-approves every tool call, which an unattended crewmate needs.
-  # Every task worktree is a fresh path, so agy would show a folder-trust
-  # dialog ("Do you trust the contents of this project?") and no launch flag
-  # suppresses it (agy 1.2.0 --help lists none). Left unanswered, the turn
-  # runs in agy's own scratch directory instead of the worktree, so the
-  # worktree is pre-registered in the captain's own
-  # ~/.gemini/antigravity-cli/settings.json trustedWorkspaces before launch
-  # (bin/fm-agy-trust.sh, the claude shape), and the post-launch gate
-  # (agy_wait_for_working) answers the preselected safe default ("Yes, I
-  # trust this folder") with a single Enter if the dialog renders anyway,
-  # then requires the busy signature before the spawn reports success.
+  # bin/fm-agy-trust.sh owns selected-executable profile/path resolution;
+  # agy_wait_for_working below owns the post-launch trust backstop.
   # The foreign primary markers are cleared for the same
   # reason cursor clears them: agy publishes no marker of its own and does not
   # clear an inherited CLAUDECODE (verified in the /proc environ of a live 1.2.0
@@ -4326,11 +4316,10 @@ rovo_endpoint_cleanup() {
 }
 
 # agy carries its brief on the launch command, so it needs no delivery gate,
-# but a worktree agy does not trust parks the TUI on the folder-trust dialog
-# and an unanswered dialog sends the turn into agy's scratch directory instead
-# of the worktree. The trust is pre-registered before launch
-# (bin/fm-agy-trust.sh, verified to remove the dialog), and this gate is the
-# backstop in the rovo/kimi launch-then-confirm shape: answer the dialog once
+# but an unanswered folder-trust dialog can redirect work into agy's scratch
+# directory. bin/fm-agy-trust.sh owns pre-registration, with evidence and
+# platform limits in docs/verification/agy.md. This gate is the backstop in
+# the rovo/kimi launch-then-confirm shape: answer the dialog once
 # with the preselected safe default if it renders anyway, then require
 # positive proof that the brief is being processed - the same verdict the
 # supervisor reads (Herdr's native working state or the pinned `esc to cancel`
@@ -4525,10 +4514,9 @@ spawn_assert_agent_worktree
 # temp root, no retired relaunch wiring and no busy record exists yet to strand,
 # so the refusal names the endpoint the same way they do and leaves nothing else
 # behind.
-# agy gates a fresh worktree behind its own folder-trust dialog and honours a
-# trustedWorkspaces entry written ahead of launch (bin/fm-agy-trust.sh), so the
-# same pre-registration removes the dialog for it. Unlike claude's dialog, agy's
-# preselects the safe answer, so a failed registration is not fatal here: the
+# bin/fm-agy-trust.sh owns agy's pre-registration contract.
+# Unlike claude's dialog, agy's preselects the safe answer,
+# so a failed registration is not fatal here: the
 # post-launch gate (agy_wait_for_working) answers the dialog itself and, on a
 # path that was not pre-registered, refuses to count a busy turn as ready until
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
@@ -4548,7 +4536,7 @@ claude*)
   ;;
 agy)
   if [ "$KIND" != secondmate ]; then
-    if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+    if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" "$AGY_BIN" >/dev/null; then
       AGY_TRUST_PREREGISTERED=1
     else
       echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
