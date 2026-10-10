@@ -228,7 +228,16 @@ test_park_inert_on_non_model_stop() {
   decision=$(decision_of "$out")
   [ "$decision" = "allow" ] || fail "max_steps_exceeded termination must allow stop, got: $out"
   [ ! -e "$dir/state/arm-ran" ] || fail "arm should not run on non-model-stop"
-  pass "fm-turnend-guard-agy: inert when terminationReason is not model_stop"
+
+  # NO_TOOL_CALL is Antigravity CLI's live enum for text completions and must park.
+  rm -f "$dir/state/arm-ran"
+  payload='{"conversationId":"conv-1","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
+  out=$(run_park "$dir" 1 "" "$payload")
+  decision=$(decision_of "$out")
+  [ "$decision" = "continue" ] || fail "NO_TOOL_CALL must park and emit continue, got: $out"
+  [ -e "$dir/state/arm-ran" ] || fail "arm should run on NO_TOOL_CALL"
+
+  pass "fm-turnend-guard-agy: inert on error/max_steps, active on NO_TOOL_CALL"
 }
 
 test_park_inert_in_away_mode() {

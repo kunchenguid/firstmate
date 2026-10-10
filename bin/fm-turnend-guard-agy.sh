@@ -97,7 +97,10 @@ TERMINATION_REASON=$(printf '%s' "$PAYLOAD" | jq -r '
 ' 2>/dev/null) || emit_allow
 
 # Only park when model stopped naturally. If stopped due to max_steps_exceeded, error, or cancel, allow.
-[ "$TERMINATION_REASON" = "model_stop" ] || emit_allow
+case "$TERMINATION_REASON" in
+  model_stop|NO_TOOL_CALL|'') ;;
+  *) emit_allow ;;
+esac
 
 LOOP_COUNT=$(printf '%s' "$PAYLOAD" | jq -r '
   if type != "object" then error("payload")
