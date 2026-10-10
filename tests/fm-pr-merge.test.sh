@@ -96,7 +96,7 @@ write_github_live_json() {
   local case_dir=$1 head=$2
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","workflowId":1,"status":"COMPLETED","conclusion":"SUCCESS"}]}
 JSON
 }
 
@@ -104,21 +104,23 @@ write_github_red_json() {
   local case_dir=$1 head=$2 name=$3
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"$name","status":"COMPLETED","conclusion":"FAILURE"}]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"$name","workflowId":1,"status":"COMPLETED","conclusion":"FAILURE"}]}
 JSON
 }
 
-# One CheckRun rollup entry the way GitHub reports it. A conclusion or timestamp
-# of "-" is emitted as JSON null. Args: name status conclusion [startedAt]
-# [completedAt]
+# One normalized CheckRun rollup entry from the GitHub GraphQL read. A
+# conclusion or timestamp of "-" is emitted as JSON null. Args: name status
+# conclusion [startedAt] [completedAt] [workflowId] [workflowName]
 check_run() {
-  local name=$1 status=$2 conclusion=$3 started=${4:--} completed=${5:-${4:--}}
+  local name=$1 status=$2 conclusion=$3 started=${4:--} completed=${5:-${4:--}} workflow_id=${6:-1} workflow_name=${7:-CI}
   local conclusion_json='null' started_json='null' completed_json='null'
+  local workflow_id_json
   [ "$conclusion" = - ] || conclusion_json="\"$conclusion\""
   [ "$started" = - ] || started_json="\"$started\""
   [ "$completed" = - ] || completed_json="\"$completed\""
-  printf '{"__typename":"CheckRun","name":"%s","status":"%s","conclusion":%s,"startedAt":%s,"completedAt":%s}' \
-    "$name" "$status" "$conclusion_json" "$started_json" "$completed_json"
+  [ "$workflow_id" = - ] && workflow_id_json=null || workflow_id_json="$workflow_id"
+  printf '{"__typename":"CheckRun","name":"%s","workflowName":"%s","workflowId":%s,"status":"%s","conclusion":%s,"startedAt":%s,"completedAt":%s}' \
+    "$name" "$workflow_name" "$workflow_id_json" "$status" "$conclusion_json" "$started_json" "$completed_json"
 }
 
 status_context() {
@@ -173,29 +175,6 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
-      *statusCheckRollup*)
-        if [ -n "${FM_TEST_GH_MERGEABLE_SEQUENCE:-}" ]; then
-          call_n=$(( $(cat "$FM_TEST_GH_MERGEABLE_CALLS" 2>/dev/null || echo 0) + 1 ))
-          printf '%s\n' "$call_n" > "$FM_TEST_GH_MERGEABLE_CALLS"
-          call_m=$(sed -n "${call_n}p" "$FM_TEST_GH_MERGEABLE_SEQUENCE")
-          [ -n "$call_m" ] || call_m=$(tail -n1 "$FM_TEST_GH_MERGEABLE_SEQUENCE")
-          # An optional second word overrides the first check's conclusion.
-          read -r call_m call_c <<< "$call_m"
-          jq -c --arg m "$call_m" --arg c "${call_c:-}" \
-            '.mergeable = $m | if $c != "" then .statusCheckRollup[0].conclusion = $c else . end' \
-            "$FM_TEST_GH_VIEW_JSON"
-        else
-          cat "$FM_TEST_GH_VIEW_JSON"
-        fi
-        if [ -f "${FM_TEST_AWAY_RECORD_AFTER_VIEW:-}" ]; then
-          if [ -s "${FM_TEST_AWAY_RECORD_AFTER_VIEW}" ]; then
-            cp "$FM_TEST_AWAY_RECORD_AFTER_VIEW" "$FM_STATE_OVERRIDE/.afk-contract"
-          else
-            rm -f "$FM_STATE_OVERRIDE/.afk-contract"
-          fi
-        fi
-        exit 0
-        ;;
       *headRefOid*)
         cat "$FM_TEST_GH_HEAD"
         exit 0
@@ -233,11 +212,59 @@ case "${1:-} ${2:-}" in
     exit "$merge_rc"
     ;;
   "api graphql")
-    if [ -f "${FM_TEST_GH_GRAPHQL_FAIL:-}" ]; then
+    # This fixture models the post-merge outcome query failing while the
+    # pre-merge statusCheckRollup query remains readable.
+    if [ -f "${FM_TEST_GH_GRAPHQL_FAIL:-}" ] && [[ " $* " != *statusCheckRollup* ]]; then
       echo 'error: could not reach the GitHub API' >&2
       exit 1
     fi
-    cat "$FM_TEST_GH_OUTCOME"
+    case " $* " in
+      *statusCheckRollup*)
+        graphql_jq=''
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = --jq ]; then
+            graphql_jq=${2:-}
+            shift 2
+          else
+            shift
+          fi
+        done
+        [ -n "$graphql_jq" ] || exit 2
+        if [ -n "${FM_TEST_GH_MERGEABLE_SEQUENCE:-}" ]; then
+          call_n=$(( $(cat "$FM_TEST_GH_MERGEABLE_CALLS" 2>/dev/null || echo 0) + 1 ))
+          printf '%s\n' "$call_n" > "$FM_TEST_GH_MERGEABLE_CALLS"
+          call_m=$(sed -n "${call_n}p" "$FM_TEST_GH_MERGEABLE_SEQUENCE")
+          [ -n "$call_m" ] || call_m=$(tail -n1 "$FM_TEST_GH_MERGEABLE_SEQUENCE")
+          read -r call_m call_c <<< "$call_m"
+          fixture_json=$(jq -c --arg m "$call_m" --arg c "${call_c:-}" \
+            '.mergeable = $m | if $c != "" then .statusCheckRollup[0].conclusion = $c else . end' \
+            "$FM_TEST_GH_VIEW_JSON")
+        else
+          fixture_json=$(cat "$FM_TEST_GH_VIEW_JSON")
+        fi
+        printf '%s' "$fixture_json" | jq -c '
+          . as $pr
+          | ($pr.statusCheckRollup // []) as $checks
+          | $pr
+          | .statusCheckRollup = {contexts: {nodes: [$checks[] |
+              if .__typename == "CheckRun" then
+                . as $check
+                | del(.workflowId, .workflowName)
+                | . + {checkSuite: {workflowRun: {workflow: {databaseId: $check.workflowId}}}}
+              else . end
+            ]}}
+          | {data: {repository: {pullRequest: .}}}
+        ' | jq -c "$graphql_jq"
+        if [ -f "${FM_TEST_AWAY_RECORD_AFTER_VIEW:-}" ]; then
+          if [ -s "${FM_TEST_AWAY_RECORD_AFTER_VIEW}" ]; then
+            cp "$FM_TEST_AWAY_RECORD_AFTER_VIEW" "$FM_STATE_OVERRIDE/.afk-contract"
+          else
+            rm -f "$FM_STATE_OVERRIDE/.afk-contract"
+          fi
+        fi
+        ;;
+      *) cat "$FM_TEST_GH_OUTCOME" ;;
+    esac
     exit 0
     ;;
   api\ *)
@@ -669,8 +696,8 @@ test_github_mergeable_unknown_retries_then_succeeds() {
   set -e
 
   expect_code 0 "$rc" "github-mergeable-unknown-then-mergeable: a merge should succeed once mergeable resolves"
-  [ "$(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")" -eq 2 ] \
-    || fail "github-mergeable-unknown-then-mergeable: expected exactly 2 mergeable reads, got $(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")"
+  [ "$(grep -c '^api graphql .*statusCheckRollup' "$case_dir/gh.log")" -eq 2 ] \
+    || fail "github-mergeable-unknown-then-mergeable: expected exactly 2 mergeable reads, got $(grep -c '^api graphql .*statusCheckRollup' "$case_dir/gh.log")"
   assert_logged_gh_merge "$case_dir" 83 example/repo --squash
   [ "$(grep -c '^pr merge ' "$case_dir/gh.log")" -eq 1 ] \
     || fail "github-mergeable-unknown-then-mergeable: the wrapper attempted more than one merge"
@@ -701,8 +728,8 @@ test_github_mergeable_unknown_exhausts_bound_and_reports_pending() {
   set -e
 
   expect_code 1 "$rc" "github-mergeable-unknown-exhausted: a mergeable read that never resolves must still fail"
-  [ "$(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")" -eq 5 ] \
-    || fail "github-mergeable-unknown-exhausted: expected exactly 5 bounded mergeable reads, got $(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")"
+  [ "$(grep -c '^api graphql .*statusCheckRollup' "$case_dir/gh.log")" -eq 5 ] \
+    || fail "github-mergeable-unknown-exhausted: expected exactly 5 bounded mergeable reads, got $(grep -c '^api graphql .*statusCheckRollup' "$case_dir/gh.log")"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "github-mergeable-unknown-exhausted: a merge was attempted while mergeable never resolved"
   assert_grep "mergeability for https://github.com/example/repo/pull/84 is still being computed by GitHub; retry shortly" \
@@ -732,8 +759,8 @@ test_github_mergeable_unknown_retry_rechecks_checks() {
   set -e
 
   expect_code 1 "$rc" "github-mergeable-unknown-check-turns-red: a check that turned red must refuse"
-  [ "$(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")" -eq 2 ] \
-    || fail "github-mergeable-unknown-check-turns-red: expected exactly 2 reads, got $(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")"
+  [ "$(grep -c '^api graphql .*statusCheckRollup' "$case_dir/gh.log")" -eq 2 ] \
+    || fail "github-mergeable-unknown-check-turns-red: expected exactly 2 reads, got $(grep -c '^api graphql .*statusCheckRollup' "$case_dir/gh.log")"
   assert_grep "check 'ci' is not green" "$case_dir/stderr" \
     "github-mergeable-unknown-check-turns-red: the re-check did not refuse the red check"
   assert_no_grep 'still being computed' "$case_dir/stderr" \
@@ -764,7 +791,7 @@ test_github_mergeable_conflicting_is_not_retried() {
   set -e
 
   expect_code 1 "$rc" "github-mergeable-conflicting: a genuine conflict must refuse"
-  [ "$(grep -c '^pr view .*statusCheckRollup' "$case_dir/gh.log")" -eq 1 ] \
+  [ "$(grep -c '^api graphql .*statusCheckRollup' "$case_dir/gh.log")" -eq 1 ] \
     || fail "github-mergeable-conflicting: a genuine conflict was retried instead of refused immediately"
   assert_grep 'mergeable is "CONFLICTING", not MERGEABLE' "$case_dir/stderr" \
     "github-mergeable-conflicting: the conflict was not named"
@@ -2671,6 +2698,50 @@ test_superseded_failed_check_run_no_longer_refuses() {
   pass "fm-pr-merge merges when a failed check run was replaced by a passing re-run"
 }
 
+test_same_name_checks_from_different_workflows_do_not_supersede() {
+  local case_dir rc head
+  head=dededededededededededededededededededede
+  case_dir=$(make_case github-same-name-different-workflows)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run 'dependency-backed Python contracts' COMPLETED FAILURE 2026-01-01T00:00:01Z 2026-01-01T00:00:02Z 101 shared-display-name)" \
+    "$(check_run 'dependency-backed Python contracts' COMPLETED SUCCESS 2026-01-01T00:00:09Z 2026-01-01T00:00:10Z 202 shared-display-name)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-same-name-different-workflows: a green workflow must not supersede a red workflow"
+  assert_grep "check 'dependency-backed Python contracts' is not green" "$case_dir/stderr" \
+    "github-same-name-different-workflows: the red check was not reported"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-same-name-different-workflows: cross-workflow green run hid the failure"
+  pass "fm-pr-merge keeps same-named failures red across different workflows"
+}
+
+test_check_run_without_workflow_identity_cannot_be_superseded() {
+  local case_dir rc head
+  head=dededededededededededededededededededede
+  case_dir=$(make_case github-missing-workflow-identity)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED FAILURE 2026-01-01T00:00:01Z 2026-01-01T00:00:02Z -)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/92 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-missing-workflow-identity: a missing identity must stay red"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-missing-workflow-identity: an identified run hid the unscoped failure"
+  pass "fm-pr-merge does not supersede a run without workflow identity"
+}
+
 # Legacy status contexts remain independent from check runs, even when their
 # reported names match.
 test_check_runs_never_supersede_status_contexts() {
@@ -3854,6 +3925,8 @@ test_backend_override_bypasses_unreadable_user_config
 test_github_red_checks_refuse_and_allow_red_waives_named
 test_github_draft_or_unreadable_draft_state_refuses
 test_superseded_failed_check_run_no_longer_refuses
+test_same_name_checks_from_different_workflows_do_not_supersede
+test_check_run_without_workflow_identity_cannot_be_superseded
 test_check_runs_never_supersede_status_contexts
 test_current_failed_check_run_still_refuses
 test_late_finishing_old_success_does_not_hide_current_failure
