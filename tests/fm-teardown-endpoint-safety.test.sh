@@ -845,6 +845,8 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
   # it, standing in for a slot allocation running in that home right now.
   lock=$(resolve_project_lock "$child_home" "$child_project") \
     || fail "the local child could not resolve the shared project lock"
+  # The holder execs sleep while holding the lock: the lock's owner identity is
+  # exec-invariant, so the replaced command line must not read as a foreign holder.
   FM_HOME="$child_home" bash -c \
     '. "$1"; fm_lock_try_acquire "$2" || exit 1; : > "$3"; exec sleep 30' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/lock-held" &

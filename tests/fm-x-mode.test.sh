@@ -2972,7 +2972,12 @@ test_followup_post_record_failure_clears_link() {
   err="$home/err.txt"
   cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
-if [ -n "${FAKE_MV_FAIL_AFTER_FLAG:-}" ] \
+dest=
+for arg in "$@"; do
+  dest=$arg
+done
+if [ "${dest%.meta}" != "$dest" ] \
+  && [ -n "${FAKE_MV_FAIL_AFTER_FLAG:-}" ] \
   && [ -f "$FAKE_MV_FAIL_AFTER_FLAG" ] \
   && [ -n "${FAKE_MV_FAILED_ONCE:-}" ] \
   && [ ! -f "$FAKE_MV_FAILED_ONCE" ]; then
