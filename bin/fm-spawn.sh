@@ -93,10 +93,14 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
-#   OpenCode has no interactive effort flag, so its effort is written as the
-#   build agent's variant, keyed to the resolved model, inside the
-#   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
-#   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   OpenCode v2 removed --model from the interactive launch, so that axis is
+#   never passed there; the resolved model is written to the worktree's own
+#   untracked .opencode/opencode.json instead (write_opencode_worktree_model,
+#   verified on opencode 2.0.26). OpenCode has no interactive effort flag
+#   either, so its effort is written as the build agent's variant, keyed to the
+#   resolved model, inside the OPENCODE_CONFIG_CONTENT JSON its launch already
+#   carries (config schema verified on opencode 1.18.32); without a model the
+#   axis is recorded but omitted.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -2696,14 +2700,62 @@ relaunch_resume_args() {  # <harness> <backend> <target>
   printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
 }
 
+# opencode is deliberately absent from the list below. OpenCode v2 removed
+# `--model` from the interactive launch: `opencode --help` on 2.0.26 advertises
+# only --standalone --server --auto --continue/-c --session/-s --prompt, and any
+# launch carrying the flag dies immediately with "Unrecognized flag: --model in
+# command opencode" (exit 1, verified 2026-10-10). Because both the default and
+# the icms dispatch profiles resolve opencode/space-bunny-free, every dispatch
+# was emitting it. The model axis is not dropped with the flag: it rides the
+# worktree's own .opencode/opencode.json instead (write_opencode_worktree_model).
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
+}
+
+# OpenCode v2 dropped `--model` from the interactive launch, so the resolved
+# model rides the worktree's own config instead (verified 2026-10-10, opencode
+# 2.0.26, this host):
+#   * `opencode debug config` reports ~/.config/opencode/opencode.jsonc and the
+#     worktree's .opencode/opencode.json as SEPARATE merged sources, so a
+#     project config carrying only `model` does NOT shadow the captain's global
+#     provider block. Measured with the pin in place: local-llm/gemma-4 and
+#     local-llm/qwen3.8-27b-gguf stayed in `opencode models` exactly as in the
+#     unpinned baseline.
+#   * The `model` key is honored for real selection: a worktree pinned to
+#     opencode-go/space-bunny ran on opencode-go/space-bunny, while an unpinned
+#     run in a fresh directory ran on opencode-go/claude-haiku-5-5. Dropping the
+#     flag alone therefore does NOT keep the configured model.
+#   * OPENCODE_CONFIG_CONTENT is NOT honored for `model` in v2 (it does not even
+#     appear as a configuration source), so the launch's existing env overlay
+#     cannot carry the pin and the file route is the supported one.
+# The generated file is untracked and git-excluded: it is per-worktree launch
+# scaffolding in the same class as the busy-state plugin written beside it, not
+# a tracked change to the project.
+write_opencode_worktree_model() {  # <model>
+  local model=$1 target
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  # Only a <provider>/<id> pair is a pin; anything else is not a model this can
+  # name, and silently writing it would produce a config opencode cannot use.
+  case "$model" in
+  */*) ;;
+  *) return 0 ;;
+  esac
+  target="$WT/.opencode/opencode.json"
+  # A project that ships its own committed .opencode/opencode.json owns that
+  # file. Never overwrite it: clobbering a project's tracked configuration is
+  # not a pin. The launch still runs, on the host's own default model.
+  if [ -e "$target" ] && git -C "$WT" ls-files --error-unmatch .opencode/opencode.json >/dev/null 2>&1; then
+    return 0
+  fi
+  mkdir -p "$WT/.opencode"
+  printf '{"model":"%s"}\n' "$(json_escape "$model")" > "$target"
+  exclude_path '.opencode/opencode.json'
 }
 
 effort_flag_for_harness() {
@@ -4867,6 +4919,9 @@ export const FmBusyState = async () => {
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'
+    # opencode v2 has no --model on the interactive launch, so the resolved
+    # model axis lands here instead. See write_opencode_worktree_model.
+    write_opencode_worktree_model "$MODEL"
     ;;
   pi | pi-signed)
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension

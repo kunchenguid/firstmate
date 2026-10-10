@@ -1,6 +1,6 @@
 # OpenCode
 
-Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4.
+Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4, and the model and config behavior re-verified on 2026-10-10 using 2.0.26.
 
 ## Operating facts
 
@@ -11,9 +11,10 @@ Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue be
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
 | Resume | Relaunch with `--continue` to resume the most recent session for the current directory, then send the next instruction after the TUI is ready because `--prompt` does not auto-submit alongside `--continue`. |
-| Model flag | `--model <provider/model>`. |
+| Model flag | None on the interactive launch. OpenCode v2 removed `--model` from `opencode`: on 2.0.26 `opencode --help` advertises only `--standalone --server --auto --continue/-c --session/-s --prompt`, and a launch carrying the flag exits 1 with `Unrecognized flag: --model in command opencode`. `opencode run` still has `--model, -m`, but `run` is the headless mode, not this path. Firstmate therefore never passes the flag and writes the resolved model to the worktree's untracked `.opencode/opencode.json` instead (`write_opencode_worktree_model` in `../../../bin/fm-spawn.sh`). Do not hand-edit `~/.config/opencode/opencode.jsonc`: that is the captain's file. |
 | Effort flag | None for Firstmate's interactive `opencode --prompt` launch; `opencode run` has `--variant`, but that is not this path. The effort instead rides the launch's `OPENCODE_CONFIG_CONTENT` JSON as the `build` agent's `variant` keyed to the resolved model, the config schema's per-model reasoning-effort field verified on 1.18.32. It is emitted only when the resolved model's provider is known to expose that effort as a variant (`anthropic/*`: high, max; `openai/*`: low, medium, high, xhigh); with no model resolved, another provider, or an effort outside its family's list, the variant is omitted and the permission-only launch is unchanged. |
 | Model discovery | Run `opencode models [provider]` to list available provider/model identifiers. |
+| Model pinning | A worktree's `.opencode/opencode.json` carrying a `model` key is honored by v2 and does not shadow the operator's global config: `opencode debug config` lists `~/.config/opencode/opencode.jsonc` and the project file as separate merged sources, and with the pin in place the global `local-llm` models stayed visible in `opencode models` exactly as in the unpinned baseline. `OPENCODE_CONFIG_CONTENT` is NOT honored for `model` in v2 - it does not appear as a configuration source at all - so the env overlay cannot carry a pin. Dropping the flag is not enough on its own: an unpinned run in a fresh directory started on `opencode-go/claude-haiku-5-5`, not the host's last-used TUI selection. |
 | Trust dialog | None. |
 | Marker | None; OpenCode publishes no identity marker, so `../../../bin/fm-harness.sh` identifies it from process ancestry. |
 

@@ -761,12 +761,100 @@ test_opencode_threads_model_and_effort_variant() {
   # the launch already writes, keyed to the resolved model on the default
   # build agent, never as a launch flag.
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --prompt" \
     "opencode launch did not write the effort as the build agent's variant in its config"
+  # opencode v2 removed --model from the interactive launch; a launch carrying
+  # it exits 1 with "Unrecognized flag: --model in command opencode".
+  assert_not_contains "$launch" "--model" "opencode v2 interactive launch must not pass --model"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode receives --model and the effort as its config's agent variant"
+  pass "opencode drops --model, pins the model in its worktree config, and keeps the effort as its config's agent variant"
+}
+
+# OpenCode v2 dropped --model, so the model axis is not dropped with it: it
+# rides the worktree's untracked .opencode/opencode.json. The file is excluded
+# from git so it never dirties the project, and opencode reads it alongside the
+# operator's global config rather than replacing it.
+test_opencode_pins_model_in_worktree_config() {
+  local rec id out status cfg
+  id=profile-opencode-pin-z7e
+  rec=$(make_spawn_case profile-opencode-pin opencode "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model opencode/space-bunny-free --effort high)
+  status=$?
+  expect_code 0 "$status" "opencode spawn with the captain's model should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode/space-bunny-free high
+
+  cfg="$WT_DIR/.opencode/opencode.json"
+  [ -f "$cfg" ] || fail "opencode spawn did not write the model pin to $cfg"
+  assert_contains "$(cat "$cfg")" '"model":"opencode/space-bunny-free"' \
+    "worktree config did not pin the resolved model"
+  if git -C "$WT_DIR" check-ignore -q .opencode/opencode.json; then
+    pass "opencode pins the model in an untracked, git-excluded worktree config"
+  else
+    fail "the generated .opencode/opencode.json is not git-excluded and would dirty the project"
+  fi
+}
+
+# A project that ships its own committed .opencode/opencode.json owns that
+# file. Overwriting it would clobber the project's tracked configuration, which
+# is not a pin.
+test_opencode_never_clobbers_a_tracked_project_config() {
+  local case_dir home proj wt fakebin launchlog id out status cfg existing
+  id=profile-opencode-tracked-z7f
+  case_dir="$TMP_ROOT/profile-opencode-tracked"
+  home="$case_dir/home"; proj="$case_dir/project"; wt="$case_dir/wt"
+  launchlog="$case_dir/launch.log"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  fm_test_spawn_home "$home" opencode
+  # The project commits its own .opencode/opencode.json BEFORE the task
+  # worktree is created, so the worktree inherits it as a tracked file exactly
+  # as a real project's worktree would. make_spawn_case cannot express this: it
+  # creates the worktree from the project's first commit.
+  fm_git_init_commit "$proj"
+  mkdir -p "$proj/.opencode"
+  printf '%s\n' '{"model":"local-llm/gemma-4"}' > "$proj/.opencode/opencode.json"
+  git -C "$proj" add .opencode/opencode.json
+  git -C "$proj" -c user.email=test@example.com -c user.name=test \
+    commit -q -m 'project owns its opencode config'
+  fm_git_add_origin "$proj" "$proj.origin.git"
+  git -C "$proj" worktree add --quiet -b wt-profile-opencode-tracked "$wt"
+  fm_test_spawn_brief "$home" "$id"
+  read_case_record "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
+
+  existing=$(cat "$WT_DIR/.opencode/opencode.json")
+  git -C "$wt" ls-files --error-unmatch .opencode/opencode.json >/dev/null 2>&1 \
+    || fail "fixture error: the project's config is not tracked in the worktree"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model opencode/space-bunny-free)
+  status=$?
+  expect_code 0 "$status" "opencode spawn beside a tracked project config should still succeed"
+  cfg=$(cat "$wt/.opencode/opencode.json")
+  [ "$cfg" = "$existing" ] || fail "opencode overwrote the project's tracked config"$'\n'"before: $existing"$'\n'"after:  $cfg"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "--model" "opencode must still not pass --model beside a tracked config"
+  pass "opencode leaves a project's committed .opencode/opencode.json untouched"
+}
+
+# The default model axis records itself in metadata and pins nothing: there is
+# no model name to write, so no config file is invented.
+test_opencode_default_model_writes_no_worktree_config() {
+  local rec id out status
+  id=profile-opencode-default-z7g
+  rec=$(make_spawn_case profile-opencode-default opencode "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model default)
+  status=$?
+  expect_code 0 "$status" "opencode spawn with the default model axis should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode default default
+  if [ -e "$WT_DIR/.opencode/opencode.json" ]; then
+    fail "a default model axis must not write a worktree model pin"
+  fi
+  pass "opencode records a default model axis in metadata without writing a pin"
 }
 
 test_opencode_without_effort_keeps_launch_config_unchanged() {
@@ -781,9 +869,12 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --prompt" \
     "opencode launch without effort must keep the permission-only config byte-identical"
+  assert_not_contains "$launch" "--model" "opencode v2 interactive launch must not pass --model"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
+  assert_contains "$(cat "$WT_DIR/.opencode/opencode.json")" '"model":"anthropic/claude-sonnet-4-5"' \
+    "the resolved model must still be pinned in the worktree config"
   pass "opencode without an effort keeps its launch config unchanged"
 }
 
@@ -799,8 +890,9 @@ test_opencode_emits_variant_for_openai_family_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --model 'openai/gpt-5.6-sol' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --prompt" \
     "opencode launch did not write the openai family effort as the build agent's variant"
+  assert_not_contains "$launch" "--model" "opencode v2 interactive launch must not pass --model"
   pass "opencode emits the variant for an effort the openai family exposes"
 }
 
@@ -816,8 +908,9 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --prompt" \
     "opencode must keep the permission-only config when the model family lacks the effort"
+  assert_not_contains "$launch" "--model" "opencode v2 interactive launch must not pass --model"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
   pass "opencode omits the variant for an effort outside the model family's list"
 }
@@ -2219,6 +2312,9 @@ test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_effort_variant
+test_opencode_pins_model_in_worktree_config
+test_opencode_never_clobbers_a_tracked_project_config
+test_opencode_default_model_writes_no_worktree_config
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
 test_opencode_omits_variant_when_model_family_lacks_effort
