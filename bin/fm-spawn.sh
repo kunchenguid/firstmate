@@ -3641,6 +3641,14 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   BACKLOG_TRANSITION=1
   if fm_backlog_row_probe "$DATA" "$ID"; then
     BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
+    case "$KIND" in
+      ship|scout)
+        if [ "$FM_BACKLOG_ROW_KIND" != "$KIND" ]; then
+          echo "error: task $ID's backlog item is kind ${FM_BACKLOG_ROW_KIND:-none} but this dispatch is kind $KIND; refusing before creating its endpoint or local copy - repair with: bin/fm-tasks-axi.sh update $ID --kind $KIND" >&2
+          exit 1
+        fi
+        ;;
+    esac
   elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
     echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (bin/fm-tasks-axi.sh add $ID '<title>' --kind $KIND) and re-run" >&2
     exit 1

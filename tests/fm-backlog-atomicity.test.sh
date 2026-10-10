@@ -132,7 +132,7 @@ case "\${1:-}" in
   update) printf '%s\n' '--archive-body' ;;
   mv) printf '%s\n' '[<id>...]' ;;
   show)
-    printf 'task:\n  state: queued\n  held: no\n  blocked: no\n'
+    printf 'task:\n  state: queued\n  kind: ship\n  held: no\n  blocked: no\n'
     ;;
   start)
     printf '%s\n' "\$*" > "$case_dir/env-backend-start"
@@ -201,7 +201,7 @@ case "\${1:-}" in
     fi
     printf '%s\n' 'task:'
     printf '  id: %s\n' "$id"
-    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    printf '%s\n' '  state: in_flight' '  kind: ship' '  held: no' '  blocked: no'
     ;;
   *)
     exit 1
@@ -791,6 +791,39 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   pass "dispatch publishes the record and moves the backlog item In flight in one run"
 }
 
+# The row's kind and the dispatch kind are one fact under two names: the
+# record's kind picks the close reason later, the row's kind feeds the close
+# gates, so a dispatch that would make them disagree refuses before any
+# endpoint, local copy, or record exists - and the named repair makes it pass.
+test_dispatch_refuses_a_row_whose_kind_differs_from_the_dispatch() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-kind-b1
+  case_dir=$(make_home dispatch-kind "$id")
+  add_item "$case_dir" "$id" scout
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn dispatched a scout row as a ship"
+  assert_contains "$out" "kind scout" \
+    "the kind refusal did not name the row's kind"
+  assert_contains "$out" "bin/fm-tasks-axi.sh update $id --kind ship" \
+    "the kind refusal did not name the repair"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+    "a kind-refused dispatch published a task record"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "a kind-refused dispatch moved the row to $(row_state "$case_dir" "$id")"
+
+  tasks-axi update "$id" --kind ship --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "the row's kind could not be repaired"
+  rc=0
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -eq 0 ] || fail "spawn refused a row whose kind matches the dispatch: $out"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "a matching-kind dispatch published no task record"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "a matching-kind dispatch left its row at $(row_state "$case_dir" "$id")"
+  pass "dispatch refuses a row whose kind differs from the dispatch kind and accepts the repaired row"
+}
+
 test_dispatch_omits_the_file_for_a_beads_show() {
   local case_dir home id out
   id=atomic-dispatch-beads-b1
@@ -864,7 +897,7 @@ case "\${1:-}" in
     esac
     printf '%s\n' 'task:'
     printf '  id: %s\n' "$id"
-    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    printf '%s\n' '  state: in_flight' '  kind: ship' '  held: no' '  blocked: no'
     ;;
   done)
     [ "\${2:-}" = "$id" ] || exit 1
@@ -3040,6 +3073,7 @@ test_backend_resolution_preserves_precedence_and_defaults
 test_backlog_callers_refuse_unreadable_backend_config
 test_captain_hold_preserves_relocated_backlog_on_backend_error
 test_dispatch_moves_the_item_in_flight_in_the_same_run
+test_dispatch_refuses_a_row_whose_kind_differs_from_the_dispatch
 test_dispatch_omits_the_file_for_a_beads_show
 test_a_leftover_markdown_symlink_does_not_brick_a_beads_home
 test_completion_omits_the_file_for_a_beads_done
@@ -3103,6 +3137,337 @@ test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata
 test_recovery_preserves_both_records_when_meta_removal_fails
 test_recovery_preserves_a_close_beside_symlinked_metadata
+# --- close kinds ------------------------------------------------------------
+
+# A close records one structured completion fact, never free prose. Driven
+# through the library's own close entry point against a real backlog, so the
+# assertion is the resulting ROW STATE, not the wording of the refusal.
+close_with() {  # <case-dir> <id> <arg>...
+  local case_dir=$1 id=$2
+  shift 2
+  ( set -u
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$ROOT/bin/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_done "$(home_of "$case_dir")/data" "$id" "$(home_of "$case_dir")/state" "$@" && exit 0
+    printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1 )
+}
+
+test_a_close_accepts_every_done_class_reason() {
+  local case_dir id
+  case_dir=$(make_home close-kinds-accepted)
+  for id in landed-pr-c1 landed-local-c2 superseded-c4 cancelled-c5 answered-c6; do
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+  done
+  add_item "$case_dir" scout-report-c3 scout
+  start_item "$case_dir" scout-report-c3
+
+  close_with "$case_dir" landed-pr-c1 --pr https://github.com/o/r/pull/42 \
+    || fail "a landing URL was refused as a close reason"
+  close_with "$case_dir" landed-local-c2 --note 'local main' \
+    || fail "a local land was refused as a close reason"
+  close_with "$case_dir" scout-report-c3 --report data/scout-report-c3/report.md \
+    || fail "a scout report was refused as a close reason"
+  close_with "$case_dir" superseded-c4 --note 'superseded by landed-pr-c1' \
+    || fail "a superseded reason naming a task was refused"
+  close_with "$case_dir" cancelled-c5 --note 'cancelled: the captain called it off' \
+    || fail "a cancelled reason carrying the captain word was refused"
+  close_with "$case_dir" answered-c6 --note 'answered: the captain said ship it' \
+    || fail "an answered reason carrying the captain word was refused"
+
+  for id in landed-pr-c1 landed-local-c2 scout-report-c3 superseded-c4 cancelled-c5 answered-c6; do
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "a done-class close left $id in state $(row_state "$case_dir" "$id")"
+  done
+  pass "a close accepts every done-class reason and marks the row done"
+}
+
+test_a_close_refuses_a_reason_outside_the_done_class() {
+  local case_dir id out rc
+  case_dir=$(make_home close-kinds-refused)
+  add_item "$case_dir" refused-close-c6
+  start_item "$case_dir" refused-close-c6
+
+  # A bare "Closed", an empty word, a superseded note naming nothing, and a
+  # cancelled note carrying no captain word are each junk being recorded as the
+  # reason a task is done.
+  for out in 'Closed' 'done' '' 'superseded by ' 'cancelled: ' 'local main and more'; do
+    rc=0
+    close_with "$case_dir" refused-close-c6 --note "$out" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "a close reason outside the done class was accepted: '$out'"
+    [ "$(row_state "$case_dir" refused-close-c6)" = in_flight ] \
+      || fail "a refused close reason still changed the row: '$out'"
+  done
+
+  # An unrelated tasks-axi flag is not a close reason either.
+  rc=0
+  close_with "$case_dir" refused-close-c6 --keep 5 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a non-reason flag was accepted as a close reason"
+
+  # The refusal names what a caller may use instead.
+  out=$(close_with "$case_dir" refused-close-c6 --note 'Closed' 2>&1) && \
+    fail "a bare Closed was accepted as a close reason"
+  assert_contains "$out" "done-class reason" "the refusal did not name the rule"
+  assert_contains "$out" "superseded by" "the refusal did not name the accepted reasons"
+
+  [ "$(row_state "$case_dir" refused-close-c6)" = in_flight ] \
+    || fail "a refused close reason left the row closed"
+  id=refused-close-c6
+  close_with "$case_dir" "$id" --note 'local main' || fail "the row could not be closed afterwards"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "a done-class close after a refusal did not land"
+  pass "a close refuses a reason outside the done class and leaves the row untouched"
+}
+
+# A project-shaped row - a repo plus a ship or scout kind - cannot be marked
+# done when no worker record proves a worker ever existed for it. The one way
+# past it is the captain's own word, which the close itself records.
+add_project_item() {  # <case-dir> <id> <kind>
+  tasks-axi add "$2" "project item for $2" --kind "$3" --repo firstmate \
+    --file "$(backlog_of "$1")" >/dev/null
+}
+
+test_project_work_is_not_closed_without_a_worker_record() {
+  local case_dir out rc=0 marker
+  case_dir=$(make_home close-worker-record)
+  add_project_item "$case_dir" unworked-ship-c7 ship
+  start_item "$case_dir" unworked-ship-c7
+  add_project_item "$case_dir" unworked-scout-c8 scout
+  start_item "$case_dir" unworked-scout-c8
+  add_project_item "$case_dir" worked-ship-c9 ship
+  start_item "$case_dir" worked-ship-c9
+  add_item "$case_dir" plain-ship-c10
+  start_item "$case_dir" plain-ship-c10
+
+  out=$(close_with "$case_dir" unworked-ship-c7 --note 'local main' 2>&1) && \
+    fail "project work with no worker record was marked done"
+  assert_contains "$out" "no worker record" "the refusal did not name the missing worker record"
+  [ "$(row_state "$case_dir" unworked-ship-c7)" = in_flight ] \
+    || fail "a refused project close still changed the row"
+
+  rc=0
+  close_with "$case_dir" unworked-scout-c8 --report data/unworked-scout-c8/report.md >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unworked scout was closed against a report no worker wrote"
+
+  # A row that is not project-shaped is untouched by this gate.
+  close_with "$case_dir" plain-ship-c10 --note 'local main' \
+    || fail "a row with no repo was caught by the project worker-record gate"
+  [ "$(row_state "$case_dir" plain-ship-c10)" = "done" ] \
+    || fail "a non-project close did not land"
+
+  # The live task record is a worker record.
+  : > "$(home_of "$case_dir")/state/worked-ship-c9.meta"
+  close_with "$case_dir" worked-ship-c9 --note 'local main' \
+    || fail "project work with a live task record was refused"
+  [ "$(row_state "$case_dir" worked-ship-c9)" = "done" ] \
+    || fail "a worked project close did not land"
+
+  # So is the pending-close record teardown stages as it removes that record.
+  marker="$(home_of "$case_dir")/state/unworked-scout-c8.backlog-close"
+  : > "$marker"
+  close_with "$case_dir" unworked-scout-c8 --report data/unworked-scout-c8/report.md \
+    || fail "a close staged behind a pending-close record was refused"
+  [ "$(row_state "$case_dir" unworked-scout-c8)" = "done" ] \
+    || fail "a close behind a pending-close record did not land"
+  pass "project work is not marked done without a worker record"
+}
+
+test_an_answered_close_is_the_same_captain_authority() {
+  local case_dir out
+  case_dir=$(make_home close-answered)
+  add_project_item "$case_dir" answered-hold-c12 ship
+  start_item "$case_dir" answered-hold-c12
+
+  # A blank answer is not authority, so it overrides nothing.
+  close_with "$case_dir" answered-hold-c12 --note 'answered: ' >/dev/null 2>&1 \
+    && fail "a blank answered note was accepted as captain authority"
+  [ "$(row_state "$case_dir" answered-hold-c12)" = in_flight ] \
+    || fail "a blank answered note still closed the row"
+
+  # Answering a hold closes real project work with no worker record, on the
+  # captain's own word, through the same one mechanism `cancelled` uses.
+  close_with "$case_dir" answered-hold-c12 --note 'answered: the captain said ship it' \
+    || fail "an answered close did not clear the worker-record gate"
+  [ "$(row_state "$case_dir" answered-hold-c12)" = "done" ] \
+    || fail "an answered close did not close the row"
+  out=$(tasks-axi show answered-hold-c12 --file "$(backlog_of "$case_dir")" 2>&1)
+  assert_contains "$out" "the captain said ship it" \
+    "the captain answer that authorized the close was not recorded on the task"
+  pass "an answered close carries the same captain authority and is recorded"
+}
+
+test_the_captain_word_is_the_one_override_and_is_recorded() {
+  local case_dir out
+  case_dir=$(make_home close-captain-word)
+  add_project_item "$case_dir" captain-stood-down-c11 ship
+  start_item "$case_dir" captain-stood-down-c11
+
+  # An empty or blank captain word is not captain authority, so it overrides
+  # nothing - the override cannot be spent silently.
+  for out in '' '   '; do
+    close_with "$case_dir" captain-stood-down-c11 --note "cancelled: $out" >/dev/null 2>&1 \
+      && fail "a blank captain word was accepted as an override"
+    [ "$(row_state "$case_dir" captain-stood-down-c11)" = in_flight ] \
+      || fail "a blank captain word still closed the row"
+  done
+
+  close_with "$case_dir" captain-stood-down-c11 \
+    --note 'cancelled: the captain stood this down before anyone picked it up' \
+    || fail "the captain word did not override the missing worker record"
+  [ "$(row_state "$case_dir" captain-stood-down-c11)" = "done" ] \
+    || fail "the captain-word override did not close the row"
+
+  # Recorded, not merely accepted: the captain's own words are on the closed row.
+  out=$(tasks-axi show captain-stood-down-c11 --file "$(backlog_of "$case_dir")" 2>&1)
+  assert_contains "$out" "the captain stood this down before anyone picked it up" \
+    "the captain word that authorized the close was not recorded on the task"
+  pass "the captain word is the one override and is recorded on the closed task"
+}
+
+# A close whose row could not be read is refused with its own reason: never the
+# unworked-row refusal, and never a close inferred from a read that failed.
+test_a_close_refuses_when_the_row_cannot_be_verified() {
+  local case_dir id out real
+  case_dir=$(make_home close-unverified-read)
+  id=unverified-read-c13
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  real=$(command -v tasks-axi)
+  mkdir -p "$case_dir/fakebin"
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = show ]; then
+  sleep 5
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(PATH="$case_dir/fakebin:$PATH" FM_BACKLOG_ROW_TIMEOUT_SECS=1 \
+    close_with "$case_dir" "$id" --note 'local main' 2>&1) && \
+    fail "a close whose row read hit its bound was not refused"
+  assert_contains "$out" "could not verify the row" \
+    "the unverifiable-row refusal did not name its own reason"
+  assert_not_contains "$out" "no worker record" \
+    "a failed row read was reported as an unworked row"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "a refused unverifiable close still changed the row"
+
+  rm -f "$case_dir/fakebin/tasks-axi"
+  close_with "$case_dir" "$id" --note 'local main' \
+    || fail "the same close was refused once the row could be read"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "a close after the read recovered did not land"
+  pass "a close refuses an unreadable row with its own reason and closes once readable"
+}
+
+# `--report` records a scout's own deliverable, so a row that is not a scout is
+# refused it rather than closed under a completion fact nobody can check.
+test_a_report_close_is_for_scout_rows_only() {
+  local case_dir out
+  case_dir=$(make_home close-report-kind)
+  add_item "$case_dir" report-ship-c14 ship
+  start_item "$case_dir" report-ship-c14
+  add_item "$case_dir" report-scout-c15 scout
+  start_item "$case_dir" report-scout-c15
+
+  out=$(close_with "$case_dir" report-ship-c14 --report data/report-ship-c14/report.md 2>&1) && \
+    fail "a ship row was closed against a scout deliverable"
+  assert_contains "$out" "report completion is for scout rows" \
+    "the non-scout report refusal did not name its rule"
+  [ "$(row_state "$case_dir" report-ship-c14)" = in_flight ] \
+    || fail "a refused non-scout report close still changed the row"
+
+  close_with "$case_dir" report-scout-c15 --report data/report-scout-c15/report.md \
+    || fail "a scout row was refused its own report deliverable"
+  [ "$(row_state "$case_dir" report-scout-c15)" = "done" ] \
+    || fail "the scout report close did not land"
+  pass "a report close lands for a scout row and is refused for any other kind"
+}
+
+# --- dependency edges -------------------------------------------------------
+
+# The dispatch gate firstmate reads is `tasks-axi ready`, and a task-to-task
+# dependency is what keeps a dependent out of it. This pins the tasks-axi
+# contract firstmate relies on for that: `block` records the edge, the blocked
+# task leaves `ready` while its blocker stays, and `unblock` restores it.
+# Firstmate does not create these edges yet; the edge call sites are a separate
+# slice. Pinning the contract now is what makes that slice safe to add.
+# `tasks-axi block` is known to hang, suspected to be a `bd send-metrics` child
+# holding stdout open. Fixing that is out of scope here, but a hang must not
+# wedge the lane: bound every call and turn an expired bound into a clear
+# failure naming the suspected cause.
+BLOCK_EDGE_TIMEOUT=${FM_TEST_BLOCK_EDGE_TIMEOUT:-30}
+bounded_axi() {  # <case-dir> <verb> <arg>...
+  local case_dir=$1 verb rc=0
+  shift
+  verb=$1
+  fm_run_timed "$BLOCK_EDGE_TIMEOUT" tasks-axi "$@" --file "$(backlog_of "$case_dir")" \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 124 ] || fail "tasks-axi $verb did not finish within ${BLOCK_EDGE_TIMEOUT}s; suspected hang from a bd send-metrics child holding stdout open"
+  return "$rc"
+}
+
+block_edge_of() {  # <case-dir> <id>
+  tasks-axi show "$2" --file "$(backlog_of "$1")" 2>/dev/null |
+    sed -n 's/^  blocked_by: *//p' | head -1
+}
+
+ready_ids() {  # <case-dir>
+  tasks-axi ready --file "$(backlog_of "$1")" 2>/dev/null |
+    sed -n 's/^  \([A-Za-z0-9._-]*\),.*/\1/p'
+}
+
+test_a_blocked_task_leaves_the_ready_set() {
+  local case_dir before after cleared
+  case_dir="$TMP_ROOT/block-edge"
+  make_home block-edge >/dev/null
+  add_item "$case_dir" blocker-item
+  add_item "$case_dir" dependent-item
+
+  before=$(ready_ids "$case_dir")
+  assert_contains "$before" "blocker-item" "the blocker was not dispatchable before the edge"
+  assert_contains "$before" "dependent-item" "the dependent was not dispatchable before the edge"
+
+  bounded_axi "$case_dir" block dependent-item --by blocker-item \
+    || fail "tasks-axi block did not record the dependency edge"
+
+  [ "$(block_edge_of "$case_dir" dependent-item)" = blocker-item ] \
+    || fail "the recorded dependency edge does not name the blocker"$'\n'"blocked_by: $(block_edge_of "$case_dir" dependent-item)"
+
+  after=$(ready_ids "$case_dir")
+  assert_not_contains "$after" "dependent-item" "a blocked task was still offered as dispatchable"
+  assert_contains "$after" "blocker-item" "blocking a dependent also removed its blocker"
+
+  # Idempotent: repeating the edge is not an error and changes nothing.
+  bounded_axi "$case_dir" block dependent-item --by blocker-item \
+    || fail "repeating an existing dependency edge failed"
+  [ "$(ready_ids "$case_dir")" = "$after" ] \
+    || fail "repeating an existing dependency edge changed the ready set"
+
+  bounded_axi "$case_dir" unblock dependent-item --by blocker-item \
+    || fail "tasks-axi unblock did not clear the dependency edge"
+  cleared=$(ready_ids "$case_dir")
+  assert_contains "$cleared" "dependent-item" "clearing the dependency did not restore the dependent"
+  assert_contains "$cleared" "blocker-item" "clearing the dependency lost the blocker"
+  pass "a task-to-task dependency edge removes the dependent from the ready set until it clears"
+}
+
+test_a_dependency_edge_requires_an_existing_blocker() {
+  local case_dir rc=0
+  case_dir="$TMP_ROOT/block-missing"
+  make_home block-missing >/dev/null
+  add_item "$case_dir" lonely-item
+  bounded_axi "$case_dir" block lonely-item --by no-such-blocker || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dependency on a nonexistent blocker was accepted"
+  assert_contains "$(ready_ids "$case_dir")" "lonely-item" \
+    "a refused dependency still removed the task from the ready set"
+  pass "a dependency edge on a nonexistent blocker is refused and changes nothing"
+}
+
 test_recovery_rejects_a_marker_for_another_task_identity
 test_recovery_rejects_a_foreign_data_directory
 test_recovery_rejects_an_unterminated_unknown_field
@@ -3135,3 +3500,12 @@ test_environment_selected_adapter_is_not_forced_to_markdown
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
 test_a_secondmate_home_keeps_its_own_books
 test_a_persistent_secondmate_is_never_a_backlog_item
+test_a_blocked_task_leaves_the_ready_set
+test_a_dependency_edge_requires_an_existing_blocker
+test_a_close_accepts_every_done_class_reason
+test_a_close_refuses_a_reason_outside_the_done_class
+test_project_work_is_not_closed_without_a_worker_record
+test_the_captain_word_is_the_one_override_and_is_recorded
+test_an_answered_close_is_the_same_captain_authority
+test_a_close_refuses_when_the_row_cannot_be_verified
+test_a_report_close_is_for_scout_rows_only

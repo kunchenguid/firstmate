@@ -81,9 +81,11 @@ It requires a non-empty captain decision file of at most 8192 bytes.
 It then works in this order:
 
 1. It durably writes a resolution block carrying the decision digest and a `Resolution mode:`.
-2. It retains the leading hold-set stamp until the selected `tasks-axi done` or `tasks-axi unhold` transition succeeds.
+2. It retains the leading hold-set stamp until the close succeeds.
 3. It then restores the successful record's resolution-first body ordering.
    The previous body remains preserved below the block and archived through tasks-axi `--archive-body`.
+
+The close itself runs through the guarded backlog close owned by `bin/fm-backlog-transition-lib.sh`, which records the answer's first line as the close's `answered:` done-class reason - except when a pending retention carries a retained Gerrit change, where the row closes with that change's URL as its recorded note instead - or `tasks-axi unhold` under `answer --release`, so a captain-gated work item resumes instead of closing.
 
 If the close is interrupted, the still-held task therefore keeps its original age basis.
 A matching retry also completes any resolution-first normalization left unfinished after the close itself succeeded.

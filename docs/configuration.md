@@ -355,10 +355,13 @@ Do not register a Beads `types.custom` `captain` type for this: captain is a hol
 When the automatic transition gate applies, dispatch and completion each move the work item in the same run that creates or removes its task record.
 The ordinary successful path therefore keeps the backlog and live task set in sync ([`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh)).
 Under that gate, dispatch accepts only an unheld, unblocked Queued or In flight item in this home; a missing, Done, held, or dependency-blocked item is refused before any endpoint or local copy is created.
+A ship or scout dispatch is also refused there when the item's kind differs from the dispatch kind, and completion re-checks that agreement before teardown destroys anything, refusing with the task record and worktree intact on a mismatch or an unreadable row; repair a mismatch with `bin/fm-tasks-axi.sh update <id> --kind <kind>` ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh), [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)).
 
 [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) refuses `add --start` and its `create --start` alias.
 Either would place a row In flight without a task record, status file, or inbox, counting it as live work that nobody is doing.
 The wrapper still passes through the documented direct transition `tasks-axi start <id>`.
+The same wrapper routes `done` (and its `close` alias) through the guarded close, so a close there records exactly one done-class reason - `--pr <url>`, `--note "local main"`, `--report <path>` (scout rows only), `--note "superseded by <id>"`, `--note "cancelled: <word>"`, or `--note "answered: <word>"` - and closes a repo-carrying project row only while a worker record still proves a worker existed for it, or under the captain's own word.
+A manual-backend home, or a markdown home keeping no backlog file, passes `done` through unchanged, and a direct `tasks-axi done` outside the wrapper stays out of reach by design.
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
 
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
