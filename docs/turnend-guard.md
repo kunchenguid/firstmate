@@ -210,7 +210,9 @@ With `state/.afk` absent the daemon lock proves nothing and the strict watcher p
 Every Herdr CLI call reachable from a watcher cycle, including recorded-window capture, agent-state checks, and inbox ringing, is bounded by `HERDR_CLI_TIMEOUT` (default 30 seconds, configurable as `FM_HERDR_CLI_TIMEOUT`).
 A timed-out Herdr call is treated as an unknown result for that item, so the existing unreadable or unknown handling refuses recovery and teardown.
 The detached long-lived `herdr server` launch is the exception; it is not a cycle step and remains unbounded while its caller waits only on bounded status reads.
-A healthy watcher's beacon therefore tracks the longest individual bounded step rather than the aggregate cost of a recorded-window sweep.
+The beacon is touched once per fleet item, not once per Herdr call, and one recorded-window item can run several bounded calls in sequence (target readiness, pane capture, and when an inbox steer is due, pane, agent, process, status, capture, and send-keys reads).
+Between touches a healthy watcher's beacon can therefore age by the sum of the bounded calls inside one item, up to that call count times `HERDR_CLI_TIMEOUT`, rather than by the aggregate cost of a whole recorded-window sweep.
+The per-item touch stays because a sweep over several windows, each making several bounded calls, can exceed the grace even though every call is bounded.
 
 A fixed 300-second grace default stops correctly bounding staleness once a home's `FM_POLL` reaches or exceeds it.
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.
