@@ -271,6 +271,222 @@ SH
   printf '%s\n' "$fb"
 }
 
+# make_herdr_groupfake: a STATEFUL `herdr` stub for the native worktree-group
+# path, modeling the verified Herdr 0.9.3 facts docs/herdr-backend.md "Worktree
+# groups" rests on: `status --json` reports the versions FM_FAKE_HERDR_VERSION
+# names for client and server; `api schema --json` lists worktree.list and
+# worktree.open unless FM_FAKE_HERDR_NO_WORKTREE_SCHEMA=1; `workspace create`
+# records its --cwd and seeds one default tab; `worktree list --workspace W`
+# lists the primary checkout (FM_FAKE_HERDR_REPO_ROOT) and every linked checkout
+# in FM_FAKE_HERDR_WORKTREES, each with the open_workspace_id Herdr's own
+# heuristic would report - explicit membership first, else a workspace whose
+# cwd is the checkout (FM_FAKE_HERDR_OPEN_OVERRIDE="<path>=<ws>" injects the
+# parent-sitting-in-the-checkout shape of upstream issue #4293); `worktree
+# open --workspace P --path X` returns already_open for an open checkout and
+# otherwise creates a child with linked membership, marking P's own membership;
+# `workspace get`, `workspace rename`, `tab list`, `tab create`, `pane list`,
+# `pane get`, `pane close`, `tab close`, and `agent get` reflect live state. The
+# first workspace is focused with its first tab active, matching a lab session.
+make_herdr_groupfake() {  # <dir> -> echoes fakebin dir; seeds an empty state file
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{}}\n' > "$dir/state.json"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_HERDR_LOG:?}"
+STATE="${FM_FAKE_HERDR_STATE:?}"
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+
+jq_state() { jq "$@" "$STATE"; }
+save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+REPO_ROOT=${FM_FAKE_HERDR_REPO_ROOT:-/repo}
+REPO_KEY="$REPO_ROOT/.git"
+REPO_NAME=${REPO_ROOT##*/}
+VERSION=${FM_FAKE_HERDR_VERSION:-0.9.3}
+
+cmd=${1:-}; sub=${2:-}
+ws=""; label=""; cwd=""; wpath=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --workspace) ws=${args[$((i+1))]:-} ;;
+    --label) label=${args[$((i+1))]:-} ;;
+    --cwd) cwd=${args[$((i+1))]:-} ;;
+    --path) wpath=${args[$((i+1))]:-} ;;
+  esac
+done
+
+# Every listing decorates the live state with focus: the first workspace is
+# focused, its first tab is active.
+open_ws_for() {  # <path> -> workspace id or empty
+  local path=$1 override
+  override=${FM_FAKE_HERDR_OPEN_OVERRIDE:-}
+  if [ -n "$override" ] && [ "${override%%=*}" = "$path" ]; then
+    printf '%s' "${override#*=}"
+    return 0
+  fi
+  jq_state -r --arg p "$path" '
+    ([.workspaces[] | select(.worktree.checkout_path == $p)] | .[0].workspace_id)
+    // ([.workspaces[] | select(.worktree == null and .cwd == $p)] | .[0].workspace_id)
+    // empty'
+}
+emit_workspace() {  # <wsid>
+  jq_state -c --arg w "$1" '
+    (.workspaces[0].workspace_id // "") as $focused
+    | .tabs as $tabs
+    | .workspaces[] | select(.workspace_id == $w)
+    | {workspace_id, label, focused: (.workspace_id == $focused),
+       active_tab_id: ([$tabs[] | select(.workspace_id == $w)] | .[0].tab_id // ""),
+       tab_count: ([$tabs[] | select(.workspace_id == $w)] | length)}
+      + (if .worktree then {worktree} else {} end)'
+}
+
+case "$cmd $sub" in
+  "status --json")
+    running=${FM_FAKE_HERDR_SERVER_RUNNING:-true}
+    printf '{"client":{"version":"%s","protocol":22},"server":{"running":%s,"version":"%s","protocol":22}}\n' "$VERSION" "$running" "$VERSION"
+    ;;
+  "api schema")
+    if [ "${FM_FAKE_HERDR_NO_WORKTREE_SCHEMA:-0}" = 1 ]; then
+      printf '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.create"}}}]}}}\n'
+    else
+      printf '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.create"}}},{"properties":{"method":{"const":"worktree.list"}}},{"properties":{"method":{"const":"worktree.open"}}}]}}}\n'
+    fi
+    ;;
+  "terminal title")
+    printf '{"result":{"reason":"no_foreground_client"}}\n'
+    ;;
+  "workspace list")
+    jq_state -c '
+      (.workspaces[0].workspace_id // "") as $focused
+      | .tabs as $tabs
+      | {result: {workspaces: [.workspaces[] | .workspace_id as $w
+          | {workspace_id, label, focused: (.workspace_id == $focused),
+             active_tab_id: ([$tabs[] | select(.workspace_id == $w)] | .[0].tab_id // ""),
+             tab_count: ([$tabs[] | select(.workspace_id == $w)] | length)}
+            + (if .worktree then {worktree} else {} end)]}}'
+    ;;
+  "workspace get")
+    wsid=${3:-}
+    entry=$(emit_workspace "$wsid")
+    if [ -n "$entry" ]; then
+      printf '{"result":{"type":"workspace_info","workspace":%s}}\n' "$entry"
+    else
+      printf '{"error":{"code":"workspace_not_found","message":"workspace %s not found"}}\n' "$wsid"
+    fi
+    ;;
+  "workspace rename")
+    jq_state --arg w "${3:-}" --arg l "${4:-}" '.workspaces |= map(if .workspace_id == $w then .label = $l else . end)' | save
+    printf '{"result":{"type":"ok"}}\n'
+    ;;
+  "workspace create")
+    n=$(jq_state -r '.next'); wsid="w$n"; dn=$((n + 1))
+    jq_state --arg wsid "$wsid" --arg wlabel "$label" --arg cwd "$cwd" \
+      --arg tabid "$wsid:t$dn" --arg paneid "$wsid:p$dn" \
+      '.workspaces += [{workspace_id:$wsid, label:$wlabel, cwd:$cwd}]
+       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid}]
+       | .next = (.next + 2)' | save
+    printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"},"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' \
+      "$wsid" "$label" "$wsid:t$dn" "$wsid:p$dn"
+    ;;
+  "worktree list")
+    entries="{\"path\":\"$REPO_ROOT\",\"is_linked_worktree\":false,\"is_bare\":false,\"is_prunable\":false,\"label\":\"$REPO_NAME\"}"
+    open=$(open_ws_for "$REPO_ROOT")
+    [ -z "$open" ] || entries=$(printf '%s' "$entries" | jq -c --arg o "$open" '. + {open_workspace_id: $o}')
+    all="[$entries"
+    while IFS= read -r wt; do
+      [ -n "$wt" ] || continue
+      e="{\"path\":\"$wt\",\"is_linked_worktree\":true,\"is_bare\":false,\"is_prunable\":false,\"label\":\"$REPO_NAME\"}"
+      open=$(open_ws_for "$wt")
+      [ -z "$open" ] || e=$(printf '%s' "$e" | jq -c --arg o "$open" '. + {open_workspace_id: $o}')
+      all="$all,$e"
+    done <<EOF
+${FM_FAKE_HERDR_WORKTREES:-}
+EOF
+    all="$all]"
+    printf '{"result":{"type":"worktree_list","source":{"repo_key":"%s","repo_root":"%s","source_workspace_id":"%s"},"worktrees":%s}}\n' "$REPO_KEY" "$REPO_ROOT" "$ws" "$all"
+    ;;
+  "worktree open")
+    parent_cwd=$(jq_state -r --arg w "$ws" '.workspaces[] | select(.workspace_id == $w) | (.worktree.checkout_path // .cwd)')
+    jq_state --arg w "$ws" --arg key "$REPO_KEY" --arg root "$REPO_ROOT" --arg name "$REPO_NAME" --arg cp "$parent_cwd" \
+      '.workspaces |= map(if .workspace_id == $w then .worktree = {checkout_path:$cp, is_linked_worktree:false, repo_key:$key, repo_root:$root, repo_name:$name} else . end)' | save
+    open=$(open_ws_for "$wpath")
+    if [ -n "$open" ]; then
+      jq_state --arg w "$open" --arg key "$REPO_KEY" --arg root "$REPO_ROOT" --arg name "$REPO_NAME" --arg cp "$wpath" --arg l "$label" \
+        '.workspaces |= map(if .workspace_id == $w then .worktree = {checkout_path:$cp, is_linked_worktree:true, repo_key:$key, repo_root:$root, repo_name:$name} | (if $l != "" then .label = $l else . end) else . end)' | save
+      tab=$(jq_state -r --arg w "$open" '[.tabs[] | select(.workspace_id == $w)][0] | "\(.tab_id)\t\(.pane_id)"')
+      printf '{"result":{"type":"worktree_opened","already_open":true,"workspace":%s,"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' \
+        "$(emit_workspace "$open")" "${tab%%$'\t'*}" "${tab#*$'\t'}"
+      exit 0
+    fi
+    n=$(jq_state -r '.next'); wsid="w$n"; dn=$((n + 1))
+    jq_state --arg wsid "$wsid" --arg wlabel "${label:-$REPO_NAME}" --arg cwd "$wpath" --arg key "$REPO_KEY" --arg root "$REPO_ROOT" --arg name "$REPO_NAME" \
+      --arg tabid "$wsid:t$dn" --arg paneid "$wsid:p$dn" \
+      '.workspaces += [{workspace_id:$wsid, label:$wlabel, cwd:$cwd, worktree:{checkout_path:$cwd, is_linked_worktree:true, repo_key:$key, repo_root:$root, repo_name:$name}}]
+       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid}]
+       | .next = (.next + 2)' | save
+    printf '{"result":{"type":"worktree_opened","already_open":false,"workspace":%s,"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' \
+      "$(emit_workspace "$wsid")" "$wsid:t$dn" "$wsid:p$dn"
+    ;;
+  "tab list")
+    jq_state -c --arg w "$ws" '
+      (.workspaces[0].workspace_id // "") as $focused
+      | ([.tabs[] | select(.workspace_id == $focused)][0].tab_id // "") as $active
+      | {result: {tabs: [.tabs[] | select(.workspace_id == $w) | {tab_id, label, workspace_id, focused: (.tab_id == $active)}]}}'
+    ;;
+  "tab create")
+    n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
+    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
+      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid}]
+       | .next = (.next + 1)' | save
+    printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
+    ;;
+  "pane list")
+    jq_state -c --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id, workspace_id:.workspace_id}]}}'
+    ;;
+  "pane get")
+    pane=${3:-}
+    entry=$(jq_state -c --arg p "$pane" '[.tabs[] | select(.pane_id == $p)][0] // empty | {pane_id, tab_id, workspace_id}')
+    if [ -n "$entry" ]; then
+      printf '{"result":{"pane":%s}}\n' "$entry"
+    else
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$pane"
+    fi
+    ;;
+  "pane close")
+    pane=${3:-}
+    jq_state --arg p "$pane" '.tabs |= [.[]|select(.pane_id != $p)]' | save
+    # Closing a workspace's last pane removes the workspace itself.
+    jq_state '(.tabs | map(.workspace_id) | unique) as $live | .workspaces |= [.[] | select(.workspace_id as $w | $live | index($w))]' | save
+    printf '{"result":{"type":"ok"}}\n'
+    ;;
+  "tab close")
+    tab=${3:-}
+    jq_state --arg t "$tab" '.tabs |= [.[]|select(.tab_id != $t)]' | save
+    jq_state '(.tabs | map(.workspace_id) | unique) as $live | .workspaces |= [.[] | select(.workspace_id as $w | $live | index($w))]' | save
+    ;;
+  "agent get")
+    pane=${3:-}
+    status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
+    if [ -n "$status" ]; then
+      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status"
+    else
+      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane"
+    fi
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
 # fake_herdr_set_agent_status: preset <pane_id>'s agent_status in the
 # stateful fake's state file, mirroring an agent registering itself
 # out-of-band (never through a CLI call the adapter itself would make).
@@ -5880,6 +6096,244 @@ test_wait_transition_clean_timeout_returns_1() {
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
+# --- native worktree groups (docs/herdr-backend.md "Worktree groups") -------
+
+# groupfake_env <name>: a scratch world for the group-aware fake - a project
+# directory, two linked checkouts, and a home's state/config - printed as its
+# physical path because the adapter canonicalizes every checkout it compares.
+groupfake_env() {  # <name>
+  local dir="$TMP_ROOT/$1"
+  mkdir -p "$dir/alpha" "$dir/wt1" "$dir/wt2" "$dir/state" "$dir/config" "$dir/home"
+  : > "$dir/log"
+  (cd "$dir" && pwd -P)
+}
+
+# groupfake_run <dir> <body> [env assignments...]: run <body> in a fresh shell
+# that sources the adapter against <dir>'s fake, with the fake's repo and
+# checkouts set from the scratch world.
+groupfake_run() {  # <dir> <body> [VAR=value...]
+  local dir=$1 body=$2
+  shift 2
+  env "$@" PATH="$dir/fakebin:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    FM_FAKE_HERDR_REPO_ROOT="$dir/alpha" FM_FAKE_HERDR_WORKTREES="$dir/wt1"$'\n'"$dir/wt2" \
+    FM_HOME="$dir/home" HERDR_SESSION=fmtest \
+    bash -c ". \"\$0/bin/backends/herdr.sh\"; $body" "$ROOT"
+}
+
+# Bodies are bash -c sources, so their single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+test_worktree_group_floor_classifies_releases() {
+  local dir case version want out
+  dir=$(groupfake_env wtg-floor)
+  make_herdr_groupfake "$dir" >/dev/null
+  for case in 0.9.0:1 0.9.1:1 0.9.2:0 0.9.3:0 0.9.3-preview:0 0.10.0:0 unknown:2; do
+    version=${case%%:*}; want=${case##*:}
+    out=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_group_release_supported fmtest || s=$?; printf "%s" "$s"' \
+      FM_FAKE_HERDR_VERSION="$version")
+    [ "$out" = "$want" ] || fail "release $version should classify $want against the worktree-group floor, got $out"
+  done
+  out=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_group_release_supported fmtest || s=$?; printf "%s" "$s"' \
+    FM_FAKE_HERDR_VERSION=0.9.3 FM_FAKE_HERDR_SERVER_RUNNING=false)
+  [ "$out" = 2 ] || fail "a session with no running server should be indeterminate for the worktree-group floor, got $out"
+  out=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_group_release_supported fmtest || s=$?; printf "%s" "$s"' \
+    FM_FAKE_HERDR_VERSION=0.9.3 FM_FAKE_HERDR_NO_WORKTREE_SCHEMA=1)
+  [ "$out" = 2 ] || fail "a server schema without worktree.open should be indeterminate for the worktree-group floor, got $out"
+  assert_contains "$(cat "$dir/log")" $'\x1f''api'$'\x1f''schema' "the worktree-group floor never read the server schema"
+  pass "fm_backend_herdr_worktree_group_release_supported: 0.9.2 is the floor, both client and server count, and a missing server or worktree surface is indeterminate"
+}
+
+# Bodies are bash -c sources, so their single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+test_worktree_group_enabled_gate_and_one_warning() {
+  local dir status err
+  dir=$(groupfake_env wtg-gate)
+  make_herdr_groupfake "$dir" >/dev/null
+  printf 'off\n' > "$dir/config/herdr-presentation-spaces"
+  status=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_group_enabled "'"$dir/config"'" "'"$dir/state"'" fmtest || s=$?; printf "%s" "$s"' FM_FAKE_HERDR_VERSION=0.9.3)
+  [ "$status" = 1 ] || fail "config off must opt the home out of worktree groups too, got $status"
+  [ ! -s "$dir/log" ] || fail "config off should decide without consulting herdr: $(cat "$dir/log")"
+  printf 'on\n' > "$dir/config/herdr-presentation-spaces"
+  status=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_group_enabled "'"$dir/config"'" "'"$dir/state"'" fmtest || s=$?; printf "%s" "$s"' FM_FAKE_HERDR_VERSION=0.9.3)
+  [ "$status" = 0 ] || fail "a value other than off must leave grouping on, got $status"
+  rm -f "$dir/config/herdr-presentation-spaces"
+  status=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_group_enabled "'"$dir/config"'" "'"$dir/state"'" fmtest || s=$?; printf "%s" "$s"' FM_FAKE_HERDR_VERSION=0.9.3 FM_TEST_SEAM= FM_TEST_HERDR_WORKTREE_GROUPS=off)
+  [ "$status" = 0 ] || fail "the worktree-group test seam must stay inert without FM_TEST_SEAM, got $status"
+  status=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_group_enabled "'"$dir/config"'" "'"$dir/state"'" fmtest || s=$?; printf "%s" "$s"' FM_FAKE_HERDR_VERSION=0.9.3)
+  [ "$status" = 0 ] || fail "an unconfigured home on 0.9.3 should group, got $status"
+  err=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_group_enabled "'"$dir/config"'" "'"$dir/state"'" fmtest || s=$?; printf "%s" "$s" >/dev/null' FM_FAKE_HERDR_VERSION=0.9.1 2>&1)
+  assert_contains "$err" "older than the 0.9.2 floor for native worktree groups" "a 0.9.1 release did not warn about the worktree-group floor"
+  assert_contains "$err" "#4293" "the floor warning did not name the upstream issue the floor exists for"
+  ls "$dir/state"/.herdr-worktree-group-floor-* >/dev/null 2>&1 || fail "the floor warning did not record its one-per-release marker"
+  err=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_group_enabled "'"$dir/config"'" "'"$dir/state"'" fmtest || s=$?; printf "%s" "$s" >/dev/null' FM_FAKE_HERDR_VERSION=0.9.1 2>&1)
+  [ -z "$err" ] || fail "the same release warned twice: $err"
+  pass "fm_backend_herdr_worktree_group_enabled: off opts out before any herdr call, on or absent groups on 0.9.3, 0.9.1 falls back with one named warning per release"
+}
+
+# Bodies are bash -c sources, so their single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+test_worktree_parent_label_never_spells_a_home_label() {
+  local dir out
+  dir=$(groupfake_env wtg-label)
+  out=$(groupfake_run "$dir" 'fm_backend_herdr_worktree_parent_label /x/alpha')
+  [ "$out" = alpha ] || fail "a primary home should label its parent after the project, got '$out'"
+  out=$(groupfake_run "$dir" 'fm_backend_herdr_worktree_parent_label /x/firstmate/')
+  [ "$out" = 'firstmate repo' ] || fail "a project named firstmate must not spell the home label, got '$out'"
+  out=$(groupfake_run "$dir" 'fm_backend_herdr_worktree_parent_label /x/2ndmate-z')
+  [ "$out" = '2ndmate-z repo' ] || fail "a project named like a secondmate home must not spell that label, got '$out'"
+  printf 'sm9\n' > "$dir/home/.fm-secondmate-home"
+  out=$(groupfake_run "$dir" 'fm_backend_herdr_worktree_parent_label /x/alpha')
+  [ "$out" = '2ndmate-sm9/alpha' ] || fail "a secondmate home should prefix its parent label with its home, got '$out'"
+  pass "fm_backend_herdr_worktree_parent_label: project basename, home-prefixed in a secondmate home, never equal to a home workspace label"
+}
+
+# Bodies are bash -c sources, so their single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+test_worktree_child_open_groups_adopts_and_reuses_parent() {
+  local dir out parent child1 child2 state opens
+  dir=$(groupfake_env wtg-place)
+  make_herdr_groupfake "$dir" >/dev/null
+  state="$dir/state.json"
+  out=$(groupfake_run "$dir" '
+    fm_backend_herdr_worktree_parent_ensure fmtest "'"$dir/alpha"'" alpha || exit 1
+    printf "%s %s\n" "$FM_BACKEND_HERDR_PARENT_WS_ID" "$FM_BACKEND_HERDR_PARENT_CREATED"
+    fm_backend_herdr_worktree_child_open fmtest "$FM_BACKEND_HERDR_PARENT_WS_ID" "'"$dir/wt1"'" t1 fm-t1 || exit 1
+    printf "%s %s %s %s\n" "$FM_BACKEND_HERDR_GROUP_WORKSPACE_ID" "$FM_BACKEND_HERDR_GROUP_CREATED" "$FM_BACKEND_HERDR_GROUP_TAB_ID" "$FM_BACKEND_HERDR_GROUP_PANE_ID"
+  ') || fail "parent ensure plus child open failed against the group fake: $out"
+  parent=${out%% *}
+  [ "${out#* }" != "$out" ] && [ "$(printf '%s\n' "$out" | sed -n '1p' | cut -d' ' -f2)" = 1 ] || fail "the first parent ensure should have created the parent: $out"
+  child1=$(printf '%s\n' "$out" | sed -n '2p' | cut -d' ' -f1)
+  [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d' ' -f2)" = 1 ] || fail "the first child open should have created the child: $out"
+  jq -e --arg p "$parent" --arg repo "$dir/alpha" '.workspaces[] | select(.workspace_id == $p) | .worktree.is_linked_worktree == false and .worktree.checkout_path == $repo' "$state" >/dev/null \
+    || fail "the parent did not gain primary-checkout membership: $(jq -c .workspaces "$state")"
+  jq -e --arg c "$child1" --arg wt "$dir/wt1" '.workspaces[] | select(.workspace_id == $c) | .worktree.is_linked_worktree == true and .worktree.checkout_path == $wt and .label == "t1"' "$state" >/dev/null \
+    || fail "the child is not a labeled linked-worktree workspace for wt1: $(jq -c .workspaces "$state")"
+  jq -e --arg c "$child1" '[.tabs[] | select(.workspace_id == $c)] | length == 1 and .[0].label == "fm-t1"' "$state" >/dev/null \
+    || fail "the child should hold exactly its fm-t1 tab with the seeded tab pruned: $(jq -c .tabs "$state")"
+  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''rename'$'\x1f'"$child1"$'\x1f''t1' "the fresh child was not labeled after the task"
+  out=$(groupfake_run "$dir" '
+    fm_backend_herdr_worktree_parent_ensure fmtest "'"$dir/alpha"'" alpha || exit 1
+    printf "%s %s\n" "$FM_BACKEND_HERDR_PARENT_WS_ID" "$FM_BACKEND_HERDR_PARENT_CREATED"
+    fm_backend_herdr_worktree_child_open fmtest "$FM_BACKEND_HERDR_PARENT_WS_ID" "'"$dir/wt2"'" t2 fm-t2 || exit 1
+    printf "%s %s\n" "$FM_BACKEND_HERDR_GROUP_WORKSPACE_ID" "$FM_BACKEND_HERDR_GROUP_CREATED"
+  ') || fail "second parent ensure plus child open failed: $out"
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "$parent 0" ] || fail "the second spawn should find the same parent without creating one: $out"
+  child2=$(printf '%s\n' "$out" | sed -n '2p' | cut -d' ' -f1)
+  [ "$child2" != "$child1" ] && [ "$child2" != "$parent" ] || fail "the second child is not a distinct workspace: $out"
+  [ "$(jq -r '.workspaces | length' "$state")" = 3 ] || fail "expected one parent and two children, got $(jq -c .workspaces "$state")"
+  # Adoption: the task pane dies while the child survives with another tab, so
+  # the next placement for the same slot adopts that child rather than opening
+  # a second workspace on the same checkout.
+  groupfake_run "$dir" 'fm_backend_herdr_cli fmtest tab create --workspace "'"$child1"'" --label keep --no-focus >/dev/null' >/dev/null
+  groupfake_run "$dir" 'fm_backend_herdr_cli fmtest pane close "$(jq -r --arg c "'"$child1"'" "[.tabs[] | select(.workspace_id == \$c and .label == \"fm-t1\")][0].pane_id" "'"$state"'")" >/dev/null' >/dev/null
+  opens=$(grep -c $'\x1f''worktree'$'\x1f''open' "$dir/log" || true)
+  out=$(groupfake_run "$dir" '
+    fm_backend_herdr_worktree_child_open fmtest "'"$parent"'" "'"$dir/wt1"'" t1 fm-t1 || exit 1
+    printf "%s %s\n" "$FM_BACKEND_HERDR_GROUP_WORKSPACE_ID" "$FM_BACKEND_HERDR_GROUP_CREATED"
+  ') || fail "adopting a surviving child failed: $out"
+  [ "$out" = "$child1 0" ] || fail "the surviving child workspace should have been adopted, got '$out'"
+  [ "$(grep -c $'\x1f''worktree'$'\x1f''open' "$dir/log" || true)" = "$opens" ] || fail "adoption must not open the checkout again"
+  jq -e --arg c "$child1" '[.tabs[] | select(.workspace_id == $c and .label == "fm-t1")] | length == 1' "$state" >/dev/null \
+    || fail "adoption did not create the task tab inside the surviving child: $(jq -c .tabs "$state")"
+  pass "fm_backend_herdr_worktree_child_open: opens each checkout as a labeled child under one reused parent, prunes the seeded tab, and adopts a surviving child instead of reopening"
+}
+
+# Bodies are bash -c sources, so their single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+test_worktree_child_open_refuses_hijack_shapes_without_mutating() {
+  local dir out status before after parent plain
+  dir=$(groupfake_env wtg-hijack)
+  make_herdr_groupfake "$dir" >/dev/null
+  out=$(groupfake_run "$dir" 'fm_backend_herdr_worktree_parent_ensure fmtest "'"$dir/alpha"'" alpha || exit 1; printf "%s" "$FM_BACKEND_HERDR_PARENT_WS_ID"') \
+    || fail "parent ensure failed: $out"
+  parent=$out
+  before=$(jq -c . "$dir/state.json")
+  # Upstream issue #4293's shape: the parent's own first tab sits inside the
+  # checkout, so Herdr reports the parent as the checkout's open workspace.
+  out=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_child_open fmtest "'"$parent"'" "'"$dir/wt1"'" t1 fm-t1 || s=$?; printf "%s" "$s"' \
+    FM_FAKE_HERDR_OPEN_OVERRIDE="$dir/wt1=$parent" 2>"$dir/hijack.err")
+  [ "$out" = 2 ] || fail "a parent reported open on the checkout should refuse with fallback allowed (2), got $out: $(cat "$dir/hijack.err")"
+  assert_contains "$(cat "$dir/hijack.err")" "project's own workspace $parent" "the hijack refusal did not name the parent"
+  after=$(jq -c . "$dir/state.json")
+  [ "$before" = "$after" ] || fail "the hijack refusal mutated Herdr state: $after"
+  ! grep -q $'\x1f''worktree'$'\x1f''open' "$dir/log" || fail "the hijack refusal still called worktree open"
+  # A plain workspace whose shell merely sits in the checkout is not a worktree
+  # workspace for it and is neither adopted nor relabeled.
+  plain=$(groupfake_run "$dir" 'fm_backend_herdr_cli fmtest workspace create --cwd "'"$dir/wt1"'" --label captain --no-focus | jq -r .result.workspace.workspace_id')
+  before=$(jq -c . "$dir/state.json")
+  out=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_child_open fmtest "'"$parent"'" "'"$dir/wt1"'" t1 fm-t1 || s=$?; printf "%s" "$s"' 2>"$dir/plain.err")
+  [ "$out" = 2 ] || fail "a membership-less workspace sitting in the checkout should refuse adoption (2), got $out: $(cat "$dir/plain.err")"
+  assert_contains "$(cat "$dir/plain.err")" "workspace $plain as already open" "the plain-workspace refusal did not name the workspace"
+  [ "$(jq -c . "$dir/state.json")" = "$before" ] || fail "the plain-workspace refusal mutated Herdr state"
+  ! grep -q $'\x1f''worktree'$'\x1f''open' "$dir/log" || fail "the plain-workspace refusal still called worktree open"
+  # A checkout Herdr does not list for this parent's repository is refused too.
+  out=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_child_open fmtest "'"$parent"'" "'"$dir/home"'" t1 fm-t1 || s=$?; printf "%s" "$s"' 2>/dev/null)
+  [ "$out" = 2 ] || fail "a path that is not a worktree of the repository should refuse (2), got $out"
+  pass "fm_backend_herdr_worktree_child_open: refuses a parent or plain workspace reported open on the checkout, and an unlisted checkout, before any mutation"
+}
+
+# Bodies are bash -c sources, so their single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+test_worktree_parent_find_refuses_ambiguity_and_ignores_plain_workspaces() {
+  local dir out
+  dir=$(groupfake_env wtg-parent)
+  make_herdr_groupfake "$dir" >/dev/null
+  # A plain workspace created in the project carries no membership and is never
+  # the parent, so the first ensure creates one beside it.
+  groupfake_run "$dir" 'fm_backend_herdr_cli fmtest workspace create --cwd "'"$dir/alpha"'" --label firstmate --no-focus >/dev/null' >/dev/null
+  out=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_parent_find fmtest "'"$dir/alpha"'" || s=$?; printf "%s" "$s"')
+  [ "$out" = 1 ] || fail "a membership-less workspace in the project must not be found as the parent, got '$out'"
+  out=$(groupfake_run "$dir" 'fm_backend_herdr_worktree_parent_ensure fmtest "'"$dir/alpha"'" alpha || exit 1; printf "%s %s" "$FM_BACKEND_HERDR_PARENT_WS_ID" "$FM_BACKEND_HERDR_PARENT_CREATED"')
+  [ "${out#* }" = 1 ] || fail "ensure should create a parent beside the plain workspace, got '$out'"
+  groupfake_run "$dir" 'fm_backend_herdr_worktree_child_open fmtest "'"${out%% *}"'" "'"$dir/wt1"'" t1 fm-t1' >/dev/null 2>&1 || fail "child open under the created parent failed"
+  # Two primaries recorded for one project is an ambiguity the adapter refuses
+  # to resolve by guessing.
+  groupfake_run "$dir" 'fm_backend_herdr_cli fmtest workspace create --cwd "'"$dir/alpha"'" --label dup --no-focus >/dev/null' >/dev/null
+  jq --arg repo "$dir/alpha" '.workspaces |= map(if .label == "dup" then .worktree = {checkout_path: $repo, is_linked_worktree: false, repo_key: ($repo + "/.git")} else . end)' "$dir/state.json" > "$dir/state.json.tmp" && mv "$dir/state.json.tmp" "$dir/state.json"
+  out=$(groupfake_run "$dir" 's=0; fm_backend_herdr_worktree_parent_ensure fmtest "'"$dir/alpha"'" alpha || s=$?; printf "%s" "$s"' 2>"$dir/dup.err")
+  [ "$out" = 2 ] || fail "two recorded primaries should refuse (2), got $out"
+  assert_contains "$(cat "$dir/dup.err")" "refusing to guess which one groups its tasks" "the ambiguity refusal did not explain itself"
+  pass "fm_backend_herdr_worktree_parent_find: only Herdr-recorded primaries count, and two of them refuse rather than guess"
+}
+
+# Bodies are bash -c sources, so their single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+test_worktree_group_cleanup_closes_child_and_only_an_unneeded_created_parent() {
+  local dir out parent child1 child2 pane1 pane2 parent_pane
+  dir=$(groupfake_env wtg-cleanup)
+  make_herdr_groupfake "$dir" >/dev/null
+  out=$(groupfake_run "$dir" '
+    fm_backend_herdr_worktree_parent_ensure fmtest "'"$dir/alpha"'" alpha || exit 1
+    fm_backend_herdr_worktree_child_open fmtest "$FM_BACKEND_HERDR_PARENT_WS_ID" "'"$dir/wt1"'" t1 fm-t1 || exit 1
+    printf "%s %s %s %s\n" "$FM_BACKEND_HERDR_PARENT_WS_ID" "$FM_BACKEND_HERDR_PARENT_SEEDED_PANE_ID" "$FM_BACKEND_HERDR_GROUP_WORKSPACE_ID" "$FM_BACKEND_HERDR_GROUP_PANE_ID"
+    fm_backend_herdr_worktree_child_open fmtest "$FM_BACKEND_HERDR_PARENT_WS_ID" "'"$dir/wt2"'" t2 fm-t2 || exit 1
+    printf "%s %s\n" "$FM_BACKEND_HERDR_GROUP_WORKSPACE_ID" "$FM_BACKEND_HERDR_GROUP_PANE_ID"
+  ') || fail "placing two children failed: $out"
+  read -r parent parent_pane child1 pane1 <<EOF
+$(printf '%s\n' "$out" | sed -n '1p')
+EOF
+  read -r child2 pane2 <<EOF
+$(printf '%s\n' "$out" | sed -n '2p')
+EOF
+  groupfake_run "$dir" 'fm_backend_herdr_worktree_group_cleanup_exact fmtest "'"$pane1"'" "" "'"$parent"'" "'"$parent_pane"'"' >/dev/null 2>&1
+  jq -e --arg c "$child1" '[.workspaces[] | select(.workspace_id == $c)] | length == 0' "$dir/state.json" >/dev/null \
+    || fail "cleanup did not remove the aborted child: $(jq -c .workspaces "$dir/state.json")"
+  jq -e --arg p "$parent" --arg c "$child2" '([.workspaces[] | select(.workspace_id == $p)] | length == 1) and ([.workspaces[] | select(.workspace_id == $c)] | length == 1)' "$dir/state.json" >/dev/null \
+    || fail "cleanup closed the parent while another child still needed it: $(jq -c .workspaces "$dir/state.json")"
+  groupfake_run "$dir" 'fm_backend_herdr_worktree_group_cleanup_exact fmtest "'"$pane2"'" "" "'"$parent"'" "'"$parent_pane"'"' >/dev/null 2>&1
+  [ "$(jq -r '.workspaces | length' "$dir/state.json")" = 0 ] \
+    || fail "cleanup of the last child should also close the parent this process created: $(jq -c .workspaces "$dir/state.json")"
+  ! grep -q $'\x1f''workspace'$'\x1f''close' "$dir/log" || fail "cleanup must never call workspace close"
+  pass "fm_backend_herdr_worktree_group_cleanup_exact: closes exact panes only, keeps a parent another child still uses, and never calls workspace close"
+}
+
+
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr
@@ -6082,6 +6536,7 @@ test_send_text_submit_clears_a_wrapped_suffix_one_row_per_press
 test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message
 test_send_text_submit_claude_refuses_to_type_into_a_nonempty_composer
 test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head
+
 test_send_text_submit_accepts_marked_payloads_whose_read_back_drops_u2063
 test_send_text_submit_refuses_marked_digest_missing_its_head
 test_composer_state_claude_slash_popup_pushes_composer_above_tail_window
@@ -6092,6 +6547,13 @@ test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder
 test_send_text_submit_three_paste_placeholders_submit_the_long_payload
 test_send_text_submit_non_claude_skips_the_payload_proof
+test_worktree_group_floor_classifies_releases
+test_worktree_group_enabled_gate_and_one_warning
+test_worktree_parent_label_never_spells_a_home_label
+test_worktree_child_open_groups_adopts_and_reuses_parent
+test_worktree_child_open_refuses_hijack_shapes_without_mutating
+test_worktree_parent_find_refuses_ambiguity_and_ignores_plain_workspaces
+test_worktree_group_cleanup_closes_child_and_only_an_unneeded_created_parent
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

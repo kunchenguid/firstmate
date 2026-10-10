@@ -272,6 +272,11 @@ export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 # inherited from the terminal it was launched in must not follow spawn into it
 # as a cross-session parent identity. Every projection below is anchored on the
 # parent this suite sets up, not on the developer's own workspace.
+# This suite is the projection's regression surface. On Herdr 0.9.2 and newer
+# the native worktree-group placement supersedes the projection for every clean
+# fresh spawn, so the worktree-group test seam keeps the projection path under
+# test here (docs/herdr-backend.md "Worktree groups").
+export FM_TEST_SEAM=1 FM_TEST_HERDR_WORKTREE_GROUPS=off
 herdr_forget_inherited_pane
 
 HERDR_LAB_SESSION=$(PATH="$HERDR_ORIGINAL_PATH" \

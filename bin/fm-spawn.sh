@@ -126,7 +126,18 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
-#   Herdr additionally uses a presentation-only layout by default when the
+#   On Herdr 0.9.2 and newer a clean fresh crewmate or scout is instead placed
+#   as a native linked-worktree child of its project's parent workspace
+#   (docs/herdr-backend.md "Worktree groups"): the task's Treehouse slot is
+#   leased durably first (`treehouse get --lease`), the checkout is opened
+#   under the parent with `worktree open`, and the task tab is created inside
+#   it; a refusal before any Herdr mutation returns the lease and takes the
+#   projection or flat path below, a failure after a create is a spawn failure
+#   with exact-id cleanup, and --relaunch's rebind re-opens the recorded
+#   worktree under the same parent. config/herdr-presentation-spaces "off" is
+#   the one opt-out and opts the home out of native grouping too; an absent
+#   file or any other value leaves grouping on.
+#   Below that floor Herdr uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
 #   opt in below that floor; an empty file remains the historical opt-in form.
@@ -1257,6 +1268,15 @@ HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+# Native worktree-group placement (docs/herdr-backend.md "Worktree groups")
+# shares the projection's abort-cleanup arming; HERDR_ABORT_SHAPE says which
+# exact-id cleanup the trap runs, and the parent fields name a parent workspace
+# THIS process created so an abort can close it again while it is still empty.
+HERDR_ABORT_SHAPE=projection
+HERDR_GROUP_ABORT_PARENT_WS=
+HERDR_GROUP_ABORT_PARENT_PANE=
+HERDR_GROUPED=0
+HERDR_GROUP_LEASED=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 SPAWN_CONTROL_LOCK=
@@ -1345,14 +1365,38 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
-      "$HERDR_PROJECTION_ABORT_SESSION" \
-      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+    if [ "$HERDR_ABORT_SHAPE" = group ]; then
+      fm_backend_herdr_worktree_group_cleanup_exact \
+        "$HERDR_PROJECTION_ABORT_SESSION" \
+        "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+        "$HERDR_PROJECTION_ABORT_SEEDED_PANE" \
+        "$HERDR_GROUP_ABORT_PARENT_WS" \
+        "$HERDR_GROUP_ABORT_PARENT_PANE" || true
+    else
+      fm_backend_herdr_projection_cleanup_exact \
+        "$HERDR_PROJECTION_ABORT_SESSION" \
+        "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+        "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+    fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  # A native placement leases its Treehouse slot durably before any endpoint
+  # exists, so an abort that never published a record (every record is published
+  # before the launch line is sent) returns that lease; otherwise the slot would
+  # stay reserved for a task no record describes. The return runs after the
+  # pane cleanup above, so no shell of this spawn's still sits in the slot.
+  if [ "$HERDR_GROUP_LEASED" = 1 ] && [ -n "${WT:-}" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    HERDR_GROUP_LEASED=0
+    if [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
+      (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1 ||
+        echo "warning: could not return task $ID's leased Treehouse slot $WT after the aborted spawn; run 'treehouse return --force $WT' from $PROJ_ABS" >&2
+    else
+      echo "warning: leaving task $ID's leased Treehouse slot $WT in place; a launch was already sent into it" >&2
+    fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -1524,6 +1568,70 @@ spawn_herdr_presentation_order_lock_release() {
   [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
   HERDR_PRESENTATION_ORDER_LOCK_HELD=0
   fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+}
+
+# spawn_herdr_group_place <session> <label-home> <checkout>: place this task as
+# a native linked-worktree child of its project's parent workspace in
+# <session>, with <checkout> the task's existing Treehouse slot. The caller
+# holds the session lock. On 0 the task's Herdr ids are set (HERDR_SES,
+# HERDR_WORKSPACE_ID, HERDR_TAB_ID, HERDR_PANE_ID), HERDR_GROUPED=1, and the
+# exact-id abort cleanup is armed in its group shape. On 2 nothing of this
+# spawn's exists in Herdr (a parent this call created is closed again) and the
+# caller may fall back. On 1 the abort cleanup is armed for whatever exact ids
+# the adapter returned and the caller must fail the spawn. Every refusal and
+# failure reason is already on stderr from the adapter.
+spawn_herdr_group_place() {  # <session> <label-home> <checkout>
+  local session=$1 label_home=$2 checkout=$3 parent_label child_label status
+  parent_label=$(FM_HOME="$label_home" fm_backend_herdr_worktree_parent_label "$PROJ_ABS")
+  child_label=$(fm_backend_herdr_projection_concise_task_label "$ID")
+  HERDR_GROUP_ABORT_PARENT_WS=
+  HERDR_GROUP_ABORT_PARENT_PANE=
+  if ! FM_HOME="$label_home" fm_backend_herdr_worktree_parent_ensure "$session" "$PROJ_ABS" "$parent_label"; then
+    return 2
+  fi
+  if [ "${FM_BACKEND_HERDR_PARENT_CREATED:-0}" = 1 ]; then
+    HERDR_GROUP_ABORT_PARENT_WS=$FM_BACKEND_HERDR_PARENT_WS_ID
+    HERDR_GROUP_ABORT_PARENT_PANE=$FM_BACKEND_HERDR_PARENT_SEEDED_PANE_ID
+  fi
+  if FM_HOME="$label_home" fm_backend_herdr_worktree_child_open \
+    "$session" "$FM_BACKEND_HERDR_PARENT_WS_ID" "$checkout" "$child_label" "$W"; then
+    status=0
+  else
+    status=$?
+  fi
+  case "$status" in
+  0)
+    HERDR_GROUPED=1
+    HERDR_SES=$session
+    HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_GROUP_WORKSPACE_ID
+    HERDR_SEEDED_DEFAULT_TAB_ID=""
+    HERDR_TAB_ID=$FM_BACKEND_HERDR_GROUP_TAB_ID
+    HERDR_PANE_ID=$FM_BACKEND_HERDR_GROUP_PANE_ID
+    HERDR_ABORT_SHAPE=group
+    HERDR_PROJECTION_ABORT_CLEANUP=1
+    HERDR_PROJECTION_ABORT_SESSION=$session
+    HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+    HERDR_PROJECTION_ABORT_SEEDED_PANE=""
+    return 0
+    ;;
+  2)
+    if [ -n "$HERDR_GROUP_ABORT_PARENT_PANE" ]; then
+      fm_backend_herdr_worktree_group_cleanup_exact "$session" "" "" \
+        "$HERDR_GROUP_ABORT_PARENT_WS" "$HERDR_GROUP_ABORT_PARENT_PANE" || true
+    fi
+    HERDR_GROUP_ABORT_PARENT_WS=
+    HERDR_GROUP_ABORT_PARENT_PANE=
+    return 2
+    ;;
+  esac
+  if [ "${FM_BACKEND_HERDR_GROUP_CLEANUP_SAFE:-0}" = 1 ] || [ -n "$HERDR_GROUP_ABORT_PARENT_PANE" ]; then
+    HERDR_ABORT_SHAPE=group
+    HERDR_PROJECTION_ABORT_CLEANUP=1
+    HERDR_PROJECTION_ABORT_SESSION=$session
+    HERDR_PROJECTION_ABORT_TASK_PANE=${FM_BACKEND_HERDR_GROUP_PANE_ID:-}
+    HERDR_PROJECTION_ABORT_SEEDED_PANE=${FM_BACKEND_HERDR_GROUP_SEEDED_PANE_ID:-}
+  fi
+  return 1
 }
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
@@ -3705,17 +3813,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # (fm_control_endpoint_absence_verdict owns that argument). tmux and every
     # secondmate were already refused, so there is no dispatch left to make.
     #
-    # This deliberately uses the FLAT container shape rather than Herdr's
-    # presentation projection: projection is a presentation-only layout that is
-    # never endpoint or ownership authority, and flat is already the documented
-    # fallback for every recovery it cannot bind exactly
-    # (docs/herdr-backend.md "Presentation spaces").
+    # On a release that supports native worktree groups the rebind first
+    # places the endpoint in its project's group (docs/herdr-backend.md
+    # "Worktree groups") and arms the same exact-id abort cleanup a fresh
+    # grouped spawn does. Every refusal falls back to the FLAT container shape
+    # rather than Herdr's presentation projection: projection is a
+    # presentation-only layout that is never endpoint or ownership authority,
+    # and flat is already the documented fallback for every recovery it cannot
+    # bind exactly (docs/herdr-backend.md "Presentation spaces").
     #
-    # KNOWN LIMITATION (bead fm-herdr-rebind-leak-20260913): the tab minted
-    # below is registered with no abort cleanup, so a later refusal leaves that
-    # pane behind and a retry mints another. Documented in
-    # docs/agent-control.md rather than fixed here, because the remedy is
-    # machinery the ordinary flat spawn path does not have either.
+    # KNOWN LIMITATION of that flat fallback (bead
+    # fm-herdr-rebind-leak-20260913): the flat tab is registered with no abort
+    # cleanup, so a later refusal leaves that pane behind and a retry mints
+    # another. Documented in docs/agent-control.md rather than fixed here,
+    # because the remedy is machinery the ordinary flat spawn path does not
+    # have either.
     #
     # Re-create the tab under the RECORDED herdr session. Without the explicit
     # session the container would resolve from the AMBIENT one
@@ -3724,38 +3836,69 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # onto another herdr server - an identity change, published as a
     # self-consistent but wrong record.
     HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
-    HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
-      fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
-      # container_ensure returns 1 for several unrelated reasons - a failed
-      # version check, a server that will not start, an ambiguous workspace
-      # label, a cross-session launcher identity, a failed workspace create -
-      # and each already printed its own accurate message. Add only what this
-      # layer actually knows, and name the session mismatch solely when there
-      # IS one, rather than asserting a cause this condition cannot establish.
-      #
-      # A seat with NO herdr pane never reaches the cross-session guard at all:
-      # fm_backend_herdr_launcher_identity returns 2 for it and the placement
-      # falls back to the recorded session's labeled container, which is what
-      # makes a plain ssh or cron reclaim work. Its ambient session still reads
-      # `default` (fm_backend_herdr_session's fallback), so the inequality alone
-      # would fire for EVERY named-session task reclaimed from a plain shell and
-      # send the operator chasing a session mismatch that was never the cause.
-      HERDR_AMBIENT_SES=$(fm_backend_herdr_session)
-      if [ -n "$RELAUNCH_LAUNCHER_PANE_ID" ] && [ "$HERDR_AMBIENT_SES" != "$HERDR_REBIND_SES" ]; then
-        echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; this seat is running in herdr session '$HERDR_AMBIENT_SES', and a reclaim never moves a task to another session" >&2
+    # A reclaimed endpoint lands back in its project's worktree group on a
+    # release that supports native grouping (docs/herdr-backend.md "Worktree
+    # groups"): the recorded worktree is re-opened, or its surviving child
+    # workspace adopted, under the project's parent in the RECORDED session.
+    # A placement keeps the session lock through the launch line, exactly as
+    # the projection does. Every refusal falls back to the flat container below.
+    HERDR_GROUPED=0
+    fm_backend_herdr_version_check || exit 1
+    if ! fm_backend_herdr_server_ensure "$HERDR_REBIND_SES"; then
+      echo "warning: herdr worktree group could not ensure the recorded session's server; re-creating the endpoint in the flat container" >&2
+    elif fm_backend_herdr_worktree_group_enabled "$CONFIG" "$STATE" "$HERDR_REBIND_SES"; then
+      if spawn_herdr_presentation_order_lock_acquire "$HERDR_REBIND_SES"; then
+        if spawn_herdr_group_place "$HERDR_REBIND_SES" "$FM_HOME" "$WT"; then
+          HERDR_GROUP_PLACE_STATUS=0
+        else
+          HERDR_GROUP_PLACE_STATUS=$?
+        fi
+        case "$HERDR_GROUP_PLACE_STATUS" in
+        0) ;;
+        2)
+          spawn_herdr_presentation_order_lock_release
+          echo "warning: herdr worktree group placement was refused for the reclaim of $ID; re-creating the endpoint in the flat container" >&2
+          ;;
+        *) exit 1 ;;
+        esac
       else
-        echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; see the refusal above for what failed" >&2
+        echo "warning: herdr session lock unavailable; re-creating $ID's endpoint in the flat container" >&2
       fi
-      exit 1
-    }
-    CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
-    HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
-    HERDR_SES=${CONTAINER%%:*}
-    HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    fi
+    if [ "$HERDR_GROUPED" -ne 1 ]; then
+      HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
+        fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
+        # container_ensure returns 1 for several unrelated reasons - a failed
+        # version check, a server that will not start, an ambiguous workspace
+        # label, a cross-session launcher identity, a failed workspace create -
+        # and each already printed its own accurate message. Add only what this
+        # layer actually knows, and name the session mismatch solely when there
+        # IS one, rather than asserting a cause this condition cannot establish.
+        #
+        # A seat with NO herdr pane never reaches the cross-session guard at all:
+        # fm_backend_herdr_launcher_identity returns 2 for it and the placement
+        # falls back to the recorded session's labeled container, which is what
+        # makes a plain ssh or cron reclaim work. Its ambient session still reads
+        # `default` (fm_backend_herdr_session's fallback), so the inequality alone
+        # would fire for EVERY named-session task reclaimed from a plain shell and
+        # send the operator chasing a session mismatch that was never the cause.
+        HERDR_AMBIENT_SES=$(fm_backend_herdr_session)
+        if [ -n "$RELAUNCH_LAUNCHER_PANE_ID" ] && [ "$HERDR_AMBIENT_SES" != "$HERDR_REBIND_SES" ]; then
+          echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; this seat is running in herdr session '$HERDR_AMBIENT_SES', and a reclaim never moves a task to another session" >&2
+        else
+          echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; see the refusal above for what failed" >&2
+        fi
+        exit 1
+      }
+      CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+      HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+      HERDR_SES=${CONTAINER%%:*}
+      HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+    fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
@@ -3805,7 +3948,75 @@ else
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
-    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    # Native worktree groups (docs/herdr-backend.md "Worktree groups"): on
+    # Herdr 0.9.2 and newer a clean fresh crewmate or scout becomes a linked
+    # worktree child of its project's parent workspace instead of a projection.
+    # `worktree open` needs the checkout to exist, so this path leases the
+    # task's Treehouse slot durably FIRST (`treehouse get --lease`, the same
+    # acquisition secondmate homes use) and creates the task tab inside the
+    # child with that slot as its cwd; the in-pane `treehouse get` further down
+    # is skipped for it. A refusal before any Herdr mutation returns the lease
+    # and falls through to the projection or flat decision below; a failure
+    # after a create is a spawn failure with same-process exact cleanup. A
+    # placement keeps the session lock through the launch line, exactly as the
+    # projection does.
+    HERDR_GROUPED=0
+    if [ "$KIND" != secondmate ] \
+       && [ ! -e "$HERDR_PRESENTATION_JOURNAL" ] && [ ! -L "$HERDR_PRESENTATION_JOURNAL" ] \
+       && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      HERDR_SES=$(fm_backend_herdr_session)
+      fm_backend_herdr_version_check || exit 1
+      if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
+        echo "warning: herdr worktree group could not ensure its session server; using the ordinary layout" >&2
+      elif fm_backend_herdr_worktree_group_enabled "$CONFIG" "$STATE" "$HERDR_SES"; then
+        if spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
+          HERDR_GROUP_WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "fm-$ID") || HERDR_GROUP_WT=
+          if [ -z "$HERDR_GROUP_WT" ]; then
+            spawn_herdr_presentation_order_lock_release
+            echo "error: treehouse get --lease did not report a worktree for task $ID in project '$PROJ_ABS'" >&2
+            exit 1
+          fi
+          WT=$HERDR_GROUP_WT
+          HERDR_GROUP_LEASED=1
+          validate_spawn_worktree "treehouse get --lease" "(no endpoint yet)"
+          # The slot claim below is the same claim the in-pane acquisition
+          # writes; see that site for why a slot that cannot be claimed refuses.
+          if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+            if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+              echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own" >&2
+              exit 1
+            fi
+            SPAWN_SLOT_CLAIMED=1
+          fi
+          if spawn_herdr_group_place "$HERDR_SES" "$HERDR_LABEL_HOME" "$WT"; then
+            HERDR_GROUP_PLACE_STATUS=0
+          else
+            HERDR_GROUP_PLACE_STATUS=$?
+          fi
+          case "$HERDR_GROUP_PLACE_STATUS" in
+          0) ;;
+          2)
+            spawn_herdr_presentation_order_lock_release
+            # Nothing was created; give the slot back and take the ordinary
+            # path, whose own in-pane acquisition allocates afresh.
+            if [ "$SPAWN_SLOT_CLAIMED" = 1 ]; then
+              fm_treehouse_slot_owner_release "$WT" "$ID" || true
+              SPAWN_SLOT_CLAIMED=0
+            fi
+            (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1 ||
+              echo "warning: could not return task $ID's leased Treehouse slot $WT; run 'treehouse return --force $WT' from $PROJ_ABS" >&2
+            HERDR_GROUP_LEASED=0
+            WT=
+            echo "warning: herdr worktree group placement was refused for task $ID; using the ordinary layout" >&2
+            ;;
+          *) exit 1 ;;
+          esac
+        else
+          echo "warning: herdr session lock unavailable; using the ordinary layout without worktree grouping" >&2
+        fi
+      fi
+    fi
+    if [ "$HERDR_GROUPED" -ne 1 ] && [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
@@ -3934,7 +4145,7 @@ else
         fi
       fi
     fi
-    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+    if [ "$HERDR_PROJECTED" -ne 1 ] && [ "$HERDR_GROUPED" -ne 1 ]; then
       HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
@@ -4416,7 +4627,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "${HERDR_GROUPED:-0}" -ne 1 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -5552,7 +5763,7 @@ sleep 0.3
 SPAWN_LAUNCH_SENT=1
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+if [ "${HERDR_PROJECTED:-0}" -eq 1 ] || [ "${HERDR_GROUPED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi

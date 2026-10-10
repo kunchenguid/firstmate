@@ -8,6 +8,7 @@ Firstmate requires Herdr protocol 14 or newer.
 Broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0.
 Protocol-16 features remain gated by availability.
 Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
+Native worktree groups need Herdr 0.9.2 for the reason given under [Worktree groups](#worktree-groups), and are verified on 0.9.3.
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
@@ -18,7 +19,8 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Install Herdr and select it | [Setup](#setup) |
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
-| The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
+| One workspace per task grouped under its project, on Herdr 0.9.2 and newer | [Worktree groups](#worktree-groups) |
+| The one-task workspaces below that floor, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
@@ -108,7 +110,7 @@ A secondmate launched by the primary receives a narrowly scoped home override du
 
 ### Watching tasks
 
-Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
+Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs, or, for a task placed in a [worktree group](#worktree-groups), to its child workspace under the project's parent row.
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
 
 ### Focus
@@ -125,7 +127,7 @@ Herdr 0.7.5 exports `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SESSION`, `HERDR_SOCKET
 A Firstmate or secondmate agent's own commands inherit them.
 Older injection shapes are unverified, so a claimed launcher pane without the injected socket identity cannot be trusted.
 
-With presentation spaces disabled, a crewmate or scout is created in the exact workspace that identity currently resolves to.
+Without a [worktree group](#worktree-groups) placement and with presentation spaces disabled, a crewmate or scout is created in the exact workspace that identity currently resolves to.
 That workspace is read live from Herdr rather than from the injected snapshot, so the worker always appears beside the agent that launched it.
 Duplicate labels elsewhere in the session are irrelevant, and the globally focused workspace is never the target.
 A `--secondmate` launch is the deliberate exception: it stands up that secondmate home's own workspace instead of joining the launcher's.
@@ -157,16 +159,112 @@ Rename it manually before expecting new tasks or recovery to use it.
 
 Recovery and list-live still scan the first workspace matching the home label, because they address panes they already recorded rather than choosing where new work goes.
 The one recovery that does place new work is the control plane's reclaim of a destroyed endpoint.
-It mints a replacement tab through this section's ordinary placement rules while pinning the herdr session the task's record names ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
+On a release with [Worktree groups](#worktree-groups) it re-opens the recorded worktree under the project's parent first; otherwise it mints a replacement tab through this section's ordinary placement rules, always pinning the herdr session the task's record names ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Worktree groups
+
+On Herdr 0.9.2 and newer, each new crewmate or scout is placed as a native linked-worktree child workspace under one parent workspace per project.
+This section calls that layout a worktree group.
+Herdr renders the parent row with its children indented, so the sidebar shows one group per project instead of one flat workspace per task.
+Herdr provides the grouping, and Treehouse still provides every task checkout: Firstmate never runs `worktree create` or `worktree remove`, and cleanup never runs `workspace close`.
+
+### How a task is placed
+
+1. The task's Treehouse slot is leased durably first, with `treehouse get --lease`, because `herdr worktree open` needs the checkout path to exist.
+2. The project's parent workspace is found by its recorded primary checkout, or created in the project's primary checkout with `--no-focus` when none exists.
+3. The parent's `worktree list` is read, and the task's checkout is opened as a child workspace with `worktree open --workspace <parent> --path <checkout> --no-focus`.
+4. The ordinary `fm-<id>` task tab is created inside that child with the checkout as its directory, and the seeded tab the open response returned is pruned through the same response-id gate the flat path uses.
+5. The child is labeled with the task's concise name, and the task record stores the child workspace, tab, and pane exactly as before.
+
+The in-pane `treehouse get` of the flat path does not run for a grouped task.
+The pane shell is created in the leased slot, and the spawn still moves it there explicitly and verifies it before any harness starts.
+Task metadata is unchanged: `herdr_workspace_id` names the child workspace, and nothing new is recorded.
+A spawn that fails after the lease and before its record exists closes the exact panes it created and returns the lease.
+
+### The parent workspace
+
+The parent is the one workspace Herdr itself records as the project's primary checkout: explicit `worktree` provenance with `is_linked_worktree` false and a `checkout_path` canonically equal to the project directory.
+It is created on demand and reused for every later task of that project in that session, including a reclaim.
+Its own seeded tab is an idle shell in the project's primary checkout; Firstmate never types into it and never prunes it, because closing a parent's last tab closes the whole group.
+Two workspaces recorded as the same project's primary are an ambiguous parent, and placement falls back rather than guessing.
+A workspace without that provenance is never adopted as the parent, even when its shell sits in the project, so the captain's own workspace stays theirs.
+
+Labels are cosmetic and never placement authority.
+The primary home labels a parent with the project's basename, and a secondmate home prefixes its own home label, as in `2ndmate-<id>/<project>`.
+A project whose basename would spell a home workspace label, such as `firstmate`, is labeled `<basename> repo`, because the per-home label lookup matches labels exactly.
+A child is labeled with the task's concise name.
+
+### Version floor
+
+The native path is floored at Herdr 0.9.2, for both the installed client and the running server.
+`worktree open` has existed since protocol 10, but through Herdr 0.9.1 it could take over a repository's own workspace whenever that workspace's first tab sat inside the linked checkout (upstream issue #4293, fixed in 0.9.2): the open returned `already_open` with the parent's id, flipped the parent to a linked worktree, and a later removal closed the parent with everything running in it.
+A flat per-home workspace whose first task tab sits in a Treehouse slot is exactly that shape.
+Releases 0.9.0 through 0.9.3 all report protocol 22, so the protocol number cannot carry this verdict and the release core of the version string decides.
+The running server's `api schema` must additionally list `worktree.list` and `worktree.open`, which is the structural proof that the surface exists on the server answering.
+Below the floor, or when the gate cannot read a verdict, placement falls back to the projection or the flat layout exactly as before, with one warning per home per detected release recorded as a `state/.herdr-worktree-group-floor-<release>` marker.
+
+### Hijack guard and adoption
+
+Herdr resolves which workspace already holds a checkout by explicit membership first, then by a workspace's cached Git metadata or its first tab's live directory, and `worktree open` marks membership on whatever workspace it returns.
+So before any open, the parent's `worktree list` is read:
+
+- A checkout reported open in the parent itself refuses native placement without mutating anything, which guards the issue #4293 shape independently of the version.
+- A checkout reported open in a workspace that does not carry explicit linked-worktree membership for exactly that checkout refuses the same way; such a workspace is never adopted or relabeled.
+- A checkout reported open in a workspace that does carry that membership is a prior child for the same Treehouse slot, and the task tab is created inside it through the ordinary husk-aware create.
+- A checkout Herdr does not list as a linked worktree of the parent's repository refuses as well.
+
+Every refusal leaves Herdr untouched, returns the leased slot, and takes the ordinary path, whose own in-pane acquisition then allocates afresh.
+A parent created by the refused placement is closed again while it is still empty.
+
+### Settings
+
+Native grouping is the default at or above the floor, and `off` is its one opt-out: every clean fresh crewmate or scout, and every reclaimed endpoint, is grouped unless `config/herdr-presentation-spaces` says `off`.
+That `off` opts the home out of every one-task-workspace layout, grouping included, so a home that already said it keeps its flat layout and is never regrouped without consent; an absent file or any other value leaves the floor to decide, and the file is inherited into secondmate homes exactly as before.
+There is no setting that forces grouping below the floor, because the open itself is unsafe there.
+
+### Cleanup, restart, and reclaim
+
+Cleanup is unchanged: teardown closes only the exact recorded task pane under the session lock, never calls `workspace close`, and Herdr removes the emptied child through its last-pane path, so the parent row stays with its own tab.
+A workspace-emptying close takes the same focus-safe plan as any other.
+A Herdr server restart restores the parent and child workspaces with their membership, and a restored agent-free child pane is adopted by the control plane's relaunch exactly as any other dead endpoint.
+When the recorded endpoint is proven gone, the relaunch re-opens the recorded worktree, or adopts its surviving child workspace, under the project's parent in the recorded session, so a reclaimed task lands back in its group rather than in the home workspace.
+Every refusal falls back to the flat container as before ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
+A secondmate agent itself still runs in its ordinary per-home workspace; only the children a home launches are grouped, under that home's own project parents.
+
+### Relation to presentation spaces
+
+Native grouping replaces the projection below as the default one-task layout on a supported release, rather than becoming one of its placement modes.
+The projection's machinery exists to simulate grouping on releases without it: a random token in the title to re-find a workspace after a restart, best-effort reordering next to the home workspace, a journal to bind and reclaim it, and a session-start sweep for stale titles.
+A native child needs none of that, because Herdr binds it to its checkout path, which is unique per open workspace, groups it itself, and restores the membership with the session.
+Binding a native child to the projection's home-parent block predicate would also be wrong, because Herdr orders children under the repository parent, not the home.
+The projection is therefore untouched and remains the layout below the 0.9.2 floor, on an explicit `on` below its own 0.8.0 floor, and for every task that already holds a presentation journal.
+Such a task keeps its journal, its workspace, and every recovery path it had, and is never moved.
+
+### Operational compromises
+
+- A parent row is a real Herdr workspace with one idle shell in the project's primary checkout; closing it from the sidebar with `--group` closes every child and its running worker, so leave parent rows alone.
+- A stale child workspace left by a crash between the open and the record publication is not swept at session start; the next task placed on that Treehouse slot adopts it, and otherwise it needs manual cleanup in Herdr's UI.
+- A parent whose first open failed carries no provenance and is closed again by the placement that created it; one left behind by a crash reads as a plain workspace, so the next placement creates a second, labeled parent beside it.
+- The pre-open read and the open are two calls, so a workspace that moves into the checkout between them is adopted only when Herdr's returned record is exactly this checkout's, and is otherwise refused with that record already marked by Herdr.
+
+### Worktree-group tests
+
+| Test | What it covers |
+| --- | --- |
+| `tests/fm-backend-herdr.test.sh` | The floor classifier and gate, the one-per-release warning, parent labels, grouped placement, adoption, the hijack refusals, parent ambiguity, and exact cleanup, against a stateful fake. |
+| `tests/fm-backend-herdr-worktree-groups-e2e.test.sh` | Two tasks of one project and one of another grouped under one parent each, a reclaim landing back in its group, a secondmate-shaped home's own parent, a config `off` that takes the flat layout instead of grouping, the never-adopted home workspace, and teardown, through the real spawn and teardown scripts in a guarded lab; below the floor it proves the fallback instead. |
+
+[`verification/runtime-backends.md`](verification/runtime-backends.md#worktree-groups) owns the dated evidence.
+
 ## Presentation spaces
 
-Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
+On Herdr 0.8.0 through 0.9.1, each new crewmate or scout is placed in a disposable one-task workspace by default.
 This section calls that one-task workspace the projection.
+From Herdr 0.9.2, [Worktree groups](#worktree-groups) replace the projection for new tasks; this section then governs tasks that already hold a presentation journal, an explicit `on` below the projection's own floor, and the `off` that opts a home out of both layouts.
 Without the projection, tasks use the ordinary flat layout described under [Watching and task containers](#watching-and-task-containers).
 
 ### Setting values
@@ -176,7 +274,7 @@ The local gitignored `config/herdr-presentation-spaces` file controls the projec
 | File state | Result |
 | --- | --- |
 | Absent | Leaves the choice to the version floor below (the unconfigured default). |
-| `off` | Opts the home out. |
+| `off` | Opts the home out of the projection and, on Herdr 0.9.2 and newer, of [worktree groups](#worktree-groups) too. |
 | `on` | Forces the projection on, as a deliberate opt-in. |
 | Empty | A deliberate opt-in, the same as `on`. |
 | Any other value | Warns and follows the unconfigured default rather than failing a spawn over a purely visual setting. |
@@ -851,6 +949,7 @@ tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
+tests/fm-backend-herdr-worktree-groups-e2e.test.sh
 tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh
 tests/fm-herdr-pi-stale-registration-live-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh

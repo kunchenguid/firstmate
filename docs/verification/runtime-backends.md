@@ -1595,6 +1595,58 @@ ok - forced secondmate teardown retains Herdr child identity until exact pane di
 ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
 ```
 
+### Worktree groups
+
+Measured 2026-10-07 on WSL2 Ubuntu (Linux 6.18 x86_64) against Herdr 0.9.3 (protocol 22) in an isolated `fm-lab-` session provisioned by `bin/fm-herdr-lab.sh`, with a throwaway repository and two `git worktree add --detach` checkouts.
+
+The grouping surface, read through the lab helper:
+
+```sh
+herdr worktree list --cwd /tmp/herdr-exp-repo
+herdr workspace create --cwd /tmp/herdr-exp-repo --label parentproj --no-focus
+herdr worktree open --workspace w3 --path /tmp/herdr-exp-wt2 --label child2 --no-focus
+herdr workspace close w3
+herdr pane close w4:p2
+```
+
+```text
+{"result":{"source":{"repo_key":"/tmp/herdr-exp-repo/.git","repo_name":"herdr-exp-repo","repo_root":"/tmp/herdr-exp-repo","source_checkout_path":"/tmp/herdr-exp-repo"},"type":"worktree_list","worktrees":[{"branch":"main","is_bare":false,"is_detached":false,"is_linked_worktree":false,"is_prunable":false,"label":"herdr-exp-repo","path":"/tmp/herdr-exp-repo"},{"is_bare":false,"is_detached":true,"is_linked_worktree":true,"is_prunable":false,"label":"herdr-exp-repo","path":"/tmp/herdr-exp-wt1"},{"is_bare":false,"is_detached":true,"is_linked_worktree":true,"is_prunable":false,"label":"herdr-exp-repo","path":"/tmp/herdr-exp-wt2"}]}
+{"result":{"type":"workspace_created","workspace":{"active_tab_id":"w3:t1","agent_status":"unknown","focused":false,"label":"parentproj","number":3,"pane_count":1,"tab_count":1,"workspace_id":"w3"}}}
+{"result":{"already_open":false,"root_pane":{"pane_id":"w4:p1","tab_id":"w4:t1","workspace_id":"w4"},"tab":{"label":"1","tab_id":"w4:t1","workspace_id":"w4"},"type":"worktree_opened","workspace":{"label":"child2","workspace_id":"w4","worktree":{"checkout_path":"/tmp/herdr-exp-wt2","is_linked_worktree":true,"repo_key":"/tmp/herdr-exp-repo/.git","repo_name":"herdr-exp-repo","repo_root":"/tmp/herdr-exp-repo"}},"worktree":{"is_linked_worktree":true,"open_workspace_id":"w4","path":"/tmp/herdr-exp-wt2"}}}
+{"error":{"code":"workspace_group_close_required","message":"workspace has linked worktree workspaces; use --group (close_group=true in the API) to close the group"},"id":"cli:workspace:close"}
+{"id":"cli:pane:close","result":{"type":"ok"}}
+```
+
+Facts the adapter rests on, each read from those responses: a `workspace create` response carries no `worktree` field, and the parent gains `{checkout_path, is_linked_worktree: false, repo_key}` membership only once it serves as a worktree source; a child carries `is_linked_worktree: true` with the checkout path and the parent's `repo_key`; `workspace list` exposes no parent id, so the group is the set of workspaces sharing a `repo_key`; `worktree open` on an already open checkout answers `already_open: true` and applies a passed `--label` to that existing workspace; closing a child's last pane removes only the child.
+`worktree open --cwd <repo>` with no parent workspace creates one labeled after the repository, which is why the adapter creates the parent itself with `--no-focus` and always passes `--workspace`.
+
+The hijack shape of upstream issue #4293 was reproduced on 0.9.3 against the pre-open read: after `cd /tmp/wthij/wt1` in the parent's own seeded tab, `herdr worktree list --workspace w1` reported `{"path":"/tmp/wthij/wt1","open_workspace_id":"w1"}`, and `fm_backend_herdr_worktree_child_open` refused with `herdr reports the project's own workspace w1 as already open on '/tmp/wthij/wt1'` and status 2, leaving the workspace list unchanged; after `cd /tmp/wthij/proj` the same call opened `w2` as the child.
+The floor is the version string because `herdr status --json` reported `"version":"0.9.3","protocol":22` and the 0.9.0 client measured in "Client selection" above also reported protocol 22, while the upstream changelog places the fix in 0.9.2.
+
+The end-to-end guarantee, through the real spawn, relaunch, and teardown scripts:
+
+```sh
+tests/fm-backend-herdr-worktree-groups-e2e.test.sh
+```
+
+```text
+# evidence: herdr 0.9.3 workspace list after a1, a2 (alpha) and b1 (beta): [{"workspace_id":"w1","label":"alpha","worktree":{"checkout_path":"/tmp/fm-herdr-wtgroups.zaJ0gs/alpha","is_linked_worktree":false,"repo_name":"alpha"}},{"workspace_id":"w2","label":"a1","worktree":{"checkout_path":"/home/lee/.treehouse/alpha-0840dc/1/alpha","is_linked_worktree":true,"repo_name":"alpha"}},{"workspace_id":"w3","label":"a2","worktree":{"checkout_path":"/home/lee/.treehouse/alpha-0840dc/2/alpha","is_linked_worktree":true,"repo_name":"alpha"}},{"workspace_id":"w4","label":"beta","worktree":{"checkout_path":"/tmp/fm-herdr-wtgroups.zaJ0gs/beta","is_linked_worktree":false,"repo_name":"beta"}},{"workspace_id":"w5","label":"b1","worktree":{"checkout_path":"/home/lee/.treehouse/beta-dca90f/1/beta","is_linked_worktree":true,"repo_name":"beta"}}]
+# evidence: worktree list --workspace w1 (alpha): [{"path":"/tmp/fm-herdr-wtgroups.zaJ0gs/alpha","is_linked_worktree":false,"open_workspace_id":"w1"},{"path":"/home/lee/.treehouse/alpha-0840dc/1/alpha","is_linked_worktree":true,"open_workspace_id":"w2"},{"path":"/home/lee/.treehouse/alpha-0840dc/2/alpha","is_linked_worktree":true,"open_workspace_id":"w3"}]
+ok - real herdr 0.9.3: two tasks of one project and one of another are linked worktree children under one parent workspace per project
+# evidence: after destroying a1's pane and relaunching: a1 is w6 ({"label":"a1","worktree":{"checkout_path":"/home/lee/.treehouse/alpha-0840dc/1/alpha","is_linked_worktree":true}}) under parent w1; worktree list: [{"path":"/tmp/fm-herdr-wtgroups.zaJ0gs/alpha","open_workspace_id":"w1"},{"path":"/home/lee/.treehouse/alpha-0840dc/1/alpha","open_workspace_id":"w6"},{"path":"/home/lee/.treehouse/alpha-0840dc/2/alpha","open_workspace_id":"w3"}]
+ok - real herdr 0.9.3: a reclaimed endpoint lands back in its project group, not in the home workspace
+# evidence: secondmate-shaped home: sm1 is w8 under w7 labeled '2ndmate-wtgroup-sm/alpha', distinct from the primary's alpha parent w1
+ok - real herdr 0.9.3: a secondmate-shaped home's task groups under that home's own project parent
+# evidence: config off: off-flat is w9, the home workspace, carrying no linked-worktree membership; project A's parent w1 still holds 1 tab(s)
+ok - real herdr 0.9.3: config/herdr-presentation-spaces off opts the home out of native worktree grouping too
+ok - real herdr 0.9.3: the per-home workspace sitting in the project is never adopted as the group parent
+# evidence: after teardown of every task: [{"workspace_id":"w1","label":"alpha","tab_count":1},{"workspace_id":"w4","label":"beta","tab_count":1},{"workspace_id":"w7","label":"2ndmate-wtgroup-sm/alpha","tab_count":1}]
+ok - real herdr 0.9.3: teardown closes exactly each task's child workspace and never a parent
+```
+
+Refresh this entry by running that suite on a Herdr 0.9.2 or newer lab; below the floor it reports the fallback instead of the grouped cases.
+
+
 ### Composer and operational input
 
 Real captures verified these active distinctions:
