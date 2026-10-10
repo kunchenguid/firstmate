@@ -196,6 +196,7 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 A project's declared machine capacity (`config/project-capacity`) still bounds that dispatch: a spawn beyond it exits 75 without launching, and its item stays queued rather than blocked.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+Before dispatch, make the task-specific brief state the requested outcome, observable completion evidence, material constraints, and any unresolved assumption that could materially change scope, behavior, or safety; choose a conservative default for safe uncertainties, and ask only when a consequential choice cannot be resolved.
 Write the task-specific brief under section 11 before spawning.
 Fill the task subsections according to section 11.
 
