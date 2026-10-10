@@ -263,6 +263,24 @@ test_spaced_project_name_is_declared() {
   pass "a project name with spaces is declared by taking the capacity from the last field"
 }
 
+# A project registered under an alias that differs from its clone directory
+# name is declared by that registered name, the same name the spawn records as
+# project_name and looks up in the registry.
+test_registered_alias_is_declared() {
+  local case_dir home out rc=0
+  case_dir=$(make_case alias task-c)
+  home="$case_dir/home"
+  printf '{"heavy": "%s"}\n' "$case_dir/project" > "$home/data/project-paths.json"
+  declare_capacity "$home" "heavy 1" "project 5"
+  write_live "$home" live-a "$case_dir/project"
+  out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a project registered under an alias was not capped by its alias declaration: $out"
+  assert_contains "$out" "deferred: project heavy admits 1 worker(s) at once" \
+    "the deferral did not use the registered alias's declared capacity"
+  assert_absent "$home/state/task-c.meta" "the deferred alias spawn published a record"
+  pass "a project registered under an alias is declared by its registered name"
+}
+
 # A clone directory may be named with a leading '#'. That name is declared when
 # the '#' is written against the rest of the name and the line ends with the
 # capacity. A '#' followed by whitespace stays a comment even when the line
@@ -628,6 +646,7 @@ test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind
 test_spaced_project_name_is_declared
+test_registered_alias_is_declared
 test_hash_prefixed_project_name_is_declared
 test_symlinked_home_counts_each_worker_once
 test_release_frees_a_place

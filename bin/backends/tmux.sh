@@ -24,6 +24,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-view-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-view-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -69,8 +71,15 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
-# prints the resolved session name.
+# prints the resolved session name. Inside a Firstmate view it refuses a
+# server started inside the view, and refuses to start one (bin/fm-view-lib.sh).
 fm_backend_tmux_container_ensure() {
+  local server_pid
+  if server_pid=$(tmux display-message -p '#{pid}' 2>/dev/null); then
+    fm_view_refuse_server_inside tmux "$server_pid" || return 1
+  elif [ -z "${TMUX:-}" ]; then
+    fm_view_refuse_server_start tmux || return 1
+  fi
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else

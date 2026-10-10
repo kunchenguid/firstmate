@@ -4,6 +4,11 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   <project-dir> may be a path, a bare registered project name, or
+#   projects/<name>; names resolve through bin/fm-projects-lib.sh's central
+#   contract (data/project-paths.json, then the projects root, then the legacy
+#   $FM_HOME/projects clone). The task record carries both project=<abs path>
+#   and project_name=<stable alias or basename>.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -569,8 +574,9 @@ if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
 fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-projects-lib.sh
+. "$SCRIPT_DIR/fm-projects-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
@@ -2930,10 +2936,7 @@ resolved_existing_dir() {
 
 resolve_project_dir_arg() {
   local path=$1
-  case "$path" in
-  projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
-  *) printf '%s\n' "$path" ;;
-  esac
+  fm_project_resolve "$FM_HOME" "$CONFIG" "$DATA" "$path"
 }
 
 path_is_ancestor_of() {
@@ -3004,6 +3007,11 @@ validate_firstmate_home_for_spawn() {
 validate_firstmate_operational_dirs() {
   local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
   for name in data state config projects; do
+    # An org-shaped home holds no projects/ directory; its projects live as
+    # siblings under its config/projects-root.
+    if [ "$name" = projects ] && fm_projects_root_is_custom "$abs_home/config"; then
+      continue
+    fi
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
       echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
@@ -3112,9 +3120,44 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_RESOLVED=$(resolve_project_dir_arg "$PROJ") || exit 1
+  [ -n "$PROJ_RESOLVED" ] || {
+    echo "error: could not resolve a project directory for $PROJ" >&2
+    exit 1
+  }
+  PROJ_ABS=$(cd "$PROJ_RESOLVED" && pwd) || {
+    echo "error: project directory does not exist: $PROJ_RESOLVED" >&2
+    exit 1
+  }
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+fi
+# The stable project name: a bare alias or projects/<name> argument keeps that
+# name, a path argument uses its registered alias when one resolves to it, and
+# a relaunch reuses the recorded name. Secondmates record home=/projects=
+# instead and carry no project_name.
+if [ "$KIND" = secondmate ]; then
+  PROJ_NAME=
+elif [ "$RELAUNCH" -eq 1 ]; then
+  PROJ_NAME=$(fm_meta_get "$RELAUNCH_META" project_name)
+  [ -n "$PROJ_NAME" ] || PROJ_NAME=$(basename "$PROJ_ABS")
+else
+  if fm_projects_root_is_custom "$CONFIG"; then
+    PROJ_REGISTERED_ALIAS=$(fm_project_alias_for_path "$FM_HOME" "$CONFIG" "$DATA" "$PROJ_ABS") || {
+      echo "error: could not read this home's project registry" >&2
+      exit 1
+    }
+    [ -n "$PROJ_REGISTERED_ALIAS" ] || {
+      echo "error: $PROJ_ABS is not a registered project of this home; register it in $DATA/projects.md (or data/project-paths.json) before spawning" >&2
+      exit 1
+    }
+    PROJ_NAME=$PROJ_REGISTERED_ALIAS
+  else
+    PROJ_NAME=$(fm_project_name_for "$FM_HOME" "$CONFIG" "$DATA" "$PROJ" "$PROJ_ABS") || {
+      echo "error: could not resolve the project name for $PROJ" >&2
+      exit 1
+    }
+  fi
 fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
@@ -3129,7 +3172,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
     echo "error: could not resolve the root Firstmate home that declares project capacity for $PROJ_ABS" >&2
     exit 1
   }
-  if ! fm_project_capacity_lookup "$SPAWN_CAPACITY_CONFIG" "$(basename "$PROJ_ABS")"; then
+  if ! fm_project_capacity_lookup "$SPAWN_CAPACITY_CONFIG" "$PROJ_NAME"; then
     echo "error: spawn refused: the project capacity declaration is unreadable ($FM_PROJECT_CAPACITY_ERROR); fix it so the captain's worker limits are known (docs/configuration.md \"Project capacity\")" >&2
     exit 1
   fi
@@ -3154,11 +3197,11 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
 fi
 if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
   if ! fm_project_capacity_occupants "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE" "$ID"; then
-    echo "error: spawn refused: project $(basename "$PROJ_ABS") declares a capacity of $SPAWN_PROJECT_CAPACITY, but this machine's task records cannot all be read to count it ($FM_PROJECT_CAPACITY_ERROR)" >&2
+    echo "error: spawn refused: project $PROJ_NAME declares a capacity of $SPAWN_PROJECT_CAPACITY, but this machine's task records cannot all be read to count it ($FM_PROJECT_CAPACITY_ERROR)" >&2
     exit 1
   fi
   if [ "$FM_PROJECT_CAPACITY_OCCUPANTS" -ge "$SPAWN_PROJECT_CAPACITY" ]; then
-    echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
+    echo "deferred: project $PROJ_NAME admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
     exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
   fi
 fi
@@ -3198,7 +3241,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       echo "error: --base-branch requires a branch name" >&2
       exit 1
     }
-    BASE_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$(basename "$PROJ_ABS")") || exit 1
+    BASE_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME") || exit 1
     fm_base_branch_valid "$BASE_BRANCH" "$MODE" "${BASE_FORGE:-none}" "fm-spawn.sh --base-branch" || exit 1
     if ! fm_brief_base_branches "$BRIEF" >/dev/null || fm_brief_base_branches "$BRIEF" | grep -vxF -- "$BASE_BRANCH" >/dev/null; then
       echo "error: $BRIEF must record Base branch: $BASE_BRANCH and no other Base branch line to spawn with --base-branch $BASE_BRANCH; scaffold it with bin/fm-brief.sh --base-branch $BASE_BRANCH" >&2
@@ -3247,7 +3290,6 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 # would launch a worker whose instructions and whose recorded task delivery
 # differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
   # The parser's own refusal reaches the operator here rather than being
   # discarded: an entry it refuses (an unknown forge token, or a forge on
   # local-only) resolves to no posture at all, and launching on the silent
@@ -3767,7 +3809,7 @@ EOF
 else
   case "$BACKEND" in
   tmux)
-    SES=$(fm_backend_tmux_container_ensure)
+    SES=$(fm_backend_tmux_container_ensure) || exit 1
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
@@ -5077,7 +5119,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project project_name harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5088,6 +5130,7 @@ preserve_relaunch_meta() {
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
+  [ -z "$PROJ_NAME" ] || echo "project_name=$PROJ_NAME"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
@@ -5309,6 +5352,15 @@ case "$LAUNCH" in
 esac
 case "$HARNESS" in
 claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+  # The launcher's CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 reaches panes only if its
+  # session started the multiplexer server, so state it per launch: a
+  # secondmate is a Firstmate session (memory in its home), a worker is not.
+  if [ "$HARNESS" = claude ]; then
+    case "$KIND" in
+    secondmate) LAUNCH="CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 $LAUNCH" ;;
+    *) LAUNCH="-u CLAUDE_CODE_DISABLE_AUTO_MEMORY $LAUNCH" ;;
+    esac
+  fi
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -5359,7 +5411,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LAUNCH_DIR= FM_LAUNCH_ROOT= FM_LAUNCH_MODE= FM_LAUNCH_NOTICE= FM_VIEW= FM_VIEW_ROOT= FM_LAUNCH_REAL= FM_LAUNCH_REAL_RW= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 # Pane-scoped override: git in this worker reads our commit-msg strip without
 # rewriting the project's core.hooksPath. GIT_CONFIG_* takes precedence over
