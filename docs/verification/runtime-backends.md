@@ -820,6 +820,33 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
+### Pi dollar-first subscription footer live guard
+
+Verified 2026-10-10 on macOS arm64 with Pi 0.99.1 and tmux 3.6a, using a disposable agent directory, unusable OAuth fixture values, and no submitted prompt or provider request.
+The fixture selects Pi's actual subscription-footer renderer without using a real credential.
+The installed TUI rendered `$0.000 (sub)` below a blank separator-bounded composer on `openai-codex/gpt-6.1-sol` with `xhigh` thinking.
+The existing dollar-footer classifier recognized that composer on both cursor-anchored and cursorless captures; the latter exercises Herdr's classifier capabilities, not Herdr's capture transport.
+Glyph-only, cost-like, and placeholder-like text actually typed into that same Pi composer remained pending until Ctrl+U cleared it.
+The guard also separates identity from styling: absent Pi identity refuses the blank region, while an unstyled but truly blank capture retains its identity-backed proof.
+
+Refresh after a Pi upgrade with this default-on, token-free guard:
+
+```sh
+bin/fm-test-run.sh tests/fm-composer-pi-idle-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - pi (0.99.1): real dollar-first idle footer is empty on tmux and cursorless reads; absent identity refuses
+ok - pi (0.99.1): real drafts including glyph-only and cost-like text remain pending until cleared
+# harness absent, not verified here: pi-signed
+ok - Pi composer live guard verified 1 installed harness(es) without a provider request
+```
+
+The guard checks Pi and pi-signed when installed and reports an absent signed wrapper explicitly.
+`tests/fm-composer-lib.test.sh` pins the same footer and draft boundaries portably, including blocked and unknown native identities and both locale modes.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
