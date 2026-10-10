@@ -53,9 +53,7 @@
 #                    only, so the Pi trust store is never written and all of
 #                    .pi/extensions loads; sessions stay under
 #                    <lab-root>/pi-sessions.
-#   task ids         lab<nonce>-mate and lab<nonce>-worker, unique per lab,
-#                    because a spawn keeps a task temp dir at /tmp/fm-<id>
-#                    that a fixed id would share with other labs and tasks.
+#   task ids         lab<nonce>-mate and lab<nonce>-worker, unique per lab.
 #   mate/            --mate: bin/fm-home-seed.sh <mate-id> <lab-root>/mate
 #                    --no-projects (an explicit path cloned from the git lab
 #                    home), launched by bin/fm-spawn.sh --secondmate.
@@ -98,8 +96,10 @@
 #
 # down refuses any path without the lab record up writes. It kills only the
 # lab's recorded private tmux server and launch pane PIDs, and their descendants;
-# runs bin/fm-lab-home.sh teardown; removes the task temp and launch dirs the
-# lab's spawns kept under /tmp, including a failed spawn's; removes every
+# runs bin/fm-lab-home.sh teardown; removes lab-home-scoped launch dirs under
+# /tmp, including failed mate/worker spawns, and legacy task temp roots only
+# for the lab's unique mate and worker ids, preserving other shared legacy
+# roots. Home-scoped task temp roots leave with <lab-root>. It removes every
 # project entry at or under <lab-root> from the recorded Claude store, following
 # a symlinked store to its target (compare-and-swap atomic replace, unrelated
 # entries kept); reports a changed Pi trust store or a new
@@ -789,9 +789,6 @@ cmd_down() {
     die "refusing to remove the lab: its processes did not exit (pid ppid pgid state command): $details"
   fi
   echo "stopped: lab tmux server and lab processes"
-  # A spawn keeps /tmp/fm-<id> and /tmp/fm-<id>+<sha256 of the spawning home>.
-  # The second is scoped to this lab home for any task it spawned; the first is
-  # removed only for the lab's own unique ids, since another home may share it.
   home_hash=$(printf '%s' "$LAB" | shasum -a 256 | awk '{print $1}')
   ids=("$MATE_ID" "$WORKER_ID")
   for meta in "$LAB"/state/*.meta; do
@@ -799,12 +796,16 @@ cmd_down() {
   done
   for id in "${ids[@]}"; do
     [ -n "$id" ] || continue
-    for dir in "/tmp/fm-$id+$home_hash" "/tmp/fm-$id"; do
-      [ "$dir" != "/tmp/fm-$id" ] || [ "$id" = "$MATE_ID" ] || [ "$id" = "$WORKER_ID" ] || continue
+    dir="/tmp/fm-$id+$home_hash"
+    if [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ]; then
+      rm -rf "$dir" && echo "removed: task launch dir $dir"
+    fi
+    if [ "$id" = "$MATE_ID" ] || [ "$id" = "$WORKER_ID" ]; then
+      dir="/tmp/fm-$id"
       if [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ]; then
         rm -rf "$dir" && echo "removed: task temp $dir"
       fi
-    done
+    fi
   done
   if [ -f "$LAB/.fm-lab-home" ]; then
     "$LAB_HOME_HELPER" teardown "$LAB" || die "cannot remove the private tmux directory"

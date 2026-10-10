@@ -16,7 +16,6 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
-KIMI_RUNTIME_TASK_TMP=
 KIMI_RUNTIME_LAUNCH_DIR=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
@@ -36,7 +35,6 @@ ai_trailer_hooks_prefix() {  # <home> <id>
 }
 
 cleanup_kimi_harness() {
-  [ -z "$KIMI_RUNTIME_TASK_TMP" ] || fm_test_remove_tree "$KIMI_RUNTIME_TASK_TMP"
   [ -z "$KIMI_RUNTIME_LAUNCH_DIR" ] || fm_test_remove_tree "$KIMI_RUNTIME_LAUNCH_DIR"
   fm_test_remove_tree "$TMP_ROOT"
 }
@@ -290,11 +288,9 @@ EOF
 test_kimi_launch_then_send_is_verified() {
   local id rec out rc launch pointer brief_real meta task_tmp launch_dir launch_file launch_base
   id="kimi-success-z1-$$"
-  task_tmp="/tmp/fm-$id"
-  KIMI_RUNTIME_TASK_TMP=$task_tmp
-  rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
+  task_tmp=$(kimi_task_tmp "$id" "$HOME_DIR")
   launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
   KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
   rm -rf "$launch_dir"
@@ -339,7 +335,7 @@ test_kimi_launch_then_send_is_verified() {
     || fail "kimi spawn staged its launch command without mode 0600: $(path_mode "$launch_file")"
   grep -qF -- "-l . '$launch_file'" "$CASE_DIR/tmux-calls.log" \
     || fail "kimi spawn did not type a short line sourcing its staged launch command"
-  assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
+  assert_grep "export GOTMPDIR='$task_tmp/gotmp'" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
   assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not mark the pane with its task id"
@@ -348,6 +344,10 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+kimi_task_tmp() {  # <id> <home>
+  printf '%s/%s.tasktmp' "$(cd "$2/state" && pwd -P)" "$1"
 }
 
 path_mode() {
@@ -379,13 +379,11 @@ kimi_typed_launch_file() {
 test_kimi_spawn_refuses_shared_task_temp_root() {
   local id rec out rc task_tmp launch_dir launch_file stale_file
   id="kimi-sharedtmp-z1-$$"
-  task_tmp="/tmp/fm-$id"
-  KIMI_RUNTIME_TASK_TMP=$task_tmp
-  rm -rf "$task_tmp"
-  mkdir "$task_tmp"
-  chmod 777 "$task_tmp"
   rec=$(make_spawn_case sharedtmp "$id")
   read_spawn_record "$rec"
+  task_tmp=$(kimi_task_tmp "$id" "$HOME_DIR")
+  mkdir "$task_tmp"
+  chmod 777 "$task_tmp"
   launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
   KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
   rm -rf "$launch_dir"
@@ -397,11 +395,11 @@ test_kimi_spawn_refuses_shared_task_temp_root() {
   assert_absent "$task_tmp/launch.sh" "kimi spawn staged its launch command in a shared directory"
   assert_absent "$launch_dir" "kimi spawn staged a namespaced launch directory after refusing the shared temp root"
   [ ! -s "$CASE_DIR/launch.log" ] || fail "kimi spawn launched despite an unsafe task temp root"
-  rm -rf "$task_tmp"
-  mkdir "$task_tmp"
-  chmod 755 "$task_tmp"
   rec=$(make_spawn_case ownedtmp "$id")
   read_spawn_record "$rec"
+  task_tmp=$(kimi_task_tmp "$id" "$HOME_DIR")
+  mkdir "$task_tmp"
+  chmod 755 "$task_tmp"
   launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
   KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
   rm -rf "$launch_dir"
@@ -434,8 +432,52 @@ test_kimi_spawn_refuses_shared_task_temp_root() {
     || fail "kimi spawn reused the shared per-id launch file"
   grep -qF -- "-l . '$launch_file'" "$CASE_DIR/tmux-calls.log" \
     || fail "kimi spawn did not type a short line sourcing its namespaced launch command"
-  rm -rf "$task_tmp" "$launch_dir"
+  rm -rf "$launch_dir"
   pass "fm-spawn: unsafe task roots are refused, owned roots are tightened, and launch files stay unique and 0600"
+}
+
+# Regression: the task temp root used to be /tmp/fm-<id> for every home, so a
+# test spawn never torn down stranded it in /tmp, and two homes spawning one
+# task id shared (and one teardown deleted) the same root. Spawn the same id
+# from two homes: each root must live in its own home, and tearing down one
+# home's task must leave the other's root intact.
+test_task_temp_root_is_scoped_to_the_spawning_home() {
+  local id rec_a rec_b home_a home_b tmp_a tmp_b launch_a launch_b out rc
+  id="kimi-homescope-z1-$$"
+  rec_a=$(make_spawn_case homescope-a "$id")
+  rec_b=$(make_spawn_case homescope-b "$id")
+  read_spawn_record "$rec_b"
+  home_b=$HOME_DIR
+  launch_b=$(kimi_launch_dir "$id" "$home_b")
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  rm -rf "$launch_b"
+  expect_code 0 "$rc" "the second home's spawn should succeed: $out"
+  read_spawn_record "$rec_a"
+  home_a=$HOME_DIR
+  launch_a=$(kimi_launch_dir "$id" "$home_a")
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_a
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "the first home's spawn should succeed: $out"
+  tmp_a=$(kimi_task_tmp "$id" "$home_a")
+  tmp_b=$(kimi_task_tmp "$id" "$home_b")
+  assert_grep "tasktmp=$tmp_a" "$home_a/state/$id.meta" "home A did not record a temp root inside its own home"
+  assert_grep "tasktmp=$tmp_b" "$home_b/state/$id.meta" "home B did not record a temp root inside its own home"
+  [ "$tmp_a" != "$tmp_b" ] || fail "two homes spawning one task id share a temp root: $tmp_a"
+  assert_present "$tmp_a/gotmp" "home A's spawn did not create its Go temp directory"
+  assert_present "$tmp_b/gotmp" "home B's spawn did not create its Go temp directory"
+  assert_absent "/tmp/fm-$id" "a spawn still created the shared legacy temp root in /tmp"
+  printf 'home b build\n' > "$tmp_b/gotmp/artifact"
+
+  HOME="$home_a" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home_a" \
+    FM_STATE_OVERRIDE="$home_a/state" FM_DATA_OVERRIDE="$home_a/data" \
+    FM_PROJECTS_OVERRIDE="$home_a/projects" FM_CONFIG_OVERRIDE="$home_a/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "home A's teardown failed"
+  assert_absent "$tmp_a" "teardown left home A's task temp root behind"
+  assert_present "$tmp_b/gotmp/artifact" "home A's teardown removed home B's live task temp root"
+  pass "fm-spawn: the task temp root is scoped to the spawning home, and teardown removes only that home's root"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -1133,6 +1175,7 @@ test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_spawn_refuses_shared_task_temp_root
+test_task_temp_root_is_scoped_to_the_spawning_home
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token

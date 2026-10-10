@@ -317,6 +317,23 @@
 #   prevents equal task ids in different Firstmate homes from sharing a file.
 #   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
 #   task teardown removes only the current home's launch namespace.
+# Task temp root:
+#   New tasks get a private 0700 temp root at state/<id>.tasktmp/ in the
+#   spawning home, recorded as tasktmp= in its meta. Spawn creates gotmp/
+#   because Go does not create GOTMPDIR, then exports that subdirectory to the
+#   pane as GOTMPDIR (not the far broader TMPDIR). Scoping new roots to the
+#   home keeps equal task ids in different Firstmate homes from sharing a
+#   root; removing a disposable home also
+#   removes its roots instead of stranding them in /tmp.
+#   fm-teardown removes exactly the recorded tasktmp= root; a forced secondmate
+#   teardown's children lose their home-scoped roots with the retired home.
+#   When a validated existing task record has tasktmp= exactly /tmp/fm-<id>,
+#   an explicit --relaunch or recovery of an existing secondmate keeps that
+#   legacy shared root, so recovery cannot strand its scratch files and later
+#   teardown still removes the root the task used. A record without a temp
+#   root gets the home-scoped root. Spawn reuses a pre-existing root only as a
+#   real directory owned by this user and writable by nobody else, then
+#   tightens it.
 # Launch environment (config/launch-env-allowlist):
 #   Absent means unchanged ambient inheritance. A present readable regular file
 #   opts every launch (ship, scout, secondmate, raw command, and relaunch) into
@@ -4557,22 +4574,26 @@ agy)
   ;;
 esac
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-# The root is private (0700) because its path is predictable under a shared
-# /tmp: a root that already exists is reused only as a real directory owned by
-# this user and writable by nobody else, then tightened, so no other local user
-# can plant or swap a file in it. The staged launch command lives in a sibling
-# directory namespaced by home identity, not in this shared per-id root.
-TASK_TMP="/tmp/fm-$ID"
+mkdir -p "$STATE"
+STATE_REAL=$(cd "$STATE" && pwd -P)
+
+# Implement the task temp root contract in this script's header.
+TASK_TMP="$STATE_REAL/$ID.tasktmp"
+if { [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; } &&
+  { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+  fm_backlog_record_present "$STATE/$ID.meta" "task record" "$STATE" || {
+    echo "error: task record is unsafe: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  }
+  if [ "$RELAUNCH" -eq 1 ] || [ "$(fm_meta_get "$STATE/$ID.meta" kind)" = secondmate ]; then
+    [ "$(fm_meta_get "$STATE/$ID.meta" tasktmp)" != "/tmp/fm-$ID" ] || TASK_TMP="/tmp/fm-$ID"
+  fi
+fi
 if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
   if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
     [ -n "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
     ! chmod 700 "$TASK_TMP"; then
-    echo "error: task temp root $TASK_TMP already exists and is not a private directory owned by this user; refusing to stage the launch command there; inspect and remove it, then retry" >&2
+    echo "error: task temp root $TASK_TMP already exists and is not a private directory owned by this user; refusing to use it; inspect and remove it, then retry" >&2
     exit 1
   fi
 fi
@@ -4582,8 +4603,6 @@ mkdir -p "$TASK_TMP/gotmp"
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
 # check or leak into a commit.
-mkdir -p "$STATE"
-STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
@@ -5435,7 +5454,7 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+spawn_send_text_line "$T" "export GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp")"
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.

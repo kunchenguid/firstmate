@@ -16,6 +16,7 @@ TMP_ROOT=$(fm_test_tmproot fm-live-lab)
 : > "$TMP_ROOT/tmux-dirs"
 LIVE_LAB="$ROOT/bin/fm-live-lab.sh"
 TRUST="$ROOT/bin/fm-claude-trust.sh"
+TASK_TMPS=()
 
 live_lab_cleanup() {
   local dir pid marker
@@ -28,7 +29,9 @@ live_lab_cleanup() {
     env -u TMUX TMUX_TMPDIR="$dir" tmux kill-server 2>/dev/null
     case "$dir" in /tmp/fml.*) rm -rf "$dir" ;; esac
   done < "$TMP_ROOT/tmux-dirs"
-  rm -rf "/tmp/fm-labt$$-mate" "/tmp/fm-labt$$-worker" "/tmp/fm-labt$$-other" /tmp/fm-labt"$$"-*+*
+  for dir in "${TASK_TMPS[@]:-}"; do
+    [ -n "$dir" ] && rm -rf "$dir"
+  done
   fm_test_cleanup
 }
 trap live_lab_cleanup EXIT
@@ -41,8 +44,9 @@ printf '{}\n' > "$FAKE_HOME/.pi/agent/trust.json"
 export HOME="$FAKE_HOME"
 unset CLAUDE_CONFIG_DIR TMUX
 
-MATE_ID="labt$$-mate"
-WORKER_ID="labt$$-worker"
+LAB_TEST_ID="labt$$-$RANDOM"
+MATE_ID="$LAB_TEST_ID-mate"
+WORKER_ID="$LAB_TEST_ID-worker"
 NONCE=abc12345
 
 digest() { shasum -a 256 "$1" | awk '{print $1}'; }
@@ -90,8 +94,8 @@ make_lab() {
   lab_tmux "$root" new-window -d -t firstmate: -n main -c "$home" "printf 'LABREADY-$NONCE\n'; exec sleep 600"
   lab_tmux "$root" new-window -d -t firstmate: -n "fm-$MATE_ID" -c "$root/mate" 'exec sleep 600'
   lab_tmux "$root" new-window -d -t firstmate: -n "fm-$WORKER_ID" -c "$root" 'exec sleep 600'
-  fm_write_meta "$home/state/$MATE_ID.meta" "window=firstmate:fm-$MATE_ID" "tasktmp=/tmp/fm-$MATE_ID"
-  fm_write_meta "$home/state/$WORKER_ID.meta" "window=firstmate:fm-$WORKER_ID" "worktree=$home/projects/notes" "kind=secondmate" "tasktmp=/tmp/fm-$WORKER_ID"
+  fm_write_meta "$home/state/$MATE_ID.meta" "window=firstmate:fm-$MATE_ID" "tasktmp=$home/state/$MATE_ID.tasktmp"
+  fm_write_meta "$home/state/$WORKER_ID.meta" "window=firstmate:fm-$WORKER_ID" "worktree=$home/projects/notes" "kind=secondmate" "tasktmp=$home/state/$WORKER_ID.tasktmp"
   mkdir -p "$home/projects/notes"
   printf 'paused [at=1]: waiting on gate file %s to exist\n' "$home/data/$WORKER_ID/gate" > "$home/state/$WORKER_ID.status"
 
@@ -334,9 +338,14 @@ assert_present "$NOT_LAB/keep" "a refused down removes nothing"
 pass "down refuses anything up did not build"
 
 C_HASH=$(printf '%s' "$CH" | shasum -a 256 | awk '{print $1}')
-OTHER_ID="labt$$-other"
+OTHER_ID="$LAB_TEST_ID-other"
 fm_write_meta "$CH/state/$OTHER_ID.meta" "window=firstmate:fm-$OTHER_ID" "tasktmp=/tmp/fm-$OTHER_ID"
-mkdir -p "/tmp/fm-$WORKER_ID/gotmp" "/tmp/fm-$MATE_ID" "/tmp/fm-$WORKER_ID+$C_HASH" "/tmp/fm-$OTHER_ID+$C_HASH" "/tmp/fm-$OTHER_ID"
+mkdir -p "$CH/state/$WORKER_ID.tasktmp/gotmp" "$CH/state/$MATE_ID.tasktmp"
+for dir in "/tmp/fm-$MATE_ID" "/tmp/fm-$WORKER_ID" "/tmp/fm-$WORKER_ID+$C_HASH" "/tmp/fm-$OTHER_ID+$C_HASH" "/tmp/fm-$OTHER_ID"; do
+  (umask 077 && mkdir "$dir") || fail "cannot exclusively create lab temp fixture $dir"
+  TASK_TMPS+=("$dir")
+done
+fm_write_meta "$CH/state/$MATE_ID.meta" "window=firstmate:fm-$MATE_ID" "tasktmp=/tmp/fm-$MATE_ID"
 # An outsider opening a lab path is not owned by the lab.
 printf 'sleep 600\n' > "$C/stray.sh"
 bash "$C/stray.sh" >/dev/null 2>&1 &
@@ -360,7 +369,7 @@ printf 'sleep 600\n' > "${C}2/stray.sh"
 bash "${C}2/stray.sh" 2>/dev/null &
 SIBLING=$!
 printf '%s\n' "$SIBLING" >> "$TMP_ROOT/pids"
-# The worker spawn failed after keeping its task temp dirs, before its meta.
+# The worker spawn failed after keeping its task temp root and launch dir, before its meta.
 rm -f "$CH/state/$WORKER_ID.meta"
 C_TMUX=$(sed -n 's/^tmux_dir=//p' "$C/.fm-live-lab")
 out=$(HOME="$LATER_HOME" "$LIVE_LAB" down "$C" 2>&1)
@@ -374,16 +383,16 @@ kill -0 "$SIBLING" 2>/dev/null || fail "down leaves a sibling root's process run
 pkill -P "$SIBLING" 2>/dev/null
 kill "$SIBLING" 2>/dev/null
 assert_absent "$C_TMUX" "down removes the private tmux directory"
-assert_absent "/tmp/fm-$WORKER_ID" "down removes the worker's task temp dir, even without its meta"
-assert_absent "/tmp/fm-$MATE_ID" "down removes the mate's task temp dir"
+assert_absent "/tmp/fm-$WORKER_ID" "down removes the worker's legacy temp root even without its meta"
+assert_absent "/tmp/fm-$MATE_ID" "down removes the mate's recorded legacy temp root"
 assert_absent "/tmp/fm-$WORKER_ID+$C_HASH" "down removes the worker's launch dir"
 assert_absent "/tmp/fm-$OTHER_ID+$C_HASH" "down removes a lab-spawned task's launch dir scoped to the lab home"
-assert_present "/tmp/fm-$OTHER_ID" "down keeps a task temp dir another home could share"
+assert_present "/tmp/fm-$OTHER_ID" "down keeps a legacy shared task temp dir another home could own"
 kept=$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));console.log(JSON.stringify([j.keep,Object.keys(j.projects).sort()]))' "$HOME/.claude.json")
 assert_equals '[1,["/elsewhere/project"]]' "$kept" "down removes exactly the lab's Claude project entries"
 assert_contains "$out" "removed: 2 Claude project entries" "down reports the removed entries"
 kill "$STRAY" "$STRAY_CHILD" 2>/dev/null || true
-pass "down stops only recorded lab processes, removes trust entries and task temp dirs"
+pass "down stops only recorded lab processes, removes trust entries, task temp roots, and launch dirs"
 
 # The Claude store up selected is the one check and down use, even from a later
 # shell with another CLAUDE_CONFIG_DIR, and a symlinked store stays a symlink.
