@@ -70,6 +70,20 @@ test_no_target_prints_counts_only() {
   pass "absent config/lane-capacity reports counts and no target"
 }
 
+test_no_target_never_prints_constrained_line() {
+  local home fakebin out rc
+  home=$(make_home no-target-constrained 1 0)
+  fakebin=$(make_probes "$TMP_ROOT/p-no-target-constrained" 9.50 9 8 1048576)
+  out=$(run_capacity "$home" "$fakebin"); rc=$?
+  expect_code 0 "$rc" "absent target on a constrained host"
+  assert_contains "$out" 'free_lanes=unknown reason=no-target '     "constrained host without a target must still report no-target"
+  assert_not_contains "$out" 'Constrained:'     "the hold-dispatch line is opt-in on config/lane-capacity"
+  printf '6\n' > "$home/config/lane-capacity"
+  out=$(run_capacity "$home" "$fakebin")
+  assert_contains "$out" 'Constrained: cpu,memory,disk'     "the hold-dispatch line appears once config/lane-capacity exists"
+  pass "the Constrained line is printed only when config/lane-capacity exists"
+}
+
 test_target_yields_open_lanes_and_full() {
   local home fakebin out
   home=$(make_home target 2 1)
@@ -153,6 +167,7 @@ test_real_host_smoke() {
 }
 
 test_no_target_prints_counts_only
+test_no_target_never_prints_constrained_line
 test_target_yields_open_lanes_and_full
 test_host_constraints_close_lanes
 test_unavailable_probes_degrade
