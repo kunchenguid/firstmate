@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-send typed-plane submit-confirm budget for agy targets.
+# fm-send typed-plane submit-confirm budget for agy and Droid targets.
 #
 # A typed send to an explicit tmux agy endpoint is acknowledged only by the
 # submit core's idle-to-busy transition poll: agy's bare `>` composer verdict
@@ -70,7 +70,7 @@ case "\${1:-}" in
     n=\$(( \$(cat "\$cnt_file" 2>/dev/null || echo 0) + 1 ))
     printf '%s' "\$n" > "\$cnt_file"
     if [ "\$n" -ge $busy_at ]; then
-      printf '> \n? for shortcuts\n ⏺ 5s · esc to cancel · gemini-3.8-flash-low\n'
+      printf '> \n? for shortcuts\n%s\n' "\${FM_FAKE_BUSY_LINE:- ⏺ 5s · esc to cancel · gemini-3.8-flash-low}"
     else
       printf '> \n? for shortcuts\n'
     fi
@@ -107,6 +107,9 @@ run_send() {  # <harness> <busy-at> [env=val ...]
   (
     export FM_GATE_REFUSE_BYPASS=1 FM_SEND_SETTLE=0
     export PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_SLEEP_LOG="$log"
+    if [ "$harness" = droid ]; then
+      export FM_FAKE_BUSY_LINE=' ⠃ Executing...  (Press ESC to stop)'
+    fi
     for a in "$@"; do eval "export $a"; done
     "$SEND" sess:win 'Append steer1 line to notes.md' 2>"$dir/err"
     printf 'rc %s\n' "$?"
@@ -154,6 +157,11 @@ out=$(run_send agy 16)
 expect_code 0 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
   "agy typed send with long-brief late busy footer confirms and exits 0"
 pass "agy typed send: long-brief render (15th poll) still confirms idle-to-busy"
+
+out=$(run_send droid 6)
+expect_code 0 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
+  "Droid typed send with late busy status confirms within its adapter budget"
+pass "Droid typed send: its live busy status confirms a late submission"
 
 # claude on the identical late-busy pane: the shared 3-retry default is
 # untouched, so the same latency still refuses - the raised budget is

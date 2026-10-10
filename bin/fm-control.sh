@@ -113,12 +113,11 @@
 # Fail-closed boundaries:
 #   - An unverified harness, or a harness whose control mechanics are unknown,
 #     is refused rather than guessed at.
-#   - A backend that cannot deliver the harness's interrupt key is refused
-#     (Orca's terminal API has no Escape).
-#   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#   - A backend that cannot deliver the harness's interrupt key is refused;
+#     Orca's raw Escape and Ctrl+U control is verified for Droid only.
+#   - `exit` and `relaunch` require a recovery-grade agent-state classifier
+#     (tmux, herdr) or Droid's current-generation SessionEnd proof on Orca.
+#     Other zellij, orca, and cmux combinations refuse unproven stops.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
@@ -371,8 +370,32 @@ fm_backend_validate "$BACKEND" || exit 1
 
 # --- shared helpers ---------------------------------------------------------
 
+droid_orca_agent_state() {
+  local gen record pane verdict
+  fm_backend_source orca >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  gen=$(fm_meta_get "$META" busy_gen)
+  [ -n "$gen" ] || { printf 'unknown'; return 0; }
+  fm_control_droid_session_ended "$STATE" "$ID" "$META" && { printf 'dead'; return 0; }
+  record=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) || record=
+  case "$record" in
+    "busy droid-hook "*|"idle droid-hook "*) ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  pane=$(fm_backend_visible_capture orca "$T" "$LABEL" 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  verdict=$(fm_composer_droid_state "$pane" orca)
+  case "$verdict" in
+    empty|pending|pending-unproven) printf 'alive' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  if [ "$BACKEND" = orca ] && [ "$HARNESS" = droid ]; then
+    droid_orca_agent_state
+  else
+    fm_backend_agent_state "$BACKEND" "$T"
+  fi
 }
 
 busy_verdict() {
@@ -402,6 +425,9 @@ wait_agent_state() {  # <timeout> <wanted>...
 
 require_state_verified_backend() {  # <verb>
   fm_control_backend_state_verified "$BACKEND" && return 0
+  if [ "$BACKEND" = orca ] && [ "$HARNESS" = droid ]; then
+    return 0
+  fi
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
 }
 
@@ -465,9 +491,9 @@ send_interrupt_keys() {
   arm=$(fm_control_interrupt_arm_signal "$HARNESS")
   hazard=$(fm_control_interrupt_hazard_signal "$HARNESS")
   gap=$(fm_control_interrupt_press_gap "$HARNESS")
-  fm_control_backend_supports_key "$BACKEND" "$key" \
+  fm_control_backend_supports_key "$BACKEND" "$key" "$HARNESS" \
     || die "harness $HARNESS interrupts with $key, which the $BACKEND backend cannot deliver; refusing to send a different key"
-  [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
+  [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" "$HARNESS" \
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, which the $BACKEND backend cannot deliver; refusing to leave the cancelled prompt where the next submitted line would concatenate onto it"
   [ -z "$arm$hazard" ] || fm_backend_visible_capture_supported "$BACKEND" \
     || die "harness $HARNESS must see its screen between interrupt presses, because a repeated $key on an idle agent opens its revert picker, and the $BACKEND backend has no verified viewport read; refusing to press blind"
@@ -552,7 +578,8 @@ verify_interrupt_running() {
   fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
     || die "task $ID's endpoint disappeared while interrupting it; no further control action is safe"
   proof=endpoint
-  if fm_control_backend_state_verified "$BACKEND"; then
+  if fm_control_backend_state_verified "$BACKEND" \
+    || { [ "$BACKEND" = orca ] && [ "$HARNESS" = droid ]; }; then
     # An interrupt cancels a turn; it must never have stopped the agent. This
     # is the postcondition that separates a landed interrupt from an accident.
     after=$(agent_state)
@@ -627,7 +654,12 @@ retire_busy_incarnation() {
     gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
     if [ -n "$gen" ] \
       && "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$gen" >/dev/null 2>&1; then
-      clear_retired_meta_busy_gen "$gen" || true
+      # Orca Droid's stop proof compares SessionEnd to this old generation, so
+      # a later exit or relaunch still needs it. A replacement spawn publishes
+      # a fresh generation over it.
+      if [ "$BACKEND" != orca ] || [ "$HARNESS" != droid ]; then
+        clear_retired_meta_busy_gen "$gen" || true
+      fi
     fi
   fi
 }
@@ -1074,6 +1106,11 @@ do_relaunch() {
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  # Orca's only lifecycle proof is Droid's own hooks, so the replacement must
+  # be Droid too or its start could not be confirmed after the old one stops.
+  if ! fm_control_backend_state_verified "$BACKEND" && [ "$TARGET_HARNESS" != droid ]; then
+    die "task $ID runs on the $BACKEND backend, where only Droid's start and stop can be verified; relaunching onto '$TARGET_HARNESS' would stop the running agent for a replacement that cannot be confirmed"
+  fi
 
   case "$KIND" in
     ship|scout)

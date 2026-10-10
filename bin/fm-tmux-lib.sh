@@ -167,7 +167,26 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
+  if [ "$verdict" = unknown ] && fm_tmux_pane_is_droid "$target"; then
+    verdict=$(fm_tmux_droid_composer_state "$pane")
+  fi
   printf '%s' "$verdict"
+}
+
+# Droid parks tmux's cursor below its bordered composer, so a cursor-anchored
+# read cannot identify it. Limit the cursorless fallback to a foreground Droid
+# process and its live status/box envelope. Below the box only Droid's own
+# timer footer row (with an integration indicator) and the worker's `firstmate` status
+# row may appear; any other row, including a user statusLine or a modal, leaves
+# the composer unknown instead of allowing input.
+fm_tmux_pane_is_droid() {  # <target>
+  local comm
+  comm=$(tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null) || return 1
+  [ "$comm" = droid ]
+}
+
+fm_tmux_droid_composer_state() {  # <styled viewport>
+  fm_composer_droid_state "$1" tmux
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains

@@ -2494,3 +2494,55 @@ Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which
 This live proof covers the watcher and queue boundary; it does not establish live daemon-consumer delivery.
 `bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.
 Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
+## Factory Droid CLI
+
+Verified on 2026-10-01 with Droid 0.230.0, tmux 3.6a, and Orca 1.4.218 on Darwin 25.5.0 arm64.
+`droid --help` accepts an interactive positional prompt, `--settings`, and `--auto high`.
+`droid exec --help` lists model IDs and each model's supported reasoning levels, while interactive Droid receives model and effort through its per-task settings file.
+The [Factory CLI](https://docs.factory.com/droid-cli/cli-reference.md), [settings](https://docs.factory.com/droid-cli/settings.md), and [hooks](https://docs.factory.com/harness/hooks.md) references own those vendor contracts.
+Firstmate probes an explicit model before creating an endpoint, records a requested effort in task metadata, and omits it from runtime settings when no explicit model is given or that model does not support it.
+The settings replace the task's `statusLine` with `printf firstmate`, leave the operator's `hooksDisabled` policy intact, select Auto (High), and register `UserPromptSubmit`, `Stop`, `Notification`, and `SessionEnd` hooks.
+Spawn answers the fresh-worktree trust dialog only when `Trust this folder` is visibly selected and requires the launch prompt hook to acknowledge the brief.
+Droid dispatch is limited to tmux and Orca until the composer and lifecycle are verified live on other backends.
+
+The tmux composer proof uses the live `droid` process identity, the bounded box, a `[⏱ …]` timer row with a nonempty trailing integration indicator after `|`, and the task-owned status row.
+The Orca proof requires `terminal read --screen` to return `source=screen` and the exact recorded task terminal, then applies the same box, timer, and status-row check.
+That screen read is scoped to recorded Droid tasks; Orca is not in the shared `FM_BACKEND_VISIBLE_CAPTURE` capability list used by other harnesses.
+The live captures showed `TMUX ⧉` on tmux and `IDE ◌` on Orca, while the production parser accepts other trailing integration indicators.
+The opt-in Orca guard still asserts the observed `IDE ◌` indicator as a version drift check.
+An unrelated process, stale frame, extra row, or unknown terminal reads `unknown` and cannot authorize typed input.
+Orca 1.4.218 delivered Droid's raw Escape and Ctrl+U keys, while its current-generation `SessionEnd` hook marked exit before relaunch or teardown.
+A later rerun of the opt-in Orca guard on Orca 1.4.220 with Droid 0.233.0 passed relaunch, exit, and teardown with the process-gone check in place. Sampling `lsof -w -a -c droid -d cwd` every 3 seconds during that run found one `droid` process in the task worktree at a time and none after exit, so no `droid exec` worker child outlived the TUI there.
+A disposable Droid 0.230.0 TUI with a payload-recording `SessionEnd` hook showed `/clear` emitting `reason=clear` and then `reason=other` for the same old `session_id` while the process kept running, and `/exit` and Ctrl+C each emitting one `reason=other` for the current session. `reason=other` is therefore a session-close signal, not proof of process exit: the installed binary also sends it when it reloads a session or closes a Task subagent's session. Stop proof additionally requires an `lsof` scan finding no `droid` process whose working directory is inside the task worktree.
+The live interrupt checks observed a busy running tool, then an idle hook and missing completion marker before the tool's 45-second duration; control conservatively reports `cancel=unconfirmed` because the vendor offers no separate cancellation acknowledgement.
+
+Refresh commands:
+
+```sh
+bash tests/fm-droid-harness.test.sh
+bash tests/fm-backend-orca.test.sh
+FM_LIVE=1 bash tests/fm-harness-liveness-drift-live-e2e.test.sh
+FM_DROID_SIGNALS=1 bash tests/fm-droid-signals-live-e2e.test.sh
+FM_DROID_ORCA_SIGNALS=1 bash tests/fm-droid-orca-signals-live-e2e.test.sh
+```
+
+The real tmux and Orca scouts each received an explicit `gpt-5.6-luna` model and `low` effort, wrote their report, acknowledged an inbox steer, settled a turn-end hook, accepted a typed steer, interrupted a busy turn, relaunched with the same model and effort under a fresh generation, exited, and tore down their task wiring.
+The Orca scout also preserved its exact terminal handle and worktree ID across relaunch and removed the isolated worktree at teardown.
+The tmux guard has since defaulted to `gpt-5.6-terra`; the comment above its spawn in `tests/fm-droid-signals-live-e2e.test.sh` records why, and `FM_DROID_LIVE_MODEL` overrides either guard's model.
+The live liveness guard reported `droid 0.230.0: title='droid'`, `ancestry verdicts=[comm droid]`, and `checked 6 installed harness(es)` on tmux.
+The opt-in guards print five `ok` checks each, and the private task evidence contains their full stdout, report, viewport, and terminal transcript.
+Rechecked on 2026-10-05 with Droid 0.230.0, tmux 3.6a, and Orca 1.4.218 after merging current upstream main.
+Both live guards again printed five `ok` lifecycle checks; the Orca guard also verified that the typed prompt's `UserPromptSubmit` receipt matched its payload hash, current generation, and pre-Enter sequence.
+Rechecked `FM_DROID_ORCA_SIGNALS=1 bash tests/fm-droid-orca-signals-live-e2e.test.sh` on 2026-10-07 with Droid 0.233.0 and Orca 1.4.222 after limiting `--screen` to recorded Droid tasks and retaining the old `busy_gen` until replacement admission; exit `0` with these five checks:
+
+```text
+ok - Orca Droid received its brief and settled its turn
+ok - Orca Droid acknowledged inbox and typed fm-send steers
+ok - Orca Droid interrupted a running tool before normal completion
+ok - Orca Droid relaunch preserved endpoint and profile with a fresh generation
+ok - Orca Droid exit and teardown retired the terminal, worktree, and task wiring
+```
+
+That run was taken at commit `bd34cff`, before standalone Orca Droid exits also kept the retired `busy_gen`.
+Rechecked on 2026-10-08 with Droid 0.233.0 and Orca 1.4.222 at commit `a90dca3`, which made that change; exit `0` with the same five `ok` checks.
+`tests/fm-control.test.sh` also covers that change with a fake Orca terminal and `lsof`.
