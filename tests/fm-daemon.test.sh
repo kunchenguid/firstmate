@@ -726,7 +726,7 @@ test_unknown_wake_ack_suppresses_handled_identity() {
     || fail "a lost undelivered unknown wake did not escalate again"
 
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "unknown-wake flush failed"
   grep -F 'unknown wake: frobnicate: already-handled' "$state/.subsuper-unknown-acked" >/dev/null \
@@ -776,7 +776,7 @@ test_unknown_wake_ack_failure_still_clears_delivered_digest() {
     || fail "the unknown wake was not handled"
   escalate_add "$state" "done: PR https://example.test/pull/10"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" 2>/dev/null \
     || fail "a delivered digest was reported undelivered after its acknowledgement write failed"
   delivered_digest "$sent" | grep -F 'unknown wake: frobnicate: ack-write-fails' >/dev/null \
@@ -1651,7 +1651,7 @@ test_escalate_batches_into_one_digest() {
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed"
   # A Claude Code primary strips U+2063 from submitted prompts, so the digest
@@ -1684,7 +1684,7 @@ test_escalate_marker_preserving_primary_types_envelope() {
   capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
   escalate_add "$state" "event C: done: PR 3"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_DAEMON_PRIMARY_HARNESS=codex \
     escalate_flush "$state" || fail "escalate_flush failed for a marker-preserving primary"
   grep -F "${FM_OPERATIONAL_PREFIX}v1 away-supervisor: " "$sent" >/dev/null \
@@ -1735,7 +1735,7 @@ test_escalate_batch_age_uses_first_append() {
   escalate_add "$state" "event B: done: PR 2"
   echo $(( $(date +%s) - 100 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=90 FM_HOUSEKEEPING_TICK=0 \
     housekeeping "$state"
   delivered_digest "$sent" | grep -F 'event A: done: PR 1 | event B: done: PR 2' >/dev/null \
@@ -1966,7 +1966,7 @@ test_afk_absent_daemon_does_not_inject() {
   capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer: STRICT injection needs positive proof
   escalate_add "$state" "done: PR 1"
   # afk flag deliberately NOT set
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
     fail "escalate_flush succeeded while afk inactive"
   fi
@@ -1985,7 +1985,7 @@ test_busy_guard_defers_when_supervisor_busy() {
   printf 'esc to interrupt\n' > "$capture"
   escalate_add "$state" "done: PR 1"
   afk_enter "$state"
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
     fail "escalate_flush should defer when supervisor pane busy"
   fi
@@ -2334,7 +2334,7 @@ test_submit_ack_confirms_on_bordered_empty_composer() {
   local dir fakebin sent verdict
   dir=$(make_bordered_case ack-bordered)
   fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
-  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     fm_tmux_submit_core "win" "the digest" 3 0.05 0.05)
   [ "$verdict" = empty ] || fail "submit-ACK did not confirm on a bordered-empty composer: $verdict"
   [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "digest typed more than once (retype)"
@@ -2350,7 +2350,7 @@ test_submit_ack_reports_pending_on_persistent_swallow() {
   dir=$(make_bordered_case ack-swallow)
   fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
   touch "$dir/.swallow"
-  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
     fm_tmux_submit_core "win" "the digest" 3 0.05 0.05)
   [ "$verdict" = pending ] || fail "persistent swallow not reported as pending: $verdict"
@@ -2368,7 +2368,7 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
   escalate_add "$state" "needs-decision: pick A"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
   [ "$(delivered_digest "$sent" 2>/dev/null | grep -c 'Supervisor escalate' || true)" -eq 1 ] \
@@ -2389,7 +2389,7 @@ test_max_defer_flushes_empty_idle_pane() {
   escalate_add "$state" "done: PR https://x/y/pull/1"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
     housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a recovered max-defer flush"
@@ -2406,7 +2406,7 @@ test_max_defer_pending_composer_alarms_without_typing() {
   escalate_add "$state" "needs-decision: pick B"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
     housekeeping "$state"
   [ ! -s "$sent" ] || fail "max-defer typed into a pending composer"
@@ -2424,7 +2424,7 @@ test_normal_flush_clears_stale_wedge_marker() {
   printf 'old wedge\n' > "$state/.subsuper-inject-wedged"
   escalate_add "$state" "done: PR https://x/y/pull/2"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
     || fail "normal escalate_flush failed"
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after normal flush"
@@ -2450,7 +2450,7 @@ test_oversized_digest_is_bounded_and_kept_durable() {
   raw=$(LC_ALL=C wc -c < "$dir/buffer.orig" | tr -d ' ')
   [ "$raw" -gt 131071 ] || fail "fixture buffer is only $raw bytes; it must exceed one argument's 131,071-byte ceiling"
   afk_enter "$state"
-  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_FAKE_SEND_MAX_BYTES=131071 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
     || fail "oversized digest was not delivered: $(cat "$dir/daemon.log" 2>/dev/null)"
   digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
@@ -2480,7 +2480,7 @@ test_digest_budget_counts_omitted_events() {
   done
   cp "$state/.subsuper-escalations" "$dir/buffer.orig"
   afk_enter "$state"
-  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" || fail "many-event digest was not delivered"
   digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
   assert_contains "$digest" 'Supervisor escalate (20 event(s)): event 1: x' "digest header must count every buffered event"
@@ -2503,7 +2503,7 @@ test_inject_send_failure_logs_stage_stderr_and_bytes() {
   escalate_add "$state" "$item"
   cp "$state/.subsuper-escalations" "$dir/buffer.orig"
   afk_enter "$state"
-  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_FAKE_SEND_MAX_BYTES=100 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
     fail "escalate_flush reported success although the transport refused the send"
   fi
@@ -2514,7 +2514,7 @@ test_inject_send_failure_logs_stage_stderr_and_bytes() {
   fi
   [ ! -s "$sent" ] || fail "nothing may be typed when the initial send fails"
   cmp -s "$state/.subsuper-escalations" "$dir/buffer.orig" || fail "buffer changed after a failed send"
-  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_FAKE_SEND_MAX_BYTES=100 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
     fail "escalate_flush reported success on a retried refused send"
   fi
@@ -2537,7 +2537,7 @@ test_inject_enter_failure_logs_confirmation_stage() {
   touch "$dir/.swallow"
   escalate_add "$state" "needs-decision: pick C"
   afk_enter "$state"
-  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
     escalate_flush "$state"; then
     fail "escalate_flush reported success on a swallowed Enter"
@@ -2561,7 +2561,7 @@ test_bounded_digest_full_text_kept_after_typing() {
   escalate_add "$state" "$item"
   cp "$state/.subsuper-escalations" "$dir/buffer.orig"
   afk_enter "$state"
-  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
     escalate_flush "$state"; then
     fail "escalate_flush reported success on a swallowed Enter"
@@ -2570,13 +2570,13 @@ test_bounded_digest_full_text_kept_after_typing() {
   full=$(printf '%s' "$digest" | sed -n 's/.*full text of every event: \([^ )]*\).*/\1/p')
   [ -n "$full" ] && [ -f "$full" ] || fail "a typed bounded digest names a full-text file that was removed: $digest"
   cmp -s "$full" "$dir/buffer.orig" || fail "kept full-text file does not hold the buffered event verbatim"
-  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
     fail "escalate_flush reported success while the composer still held the typed digest"
   fi
   [ -f "$full" ] || fail "a deferred retry removed the full-text file the typed digest names"
   escalate_add "$state" "needs-decision: pick D"
-  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
     fail "escalate_flush reported success while the composer still held the typed digest"
   fi
@@ -2594,7 +2594,7 @@ test_below_max_defer_does_nothing() {
   escalate_add "$state" "needs-decision: pick A"
   date +%s > "$state/.subsuper-escalations.since"   # just now
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=300 housekeeping "$state"
   [ ! -s "$sent" ] || fail "injected before MAX_DEFER elapsed"
@@ -2610,7 +2610,7 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm() {
   sent="$dir/sent.log"; : > "$sent"
   escalate_add "$state" "needs-decision: pick B"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" FM_SUPERVISOR_TARGET=fm-sup:0 FM_SUPERVISOR_BACKEND=tmux \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
     housekeeping "$state"
   [ ! -s "$sent" ] || fail "injected while afk was inactive"
@@ -3228,6 +3228,279 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+# --- operator-session binding + resolver (kunchenguid/firstmate#1506) --------
+# The defect behind the 3.16-day undelivered escalation: with no operator
+# context, discovery "resolved" the firstmate:0 constant - a crew shell - and
+# armed pane delivery on it. The replacement contract: no constant is ever an
+# identity; the verdict is UNAVAILABLE; a session-start binding names the
+# operator session and is re-verified live before every delivery; and the
+# wedge alarm gets a channel independent of the pane path.
+
+test_resolve_returns_unavailable_not_the_fallback_constant() {
+  local dir state out
+  dir=$(make_supercase resolve-unavailable); state="$dir/state"
+  if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' \
+    HERDR_ENV='' HERDR_PANE_ID='' fm_supervisor_resolve "$state"); then
+    fail "resolver returned success with no operator identity anywhere: $out"
+  fi
+  case "$out" in
+    *firstmate*|*:0*) fail "resolver surfaced the fallback constant as a target: $out" ;;
+  esac
+  printf '%s' "$out" | grep -q 'UNAVAILABLE' \
+    || fail "resolver did not print the UNAVAILABLE verdict: $out"
+  pass "resolver: no identity resolves to UNAVAILABLE, never the firstmate:0 constant"
+}
+
+test_resolve_precedence_explicit_bound_tmuxpane_herdr() {
+  local dir state
+  dir=$(make_supercase resolve-precedence); state="$dir/state"
+  # Subshell-scoped: env assignments preceding FUNCTION calls persist in bash,
+  # so every neutralized discovery env must evaporate with the subshell rather
+  # than leak TMUX_PANE/HERDR_ENV into the rest of the suite.
+  (
+    set -u
+    local out
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%5' \
+      HERDR_ENV='' HERDR_PANE_ID='' fm_supervisor_resolve "$state") \
+      || fail "TMUX_PANE resolution failed: $out"
+    [ "$out" = "$(printf 'tmux\t%%5\tTMUX_PANE')" ] \
+      || fail "TMUX_PANE did not resolve as a tmux identity: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' \
+      HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 fm_supervisor_resolve "$state") \
+      || fail "herdr resolution failed: $out"
+    [ "$out" = "$(printf 'herdr\tiso1:w1:p9\tHERDR_ENV(HERDR_PANE_ID)')" ] \
+      || fail "herdr markers did not compose the target: $out"
+    out=$(FM_SUPERVISOR_TARGET='explicit:t' FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='%5' \
+      HERDR_ENV=1 HERDR_PANE_ID=w1:p9 fm_supervisor_resolve "$state") \
+      || fail "explicit resolution failed: $out"
+    [ "$out" = "$(printf 'herdr\texplicit:t\tFM_SUPERVISOR_TARGET')" ] \
+      || fail "explicit env did not win resolution: $out"
+    # A live binding beats pane env: the session-start record names the
+    # actual operator session; $TMUX_PANE only says where THIS shell happens
+    # to run. The resolver call is direct (not $()) so its RECORD_STATE
+    # verdict is readable after it returns.
+    printf 'herdr\tsess:p1\t\t\n' > "$state/$FM_SUPERVISOR_SESSION_NAME"
+    FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%5' \
+      HERDR_ENV='' HERDR_PANE_ID='' fm_supervisor_resolve "$state" > "$dir/out" \
+      || fail "bound resolution failed"
+    out=$(cat "$dir/out")
+    [ "$out" = "$(printf 'herdr\tsess:p1\tBOUND(.supervisor-session)')" ] \
+      || fail "a verified binding did not beat pane env: $out"
+    [ "$FM_SUPERVISOR_RECORD_STATE" = verified ] \
+      || fail "bound record did not report verified: $FM_SUPERVISOR_RECORD_STATE"
+    # A stale binding must NOT shadow live env discovery - it rots, so it
+    # falls through to the next provider and reports itself stale.
+    printf 'tmux\t%%999\tpane_pid:1\t\n' > "$state/$FM_SUPERVISOR_SESSION_NAME"
+    FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%5' \
+      HERDR_ENV='' HERDR_PANE_ID='' fm_supervisor_resolve "$state" > "$dir/out" \
+      || fail "stale-record env resolution failed"
+    out=$(cat "$dir/out")
+    [ "$out" = "$(printf 'tmux\t%%5\tTMUX_PANE')" ] \
+      || fail "a stale binding shadowed live pane env: $out"
+    [ "$FM_SUPERVISOR_RECORD_STATE" = stale ] \
+      || fail "stale record did not report stale: $FM_SUPERVISOR_RECORD_STATE"
+  ) || fail "resolver precedence subshell failed"
+  pass "resolver: explicit > verified binding > TMUX_PANE > herdr > UNAVAILABLE (stale binding falls through)"
+}
+
+test_inject_msg_unavailable_never_touches_a_pane() {
+  local dir state
+  dir=$(make_supercase inject-unavailable); state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { fail "a pane probe ran with no resolved identity"; }
+    fm_backend_send_text_submit() { fail "send ran with no resolved identity"; }
+    # Cleared inside the subshell: prefixes on a bash function are restored
+    # on return, which would hide any leak into the armed globals.
+    FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' \
+      HERDR_ENV='' HERDR_PANE_ID=''
+    if inject_msg "hello" "$state"; then
+      fail "inject_msg delivered with no operator session identity"
+    fi
+    case "$INJECT_LAST_FAILURE" in
+      *UNAVAILABLE*) ;;
+      *) fail "UNAVAILABLE verdict missing from the failure: $INJECT_LAST_FAILURE" ;;
+    esac
+    # The verdict disarms rather than pinning: next call re-resolves.
+    [ -z "${FM_SUPERVISOR_TARGET:-}" ] \
+      || fail "UNAVAILABLE armed FM_SUPERVISOR_TARGET=$FM_SUPERVISOR_TARGET"
+  ) || fail "UNAVAILABLE inject subshell failed"
+  pass "inject_msg: UNAVAILABLE verdict fails closed without probing any pane (buffer preserved)"
+}
+
+test_supervisor_session_bind_verify_and_drift() {
+  command -v tmux >/dev/null 2>&1 || { pass "skipped: real tmux unavailable"; return 0; }
+  local dir state session pane pid out rc
+  dir=$(make_supercase bind-tmux); state="$dir/state"
+  session="fm-bind-test-$$"
+  tmux new-session -d -s "$session" -x 80 -y 24 'sleep 600' \
+    || { pass "skipped: tmux server could not start"; return 0; }
+  pane=$(tmux display-message -p -t "$session:0.0" '#{pane_id}' 2>/dev/null)
+  pid=$(tmux display-message -p -t "$session:0.0" '#{pane_pid}' 2>/dev/null)
+  case "$pane $pid" in
+    %*\ *[0-9]*) ;;
+    *) tmux kill-session -t "$session" 2>/dev/null; fail "could not capture the pane identity: '$pane' '$pid'" ;;
+  esac
+  # Bind as the session-start writer does, then resolve with all env cleared:
+  # the record alone must carry the operator identity.
+  ( FM_SUPERVISOR_TARGET='' TMUX_PANE=$pane fm_supervisor_session_write "$state" ) \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "session_write failed under a live tmux pane"; }
+  out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' \
+    HERDR_ENV='' HERDR_PANE_ID='' fm_supervisor_resolve "$state") \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "bound record did not resolve: $out"; }
+  [ "$out" = "$(printf 'tmux\t%s\tBOUND(.supervisor-session)' "$pane")" ] \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "bound record resolved to the wrong identity: $out"; }
+  # The same live-session verifier is what lets the dead pane fail closed:
+  # kill the bound pane's session and the record stops naming it.
+  tmux kill-session -t "$session" 2>/dev/null
+  if FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' \
+    HERDR_ENV='' HERDR_PANE_ID='' fm_supervisor_resolve "$state" > "$dir/out"; then
+    fail "a stale binding still resolved after its pane died: $(cat "$dir/out")"
+  fi
+  [ "$FM_SUPERVISOR_RECORD_STATE" = stale ] \
+    || fail "dead-pane binding did not report stale: $FM_SUPERVISOR_RECORD_STATE"
+  pass "session binding: tmux record resolves BOUND while the pane lives and goes UNAVAILABLE when it dies"
+}
+
+test_supervisor_session_fields_preserves_empty_verifier() {
+  # A herdr binding has an empty verifier with a real alarm_tty behind it:
+  # IFS-tab collapse would shift the slots and misread alarm_tty as the
+  # verifier (Greptile P1). Positional parse must keep every slot exact.
+  local b t v a
+  fm_supervisor_session_fields "$(printf 'herdr\tw:p2\t\t/dev/pts/5:pts/5:777')" b t v a \
+    || fail "a 4-slot herdr record did not parse"
+  [ "$b" = herdr ] && [ "$t" = 'w:p2' ] && [ -z "$v" ] && [ "$a" = '/dev/pts/5:pts/5:777' ] \
+    || fail "empty verifier slot collapsed fields: b=$b t=$t v=$v a=$a"
+  fm_supervisor_session_fields "$(printf 'tmux\t%%1\tpane_pid:9\t/dev/pts/6:pts/6:8')" b t v a \
+    || fail "a 4-slot tmux record did not parse"
+  [ "$b" = tmux ] && [ "$t" = '%1' ] && [ "$v" = 'pane_pid:9' ] && [ "$a" = '/dev/pts/6:pts/6:8' ] \
+    || fail "tmux record parsed wrong: b=$b t=$t v=$v a=$a"
+  pass "session fields: an empty verifier keeps its slot - alarm_tty never shifts into it"
+}
+
+test_inject_msg_bound_identity_reverified_before_delivery() {
+  command -v tmux >/dev/null 2>&1 || { pass "skipped: real tmux unavailable"; return 0; }
+  local dir state session pane pid
+  dir=$(make_supercase bind-drift); state="$dir/state"
+  afk_enter "$state"
+  session="fm-drift-test-$$"
+  tmux new-session -d -s "$session" -x 80 -y 24 'sleep 600' \
+    || { pass "skipped: tmux server could not start"; return 0; }
+  pane=$(tmux display-message -p -t "$session:0.0" '#{pane_id}' 2>/dev/null)
+  pid=$(tmux display-message -p -t "$session:0.0" '#{pane_pid}' 2>/dev/null)
+  # Record the identity as bound BEFORE the pane dies, then arm inject on it.
+  # The armed env is set INSIDE the subshell, not as call prefixes: assignments
+  # preceding a bash function are restored on return, which would hide the
+  # disarm writes the drift path makes.
+  printf 'tmux\t%s\tpane_pid:%s\t\n' "$pane" "$pid" > "$state/$FM_SUPERVISOR_SESSION_NAME"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'empty'; }
+    FM_SUPERVISOR_TARGET=$pane FM_SUPERVISOR_BACKEND=tmux \
+      FM_SUPERVISOR_TARGET_SOURCE='BOUND(.supervisor-session)'
+    inject_msg "hello" "$state" \
+      || fail "inject on a live bound identity failed: $INJECT_LAST_FAILURE"
+  ) || { tmux kill-session -t "$session" 2>/dev/null; fail "live-bound inject subshell failed"; }
+  tmux kill-session -t "$session" 2>/dev/null
+  (
+    fm_backend_target_exists() { fail "a pane probe ran through a stale binding"; }
+    fm_backend_send_text_submit() { fail "send ran through a stale binding"; }
+    FM_SUPERVISOR_TARGET=$pane FM_SUPERVISOR_BACKEND=tmux \
+      FM_SUPERVISOR_TARGET_SOURCE='BOUND(.supervisor-session)'
+    if inject_msg "hello" "$state"; then
+      fail "inject_msg delivered through a stale binding"
+    fi
+    case "$INJECT_LAST_FAILURE" in
+      *stale\ binding*) ;;
+      *) fail "stale-binding refusal did not name itself: $INJECT_LAST_FAILURE" ;;
+    esac
+    [ "${FM_SUPERVISOR_TARGET_SOURCE:-}" = UNAVAILABLE ] \
+      || fail "stale binding did not disarm to UNAVAILABLE: ${FM_SUPERVISOR_TARGET_SOURCE:-}"
+    [ -z "${FM_SUPERVISOR_TARGET:-}" ] \
+      || fail "stale binding left FM_SUPERVISOR_TARGET armed: $FM_SUPERVISOR_TARGET"
+  ) || fail "stale-binding inject subshell failed"
+  pass "inject_msg: bound identity is re-verified per injection; drift disarms to UNAVAILABLE"
+}
+
+test_inject_msg_tty_backend_writes_to_bound_terminal() {
+  command -v tmux >/dev/null 2>&1 || { pass "skipped: real tmux unavailable"; return 0; }
+  local dir state session pane pid ttydev short out
+  dir=$(make_supercase bind-tty); state="$dir/state"
+  afk_enter "$state"
+  session="fm-tty-test-$$"
+  tmux new-session -d -s "$session" -x 80 -y 24 'sleep 600' \
+    || { pass "skipped: tmux server could not start"; return 0; }
+  pane=$(tmux display-message -p -t "$session:0.0" '#{pane_id}' 2>/dev/null)
+  pid=$(tmux display-message -p -t "$session:0.0" '#{pane_pid}' 2>/dev/null)
+  ttydev=$(tmux display-message -p -t "$session:0.0" '#{pane_tty}' 2>/dev/null)
+  short=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$short" ] && [ -w "$ttydev" ] \
+    || { tmux kill-session -t "$session" 2>/dev/null; pass "skipped: pane tty not capturable"; return 0; }
+  # A tty binding's verifier is the session leader's own tty triple.
+  printf 'tty\t%s\t%s:%s:%s\t\n' "$ttydev" "$ttydev" "$short" "$pid" \
+    > "$state/$FM_SUPERVISOR_SESSION_NAME"
+  out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' \
+    HERDR_ENV='' HERDR_PANE_ID='' fm_supervisor_resolve "$state") \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "tty binding did not resolve: $out"; }
+  [ "$out" = "$(printf 'tty\t%s\tBOUND(.supervisor-session)' "$ttydev")" ] \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "tty binding resolved wrong: $out"; }
+  (
+    fm_backend_target_exists() { fail "a pane probe ran on a tty backend"; }
+    fm_backend_composer_state() { fail "a composer guard ran on a tty backend"; }
+    fm_backend_send_text_submit() { fail "send ran on a tty backend"; }
+    FM_SUPERVISOR_TARGET=$ttydev FM_SUPERVISOR_BACKEND=tty \
+      FM_SUPERVISOR_TARGET_SOURCE='BOUND(.supervisor-session)' \
+      inject_msg "tty delivery probe" "$state" \
+      || fail "tty inject failed on a live bound terminal: $INJECT_LAST_FAILURE"
+  ) || { tmux kill-session -t "$session" 2>/dev/null; fail "tty inject subshell failed"; }
+  tmux capture-pane -p -t "$pane" 2>/dev/null | grep -F 'tty delivery probe' >/dev/null \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "digest did not appear on the bound terminal"; }
+  tmux kill-session -t "$session" 2>/dev/null
+  pass "inject_msg: a bound tty delivers the digest to the operator's own terminal device"
+}
+
+test_wedge_alarm_tty_channel_independent_of_pane_path() {
+  command -v tmux >/dev/null 2>&1 || { pass "skipped: real tmux unavailable"; return 0; }
+  local dir state log session pane pid ttydev short
+  dir=$(make_wedge_case wedge-tty); state="$dir/state"; log="$dir/alert.log"
+  session="fm-wedge-tty-$$"
+  tmux new-session -d -s "$session" -x 80 -y 24 'sleep 600' \
+    || { pass "skipped: tmux server could not start"; return 0; }
+  pane=$(tmux display-message -p -t "$session:0.0" '#{pane_id}' 2>/dev/null)
+  pid=$(tmux display-message -p -t "$session:0.0" '#{pane_pid}' 2>/dev/null)
+  ttydev=$(tmux display-message -p -t "$session:0.0" '#{pane_tty}' 2>/dev/null)
+  short=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$short" ] && [ -w "$ttydev" ] \
+    || { tmux kill-session -t "$session" 2>/dev/null; pass "skipped: pane tty not capturable"; return 0; }
+  # A pane binding carries its controlling terminal as the alarm side-channel.
+  printf 'tmux\t%s\tpane_pid:%s\t%s:%s:%s\n' "$pane" "$pid" "$ttydev" "$short" "$pid" \
+    > "$state/$FM_SUPERVISOR_SESSION_NAME"
+  # Selection: the tty channel routes through the recorder seam like any other.
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=off wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker" "$state"
+  grep -F 'tty' "$log" >/dev/null \
+    && { tmux kill-session -t "$session" 2>/dev/null; fail "off did not suppress the bound-tty channel: $(cat "$log")"; }
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker" "$state"
+  grep -F $'tty\t' "$log" >/dev/null \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "bound tty did not fire alongside the configured channel: $(cat "$log")"; }
+  grep -F 'osascript' "$log" >/dev/null \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "configured channel did not fire: $(cat "$log")"; }
+  # Real write: bypass the seam and the alarm text lands on the bound
+  # terminal itself, with no pane/composer/status-line in the path.
+  FM_WEDGE_ALARM_EXEC='' wedge_alarm_via_tty "away-mode escalations WEDGED 900s undelivered" "$state" \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "real tty channel returned failure on a live bound terminal"; }
+  tmux capture-pane -p -t "$pane" 2>/dev/null | grep -F 'escalations WEDGED' >/dev/null \
+    || { tmux kill-session -t "$session" 2>/dev/null; fail "alarm text did not reach the bound terminal"; }
+  # Fails closed: once the recorded session dies, the real channel refuses
+  # to write - no terminal on this box may receive the alarm text.
+  tmux kill-session -t "$session" 2>/dev/null
+  FM_WEDGE_ALARM_EXEC='' wedge_alarm_via_tty "should never be written" "$state" \
+    && fail "real tty channel wrote to a terminal whose session died"
+  pass "wedge alarm: bound tty fires independent of the pane path, honors off, and fails closed on a dead session"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -3372,3 +3645,11 @@ test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+test_resolve_returns_unavailable_not_the_fallback_constant
+test_resolve_precedence_explicit_bound_tmuxpane_herdr
+test_inject_msg_unavailable_never_touches_a_pane
+test_supervisor_session_bind_verify_and_drift
+test_supervisor_session_fields_preserves_empty_verifier
+test_inject_msg_bound_identity_reverified_before_delivery
+test_inject_msg_tty_backend_writes_to_bound_terminal
+test_wedge_alarm_tty_channel_independent_of_pane_path

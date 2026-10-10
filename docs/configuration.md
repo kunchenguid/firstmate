@@ -526,13 +526,19 @@ Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.
-It currently supports only `tmux` and `herdr` supervisor panes.
+It supports `tmux` and `herdr` supervisor panes plus `tty` bound-terminal delivery; `tty` writes the digest to the operator terminal device recorded at session start and is how a primary outside every multiplexer is reached.
 
-Set `FM_SUPERVISOR_BACKEND=tmux|herdr` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"`.
-Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then falls back to `tmux`.
+Set `FM_SUPERVISOR_BACKEND=tmux|herdr|tty` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"` and for tty a writable `/dev/...` terminal device.
 
+Every delivery path resolves the operator session through one resolver (`bin/fm-supervisor-target-lib.sh`'s `fm_supervisor_resolve`), with precedence: explicit `FM_SUPERVISOR_TARGET`, then the `state/.supervisor-session` binding while it still names the same live session, then `$TMUX_PANE`, then `HERDR_ENV=1` with `HERDR_PANE_ID` (`"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"`), then the `UNAVAILABLE` verdict.
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
-Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
+UNAVAILABLE means pane escalation is OFF: no identity was discovered or verified anywhere, and the daemon never substitutes the legacy `firstmate:0` constant - a constant is not an identity, and arming it is how escalations once aimed a crew shell pane for days (issue #1506).
+
+### Operator-session binding (state/.supervisor-session)
+
+While it holds the fleet lock, `bin/fm-session-start.sh` records the session it is running in: tmux pane id with its `pane_pid` verifier, a herdr `"<session>:<pane-id>"`, or its own controlling tty as `<device>:<ps-tty-short>:<session-leader-pid>` triple, in that precedence.
+Pane records also carry the pane's controlling terminal as an alarm side-channel for the wedge alarm below.
+Every injection re-verifies the binding still names the same live session (tmux `pane_pid` re-probe, tty triple re-check); a record whose session died or drifted fails closed to `UNAVAILABLE` rather than delivering to whatever occupies the endpoint now.
 
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
@@ -540,6 +546,8 @@ Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, r
 
 When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
 Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
+The marker records the armed supervisor target, its resolution source (explicit, `BOUND(.supervisor-session)`, `TMUX_PANE`, `HERDR_ENV`, or `UNAVAILABLE`), the backend, and the last delivery failure, so the alarm names the failed path instead of guessing "pane busy or wedged".
+Whenever a verified `state/.supervisor-session` binding exists, the alarm also writes its text to the bound controlling terminal - the one exit that shares no code path with the pane delivery that just failed; an `off` directive suppresses it like every other channel.
 
 ### Channels and overrides
 
@@ -2481,8 +2489,8 @@ FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed-plane submit; 0 disables
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after the request turn completes without a correlated parent report before its one recovery repost is eligible, and after the recovery turn completes before the missed-report escalation is eligible; never counted from delivery
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
-FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
-FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected
+FM_SUPERVISOR_BACKEND=             # optional supervisor pane/terminal backend override; tmux/herdr/tty, otherwise resolves per the precedence above
+FM_SUPERVISOR_TARGET=              # optional supervisor pane/terminal target override; tmux target, herdr <session>:<pane-id>, or tty /dev/... device, otherwise auto-resolved
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
