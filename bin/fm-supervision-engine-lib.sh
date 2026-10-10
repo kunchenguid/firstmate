@@ -55,7 +55,7 @@ FM_SUPERVISION_ENGINES_VERIFIED='claude'
 fm_supervision_host_primary() {
   if [ "${FM_TEST_SEAM:-}" = 1 ]; then
     case "${FM_TEST_HARNESS:-}" in
-      claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | unknown)
+      claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | unknown)
         printf '%s\n' "$FM_TEST_HARNESS"
         return
         ;;

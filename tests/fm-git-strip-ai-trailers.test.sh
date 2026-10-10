@@ -356,7 +356,18 @@ test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   pass "commit-msg file mode strips the trailer and keeps the subject"
 }
 
+test_commandcode_trailer_is_stripped() {
+  local msg
+  msg="$TMP_ROOT/commandcode-msg.txt"
+  printf '%s\n' 'Add computed sum to answer.txt' '' 'Co-authored-by: CommandCodeBot <noreply@commandcode.ai>' >"$msg"
+  "$STRIP" "$msg" || fail "strip should succeed"
+  assert_not_contains "$(cat "$msg")" "CommandCodeBot" "strip left the Command Code trailer in the file"
+  assert_contains "$(cat "$msg")" "Add computed sum to answer.txt" "strip dropped the subject"
+  pass "the Command Code trailer a worker writes into its own message is stripped"
+}
+
 test_cursor_trailer_does_not_reach_the_commit_object
+test_commandcode_trailer_is_stripped
 test_human_coauthor_is_kept
 test_human_at_a_vendor_domain_is_kept
 test_hook_manager_cannot_displace_the_strip

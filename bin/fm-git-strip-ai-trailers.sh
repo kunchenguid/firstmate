@@ -36,6 +36,9 @@
 # on cursor-agent 2026.09.15 with attribution on: the trailer is already in
 # .git/COMMIT_EDITMSG when the commit-msg hook runs, so the spawn-owned hook is
 # the layer that sees the assembled message before the commit object is written.
+# Command Code adds `Co-authored-by: CommandCodeBot <noreply@commandcode.ai>`
+# to worker commits by default (seen live on 1.74.1); only its settings files can
+# turn that off, with no per-process switch, so this strip is its only layer.
 # Human Co-Authored-By trailers are left untouched. Author identity is not
 # rewritten.
 #
@@ -104,12 +107,12 @@ fm_is_ai_attribution_line() {
   esac
   name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
   case "$email" in
-  noreply@anthropic.com | cursoragent@* | noreply@openai.com | copilot@github.com)
+  noreply@anthropic.com | cursoragent@* | noreply@openai.com | copilot@github.com | noreply@commandcode.ai)
     return 0
     ;;
   esac
   case "$name" in
-  cursor | 'cursor agent' | claude | 'claude code' | 'github copilot' | copilot | codex | chatgpt | gemini | 'google gemini' | grok | openai)
+  cursor | 'cursor agent' | claude | 'claude code' | 'github copilot' | copilot | codex | chatgpt | gemini | 'google gemini' | grok | openai | commandcodebot)
     return 0
     ;;
   esac

@@ -772,6 +772,10 @@ devin is verified for crewmate and scout launches only; a secondmate is refused 
 
 Its private worker config disables Claude Code imports (including the captain's hooks) and, unless the home sets `config/keep-ai-trailers` (see "Commit attribution"), Devin commit attribution without editing user or project config; [`fm-devin-config.sh`](../bin/fm-devin-config.sh) owns these enforced settings and [Devin verification](verification/devin.md) owns the live evidence and observed model availability.
 
+commandcode (Command Code) is verified for crewmate and scout launches only; a secondmate is refused because Command Code has no verified primary supervision protocol.
+It runs only on the tmux and Herdr backends; a zellij, cmux, or orca launch is refused because those backends supply no Command Code pane identity, without which its idle composer placeholder never reads empty and steering stalls.
+Its busy-state wiring is a tracked mod loaded per process with `--mod`, so no user or project Command Code settings are edited; [its adapter reference](../.agents/skills/harness-adapters/references/harness/commandcode.md) owns the launch facts and [Command Code verification](verification/commandcode.md) owns the live evidence.
+
 ### Verification and primary supervision
 
 New harnesses get verified through a supervised trial task before joining the set.
@@ -1159,7 +1163,7 @@ Typed resolution additively recognizes `gemini` because AGENTS.md section 4 veri
 | Harness | Provider declaration on the opted-in resolver path |
 | --- | --- |
 | `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, `muse` | The resolver has an authoritative single-provider mapping. |
-| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, and `devin`; omission is an actionable configuration error before any request. |
+| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, `devin`, and `commandcode`; omission is an actionable configuration error before any request. |
 
 This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 
@@ -2474,7 +2478,7 @@ FM_BUSY_REGEX=          # optional override for rendered delivery guards and Gro
 FM_COMPOSER_IDLE_RE=    # optional fleet-wide idle-placeholder regex override (bin/fm-composer-lib.sh); a match alone does not prove emptiness because shape-specific position and ANSI de-emphasis safety gates still apply
 FM_COMPOSER_CAPTURE_LINES=20   # fleet-wide bound for tail-capture composer reads; it no longer bounds the adapter composer state/content reads on tmux or herdr, which supply their bounded visible pane instead, while the cmux, orca, and Zellij adapters use this small window so stale scrollback banners stay out of the candidate set; it still bounds the shared inbox composer read (bin/fm-task-inbox-lib.sh) on every backend, and on herdr it also floors how many Ctrl+U presses a refused leftover may take
 FM_COMPOSER_PI_MAX_LINES=8     # fleet-wide: maximum rows admitted between Pi's identity-corroborated separator pair; taller or ambiguous candidates stay unknown
-FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, used by styled tmux, herdr, and Zellij reads)
+FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless, and a screen whose backend identity is Command Code is read at a fixed 160 instead. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, used by styled tmux, herdr, and Zellij reads)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send typed-plane Enter-retry attempts after typing the line once; agy typed targets use a longer per-harness default owned by bin/fm-send.sh
 FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
