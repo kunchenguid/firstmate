@@ -141,6 +141,7 @@ an ERROR in the daemon log naming the last delivery failure, a durable
 `state/.subsuper-inject-wedged` marker (the return brief's health line carries it), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
+When the captain pane no longer holds a live agent, the wedge instead fails the away window terminally and the failure leads the return brief (`docs/wedge-alarm.md` "Terminal away-window failure").
 
 ### Submit model
 
@@ -218,7 +219,8 @@ The single-line format makes submission unambiguous across harnesses; the carrie
   durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
   applicable, and a backend-independent active alert. A
   composer false-positive surfaces as a visible stall, never an unbounded silent
-  no-op.
+  no-op; an exited or vanished captain agent fails the window terminally
+  (`docs/wedge-alarm.md` "Terminal away-window failure").
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit
@@ -252,7 +254,7 @@ The single-line format makes submission unambiguous across harnesses; the carrie
 ### Stale-artifact lifecycle
 
 Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-unknown-acked` as session-scoped delivery artifacts, not as the durable work record.
-Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
+Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry (no `state/.afk`) and preserves the current session's buffer on refresh or on a restart of an unfinished window (`docs/wedge-alarm.md` "Terminal away-window failure").
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush, clears it, and archives the posture record last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
 
