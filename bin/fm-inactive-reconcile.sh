@@ -88,7 +88,7 @@
 #
 # Every scan, including one the cadence gate then skips, also keeps the
 # idle-after-handoff record under state/handoff-continuations/. One record per
-# task incarnation and exact completion line. It is not a parent delivery:
+# task incarnation and exact completion event. It is not a parent delivery:
 # publishing a child outcome upstream does not clear it, and this pass never
 # sends the validation command. needs-validation is not a terminal ledger line,
 # so the ledger-first path does not publish it. A legacy no-mistakes done
@@ -728,8 +728,8 @@ handoff_set() { # <record> <key> <value>
   mv -f "$tmp" "$record" || { rm -f "$tmp"; return 1; }
 }
 
-handoff_ensure() { # <fingerprint> <task> <incarnation> <line> <observed-epoch>
-  local fingerprint=$1 task=$2 incarnation=$3 line=$4 observed=$5 path tmp
+handoff_ensure() { # <fingerprint> <task> <incarnation> <line> <event-ordinal> <observed-epoch>
+  local fingerprint=$1 task=$2 incarnation=$3 line=$4 ordinal=$5 observed=$6 path tmp
   path=$(handoff_record_path "$fingerprint")
   if [ -f "$path" ] && [ ! -L "$path" ]; then
     return 0
@@ -741,6 +741,7 @@ handoff_ensure() { # <fingerprint> <task> <incarnation> <line> <observed-epoch>
     printf 'task_id=%s\n' "$task"
     printf 'incarnation=%s\n' "$incarnation"
     printf 'completion_line=%s\n' "$(clean_field "$line")"
+    printf 'completion_ordinal=%s\n' "$ordinal"
     printf 'observed_epoch=%s\n' "$observed"
     printf 'bound_secs=%s\n' "$FM_HANDOFF_IDLE_SECS"
     printf 'alerted=0\n'
@@ -787,7 +788,7 @@ handoff_marker_write() { # <task> <fingerprint>
 }
 
 handoff_one() { # <id> <meta>
-  local id=$1 meta=$2 status kind mode incarnation line verb fingerprint observed record known
+  local id=$1 meta=$2 status kind mode incarnation line verb fingerprint observed record known ordinal=0
   local -a open_fps=() stored_fps=()
   local now age key alerted last_alert state_line state_rc path item fp
   local clearer_epoch marker proof='' reason='' evidence_rc=0
@@ -814,8 +815,9 @@ handoff_one() { # <id> <meta>
       case "$line" in *[![:space:]]*) ;; *) continue ;; esac
       verb=$(status_line_verb "$line")
       _fm_status_verb_recognized "$verb" || continue
+      ordinal=$((ordinal + 1))
       if handoff_is_completion "$verb" "$line" "$kind" "$mode" "$id" "$meta"; then
-        fingerprint=$(sha256_text "$incarnation|$id|$line")
+        fingerprint=$(sha256_text "$incarnation|$id|$ordinal|$line")
         observed=$(handoff_line_epoch "$line")
         case "$observed" in
           ''|*[!0-9]*) observed=$(handoff_value "$(handoff_record_path "$fingerprint")" observed_epoch) ;;
@@ -823,7 +825,7 @@ handoff_one() { # <id> <meta>
         case "$observed" in
           ''|*[!0-9]*) observed=$(reconcile_now) ;;
         esac
-        handoff_ensure "$fingerprint" "$id" "$incarnation" "$line" "$observed" || return 1
+        handoff_ensure "$fingerprint" "$id" "$incarnation" "$line" "$ordinal" "$observed" || return 1
         if [ -z "$(handoff_value "$(handoff_record_path "$fingerprint")" cleared_epoch)" ]; then
           known=0
           for item in "${open_fps[@]+"${open_fps[@]}"}"; do

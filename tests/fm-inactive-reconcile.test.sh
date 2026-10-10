@@ -1369,6 +1369,45 @@ test_handoff_idle_replay_keeps_later_completion_open() {
   pass "status replay clears only completions pending at the continuation line"
 }
 
+test_handoff_idle_records_repeated_identical_completions() {
+  local home completion record first_record='' second_record='' fp8 key
+  make_world handoff-repeated-completion
+  install_handoff_fakes
+  home=$MAIN
+  completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
+  write_child "$home" intake "$completion" inc-repeated-1
+  printf '%s\n%s\n' \
+    "$completion" \
+    "needs-decision [at=$HANDOFF_CONT] [key=hold]: an explicit hold" \
+    > "$home/state/intake.status"
+  scan_handoff "$home"
+  printf '%s\n' "$completion" >> "$home/state/intake.status"
+  scan_handoff "$home"
+
+  while IFS= read -r record; do
+    if [ -z "$(handoff_field "$record" cleared_epoch)" ]; then
+      second_record=$record
+    else
+      first_record=$record
+    fi
+  done < <(records_for "$home" intake)
+  [ "$(records_for_count "$home" intake)" = 2 ] \
+    || fail "two identical completion events did not keep separate records"
+  [ -n "$first_record" ] || fail "the held completion record was missing"
+  [ "$(handoff_field "$first_record" clear_reason)" = status:needs-decision ] \
+    || fail "the explicit hold did not clear the first completion"
+  [ -n "$second_record" ] || fail "the repeated completion did not create an open record"
+  [ -z "$(handoff_field "$second_record" cleared_epoch)" ] \
+    || fail "the repeated completion inherited the earlier clear"
+  fp8=$(basename "$second_record" .record)
+  key="handoff-idle-intake-${fp8:0:8}"
+  grep -Fxq "$fp8" "$home/state/handoff-continuations/intake.open" \
+    || fail "the repeated completion did not own the open marker"
+  grep -Fq "$key" "$home/state/.wake-queue" \
+    || fail "the repeated completion did not receive an idle alert"
+  pass "each identical completion occurrence retains its own handoff"
+}
+
 test_handoff_idle_clears_only_on_continuation() {
   local home record before after verb uncleared
   local completion="needs-validation [at=$HANDOFF_OLD]: committed c118078, 706 tests"
@@ -1755,6 +1794,7 @@ test_handoff_idle_fails_closed_when_continuation_predicate_is_unreadable
 test_handoff_idle_generic_line_does_not_read_the_predicate
 test_handoff_idle_survives_a_replaced_status_log
 test_handoff_idle_replay_keeps_later_completion_open
+test_handoff_idle_records_repeated_identical_completions
 test_parent_publication_does_not_clear_local_continuation
 test_handoff_directory_symlink_fails_the_scan
 test_handoff_idle_bound_refuses_out_of_range
