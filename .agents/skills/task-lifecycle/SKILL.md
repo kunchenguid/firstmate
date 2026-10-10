@@ -39,10 +39,13 @@ Resolve every ship task's concrete delivery mode and `yolo` merge posture at int
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
 Resolve the project's registered ship-branch prefix the same way, via `bin/fm-project-mode.sh --branch-prefix <project>`, and pass it explicitly to the brief, ship spawn, and scout promotion as `--branch-prefix` (default `fm/` needs no flag).
+When the work must start from and target a branch other than the project's default, such as a named feature or release branch, pass it to the ship or scout brief and spawn as `--base-branch <branch>`; any promotion reads it from task meta.
 On a `no-mistakes-prod-only` project, internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`; product-facing, mixed, and uncertain work ships `no-mistakes`; never infer internal-only from file location or project name.
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
 Dispatch isolated work immediately when each change can be independently implemented and validated; serialize only for a true semantic dependency or other concrete unsafe overlap.
+A project's declared machine capacity (`config/project-capacity`) still bounds that dispatch: a spawn beyond it exits 75 without launching, and its item stays queued rather than blocked.
+When `config/project-capacity` caps a project, also re-evaluate its queued work after a recorded PR-ready handoff, dispatching items only when dependencies, time gates, and project capacity have cleared.
 Write the task-specific brief under `AGENTS.md` section 11 before spawning.
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 Fill `## Captain's intent` with the captain's own ask and stated boundary plus the context needed to read it, including the substance of any report, decision, or PR the ask refers to; never widen the ask there.

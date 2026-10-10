@@ -54,8 +54,11 @@
 #     before the close is printed, so supervision continues when the session
 #     drops the handoff. It confirms no handling handoff, so the recovery
 #     marker still reads downtime and the re-arm owner delivers the close to
-#     main. The watcher singleton lock makes the session's next arm attach to
-#     that cycle instead of starting a second one;
+#     main. The host records that successor's arm before relinquishing it
+#     (detach_successor owns the persistence check and failure path). The
+#     session's next park without --restart requests a take-over of its cycle
+#     rather than an ordinary attach; bin/fm-watch-arm.sh's --take-over header owns the
+#     conditions under which that restores a single owner and the fallback;
 #   - away (an away record exists): every close goes to the engine.
 # Every turn that starts attended meets that rule again at its start, so a
 # close accepted away whose turn starts attended (the captain returned in
@@ -132,7 +135,12 @@
 # left running (recorded with identities, never by name), including the
 # engine descendants its turn recorded, removes that turn's files, and
 # releases the branch actor's leases; it releases them again after every
-# engine turn.
+# engine turn. It also reads the record of a successor a pass-through left for
+# main: while that arm still runs under its recorded identity, the first cycle
+# without --restart requests a take-over rather than an ordinary attach.
+# Activation removes the
+# record only once that identity is no longer alive, so a later host retries a
+# take-over that left it running.
 #
 # STATE (all under state/, owned here): .supervision-host (this host's pid and
 # the processes it runs), .supervision-host-engine (the engine conversation:
@@ -141,7 +149,8 @@
 # report scope and the reports it recorded), .supervision-host-prompt and
 # .supervision-host-wake (the prompt and wake text of the current turn),
 # .supervision-host-mirror (the dialog-mirror feed while an attended wake is
-# rendered),
+# rendered), .supervision-host-left (the pid and identity of the successor arm a
+# pass-through left running for main, until that arm is gone),
 # .supervision-host-health (the latch: errors, cooldown, and probe time, keyed
 # to the main session, engine, and model), and .supervision-host.log (a bounded
 # ledger of where every close went, with each engine turn's usage and
@@ -155,10 +164,15 @@
 # a new engine conversation after this many turns; every main session start
 # also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
 # successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1).
+# Park duration uses Bash's process-relative SECONDS counter (including Bash
+# 3.2), while durable timestamps still use epoch time. This is not a portable
+# monotonic-clock guarantee. Arm exit probes use ordinary 0.5-second child
+# sleeps within the unchanged POLL-cadence maintenance and boundary checks;
+# close observation and a shell-only caught signal may wait that interval plus
+# work/scheduling time. No stop-signal disposition or cleanup bound changes.
 # FM_TEST_SUPERVISION_HOST_CLOCK names a file holding the park's elapsed
-# seconds, which the park and turn boundary checks read in place of the wall
-# clock only when FM_TEST_SEAM=1; tests/lib.sh arms the marker for isolated
-# suites.
+# seconds, which the park and turn boundary checks read in place of SECONDS
+# only when FM_TEST_SEAM=1; tests/lib.sh arms the marker for isolated suites.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -226,8 +240,10 @@ HOST_LOG="$STATE/.supervision-host.log"
 ENGINE_PID_FILE="$STATE/.supervision-host.engine-pid"
 HEALTH_FILE="$STATE/.supervision-host-health"
 MIRROR_FEED="$STATE/.supervision-host-mirror"
+LEFT_RECORD="$STATE/.supervision-host-left"
 
 HOST_PID=$$
+HOST_STARTED_SECONDS=$SECONDS
 HOST_STARTED=$(date +%s)
 GEN="host-$HOST_PID-$HOST_STARTED"
 TURN_SEQ=0
@@ -245,7 +261,12 @@ HANDLE_RC=0
 ENGINE_SUBSHELL=
 SUCCESSOR_PID=
 SUCCESSOR_OUT=
+SUCCESSOR_WATCHER=
+SUCCESSOR_GENERATION=
 ENGINE_RUNNING=0
+# The successor arm a predecessor's pass-through left for main, which the
+# first cycle takes over.
+LEFT_ARM=
 # The running turn's result and diagnostics files, removed by the cleanup when
 # the host is stopped mid-turn.
 TURN_RESULT=
@@ -356,6 +377,18 @@ activate() {
   done
   rm -f "$STATE"/.supervision-host-arm.* "$STATE"/.supervision-host-descendants.* "$STATE"/.supervision-host-result.* \
     "$STATE"/.supervision-host-errors.* "$STATE"/.supervision-host-readback.* "$TURN_FILE" "$MIRROR_FEED" 2>/dev/null || true
+  # The successor a pass-through left for main: the first cycle takes it over
+  # while it still answers to its recorded identity, and its record goes only
+  # once it does not.
+  if [ -f "$LEFT_RECORD" ]; then
+    pid='' identity=''
+    IFS="$(printf '\t')" read -r pid identity < "$LEFT_RECORD" || true
+    if fm_pid_alive "$pid" && [ -n "$identity" ] && [ "$(identity_of "$pid")" = "$identity" ]; then
+      LEFT_ARM=$pid
+    else
+      rm -f "$LEFT_RECORD"
+    fi
+  fi
   printf 'host\t%s\t%s\n' "$HOST_PID" "$(identity_of "$HOST_PID")" > "$HOST_RECORD" || return 1
   release_branch_leases
 }
@@ -431,33 +464,40 @@ start_arm() {  # <predecessor-arm-pid or empty> [--restart]; sets the started pi
   local predecessor=$1 out pid
   shift
   out=$(mktemp "$STATE/.supervision-host-arm.XXXXXX") || return 1
+  # An arm left for main outlives this host, and Claude tears the hook's
+  # process group down after the exit-2 rewake, so it gets a group of its own
+  # (the shape start_handling_successor in bin/fm-claude-stop-autoarm.sh uses).
+  [ "${ARM_OWN_GROUP:-0}" -ne 1 ] || set -m 2>/dev/null || true
   if [ -n "$predecessor" ]; then
-    FM_WATCH_PREDECESSOR_ARM_PID=$predecessor FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 &
+    FM_WATCH_PREDECESSOR_ARM_PID=$predecessor FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 &
+    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
   fi
   pid=$!
+  [ "${ARM_OWN_GROUP:-0}" -ne 1 ] || set +m 2>/dev/null || true
   record_process arm "$pid"
   STARTED_ARM_PID=$pid
   STARTED_ARM_OUT=$out
 }
 
-park_elapsed() {
+park_elapsed() {  # Sets PARK_ELAPSED without a production clock/helper fork.
   if [ "${FM_TEST_SEAM:-}" = 1 ] && [ -n "${FM_TEST_SUPERVISION_HOST_CLOCK:-}" ]; then
-    numeric_or "$(cat "$FM_TEST_SUPERVISION_HOST_CLOCK" 2>/dev/null)" 0
+    PARK_ELAPSED=$(numeric_or "$(cat "$FM_TEST_SUPERVISION_HOST_CLOCK" 2>/dev/null)" 0)
     return
   fi
-  printf '%s\n' $(( $(date +%s) - HOST_STARTED ))
+  PARK_ELAPSED=$((SECONDS - HOST_STARTED_SECONDS))
 }
 
 boundary_reached() {
-  [ "$(park_elapsed)" -ge "$PARK_SECONDS" ]
+  park_elapsed
+  [ "$PARK_ELAPSED" -ge "$PARK_SECONDS" ]
 }
 
 # True when an engine turn started now could still be running at the turn
 # limit (the boundary unless the owner set a later one).
 turn_crosses_boundary() {
-  [ $(( $(park_elapsed) + TURN_TIMEOUT + ENGINE_GRACE )) -ge "$PARK_LIMIT" ]
+  park_elapsed
+  [ $((PARK_ELAPSED + TURN_TIMEOUT + ENGINE_GRACE)) -ge "$PARK_LIMIT" ]
 }
 
 # End the park at the boundary: stop the current and successor arms and this
@@ -471,7 +511,8 @@ boundary_exit() {
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
   "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
-  log_line "boundary	after $(park_elapsed)s"
+  park_elapsed
+  log_line "boundary	after ${PARK_ELAPSED}s"
   emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
   exit 0
 }
@@ -496,12 +537,11 @@ await_close() {
     refresh_process "$ARM_PID"
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
-    # The arm's exit is probed at a tenth of a second between POLL-cadence
-    # checks: the close is read as soon as the arm dies instead of up to POLL
-    # seconds late, while refresh keeps its per-second cadence.
-    i=$((POLL * 10))
+    # Probe the arm's exit twice a second between POLL-cadence checks, without
+    # changing the outer identity refresh, readiness, or boundary cadence.
+    i=$((POLL * 2))
     while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID"; do
-      sleep 0.1
+      sleep 0.5
       i=$((i - 1))
     done
   done
@@ -545,10 +585,17 @@ retire_successor() {
 # Hand the close to main: stop the successor cycle, print the close, why, and
 # any further "supervision-host:" lines, and exit.
 exit_to_main() {  # <why> [further lines]
+  local lines=${2:-} rc=0
   retire_successor
+  if [ -n "$SUCCESSOR_GENERATION" ] \
+    && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+    log_line "to-main	downtime-unrestored	$1"
+    lines=${lines:+$lines$'\n'}"supervision-host: watcher downtime could not be restored for the main hand-back"
+    rc=1
+  fi
   log_line "to-main	$1"
-  emit "supervision-host: $1" "${2:-}"
-  exit 0
+  emit "supervision-host: $1" "$lines"
+  exit "$rc"
 }
 
 # The outcome store (bin/fm-branch-outcome.sh) owns and validates these rows.
@@ -629,13 +676,27 @@ start_successor() {  # <predecessor-arm-pid>
   done
 }
 
-# Drop the successor from this host's cleanup without stopping it. The shell
-# signals background jobs when it exits, and this arm's handler would then
-# stop the watcher, so disown it first. The capture file stays tracked so the
-# EXIT trap unlinks it; the arm already holds that descriptor and keeps
-# waiting on the watcher.
+# Record the successor for the next host to take over, then drop it from this
+# host's cleanup without stopping it. A successor whose record does not read
+# back as a regular file holding exactly its pid and identity stays tracked,
+# so the cleanup stops it and main's next turn end arms a fresh cycle; that
+# returns 1. The shell signals background jobs when it exits, and this arm's
+# handler would then stop the watcher, so disown it first. The capture file
+# stays tracked so the EXIT trap unlinks it; the arm already holds that
+# descriptor and keeps waiting on the watcher.
 detach_successor() {
+  local identity tmp=
   [ -n "${SUCCESSOR_PID:-}" ] || return 0
+  identity=$(identity_of "$SUCCESSOR_PID")
+  if [ -z "$identity" ] || ! tmp=$(mktemp "$LEFT_RECORD.tmp.XXXXXX" 2>/dev/null) \
+    || ! printf '%s\t%s\n' "$SUCCESSOR_PID" "$identity" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$LEFT_RECORD" 2>/dev/null \
+    || [ -L "$LEFT_RECORD" ] || [ ! -f "$LEFT_RECORD" ] \
+    || [ "$(cat "$LEFT_RECORD" 2>/dev/null)" != "$SUCCESSOR_PID"$'\t'"$identity" ]; then
+    [ -z "$tmp" ] || rm -f "$tmp" "$LEFT_RECORD/${tmp##*/}" 2>/dev/null || true
+    log_line "pass-through	successor-unrecorded	$(printf '%s\n' "$REASON" | head -n 1)"
+    return 1
+  fi
   disown "$SUCCESSOR_PID" 2>/dev/null || true
   forget_process "$SUCCESSOR_PID"
   SUCCESSOR_PID=
@@ -647,7 +708,7 @@ detach_successor() {
 # downtime (autoarm_commit in bin/fm-claude-stop-autoarm.sh). A failed start
 # returns 1; the caller still prints the close unchanged.
 leave_successor_for_main() {
-  if ! start_successor "$CLOSED_ARM_PID"; then
+  if ! ARM_OWN_GROUP=1 start_successor "$CLOSED_ARM_PID"; then
     log_line "pass-through	successor-unverified	$(printf '%s\n' "$REASON" | head -n 1)"
     return 1
   fi
@@ -1000,6 +1061,9 @@ log_line "start	gen=$GEN	primary=$PRIMARY"
 # The first cycle.
 if [ "$FIRST_ARM_RESTART" -eq 1 ]; then
   start_arm "$OWNER_PREDECESSOR" --restart
+elif [ -n "$LEFT_ARM" ]; then
+  log_line "take-over	arm=$LEFT_ARM"
+  start_arm "$OWNER_PREDECESSOR" --take-over "$LEFT_ARM"
 else
   start_arm "$OWNER_PREDECESSOR"
 fi || { echo "watcher: FAILED - the supervision host could not start a watcher cycle"; exit 1; }
@@ -1057,7 +1121,7 @@ while :; do
 
   # A turn that could outlive the boundary would outlive the hook registration.
   turn_crosses_boundary && boundary_exit
-  if ! start_successor "$CLOSED_ARM_PID"; then
+  if ! ARM_OWN_GROUP=1 start_successor "$CLOSED_ARM_PID"; then
     exit_to_main "the successor watcher cycle could not be verified before handling; this wake is yours"
   fi
   if [ -n "$SUCCESSOR_GENERATION" ]; then

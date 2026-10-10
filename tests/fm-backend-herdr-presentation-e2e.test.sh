@@ -8,6 +8,8 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -279,13 +281,18 @@ export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
+LOCK_REFUSE_HOLDER_PID=
+LOCK_WAIT_HOLDER_PID=
 cleanup_all() {
-  local wt
-  if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
-    kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
-    wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
-    LOCK_CONTENTION_OWNER_PID=
-  fi
+  local wt pid
+  for pid in "$LOCK_CONTENTION_OWNER_PID" "$LOCK_REFUSE_HOLDER_PID" "$LOCK_WAIT_HOLDER_PID"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  LOCK_CONTENTION_OWNER_PID=
+  LOCK_REFUSE_HOLDER_PID=
+  LOCK_WAIT_HOLDER_PID=
   while IFS= read -r wt; do
     [ -n "$wt" ] || continue
     [ -d "$wt" ] || continue
@@ -407,10 +414,14 @@ Verify projected workspace behavior for $id.
 EOF
 }
 
-spawn_task() {  # <id> <home> <project>
+spawn_task() {  # <id> <home> <project> [extra fm-spawn args...]; SPAWN_DEADLINE_SECONDS bounds the run
   local id=$1 home=$2 project=$3
+  shift 3
+  local -a deadline_cmd=()
+  [ -z "${SPAWN_DEADLINE_SECONDS:-}" ] || deadline_cmd=(fm_run_timed "$SPAWN_DEADLINE_SECONDS")
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'while :; do sleep 60; done'" --mode no-mistakes --yolo off --backend herdr
+    ${deadline_cmd[@]+"${deadline_cmd[@]}"} "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'while :; do sleep 60; done'" \
+    --mode no-mistakes --yolo off --backend herdr "$@"
 }
 
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
@@ -1373,6 +1384,129 @@ teardown_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" > "$TMP_ROOT/bravo-wave-teardown
 "$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_NEW_WT" >/dev/null 2>&1 || true
 "$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_NEW_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift"
+
+# Exact-resume presentation-lock contention refuses by default. Hold the
+# shared session lock from an unrelated process past the bounded-retry window
+# and assert the default resume hard-refuses without the opt-in flag.
+LOCK_REFUSE_ID=lock-refuse-resume-r1
+mkdir -p "$HOME_DIR/data/$LOCK_REFUSE_ID"
+write_ship_brief "$HOME_DIR" "$LOCK_REFUSE_ID" 'Resume lock-refuse fixture.'
+spawn_task "$LOCK_REFUSE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/lock-refuse-first.out" 2> "$TMP_ROOT/lock-refuse-first.err" \
+  || fail "lock-refuse recovery fixture failed: $(cat "$TMP_ROOT/lock-refuse-first.err")"
+LOCK_REFUSE_META="$HOME_DIR/state/$LOCK_REFUSE_ID.meta"
+LOCK_REFUSE_OLD_WT=$(remember_meta_worktree "$LOCK_REFUSE_META")
+LOCK_REFUSE_OLD_PANE=$(grep '^herdr_pane_id=' "$LOCK_REFUSE_META" | cut -d= -f2-)
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for resume lock-refuse"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for resume lock-refuse"
+
+LOCK_REFUSE_READY="$TMP_ROOT/lock-refuse-ready"
+LOCK_REFUSE_HOLD_SECONDS=15
+LOCK_REFUSE_PATH=$(session_presentation_lock_path) \
+  || fail "could not resolve session lock for resume lock-refuse"
+ROOT="$ROOT" READY="$LOCK_REFUSE_READY" HOLD="$LOCK_REFUSE_HOLD_SECONDS" LOCK="$LOCK_REFUSE_PATH" bash -c '
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$LOCK" || exit 1
+  : > "$READY"
+  sleep "$HOLD"
+  fm_lock_release "$LOCK"
+' &
+LOCK_REFUSE_HOLDER_PID=$!
+while [ ! -e "$LOCK_REFUSE_READY" ] && kill -0 "$LOCK_REFUSE_HOLDER_PID" 2>/dev/null; do sleep 0.01; done
+[ -e "$LOCK_REFUSE_READY" ] || fail "could not hold the session presentation lock for resume lock-refuse"
+
+LOCK_REFUSE_FOCUS=$(focus_snapshot)
+if spawn_task "$LOCK_REFUSE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" \
+    > "$TMP_ROOT/lock-refuse-resume.out" 2> "$TMP_ROOT/lock-refuse-resume.err"; then
+  LOCK_REFUSE_STATUS=0
+else
+  LOCK_REFUSE_STATUS=$?
+fi
+if [ "$LOCK_REFUSE_STATUS" -eq 0 ]; then
+  kill "$LOCK_REFUSE_HOLDER_PID" 2>/dev/null || true
+  wait "$LOCK_REFUSE_HOLDER_PID" 2>/dev/null || true
+  fail "default resumed identity succeeded under session lock contention instead of refusing: $(cat "$TMP_ROOT/lock-refuse-resume.out")"
+fi
+wait "$LOCK_REFUSE_HOLDER_PID" || fail "resume lock-refuse lock holder failed"
+LOCK_REFUSE_HOLDER_PID=
+[ "$LOCK_REFUSE_STATUS" -ne 0 ] \
+  || fail "default resumed identity returned success under contention"
+grep -F "refusing a concurrent resume" "$TMP_ROOT/lock-refuse-resume.err" >/dev/null 2>&1 \
+  || fail "default resume under contention did not refuse with the concurrent-resume message: $(cat "$TMP_ROOT/lock-refuse-resume.err")"
+# Fixture metadata and husk must be unchanged after the refused resume.
+[ "$(grep '^herdr_pane_id=' "$LOCK_REFUSE_META" | cut -d= -f2-)" = "$LOCK_REFUSE_OLD_PANE" ] \
+  || fail "refused resume mutated the recorded pane id"
+assert_focus_is "$LOCK_REFUSE_FOCUS" "resume lock-refuse"
+# Leave the journal/meta in place so the opt-in wait path below can resume the
+# same identity after another stop/reprovision cycle.
+pass "real Herdr lab: default resumed identity refuses session lock contention"
+
+# With --herdr-resume-lock-wait, the same exact resume WAITS for session lock
+# contention rather than treating a short bounded window as fatal. Hold the
+# shared session lock from an unrelated process for a duration well past any
+# plausible bounded-retry window so the assertion below is deterministic
+# rather than a race that could pass by luck on a fast machine.
+LOCK_WAIT_ID=$LOCK_REFUSE_ID
+LOCK_WAIT_META=$LOCK_REFUSE_META
+LOCK_WAIT_OLD_WT=$LOCK_REFUSE_OLD_WT
+LOCK_WAIT_WSID=$(grep '^herdr_workspace_id=' "$LOCK_WAIT_META" | cut -d= -f2-)
+LOCK_WAIT_OLD_PANE=$LOCK_REFUSE_OLD_PANE
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for resume lock-wait"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for resume lock-wait"
+
+LOCK_WAIT_READY="$TMP_ROOT/lock-wait-ready"
+LOCK_WAIT_HOLD_SECONDS=30
+LOCK_WAIT_PATH=$(session_presentation_lock_path) \
+  || fail "could not resolve session lock for resume lock-wait"
+ROOT="$ROOT" READY="$LOCK_WAIT_READY" HOLD="$LOCK_WAIT_HOLD_SECONDS" LOCK="$LOCK_WAIT_PATH" bash -c '
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$LOCK" || exit 1
+  : > "$READY"
+  sleep "$HOLD"
+  fm_lock_release "$LOCK"
+' &
+LOCK_WAIT_HOLDER_PID=$!
+while [ ! -e "$LOCK_WAIT_READY" ] && kill -0 "$LOCK_WAIT_HOLDER_PID" 2>/dev/null; do sleep 0.01; done
+[ -e "$LOCK_WAIT_READY" ] || fail "could not hold the session presentation lock for resume lock-wait"
+
+LOCK_WAIT_DEADLINE_SECONDS=$((LOCK_WAIT_HOLD_SECONDS + 60))
+LOCK_WAIT_FOCUS=$(focus_snapshot)
+LOCK_WAIT_START=$(date +%s)
+if SPAWN_DEADLINE_SECONDS=$LOCK_WAIT_DEADLINE_SECONDS \
+    spawn_task "$LOCK_WAIT_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" --herdr-resume-lock-wait \
+    > "$TMP_ROOT/lock-wait-resume.out" 2> "$TMP_ROOT/lock-wait-resume.err"; then
+  LOCK_WAIT_STATUS=0
+else
+  LOCK_WAIT_STATUS=$?
+fi
+LOCK_WAIT_ELAPSED=$(( $(date +%s) - LOCK_WAIT_START ))
+wait "$LOCK_WAIT_HOLDER_PID" || fail "resume lock-wait lock holder failed"
+LOCK_WAIT_HOLDER_PID=
+if [ "$LOCK_WAIT_STATUS" -eq 124 ]; then
+  fail "opt-in resumed recovery hung for over ${LOCK_WAIT_DEADLINE_SECONDS}s instead of waiting out a ${LOCK_WAIT_HOLD_SECONDS}s session lock hold"
+fi
+[ "$LOCK_WAIT_STATUS" -eq 0 ] \
+  || fail "opt-in resumed identity refused instead of waiting out session lock contention: $(cat "$TMP_ROOT/lock-wait-resume.err")"
+[ "$LOCK_WAIT_ELAPSED" -ge $((LOCK_WAIT_HOLD_SECONDS - 5)) ] \
+  || fail "opt-in resumed recovery returned after ${LOCK_WAIT_ELAPSED}s, too soon to have genuinely waited out a ${LOCK_WAIT_HOLD_SECONDS}s hold"
+LOCK_WAIT_NEW_WT=$(remember_meta_worktree "$LOCK_WAIT_META")
+[ "$(grep '^herdr_workspace_id=' "$LOCK_WAIT_META" | cut -d= -f2-)" = "$LOCK_WAIT_WSID" ] \
+  || fail "opt-in resume lock-wait flattened the task into a different workspace"
+LOCK_WAIT_NEW_PANE=$(grep '^herdr_pane_id=' "$LOCK_WAIT_META" | cut -d= -f2-)
+[ "$LOCK_WAIT_NEW_PANE" != "$LOCK_WAIT_OLD_PANE" ] \
+  || fail "opt-in resume lock-wait reused the old husk pane"
+if lab pane get "$LOCK_WAIT_OLD_PANE" >/dev/null 2>&1; then
+  fail "opt-in resume lock-wait left the old husk pane behind"
+fi
+assert_focus_is "$LOCK_WAIT_FOCUS" "resume lock-wait"
+teardown_task "$LOCK_WAIT_ID" "$HOME_DIR" > "$TMP_ROOT/lock-wait-teardown.out" 2> "$TMP_ROOT/lock-wait-teardown.err" \
+  || fail "resume lock-wait fixture teardown failed: $(cat "$TMP_ROOT/lock-wait-teardown.err")"
+"$REAL_TREEHOUSE" return --force "$LOCK_WAIT_OLD_WT" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$LOCK_WAIT_NEW_WT" >/dev/null 2>&1 || true
+pass "real Herdr lab: --herdr-resume-lock-wait waits out session lock contention instead of refusing"
 
 # Seed a legacy old-format primary projection and a flat secondmate tab; correction must not migrate them.
 LEGACY_OUT=$(lab workspace create --cwd "$PROJECT_DIR" --label "firstmate/legacy-seed · p:AbCdEfGhIjKlMnOpQrStUv" --no-focus) \
