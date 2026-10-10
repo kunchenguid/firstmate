@@ -55,11 +55,10 @@ A follow-up live check under real tmux 3.6a - an isolated `tmux -L <private-sock
 The launch-then-send live guard (`../../../../tests/fm-rovo-signals-live-e2e.test.sh`) now reproduces it over a raw PTY too: an earlier single fixed-timer Escape landed unreliably (the interrupt instant is timing-sensitive over a bare PTY), so the guard sends Escape across the live tool-call window until the cancel renders - a deterministic way to reproduce a timing-sensitive interrupt, and confirmed to print `Agent cancelled` every run.
 Escape is the interrupt key and is what `fm_control_interrupt_key` returns.
 `fm_control_interrupt_ack_source` still records `none` for rovo - the same conservative choice already made for claude/codex/grok/kimi/cursor, a control-plane fact independent of whether the render happens to appear - so the control plane sends the key and lets its own postcondition, not a parsed string, decide whether the agent actually stopped.
-The interrupt key and its rendered evidence are now fully corroborated rather than in tension with the code.
 
 ## OAuth token lifetime
 
-The access token lasts about one hour, but `rovo` refreshes it silently and non-interactively from a stored refresh token (about four weeks' lifetime) with no browser prompt and no visible interruption - this is standing captain-corrected guidance, not this task's own discovery, and this task's own live checks corroborated it empirically: `rovo auth status` showed `Access token expired ... but a refresh token is present`, then a plain `rovo run` completed successfully and a follow-up `rovo auth status` showed a freshly valid token with no interactive step in between.
+The access token lasts about one hour, but `rovo` refreshes it silently and non-interactively from a stored refresh token (about four weeks' lifetime) with no browser prompt and no visible interruption - live checks confirmed it: `rovo auth status` showed `Access token expired ... but a refresh token is present`, then a plain `rovo run` completed successfully and a follow-up `rovo auth status` showed a freshly valid token with no interactive step in between.
 Treat the ~1h access-token lifetime as an ordinary operational fact, not a non-negotiable-safety blocker: a rovo worker does not need to be scoped short to survive it.
 `rovo auth login` (interactive browser OAuth) is needed only after roughly four weeks of disuse or if the refresh token itself is invalidated.
 
