@@ -750,6 +750,12 @@ cmd_register_extension() {
   # result holds the source lock while the extension host takes the lifecycle
   # lock. The reverse order here would let both wait on each other forever.
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  # A live poll holds the lifecycle lock, so refuse its replacement before
+  # waiting for that lock. The source lock keeps this ownership check stable.
+  if ! extension_registration_replacement_safe_locked "$id"; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot replace extension registration while its prior runner remains active: $id"
+  fi
   if ! extension_lifecycle_lock_acquire; then
     fm_procevent_source_lock_release "$id"
     die "cannot lock the extension lifecycle"
@@ -784,10 +790,6 @@ cmd_register_extension() {
     owner_task=$(source_owner_task "$id")
     register_extension_locks_release "$id"
     die "cannot replace task-owned source $id owned by task $owner_task; steer that task to re-arm its board"
-  fi
-  if ! extension_registration_replacement_safe_locked "$id"; then
-    register_extension_locks_release "$id"
-    die "cannot replace extension registration while its prior runner remains active: $id"
   fi
   if ! fm_procevent_extension_registration_publish_locked "$STATE" "$adapter" "$id" \
       "$extension_id" "$extension_version" "$capability_version" "$package_digest" \
@@ -1080,12 +1082,15 @@ cmd_start() {
   CLAIM_STATE_DEVICE=$FM_PROCEVENT_CLAIM_STATE_DEVICE
   CLAIM_STATE_INODE=$FM_PROCEVENT_CLAIM_STATE_INODE
   STAGED_OUTPUT=
+  CAPTURE_IN_FLIGHT=0
   # Exit cleanup must not wait for the source lock: retire and reconcile hold it
   # while waiting for this runner, so blocking here creates a circular wait
   # broken only by KILL. On contention, leave the generation-bound claim for
   # the stopper or subsequent reconciliation to reclaim.
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
+    # The helper retains the process group and claim until capture stops.
+    [ "$CAPTURE_IN_FLIGHT" -eq 0 ] || return 0
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
     fm_procevent_source_lock_try_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
@@ -1223,13 +1228,15 @@ cmd_start() {
   esac
   exec 7<&-
   if [ "$extension_owner" -eq 1 ]; then
+    CDPATH='' cd -- /dev/fd/9 || die "cannot enter the source launch boundary: $id"
     launch_ready=".$id.$CLAIM_TOKEN.launch-ready"
-    launch_reply="$REG/.$id.$CLAIM_TOKEN.launch-reply"
-    (umask 077; : > "$REG/$launch_ready" && : > "$launch_reply") || {
-      rm -f -- "$REG/$launch_ready" "$launch_reply"
+    launch_reply=".$id.$CLAIM_TOKEN.launch-reply"
+    (umask 077; : > "$launch_ready" && : > "$launch_reply") || {
+      rm -f -- "$launch_ready" "$launch_reply"
       fm_procevent_source_lock_release "$id"
       die "cannot prepare the source launch boundary: $id"
     }
+    CAPTURE_IN_FLIGHT=1
     perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
       9 8 6 "$id" "$adapter" "$FM_PROCEVENT_EXTENSION_ID" \
       "$FM_PROCEVENT_EXTENSION_VERSION" "$FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION" \
@@ -1237,22 +1244,24 @@ cmd_start() {
       "$CLAIM_TOKEN" "$runner" "$out" "$$" "$(fm_pid_identity "$$")" "$MAX_OUTPUT_BYTES" \
       "$launch_ready" -- "${ARGV[@]}" > "$launch_reply" &
     launch_pid=$!
-    while [ ! -s "$REG/$launch_ready" ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
+    while [ ! -s "$launch_ready" ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
     fm_procevent_source_lock_release "$id" \
       || die "cannot release the source launch boundary: $id"
     wait "$launch_pid" || {
-      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      rm -f -- "$launch_ready" "$launch_reply"
       die "cannot safely stage the extension result"
     }
-    [ -s "$REG/$launch_ready" ] || {
-      rm -f -- "$REG/$launch_ready" "$launch_reply"
+    CAPTURE_IN_FLIGHT=0
+    [ -s "$launch_ready" ] || {
+      rm -f -- "$launch_ready" "$launch_reply"
       die "cannot establish the source launch boundary: $id"
     }
     IFS= read -r capture_state < "$launch_reply" || capture_state=
-    rm -f -- "$REG/$launch_ready" "$launch_reply"
+    rm -f -- "$launch_ready" "$launch_reply"
     IFS=$'\t' read -r capture_state durable rc truncated reservation_terminal reservation_silent <<EOF
 $capture_state
 EOF
+    CDPATH='' cd -- /dev/fd/8 || die "cannot enter the external capture boundary: $id"
     exec 9<&-
     case "$capture_state" in
       captured|no-result) ;;

@@ -255,6 +255,7 @@ elif mode in ("replay", "replay-no-result"):
     raw(success({"status":"no-result", "output":""} if mode == "replay-no-result" else {"status":"result", "output":f"replay {request['request_id']}\n"}))
 elif mode.startswith("active-block|"):
     _, block_marker, block_release = mode.split("|", 2)
+    with open(block_marker + ".polls", "a", encoding="utf-8") as polls: polls.write("poll\n")
     write_exclusive(block_marker, f"{os.getpid()}\n")
     while not os.path.exists(block_release): time.sleep(.01)
     raw(success({"status":"result", "output":"active runner completed\n"}))
@@ -1364,8 +1365,13 @@ FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-sourc
 FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" start active-source > "$TMP_ROOT/active-runner.out" 2>&1 &
 active_runner_pid=$!
 wait_for_file "$active_runner_marker" || fail "active extension runner never entered its poll"
-expect_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref replacement
-expect_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- /bin/echo built-in
+: > "$H_ACTIVE_RUNNER/state/procevent/active-source.runner"
+active_restart=$(FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" start active-source) \
+  || fail "empty runner record bypassed the live claim"
+assert_contains "$active_restart" "already owned: active-source" "empty runner record displaced the live owner"
+[ ! -s "$H_ACTIVE_RUNNER/state/procevent/active-source.runner" ] || fail "live owner's empty runner record changed"
+expect_failure "prior runner remains active" timeout 10 env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref replacement
+expect_failure "prior runner remains active" timeout 10 env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- /bin/echo built-in
 touch "$active_runner_release"
 active_runner_release=
 wait "$active_runner_pid" || fail "active extension runner did not complete"
@@ -1377,6 +1383,118 @@ active_replacement=$(FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension 
 active_replacement_owner=$(printf '%s\n' "$active_replacement" | sed -n 's/^owner-token: //p')
 FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" retire active-source --if-owner "$active_replacement_owner" >/dev/null
 pass "all registration owner transitions wait for the prior extension runner"
+
+for shell_signal in TERM KILL; do
+  H_EXIT_RUNNER="$HOMES/exit-runner-$shell_signal"; new_home "$H_EXIT_RUNNER"
+  bind_package "$H_EXIT_RUNNER" "$P_FLOW" ext-flow >/dev/null
+  exit_source="exit-source-$shell_signal"
+  active_runner_marker="$TMP_ROOT/$exit_source.marker"
+  active_runner_release="$TMP_ROOT/$exit_source.release"
+  FM_HOME="$H_EXIT_RUNNER" "$PROCEVENT" register-extension ext-flow "$exit_source" \
+    --config-ref "active-block|$active_runner_marker|$active_runner_release" >/dev/null
+  FM_HOME="$H_EXIT_RUNNER" "$PROCEVENT" start "$exit_source" > "$TMP_ROOT/$exit_source.out" 2>&1 &
+  active_runner_pid=$!
+  wait_for_file "$active_runner_marker" || fail "$shell_signal runner never entered its poll"
+  runner_record="$H_EXIT_RUNNER/state/procevent/$exit_source.runner"
+  capture_helper_pid=$(cat "$runner_record")
+  runner_shell_pid=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/$exit_source.claim")
+  [ "$capture_helper_pid" != "$runner_shell_pid" ] || fail "runner record identifies the shell instead of capture"
+  kill -"$shell_signal" "$runner_shell_pid"
+  wait "$active_runner_pid" 2>/dev/null || true
+  active_runner_pid=
+  kill -0 "$capture_helper_pid" || fail "$shell_signal stopped the capture helper"
+  assert_present "$FM_PROCEVENT_CLAIM_ROOT/$exit_source.claim" "$shell_signal released a live capture claim"
+  exit_restart=$(FM_HOME="$H_EXIT_RUNNER" "$PROCEVENT" start "$exit_source") \
+    || fail "$shell_signal live capture restart was not refused"
+  assert_contains "$exit_restart" "already owned: $exit_source" "$shell_signal displaced a live capture"
+  [ "$(wc -l < "$active_runner_marker.polls" | tr -d ' ')" = 1 ] || fail "$shell_signal launched a second poll"
+  touch "$active_runner_release"
+  active_runner_release=
+  wait_for_file "$H_EXIT_RUNNER/state/procevent-inbox/$exit_source.1.result" || fail "$shell_signal lost capture evidence"
+  for ((i=0; i<200; i++)); do
+    [ ! -e "$runner_record" ] && break
+    sleep 0.1
+  done
+  assert_absent "$runner_record" "$shell_signal capture did not finish cleanup"
+  for ((i=0; i<200; i++)); do
+    kill -0 -"$runner_shell_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 -"$runner_shell_pid" 2>/dev/null; then
+    fail "$shell_signal capture process group did not stop"
+  fi
+  [ "$(wc -l < "$active_runner_marker.polls" | tr -d ' ')" = 1 ] || fail "$shell_signal drained the source twice"
+  assert_absent "$H_EXIT_RUNNER/state/procevent-inbox/$exit_source.2.result" "$shell_signal captured duplicate evidence"
+  rm "$active_runner_marker"
+  FM_HOME="$H_EXIT_RUNNER" "$PROCEVENT" start "$exit_source" > "$TMP_ROOT/$exit_source.fresh.out" 2>&1 \
+    || fail "$shell_signal prevented a fresh start after capture stopped"
+  assert_present "$H_EXIT_RUNNER/state/procevent-inbox/$exit_source.2.result" "$shell_signal fresh start did not capture"
+  [ "$(wc -l < "$active_runner_marker.polls" | tr -d ' ')" = 2 ] || fail "$shell_signal fresh start did not poll once"
+done
+pass "shell-only TERM and KILL retain the live capture claim until polling stops"
+
+H_RUNNER_RESTART="$HOMES/runner-restart"; new_home "$H_RUNNER_RESTART"
+bind_package "$H_RUNNER_RESTART" "$P_FLOW" ext-flow >/dev/null
+FM_HOME="$H_RUNNER_RESTART" "$PROCEVENT" register-extension ext-flow stale-source --config-ref good >/dev/null
+(exit 0) &
+dead_runner_pid=$!
+wait "$dead_runner_pid"
+runner_record="$H_RUNNER_RESTART/state/procevent/stale-source.runner"
+printf '%s\n' "$dead_runner_pid" > "$runner_record"
+chmod 0600 "$runner_record"
+FM_HOME="$H_RUNNER_RESTART" "$PROCEVENT" start stale-source > "$TMP_ROOT/stale-runner.out" 2>&1 \
+  || fail "dead extension runner record prevented restart"
+assert_present "$H_RUNNER_RESTART/state/procevent-inbox/stale-source.1.result" "restart did not capture extension evidence"
+assert_absent "$runner_record" "restarted extension retained its runner record"
+pass "a dead extension runner record allows restart and capture"
+
+FM_HOME="$H_RUNNER_RESTART" "$PROCEVENT" register-extension ext-flow empty-source --config-ref good >/dev/null
+runner_record="$H_RUNNER_RESTART/state/procevent/empty-source.runner"
+: > "$runner_record"
+chmod 0600 "$runner_record"
+FM_HOME="$H_RUNNER_RESTART" "$PROCEVENT" start empty-source > "$TMP_ROOT/empty-runner.out" 2>&1 \
+  || fail "empty extension runner residue prevented restart"
+assert_present "$H_RUNNER_RESTART/state/procevent-inbox/empty-source.1.result" "empty-residue restart did not capture extension evidence"
+assert_absent "$runner_record" "empty-residue restart retained its runner record"
+pass "an empty extension runner residue allows restart and capture"
+
+refused_marker="$TMP_ROOT/refused-runner.marker"
+refused_release="$TMP_ROOT/refused-runner.release"
+touch "$refused_release"
+sleep 300 &
+active_runner_pid=$!
+for runner_case in live malformed symlink fifo; do
+  runner_source="refused-$runner_case"
+  FM_HOME="$H_RUNNER_RESTART" "$PROCEVENT" register-extension ext-flow "$runner_source" \
+    --config-ref "active-block|$refused_marker|$refused_release" >/dev/null
+  runner_record="$H_RUNNER_RESTART/state/procevent/$runner_source.runner"
+  case "$runner_case" in
+    live) printf '%s\n' "$active_runner_pid" > "$runner_record" ;;
+    malformed) printf 'not-a-pid\n' > "$runner_record" ;;
+    symlink) ln -s "$TMP_ROOT/runner-target" "$runner_record" ;;
+    fifo) mkfifo "$runner_record" ;;
+  esac
+  [ "$runner_case" = symlink ] || chmod 0600 "$runner_record"
+  if [ "$runner_case" = fifo ]; then
+    fifo_started=$SECONDS
+    expect_failure "capture failed: cannot create" timeout 10 env FM_HOME="$H_RUNNER_RESTART" "$PROCEVENT" start "$runner_source"
+    [ "$((SECONDS - fifo_started))" -lt 10 ] || fail "FIFO runner refusal waited for the timeout"
+  else
+    expect_failure "capture failed: cannot create" env FM_HOME="$H_RUNNER_RESTART" "$PROCEVENT" start "$runner_source"
+  fi
+  case "$runner_case" in
+    live) [ "$(cat "$runner_record")" = "$active_runner_pid" ] || fail "live runner record changed" ;;
+    malformed) [ "$(cat "$runner_record")" = not-a-pid ] || fail "malformed runner record changed" ;;
+    symlink) [ -L "$runner_record" ] || fail "runner symlink was removed" ;;
+    fifo) [ -p "$runner_record" ] || fail "runner FIFO was removed" ;;
+  esac
+  assert_absent "$refused_marker" "refused runner invoked its adapter"
+  assert_absent "$H_RUNNER_RESTART/state/procevent-inbox/$runner_source.1.result" "refused runner captured a result"
+done
+kill -TERM "$active_runner_pid"
+wait "$active_runner_pid" 2>/dev/null || true
+active_runner_pid=
+pass "live, malformed, symlink, and FIFO extension runner records remain refused"
 fi
 
 # --- owner tokens, overridden state, sweep, and legacy compatibility --------
@@ -1508,15 +1626,15 @@ printf 'decoy\n' > "$state_path_decoy"
 chmod 0600 "$state_path_decoy"
 for control_kind in tab newline; do
   case "$control_kind" in
-    tab) control_state="$TMP_ROOT/control-state"$'\t'"tab" ;;
-    newline) control_state="$TMP_ROOT/control-state"$'\n'"newline" ;;
+    tab) control_state="$TMP_ROOT/control-state"$'\t'"tab"; control_error="cannot claim source" ;;
+    newline) control_state="$TMP_ROOT/control-state"$'\n'"newline"; control_error="process-event state root is not a private directory" ;;
   esac
   control_source="control-${control_kind}-state-source"
   mkdir -p "$control_state"
   chmod 0700 "$control_state"
   FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
     "$PROCEVENT" register lavish "$control_source" -- /bin/echo control >/dev/null
-  expect_failure "cannot acquire source ownership" env FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
+  expect_failure "$control_error" env FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
     "$PROCEVENT" start "$control_source"
   assert_absent "$TMP_ROOT/claims/$control_source.claim" "control-byte state root created a malformed claim"
   assert_absent "$control_state/procevent-capture-reservations" "control-byte state root created reservation state"
@@ -1538,7 +1656,7 @@ override_crash_runner_pid=$(sed -n '2p' "$override_crash_claim")
 override_crash_token=$(sed -n '3p' "$override_crash_claim")
 override_crash_records=$(find "$STATE_OVERRIDE/procevent-capture-reservations" -type f \
   -name ".extension-capture-$override_crash_token.*" -print | wc -l | tr -d '[:space:]')
-[ "$override_crash_records" -eq 2 ] || fail "overridden-state crash fixture did not create both immediate reservations"
+[ "$override_crash_records" -eq 1 ] || fail "overridden-state crash fixture did not retain its pending terminal reservation (found $override_crash_records)"
 mkdir -p "$H_STATE_OVERRIDE/state/procevent-capture-reservations"
 chmod 0700 "$H_STATE_OVERRIDE/state" "$H_STATE_OVERRIDE/state/procevent-capture-reservations"
 override_crash_decoy="$H_STATE_OVERRIDE/state/procevent-capture-reservations/.extension-capture-$override_crash_token.decoy.json"
@@ -1548,7 +1666,9 @@ kill -KILL -"$override_crash_runner_pid" 2>/dev/null || fail "could not terminat
 wait "$override_crash_start_pid" 2>/dev/null || true
 override_crash_start_pid=
 override_crash_runner_pid=
-FM_HOME="$H_STATE_OVERRIDE" "$PROCEVENT" reconcile >/dev/null
+# Model an orphaned crashed capture so reconcile cleans it without relaunching.
+rm "$STATE_OVERRIDE/procevent/override-crash-source.source"
+FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" "$PROCEVENT" reconcile >/dev/null
 assert_absent "$override_crash_claim" "reconcile retained a dead overridden-state claim"
 override_crash_records=$(find "$STATE_OVERRIDE/procevent-capture-reservations" -type f \
   -name ".extension-capture-$override_crash_token.*" -print -quit)
@@ -1715,6 +1835,38 @@ assert_present "$TMP_ROOT/capture-swap-real-inbox/capture-swap-source.1.result" 
 [ -z "$(find "$TMP_ROOT/capture-swap-outside" -mindepth 1 -print -quit)" ] \
   || fail "capture helper reopened a substituted inbox pathname"
 pass "capture helper retains the inherited inbox descriptor before publication"
+for replacement_outcome in captured no-result failure; do
+  replacement_state="$TMP_ROOT/capture-replacement-$replacement_outcome"
+  mkdir -p "$replacement_state/procevent" "$replacement_state/inbox"
+  chmod 0700 "$replacement_state" "$replacement_state/procevent" "$replacement_state/inbox"
+  exec 9<"$replacement_state/procevent"
+  exec 6<"$replacement_state/procevent"
+  exec 8<"$replacement_state/inbox"
+  active_runner_release="$replacement_state/release"
+  perl "$ROOT/bin/fm-procevent-extension-capture.pl" \
+    9 8 6 replacement-source ext-flow org.example.flow 1.2.3 1 \
+    "sha256:$(printf 'a%.0s' {1..64})" "sha256:$(printf 'b%.0s' {1..64})" replacement-token \
+    replacement-source.runner .replacement.output "$$" "$forged_claim_identity" 1024 -- \
+    bash -c 'printf "ready\n" > "$1"; while [ ! -e "$2" ]; do sleep 0.01; done
+      case "$3" in captured) printf result ;; no-result) exit 75 ;; failure) kill -KILL "$$" ;; esac' \
+    bash "$replacement_state/ready" "$active_runner_release" "$replacement_outcome" > "$replacement_state/reply" &
+  active_runner_pid=$!
+  wait_for_file "$replacement_state/ready" || fail "replacement capture did not enter polling"
+  mv "$replacement_state/procevent/replacement-source.runner" "$replacement_state/original-runner"
+  printf 'replacement\n' > "$replacement_state/procevent/replacement-source.runner"
+  chmod 0600 "$replacement_state/procevent/replacement-source.runner"
+  touch "$active_runner_release"
+  active_runner_release=
+  wait "$active_runner_pid" || fail "replacement capture failed"
+  active_runner_pid=
+  [ "$(cat "$replacement_state/procevent/replacement-source.runner")" = replacement ] \
+    || fail "$replacement_outcome cleanup removed a replacement runner record"
+  assert_contains "$(cat "$replacement_state/reply")" "$replacement_outcome" "replacement capture did not exercise its cleanup path"
+  exec 9<&-
+  exec 6<&-
+  exec 8<&-
+done
+pass "capture cleanup preserves replacement runner records on every completion path"
 H_LEGACY_LINK="$HOMES/legacy-link"; new_home "$H_LEGACY_LINK"
 LEGACY_REAL_STATE="$TMP_ROOT/legacy-real-state"
 LEGACY_LINK_STATE="$TMP_ROOT/legacy-state-link"
