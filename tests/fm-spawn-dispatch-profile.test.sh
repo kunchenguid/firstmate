@@ -822,6 +822,287 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
   pass "opencode omits the variant for an effort outside the model family's list"
 }
 
+# A stub of OpenCode 1.18.32's `opencode models <provider> --verbose --pure`,
+# which prints each model as a "<provider>/<id>" line followed by its JSON
+# record. It answers only a plugin-free (--pure) listing asked from /, the
+# neutral directory with no .opencode/ for OpenCode to load or write into, and
+# FM_FAKE_OPENCODE_MODELS=fail|hang breaks the lookup instead. Every call is
+# logged to FM_FAKE_OPENCODE_LOOKUP_LOG when set. The suite's fake timeout
+# serves Cursor's `timeout <s> <cmd>` probe and cannot run fm_run_timed's
+# `timeout -k <grace> <s>` form, so a catalog case drops it and bounds the
+# lookup with the host's real mechanism.
+make_opencode_catalog_stub() {
+  local fakebin=$1
+  rm -f "$fakebin/timeout"
+  cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_OPENCODE_LOOKUP_LOG:-}" ] || printf '%s|%s\n' "$PWD" "$*" >> "$FM_FAKE_OPENCODE_LOOKUP_LOG"
+case "${FM_FAKE_OPENCODE_MODELS:-}" in
+fail) echo 'Error: Provider not found: github-copilot' >&2; exit 1 ;;
+hang) sleep 30; exit 0 ;;
+esac
+[ "$*" = 'models github-copilot --verbose --pure' ] && [ "$PWD" = / ] || exit 64
+cat <<'LISTING'
+github-copilot/no-variants-absent
+{
+  "id": "no-variants-absent",
+  "providerID": "github-copilot"
+}
+github-copilot/no-variants-null
+{
+  "id": "no-variants-null",
+  "providerID": "github-copilot",
+  "variants": null
+}
+github-copilot/no-variants-empty
+{
+  "id": "no-variants-empty",
+  "providerID": "github-copilot",
+  "variants": {}
+}
+github-copilot/claude-haiku-4.5
+{
+  "id": "claude-haiku-4.5",
+  "providerID": "github-copilot",
+  "status": "active",
+  "variants": {
+    "max": {
+      "thinking": {
+        "type": "enabled",
+        "budgetTokens": 31999
+      }
+    },
+    "high": {
+      "thinking": {
+        "type": "enabled",
+        "budgetTokens": 16000
+      }
+    }
+  }
+}
+github-copilot/claude-opus-5.5
+{
+  "id": "claude-opus-5.5",
+  "providerID": "github-copilot",
+  "status": "active",
+  "variants": {
+    "low": {
+      "effort": "low"
+    },
+    "medium": {
+      "effort": "medium"
+    },
+    "high": {
+      "effort": "high"
+    },
+    "xhigh": {
+      "effort": "xhigh"
+    },
+    "max": {
+      "effort": "max"
+    }
+  }
+}
+LISTING
+SH
+  chmod +x "$fakebin/opencode"
+}
+
+test_opencode_emits_copilot_variant_the_model_lists() {
+  local rec id out status launch
+  id=profile-opencode-copilot-z7e
+  rec=$(make_spawn_case profile-opencode-copilot opencode "$id")
+  read_case_record "$rec"
+  make_opencode_catalog_stub "$FAKEBIN_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model github-copilot/claude-opus-5.5 --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "opencode spawn with a copilot model and a listed effort should succeed"$'\n'"$out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode github-copilot/claude-opus-5.5 xhigh
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"github-copilot/claude-opus-5.5\",\"variant\":\"xhigh\"}}}' opencode --model 'github-copilot/claude-opus-5.5' --prompt" \
+    "opencode launch did not write the copilot model's listed effort as the build agent's variant"
+  assert_not_contains "$out" "notice:" "a listed copilot variant must not print an omission notice"
+  pass "opencode emits the variant OpenCode's catalog lists for the copilot model"
+}
+
+test_opencode_omits_copilot_variant_the_model_lacks() {
+  local rec id out status launch
+  id=profile-opencode-copilot-omit-z7f
+  rec=$(make_spawn_case profile-opencode-copilot-omit opencode "$id")
+  read_case_record "$rec"
+  make_opencode_catalog_stub "$FAKEBIN_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model github-copilot/claude-haiku-4.5 --effort low)
+  status=$?
+  expect_code 0 "$status" "opencode spawn with a copilot model lacking the effort should succeed"$'\n'"$out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode github-copilot/claude-haiku-4.5 low
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'github-copilot/claude-haiku-4.5' --prompt" \
+    "opencode must keep the permission-only config when the copilot model lacks the effort"
+  assert_contains "$out" \
+    "notice: OpenCode lists no 'low' variant for 'github-copilot/claude-haiku-4.5' (its variants: max high); effort=low is recorded but omitted from the launch" \
+    "the omitted copilot effort must be noticed with the model's own variants"
+  pass "opencode omits and notices a copilot effort the model's variants lack"
+}
+
+test_opencode_notices_copilot_model_without_variants() {
+  local shape rec id model out status launch
+  for shape in absent null empty; do
+    id=profile-opencode-no-variants-$shape
+    model=github-copilot/no-variants-$shape
+    rec=$(make_spawn_case "$id" opencode "$id")
+    read_case_record "$rec"
+    make_opencode_catalog_stub "$FAKEBIN_DIR"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" --effort high)
+    status=$?
+    expect_code 0 "$status" "opencode spawn with $shape variants should succeed"$'\n'"$out"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" opencode "$model" high
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" \
+      "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model '$model' --prompt" \
+      "opencode must omit the variant for $shape variants"
+    assert_contains "$out" \
+      "notice: OpenCode lists no 'high' variant for '$model' (its variants: none listed); effort=high is recorded but omitted from the launch" \
+      "$shape variants must be reported as none listed"
+    assert_not_contains "$out" "could not read the variants" "$shape variants are not a catalog read failure"
+  done
+  pass "opencode reports absent, null, and empty variants as none listed"
+}
+
+test_opencode_omits_copilot_variant_when_catalog_lookup_fails() {
+  local rec id out status launch mode bound
+  for mode in fail hang; do
+    id=profile-opencode-copilot-$mode-z7g
+    rec=$(make_spawn_case "profile-opencode-copilot-$mode" opencode "$id")
+    read_case_record "$rec"
+    make_opencode_catalog_stub "$FAKEBIN_DIR"
+    # Only the hang case is about the bound, so only it shortens the bound; a
+    # prompt failure keeps the default headroom for its fork and exec.
+    bound=
+    [ "$mode" = fail ] || bound=1
+
+    out=$(FM_FAKE_OPENCODE_MODELS=$mode FM_OPENCODE_MODELS_TIMEOUT=$bound \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model github-copilot/claude-opus-5.5 --effort high)
+    status=$?
+    expect_code 0 "$status" "opencode spawn must survive a copilot catalog lookup that can $mode"$'\n'"$out"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" opencode github-copilot/claude-opus-5.5 high
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" \
+      "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'github-copilot/claude-opus-5.5' --prompt" \
+      "opencode must keep the permission-only config when the copilot catalog lookup can $mode"
+    case "$mode" in
+    fail)
+      assert_contains "$out" \
+        "notice: could not read the variants of 'github-copilot/claude-opus-5.5' from 'opencode models github-copilot --verbose --pure'; effort=high is recorded but omitted from the launch" \
+        "a failed copilot catalog lookup must be noticed"
+      ;;
+    hang)
+      assert_contains "$out" \
+        "notice: 'opencode models github-copilot' did not answer within 1s; effort=high for 'github-copilot/claude-opus-5.5' is recorded but omitted from the launch" \
+        "a copilot catalog lookup past its bound must be cut off and noticed"
+      ;;
+    esac
+  done
+  pass "opencode omits a copilot effort when its catalog lookup fails or times out"
+}
+
+test_opencode_skips_catalog_lookup_when_temp_directory_fails() {
+  local rec id out status launch lookups
+  id=profile-opencode-copilot-mktemp
+  rec=$(make_spawn_case "$id" opencode "$id")
+  read_case_record "$rec"
+  make_opencode_catalog_stub "$FAKEBIN_DIR"
+  lookups="$CASE_DIR/opencode-lookups.log"
+  printf '#!/usr/bin/env bash\nreal_mktemp=%q\n' "$(command -v mktemp)" > "$FAKEBIN_DIR/mktemp"
+  cat >> "$FAKEBIN_DIR/mktemp" <<'SH'
+case "$*" in
+'-d '*/fm-opencode-variant.XXXXXX) exit 1 ;;
+esac
+exec "$real_mktemp" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/mktemp"
+
+  out=$(FM_FAKE_OPENCODE_LOOKUP_LOG=$lookups \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model github-copilot/claude-opus-5.5 --effort high)
+  status=$?
+  expect_code 0 "$status" "opencode spawn must survive variant directory creation failure"$'\n'"$out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode github-copilot/claude-opus-5.5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'github-copilot/claude-opus-5.5' --prompt" \
+    "opencode must omit the variant when its lookup directory cannot be created"
+  assert_contains "$out" \
+    "notice: could not read the variants of 'github-copilot/claude-opus-5.5' from 'opencode models github-copilot --verbose --pure'; effort=high is recorded but omitted from the launch" \
+    "variant directory creation failure must print the failed-read notice"
+  [ ! -e "$lookups" ] || fail "opencode consulted the catalog after directory creation failed: $(cat "$lookups")"
+  pass "opencode skips the catalog and omits effort when its lookup directory cannot be created"
+}
+
+test_opencode_skips_catalog_lookup_without_copilot_effort() {
+  local rec id out status launch lookups shape model effort expected
+  for shape in copilot-noeffort anthropic-effort; do
+    case "$shape" in
+    copilot-noeffort)
+      model=github-copilot/claude-opus-5.5 effort=
+      expected="OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'github-copilot/claude-opus-5.5' --prompt"
+      ;;
+    anthropic-effort)
+      model=anthropic/claude-sonnet-4-5 effort=high
+      expected="OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt"
+      ;;
+    esac
+    id=profile-opencode-$shape-z7h
+    rec=$(make_spawn_case "profile-opencode-$shape" opencode "$id")
+    read_case_record "$rec"
+    make_opencode_catalog_stub "$FAKEBIN_DIR"
+    lookups="$CASE_DIR/opencode-lookups.log"
+
+    out=$(FM_FAKE_OPENCODE_LOOKUP_LOG=$lookups \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" ${effort:+--effort "$effort"})
+    status=$?
+    expect_code 0 "$status" "opencode $shape spawn should succeed"$'\n'"$out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "$expected" "opencode $shape launch changed"
+    [ ! -e "$lookups" ] || fail "opencode $shape spawn consulted the catalog: $(cat "$lookups")"
+  done
+  pass "opencode consults the catalog only for a copilot model with an effort"
+}
+
+test_opencode_copilot_lookup_leaves_nothing_behind_on_abort() {
+  local rec id out status tmp lookups n leftover
+  id=profile-opencode-copilot-abort-z7i
+  rec=$(make_spawn_case profile-opencode-copilot-abort opencode "$id")
+  read_case_record "$rec"
+  make_opencode_catalog_stub "$FAKEBIN_DIR"
+  tmp="$CASE_DIR/tmp"
+  lookups="$CASE_DIR/opencode-lookups.log"
+  mkdir -p "$tmp"
+
+  # The duplicate window refuses endpoint creation, after the preflight has
+  # started the background lookup; the hanging catalog keeps it running then.
+  out=$(TMPDIR=$tmp FM_FAKE_DUPLICATE_WINDOW="fm-$id" FM_FAKE_OPENCODE_MODELS=hang FM_OPENCODE_MODELS_TIMEOUT=2 \
+    FM_FAKE_OPENCODE_LOOKUP_LOG=$lookups \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model github-copilot/claude-opus-5.5 --effort high)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn refused at endpoint creation should fail"$'\n'"$out"
+  assert_contains "$out" "already exists" "the spawn should abort at endpoint creation"
+  n=0
+  while [ ! -s "$lookups" ] && [ "$n" -lt 100 ]; do
+    sleep 0.1
+    n=$((n + 1))
+  done
+  [ -s "$lookups" ] || fail "the aborted spawn never started its catalog lookup, so the cleanup check proves nothing"
+  for leftover in "$tmp"/fm-opencode-variant.*; do
+    [ ! -e "$leftover" ] || fail "an aborted spawn left its OpenCode variant lookup output behind: $leftover"
+  done
+  pass "an aborted spawn removes its background OpenCode variant lookup output"
+}
+
 test_native_effort_validator_keeps_axes_separate() {
   local harness
   for harness in pi pi-signed; do
@@ -2217,6 +2498,13 @@ test_opencode_threads_model_and_effort_variant
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
 test_opencode_omits_variant_when_model_family_lacks_effort
+test_opencode_emits_copilot_variant_the_model_lists
+test_opencode_omits_copilot_variant_the_model_lacks
+test_opencode_notices_copilot_model_without_variants
+test_opencode_omits_copilot_variant_when_catalog_lookup_fails
+test_opencode_skips_catalog_lookup_when_temp_directory_fails
+test_opencode_skips_catalog_lookup_without_copilot_effort
+test_opencode_copilot_lookup_leaves_nothing_behind_on_abort
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra

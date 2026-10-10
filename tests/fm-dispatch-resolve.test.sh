@@ -978,6 +978,8 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"medium","provider":"claude"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"rules":[{"when":"x","use":{"harness":"opencode","model":"google/gemini-3.8-flash","effort":"high","provider":"google"}}]}|each use profile effort must be supported by its harness and model' \
   '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|use profiles whose harness lacks one authoritative provider family require provider: opencode' \
   '{"rules":[{"when":"x","use":{"harness":"rovo"}}]}|use profiles whose harness lacks one authoritative provider family require provider: rovo' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|default profiles whose harness lacks one authoritative provider family require provider: pi'; do
@@ -1004,5 +1006,22 @@ run code out err --help
 expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
+
+# --- an OpenCode github-copilot effort is valid configuration -----------------
+# That model's own variant list is read by bin/fm-spawn.sh at spawn, so it is
+# not visible in the rules file. A quota row for the declared provider makes
+# the lone candidate rankable, so the resolved profile carries the effort.
+jq '.rules[3].use = {harness: "opencode", model: "github-copilot/claude-opus-5.5", effort: "xhigh", provider: "github-copilot"}' \
+  "$BASE_RULES" > "$RULES"
+jq '.providers += [{provider: "github-copilot", state: {status: "fresh"}, quotaSemantics: {status: "known", effectiveAvailability: [
+  {scope: "all_models", status: "known", effectivePercentRemaining: 60, runway: {status: "through_reset"}, selection: {spendPriority: 0.5}}]}}]' \
+  "$QUOTA" > "$TMP_ROOT/quota-copilot.json"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/quota-copilot.json" run code out err "$BRIEF"
+expect_code 0 "$code" "an opencode copilot effort profile is a valid rules file"$'\n'"$err"
+assert_contains "$out" "  profile: --harness 'opencode' --model 'github-copilot/claude-opus-5.5' --effort 'xhigh'" "an opencode copilot effort reaches the resolved profile"
+cp "$BASE_RULES" "$RULES"
+pass "an opencode copilot effort profile resolves with its effort for the spawn to check"
 
 printf '# all fm-dispatch-resolve tests passed\n'

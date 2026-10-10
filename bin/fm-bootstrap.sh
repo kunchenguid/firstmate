@@ -1080,7 +1080,13 @@ crew_dispatch_validate() {
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "rovo" then (["low","medium","high","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
+      elif $h == "opencode" then
+        (($m | type) == "string") and (
+          (($m | startswith("anthropic/")) and (["high","max"] | index($e)) != null)
+          or (($m | startswith("openai/")) and (["low","medium","high","xhigh"] | index($e)) != null)
+          or (($m | startswith("github-copilot/")) and ($m | length) > 15
+            and (["low","medium","high","xhigh","max"] | index($e)) != null))
+      elif $h == "kimi" or $h == "cursor" then false
       else true
       end;
     def profiles($value):
