@@ -276,6 +276,14 @@ if ! fm_supervision_needed "$STATE" "$GRACE"; then
   emit_allow
 fi
 
+# Antigravity CLI park requires active in-flight work or active Relay watch.
+# Background checks (e.g. contributions poll) and idle event sources alone
+# do not lock an idle interactive session behind a blocking Stop hook.
+if [ "$FM_SUP_IN_FLIGHT" -eq 0 ] && [ ! -f "$STATE/x-watch.check.sh" ]; then
+  budget_reset_if_ours
+  emit_allow
+fi
+
 # X mode cadence: an opted-in home polls Relay at its generated cadence.
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
@@ -338,6 +346,10 @@ done
 
 # The need may have vanished while parked.
 if ! fm_supervision_needed "$STATE" "$GRACE"; then
+  budget_reset_if_ours
+  emit_allow
+fi
+if [ "$FM_SUP_IN_FLIGHT" -eq 0 ] && [ ! -f "$STATE/x-watch.check.sh" ]; then
   budget_reset_if_ours
   emit_allow
 fi

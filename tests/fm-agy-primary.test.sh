@@ -266,6 +266,23 @@ test_park_inert_when_supervision_not_needed() {
   pass "fm-turnend-guard-agy: inert when no supervision needed"
 }
 
+test_park_inert_when_only_passive_checks_exist() {
+  local dir out decision
+  dir=$(make_primary_dir "$TMP_ROOT/passive-checks")
+  : > "$dir/state/sample.check.sh"
+  chmod +x "$dir/state/sample.check.sh"
+  : > "$dir/state/sample.check-trust"
+  mkdir -p "$dir/state/procevent"
+  : > "$dir/state/procevent/sample.source"
+  write_arm_fixture "$dir" actionable
+
+  out=$(run_park "$dir")
+  decision=$(decision_of "$out")
+  [ "$decision" = "allow" ] || fail "home with only passive checks must allow stop, got: $out"
+  [ ! -e "$dir/state/arm-ran" ] || fail "arm should not run when only passive checks exist"
+  pass "fm-turnend-guard-agy: inert when only passive checks exist and no work in flight"
+}
+
 test_park_delivers_actionable_wake() {
   local dir out decision reason kind
   dir=$(make_primary_dir "$TMP_ROOT/actionable-wake")
@@ -392,6 +409,7 @@ test_park_inert_on_foreign_host
 test_park_inert_on_non_model_stop
 test_park_inert_in_away_mode
 test_park_inert_when_supervision_not_needed
+test_park_inert_when_only_passive_checks_exist
 test_park_delivers_actionable_wake
 test_park_delivers_repair_followup_and_bounds_budget
 test_park_enforces_loop_ceiling
