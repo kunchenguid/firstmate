@@ -2223,7 +2223,7 @@ cmd_handled() {
   case "$status" in
     0) printf 'handled: %s %s\n' "$id" "$seq" ;;
     1) printf 'already-handled: %s %s\n' "$id" "$seq" ;;
-    3) die "capture $id $seq is not recorded by config/procevent-recorder (see its .recorder-failed and .recorder-log);; fix the recorder, then run bin/fm-procevent.sh record $id $seq" ;;
+    3) die "capture $id $seq is not recorded by config/procevent-recorder (see its .recorder-failed and .recorder-log); fix the recorder, then run bin/fm-procevent.sh record $id $seq" ;;
     *) die "cannot durably record handling: $id $seq" ;;
   esac
   if [ "$conclude" -eq 1 ]; then
