@@ -6,6 +6,14 @@
 #   bin/fm-doc-audience-check.sh --root <repo> [--inventory <path>]
 #
 # The inventory owns classification and setup routing.
+# Canonical agent-only index membership comes from tracked .agents/skills/*/SKILL.md
+# frontmatter: name matches its directory, description is a non-empty string,
+# user-invocable is a boolean, and metadata.internal is true. The index itself
+# and decision-hold-lifecycle compatibility redirect are not members; neither
+# are user-invocable skills. Each member has exactly one local Markdown owner
+# link in the index. Skill descriptions remain the trigger authority.
+# Required frontmatter uses block mappings, plain or quoted strings, and
+# folded/literal description blocks; no YAML dependency or trigger-text registry.
 # This check validates structure only and does not keyword-lint prose.
 set -eu
 
@@ -20,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -27,6 +36,8 @@ from urllib.parse import unquote, urlsplit
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 HTML_LINK_RE = re.compile(r"\b(?:href|src)=[\"']([^\"']+)[\"']", re.IGNORECASE)
 REQUIRED_TRACKED_PATTERNS = ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]
+SKILL_INDEX = ".agents/skills/agent-skill-trigger-index/SKILL.md"
+SKILL_INDEX_EXCLUSIONS = {SKILL_INDEX, ".agents/skills/decision-hold-lifecycle/SKILL.md"}
 
 
 class CheckError(Exception):
@@ -137,6 +148,111 @@ def markdown_anchors(path: Path) -> set[str]:
     return anchors
 
 
+def skill_metadata(root: Path, path: str) -> tuple[str, bool]:
+    """Normalize the required fields of the repository's block-style frontmatter."""
+    def invalid(detail: str) -> None:
+        fail(f"invalid skill metadata in {path}: {detail}")
+
+    def fields(lines: list[str]) -> dict[str, tuple[str, list[str]]]:
+        result: dict[str, tuple[str, list[str]]] = {}
+        key = None
+        for line in lines:
+            if not line.strip() or line.startswith("#"):
+                continue
+            match = re.fullmatch(r"([a-zA-Z][\w-]*):(?:\s+(.*))?", line)
+            if match:
+                key, value = match.groups()
+                if key in result:
+                    invalid(f"duplicate field {key}")
+                result[key] = ((value or "").strip(), [])
+            elif line.startswith(" ") and key is not None:
+                result[key][1].append(line)
+            else:
+                invalid("expected a block mapping")
+        return result
+
+    def string_value(value: str, continuation: list[str], label: str) -> str:
+        if re.fullmatch(r"[>|][+-]?", value):
+            value = "\n".join(line.strip() for line in continuation)
+        elif value.startswith('"'):
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError):
+                invalid(f"{label} must be a string")
+            if continuation:
+                invalid(f"{label} has unexpected continuation")
+        elif re.fullmatch(r"'(?:[^']|'')*'", value):
+            value = value[1:-1].replace("''", "'")
+            if continuation:
+                invalid(f"{label} has unexpected continuation")
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0]
+            if (not value or value[0] in "{[&*!'\"|>" or ": " in value
+                    or value.lower() in {"true", "false", "null", "~"}
+                    or re.fullmatch(r"[+-]?[\d.]+", value)):
+                invalid(f"{label} must be a string")
+            value = " ".join([value, *(line.strip() for line in continuation)])
+        if not isinstance(value, str) or not value.strip():
+            invalid(f"{label} must be a non-empty string")
+        return value.strip()
+
+    def boolean_value(value: str, continuation: list[str], label: str) -> bool:
+        value = re.split(r"\s+#", value, maxsplit=1)[0].lower()
+        if continuation or value not in {"true", "false"}:
+            invalid(f"{label} must be a boolean")
+        return value == "true"
+
+    try:
+        lines = (root / path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        invalid(f"cannot read frontmatter: {exc}")
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        invalid("missing frontmatter delimiters")
+    values = fields(lines[1:lines.index("---", 1)])
+    for required in ("name", "description", "user-invocable", "metadata"):
+        if required not in values:
+            invalid(f"missing {required}")
+    name = string_value(*values["name"], "name")
+    if name != Path(path).parent.name:
+        invalid("name must match the skill directory")
+    string_value(*values["description"], "description")
+    invocable = boolean_value(*values["user-invocable"], "user-invocable")
+    value, continuation = values["metadata"]
+    if value:
+        invalid("metadata must be a block mapping")
+    metadata = fields(textwrap.dedent("\n".join(continuation)).splitlines())
+    if "internal" not in metadata or not boolean_value(*metadata["internal"], "metadata.internal"):
+        invalid("metadata.internal must be true")
+    return name, invocable
+
+
+def validate_skill_index(root: Path, tracked: set[str]) -> None:
+    skill_paths = sorted(path for path in tracked if re.fullmatch(r"\.agents/skills/[^/]+/SKILL\.md", path))
+    if not skill_paths:
+        return
+    expected = set()
+    for path in skill_paths:
+        _, invocable = skill_metadata(root, path)
+        if not invocable and path not in SKILL_INDEX_EXCLUSIONS:
+            expected.add((root / path).resolve())
+    if SKILL_INDEX not in tracked:
+        fail(f"agent skill index must be tracked: {SKILL_INDEX}")
+    members = [target for _, target in markdown_local_links(root, root / SKILL_INDEX)
+               if target.name == "SKILL.md"]
+    duplicates = sorted(str(path.relative_to(root)) for path, count in Counter(members).items() if count > 1)
+    if duplicates:
+        fail("duplicate agent skill index membership: " + ", ".join(duplicates))
+    missing = sorted(str(path.relative_to(root)) for path in expected - set(members))
+    extra = sorted(str(path.relative_to(root)) for path in set(members) - expected)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append("missing canonical skills: " + ", ".join(missing))
+        if extra:
+            details.append("non-canonical members: " + ", ".join(extra))
+        fail("agent skill index: " + "; ".join(details))
+
+
 def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
     data = load_inventory(inventory_path)
     scope = data.get("scope")
@@ -243,6 +359,7 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
                 if fragment not in anchors:
                     fail(f"unresolved local anchor in {path}: {raw}")
 
+    validate_skill_index(root, tracked)
     return len(tracked), checked_links
 
 

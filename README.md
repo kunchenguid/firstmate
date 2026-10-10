@@ -198,7 +198,7 @@ Bearings invocation examples:
 - `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
 - `/bearings file include PRs` combines the dated report with live PR enrichment.
 
-Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
+Agent-only reference skills live under `.agents/skills/`; each skill's description owns its load trigger, and the [skill index](.agents/skills/agent-skill-trigger-index/SKILL.md) lists the canonical skills.
 
 ### Two-tier skill layout
 
