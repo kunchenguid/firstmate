@@ -1934,7 +1934,7 @@ terminal_done_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2 delivered
   STALE_WAIT_DECLARATION=
   status_line_verb "$(last_status_line "$STATE/$task.status")" delivered
-  [ "$delivered" = done ] || return 1
+  [ "$delivered" = "done" ] || return 1
   crew_is_terminal_done "$task" || return 1
   STALE_WAIT_DECLARATION=$(terminal_done_declaration "$task")
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
