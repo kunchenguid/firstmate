@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # fm-control.sh relaunch: the transactional replace-the-agent verb.
 #
+#
 # Relaunch is the only control verb that changes durable records, so these
 # tests pin the transaction itself, hermetically (stubbed session provider, no
 # real agent):
@@ -735,6 +736,34 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   [ "$(meta_field "$dir" rl6 model)" = opus ] || fail "the model should carry across a same-harness relaunch"
   [ "$(meta_field "$dir" rl6 effort)" = high ] || fail "the effort should carry across a same-harness relaunch"
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
+}
+
+test_same_droid_relaunch_preserves_dynamic_effort() {
+  local dir out rc settings mode id
+  for mode in explicit recorded; do
+    id="rl35-$mode"
+    dir=$(new_case "droid-settings-$mode" "$id")
+    add_ship_task "$dir" "$id" droid
+    printf 'droid' > "$dir/fake/command"
+    printf 'droid' > "$dir/fake/becomes"
+    settings="$dir/home/state/$id.droid-settings.json"
+    printf '%s\n' '{"retired":true}' > "$settings"
+
+    if [ "$mode" = explicit ]; then
+      out=$(run_control "$dir" "$id" relaunch --effort dynamic --note "continue with fresh settings"); rc=$?
+    else
+      sed 's/^effort=default$/effort=dynamic/' "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
+      mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
+      out=$(run_control "$dir" "$id" relaunch --note "recover with the recorded profile"); rc=$?
+    fi
+    expect_code 0 "$rc" "same-Droid relaunch should preserve $mode dynamic effort"$'\n'"$out"
+    [ "$(meta_field "$dir" "$id" effort)" = dynamic ] \
+      || fail "same-Droid relaunch did not record $mode dynamic effort"
+    jq -e '.retired == null and .sessionDefaultSettings.reasoningEffort == "dynamic" and .hooks.Stop[0].hooks[0].type == "command"' "$settings" >/dev/null \
+      || fail "same-Droid relaunch did not publish $mode dynamic effort in replacement runtime settings"
+    chmod u+w "$dir/home/state/$id.git-hooks" || fail 'could not restore the Droid fixture hook directory for cleanup'
+    pass "fm-control relaunch: Droid preserves $mode dynamic effort"
+  done
 }
 
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
@@ -2502,6 +2531,7 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_same_droid_relaunch_preserves_dynamic_effort
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch

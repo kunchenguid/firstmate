@@ -774,6 +774,10 @@ Its private worker config disables Claude Code imports (including the captain's 
 
 ### Verification and primary supervision
 
+Droid is verified for crewmate and scout launches only; primary and secondmate supervision are unsupported.
+Its [adapter reference](../.agents/skills/harness-adapters/references/harness/droid.md) owns current trust, model, effort, and lifecycle facts, and [runtime verification](verification/runtime-backends.md#droid) records the live guard.
+Template-backed Droid launches require `jq` to construct private per-task settings; bootstrap diagnoses that dependency for static Droid crew selection or an active dispatch profile file, and every template-backed Droid spawn checks it before allocation.
+
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in the skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 
@@ -1110,7 +1114,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "min_confidence": 0.85,
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra|dynamic, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }

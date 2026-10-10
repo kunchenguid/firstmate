@@ -111,6 +111,7 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
+  new-window) [ ! -e "$(dirname "$0")/fail-new-window" ] || exit 1; exit 0 ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
@@ -118,8 +119,11 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  has-session|new-session|kill-window|set-window-option) exit 0 ;;
   send-keys)
+    if [ -e "$(dirname "$0")/fail-gotmp-send" ]; then
+      case "$*" in *GOTMPDIR*) exit 1 ;; esac
+    fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do

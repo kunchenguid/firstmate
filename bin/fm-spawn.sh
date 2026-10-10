@@ -87,7 +87,7 @@
 #   only a shell that will not go refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
-#   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
+#   --model <name> and --effort <low|medium|high|xhigh|max|ultra|dynamic> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed. Ultra is the explicit
@@ -202,7 +202,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|droid)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -396,6 +396,8 @@
 #                  every other harness)
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#     __DROIDSETTINGS__ absolute path to the private per-task Droid settings file
+#                  carrying autonomy/model/effort pins and the worker Stop hook
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -873,9 +875,9 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
   }
 fi
 case "$EFFORT" in
-'' | low | medium | high | xhigh | max | ultra) ;;
+'' | low | medium | high | xhigh | max | ultra | dynamic) ;;
 *)
-  echo "error: --effort must be one of low, medium, high, xhigh, max, ultra" >&2
+  echo "error: --effort must be one of low, medium, high, xhigh, max, ultra, dynamic" >&2
   exit 1
   ;;
 esac
@@ -1251,6 +1253,11 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+DROID_SETTINGS_CLEANUP=
+DROID_TRUST_PENDING=0
+DROID_SETTINGS_TMP=
+DROID_SETTINGS_PATH=
+DROID_SETTINGS_STAGED=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1312,11 +1319,16 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$DROID_SETTINGS_TMP" ]; then
+    rm -f "$DROID_SETTINGS_TMP" || true
+    DROID_SETTINGS_TMP=
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
     [ ! -e "$SPAWN_META_TMP" ] &&
     [ ! -L "$SPAWN_META_TMP" ]; then
+    DROID_SETTINGS_CLEANUP=
     RELAUNCH_REPLACEMENT_PENDING=0
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
@@ -1400,6 +1412,23 @@ spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
     if ! spawn_fresh_commit_rollback; then
+      status=1
+    fi
+  fi
+  if [ -n "$DROID_SETTINGS_CLEANUP" ]; then
+    # A fresh task record retained after rollback still owns its launched
+    # worker's settings; deleting them would strip its profile and Stop hook.
+    if [ "${RELAUNCH:-0}" -eq 1 ] ||
+      { [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; }; then
+      rm -f "$DROID_SETTINGS_CLEANUP" || true
+    fi
+    DROID_SETTINGS_CLEANUP=
+  fi
+  if [ "$status" -ne 0 ] && [ "$DROID_TRUST_PENDING" = 1 ] &&
+    [ "${RELAUNCH:-0}" -ne 1 ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    if ! "$FM_ROOT/bin/fm-droid-trust.sh" --rollback "$STATE/$ID.droid-trust" >/dev/null; then
+      echo "error: aborted spawn retained Droid trust receipt for recovery: $STATE/$ID.droid-trust" >&2
       status=1
     fi
   fi
@@ -1923,7 +1952,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | droid)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2040,6 +2069,16 @@ agy_model_validate() {  # <agy-bin> <model>
     return 0
   fi
   echo "error: agy model '$model' is not listed by 'agy models'; choose a listed id or omit --model" >&2
+  return 1
+}
+
+publish_file_no_clobber() {
+  local source=$1 destination=$2
+  if ln -T -- "$source" "$destination" 2>/dev/null \
+     || ln -h -- "$source" "$destination" 2>/dev/null; then
+    rm -f "$source"
+    return 0
+  fi
   return 1
 }
 
@@ -2195,6 +2234,10 @@ launch_template() {
   # launch command - it is a Stop-event hook installed below (global hook +
   # per-task pointer), so the template is identical for ship/scout/secondmate.
   grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Droid settings are process-local and keep hooks outside the worktree.
+  # Pin high autonomy in settings as well: user session defaults can override
+  # --auto high (verified 0.237.0). Exact-worktree trust is registered below.
+  droid) printf '%s' 'droid --settings __DROIDSETTINGS__ --auto high "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
   # --yolo does NOT cover and which would otherwise block every spawn, since
   # each task gets a fresh worktree path cursor has never seen. --yolo is the
@@ -2310,6 +2353,7 @@ launch_template() {
   esac
 }
 
+DROID_TEMPLATE=0
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
@@ -2347,6 +2391,7 @@ case "$ARG3" in
     echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
     exit 1
   }
+  [ "$HARNESS" != droid ] || DROID_TEMPLATE=1
   ;;
 *)
   HARNESS=$ARG3
@@ -2354,10 +2399,11 @@ case "$ARG3" in
     echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
     exit 1
   }
+  [ "$HARNESS" != droid ] || DROID_TEMPLATE=1
   ;;
 esac
 
-# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, devin, and droid are CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2371,7 +2417,7 @@ esac
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = droid ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2382,6 +2428,11 @@ fi
 # standing one up with no way to arm its watch cycle.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+if [ "$DROID_TEMPLATE" -eq 1 ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq is required to build droid runtime settings" >&2
   exit 1
 fi
 
@@ -2789,6 +2840,19 @@ effort_flag_for_harness() {
     # stays in task metadata but never reaches the launch command. Cursor encodes
     # effort in model ids such as cursor-grok-4.5-high, so it also receives no
     # separate effort flag.
+  esac
+}
+
+droid_model_reference() {
+  [ -n "$1" ] && [ "$1" != default ] || return 0
+  # Native catalog and custom registry ids are passed without alias inference.
+  printf '%s' "$1"
+}
+
+droid_effort_value() {
+  local effort=$1
+  case "$effort" in
+  low | medium | high | xhigh | max | dynamic) printf '%s' "$effort" ;;
   esac
 }
 
@@ -3343,6 +3407,47 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # once here so every downstream comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+
+if [ "$DROID_TEMPLATE" -eq 1 ]; then
+  mkdir -p "$STATE"
+  STATE_REAL=$(cd "$STATE" && pwd -P)
+  TURNEND="$STATE_REAL/$ID.turn-ended"
+  DROID_MODEL=$(droid_model_reference "$MODEL")
+  DROID_EFFORT=$(droid_effort_value "$EFFORT")
+  DROID_HOOK_COMMAND="touch $(shell_quote "$TURNEND")"
+  DROID_SETTINGS_TMP=$(mktemp "$STATE/.${ID}.droid-settings.XXXXXXXXXXXX")
+  if jq -n \
+    --arg model "$DROID_MODEL" \
+    --arg effort "$DROID_EFFORT" \
+    --arg hook_command "$DROID_HOOK_COMMAND" '
+      {sessionDefaultSettings:
+         ({autonomyLevel: "high", autonomyMode: "auto-high", interactionMode: "auto"} +
+          (if $model == "" then {} else {model: $model} end) +
+          (if $effort == "" then {} else {reasoningEffort: $effort} end))} +
+      (if $hook_command == "" then {}
+       else {hooks: {Stop: [{hooks: [{type: "command", command: $hook_command}]}]}}
+       end)
+    ' > "$DROID_SETTINGS_TMP" \
+    && jq -e 'type == "object"' "$DROID_SETTINGS_TMP" >/dev/null; then
+    DROID_SETTINGS_PATH="$STATE/$ID.droid-settings.json"
+    if [ "$RELAUNCH" -eq 1 ]; then
+      DROID_SETTINGS_STAGED=1
+    elif publish_file_no_clobber "$DROID_SETTINGS_TMP" "$DROID_SETTINGS_PATH"; then
+      DROID_SETTINGS_TMP=
+      DROID_SETTINGS_CLEANUP=$DROID_SETTINGS_PATH
+    else
+      rm -f "$DROID_SETTINGS_TMP"
+      DROID_SETTINGS_TMP=
+      echo "error: droid runtime settings already exist for task '$ID'" >&2
+      exit 1
+    fi
+  else
+    rm -f "$DROID_SETTINGS_TMP"
+    DROID_SETTINGS_TMP=
+    echo "error: failed to build droid runtime settings" >&2
+    exit 1
+  fi
+fi
 
 real_path_or_raw() { # <path>
   local path=$1 real
@@ -4533,6 +4638,14 @@ spawn_assert_agent_worktree
 # path that was not pre-registered, refuses to count a busy turn as ready until
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
+if [ "$DROID_TEMPLATE" -eq 1 ]; then
+  DROID_TRUST_PENDING=1
+  "$FM_ROOT/bin/fm-droid-trust.sh" --receipt "$STATE/$ID.droid-trust" "$WT" "$PROJ_ABS" >/dev/null || {
+    echo "error: could not register Droid trust for the isolated worktree $WT; refusing launch" >&2
+    exit 1
+  }
+fi
+
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
@@ -4606,6 +4719,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_HARNESS=$HARNESS
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
+fi
+if [ "$DROID_SETTINGS_STAGED" -eq 1 ]; then
+  if publish_file_no_clobber "$DROID_SETTINGS_TMP" "$DROID_SETTINGS_PATH"; then
+    DROID_SETTINGS_TMP=
+    DROID_SETTINGS_CLEANUP=$DROID_SETTINGS_PATH
+    DROID_SETTINGS_STAGED=0
+  else
+    echo "error: droid runtime settings already exist for task '$ID'" >&2
+    exit 1
+  fi
 fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
@@ -5203,6 +5326,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+  DROID_SETTINGS_CLEANUP=
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
@@ -5230,6 +5354,7 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_droidsettings=$(shell_quote "$STATE/$ID.droid-settings.json")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
@@ -5266,6 +5391,7 @@ fi
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__DROIDSETTINGS__/$sq_droidsettings}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
@@ -5308,7 +5434,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | droid)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -5691,6 +5817,7 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   echo "error: spawn of $ID was interrupted after launch delivery began; $SPAWN_PRESERVED_CLAIM" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
+DROID_SETTINGS_CLEANUP=
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 

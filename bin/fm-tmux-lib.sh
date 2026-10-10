@@ -161,13 +161,33 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # `unknown`. Reclassify that pane the way every cursorless backend already
   # classifies it, letting the bottom-most shape win, which is the same rule
   # herdr, zellij, cmux, and orca use for every harness including this one.
-  # Gated on Cursor's own structural process identity, never on the verdict
-  # alone, so the strict blank-row posture that owns `unknown` for every other
-  # harness is untouched.
-  if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
+  # Droid also parks its cursor below the input box after a completed turn.
+  # Gate that read on its exact foreground process, so shells and other
+  # harnesses retain the strict cursor guard. Both reads still require the
+  # shared classifier to prove the composer empty before allowing input.
+  if [ "$verdict" = unknown ] \
+     && { fm_tmux_pane_is_cursor "$target" \
+          || fm_tmux_pane_is_droid "$target"; }; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
   printf '%s' "$verdict"
+}
+
+# Fish can remain tmux's pane_current_command while its foreground group also
+# contains Droid. Require the exact live executable in that group, so a
+# background Droid or a stale screen after exit cannot authorize input.
+fm_tmux_pane_is_droid() {  # <target>
+  local target=$1 tty pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r _ pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    [ "${comm##*/}" != droid ] || return 0
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains

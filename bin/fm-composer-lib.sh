@@ -402,6 +402,10 @@ FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 # every omp busy and furniture read on Linux CI.
 FM_OMP_SPINNER_FRAMES_RE='(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)'
 FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='Working…|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]'
+# Independent Droid activity and interrupt hints survive either being cropped.
+# Alternation keeps multibyte spinner frames intact under LC_ALL=C.
+FM_DROID_SPINNER_FRAMES_RE='(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)'
+FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT='Press ESC to stop|^[[:space:]]*'"$FM_DROID_SPINNER_FRAMES_RE"'[[:space:]]+(Thinking|Streaming|Invoking tools|Executing)\.\.\.'
 FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
@@ -434,6 +438,7 @@ fm_busy_lines_match() {  # [harness]
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
       omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
+      droid) regex=$FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
@@ -1481,6 +1486,13 @@ _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
   _fm_composer_titled_rule_row "$above" "${below//─/ }"
 }
 
+# Droid draws this elapsed-time/context status row immediately below its box.
+# It is composer furniture, not a newer interactive surface.
+_fm_composer_droid_status_row() {  # <trimmed-row>
+  local re='^\[⏱ [0-9]+[smh]( [0-9]+[smh])*(, context: (<1|[0-9]+)%)?\] '
+  [[ $1 =~ $re ]]
+}
+
 _fm_composer_select_cursorless() {
   local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
   FM_COMPOSER_SELECTED_KIND=
@@ -1587,7 +1599,9 @@ _fm_composer_select_cursorless() {
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
-    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
+    if [ -n "$trimmed" ] \
+       && ! fm_composer_row_has_edge "$trimmed" \
+       && ! _fm_composer_droid_status_row "$trimmed"; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi

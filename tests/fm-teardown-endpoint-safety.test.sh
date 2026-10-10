@@ -988,7 +988,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
 # The claim proves the stale record's teardown is records-only, so the record
 # scan must not refuse it; once it is gone, the claimant tears down normally.
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
-  local dir id=stale-task other=live-task rc
+  local dir id=stale-task other=live-task rc trust_home store
 
   dir=$(make_case slot-reassigned-both-records)
   mark_case_as_treehouse_pool "$dir"
@@ -999,9 +999,14 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other"
+  trust_home="$dir/user-home"
+  mkdir -p "$trust_home/.factory"
+  store="$trust_home/.factory/settings.json"
+  printf '%s\n' '{"trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
+  HOME="$trust_home" "$ROOT/bin/fm-droid-trust.sh" --receipt "$dir/home/state/$id.droid-trust" "$dir/worktree" "$dir/project" >/dev/null || fail 'pooled trust setup failed'
 
   set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  HOME="$trust_home" run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "records-only teardown of a stale record on a claimed slot failed: $(cat "$dir/stderr")"
@@ -1009,15 +1014,115 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   assert_present "$dir/worktree/sentinel" "records-only teardown reset the claimant's slot"
   assert_present "$dir/home/state/$other.meta" "records-only teardown removed the claimant's record"
 
+  assert_absent "$dir/home/state/$id.droid-trust" "retired task retained trust ownership"
+  assert_present "$dir/home/state/$other.droid-trust" "non-Droid successor did not inherit trust cleanup"
+  jq -e '.trustedFolders | length == 3' "$store" >/dev/null || fail 'successor lost exact-path trust'
+
   : > "$dir/runtime.log"
-  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
+  HOME="$trust_home" run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "claimant teardown failed after the stale record retired: $(cat "$dir/stderr")"
   assert_absent "$dir/home/state/$other.meta" "claimant teardown left its record"
   assert_absent "$dir/pool/1/.fm-slot-owner" "claimant teardown left its spent slot claim behind"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "claimant teardown did not return its pool slot: $(cat "$dir/runtime.log")"
 
-  pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
+  jq -e '.trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'final pooled teardown retained trust or lost unrelated grants'
+  assert_absent "$dir/home/state/$other.droid-trust" "successor retained cleanup receipt"
+  pass "fm-teardown: a stale record transfers trust cleanup to a non-Droid claimant, which retires it"
+}
+
+test_retired_droid_record_does_not_trust_a_pooled_successor() {
+  local dir id=retired-droid other=live-task trust_home store
+  dir=$(make_case retired-droid-slot)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "harness=droid" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+  trust_home="$dir/user-home"
+  mkdir -p "$trust_home/.factory"
+  store="$trust_home/.factory/settings.json"
+  printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
+
+  HOME="$trust_home" run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "receipt-free records-only cleanup failed: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" 'retired Droid task beside its successor'
+  assert_present "$dir/home/state/$other.meta" 'receipt-free cleanup removed the successor record'
+  assert_absent "$dir/home/state/$id.droid-trust" 'receipt-free cleanup recreated retired trust ownership'
+  assert_absent "$dir/home/state/$other.droid-trust" 'receipt-free cleanup created trust ownership for the successor'
+  jq -e '.otherSetting == "preserve" and .trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'receipt-free cleanup trusted the successor or changed unrelated settings'
+  pass 'a receipt-free retired Droid task does not recreate trust for a pooled successor'
+}
+
+test_vanished_pool_successor_retirement_serializes_trust_transfer() {
+  local dir id=trust-owner other=non-droid-successor trust_home store successor_pid rc=0 i=0 real_rm
+  dir=$(make_case vanished-pool-trust-race)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "harness=droid" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" "harness=claude" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+  trust_home="$dir/user-home"
+  mkdir -p "$trust_home/.factory"
+  store="$trust_home/.factory/settings.json"
+  printf '%s\n' '{"otherSetting":"preserve","trustedFolders":{"/unrelated":{"trustedAt":"existing"}}}' > "$store"
+  HOME="$trust_home" "$ROOT/bin/fm-droid-trust.sh" --receipt "$dir/home/state/$id.droid-trust" "$dir/worktree" "$dir/project" >/dev/null || fail 'race trust setup failed'
+  git -C "$dir/project" worktree remove --force "$dir/pool/1/project" || fail 'could not remove the pooled worktree'
+  rm -f "$dir/worktree"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "harness=droid" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=scout"
+  real_rm=$(command -v rm)
+  cat > "$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "$FM_RACE_STATE/$FM_RACE_SUCCESSOR.turn-ended" ]; then
+    : > "$FM_RACE_READY"
+    for ((i=0; i<6000; i++)); do
+      [ ! -e "$FM_RACE_RELEASE" ] || break
+      sleep 0.01
+    done
+    [ -e "$FM_RACE_RELEASE" ] || exit 1
+  fi
+done
+SH
+  printf 'exec %q "$@"\n' "$real_rm" >> "$dir/fakebin/rm"
+  chmod +x "$dir/fakebin/rm"
+  HOME="$trust_home" FM_RACE_STATE="$dir/home/state" FM_RACE_SUCCESSOR="$other" \
+    FM_RACE_READY="$dir/ready" FM_RACE_RELEASE="$dir/release" \
+    run_case "$dir" "$other" > "$dir/successor.stdout" 2> "$dir/successor.stderr" &
+  successor_pid=$!
+  while [ ! -e "$dir/ready" ] && [ "$i" -lt 1000 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/ready" ]; then
+    : > "$dir/release"
+    wait "$successor_pid" 2>/dev/null || true
+    fail "successor did not reach receipt-free metadata retirement: $(cat "$dir/successor.stderr")"
+  fi
+  assert_present "$dir/home/state/$other.meta" 'paused successor already lost its metadata'
+  assert_absent "$dir/home/state/$other.droid-trust" 'paused successor unexpectedly owned a receipt'
+  HOME="$trust_home" run_case "$dir" "$id" > "$dir/owner.stdout" 2> "$dir/owner.stderr" || rc=$?
+  : > "$dir/release"
+  wait "$successor_pid" || fail "successor teardown failed: $(cat "$dir/successor.stderr")"
+  [ "$rc" -ne 0 ] || fail 'trust retirement transferred ownership into an already retiring successor'
+  assert_present "$dir/home/state/$id.meta" 'contended retirement removed its owner record'
+  assert_present "$dir/home/state/$id.droid-trust" 'contended retirement lost its receipt'
+  assert_absent "$dir/home/state/$other.meta" 'successor teardown retained its metadata'
+  assert_absent "$dir/home/state/$other.droid-trust" 'successor teardown left an orphan receipt'
+  jq -e '.otherSetting == "preserve" and (.trustedFolders | length == 3)' "$store" >/dev/null || fail 'contended retirement changed trust'
+  HOME="$trust_home" run_case "$dir" "$id" > "$dir/retry.stdout" 2> "$dir/retry.stderr" || fail "owner retirement retry failed: $(cat "$dir/retry.stderr")"
+  assert_absent "$dir/home/state/$id.meta" 'owner retry retained its metadata'
+  assert_absent "$dir/home/state/$id.droid-trust" 'owner retry retained its receipt'
+  jq -e '.otherSetting == "preserve" and .trustedFolders == {"/unrelated":{"trustedAt":"existing"}}' "$store" >/dev/null || fail 'concurrent retirement leaked exact-path trust or changed unrelated settings'
+  pass 'vanished pooled worktree retirement cannot transfer trust past a non-Droid successor receipt check'
 }
 
 # The two states that must never become a false refusal: the task's own claim,
@@ -1441,6 +1546,8 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
+test_retired_droid_record_does_not_trust_a_pooled_successor
+test_vanished_pool_successor_retirement_serializes_trust_transfer
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
