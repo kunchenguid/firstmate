@@ -72,6 +72,12 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# For this Firstmate repository only, a local-only branch declared in
+# config/fork-stack also qualifies when its pinned base-to-tip change is
+# conflict-free and adds nothing to the local default tree after replay.
+# Declaration membership alone never proves landing, and dirt still refuses.
+# A branch accepted by that proof is retained because the declaration still
+# needs its original base-to-tip range for later stack rebuilds.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -1611,6 +1617,68 @@ work_is_landed() {
   content_in_default
 }
 
+# The declaration schema belongs to docs/configuration.md (carried contribution
+# stack) and bin/fm-fork-stack.sh. Only this repository's local default can
+# prove a carried replay landed; remote content, another project's same-named
+# branch, or patch ids cannot.
+CARRIED_STACK_BRANCH_KEEP=
+CARRIED_STACK_REFUSAL=
+carried_stack_entry_valid() { # <default-branch> <tip> <base> <extra>
+  local default=$1 tip=$2 base=$3 extra=$4 resolved
+  [ -n "$base" ] && [ -z "$extra" ] || return 1
+  git check-ref-format "refs/heads/$tip" >/dev/null 2>&1 || return 1
+  case "$tip" in "$default"|archive/*) return 1 ;; esac
+  case "$base" in *[!a-fA-F0-9]*) return 1 ;; esac
+  case "${#base}" in 40|64) ;; *) return 1 ;; esac
+  resolved=$(git -C "$WT" rev-parse --verify "refs/heads/$tip^{commit}" 2>/dev/null) || return 1
+  git -C "$WT" cat-file -e "$base^{commit}" 2>/dev/null || return 1
+  git -C "$WT" merge-base --is-ancestor "$base" "$resolved" 2>/dev/null || return 1
+  [ -z "$(git -C "$WT" rev-list --merges "$base..$resolved" 2>/dev/null)" ]
+}
+carried_stack_content_in_local_default() { # <default-branch>
+  local default=$1 declaration="$CONFIG/fork-stack" branch base extra selected='' declared='' invalid=''
+  local root_common project_common tip seen='' empty_tree merged_tree target_tree
+  CARRIED_STACK_REFUSAL=
+  [ -f "$declaration" ] && [ -r "$declaration" ] && [ ! -L "$declaration" ] || return 1
+  root_common=$(git -C "$FM_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  project_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$root_common" = "$project_common" ] || return 1
+  # Cleanup detaches HEAD and keeps a proven carried branch before returning
+  # the worktree, so a recheck after that, in this or a later teardown, derives
+  # the branch as the one declared branch whose tip is still this HEAD.
+  if ! branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+    branch=$(git -C "$WT" for-each-ref --points-at HEAD --format='%(refname:lstrip=2)' refs/heads/ 2>/dev/null \
+      | grep -Fx -f <(awk 'NF && $1 !~ /^#/ { print $1 }' "$declaration")) || return 1
+    case "$branch" in *$'\n'*) return 1 ;; esac
+  fi
+  [ "$(git -C "$WT" rev-parse --verify "refs/heads/$branch" 2>/dev/null)" = \
+    "$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null)" ] || return 1
+  while read -r tip base extra || [ -n "${tip:-}" ]; do
+    case "${tip:-}" in ''|\#*) continue ;; esac
+    [ "$tip" != "$branch" ] || { declared=1; selected=$base; }
+    [ -z "$invalid" ] || continue
+    case "$seen" in *"|$tip|"*) invalid=$tip; continue ;; esac
+    seen="$seen|$tip|"
+    carried_stack_entry_valid "$default" "$tip" "${base:-}" "${extra:-}" || invalid=$tip
+  done < "$declaration"
+  if [ -n "$invalid" ]; then
+    [ -z "$declared" ] \
+      || CARRIED_STACK_REFUSAL="config/fork-stack entry '$invalid' is invalid (expected '<branch> <full base sha>' for an existing, merge-free local branch)"
+    return 1
+  fi
+  [ -n "$selected" ] || return 1
+  CARRIED_STACK_REFUSAL="$branch is declared in config/fork-stack, but its change from ${selected:0:12} does not replay onto local $default without conflicts or extra content"
+  target_tree=$(git -C "$WT" rev-parse --verify "refs/heads/$default^{tree}" 2>/dev/null) || return 1
+  empty_tree=$(git -C "$WT" hash-object -w -t tree /dev/null) || return 1
+  merged_tree=$(GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE="$empty_tree" git -C "$WT" \
+    -c core.attributesFile=/dev/null -c merge.renormalize=false \
+    merge-tree --write-tree --merge-base="$selected" "refs/heads/$default" HEAD 2>/dev/null) || return 1
+  [ "${merged_tree%%$'\n'*}" = "$target_tree" ] || return 1
+  CARRIED_STACK_REFUSAL=
+  CARRIED_STACK_BRANCH_KEEP=$branch
+  return 0
+}
+
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
@@ -1930,10 +1998,17 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
+    CARRIED_STACK_REFUSAL=
+    if [ -z "$dirty" ] && [ -n "$unmerged" ] \
+       && carried_stack_content_in_local_default "$DEFAULT"; then
+      unmerged=
+    fi
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && report_worktree_dirt "$dirty"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      [ -n "$unmerged" ] && [ -n "$CARRIED_STACK_REFUSAL" ] \
+        && echo "carried-stack proof failed: $CARRIED_STACK_REFUSAL." >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
@@ -3576,7 +3651,9 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+        if [ "$branch" != "$CARRIED_STACK_BRANCH_KEEP" ]; then
+          git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+        fi
       fi
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
@@ -3594,7 +3671,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      if [ "$branch" != "$CARRIED_STACK_BRANCH_KEEP" ]; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.

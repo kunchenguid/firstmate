@@ -629,7 +629,7 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_ROOT_OVERRIDE="${FM_TEARDOWN_TEST_ROOT:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
@@ -831,6 +831,106 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_local_only_carried_stack_replay() {
+  local variant case_dir base original replay rc
+  for variant in replay undeclared undeclared-invalid wrong-project extra changed dirty remote-only malformed duplicate bad-base; do
+    case_dir=$(make_case "carried-$variant")
+    write_meta "$case_dir" local-only ship
+    base=$(git -C "$case_dir/wt" rev-parse HEAD)
+    wt_commit_file "$case_dir" carried.txt original "original contribution"
+    original=$(git -C "$case_dir/wt" rev-parse HEAD)
+    # Same content under a distinct commit ID, plus unrelated default content:
+    # neither commit ancestry nor whole-tree equality can prove this landed.
+    printf 'original\n' > "$case_dir/project/carried.txt"
+    printf 'upstream\n' > "$case_dir/project/upstream.txt"
+    git -C "$case_dir/project" add carried.txt upstream.txt
+    git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -q -m 'rebuilt stack'
+    replay=$(git -C "$case_dir/project" rev-parse HEAD)
+    [ "$original" != "$replay" ] || fail "carried-$variant: replay did not change commit ID"
+    if git -C "$case_dir/wt" merge-base --is-ancestor HEAD main; then
+      fail "carried-$variant: original commit unexpectedly reached local main"
+    fi
+    printf '# Carried contribution\n\nfm/task-x1 %s\n' "$base" > "$case_dir/config/fork-stack"
+    case "$variant" in
+      undeclared)
+        git -C "$case_dir/project" branch other "$original"
+        printf 'other %s\n' "$base" > "$case_dir/config/fork-stack"
+        ;;
+      undeclared-invalid) printf 'gone %s\n' "$base" > "$case_dir/config/fork-stack" ;;
+      extra) wt_commit_file "$case_dir" extra.txt unlanded ;;
+      changed) wt_commit_file "$case_dir" carried.txt unlanded ;;
+      dirty) printf 'dirty\n' >> "$case_dir/wt/carried.txt" ;;
+      remote-only)
+        git -C "$case_dir/project" push -q origin main
+        git -C "$case_dir/project" reset -q --hard "$base"
+        ;;
+      malformed) printf 'fm/task-x1 %s extra\n' "$base" > "$case_dir/config/fork-stack" ;;
+      duplicate) printf 'fm/task-x1 %s\n' "$base" >> "$case_dir/config/fork-stack" ;;
+      bad-base) printf 'fm/task-x1 %s\n' "$replay" > "$case_dir/config/fork-stack" ;;
+    esac
+    if [ "$variant" = wrong-project ]; then
+      FM_TEARDOWN_TEST_ROOT="$ROOT" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" && rc=0 || rc=$?
+    else
+      FM_TEARDOWN_TEST_ROOT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" && rc=0 || rc=$?
+    fi
+    if [ "$variant" = replay ]; then
+      expect_code 0 "$rc" "carried replay should allow cleanup: $(cat "$case_dir/stderr")"
+      assert_absent "$case_dir/state/task-x1.meta" "carried replay retained task metadata"
+      [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$original" ] \
+        || fail "carried replay deleted or moved the branch still named by fork-stack"
+    else
+      expect_code 1 "$rc" "carried-$variant should refuse cleanup: $(cat "$case_dir/stderr")"
+      assert_refusal_retained_task_state "$case_dir" "carried-$variant" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+      case "$variant" in
+        undeclared|undeclared-invalid|wrong-project|dirty)
+          ! grep -q 'carried-stack proof failed' "$case_dir/stderr" \
+            || fail "carried-$variant: refusal blamed a carried-stack proof that did not apply"
+          ;;
+        *)
+          grep -q 'carried-stack proof failed' "$case_dir/stderr" \
+            || fail "carried-$variant: refusal did not explain the failed carried-stack proof: $(cat "$case_dir/stderr")"
+          ;;
+      esac
+    fi
+  done
+  pass "declared carried replay on local main allows cleanup; undeclared, dirty, unlanded, remote-only and invalid proofs refuse"
+}
+
+# Cleanup detaches HEAD and keeps the carried branch before returning the
+# worktree; when that return fails, a fresh teardown must re-derive the branch.
+test_local_only_carried_stack_retry_after_failed_return() {
+  local case_dir base original rc
+  case_dir=$(make_case carried-retry)
+  write_meta "$case_dir" local-only ship
+  base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  wt_commit_file "$case_dir" carried.txt original "original contribution"
+  original=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'original\n' > "$case_dir/project/carried.txt"
+  git -C "$case_dir/project" add carried.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -q -m 'rebuilt stack'
+  printf 'fm/task-x1 %s\n' "$base" > "$case_dir/config/fork-stack"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ -e "$case_dir/return-failed" ] && exit 0
+: > "$case_dir/return-failed"
+echo 'fatal: simulated return failure' >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  FM_TEARDOWN_TEST_ROOT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" && rc=0 || rc=$?
+  expect_code 1 "$rc" "carried-retry: first teardown should fail on the failed return: $(cat "$case_dir/stderr")"
+  if git -C "$case_dir/wt" symbolic-ref -q HEAD >/dev/null; then
+    fail "carried-retry: first teardown did not detach HEAD before the failed return"
+  fi
+  FM_TEARDOWN_TEST_ROOT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" && rc=0 || rc=$?
+  expect_code 0 "$rc" "carried-retry: retried teardown should accept the carried replay: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "carried-retry: retried teardown retained task metadata"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$original" ] \
+    || fail "carried-retry: retried teardown deleted or moved the declared branch"
+  pass "carried replay teardown retried after a failed worktree return re-derives and keeps the declared branch"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -4649,6 +4749,8 @@ test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_carried_stack_replay
+test_local_only_carried_stack_retry_after_failed_return
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
