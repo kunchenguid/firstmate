@@ -61,6 +61,11 @@ A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only`, a
 `yolo` is inactive on a `forge=gerrit` project, so never propose `+yolo` alongside it.
 `bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-dod-lib.sh` owns what it changes for a worker.
 
+The optional `mr-pipeline=` token records whether a GitLab project's merge requests get a head pipeline at all; its one value is `mr-pipeline=none`, meaning they never do because CI runs only on protected branches.
+It is orthogonal to the mode, `+yolo`, and `forge=`, so it is never derived from any of them, and GitHub is unaffected: the token has no meaning there.
+At add or clone intake, propose it from the project's `.gitlab-ci.yml` rules or a live `glab-axi ci status --branch <default>` read reporting no pipeline found, and bind it only on the captain's confirmation, mirroring how `forge=` is bound; never register it from detection alone.
+`bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-pr-merge.sh`'s header owns what it relaxes at merge time.
+
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
