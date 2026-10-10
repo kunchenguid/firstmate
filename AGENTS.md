@@ -242,6 +242,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 ### Validate
 
 Load `validation-supervision` when a ship starts or already has an active no-mistakes validation run, including a mid-run requirement change or finding.
+Load `project-verification` before dispatching a ship whose change touches a user-facing app surface, and before writing or maintaining a project-local verification skill.
 
 ### PR ready, landing, and teardown
 
