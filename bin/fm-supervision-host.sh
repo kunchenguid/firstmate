@@ -579,10 +579,14 @@ emit() {  # [line...]
 # the host.
 retire_successor() {
   [ -n "$SUCCESSOR_PID" ] || return 0
+  # Stop the watcher before waiting for its arm to reap it.
+  # An arm still confirming its child delays TERM until that child has a
+  # cleanup-ready lock, while the home-scoped stop can end an already verified
+  # successor immediately.
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
 }
 
 # Hand the close to main: stop the successor cycle, print the close, why, and
