@@ -58,7 +58,7 @@ case "$provider" in
     repo=${path#*/}
     [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
     case "$owner" in
-      *[!A-Za-z0-9-]*|-*|*-|*--*) exit 0 ;;
+      *[!A-Za-z0-9_-]*|-*|*-|_*|*_|*--*) exit 0 ;;
     esac
     [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
     case "$repo" in
