@@ -241,6 +241,44 @@ case "${1:-} ${2:-}" in
     exit 0
     ;;
   api\ *)
+    # The stack reads and the asynchronous stack merge. A pull request with no
+    # fixture of its own reads as unstacked, the way GitHub reports one.
+    api_jq=
+    prev=
+    for arg in "$@"; do
+      [ "$prev" = --jq ] && api_jq=$arg
+      prev=$arg
+    done
+    case " $* " in
+      *" repos/"*"/pulls/"*"/merge-async/"*)
+        if [ -n "$api_jq" ]; then
+          jq -r "$api_jq" "$FM_TEST_GH_STACK_POLL"
+        else
+          cat "$FM_TEST_GH_STACK_POLL"
+        fi
+        exit $?
+        ;;
+      *" repos/"*"/pulls/"*"/merge-async "*)
+        cat "$FM_TEST_GH_STACK_SUBMIT"
+        if [ -s "${FM_TEST_GH_STACK_SUBMIT_ERR:-}" ]; then
+          cat "$FM_TEST_GH_STACK_SUBMIT_ERR" >&2
+        fi
+        exit "$(cat "$FM_TEST_GH_STACK_SUBMIT_RC" 2>/dev/null || echo 0)"
+        ;;
+      *" repos/"*"/pulls/"*)
+        if [ -f "${FM_TEST_GH_PULL:-}" ]; then
+          cat "$FM_TEST_GH_PULL"
+        else
+          pull_path=${2:-}
+          printf '{"number":%s,"stack":null}\n' "${pull_path##*/}"
+        fi
+        exit 0
+        ;;
+      *" repos/"*"/stacks?pull_request="*)
+        cat "$FM_TEST_GH_STACKS"
+        exit $?
+        ;;
+    esac
     # The required-check reads: the branch itself, and its rules read without
     # the merge-queue filter the queue reader below applies.
     case " $* " in
@@ -473,6 +511,13 @@ run_pr_merge() {
   FM_TEST_GH_BRANCH_FAIL="$case_dir/github-branch-fail" \
   FM_TEST_GH_REQUIRED_RULES="$case_dir/github-required-rules.json" \
   FM_TEST_GH_REQUIRED_RULES_FAIL="$case_dir/github-required-rules-fail" \
+  FM_TEST_GH_PULL="$case_dir/github-pull.json" \
+  FM_TEST_GH_STACKS="$case_dir/github-stacks.json" \
+  FM_TEST_GH_STACK_SUBMIT="$case_dir/github-stack-submit.json" \
+  FM_TEST_GH_STACK_SUBMIT_ERR="$case_dir/github-stack-submit-err" \
+  FM_TEST_GH_STACK_SUBMIT_RC="$case_dir/github-stack-submit-rc" \
+  FM_TEST_GH_STACK_POLL="$case_dir/github-stack-poll.json" \
+  FM_PR_GITHUB_STACK_POLL_DELAY=0 \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
   FM_TEST_ROOT="$ROOT" \
@@ -2252,6 +2297,212 @@ test_queued_github_merge_leaves_the_poll_armed() {
   pass "a queued GitHub merge stays silent and leaves confirmation to the armed poll"
 }
 
+# A GitHub stack as the forge reports it: the pull request's REST resource with
+# its stack object, and the stack listing filtered to that pull request. Each
+# member is <number>:merged or <number>:open, bottom first. Args: case_dir
+# pr_number stack_number member...
+write_github_stack() {
+  local case_dir=$1 number=$2 stack=$3 member members='' position=0 index=0
+  shift 3
+  for member in "$@"; do
+    index=$((index + 1))
+    [ "${member%%:*}" != "$number" ] || position=$index
+    members="${members:+$members,}{\"number\":${member%%:*},\"state\":\"open\",\"draft\":false,\"merged_at\":$([ "${member#*:}" = merged ] && echo '"2026-10-01T00:00:00Z"' || echo null),\"head\":{\"ref\":\"b${member%%:*}\",\"sha\":\"0\"}}"
+  done
+  printf '{"number":%s,"stack":{"base":{"ref":"main","sha":"0"},"size":%s,"position":%s,"id":%s,"number":%s}}\n' \
+    "$number" "$#" "$position" "$stack" "$stack" > "$case_dir/github-pull.json"
+  printf '[{"id":%s,"number":%s,"base":{"ref":"main"},"open":true,"pull_requests":[%s]}]\n' \
+    "$stack" "$stack" "$members" > "$case_dir/github-stacks.json"
+}
+
+# The asynchronous stack merge's submit answer and, for a pending request, what
+# polling its result returns. Args: case_dir submit_status poll_status head
+write_github_stack_merge() {
+  local case_dir=$1 submitted=$2 polled=$3 head=$4
+  printf '{"status":"%s","details":{"message":"accepted","uuid":"5f0c-77aa","merge_method":"squash","merge_action":"direct_merge","expected_head_sha":"%s"}}\n' \
+    "$submitted" "$head" > "$case_dir/github-stack-submit.json"
+  printf '{"status":"%s","details":{"message":"%s"}}\n' "$polled" "$polled" \
+    > "$case_dir/github-stack-poll.json"
+}
+
+test_stacked_pr_merges_through_the_async_stack_merge() {
+  local case_dir rc head url
+  head=1521521521521521521521521521521521521521
+  url=https://github.com/example/repo/pull/152
+  case_dir=$(make_home_case stacked-async-merge)
+  add_gh_mocks "$case_dir" "$head"
+  write_github_stack "$case_dir" 152 4 151:merged 152:open 153:open 156:open
+  write_github_stack_merge "$case_dir" pending merged "$head"
+  : >"$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stacked-async-merge: a green bottom-of-stack pull request should merge"
+  assert_grep "api --method PUT repos/example/repo/pulls/152/merge-async -f sha=$head -f merge_action=direct_merge -f merge_method=squash" \
+    "$case_dir/gh.log" "stacked-async-merge: the stack merge was not bound to the verified head"
+  assert_grep 'api repos/example/repo/pulls/152/merge-async/5f0c-77aa' "$case_dir/gh.log" \
+    "stacked-async-merge: the pending stack merge was not followed"
+  assert_no_grep 'pr merge ' "$case_dir/gh.log" \
+    "stacked-async-merge: the synchronous merge GitHub rejects for a stack was called"
+  assert_grep "verified: $url is merged" "$case_dir/stdout" \
+    "stacked-async-merge: a proved stack merge was not reported landed"
+  assert_present "$case_dir/state/task-x1.pr-poll-merge-notified" \
+    "stacked-async-merge: the landed merge was not recorded for supervision"
+  pass "a stacked pull request merges through GitHub's asynchronous stack merge bound to its verified head"
+}
+
+test_unstacked_pr_keeps_the_synchronous_merge() {
+  local case_dir rc head
+  head=9090909090909090909090909090909090909090
+  case_dir=$(make_case unstacked-sync-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : >"$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/90 -- --rebase \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unstacked-sync-merge: an unstacked pull request should merge"
+  grep -qxF 'api repos/example/repo/pulls/90' "$case_dir/gh.log" \
+    || fail "unstacked-sync-merge: stack membership was not read from the forge"
+  assert_logged_gh_merge "$case_dir" 90 example/repo --rebase
+  assert_no_grep 'merge-async' "$case_dir/gh.log" \
+    "unstacked-sync-merge: an unstacked pull request reached the stack merge"
+  assert_no_grep 'stacks?' "$case_dir/gh.log" \
+    "unstacked-sync-merge: an unstacked pull request read a stack"
+  pass "an unstacked pull request keeps the synchronous head-bound merge"
+}
+
+test_pending_stack_merge_is_not_reported_landed() {
+  local case_dir rc head url
+  head=1531531531531531531531531531531531531531
+  url=https://github.com/example/repo/pull/153
+  case_dir=$(make_home_case stacked-merge-pending)
+  add_gh_mocks "$case_dir" "$head"
+  write_github_stack "$case_dir" 153 4 152:merged 153:open 156:open
+  write_github_stack_merge "$case_dir" pending pending "$head"
+  write_github_outcome "$case_dir" OPEN false false main
+  : >"$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_GH_MERGE_STATE=open FM_TEST_HOME="$case_dir/home" \
+    run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stacked-merge-pending: an accepted stack merge is not a refusal"
+  assert_grep "pending: GitHub accepted the stack merge for $url" "$case_dir/stdout" \
+    "stacked-merge-pending: the still-running stack merge was not reported pending"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "stacked-merge-pending: an unproved stack merge was reported landed or queued"
+  assert_absent "$case_dir/state/.wake-queue" \
+    "stacked-merge-pending: a pending stack merge was reported as landed"
+  assert_absent "$case_dir/state/task-x1.pr-poll-merge-notified" \
+    "stacked-merge-pending: a pending stack merge was marked as reported"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "stacked-merge-pending: the merge poll was not left armed"
+  pass "a stack merge GitHub is still running is reported pending, never landed"
+}
+
+test_stacked_merge_refusals() {
+  local case_dir rc head url
+  head=1561561561561561561561561561561561561561
+  url=https://github.com/example/repo/pull/156
+
+  case_dir=$(make_case stacked-downstack-unmerged)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_stack "$case_dir" 156 4 152:open 153:merged 156:open
+  write_github_stack_merge "$case_dir" merged merged "$head"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "stacked-downstack-unmerged: an unmerged pull request below must refuse"
+  assert_grep 'pull request(s) #152 below it in GitHub stack 4 have not merged' "$case_dir/stderr" \
+    "stacked-downstack-unmerged: the refusal did not name the unverified pull request below"
+  assert_no_grep 'merge-async' "$case_dir/gh.log" \
+    "stacked-downstack-unmerged: the stack merge was submitted"
+
+  case_dir=$(make_case stacked-extra-arg)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_stack "$case_dir" 156 4 153:merged 156:open
+  write_github_stack_merge "$case_dir" merged merged "$head"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" -- --subject title \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "stacked-extra-arg: an argument the stack merge cannot carry must refuse"
+  assert_grep 'refusing extra argument --subject' "$case_dir/stderr" \
+    "stacked-extra-arg: the refusal did not name the argument"
+  assert_no_grep 'merge-async' "$case_dir/gh.log" \
+    "stacked-extra-arg: the stack merge was submitted"
+
+  case_dir=$(make_case stacked-auto)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_stack "$case_dir" 156 4 153:merged 156:open
+  write_github_stack_merge "$case_dir" merged merged "$head"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" --attended-override -- --auto --squash \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "stacked-auto: an attended --auto must refuse on the stack merge"
+  assert_grep 'refusing extra argument --auto' "$case_dir/stderr" \
+    "stacked-auto: the refusal did not name --auto"
+  assert_no_grep 'merge-async' "$case_dir/gh.log" \
+    "stacked-auto: the stack merge was submitted"
+  assert_no_grep 'pr merge ' "$case_dir/gh.log" \
+    "stacked-auto: a merge was handed to the forge"
+
+  case_dir=$(make_case stacked-failed-queue)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_stack "$case_dir" 156 4 153:merged 156:open
+  write_github_stack_merge "$case_dir" failed failed "$head"
+  write_github_outcome "$case_dir" OPEN false false main
+  printf 'merge_method=SQUASH\n' > "$case_dir/github-rules"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "stacked-failed-queue: a failed stack merge must refuse"
+  assert_grep "a stacked pull request merges only through GitHub's stack merge" "$case_dir/stderr" \
+    "stacked-failed-queue: the queue refusal did not explain the stack merge"
+  assert_no_grep 'retry with:' "$case_dir/stderr" \
+    "stacked-failed-queue: a --auto retry the stacked path refuses was offered"
+
+  case_dir=$(make_case stacked-away)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_stack "$case_dir" 156 4 153:merged 156:open
+  write_github_stack_merge "$case_dir" merged merged "$head"
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "stacked-away: an asynchronous stack merge must refuse while away"
+  assert_grep 'stacked pull request merges asynchronously' "$case_dir/stderr" \
+    "stacked-away: the refusal did not explain the away restriction"
+  assert_no_grep 'merge-async' "$case_dir/gh.log" \
+    "stacked-away: a stack merge was handed to the forge while away"
+  assert_no_grep 'pr merge ' "$case_dir/gh.log" \
+    "stacked-away: a merge was handed to the forge while away"
+  pass "a stacked merge refuses unmerged pull requests below it, unsupported arguments including --auto, and away authority, never offering an --auto retry"
+}
+
 test_distinct_merged_prs_keep_distinct_wakes() {
   local case_dir first_url second_url
   first_url=https://github.com/example/repo/pull/68
@@ -3841,6 +4092,10 @@ test_failed_merge_reports_nothing
 test_gitlab_refusal_reports_nothing
 test_main_home_merge_leaves_a_durable_wake
 test_queued_github_merge_leaves_the_poll_armed
+test_stacked_pr_merges_through_the_async_stack_merge
+test_unstacked_pr_keeps_the_synchronous_merge
+test_pending_stack_merge_is_not_reported_landed
+test_stacked_merge_refusals
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud

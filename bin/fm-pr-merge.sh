@@ -56,14 +56,17 @@
 # succeeded. After gh returns success, GitHub's live state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
-# own view still proves a landed merge, and every outcome it cannot prove
-# refuses, reporting the failed gh read and naming both failed reads when the
-# gh-axi view could not prove the outcome either.
+# own view still proves a landed merge, and every other outcome it cannot prove
+# refuses, except an accepted stack merge GitHub is still running, which is
+# reported pending (see below). A refusal reports the failed gh read and names
+# both failed reads when the gh-axi view could not prove the outcome either.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, an attended refusal names the queue's configured merge
 # method and exact --attended-override -- --auto --<method> retry flags. While
 # the away-posture record exists, asynchronous merge requests are refused and
 # queue retry flags are not offered because they would outlive away authority.
+# Nor are they offered for a stacked pull request, which merges only through
+# the stack merge; its refusal says to re-check the queue state instead.
 # An attended caller that already passed the configured method with --auto is
 # told instead that the accepted request has not entered the queue and its queue
 # state has to be re-checked.
@@ -80,6 +83,22 @@
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
 # a merge command that failed keeps its original error surfaced raw and first.
+# A pull request that belongs to a GitHub stack, read from the stack object on
+# its REST resource, merges only through GitHub's asynchronous merge API
+# (PUT pulls/<n>/merge-async), which GitHub requires for a stack; every other
+# pull request keeps gh pr merge. That merge also lands every open pull request
+# below the requested one, so github_read_stack refuses one with an unmerged pull
+# request below it, as it does a stack it cannot read: a stack merges from the
+# bottom, one verified pull request at a time, and GitHub retargets and rebases
+# the rest. A membership read that fails keeps gh pr merge, which GitHub itself
+# refuses for a stacked pull request. The verified head is sent as
+# the request's sha, the caller's merge method (squash by default) as
+# merge_method, and merge_action as direct_merge; any other extra argument,
+# --auto included, is refused. A still-pending request is
+# followed for a short bounded time; an outcome the live read still cannot
+# prove merged or queued is reported pending, not landed, with the merge poll
+# armed, and a failed result refuses. A stacked merge is refused while the away
+# record exists, because its background run cannot prove an immediate merge.
 # GitLab adds no method flag at all: its merge method is the project's own
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
@@ -714,6 +733,62 @@ github_required_checks_missing() {
   ' 2>/dev/null || return 1
 }
 
+# Whether the pull request belongs to a GitHub stack, read from the forge: its
+# REST resource carries a non-null stack object only when it does. A stacked
+# pull request can merge only through the asynchronous merge API, which also
+# merges every open pull request below it, so it is accepted only when every
+# pull request below it in the stack has already merged; nothing this run did
+# not verify can then land with it. Sets FM_PR_GITHUB_STACKED, and returns
+# nonzero with FM_PR_GITHUB_STACK_REFUSAL set when a stacked pull request's
+# stack cannot be read or a pull request below it is unmerged.
+FM_PR_GITHUB_STACKED=false
+FM_PR_GITHUB_STACK_REFUSAL=
+github_read_stack() {
+  local pull stacked stacks fields line stack_number='' below=''
+  FM_PR_GITHUB_STACKED=false
+  FM_PR_GITHUB_STACK_REFUSAL=
+  if ! pull=$(gh api "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" 2>/dev/null) \
+    || [ -z "$pull" ] \
+    || ! stacked=$(printf '%s' "$pull" | jq -r --argjson n "$PR_NUMBER" '
+      if type != "object" or .number != $n then error("pull request payload is unreadable")
+      elif .stack == null then "false"
+      elif (.stack | type) == "object" then "true"
+      else error("stack is unreadable") end' 2>/dev/null); then
+    # The synchronous merge stays safe here: GitHub rejects it for a stacked
+    # pull request, so nothing below this one can land unverified.
+    echo "notice: could not read whether the pull request belongs to a GitHub stack; using the synchronous merge, which GitHub refuses for a stacked pull request" >&2
+    return 0
+  fi
+  [ "$stacked" = true ] || return 0
+  FM_PR_GITHUB_STACKED=true
+  if ! stacks=$(gh api "repos/$PR_OWNER/$PR_REPO/stacks?pull_request=$PR_NUMBER" 2>/dev/null) \
+    || [ -z "$stacks" ] \
+    || ! fields=$(printf '%s' "$stacks" | jq -r --argjson n "$PR_NUMBER" '
+      if type != "array" or length != 1 or (.[0].number | type) != "number"
+        or (.[0].pull_requests | type) != "array"
+      then error("stack payload is unreadable") else .[0] end
+      | .number as $stack
+      | .pull_requests
+      | (map(.number) | index($n)) as $i
+      | if $i == null then error("pull request is not in its stack") else . end
+      | "stack=\($stack)",
+        (.[:$i][] | select(.merged_at == null) | "below=#\(.number)")' 2>/dev/null); then
+    FM_PR_GITHUB_STACK_REFUSAL="the GitHub stack this pull request belongs to could not be read"
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      stack=*) stack_number=${line#stack=} ;;
+      below=*) below="${below:+$below, }${line#below=}" ;;
+    esac
+  done <<FIELDS
+$fields
+FIELDS
+  [ -n "$below" ] || return 0
+  FM_PR_GITHUB_STACK_REFUSAL="pull request(s) $below below it in GitHub stack $stack_number have not merged, and a stack merge would land them unverified; merge the stack from the bottom"
+  return 1
+}
+
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
 # Sets FM_PR_MERGE_HEAD to the verified head on success. Returns 3, rather than
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
@@ -840,6 +915,11 @@ EOF
     done <<EOF
 $missing
 EOF
+  fi
+
+  if ! github_read_stack; then
+    refusals="$refusals  - $FM_PR_GITHUB_STACK_REFUSAL
+"
   fi
 
   if [ -n "$mergeable_refusal" ]; then
@@ -1246,6 +1326,15 @@ github_report_queue_rules() {
     return 0
   fi
   github_read_queue_method
+  if [ "$FM_PR_GITHUB_STACKED" = true ]; then
+    case "$FM_PR_GITHUB_QUEUE_STATUS" in
+      single|conflicting|unrecognised)
+        printf 'error: base branch %s requires the merge queue, but a stacked pull request merges only through GitHub'"'"'s stack merge, never with --auto; re-check the pull request'"'"'s merge queue state before retrying\n' \
+          "$FM_PR_GITHUB_BASE" >&2
+        return 0
+        ;;
+    esac
+  fi
   case "$FM_PR_GITHUB_QUEUE_STATUS" in
     single)
       case "$FM_PR_GITHUB_QUEUE_METHOD" in
@@ -1306,6 +1395,123 @@ github_report_unmerged_outcome() {
     return 0
   fi
   github_report_queue_rules
+}
+
+# The asynchronous stack merge takes a merge method, not gh pr merge flags, so
+# a stacked pull request accepts only a method. Any other extra argument is
+# refused rather than silently dropped.
+FM_PR_GITHUB_STACK_METHOD=
+github_stack_merge_args() {
+  local arg pending=false method=''
+  for arg in "$@"; do
+    if [ "$pending" = true ]; then
+      pending=false
+      continue
+    fi
+    case "$arg" in
+      --squash|--merge|--rebase|--method=*) ;;
+      --method) pending=true ;;
+      *)
+        printf 'error: a stacked pull request merges through GitHub'"'"'s asynchronous stack merge, which accepts only a merge method; refusing extra argument %s\n' "$arg" >&2
+        return 1
+        ;;
+    esac
+  done
+  method=$(caller_merge_method "$@")
+  case "$method" in
+    '') method=squash ;;
+    [mM][eE][rR][gG][eE]) method=merge ;;
+    [sS][qQ][uU][aA][sS][hH]) method=squash ;;
+    [rR][eE][bB][aA][sS][eE]) method=rebase ;;
+    *)
+      printf 'error: merge method %s is not one the asynchronous stack merge accepts (merge, squash, rebase)\n' "$method" >&2
+      return 1
+      ;;
+  esac
+  FM_PR_GITHUB_STACK_METHOD=$method
+}
+
+# GitHub runs a stack merge in the background, so its outcome cannot be proven
+# immediate before submission and would outlive away authority.
+refuse_github_stack_while_away() {
+  [ "$FM_PR_AWAY_POSTURE" = true ] || return 0
+  [ "$FM_PR_GITHUB_STACKED" = true ] || return 0
+  echo "error: GitHub merge refused while away because a stacked pull request merges asynchronously, which cannot prove an immediate merge; nothing was handed to the forge" >&2
+  return 2
+}
+
+# Submit the asynchronous stack merge bound to the verified head: GitHub cancels
+# the request if the head moves before it runs. Sets
+# FM_PR_GITHUB_STACK_OUTPUT to the forge's own response and error text and
+# FM_PR_GITHUB_STACK_STATUS to the result status, "unreadable" when an accepted
+# response could not be parsed. Returns the gh exit status, or 1 when GitHub
+# answered with a failed result, which merged nothing because a stack merge is
+# atomic.
+FM_PR_GITHUB_STACK_OUTPUT=
+FM_PR_GITHUB_STACK_STATUS=
+FM_PR_GITHUB_STACK_UUID=
+FM_PR_GITHUB_STACK_MESSAGE=
+github_stack_merge_submit() {
+  local body err_file err_text fields line rc=0
+  if ! err_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-stack.XXXXXX"); then
+    FM_PR_GITHUB_STACK_OUTPUT="error: could not create a temporary file; the stack merge was not submitted"
+    return 1
+  fi
+  body=$(gh api --method PUT "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge-async" \
+    -f "sha=$FM_PR_MERGE_HEAD" -f merge_action=direct_merge \
+    -f "merge_method=$FM_PR_GITHUB_STACK_METHOD" 2>"$err_file") || rc=$?
+  err_text=$(cat "$err_file" 2>/dev/null)
+  rm -f "$err_file"
+  FM_PR_GITHUB_STACK_OUTPUT=$body${err_text:+${body:+$'\n'}$err_text}
+  [ "$rc" -eq 0 ] || return "$rc"
+  if ! fields=$(printf '%s' "$body" | jq -r '
+      if type == "object" and (.status | type) == "string" then
+        "status=" + .status,
+        "uuid=" + ((.details.uuid // "") | tostring),
+        "message=" + ((.details.message // "") | tostring | gsub("[\r\n]"; " "))
+      else error("unreadable result") end' 2>/dev/null); then
+    FM_PR_GITHUB_STACK_STATUS=unreadable
+    return 0
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      status=*) FM_PR_GITHUB_STACK_STATUS=${line#status=} ;;
+      uuid=*) FM_PR_GITHUB_STACK_UUID=${line#uuid=} ;;
+      message=*) FM_PR_GITHUB_STACK_MESSAGE=${line#message=} ;;
+    esac
+  done <<FIELDS
+$fields
+FIELDS
+  [ "$FM_PR_GITHUB_STACK_STATUS" != failed ] || return 1
+}
+
+# Follow an accepted, still-pending stack merge for a short bounded time, so a
+# merge GitHub finishes promptly reads back as landed in this run. A request
+# still pending afterwards is left running on GitHub with the merge poll armed.
+github_stack_merge_wait() {
+  local delay attempt=0 status
+  [ "$FM_PR_GITHUB_STACK_STATUS" = pending ] || return 0
+  case "$FM_PR_GITHUB_STACK_UUID" in
+    ''|*[!A-Za-z0-9-]*) return 0 ;;
+  esac
+  delay=${FM_PR_GITHUB_STACK_POLL_DELAY:-2}
+  case "$delay" in
+    [0-9] | 10) ;;
+    *) delay=2 ;;
+  esac
+  while [ "$attempt" -lt 15 ]; do
+    attempt=$((attempt + 1))
+    sleep "$delay"
+    status=$(gh api "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge-async/$FM_PR_GITHUB_STACK_UUID" \
+      --jq '.status + "\t" + ((.details.message // "") | tostring | gsub("[\r\n\t]"; " "))' 2>/dev/null) || continue
+    case "${status%%$'\t'*}" in
+      merged|enqueued|failed)
+        FM_PR_GITHUB_STACK_STATUS=${status%%$'\t'*}
+        FM_PR_GITHUB_STACK_MESSAGE=${status#*$'\t'}
+        return 0
+        ;;
+    esac
+  done
 }
 
 gitlab_confirm_merged() {
@@ -1377,17 +1583,27 @@ case "$PROVIDER" in
       fi
       exit 1
     fi
+    if [ "$FM_PR_GITHUB_STACKED" = true ]; then
+      github_stack_merge_args "$@" || exit 1
+    fi
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1
     away_status=0
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
+    refuse_github_stack_while_away || exit 2
     refuse_github_queue_while_away || exit 2
     merge_status=0
-    merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-      --match-head-commit "$FM_PR_MERGE_HEAD" \
-      "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
+    if [ "$FM_PR_GITHUB_STACKED" = true ]; then
+      # GitHub rejects a stacked pull request on gh pr merge's synchronous path.
+      github_stack_merge_submit || merge_status=$?
+      merge_output=$FM_PR_GITHUB_STACK_OUTPUT
+    else
+      merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+        --match-head-commit "$FM_PR_MERGE_HEAD" \
+        "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
+    fi
     if [ "$merge_status" -eq 0 ]; then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
       persist_accepted_merge_authority || exit 1
@@ -1409,6 +1625,7 @@ case "$PROVIDER" in
       fi
       exit "$merge_status"
     fi
+    github_stack_merge_wait
     if ! github_read_outcome; then
       github_report_forge_output "$merge_output"
       exit 1
@@ -1420,7 +1637,17 @@ case "$PROVIDER" in
       printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
       exit 0
+    elif [ "$FM_PR_GITHUB_STACKED" = true ] && github_state_is_open \
+      && [ "$FM_PR_GITHUB_STACK_STATUS" != failed ]; then
+      # Accepted but not yet visible as merged or queued: neither landed nor
+      # refused, and the armed merge poll reports the landing when it happens.
+      printf 'pending: GitHub accepted the stack merge for %s and is still running it in the background; nothing is reported landed yet and the merge poll remains armed (state=%s, merged=%s, isInMergeQueue=%s)\n' \
+        "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+      exit 0
     else
+      [ "$FM_PR_GITHUB_STACK_STATUS" != failed ] \
+        || printf 'error: GitHub reported the stack merge for %s as failed: %s; a stack merge is atomic, so nothing in the stack merged\n' \
+          "$URL" "${FM_PR_GITHUB_STACK_MESSAGE:-no reason given}" >&2
       github_report_forge_output "$merge_output"
       github_report_unmerged_outcome
       exit 1
