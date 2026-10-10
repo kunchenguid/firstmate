@@ -5518,6 +5518,228 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
   pass "a write deferral re-surfaces once on the bounded pause cadence, so a churning worktree cannot stay invisible"
 }
 
+# --- settled board guardian: parked on a live registered board watch ---------
+# A board guardian that concluded every captured round of its registered
+# process-backed watch is idling by design, so its quiet pane must not climb
+# the wedge ladder: the first sight is absorbed and the at-threshold branch
+# defers to the long recheck cadence. The match is evidence-only, so a dead
+# watch, an unhandled round, or a second non-listening source escalates
+# exactly as before.
+test_settled_board_watch_parked_absorbed_not_escalated() {
+  local dir state fakebin out capture_file window key pane_hash sig pid i
+  dir=$(make_case settled-board-parked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-boardguard"
+  printf 'idle board guardian output' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s/worktree-boardguard\nproject=fmtest\n' "$window" "$dir" > "$state/boardguard.meta"
+  printf 'working: board review settled, holding until session end\n' > "$state/boardguard.status"
+  sig=$(seen_sig "$state/boardguard.status"); printf '%s' "$sig" > "$state/.seen-boardguard_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle board guardian output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  seed_board_source "$dir" guard-board-src boardguard || fail "could not seed the board source"
+  pe_case "$dir" reconcile >/dev/null 2>&1 || fail "reconcile refused the board source"
+  await_board_listening "$dir" guard-board-src boardguard \
+    || fail "the real OWNER column never reported the registered board watch listening"
+
+  # Phase A: the first sight of the quiet pane is absorbed, not surfaced.
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STALE_ESCALATE_SECS=999 parked_watch_bg "$dir" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a parked settled board watch (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the parked board watch printed a wake reason during absorb: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the parked board watch enqueued a wake during absorb"; }
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || { reap "$pid"; fail "stale suppressor not advanced on the parked-watch absorb"; }
+  # No assertion on .stale-since-<key> here: the first-sight absorb clears it,
+  # but the NEXT poll of the still-quiet pane routes through wedge_timer_check,
+  # whose self-heal repair deterministically re-arms it - by design, because the
+  # at-threshold branch is exactly where the parked-watch deferral re-reads the
+  # evidence. Its absence is a one-poll transient this test can only observe by
+  # winning a race; the never-escalates contract it stood for is asserted below
+  # (no wake, no queue) and across the whole of phase B.
+  [ -e "$state/.parked-watch-since-$key" ] || { reap "$pid"; fail "the parked-watch chain was not recorded"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: past the wedge threshold the ladder still defers - the pane sits
+  # silent while the watch stays live, and the escalation counter never starts.
+  : > "$out"
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STALE_ESCALATE_SECS=2 parked_watch_bg "$dir" "$out"
+  pid=$!
+  wait_live "$pid" 50 || { reap "$pid"; fail "the parked board watcher exited during the threshold window: $(cat "$out")"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    && { reap "$pid"; fail "a parked settled board watch wedge-escalated"; }
+  grep -F "stale: $window" "$out" >/dev/null \
+    && { reap "$pid"; fail "a parked settled board watch surfaced during the threshold window"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the parked board watch queued a wake past the threshold"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "the parked board watch started an escalation count"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-B watcher stop"
+  pass "a settled board guardian parked on its live registered watch is absorbed and never wedge-escalated"
+}
+
+test_settled_board_watch_resurfaces_on_the_bounded_cadence() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back rows
+  dir=$(make_case settled-board-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-boardguard"
+  printf 'idle board guardian output' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s/worktree-boardguard\nproject=fmtest\n' "$window" "$dir" > "$state/boardguard.meta"
+  printf 'working: board review settled, holding until session end\n' > "$state/boardguard.status"
+  sig=$(seen_sig "$state/boardguard.status"); printf '%s' "$sig" > "$state/.seen-boardguard_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle board guardian output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  seed_board_source "$dir" guard-board-src boardguard || fail "could not seed the board source"
+  install_fake_procevent_list "$fakebin"
+  rows=$(printf '%-28s %-12s %-10s %s' guard-board-src lavish 'task:boardguard/listening' 0)
+  # This pane has been parked on its live watch for 500s already, so the
+  # bounded re-surface is due under a 240s cadence.
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  : > "$state/.parked-watch-since-$key"
+  set_mtime "$back" "$state/.parked-watch-since-$key"
+
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_PROCEVENT_LIST_BIN="$fakebin/fake-procevent-list" FM_FAKE_PROCEVENT_LIST_ROWS="$rows" \
+    parked_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a long-idle parked board watch never re-surfaced on the bounded cadence"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the parked-watch recheck did not print a stale wake"
+  grep -F "settled board review parked on its live registered board watch" "$out" >/dev/null \
+    || fail "the parked-watch recheck was not labeled as such"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a parked-watch recheck was mislabeled a possible wedge"
+  [ -e "$state/.parked-watch-resurfaced-$key" ] || fail "the parked-watch re-surface throttle marker was not recorded"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a parked-watch recheck advanced the wedge escalation counter"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the parked-watch recheck failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the parked-watch recheck was not queued"
+  pass "a long-idle parked board watch re-surfaces once on the bounded cadence, so a dead watch cannot hide behind the exemption"
+}
+
+test_settled_board_watch_dead_still_escalates() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid rows
+  dir=$(make_case settled-board-dead); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-boardguard"
+  printf 'idle board guardian output' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s/worktree-boardguard\nproject=fmtest\n' "$window" "$dir" > "$state/boardguard.meta"
+  printf 'working: board review settled, holding until session end\n' > "$state/boardguard.status"
+  sig=$(seen_sig "$state/boardguard.status"); printf '%s' "$sig" > "$state/.seen-boardguard_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle board guardian output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  seed_board_source "$dir" guard-board-src boardguard || fail "could not seed the board source"
+  install_fake_procevent_list "$fakebin"
+  # The registered watch's runner is gone: the OWNER column says dead, so the
+  # exemption must decline and today's surface-then-escalate behavior stands.
+  rows=$(printf '%-28s %-12s %-10s %s' guard-board-src lavish 'task:boardguard/dead' 0)
+
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STALE_ESCALATE_SECS=999 FM_PROCEVENT_LIST_BIN="$fakebin/fake-procevent-list" \
+    FM_FAKE_PROCEVENT_LIST_ROWS="$rows" parked_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a parked board watch whose watch died"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the dead-watch pane did not surface the plain stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the dead-watch surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the dead-watch surface was not queued"
+
+  # Past the threshold with the watch still dead, the wedge ladder fires as today.
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  : > "$out"
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STALE_ESCALATE_SECS=240 FM_PROCEVENT_LIST_BIN="$fakebin/fake-procevent-list" \
+    FM_FAKE_PROCEVENT_LIST_ROWS="$rows" parked_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not escalate a parked board watch whose watch died"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a dead watch did not wedge-escalate"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = "1" ] \
+    || fail "the dead-watch escalation did not start the escalation count at 1"
+  pass "a parked board guardian whose registered watch died surfaces and wedge-escalates exactly as before"
+}
+
+test_settled_board_watch_round_open_still_escalates() {
+  local dir state fakebin out capture_file window key pane_hash sig pid rows back
+  dir=$(make_case settled-board-round-open); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-boardguard"
+  printf 'idle board guardian output' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s/worktree-boardguard\nproject=fmtest\n' "$window" "$dir" > "$state/boardguard.meta"
+  printf 'working: board review settled, holding until session end\n' > "$state/boardguard.status"
+  sig=$(seen_sig "$state/boardguard.status"); printf '%s' "$sig" > "$state/.seen-boardguard_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle board guardian output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  seed_board_source "$dir" guard-board-src boardguard || fail "could not seed the board source"
+  install_fake_procevent_list "$fakebin"
+  # An unhandled captured round means the review is NOT settled: the exemption
+  # must decline even though the runner is live.
+  rows=$(printf '%-28s %-12s %-10s %s' guard-board-src lavish 'task:boardguard/round-open' 1)
+  # Already-classified hash with an idle window that opened 500s ago, so the
+  # first stale poll lands straight on the at-threshold wedge branch.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STALE_ESCALATE_SECS=240 FM_PROCEVENT_LIST_BIN="$fakebin/fake-procevent-list" \
+    FM_FAKE_PROCEVENT_LIST_ROWS="$rows" parked_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not escalate a board guardian with an open round"
+  grep -F "possible wedge" "$out" >/dev/null || fail "an open-round board guardian did not wedge-escalate"
+  pass "a board guardian with an unhandled captured round keeps the unchanged escalation ladder"
+}
+
+test_settled_board_watch_requires_every_source_listening() {
+  local dir state fakebin out capture_file window key pane_hash sig pid rows back
+  dir=$(make_case settled-board-two-sources); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-boardguard"
+  printf 'idle board guardian output' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s/worktree-boardguard\nproject=fmtest\n' "$window" "$dir" > "$state/boardguard.meta"
+  printf 'working: board review settled, holding until session end\n' > "$state/boardguard.status"
+  sig=$(seen_sig "$state/boardguard.status"); printf '%s' "$sig" > "$state/.seen-boardguard_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle board guardian output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  seed_board_source "$dir" guard-board-src boardguard || fail "could not seed the board source"
+  seed_board_source "$dir" guard-side-src boardguard || fail "could not seed the second board source"
+  install_fake_procevent_list "$fakebin"
+  # One of the two owned sources is dead, so the task does not match the
+  # settled shape and the ladder fires.
+  rows=$(printf '%-28s %-12s %-10s %s\n%-28s %-12s %-10s %s' \
+    guard-board-src lavish 'task:boardguard/listening' 0 \
+    guard-side-src lavish 'task:boardguard/dead' 0)
+  # Already-classified hash with an idle window that opened 500s ago, so the
+  # first stale poll lands straight on the at-threshold wedge branch.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STALE_ESCALATE_SECS=240 FM_PROCEVENT_LIST_BIN="$fakebin/fake-procevent-list" \
+    FM_FAKE_PROCEVENT_LIST_ROWS="$rows" parked_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not escalate a guardian with one dead source among two"
+  grep -F "possible wedge" "$out" >/dev/null || fail "one dead source among two did not wedge-escalate"
+  pass "a task with any non-listening owned source keeps the unchanged escalation ladder"
+}
+
 # The worktree recorded for a secondmate is a provisioned firstmate home, and that
 # home runs its OWN supervision inside itself: its watcher beacon, pane hashes and
 # heartbeats keep state/ churning whether or not the mate produced anything. Reading
@@ -5801,6 +6023,60 @@ procevent_watch_bg() {  # <dir> <out>
   PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
     FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+}
+
+# Seed one REAL task-owned process-event registration in <dir>'s home through
+# the production registrar, so the owner_task record the settled-board-watch
+# predicate scans is the published format, not a test's guess of it. The argv
+# blocks briefly so a runner reconcile starts holds its claim without ever
+# publishing a captured round.
+seed_board_source() {  # <dir> <source-id> <task>
+  pe_case "$1" register-task lavish "$2" "$3" -- /bin/sleep 60 >/dev/null || return 1
+}
+
+# Wait until the production list reports <source-id> owned by <task> as live
+# and round-free, so a test asserts the settled shape against the real OWNER
+# vocabulary rather than assuming reconcile's timing.
+await_board_listening() {  # <dir> <source-id> <task>
+  local dir=$1 sid=$2 task=$3 i=0 row
+  dir=$(cd "$dir" && pwd -P) || return 1
+  while [ "$i" -lt 100 ]; do
+    row=$(pe_case "$dir" list 2>/dev/null | awk -v id="$sid" -v want="task:$task/listening" \
+      'NR > 1 && $1 == id { print $3 }')
+    [ "$row" = "task:$task/listening" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Install the FM_PROCEVENT_LIST_BIN stub. It prints the exact OWNER-column
+# layout `fm-procevent.sh list` publishes, with canned rows from
+# FM_FAKE_PROCEVENT_LIST_ROWS, so the dead and round-open owner verdicts are
+# deterministic without fighting reconcile's own liveness repair.
+install_fake_procevent_list() {  # <fakebin>
+  cat > "$1/fake-procevent-list" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%-28s %-12s %-10s %s\n' SOURCE ADAPTER OWNER PENDING
+[ -n "${FM_FAKE_PROCEVENT_LIST_ROWS:-}" ] && printf '%s\n' "$FM_FAKE_PROCEVENT_LIST_ROWS"
+exit 0
+SH
+  chmod +x "$1/fake-procevent-list"
+}
+
+# The settled-board-watch cases scope the watcher by FM_HOME (reconcile) and
+# carry the case-local claim root, like procevent_watch_bg. Per-case knobs
+# (threshold, list seam) are assignment-prefixed at the call site, the way
+# watch_bg callers do it - an assignment that arrives as an argument expands
+# into a command word, not an environment prefix.
+parked_watch_bg() {  # <dir> <out>
+  local dir=$1 out=$2
+  dir=$(cd "$dir" && pwd -P) || return 1
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
 }
 
 test_procevent_captured_result_surfaces_proactively() {
@@ -6724,6 +7000,11 @@ test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
+test_settled_board_watch_parked_absorbed_not_escalated
+test_settled_board_watch_resurfaces_on_the_bounded_cadence
+test_settled_board_watch_dead_still_escalates
+test_settled_board_watch_round_open_still_escalates
+test_settled_board_watch_requires_every_source_listening
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
