@@ -67,6 +67,13 @@ fm_control_harnesses() {
   printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin
 }
 
+# JSON array of the codex catalog models that list `max`, for the config
+# validators that cannot hard-code a model name.
+fm_codex_max_models() {
+  "$(dirname "${BASH_SOURCE[0]}")/fm-harness.sh" codex-effort-models max \
+    | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
 fm_control_harness_supported() {  # <harness>
   local harness found=1
   while read -r harness; do

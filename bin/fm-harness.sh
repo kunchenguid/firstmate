@@ -19,6 +19,15 @@
 #                                        codex-native/<id>. Other efforts retain
 #                                        their adapter's existing policy. Native
 #                                        Codex validates model support at startup.
+#        fm-harness.sh validate-codex-effort <model> <effort>
+#                                        Refuse a codex reasoning effort the model's
+#                                        entry in ${CODEX_HOME:-~/.codex}/models_cache.json
+#                                        does not list. An unlisted model or an
+#                                        unreadable catalog verifies only the baseline
+#                                        levels (low|medium|high|xhigh); max cannot be
+#                                        verified and is refused, never dropped.
+#        fm-harness.sh codex-effort-models <effort>
+#                                        Print the catalog models listing <effort>, one per line.
 #        fm-harness.sh ancestry [<pid>] print "<strength> <harness>" for the nearest
 #                                        harness process at or above <pid> (default this
 #                                        process), or nothing when the walk finds none.
@@ -528,7 +537,37 @@ validate_native_effort() {
   return 1
 }
 
+codex_catalog() { printf '%s/models_cache.json' "${CODEX_HOME:-$HOME/.codex}"; }
+
+codex_effort_models() {
+  local cat
+  cat=$(codex_catalog)
+  command -v jq >/dev/null 2>&1 && [ -r "$cat" ] || return 0
+  jq -r --arg e "${1:-}" '.models[]? | select(any(.supported_reasoning_levels[]?; .effort == $e)) | .slug' "$cat" 2>/dev/null || true
+}
+
+validate_codex_effort() {
+  local model=${1:-} effort=${2:-} cat listed=''
+  { [ -z "$effort" ] || [ "$effort" = default ]; } && return 0
+  cat=$(codex_catalog)
+  if [ -n "$model" ] && [ "$model" != default ] && command -v jq >/dev/null 2>&1 && [ -r "$cat" ]; then
+    listed=$(jq -r --arg m "$model" '.models[]? | select(.slug == $m) | [.supported_reasoning_levels[]?.effort] | join(" ")' "$cat" 2>/dev/null || true)
+  fi
+  if [ -n "$listed" ]; then
+    case " $listed " in *" $effort "*) return 0 ;; esac
+    echo "error: codex model $model does not support --effort $effort (its catalog lists: $listed)" >&2
+    return 1
+  fi
+  case "$effort" in
+    low|medium|high|xhigh) return 0 ;;
+  esac
+  echo "error: cannot verify codex --effort $effort for model ${model:-default}: no catalog entry in $cat; refusing rather than dropping the effort" >&2
+  return 1
+}
+
 case "${1:-}" in
+  validate-codex-effort) shift; validate_codex_effort "$@" ;;
+  codex-effort-models) shift; codex_effort_models "$@" ;;
   validate-native-effort) shift; validate_native_effort "$@" ;;
   ancestry)
     case "${2:-}" in
