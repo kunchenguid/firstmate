@@ -496,6 +496,66 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
+# make_tasks_axi_fakebin: a `tasks-axi` stub for bin/fm-tasks-axi.sh. With
+# FM_FAKE_TASK_TITLE set, `show` prints that raw TOON title value; unset, it
+# reports the task as not found, exactly like the real CLI.
+make_tasks_axi_fakebin() {  # <dir> -> echoes fakebin dir
+  local fb="$1/tasks-fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ -n "${FM_FAKE_TASK_TITLE+x}" ]; then
+  printf 'task:\n  id: %s\n  title: %s\n  state: in_flight\n' "$2" "$FM_FAKE_TASK_TITLE"
+  exit 0
+fi
+printf 'error: "Task \\"%s\\" not found in this backlog"\ncode: NOT_FOUND\n' "${2:-}"
+exit 1
+SH
+  chmod +x "$fb/tasks-axi"
+  printf '%s\n' "$fb"
+}
+
+cmux_create_task_responses() {  # <dir> <title>
+  printf '{"workspaces":[]}' > "$1/responses/1.out"
+  cmux_workspace_list_response "$1" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$2"
+  cmux_panes_response "$1" 4 "cccccccc-2222-2222-2222-222222222222"
+}
+
+test_create_task_passes_backlog_title_as_description() {
+  local dir fb tfb out title
+  dir="$TMP_ROOT/create-task-desc"; mkdir -p "$dir/responses" "$dir/home/data"
+  title=$(cmux_expected_scoped_title fm-desctask)
+  cmux_create_task_responses "$dir" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  tfb=$(make_tasks_axi_fakebin "$dir")
+  out=$( PATH="$fb:$tfb:$PATH" FM_HOME="$dir/home" FM_DATA_OVERRIDE='' FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_FAKE_TASK_TITLE='"repo: fix the \"quoted\" sidebar"' \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-desctask /tmp/proj' "$ROOT" )
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "create_task with a backlog title should still echo '<workspace_id> <surface_id>', got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''new-workspace'$'\x1f''--name'$'\x1f'"$title"$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--description'$'\x1f''repo: fix the "quoted" sidebar'$'\x1f''--focus' \
+    "create_task did not pass the decoded backlog title as --description while keeping the scoped name"
+  pass "fm_backend_cmux_create_task: passes the task's backlog title as the workspace description, name unchanged"
+}
+
+test_create_task_without_title_omits_description() {
+  local dir fb tfb out title
+  dir="$TMP_ROOT/create-task-nodesc"; mkdir -p "$dir/responses" "$dir/home/data"
+  title=$(cmux_expected_scoped_title fm-nodesc)
+  cmux_create_task_responses "$dir" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  tfb=$(make_tasks_axi_fakebin "$dir")
+  out=$( PATH="$fb:$tfb:$PATH" FM_HOME="$dir/home" FM_DATA_OVERRIDE='' FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c 'unset FM_FAKE_TASK_TITLE; . "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-nodesc /tmp/proj' "$ROOT" )
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "create_task with no backlog title should still create the workspace, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''new-workspace'$'\x1f''--name'$'\x1f'"$title"$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--focus' \
+    "create_task did not create the workspace when no backlog title was available"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''--description' \
+    "create_task passed --description although no backlog title was available"
+  pass "fm_backend_cmux_create_task: creates the workspace without a description when the backlog has no title"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -1130,6 +1190,8 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_passes_backlog_title_as_description
+test_create_task_without_title_omits_description
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
