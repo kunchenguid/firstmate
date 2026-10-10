@@ -510,8 +510,8 @@ The composer-classification record below observes the same gate from the other s
 
 ## Pi seeded-secondmate project trust
 
-[`fm-spawn.sh --help`](../../bin/fm-spawn.sh) owns the seeded-secondmate project-trust approval contract and compatibility fallback.
-The live guard below isolates Pi's trust-gate behavior in secondmate-shaped homes; portable launch-command coverage separately verifies that spawn selects the flag for the intended launches.
+[`fm-spawn.sh --help`](../../bin/fm-spawn.sh) owns the Pi project-trust flag contract (seeded-secondmate `--approve`, ship and scout `--no-approve`) and compatibility fallback.
+The live guard below isolates Pi's trust-gate behavior in secondmate-shaped homes and a worker-shaped worktree; portable launch-command coverage separately verifies that spawn selects the flag for the intended launches.
 
 Verified 2026-10-10 on pi 1.0.4 through the default-on live guard (disposable `PI_CODING_AGENT_DIR` / `HOME` only; never `~/.pi`):
 
