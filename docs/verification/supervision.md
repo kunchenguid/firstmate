@@ -367,6 +367,28 @@ COMPLETE
 ```
 
 No live unattended Claude background session ran on the verifying machine: that topology is documented by the real process listings in issues #3902, #2314, #3398, and #4066, and the coverage above is the structural predicate plus those executable fixtures, not a live pass.
+
+A background move is the other way a live front-end outlives the conversation it recorded.
+The agents view's left-arrow key or `/background` forks the conversation into a new session id that runs under Claude's daemon, and after the left-arrow move the front-end stays alive as the agents view, so neither the dead-owner reclaim nor the same-session id applies.
+Claude Code records the move as a line-anchored `continued-in` record naming the new id in the moved-from session's transcript, and only for a move: on Claude Code 2.1.294 a fork that keeps its parent, such as `/fork` or a Remote Control fork, writes no record, so its copy stays a foreign session.
+`bin/fm-session-lock-lib.sh` owns the handoff contract that reads that record.
+`tests/fm-session-lock-ancestry.test.sh` drives the record apart from every weaker signal behind the deterministic process table and runs the real hooks and lock script in a bg chain detached from a live front-end.
+`tests/fm-session-lock-background-move-live-e2e.test.sh` drives the real left-arrow move in a `bin/fm-live-lab.sh` lab and is the command that refreshes this record after a Claude Code upgrade.
+Both ran on 2026-10-09 on Linux (WSL2) with Claude Code 2.1.294:
+
+```sh
+tests/fm-session-lock-ancestry.test.sh
+FM_CLAUDE_BG_MOVE_LIVE_E2E=1 tests/fm-session-lock-background-move-live-e2e.test.sh
+```
+
+Observed output, bounded to the lines the background-move coverage adds:
+
+```text
+ok - session-lock: a background move hands a live lock to the moved session, and nothing weaker does
+ok - session-lock e2e: a background move hands the live front-end's lock and supervision to the moved session
+ok - session-lock live (2.1.294 (Claude Code)): a left-arrow background move hands the live front-end's lock and supervision to the moved session
+```
+
 [`sessionstart-nudge.md`](../sessionstart-nudge.md#shared-wrapper-and-safety) owns the nudge wrapper's separate ancestry check and its redundant-nudge behavior after helper-chain recycling.
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.

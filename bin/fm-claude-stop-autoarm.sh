@@ -16,9 +16,11 @@
 #     session id (which is what keeps a background session arming after its
 #     transient helper chain is recycled).
 #     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#     or its live session moved its conversation into this one (a background
+#     move, fm_session_lock_handed_off_to_self), the hook delegates guarded
+#     recovery to bin/fm-lock.sh and then re-verifies ownership. Any other live
+#     owner, a missing lock, a malformed lock, or unresolved ancestry remains
+#     inert, so a competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -198,8 +200,9 @@ fi
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
-# A prior session may have died after leaving its numeric harness pid in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case.
+# A prior session may have died after leaving its numeric harness pid in .lock,
+# or moved its conversation into this session while its front-end lives on.
+# Use the shared liveness and handoff predicates to recognize only those cases.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
@@ -209,7 +212,9 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  if fm_harness_pid_alive "$LOCK_PID"; then
+    fm_session_lock_handed_off_to_self "$STATE" || exit 0
+  fi
   RECOVER_SESSION_LOCK=1
 fi
 

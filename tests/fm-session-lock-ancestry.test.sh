@@ -427,6 +427,118 @@ test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id() {
   pass "session-lock: a trusted id anchors the lock on the model-loop process, anything else on the outermost pid"
 }
 
+# Claude Code's own record of a background move, written into the moved-from
+# session's transcript: the only line shape the handoff accepts.
+continued_in_line() {  # <from-id> <to-id>
+  printf '{"type":"continued-in","timestamp":"2026-10-09T03:40:49.410Z","sessionId":"%s","continuedInSessionId":"%s"}\n' "$1" "$2"
+}
+
+handed_off() {  # <fakebin> <state>
+  lib_eval "$1" "fm_session_lock_handed_off_to_self '$2'"
+}
+
+# A background move: the front-end 700 that recorded S1 stays alive as the
+# agents view, while the moved conversation runs as S2 in the detached bg chain
+# whose model loop is 710. Only S1's own continued-in record, as the newest
+# conversation evidence in S1's transcript, hands the live lock to S2.
+test_background_move_hands_a_live_lock_to_the_moved_session() {
+  local dir fakebin state cfg transcript got
+  dir="$TMP_ROOT/background-move"
+  fakebin=$(fm_fakebin "$dir")
+  state="$dir/state"
+  cfg="$dir/claude-config"
+  transcript="$cfg/projects/-lab-home/S1.jsonl"
+  mkdir -p "$state" "$cfg/projects/-lab-home" "$cfg/projects/-elsewhere"
+  write_background_session_ps "$fakebin"
+  printf '700\n' > "$state/.lock"
+  printf 'S1\n' > "$state/.lock-session"
+  export CLAUDE_CONFIG_DIR="$cfg"
+
+  # The reported defect, so the cases below cannot be vacuous: with no move
+  # record the moved session is a non-owner facing a foreign live front-end.
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state"; then
+    fail "a lock was handed off with no continued-in record"
+  fi
+  got=$(FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state") \
+    || fail "without a move record the live front-end was not a foreign owner"
+  [ "$got" = 700 ] || fail "the foreign owner pid was '$got', expected 700"
+
+  # 1. The move record: handed off, no longer foreign, and still not owned
+  # until bin/fm-lock.sh reclaims it.
+  {
+    printf '{"parentUuid":"a","type":"user","sessionId":"S1"}\n'
+    continued_in_line S1 S2
+    printf '{"type":"queue-operation","operation":"enqueue","sessionId":"S1"}\n'
+    printf '{"type":"cost-state","sessionId":"S1"}\n'
+  } > "$transcript"
+  FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state" \
+    || fail "the moved session did not receive its own conversation's lock"
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state" >/dev/null; then
+    fail "the front-end that handed its conversation off was still reported as a foreign owner"
+  fi
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
+    fail "a handed-off lock was owned in place instead of being reclaimed"
+  fi
+  # 2. Nothing weaker: another session, an untrusted id, and no id.
+  if FM_TEST_SESSION_ID=S3 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state"; then
+    fail "a session the record does not name received the lock"
+  fi
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=700 handed_off "$fakebin" "$state"; then
+    fail "an id whose CLAUDE_PID is outside the current Claude run received the lock"
+  fi
+  if handed_off "$fakebin" "$state"; then
+    fail "a session with no id received the lock"
+  fi
+  # 3. The old session resumed after the move: its newer conversation entry
+  # withdraws the handoff, and a later move to S2 restores it.
+  printf '{"parentUuid":"b","type":"user","sessionId":"S1"}\n' >> "$transcript"
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state"; then
+    fail "a handoff survived the old session resuming its conversation"
+  fi
+  continued_in_line S1 S2 >> "$transcript"
+  FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state" \
+    || fail "a newer move record did not hand the lock off again"
+  # 4. Only a line-anchored record from the recorded session itself counts:
+  # quoted record text inside message content, a record naming another source
+  # session, and a newer move to another session all leave no handoff.
+  {
+    printf '{"parentUuid":"c","type":"user","message":{"content":"%s"}}\n' \
+      '{\"type\":\"continued-in\",\"sessionId\":\"S1\",\"continuedInSessionId\":\"S2\"}'
+  } > "$transcript"
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state"; then
+    fail "record text quoted inside message content handed the lock off"
+  fi
+  continued_in_line S0 S2 > "$transcript"
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state"; then
+    fail "a record naming another source session handed the lock off"
+  fi
+  { continued_in_line S1 S2; continued_in_line S1 S3; } > "$transcript"
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state"; then
+    fail "an older move survived a newer move to another session"
+  fi
+  # 5. Never fail open: an ambiguous transcript, a symlinked transcript, and an
+  # id the transcript lookup cannot hold safely are all no handoff.
+  continued_in_line S1 S2 > "$transcript"
+  cp "$transcript" "$cfg/projects/-elsewhere/S1.jsonl"
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state"; then
+    fail "two transcripts for the recorded session handed the lock off"
+  fi
+  rm -f "$cfg/projects/-elsewhere/S1.jsonl" "$transcript"
+  continued_in_line S1 S2 > "$dir/real-transcript"
+  ln -s "$dir/real-transcript" "$transcript"
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state"; then
+    fail "a symlinked transcript handed the lock off"
+  fi
+  rm -f "$transcript"
+  printf 'S1:x\n' > "$state/.lock-session"
+  continued_in_line 'S1:x' S2 > "$cfg/projects/-lab-home/S1:x.jsonl"
+  if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 handed_off "$fakebin" "$state"; then
+    fail "a recorded id outside the safe transcript charset handed the lock off"
+  fi
+  unset CLAUDE_CONFIG_DIR
+  pass "session-lock: a background move hands a live lock to the moved session, and nothing weaker does"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -680,6 +792,21 @@ wait_for_file() {  # <path> <what>
   [ -s "$1" ] || fail "background-session fixture never produced $2"
 }
 
+# End the fixture daemon and wait until the pty-host it spawned is reparented
+# away from it. The new parent is init on macOS and plain Linux but the nearest
+# subreaper elsewhere (WSL's per-session /init), and neither is harness-shaped,
+# so the contiguous claude-named run from the spare ends at the pty-host.
+end_daemon() {  # <daemon-pid> <ptyhost-pid>
+  local daemon=$1 ptyhost=$2 i=0
+  kill -TERM "$daemon"
+  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = "$daemon" ]; }; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  kill -0 "$daemon" 2>/dev/null && fail "the fixture daemon did not end"
+  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != "$daemon" ] || fail "the pty-host was not reparented after the daemon ended"
+}
+
 fire_phase() {  # <dir> <n> <hook-environment-script>
   local dir=$1 n=$2
   printf '%s\n' "$3" > "$dir/state/fire-$n.tmp"
@@ -704,11 +831,12 @@ arm_count() {  # <dir>
 
 # The recycled chain must still be treated as the owner: arm, no diagnostic,
 # lock accepted, line 1 untouched while the recorded pid lives, sidecar bytes
-# untouched. An owned actionable close records two arm invocations - the
-# foreground arm plus the handling successor the hook starts before the rewake -
-# so the cumulative <expected-arms> grows by two for every owned phase.
-expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
-  local dir=$1 n=$2 arms=$3 lock_pid=$4 label=$5
+# untouched (or equal to <expected-sidecar> when the phase claims the lock). An
+# owned actionable close records two arm invocations - the foreground arm plus
+# the handling successor the hook starts before the rewake - so the cumulative
+# <expected-arms> grows by two for every owned phase.
+expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label> [<expected-sidecar>]
+  local dir=$1 n=$2 arms=$3 lock_pid=$4 label=$5 sidecar=${6:-$1/sidecar-initial}
   expect_code 2 "$(phase_value "$dir" "$n" hook.rc)" "$label: the Stop auto-arm did not rewake"
   [ "$(arm_count "$dir")" = "$arms" ] || fail "$label: expected $arms arm(s), got $(arm_count "$dir")"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "$label: no rewake claim was recorded, got: $(epoch_outcome "$dir")"
@@ -719,8 +847,8 @@ expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
   expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh refused the session's own lock: $(cat "$dir/state/phase-$n/lock.out")"
   [ "$(phase_value "$dir" "$n" lock-after)" = "$lock_pid" ] \
     || fail "$label: lock line 1 is $(phase_value "$dir" "$n" lock-after), expected $lock_pid"
-  cmp -s "$dir/state/phase-$n/session-after" "$dir/sidecar-initial" \
-    || fail "$label: the session sidecar is not byte-identical to the one the owner wrote"
+  cmp -s "$dir/state/phase-$n/session-after" "$sidecar" \
+    || fail "$label: the session sidecar is not byte-identical to the expected $sidecar"
 }
 
 # Not the owner: no arm, the guard's foreign-owner diagnostic naming the live
@@ -765,15 +893,9 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   grep -qx "$frontend" "$dir/state/phase-1/ancestry" || fail "the healthy chain did not reach the front-end"
   expect_phase_owned "$dir" 1 2 "$frontend" "healthy chain"
 
-  # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
-  # the front-end that holds the lock stays alive.
-  kill -TERM "$daemon"
-  i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
-    sleep 0.05
-    i=$((i + 1))
-  done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+  # Recycle the bridge: the daemon ends, the pty-host is reparented away from
+  # it, and the front-end that holds the lock stays alive.
+  end_daemon "$daemon" "$ptyhost"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phase 2: the same session id over the broken chain - the reported drift.
@@ -808,6 +930,54 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
 
   : > "$dir/state/stop-spare"
   pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain"
+}
+
+# The background move reproduced live on Claude Code 2.1.294: the front-end
+# that recorded S1 stays alive as the agents view, the conversation continues as
+# S2 in a bg chain that no longer descends from it, and S1's transcript carries
+# Claude's continued-in record. The fixture reaches that shape by ending the
+# daemon under a live front-end, then fires the real hooks and lock script as S2.
+test_e2e_background_move_hands_the_lock_to_the_moved_session() {
+  local dir frontend daemon ptyhost spare cfg
+  dir="$TMP_ROOT/e2e-background-move"
+  cfg="$dir/claude-config"
+  make_background_session_home "$dir"
+  mkdir -p "$cfg/projects/-lab-home"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_FIXTURE_CLAUDE="$NAMED_CLAUDE" FM_POLL=1 FM_HEARTBEAT=999999 \
+    FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0 \
+    bash -c '"$0" "$1" &' "$NAMED_CLAUDE" "$dir/frontend.sh"
+  wait_for_file "$dir/state/frontend-lock.rc" "the front-end's lock result"
+  wait_for_file "$dir/state/spare-pid" "the bg-spare"
+  frontend=$(tr -d '[:space:]' < "$dir/state/frontend-pid")
+  daemon=$(tr -d '[:space:]' < "$dir/state/daemon-pid")
+  ptyhost=$(tr -d '[:space:]' < "$dir/state/ptyhost-pid")
+  spare=$(tr -d '[:space:]' < "$dir/state/spare-pid")
+  BG_FIXTURE_PIDS+=("$frontend" "$daemon" "$ptyhost" "$spare")
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock-session")" = S1 ] \
+    || fail "the front-end did not record its trusted session id beside the lock"
+  end_daemon "$daemon" "$ptyhost"
+
+  # Phase 1: the reported defect. Without the move record the moved session is
+  # a non-owner: no arm, the guard's foreign-owner exit, the lock refusal.
+  fire_phase "$dir" 1 "export CLAUDE_CONFIG_DIR='$cfg' CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=\$\$"
+  grep -qx "$frontend" "$dir/state/phase-1/ancestry" && fail "the moved chain reached the front-end, so this case proves nothing"
+  kill -0 "$frontend" 2>/dev/null || fail "the front-end died, so the live-owner case cannot be exercised"
+  expect_phase_foreign "$dir" 1 0 "$frontend" "background move, no record"
+
+  # Phase 2: Claude's continued-in record in S1's transcript. The same Stop now
+  # reclaims the live front-end's lock onto the moved model loop and arms.
+  { continued_in_line S1 S2; printf '{"type":"queue-operation","operation":"enqueue","sessionId":"S1"}\n'; } \
+    > "$cfg/projects/-lab-home/S1.jsonl"
+  printf 'S2\n' > "$dir/sidecar-moved"
+  fire_phase "$dir" 2 "export CLAUDE_CONFIG_DIR='$cfg' CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=\$\$"
+  kill -0 "$frontend" 2>/dev/null || fail "the front-end died before the handoff phase"
+  expect_phase_owned "$dir" 2 2 "$spare" "background move, handed off" "$dir/sidecar-moved"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$spare" ] || fail "the handoff did not leave the lock on the moved model loop"
+
+  : > "$dir/state/stop-frontend"
+  : > "$dir/state/stop-spare"
+  pass "session-lock e2e: a background move hands the live front-end's lock and supervision to the moved session"
 }
 
 # A same-session confirmation must refresh a /clear re-key even while another
@@ -1106,10 +1276,12 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
+test_background_move_hands_a_live_lock_to_the_moved_session
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
 test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
+test_e2e_background_move_hands_the_lock_to_the_moved_session
 test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
 test_same_session_confirmation_does_not_steal_after_wait
 test_failed_lock_write_restores_previous_sidecar

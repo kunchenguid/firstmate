@@ -10,7 +10,10 @@
 # is a member of this process's contiguous harness ancestry, or the trusted
 # Claude session id below matches the id recorded beside a live lock. Neither
 # signal ever fails open: no id, no sidecar, an untrusted id, or a different
-# recorded id leaves the ancestry verdict exactly as it was.
+# recorded id leaves the ancestry verdict exactly as it was. Separately, a live
+# lock whose recorded Claude session moved its conversation into this trusted
+# session is handed off rather than owned: callers reclaim it through
+# bin/fm-lock.sh exactly like a dead owner's.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -190,10 +193,11 @@ fm_harness_pid_alive() {
 # and must never own a lock with them. Ids are read from the environment only,
 # never from ps argv, where prompts and briefs are visible.
 #
-# A --fork-session successor mints a new id, so it stays a foreign live owner
-# until the pre-fork process exits; that is the safe direction and a documented
-# non-goal. Two genuinely different live sessions sharing one id is not a
-# supported state (Claude refuses to resume a running session under its id).
+# A --fork-session successor mints a new id, so it never owns through this
+# signal; fm_session_lock_handed_off_to_self below owns the one fork that moves
+# the conversation rather than copying it. Two genuinely different live
+# sessions sharing one id is not a supported state (Claude refuses to resume a
+# running session under its id).
 
 # Print the Claude session id this process may own with, or return 1. $1 is the
 # ancestry list an earlier walk already produced, so a caller that walked once
@@ -241,6 +245,51 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
   trusted=$(fm_session_lock_trusted_session_id "${2:-}") || return 1
   recorded=$(fm_session_lock_recorded_session_id "$state") || return 1
   [ "$recorded" = "$trusted" ]
+}
+
+# --- background-move handoff ---------------------------------------------------
+# Moving a running Claude conversation to the background (the agents view's
+# left-arrow key or /background) forks it into a new session id that runs under
+# Claude's shared daemon, and the front-end that recorded the lock can stay
+# alive as the agents view. Its live pid keeps the dead-owner reclaim from ever
+# firing, so without this the moved conversation reads its own home as another
+# live session's and supervision goes dark.
+#
+# Claude Code records the move in the moved-from session's own transcript, and
+# only for a move: a fork that keeps its parent (/fork, a Remote Control fork)
+# writes nothing, and that copy stays a foreign session. The record is a
+# top-level line {"type":"continued-in",...,"sessionId":<old>,
+# "continuedInSessionId":<new>}. Message content can never start a JSONL line, so
+# a line-anchored match cannot be forged by prompt text. The handoff stands only
+# while that record is the transcript's newest conversation evidence: any later
+# conversation entry (every one starts {"parentUuid":) means the old session was
+# resumed and kept going.
+#
+# True when the session recorded beside the lock in state dir $1 handed its
+# conversation to this process's trusted Claude session. Ids outside
+# [A-Za-z0-9-], no transcript, more than one transcript for the recorded id, an
+# unreadable transcript, or a changed record shape are no handoff, so the
+# ordinary verdicts stand.
+fm_session_lock_handed_off_to_self() {  # <state> [<ancestry-pids>]
+  local state=$1 trusted recorded transcript found=''
+  trusted=$(fm_session_lock_trusted_session_id "${2:-}") || return 1
+  recorded=$(fm_session_lock_recorded_session_id "$state") || return 1
+  [ "$recorded" != "$trusted" ] || return 1
+  case "$recorded$trusted" in *[!A-Za-z0-9-]*) return 1 ;; esac
+  for transcript in "${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}"/projects/*/"$recorded".jsonl; do
+    [ -f "$transcript" ] && [ ! -L "$transcript" ] || continue
+    [ -z "$found" ] || return 1
+    found=$transcript
+  done
+  [ -n "$found" ] || return 1
+  awk -v tail=",\"sessionId\":\"$recorded\",\"continuedInSessionId\":\"$trusted\"}" '
+    index($0, "{\"type\":\"continued-in\",") == 1 {
+      handed = substr($0, length($0) - length(tail) + 1) == tail
+      next
+    }
+    index($0, "{\"parentUuid\":") == 1 { handed = 0 }
+    END { exit !handed }
+  ' "$found" 2>/dev/null
 }
 
 # Print the pid bin/fm-lock.sh records on lock line 1 for this session. For a
@@ -291,9 +340,9 @@ EOF
 
 # True when state dir $1 records a live verified harness outside this process's
 # contiguous harness ancestry that was not recorded by this same trusted Claude
-# session. Sets FM_SESSION_LOCK_FOREIGN_OWNER_PID for a diagnostic caller.
-# Malformed, missing, dead, and ancestry-uncertain locks are not foreign-owner
-# evidence.
+# session and did not hand its conversation to it. Sets
+# FM_SESSION_LOCK_FOREIGN_OWNER_PID for a diagnostic caller. Malformed, missing,
+# dead, handed-off, and ancestry-uncertain locks are not foreign-owner evidence.
 # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
 FM_SESSION_LOCK_FOREIGN_OWNER_PID=
 fm_session_lock_foreign_owner_live() {
@@ -312,6 +361,7 @@ fm_session_lock_foreign_owner_live() {
 $pids
 EOF
   fm_session_lock_same_session "$state" "$pids" && return 1
+  fm_session_lock_handed_off_to_self "$state" "$pids" && return 1
   # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=$lock_pid
   return 0
