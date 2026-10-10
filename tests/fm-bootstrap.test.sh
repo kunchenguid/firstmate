@@ -44,7 +44,7 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi ssh
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -1006,6 +1006,11 @@ test_network_phases_record_per_step_elapsed_times() {
   # A real clone with a real origin, so fm-fleet-sync.sh genuinely iterates it.
   fm_git_init_commit "$case_dir/home/projects/alpha"
   fm_git_add_origin "$case_dir/home/projects/alpha" "$case_dir/alpha-origin"
+  # The origin names GitHub, so the GitHub auth probe runs whatever forge this
+  # checkout's own origin is on, while insteadOf keeps every fetch local.
+  git -C "$case_dir/home/projects/alpha" remote set-url origin https://github.com/example/alpha.git
+  git -C "$case_dir/home/projects/alpha" config "url.file://$(cd "$case_dir/alpha-origin" && pwd).insteadOf" \
+    https://github.com/example/alpha.git
   # A secondmate the liveness sweep must account for. Whatever verdict it reaches
   # is owned elsewhere; what matters here is that the step is measured.
   fm_write_secondmate_meta "$case_dir/home/state/mate-a.meta" "$case_dir/home"
@@ -1244,6 +1249,158 @@ ROWS
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
 
+# GitHub tooling is checked only where the home uses GitHub: a fleet whose every
+# origin is on another forge is never told to install gh or gh-axi or to log in
+# to GitHub, one GitHub origin anywhere brings every check back, and a home with
+# no origin at all keeps today's checks because it carries no evidence either way.
+test_github_tooling_follows_github_use() {
+  local case_dir fakebin path out
+  case_dir="$TMP_ROOT/github-in-use"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  path="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" gh gh-axi)"
+  run() {
+    PATH="$path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh"
+  }
+
+  fm_git_init_commit "$case_dir/home/projects/local"
+  out=$(run)
+  assert_contains "$out" "MISSING: gh (install:" "a home with no origin at all lost the gh check"
+  assert_contains "$out" "NEEDS_GH_AUTH" "a home with no origin at all lost the GitHub login check"
+
+  fm_git_init_commit "$case_dir/home/projects/on-gitlab"
+  git -C "$case_dir/home/projects/on-gitlab" remote add origin git@gitlab.example.com:group/on-gitlab.git
+  out=$(run)
+  assert_not_contains "$out" "MISSING: gh " "a GitLab-only home was told to install gh"
+  assert_not_contains "$out" "MISSING: gh-axi" "a GitLab-only home was told to install gh-axi"
+  assert_not_contains "$out" "NEEDS_GH_AUTH" "a GitLab-only home was told to log in to GitHub"
+
+  fm_git_init_commit "$case_dir/home/projects/on-github"
+  git -C "$case_dir/home/projects/on-github" remote add origin https://GitHub.com/owner/on-github.git
+  out=$(run)
+  assert_contains "$out" "MISSING: gh (install:" "a GitHub origin did not bring back the gh check"
+  assert_contains "$out" "MISSING: gh-axi (install:" "a GitHub origin did not bring back the gh-axi check"
+  assert_contains "$out" "NEEDS_GH_AUTH" "a GitHub origin did not bring back the GitHub login check"
+  pass "bootstrap: GitHub tooling is checked only in a home that uses GitHub"
+}
+
+test_gitlab_bound_project_prerequisites() {
+  local case_dir home fakebin path out local_out network_out host_count combined
+  case_dir="$TMP_ROOT/gitlab-prerequisites"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/data" "$home/projects"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  path="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" glab jq)"
+  gitlab_bootstrap() {
+    PATH="$path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 \
+      FM_BOOTSTRAP_NETWORK="${1:-all}" FM_TEST_GLAB_AUTH_LOG="$case_dir/auth.log" \
+      "$ROOT/bin/fm-bootstrap.sh"
+  }
+
+  fm_git_init_commit "$home/projects/bound alpha"
+  git -C "$home/projects/bound alpha" remote add origin git@code-one.example:group/alpha.git
+  fm_git_init_commit "$home/projects/bound-beta"
+  git -C "$home/projects/bound-beta" remote add origin ssh://git@code-one.example:2222/group/beta.git
+  fm_git_init_commit "$home/projects/bound-gamma"
+  git -C "$home/projects/bound-gamma" remote add origin https://code-two.example/group/gamma.git
+  printf '%s\n' \
+    '- bound alpha [direct-PR forge=gitlab] - fixture (added 2026-01-01)' \
+    '- bound-beta [no-mistakes forge=gitlab] - fixture (added 2026-01-01)' \
+    '- bound-gamma [no-mistakes forge=gitlab] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+
+  out=$(gitlab_bootstrap skip)
+  assert_contains "$out" "MISSING: glab (install:" "a GitLab-bound home did not report missing glab"
+  assert_contains "$out" "MISSING: jq (install:" "a GitLab-bound home did not report missing jq"
+  assert_not_contains "$out" "NEEDS_GLAB_AUTH" "the local phase tried to diagnose a host login"
+
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GLAB_AUTH_LOG"
+[ "$1" = auth ] && [ "$2" = status ] && [ "$3" = --hostname ] || exit 1
+[ "$4" = code-two.example ]
+SH
+  chmod +x "$fakebin/glab"
+  add_real_jq "$fakebin"
+  : > "$case_dir/auth.log"
+  local_out=$(gitlab_bootstrap skip)
+  [ ! -s "$case_dir/auth.log" ] || fail "local bootstrap made a GitLab authentication request"
+  assert_not_contains "$local_out" "MISSING: glab " "an installed glab was reported missing"
+  assert_not_contains "$local_out" "MISSING: jq " "an installed jq was reported missing"
+
+  network_out=$(gitlab_bootstrap only)
+  assert_contains "$network_out" "NEEDS_GLAB_AUTH: code-one.example (run: glab auth login --hostname code-one.example)" \
+    "bootstrap did not report the missing login for the bound instance"
+  assert_not_contains "$network_out" "NEEDS_GLAB_AUTH: code-two.example" \
+    "one instance's missing login obscured another instance's valid authentication"
+  host_count=$(printf '%s\n' "$network_out" | grep -c 'NEEDS_GLAB_AUTH: code-one.example' || true)
+  [ "$host_count" -eq 1 ] || fail "projects on the same unauthenticated host produced duplicate login diagnostics"
+  assert_not_contains "$network_out" "MISSING:" "the network phase repeated local dependency checks"
+  out=$(gitlab_bootstrap)
+  combined=$network_out
+  [ -z "$local_out" ] || combined="$local_out"$'\n'"$network_out"
+  assert_equals "$(printf '%s\n' "$combined" | LC_ALL=C sort)" \
+    "$(printf '%s\n' "$out" | LC_ALL=C sort)" "GitLab prerequisite checks did not partition into local and network phases"
+
+  printf '%s\n' '- bound alpha [direct-PR] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  rm -f "$fakebin/glab" "$fakebin/jq"
+  out=$(gitlab_bootstrap)
+  assert_not_contains "$out" "MISSING: glab " "an unbound origin acquired a GitLab prerequisite"
+  assert_not_contains "$out" "MISSING: jq " "an unbound origin acquired the GitLab JSON prerequisite"
+  assert_not_contains "$out" "NEEDS_GLAB_AUTH" "an unbound origin acquired a host-scoped login requirement"
+  pass "explicit GitLab bindings require glab and jq locally and authenticate each bound host in the network phase"
+}
+
+test_authentication_uses_resolved_scoped_hosts() {
+  local case_dir home fakebin out
+  case_dir="$TMP_ROOT/scoped-origin-authentication"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/data" "$home/projects" "$case_dir/glab-config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_git_init_commit "$home/projects/gl-project"
+  git -C "$home/projects/gl-project" remote add origin git@git-storage:group/project.git
+  fm_git_init_commit "$home/projects/gh-project"
+  git -C "$home/projects/gh-project" remote add origin git@github-storage:group/project.git
+  printf '%s\n' '- gl-project [direct-PR forge=gitlab] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do target=$arg; done
+case "${target##*@}" in
+  git-storage) printf 'hostname code.example.com\n' ;;
+  github-storage) printf 'hostname github.com\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_SCOPED_AUTH_FAIL:-0}" = 0 ] || exit 1
+[ "$1" = auth ] && [ "$2" = status ] && [ "$3" = --hostname ] && [ "$4" = code.example.com ]
+SH
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_SCOPED_AUTH_FAIL:-0}" = 0 ] || exit 1
+[ "$1" = auth ] && [ "$2" = status ] && [ "$3" = --active ] && [ "$4" = --hostname ] && [ "$5" = github.com ]
+SH
+  chmod +x "$fakebin/ssh" "$fakebin/glab" "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    GLAB_CONFIG_DIR="$case_dir/glab-config" FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "NEEDS_GH_AUTH" "GitHub authentication used an unscoped or unresolved host"
+  assert_not_contains "$out" "NEEDS_GLAB_AUTH" "GitLab authentication used the SSH alias instead of its configured hostname"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    GLAB_CONFIG_DIR="$case_dir/glab-config" FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_TEST_SCOPED_AUTH_FAIL=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "NEEDS_GH_AUTH" "the resolved GitHub origin's failed login was not diagnosed"
+  assert_contains "$out" "NEEDS_GLAB_AUTH: code.example.com" "the resolved GitLab origin's failed login was not diagnosed"
+  assert_not_contains "$out" "NEEDS_GLAB_AUTH: git-storage" "the diagnostic requested login to the SSH alias"
+  pass "bootstrap resolves SSH aliases and scopes authentication to the selected forge host"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1272,3 +1429,6 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_github_tooling_follows_github_use
+test_gitlab_bound_project_prerequisites
+test_authentication_uses_resolved_scoped_hosts

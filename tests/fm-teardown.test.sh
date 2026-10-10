@@ -777,6 +777,156 @@ SH
   pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
 }
 
+# A GitLab project for the task: the project's origin names
+# https://gitlab.example/group/repo while insteadOf keeps every fetch on the
+# local bare origin, and glab answers merge request 7 in <state> with the given
+# head. Every glab call and the GITLAB_HOST it saw are logged to glab.log.
+add_glab_mr_for_head() {  # <case-dir> <head> [state]
+  local case_dir=$1 head=$2 state=${3:-merged} origin_abs
+  origin_abs=$(cd "$case_dir/origin.git" && pwd)
+  git -C "$case_dir/project" remote set-url origin https://gitlab.example/group/repo.git
+  git -C "$case_dir/project" config "url.file://$origin_abs.insteadOf" https://gitlab.example/group/repo.git
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+printf 'GITLAB_HOST=%s %s\n' "\${GITLAB_HOST:-}" "\$*" >> '$case_dir/glab.log'
+case "\${1:-} \${2:-}" in
+  "mr list")
+    case " \$* " in
+      *" -R https://gitlab.example/group/repo "*" --source-branch fm/task-x1 "*)
+        printf '%s\n' '[{"iid":7,"state":"$state","source_branch":"fm/task-x1"}]'; exit 0 ;;
+    esac
+    printf '%s\n' '[]'; exit 0 ;;
+  "mr view")
+    case " \$* " in
+      *" 7 -R https://gitlab.example/group/repo -F json "*)
+        printf '{"iid":7,"state":"%s","sha":"%s","web_url":"https://gitlab.example/group/repo/-/merge_requests/7"}\n' '$state' '$head'
+        exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: merge request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
+# Pin the refusal tasks-axi applies to a --pr link that is not a canonical
+# GitHub pull request, so a case keeps reproducing whatever the installed
+# release accepts.
+add_tasks_axi_refusing_non_github_pr() {
+  local case_dir=$1 real_tasks_axi
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+# A squash-merged GitLab merge request with its source branch deleted is the
+# only proof the work landed: nothing is on a remote-tracking branch and main
+# never received the content. Teardown must read the merge request with glab,
+# addressing the project by host and path, and close the backlog item with the
+# merge request URL kept as a note, since tasks-axi takes no GitLab --pr link.
+test_teardown_reads_a_merged_gitlab_merge_request() {
+  local case_dir rc local_head mr_head mr_url=https://gitlab.example/group/repo/-/merge_requests/7
+  case_dir=$(make_case gitlab-recorded-mr)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  mr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "review follow-up")
+  printf 'pr=%s\n' "$mr_url" >> "$case_dir/state/task-x1.meta"
+  add_glab_mr_for_head "$case_dir" "$mr_head"
+  seed_backlog_in_flight "$case_dir"
+  add_tasks_axi_refusing_non_github_pr "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "gitlab-recorded-mr: teardown should succeed when the merge request is merged ($(cat "$case_dir/stderr"))"
+  assert_grep 'GITLAB_HOST=gitlab.example mr view 7 -R https://gitlab.example/group/repo -F json' "$case_dir/glab.log" \
+    "gitlab-recorded-mr: the merge request was not read by host and path"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "gitlab-recorded-mr: the backlog item was left at $(backlog_row_state "$case_dir")"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"GitLab merge request $mr_url\"" >/dev/null \
+    || fail "gitlab-recorded-mr: the closed item did not keep the merge request URL as a note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "gitlab-recorded-mr: a landed close left its pending-close record behind"
+
+  # With no pr= recorded, the registered forge=gitlab binding sends the branch
+  # lookup to glab, and the merge request it finds becomes the completion link.
+  case_dir=$(make_case gitlab-branch-mr)
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' '- project [direct-PR forge=gitlab] - fixture (added 2026-01-01)' > "$case_dir/data/projects.md"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  mr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "review follow-up")
+  add_glab_mr_for_head "$case_dir" "$mr_head"
+  seed_backlog_in_flight "$case_dir"
+  add_tasks_axi_refusing_non_github_pr "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "gitlab-branch-mr: teardown should find the merged merge request by branch ($(cat "$case_dir/stderr"))"
+  assert_grep 'GITLAB_HOST=gitlab.example mr list -R https://gitlab.example/group/repo --all --source-branch fm/task-x1' "$case_dir/glab.log" \
+    "gitlab-branch-mr: the branch lookup did not ask glab by host and path"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"GitLab merge request $mr_url\"" >/dev/null \
+    || fail "gitlab-branch-mr: the discovered merge request URL was not recorded on completion"
+
+  # An open merge request proves nothing, so unlanded work is still refused.
+  case_dir=$(make_case gitlab-open-mr)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf 'pr=%s\n' "$mr_url" >> "$case_dir/state/task-x1.meta"
+  add_glab_mr_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)" opened
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-open-mr: teardown must refuse unlanded work behind an open merge request"
+  grep -q REFUSED "$case_dir/stderr" || fail "gitlab-open-mr: no REFUSED line in stderr"
+  assert_grep 'mr view 7' "$case_dir/glab.log" "gitlab-open-mr: the merge request was never read"
+
+  case_dir=$(make_case gitlab-head-only-on-origin)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git clone -q "$case_dir/origin.git" "$case_dir/_mr"
+  git -C "$case_dir/_mr" fetch -q "$case_dir/wt" "$local_head"
+  git -C "$case_dir/_mr" checkout -q "$local_head"
+  printf '%s\n' follow-up > "$case_dir/_mr/review.txt"
+  git -C "$case_dir/_mr" add -- review.txt
+  git -C "$case_dir/_mr" -c user.email=t@t -c user.name=t commit -q -m "review follow-up"
+  mr_head=$(git -C "$case_dir/_mr" rev-parse HEAD)
+  git -C "$case_dir/_mr" push -q origin "HEAD:refs/merge-requests/7/head"
+  rm -rf "$case_dir/_mr"
+  ! git -C "$case_dir/wt" cat-file -e "$mr_head^{commit}" 2>/dev/null \
+    || fail "the MR-only fixture left its remote head in the local copy"
+  printf 'pr=%s\n' "$mr_url" >> "$case_dir/state/task-x1.meta"
+  add_glab_mr_for_head "$case_dir" "$mr_head"
+  seed_backlog_in_flight "$case_dir"
+  add_tasks_axi_refusing_non_github_pr "$case_dir"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "teardown should fetch the merge-request-only head ($(cat "$case_dir/stderr"))"
+  git -C "$case_dir/project" cat-file -e "$mr_head^{commit}" 2>/dev/null \
+    || fail "the missing MR head was not fetched from origin"
+  pass "teardown reads a merged GitLab merge request with glab and closes the item with its URL as a note"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -4646,6 +4796,7 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
+test_teardown_reads_a_merged_gitlab_merge_request
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

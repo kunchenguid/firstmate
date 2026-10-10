@@ -65,8 +65,11 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# A GitLab merge request is looked up the same way through glab, addressing the
+# project by host and path (docs/gitlab-merge-watch.md) and fetching
+# refs/merge-requests/<n>/head; pr_is_merged's helpers own when GitLab applies.
+# A gh or glab lookup error falls back to the content check; if that is also
+# inconclusive, teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
@@ -338,6 +341,7 @@ for _teardown_source in \
   fm-classify-lib.sh \
   fm-gate-refuse-lib.sh \
   fm-pr-lib.sh \
+  fm-forge-host-lib.sh \
   fm-public-followup-lib.sh \
   fm-x-lib.sh \
   fm-env-lib.sh \
@@ -373,6 +377,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-forge-host-lib.sh
+. "$SCRIPT_DIR/fm-forge-host-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -1494,13 +1500,95 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
-ensure_commit_object() {
-  local target=$1 commit=$2 n
+# GitHub serves a pull request's head at refs/pull/<n>/head and GitLab serves a
+# merge request's at refs/merge-requests/<n>/head, so a deleted source branch
+# still leaves the head fetchable from origin.
+ensure_commit_object() {  # <target> <commit> [pull|merge-requests]
+  local target=$1 commit=$2 ns=${3:-pull} n
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "refs/$ns/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+}
+
+# The GitLab project this task's merge request lives in, addressed by host and
+# path as bin/fm-pr-lib.sh's GitLab helpers address it. A recorded pr= decides
+# the forge on its own: a GitLab merge-request URL names the project, and any
+# other URL is not GitLab. With no pr= recorded, only the project's registered
+# forge=gitlab binding (bin/fm-project-mode.sh) selects GitLab, and the
+# worktree's origin remote then supplies host and path. Sets
+# TEARDOWN_GITLAB_HOST and TEARDOWN_GITLAB_PATH and returns 0, or returns 1
+# so the caller takes the GitHub lookup.
+TEARDOWN_GITLAB_HOST=
+TEARDOWN_GITLAB_PATH=
+teardown_gitlab_project() {
+  local parsed forge origin rest authority host path
+  TEARDOWN_GITLAB_HOST=
+  TEARDOWN_GITLAB_PATH=
+  if [ -n "$PR_URL" ]; then
+    parsed=$(fm_pr_url_parse "$PR_URL" && [ "$FM_PR_PROVIDER" = gitlab ] \
+      && printf '%s\t%s' "$FM_PR_HOST" "$FM_PR_PATH") || return 1
+    TEARDOWN_GITLAB_HOST=${parsed%%$'\t'*}
+    TEARDOWN_GITLAB_PATH=${parsed#*$'\t'}
+    return 0
+  fi
+  [ -n "$PROJ" ] || return 1
+  forge=$(FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" --forge "$(basename "$PROJ")" 2>/dev/null) \
+    || return 1
+  [ "$forge" = gitlab ] || return 1
+  # The configured URL, before any insteadOf rewrite, names the forge project.
+  origin=$(git -C "$WT" config --get remote.origin.url 2>/dev/null) || return 1
+  case "$origin" in
+    *://*)
+      rest=${origin#*://}
+      authority=${rest%%/*}
+      [ "$authority" != "$rest" ] || return 1
+      path=${rest#*/}
+      ;;
+    *:*)
+      path=${origin#*:}
+      ;;
+    *) return 1 ;;
+  esac
+  host=$(fm_forge_origin_host "$origin" gitlab) || return 1
+  path=${path#/}
+  path=${path%/}
+  path=${path%.git}
+  fm_pr_forge_host_valid "$host" || return 1
+  fm_pr_gitlab_path_valid "$path" || return 1
+  TEARDOWN_GITLAB_HOST=$host
+  TEARDOWN_GITLAB_PATH=$path
+}
+
+# Resolve the merge request for a worktree branch via glab. Echoes its number
+# on a match and returns 0; returns non-zero on no match or any lookup failure,
+# exactly like pr_number_from_branch.
+gitlab_mr_number_from_branch() {
+  local branch=$1 out n
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
+  command -v glab >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+  out=$(GITLAB_HOST="$TEARDOWN_GITLAB_HOST" glab mr list \
+    -R "https://$TEARDOWN_GITLAB_HOST/$TEARDOWN_GITLAB_PATH" \
+    --all --source-branch "$branch" --per-page 1 -F json 2>/dev/null) || return 1
+  n=$(printf '%s' "$out" | jq -r '
+    if type == "array" and length > 0 and (.[0].iid | type) == "number"
+    then .[0].iid | tostring else empty end' 2>/dev/null) || return 1
+  case "$n" in ''|0|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$n"
+}
+
+# Print "<state>\t<head>\t<url>" for a GitLab merge request, the same shape
+# the GitHub view below reads.
+gitlab_mr_view() {  # <number>
+  local out
+  command -v glab >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+  out=$(GITLAB_HOST="$TEARDOWN_GITLAB_HOST" glab mr view "$1" \
+    -R "https://$TEARDOWN_GITLAB_HOST/$TEARDOWN_GITLAB_PATH" -F json 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -r '
+    if type == "object" and (.state | type) == "string" and (.sha | type) == "string"
+      and (.web_url | type) == "string"
+    then .state + "\t" + .sha + "\t" + .web_url else error("invalid merge request") end' 2>/dev/null
 }
 
 patch_id_for_commit() {
@@ -1536,19 +1624,32 @@ EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# PR from the recorded pr= URL first, then from the branch name, and asks the
+# forge for both the PR state and head: glab for a GitLab merge request
+# (teardown_gitlab_project decides that), gh otherwise. Returns non-zero when
+# the PR is not merged, the current work is not contained in the PR head, no PR
+# is found, or any lookup error occurs - the caller then falls back to the
+# content check.
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
-  if [ -n "$PR_URL" ]; then
-    target=$PR_URL
+  local branch=$1 target view state remainder head resolved_url current landed=0 ns=pull
+  if teardown_gitlab_project; then
+    ns=merge-requests
+    if [ -n "$PR_URL" ]; then
+      target=${PR_URL##*/}
+    else
+      target=$(gitlab_mr_number_from_branch "$branch") || return 1
+    fi
+    [ -n "$target" ] || return 1
+    view=$(gitlab_mr_view "$target") || return 1
   else
-    target=$(pr_number_from_branch "$branch") || return 1
+    if [ -n "$PR_URL" ]; then
+      target=$PR_URL
+    else
+      target=$(pr_number_from_branch "$branch") || return 1
+    fi
+    [ -n "$target" ] || return 1
+    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
   fi
-  [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   remainder=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
@@ -1560,7 +1661,7 @@ pr_is_merged() {
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
+  ensure_commit_object "$target" "$head" "$ns" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
@@ -1570,6 +1671,9 @@ pr_is_merged() {
   [ "$landed" = 1 ] || return 1
   if [ -z "$PR_URL" ]; then
     [ -n "$resolved_url" ] || return 1
+    if [ "$ns" = merge-requests ]; then
+      ( fm_pr_url_parse "$resolved_url" && [ "$FM_PR_PROVIDER" = gitlab ] ) || return 1
+    fi
     PR_URL=$resolved_url
   fi
   return 0

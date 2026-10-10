@@ -53,12 +53,12 @@ The optional `+yolo` posture changes merge authority only and does not change th
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the merge-authority contract.
 
-The optional `forge=` token records which forge the project's remote actually is; its one value is `forge=gerrit`.
+The optional `forge=` token records which forge the project's remote actually is; its values are `forge=gerrit` and `forge=gitlab`, and a GitHub project carries no token.
 It is orthogonal to the mode and to `+yolo`, so it is never derived from either, and it is never inferred at use time from a remote name, host, port, or push target.
 At add or create intake, run `bin/fm-forge-detect.sh projects/<name>` once the clone exists and propose its answer alongside the posture; the captain's confirmation is what binds it, and the registry token is the durable record of that confirmation.
 Never register the binding from detection alone, and never re-derive it later from the clone.
 A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only`, and the registry refuses it on `local-only`, which publishes nothing; a Gerrit-hosted project kept local registers `local-only` with no forge token.
-`yolo` is inactive on a `forge=gerrit` project, so never propose `+yolo` alongside it.
+`yolo` is inactive on a `forge=gerrit` project, so never propose `+yolo` alongside it; `forge=gitlab` takes `+yolo` like an unbound project.
 `bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-dod-lib.sh` owns what it changes for a worker.
 
 ## Add or clone an existing project
@@ -71,12 +71,13 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 
 ## Create a project
 
-Creating a GitHub repository is outward-facing.
-Before making that remote change, propose the repository name, owner or organization, visibility, and delivery posture, defaulting visibility to private and the posture to `no-mistakes-prod-only`, then obtain the captain's explicit consent for those exact values; a stated default never replaces that consent.
-Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
-After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
+Creating a remote GitHub repository or GitLab project is outward-facing.
+Before making that remote change, propose the forge, instance, repository or project name, owner or GitLab namespace, visibility, and delivery posture, defaulting visibility to private and posture to `no-mistakes-prod-only`, then obtain the captain's explicit consent for those exact values; a stated default never replaces that consent.
+Use `gh-axi` for an approved GitHub operation and `glab` for an approved GitLab operation, consulting the selected tool's current help rather than relying on remembered flags.
+For GitLab, explicitly select the approved instance and namespace and pass the approved visibility instead of inheriting glab's internal-visibility default.
+After remote creation succeeds, clone it locally, confirm and record its forge binding, add the registry entry, and initialize it according to its delivery posture.
 
-For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
+For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no forge call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
 ## Initialize

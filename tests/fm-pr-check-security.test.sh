@@ -220,7 +220,21 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+case " $* " in
+  *" -F json "*)
+    if [ -n "${FM_TEST_GLAB_DRAFT:-}" ]; then
+      if [ -n "${FM_TEST_GLAB_DRAFT_REPO:-}" ]; then
+        case " $* " in
+          *" -R $FM_TEST_GLAB_DRAFT_REPO "*) ;;
+          *) printf '{"draft":false}\n'; exit 0 ;;
+        esac
+      fi
+      printf '{"draft":%s}\n' "$FM_TEST_GLAB_DRAFT"
+      exit 0
+    fi
+    ;;
+esac
+printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-open}"
 SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
@@ -661,6 +675,34 @@ test_draft_pull_request_is_not_armed() {
     > "$dir/stdout" 2> "$dir/stderr" || fail "an unreadable draft state blocked arming"
   [ -f "$dir/home/state/task-a.check.sh" ] || fail "an unreadable draft state was not armed"
   pass "arming refuses a draft pull request, naming it, and arms a ready or unreadable one"
+}
+
+test_draft_merge_request_is_not_armed() {
+  local dir rc url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
+  dir=$(make_case gitlab-draft-refused)
+  write_task_meta "$dir"
+  cp "$dir/home/state/task-a.meta" "$dir/meta.before"
+  rc=0
+  FM_TEST_GLAB_DRAFT=true FM_TEST_GLAB_DRAFT_REPO=https://gitlab.example/group/subgroup/project \
+    run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "arming accepted a draft merge request"
+  assert_grep 'draft merge request' "$dir/stderr" "the refusal did not identify the GitLab draft"
+  cmp -s "$dir/meta.before" "$dir/home/state/task-a.meta" || fail "a refused GitLab draft changed task metadata"
+  assert_absent "$dir/home/state/task-a.check.sh" "a refused GitLab draft armed a poll"
+  assert_absent "$dir/home/state/task-a.pr-poll" "a refused GitLab draft wrote a poll sidecar"
+  [ ! -s "$dir/guard.log" ] || fail "a refused GitLab draft reached the guard"
+
+  FM_TEST_GLAB_DRAFT=false run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a merge request marked ready was still refused"
+  assert_grep "pr=$url" "$dir/home/state/task-a.meta" "a ready merge request was not recorded"
+  assert_present "$dir/home/state/task-a.check.sh" "a ready merge request was not armed"
+
+  dir=$(make_case gitlab-draft-unreadable)
+  write_task_meta "$dir"
+  FM_TEST_GLAB_DRAFT=null run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "an unreadable GitLab draft state blocked arming"
+  assert_present "$dir/home/state/task-a.check.sh" "an unreadable draft state was not armed"
+  pass "GitLab draft registration refuses without mutation, permits a ready transition, and preserves optional unreadable-state behavior"
 }
 
 # A secondmate is a persistent worker, not a delivery lane: it never owns a
@@ -1991,7 +2033,7 @@ group/subgroup/project
 
   # Only an exact merged state wakes firstmate. Every other reading, including
   # an unreadable merge request and a changed output format, stays silent.
-  for value in opened closed locked '' not-a-state MERGED merged-but-not; do
+  for value in open closed locked '' not-a-state MERGED merged-but-not; do
     out=$(FM_TEST_GLAB_STATE="$value" run_poll "$dir")
     [ -z "$out" ] || fail "GitLab poll emitted for a non-merged state"
   done
@@ -2072,13 +2114,13 @@ EOF
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
-  grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
-    || fail "merge wrapper refused for some reason other than the state it could not read"
+  assert_grep 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
+    "merge wrapper did not explain its unreadable GitLab state refusal"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
-  grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
+  grep -qxF "api projects/group%2Fsubgroup%2Fproject/merge_requests/7 --hostname gitlab.example --repo https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
     || fail "merge wrapper did not read the merge request through glab at its own instance"
-  ! grep -qF ' mr merge ' "$dir/glab.log" \
-    || fail "merge wrapper merged despite an unreadable merge request state"
+  ! grep -qE '^(api projects/[^/[:space:]]+([[:space:]]|$)|mr merge )' "$dir/glab.log" \
+    || fail "an unreadable MR state reached project-policy discovery or merging"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
@@ -3441,6 +3483,7 @@ SH
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_draft_merge_request_is_not_armed
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree

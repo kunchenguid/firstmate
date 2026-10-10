@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bin/fm-forge-detect.sh proposes a clone's forge binding at project-add intake
-# from protocol facts in its own git config, and never records anything.
+# from protocol facts in its own git config or, for GitLab, from the origin host
+# and glab's local config, and never records anything.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -10,6 +11,20 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-forge-detect-tests)
 DETECT="$ROOT/bin/fm-forge-detect.sh"
+# Never read this machine's own glab setup; the cases that need one write it.
+GLAB_CONFIG_DIR="$TMP_ROOT/no-glab-config"
+export GLAB_CONFIG_DIR
+FAKE_SSH_BIN=$(fm_fakebin "$TMP_ROOT/ssh")
+cat > "$FAKE_SSH_BIN/ssh" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do target=$arg; done
+host=${target##*@}
+case "$host" in git-storage) host=code.corp.example ;; esac
+printf 'hostname %s\n' "$host"
+SH
+chmod +x "$FAKE_SSH_BIN/ssh"
+PATH="$FAKE_SSH_BIN:$PATH"
+export PATH
 
 new_clone() {  # <name>
   local dir="$TMP_ROOT/$1"
@@ -50,7 +65,7 @@ test_other_remotes_propose_none() {
   [ "$out" = forge=none ] || fail "a GitHub origin proposed a forge: $out"
 
   clone=$(new_clone other-port)
-  git -C "$clone" remote add origin ssh://git@gitlab.example:2222/group/project.git
+  git -C "$clone" remote add origin ssh://git@git.example:2222/group/project.git
   out=$("$DETECT" "$clone") || fail "detection failed on a non-Gerrit SSH port"
   [ "$out" = forge=none ] || fail "an SSH origin on another port proposed a forge: $out"
 
@@ -64,6 +79,64 @@ test_other_remotes_propose_none() {
   out=$("$DETECT" "$clone") || fail "detection failed on a clone with no origin"
   [ "$out" = forge=none ] || fail "a clone with no origin proposed a forge: $out"
   pass "a remote carrying neither Gerrit fact proposes forge=none"
+}
+
+test_gitlab_host_proposes_gitlab() {
+  local clone out url
+  for url in git@gitlab.example.com:group/project.git https://gitlab.com/group/sub/project.git \
+    ssh://git@GitLab.Example.com:2222/group/project.git; do
+    clone=$(new_clone "gitlab-host-$RANDOM")
+    git -C "$clone" remote add origin "$url"
+    out=$("$DETECT" "$clone") || fail "detection failed on $url"
+    case "$out" in
+      'forge=gitlab evidence=origin host '*' names GitLab') ;;
+      *) fail "an origin on a GitLab-named host did not propose gitlab with its evidence: $out" ;;
+    esac
+  done
+  clone=$(new_clone gitlab-token-origin)
+  git -C "$clone" remote add origin 'https://oauth2:not-a-real-token@gitlab.example.com/group/project.git'
+  out=$("$DETECT" "$clone") || fail "detection failed on an authenticated origin"
+  [ "$out" = 'forge=gitlab evidence=origin host gitlab.example.com names GitLab' ] \
+    || fail "forge evidence did not contain only the safe hostname"
+  assert_not_contains "$out" 'not-a-real-token' "forge evidence leaked an origin credential"
+  # A host that merely contains the word is not a GitLab label.
+  clone=$(new_clone gitlab-substring)
+  git -C "$clone" remote add origin git@mygitlab.example:group/project.git
+  out=$("$DETECT" "$clone") || fail "detection failed on a host containing gitlab"
+  [ "$out" = forge=none ] || fail "a host merely containing gitlab proposed a forge: $out"
+  pass "an origin host that is or has the label gitlab proposes forge=gitlab"
+}
+
+test_glab_configured_host_proposes_gitlab() {
+  local clone out config_dir="$TMP_ROOT/glab-config"
+  mkdir -p "$config_dir"
+  printf '%s\n' 'host: code.corp.example' 'hosts:' '    gitlab.com:' '        api_host: gitlab.com' \
+    '    code.corp.example:' '        api_host: code.corp.example' '        user: someone' \
+    'no_prompt: false' > "$config_dir/config.yml"
+  clone=$(new_clone glab-host)
+  git -C "$clone" remote add origin git@code.corp.example:group/project.git
+  out=$(GLAB_CONFIG_DIR="$config_dir" "$DETECT" "$clone") || fail "detection failed with a glab config"
+  [ "$out" = "forge=gitlab evidence=origin host code.corp.example is configured in glab ($config_dir/config.yml)" ] \
+    || fail "a glab-configured host did not propose gitlab with its evidence: $out"
+  # A setting nested under a host is not itself a host.
+  clone=$(new_clone glab-setting)
+  git -C "$clone" remote add origin git@api_host:group/project.git
+  out=$(GLAB_CONFIG_DIR="$config_dir" "$DETECT" "$clone") || fail "detection failed with a glab config"
+  [ "$out" = forge=none ] || fail "a nested glab setting was read as a host: $out"
+  # Gerrit's protocol fact outranks a glab-configured host.
+  clone=$(new_clone glab-and-gerrit)
+  git -C "$clone" remote add origin ssh://someone@code.corp.example:29418/project
+  out=$(GLAB_CONFIG_DIR="$config_dir" "$DETECT" "$clone") || fail "detection failed with a glab config"
+  case "$out" in
+    'forge=gerrit evidence='*) ;;
+    *) fail "a Gerrit SSH port lost to a glab-configured host: $out" ;;
+  esac
+  clone=$(new_clone glab-ssh-alias)
+  git -C "$clone" remote add origin git@git-storage:group/project.git
+  out=$(GLAB_CONFIG_DIR="$config_dir" "$DETECT" "$clone") || fail "SSH-alias intake failed"
+  assert_contains "$out" 'forge=gitlab evidence=origin host code.corp.example is configured in glab' \
+    "intake did not resolve the SSH alias to the configured host"
+  pass "an origin host configured in glab proposes forge=gitlab, below Gerrit's protocol facts"
 }
 
 test_detection_writes_nothing() {
@@ -90,6 +163,8 @@ test_not_a_clone_is_an_error() {
 test_ssh_port_29418_proposes_gerrit
 test_refs_for_push_refspec_proposes_gerrit
 test_other_remotes_propose_none
+test_gitlab_host_proposes_gitlab
+test_glab_configured_host_proposes_gitlab
 test_detection_writes_nothing
 test_not_a_clone_is_an_error
 echo "# all fm-forge-detect tests passed"

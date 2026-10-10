@@ -1039,6 +1039,9 @@ forge beside a mode|- fp [no-mistakes forge=gerrit] - fixture (added 2026-01-01)
 forge as the only token leaves the default mode|- fp [forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
 forge before yolo on a direct-PR project|- fp [direct-PR forge=gerrit +yolo] - fixture (added 2026-01-01)|direct-PR off|gerrit
 forge under the conditional policy|- fp [no-mistakes-prod-only forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
+gitlab beside a mode|- fp [direct-PR forge=gitlab] - fixture (added 2026-01-01)|direct-PR off|gitlab
+gitlab keeps a registered yolo|- fp [no-mistakes +yolo forge=gitlab] - fixture (added 2026-01-01)|no-mistakes on|gitlab
+gitlab under the conditional policy|- fp [no-mistakes-prod-only forge=gitlab] - fixture (added 2026-01-01)|no-mistakes off|gitlab
 a project with no forge keeps yolo|- fp [direct-PR +yolo] - fixture (added 2026-01-01)|direct-PR on|none
 a keyed token that is not the forge is ignored|- fp [direct-PR owner=me] - fixture (added 2026-01-01)|direct-PR off|none
 an unregistered project|- other [direct-PR] - fixture (added 2026-01-01)|no-mistakes off|none
@@ -1064,6 +1067,13 @@ ROWS
   done
   err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null) || true
   assert_contains "$err" 'local-only publishes nothing' "the refusal did not say why local-only takes no forge"
+  printf '%s\n' '- fp [local-only forge=gitlab] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --forge fp 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "local-only with forge=gitlab did not refuse (status $status, got '$out')"
+  printf '%s\n' '- fp [no-mistakes +yolo forge=gitlab] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a registered +yolo on forge=gitlab was refused or warned: $err"
   pass "fm-project-mode: the forge binds from its own token and is reported only through --forge"
 }
 
@@ -1092,7 +1102,7 @@ test_project_mode_refuses_only_a_malformed_forge_binding() {
     assert_contains "$err" "\"$token\"" "$label: the refusal did not name the token it could not read"
     assert_contains "$err" 'forge=gerrit' "$label: the refusal did not name the accepted binding"
   done <<'ROWS'
-an unknown forge value|- fp [no-mistakes forge=gitlab] - fixture (added 2026-01-01)|gitlab
+an unknown forge value|- fp [no-mistakes forge=bitbucket] - fixture (added 2026-01-01)|bitbucket
 a misspelled forge value|- fp [no-mistakes forge=gerit] - fixture (added 2026-01-01)|gerit
 an empty forge value|- fp [no-mistakes +yolo forge=] - fixture (added 2026-01-01)|forge=
 ROWS
@@ -1520,6 +1530,107 @@ STUB
   pass "fm-promote: a promoted worker receives the project's registered forge contract with no flag to remember"
 }
 
+# forge=gitlab keeps both pull-request contracts and swaps only their forge tool:
+# the worker opens, reads back, and marks ready a non-draft merge request with
+# glab, rule 3 and the waiting guidance name glab, and the GitHub text stays out.
+# Yolo stays available, a spawn and a promotion carry the binding exactly as they
+# carry Gerrit's, and a brief that drops it is refused as drift.
+test_forge_gitlab_uses_glab_and_keeps_yolo() {
+  local rec home proj fakebin brief out status sendroot meta payload id
+  rec=$(make_home forge-gitlab "- proj [direct-PR +yolo forge=gitlab] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  : > "$home/config/wait-no-turns"
+  FM_HOME="$home" "$BRIEF" forge-gitlab-d1 proj --mode direct-PR --forge gitlab >/dev/null \
+    || fail "a gitlab direct-PR brief should scaffold"
+  brief="$home/data/forge-gitlab-d1/brief.md"
+  grep -qx "Delivery contract: mode=direct-PR forge=gitlab" "$brief" \
+    || fail "the brief did not record the machine-readable gitlab forge"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep '3. This project is on GitLab: use `glab` for forge operations (never gh/gh-axi)' "$brief" \
+    "rule 3 still sent a GitLab worker to gh-axi"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'glab mr create --source-branch fm/forge-gitlab-d1 --target-branch <default branch>' "$brief" \
+    "the worker was not told to open the merge request with glab"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep '`glab mr view <number> -F json | jq .draft` must print `false`' "$brief" \
+    "the worker was not told to read the draft state back with glab"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'mark it ready with `glab mr update <number> --ready`' "$brief" \
+    "the worker was not told to mark a draft ready with glab"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep '`glab ci status --branch <your branch> --wait`' "$brief" \
+    "the waiting guidance did not watch the pipeline with glab"
+  assert_grep 'done [at=<epoch>]: PR {url}' "$brief" "the gitlab contract lost its PR-URL done report"
+  assert_no_grep 'gh-axi pr' "$brief" "the gitlab brief still names a gh-axi pull-request command"
+  assert_no_grep 'gh pr checks' "$brief" "the gitlab brief still waits on gh"
+
+  FM_HOME="$home" "$BRIEF" forge-gitlab-n1 proj --mode no-mistakes --forge gitlab >/dev/null \
+    || fail "a gitlab no-mistakes brief should scaffold"
+  brief="$home/data/forge-gitlab-n1/brief.md"
+  grep -qx "Delivery contract: mode=no-mistakes forge=gitlab" "$brief" \
+    || fail "the no-mistakes brief did not record the gitlab forge"
+  assert_grep 'done [at=<epoch>]: PR {url} checks green' "$brief" \
+    "the gitlab no-mistakes contract lost its CI-ready report"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep '`glab mr view <number> -F json | jq .draft` must print `false`' "$brief" \
+    "the gitlab no-mistakes worker was not told to read the draft state back with glab"
+  assert_no_grep 'gh-axi pr' "$brief" "the gitlab no-mistakes brief still names gh-axi"
+
+  out=$(FM_HOME="$home" "$BRIEF" forge-gitlab-l1 proj --mode local-only --forge gitlab 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a local-only brief accepted the gitlab forge"
+  out=$(FM_HOME="$home" "$BRIEF" forge-gitlab-s1 proj --mode direct-PR --forge gitlab --shape squash 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--shape was accepted on the gitlab forge, which publishes no change shape"
+  out=$(FM_HOME="$home" "$BRIEF" forge-gitlab-b1 proj --mode direct-PR --forge gitlab --base-branch feature/hub 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a GitLab-bound brief accepted an unsupported base-branch override"
+  assert_absent "$home/data/forge-gitlab-b1/brief.md" "the refused GitLab base wrote a brief"
+
+  # Spawn: the registered binding agrees with the brief, and yolo stays on.
+  fill_brief_subsections "$home/data/forge-gitlab-d1/brief.md" "Ship the fix." "Open the merge request."
+  out=$(run_spawn "$home" "$fakebin" forge-gitlab-d1 "$proj" claude --mode direct-PR --yolo on 2>&1)
+  assert_not_contains "$out" "forge mismatch" "an agreeing gitlab brief and registry were reported as drift"
+  assert_not_contains "$out" "--yolo on is refused" "yolo was refused on the gitlab forge"
+  write_brief "$home" forge-gitlab-d2 direct-PR
+  out=$(run_spawn "$home" "$fakebin" forge-gitlab-d2 "$proj" claude --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a gitlab project launched on a brief that records no forge"
+  assert_contains "$out" "fm-brief.sh forge-gitlab-d2 proj --mode direct-PR --forge gitlab" \
+    "the refusal did not print the gitlab re-scaffold command"
+  assert_absent "$home/state/forge-gitlab-d2.meta" "the refused spawn still recorded a task"
+
+  # Promotion takes the binding from the registry and keeps yolo.
+  sendroot="$TMP_ROOT/forge-gitlab/sendroot"
+  mkdir -p "$sendroot/bin"
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "$2" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
+  id="forge-gitlab-p1"
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 || fail "scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Fix what the investigation found." "Carry over only the fix."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1) \
+    || fail "promotion on the gitlab forge refused: $out"
+  payload="$TMP_ROOT/forge-gitlab/payload"
+  ( cd "$sendroot" \
+    && FM_TEST_CAPTURE="$payload" \
+       eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+    || fail "promotion's delivery command did not run"
+  grep -qx "Delivery contract: mode=direct-PR forge=gitlab" "$payload" \
+    || fail "the promoted worker did not receive the gitlab forge in its delivery contract"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'use `glab` for every forge operation, never `gh` or `gh-axi`' "$payload" \
+    "the promoted worker was not moved off gh-axi"
+  grep -qx 'yolo=on' "$meta" || fail "the gitlab promotion did not keep yolo on"
+  pass "forge=gitlab: workers use glab for the merge request, yolo stays available, and the binding is enforced"
+}
+
 # direct-PR composes with the forge: the mode still means "publish without the
 # pipeline", and on Gerrit publishing is one gerrit-axi call rather than a push
 # plus a pull request. The worker reports the published change, never submits or
@@ -1643,6 +1754,7 @@ test_forge_gerrit_refuses_yolo
 test_forge_gerrit_changes_what_no_mistakes_means
 test_forge_gerrit_direct_pr_publishes_one_change
 test_spawn_requires_the_brief_to_carry_the_registered_forge
+test_forge_gitlab_uses_glab_and_keeps_yolo
 test_spawn_requires_the_brief_to_carry_the_selected_branch
 test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
