@@ -36,7 +36,10 @@
 # home. The incoming session runs `handover request`: it records
 # state/.handover-request and queues one captain-inbox note (an idempotent
 # request id, so a rerun queues nothing new) whose `check` wake tells the live
-# owner exactly what to run. It then waits up to --wait seconds (default 300).
+# owner exactly what to run. If that note is not saved or its wake is not
+# announced, the request fails at once, acknowledging any saved note and
+# recording no request, rather than waiting on an owner that was never told.
+# Otherwise it waits up to --wait seconds (default 300).
 # If the owner hands over, it confirms the lock and execs fm-session-start.sh
 # (unless --no-start); if the owner's harness exits instead, it takes the
 # stale lock directly and says no new record exists; on expiry it exits 1 with
