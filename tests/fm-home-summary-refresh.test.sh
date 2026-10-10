@@ -732,9 +732,10 @@ jq -e '
 pass "producer skips remote per-task state probes"
 
 # The watcher's beacon is what the rest of supervision reads as proof it is
-# alive. Publication is side-band, so no matter how long it takes, the beacon
-# must keep advancing. Hold the publication lock for the whole observation
-# window, then require the beacon to keep ticking anyway.
+# alive. Publication is side-band, so no matter how long it takes, the watcher
+# must keep completing poll cycles. Hold the publication lock for the whole
+# observation window, then require the cycle number the beacon names to keep
+# advancing anyway.
 BEAT_HOME="$TMP_ROOT/beat-home"
 mkdir -p "$BEAT_HOME/state" "$BEAT_HOME/data" "$BEAT_HOME/config" \
   "$BEAT_HOME/projects"
@@ -777,23 +778,22 @@ while [ ! -e "$BEAT_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 200 ]; do
 done
 [ -e "$BEAT_HOME/state/.last-watcher-beat" ] \
   || fail "the stalled-publication watcher never beat: $(cat "$TMP_ROOT/beat-watch.err" 2>/dev/null)"
-beat_mtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime)' "$1"; }
 seen=0
-last=$(beat_mtime "$BEAT_HOME/state/.last-watcher-beat")
+last=$(fm_beacon_cycle_settled "$BEAT_HOME/state/.last-watcher-beat")
 i=0
 while [ "$seen" -lt 3 ] && [ "$i" -lt 200 ]; do
   kill -0 "$WATCH_PID" 2>/dev/null \
     || fail "the stalled-publication watcher exited: $(cat "$TMP_ROOT/beat-watch.err" 2>/dev/null)"
   sleep 0.1
-  now=$(beat_mtime "$BEAT_HOME/state/.last-watcher-beat")
-  if [ "$now" != "$last" ]; then
+  now=$(fm_beacon_cycle "$BEAT_HOME/state/.last-watcher-beat")
+  if [ -n "$now" ] && [ "$now" != "$last" ]; then
     seen=$((seen + 1))
     last=$now
   fi
   i=$((i + 1))
 done
 [ "$seen" -ge 3 ] \
-  || fail "the beacon advanced only $seen time(s) in 20 seconds while publication was stalled"
+  || fail "the watcher completed only $seen poll cycle(s) in 20 seconds while publication was stalled"
 kill "$WATCH_PID" >/dev/null 2>&1 || true
 wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
