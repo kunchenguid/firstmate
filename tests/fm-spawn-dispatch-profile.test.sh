@@ -746,30 +746,75 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
 }
 
 test_opencode_threads_model_and_effort_variant() {
-  local rec id out status launch
+  local rec id default_id unsupported_id out status launch cfg
   id=profile-opencode-z7
-  rec=$(make_spawn_case profile-opencode opencode "$id")
+  default_id=profile-opencode-effort-default-z7m
+  unsupported_id=profile-opencode-effort-unsupported-z7q
+  rec=$(make_spawn_case profile-opencode opencode "$id" "$default_id" "$unsupported_id")
   read_case_record "$rec"
+  mkdir -p "$WT_DIR/.opencode"
+  printf '%s\n' '{"permission":{"read":"ask"},"agent":{"build":{"temperature":0.3,"steps":8}},"provider":{"custom":{"npm":"custom/provider"}}}' > "$WT_DIR/.opencode/opencode.json"
+  printf '%s\n' '.opencode/opencode.json' >> "$PROJ_DIR/.git/info/exclude"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
   status=$?
   expect_code 0 "$status" "opencode spawn with model and effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
   launch=$(cat "$LAUNCH_LOG")
-  # opencode 1.18.32's config schema carries per-model reasoning effort as
-  # agent.<name>.variant, so the effort rides the OPENCODE_CONFIG_CONTENT JSON
-  # the launch already writes, keyed to the resolved model on the default
-  # build agent, never as a launch flag.
-  assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --prompt" \
-    "opencode launch did not write the effort as the build agent's variant in its config"
+  assert_not_contains "$launch" "OPENCODE_CONFIG_CONTENT" \
+    "OpenCode launch settings must not depend on OPENCODE_CONFIG_CONTENT"
+  cfg="$WT_DIR/.opencode/opencode.json"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    die "model was not pinned" unless $config->{model} eq "anthropic/claude-sonnet-4-5";
+    die "permission allowlist is missing" unless $config->{permission}{"*"} eq "allow";
+    die "permission rules were dropped" unless $config->{permission}{read} eq "ask";
+    die "build agent model was not pinned" unless $config->{agent}{build}{model} eq $config->{model};
+    die "effort variant was not written" unless $config->{agent}{build}{variant} eq "high";
+    die "other build settings were dropped" unless $config->{agent}{build}{temperature} == 0.3 && $config->{agent}{build}{steps} == 8;
+    die "provider settings were dropped" unless $config->{provider}{custom}{npm} eq "custom/provider";
+    die "permission marker is missing" unless $config->{"x-firstmate-model-pin"}{managedPermissionWildcard} eq "allow";
+    die "effort marker is missing" unless $config->{"x-firstmate-model-pin"}{managedBuildVariant} eq "high";
+  ' "$cfg" || fail "OpenCode worktree config did not carry model, permissions, and effort"
   # opencode v2 removed --model from the interactive launch; a launch carrying
   # it exits 1 with "Unrecognized flag: --model in command opencode".
   assert_not_contains "$launch" "--model" "opencode v2 interactive launch must not pass --model"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode drops --model, pins the model in its worktree config, and keeps the effort as its config's agent variant"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$default_id" "$PROJ_DIR" --model default)
+  status=$?
+  expect_code 0 "$status" "default model should clear only the OpenCode model pin"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    die "model pin remains" if exists $config->{model};
+    die "permission changed" unless $config->{permission}{"*"} eq "allow";
+    die "permission rules changed" unless $config->{permission}{read} eq "ask";
+    die "effort model changed" unless $config->{agent}{build}{model} eq "anthropic/claude-sonnet-4-5";
+    die "effort variant changed" unless $config->{agent}{build}{variant} eq "high";
+    die "other build settings changed" unless $config->{agent}{build}{temperature} == 0.3 && $config->{agent}{build}{steps} == 8;
+    die "provider settings changed" unless $config->{provider}{custom}{npm} eq "custom/provider";
+    my $marker = $config->{"x-firstmate-model-pin"};
+    die "model marker remains" if exists $marker->{managedModel};
+    die "permission marker was lost" unless $marker->{managedPermissionWildcard} eq "allow";
+    die "effort marker was lost" unless $marker->{managedBuildVariant} eq "high";
+  ' "$cfg" || fail "default model launch changed permission or effort settings"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$unsupported_id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5 --effort medium)
+  status=$?
+  expect_code 0 "$status" "an unsupported effort should leave OpenCode on its own variant"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    die "model was not pinned" unless $config->{model} eq "anthropic/claude-sonnet-4-5";
+    die "permission changed" unless $config->{permission}{"*"} eq "allow";
+    die "permission rules changed" unless $config->{permission}{read} eq "ask";
+    die "unsupported Firstmate build model remains" if exists $config->{agent}{build}{model};
+    die "unsupported Firstmate variant remains" if exists $config->{agent}{build}{variant};
+    die "other build settings changed" unless $config->{agent}{build}{temperature} == 0.3 && $config->{agent}{build}{steps} == 8;
+    die "effort ownership marker remains" if exists $config->{"x-firstmate-model-pin"}{managedBuildModel};
+  ' "$cfg" || fail "unsupported effort did not restore the prior build-agent settings"
+  pass "opencode stores settings in merged worktree config and default clears only model"
 }
 
 # OpenCode v2 dropped --model, so the model axis is not dropped with it: it
@@ -794,6 +839,7 @@ test_opencode_pins_model_in_worktree_config() {
     my $config = decode_json(do { local $/; <> });
     die "wrong effective model" unless $config->{model} eq "opencode/space-bunny-free";
     die "missing Firstmate ownership marker" unless $config->{"x-firstmate-model-pin"}{managedModel} eq $config->{model};
+    die "permission allowlist is missing" unless $config->{permission}{"*"} eq "allow";
   ' "$cfg" || fail "worktree config did not contain the resolved Firstmate model pin"
   if git -C "$WT_DIR" check-ignore -q .opencode/opencode.json; then
     pass "opencode pins the model in an untracked, git-excluded worktree config"
@@ -812,7 +858,7 @@ test_opencode_merges_and_clears_its_model_pin() {
   cfg="$WT_DIR/.opencode/opencode.json"
   printf '%s\n' '.opencode/opencode.json' >> "$PROJ_DIR/.git/info/exclude"
   mkdir -p "$WT_DIR/.opencode"
-  printf '%s\n' '{"model":"opencode-go/qwen3.8-flash","permission":{"*":"ask"},"provider":{"custom":{"npm":"custom/provider"}}}' > "$cfg"
+  printf '%s\n' '{"model":"opencode-go/qwen3.8-flash","permission":{"*":"ask","read":"ask"},"provider":{"custom":{"npm":"custom/provider"}}}' > "$cfg"
   chmod 600 "$cfg"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id1" "$PROJ_DIR" \
@@ -823,7 +869,8 @@ test_opencode_merges_and_clears_its_model_pin() {
     my $config = decode_json(do { local $/; <> });
     my $marker = $config->{"x-firstmate-model-pin"};
     die "wrong pin" unless $config->{model} eq "opencode/space-bunny-free";
-    die "permission settings changed" unless $config->{permission}{"*"} eq "ask";
+    die "permission wildcard was not managed" unless $config->{permission}{"*"} eq "allow";
+    die "permission rules were dropped" unless $config->{permission}{read} eq "ask";
     die "provider settings changed" unless $config->{provider}{custom}{npm} eq "custom/provider";
     die "prior model was not recorded" unless $marker->{previousModelPresent} && $marker->{previousModel} eq "opencode-go/qwen3.8-flash";
   ' "$cfg" || fail "OpenCode pin did not preserve and record existing settings"
@@ -842,9 +889,11 @@ test_opencode_merges_and_clears_its_model_pin() {
   perl -MJSON::PP -e '
     my $config = decode_json(do { local $/; <> });
     die "prior model was not restored" unless $config->{model} eq "opencode-go/qwen3.8-flash";
-    die "permission settings changed" unless $config->{permission}{"*"} eq "ask";
+    die "permission wildcard was not preserved" unless $config->{permission}{"*"} eq "allow";
+    die "permission rules were dropped" unless $config->{permission}{read} eq "ask";
     die "provider settings changed" unless $config->{provider}{custom}{npm} eq "custom/provider";
-    die "Firstmate marker remains" if exists $config->{"x-firstmate-model-pin"};
+    die "Firstmate model marker remains" if exists $config->{"x-firstmate-model-pin"}{managedModel};
+    die "Firstmate permission marker was lost" unless $config->{"x-firstmate-model-pin"}{managedPermissionWildcard} eq "allow";
   ' "$cfg" || fail "clearing the Firstmate pin did not restore and preserve the original config"
   [ "$(perl -e 'printf "%04o", (stat($ARGV[0]))[2] & 07777' "$cfg")" = "0600" ] \
     || fail "clearing a Firstmate pin changed the OpenCode config file mode"
@@ -873,13 +922,48 @@ test_opencode_refuses_unparseable_worktree_config() {
   pass "opencode refuses unparseable config without changing or launching"
 }
 
+test_opencode_refuses_malformed_model_marker_values() {
+  local rec id1 id2 out status cfg before
+  id1=profile-opencode-malformed-previous-z7o
+  id2=profile-opencode-malformed-managed-z7p
+  rec=$(make_spawn_case profile-opencode-malformed-marker opencode "$id1" "$id2")
+  read_case_record "$rec"
+  cfg="$WT_DIR/.opencode/opencode.json"
+  printf '%s\n' '.opencode/opencode.json' >> "$PROJ_DIR/.git/info/exclude"
+  mkdir -p "$WT_DIR/.opencode"
+  printf '%s\n' '{"model":"opencode/space-bunny-free","x-firstmate-model-pin":{"managedModel":"opencode/space-bunny-free","previousModelPresent":true,"previousModel":{"provider":"opencode-go"}}}' > "$cfg"
+  before=$(cat "$cfg")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id1" "$PROJ_DIR" \
+    --model default 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a non-string saved model must refuse before restore"
+  assert_contains "$out" "cannot safely update OpenCode config $cfg: invalid Firstmate pin marker" \
+    "malformed model marker refusal must name the config and marker"
+  [ "$(cat "$cfg")" = "$before" ] || fail "malformed model marker was changed"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode" "malformed model marker must refuse before launch"
+
+  printf '%s\n' '{"model":"opencode/space-bunny-free","x-firstmate-model-pin":{"managedModel":7,"previousModelPresent":false}}' > "$cfg"
+  before=$(cat "$cfg")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id2" "$PROJ_DIR" \
+    --model default 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a non-string managed model must refuse before comparison"
+  assert_contains "$out" "cannot safely update OpenCode config $cfg: invalid Firstmate pin marker" \
+    "non-string managed-model refusal must name the config and marker"
+  [ "$(cat "$cfg")" = "$before" ] || fail "non-string managed-model marker was changed"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode" "non-string managed model must refuse before launch"
+  pass "opencode refuses non-string managed marker values"
+}
+
 # A project that ships its own committed .opencode/opencode.json owns that
 # file. Overwriting it would clobber the project's tracked configuration, which
 # is not a pin.
 test_opencode_refuses_a_tracked_project_config() {
-  local case_dir home proj wt fakebin launchlog id deleted_id out status cfg existing
+  local case_dir home proj wt fakebin launchlog id deleted_id default_id out status cfg existing
   id=profile-opencode-tracked-z7f
   deleted_id=profile-opencode-tracked-deleted-z7l
+  default_id=profile-opencode-tracked-default-z7n
   case_dir="$TMP_ROOT/profile-opencode-tracked"
   home="$case_dir/home"; proj="$case_dir/project"; wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
@@ -914,6 +998,16 @@ test_opencode_refuses_a_tracked_project_config() {
   [ "$cfg" = "$existing" ] || fail "opencode overwrote the project's tracked config"$'\n'"before: $existing"$'\n'"after:  $cfg"
   assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode" "refused launch must not start OpenCode"
 
+  fm_test_spawn_brief "$home" "$default_id"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$default_id" "$PROJ_DIR" \
+    --model default 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "opencode must refuse modifying tracked config for permission setup"
+  assert_contains "$out" "cannot configure OpenCode launch: tracked project config $wt/.opencode/opencode.json must not be modified" \
+    "default-model refusal must identify the tracked config"
+  [ "$(cat "$wt/.opencode/opencode.json")" = "$existing" ] || fail "default launch modified tracked OpenCode config"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode" "refused default launch must not start OpenCode"
+
   fm_test_spawn_brief "$home" "$deleted_id"
   git -C "$wt" update-index --assume-unchanged .opencode/opencode.json
   rm "$wt/.opencode/opencode.json"
@@ -928,9 +1022,9 @@ test_opencode_refuses_a_tracked_project_config() {
   pass "opencode refuses tracked configs whether present or locally deleted"
 }
 
-# The default model axis records itself in metadata and pins nothing: there is
-# no model name to write, so no config file is invented.
-test_opencode_default_model_writes_no_worktree_config() {
+# The default model axis records itself in metadata and pins no model, while
+# the worktree config still carries Firstmate's permission policy.
+test_opencode_default_model_writes_permission_config() {
   local rec id out status
   id=profile-opencode-default-z7g
   rec=$(make_spawn_case profile-opencode-default opencode "$id")
@@ -940,10 +1034,13 @@ test_opencode_default_model_writes_no_worktree_config() {
   status=$?
   expect_code 0 "$status" "opencode spawn with the default model axis should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode default default
-  if [ -e "$WT_DIR/.opencode/opencode.json" ]; then
-    fail "a default model axis must not write a worktree model pin"
-  fi
-  pass "opencode records a default model axis in metadata without writing a pin"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    die "default model was pinned" if exists $config->{model};
+    die "permission allowlist is missing" unless $config->{permission}{"*"} eq "allow";
+    die "permission marker is missing" unless $config->{"x-firstmate-model-pin"}{managedPermissionWildcard} eq "allow";
+  ' "$WT_DIR/.opencode/opencode.json" || fail "default model config did not preserve the permission allowlist"
+  pass "opencode records default model without pinning it and writes permissions"
 }
 
 test_opencode_without_effort_keeps_launch_config_unchanged() {
@@ -957,9 +1054,8 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
   expect_code 0 "$status" "opencode spawn without effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --prompt" \
-    "opencode launch without effort must keep the permission-only config byte-identical"
+  assert_not_contains "$launch" "OPENCODE_CONFIG_CONTENT" \
+    "OpenCode launch settings must not depend on OPENCODE_CONFIG_CONTENT"
   assert_not_contains "$launch" "--model" "opencode v2 interactive launch must not pass --model"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
   perl -MJSON::PP -e '
@@ -967,8 +1063,10 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
     local $/;
     my $config = decode_json(<$fh>);
     exit 1 unless ref($config) eq "HASH" && $config->{model} eq "anthropic/claude-sonnet-4-5";
+    exit 1 unless $config->{permission}{"*"} eq "allow";
+    exit 1 if exists $config->{agent}{build}{variant};
   ' "$WT_DIR/.opencode/opencode.json" \
-    || fail "the resolved model must still be pinned in the worktree config"
+    || fail "the resolved model or permission was not configured semantically"
   pass "opencode without an effort keeps its launch config unchanged"
 }
 
@@ -983,9 +1081,14 @@ test_opencode_emits_variant_for_openai_family_effort() {
   expect_code 0 "$status" "opencode spawn with an openai model and effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --prompt" \
-    "opencode launch did not write the openai family effort as the build agent's variant"
+  assert_not_contains "$launch" "OPENCODE_CONFIG_CONTENT" \
+    "OpenCode launch settings must not depend on OPENCODE_CONFIG_CONTENT"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    die "permission allowlist is missing" unless $config->{permission}{"*"} eq "allow";
+    die "effort model is incorrect" unless $config->{agent}{build}{model} eq "openai/gpt-5.6-sol";
+    die "effort variant is incorrect" unless $config->{agent}{build}{variant} eq "xhigh";
+  ' "$WT_DIR/.opencode/opencode.json" || fail "OpenAI effort was not written to the worktree config"
   assert_not_contains "$launch" "--model" "opencode v2 interactive launch must not pass --model"
   pass "opencode emits the variant for an effort the openai family exposes"
 }
@@ -1001,11 +1104,14 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
   expect_code 0 "$status" "opencode spawn with an unsupported family effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --prompt" \
-    "opencode must keep the permission-only config when the model family lacks the effort"
+  assert_not_contains "$launch" "OPENCODE_CONFIG_CONTENT" \
+    "OpenCode launch settings must not depend on OPENCODE_CONFIG_CONTENT"
   assert_not_contains "$launch" "--model" "opencode v2 interactive launch must not pass --model"
-  assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    die "permission allowlist is missing" unless $config->{permission}{"*"} eq "allow";
+    die "unsupported effort variant was written" if exists $config->{agent}{build}{variant};
+  ' "$WT_DIR/.opencode/opencode.json" || fail "unsupported effort must not reach OpenCode config"
   pass "opencode omits the variant for an effort outside the model family's list"
 }
 
@@ -2409,8 +2515,9 @@ test_opencode_threads_model_and_effort_variant
 test_opencode_pins_model_in_worktree_config
 test_opencode_merges_and_clears_its_model_pin
 test_opencode_refuses_unparseable_worktree_config
+test_opencode_refuses_malformed_model_marker_values
 test_opencode_refuses_a_tracked_project_config
-test_opencode_default_model_writes_no_worktree_config
+test_opencode_default_model_writes_permission_config
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
 test_opencode_omits_variant_when_model_family_lacks_effort

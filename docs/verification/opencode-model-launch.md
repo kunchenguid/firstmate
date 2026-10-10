@@ -129,7 +129,7 @@ The pin decided the model.
 
 ## Live interactive launch on the captain's model
 
-A real interactive launch, carrying only the pin file that `write_opencode_worktree_model` generates and no `--model` flag:
+A real interactive launch, carrying only the worktree config that `write_opencode_worktree_config` generates and no `--model` flag:
 
 ```sh
 mkdir -p /tmp/opencode/live/.opencode && cd /tmp/opencode/live && git init -q .
@@ -154,3 +154,5 @@ Only 2.0.26 on this host was measured.
 A project that ships its own committed `.opencode/opencode.json` keeps it byte-identical. Firstmate refuses that OpenCode launch with a diagnostic naming the conflicting file, because the higher-precedence tracked model would defeat a worktree-root override and OpenCode v2 provides no verified interactive model flag or environment override. Measurements on 2.0.26 confirmed that `./opencode.json` is lower precedence than `.opencode/opencode.json`, `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` are ignored, and `.opencode/opencode.jsonc` is not read. No alternate config path was found that can override the tracked file without changing it.
 
 For an untracked worktree config, Firstmate adds its pin with an `x-firstmate-model-pin` marker and preserves other parsed JSON settings. The marker records whether a prior model existed and its value, so a later launch can update the pin or restore that prior value when the requested model is `default`. Firstmate refuses to modify malformed JSON, invalid marker data, or a model value changed externally while marked as Firstmate-owned. The prior writer's exact compact model-only output is recognized as a legacy Firstmate pin and cleared on a default launch.
+
+The OpenCode 2.0.26 host check also established that `OPENCODE_CONFIG_CONTENT` is not a usable source for `permission` or `agent` settings. Firstmate now writes the permission allowlist and supported `agent.build.model` / `agent.build.variant` effort settings through the same worktree JSON merge. The marker tracks these managed values independently; a `default` model launch clears only the model pin and leaves permission, effort, and unrelated config settings intact. The effort variant remains limited to the provider/effort combinations listed in the harness reference.
