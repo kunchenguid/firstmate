@@ -39,6 +39,9 @@ It bounds the tree to 4,096 entries and 64 MiB, includes every directory, relati
 
 After validation, the host copies the complete package into `data/extensions/packages/<id>/<version>/<tree-digest>/` under the active home.
 Installed directories are mode `0555`, installed executable files are mode `0555`, and other installed files are mode `0444`.
+That publish keeps the copied root owner-writable across its rename into the store and tightens it to mode `0555` only afterward, because APFS refuses to rename an owner-non-writable directory.
+A process stopped between that rename and tightening leaves the exact content-addressed entry owner-writable, and the next bind of that same digest revalidates its complete tree and manifest and completes the publish instead of failing; different bytes keep the refusal.
+A tightening that itself fails removes the entry it just published.
 Every invocation revalidates canonical confinement, owner, modes, links, the complete tree digest, manifest digest, and entrypoint digest before executing anything.
 The enabled binding points only at that content-addressed home-local copy, so two local or remote homes install the same package identity at independent absolute paths.
 
