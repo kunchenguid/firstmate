@@ -1084,6 +1084,20 @@ A malformed or unreadable file refuses every fresh ship or scout spawn until it 
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
 
+## Dispatch validation (config/dispatch-validator)
+
+An optional local, gitignored `config/dispatch-validator` adds synchronous home policy to fresh ship and scout dispatches after brief and delivery validation, before endpoint or worktree allocation.
+The file belongs to the effective home's config directory, including `FM_CONFIG_OVERRIDE`, and is not inherited into secondmate homes.
+Only a truly absent path leaves spawn behavior and dependencies unchanged.
+Any present path must be a readable executable regular file; a non-executable or unreadable file or a dangling symlink refuses every fresh ship or scout dispatch.
+Configured validation requires Python 3, and a refusal leaves the backlog queued without allocating a worker.
+The earlier capacity check and advisory `fm-guard.sh` keep their existing behavior.
+Each batch pair is checked independently, including when `FM_SPAWN_NO_GUARD=1`.
+Relaunch, promotion and secondmate launches are outside this first version.
+
+[`bin/fm-dispatch-validation.sh --help`](../bin/fm-dispatch-validation.sh) owns the versioned JSON request/result contract, timeout, output bounds and accepted-brief snapshot mechanics.
+[`tests/fm-spawn-dispatch-validation.test.sh`](../tests/fm-spawn-dispatch-validation.test.sh) exercises the opt-in launch boundary.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

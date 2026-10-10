@@ -1282,6 +1282,8 @@ CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
+VALIDATED_BRIEF=
+VALIDATED_BRIEF_INPUT=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1452,6 +1454,9 @@ spawn_abort_cleanup() {
       rm -rf "$GIT_HOOKS_DIR" 2>/dev/null || true
     fi
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$status" -ne 0 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ] && [ -n "$VALIDATED_BRIEF" ]; then
+    rm -f -- "$VALIDATED_BRIEF" || true
   fi
   return "$status"
 }
@@ -3343,6 +3348,22 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # once here so every downstream comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+
+# Local policy sees the parser's resolved dispatch before backend allocation.
+# Absence preserves the original path, including its dependency footprint.
+if [ "$RELAUNCH" -eq 0 ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } &&
+  { [ -e "$CONFIG/dispatch-validator" ] || [ -L "$CONFIG/dispatch-validator" ]; }; then
+  VALIDATED_BRIEF=$(mktemp "$BRIEF_DIR_REAL/.validated-brief.XXXXXX") || exit 1
+  if ! bash "$SCRIPT_DIR/fm-dispatch-validation.sh" \
+    "$CONFIG/dispatch-validator" "$VALIDATED_BRIEF" "$FM_HOME" "$STATE" "$DATA" "$CONFIG" \
+    "$ID" "$KIND" "$PROJ_ABS_REAL" "${MODE:-}" "${BASE_BRANCH:-}" "$BRIEF_REAL"; then
+    rm -f -- "$VALIDATED_BRIEF"
+    exit 1
+  fi
+  VALIDATED_BRIEF_INPUT=$BRIEF_REAL
+  BRIEF=$VALIDATED_BRIEF
+  BRIEF_REAL=$VALIDATED_BRIEF
+fi
 
 real_path_or_raw() { # <path>
   local path=$1 real
@@ -5549,6 +5570,12 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   exit 1
 fi
 sleep 0.3
+if [ -n "$VALIDATED_BRIEF" ] && ! cmp -s "$VALIDATED_BRIEF_INPUT" "$VALIDATED_BRIEF"; then
+  rm -f -- "$LAUNCH_FILE"
+  rmdir "$LAUNCH_DIR" 2>/dev/null || true
+  echo "error: dispatch validation refused: effective brief changed before launch for $ID" >&2
+  exit 1
+fi
 SPAWN_LAUNCH_SENT=1
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
