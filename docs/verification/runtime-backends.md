@@ -6,6 +6,30 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Worktree-preserving task retirement
+
+Verified on 2026-10-10 with Bash 5.3.9 and Git 2.53.0 on Linux through isolated fixture homes and the public teardown interface:
+
+```sh
+bash bin/fm-test-run.sh --per-script-timeout-secs 300 tests/fm-teardown-endpoint-safety.test.sh
+```
+
+Observed preservation cases:
+
+```text
+ok - preserve-worktree retires monitoring idempotently and preserves files, index, HEAD, refs and evidence
+ok - preservation removes only its own supervision requirement
+ok - preservation refuses active, unfinished, unresolved, dirty, unlanded and ambiguous work without mutation
+ok - preservation uses generation-bound backlog replay after an interrupted close
+ok - interrupted monitoring cleanup resumes from evidence without hiding unfinished retirement
+ok - scout report and completion gates remain required while scratch and staged index survive
+ok - Zellij, Orca and cmux preservation fail closed on their existing unverified recovery surfaces
+```
+
+[`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header owns the opt-in mode and its safety limits.
+The tests reuse fixture adapter output to exercise retirement and existing classifier integration; they do not establish new live harness or Herdr lifecycle proof.
+The recovery classifiers and harness control commands are unchanged.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

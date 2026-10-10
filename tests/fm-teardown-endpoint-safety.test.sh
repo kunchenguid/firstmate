@@ -1420,6 +1420,248 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+make_preserve_case() {
+  local dir
+  dir=$(make_case "$1")
+  git -C "$dir/project" symbolic-ref HEAD refs/heads/main
+  printf 'landed\n' > "$dir/project/kept.txt"
+  git -C "$dir/project" add kept.txt
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+  git clone -q "$dir/project" "$dir/copy"
+  git -C "$dir/copy" checkout -qb fm/preserved
+  fm_write_meta "$dir/home/state/preserved.meta" \
+    'window=firstmate:fm-preserved' 'endpoint_task_id=preserved' \
+    "worktree=$dir/copy" "project=$dir/project" 'kind=ship' \
+    'mode=local-only' 'spawn_gen=preserved-generation'
+  printf 'done [at=1000]: landed\n' > "$dir/home/state/preserved.status"
+  mkdir -p "$dir/home/state/preserved.inbox/handled" "$dir/tasktmp"
+  printf 'steering evidence\n' > "$dir/home/state/preserved.inbox/handled/001.msg"
+  printf 'temporary evidence\n' > "$dir/tasktmp/proof"
+  printf 'tasktmp=%s\n' "$dir/tasktmp" >> "$dir/home/state/preserved.meta"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) printf 'fm-preserved\n' ;;
+  display-message)
+    case "$*" in *pane_current_command*) printf '%s\n' "${FM_PRESERVE_COMMAND:-bash}" ;; esac ;;
+  kill*) echo 'unexpected endpoint close' >> "${FM_RUNTIME_LOG:?}"; exit 1 ;;
+esac
+SH
+  cat > "$dir/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = axi ] || exit 1
+if [ -n "${FM_PRESERVE_RUN:-}" ]; then
+  printf 'count: 1 of 1 total\nruns[1]{id,branch,status,head,pr}:\n  run1,fm/preserved,%s,abcdef1234567,\n' "$FM_PRESERVE_RUN"
+else
+  printf 'count: 0 of 0 total\nruns[0]{id,branch,status,head,pr}:\n'
+fi
+SH
+  chmod +x "$dir/fakebin/tmux" "$dir/fakebin/no-mistakes"
+  printf '%s\n' "$dir"
+}
+
+run_preserve_case() {
+  local dir=$1
+  shift
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEARDOWN_GUARD_DONE=1 \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    bash "$TEARDOWN" preserved --preserve-worktree "$@"
+}
+
+preserve_snapshot() {
+  local dir=$1
+  cp "$dir/copy/.git/index" "$dir/index.before"
+  cp "$dir/copy/.git/HEAD" "$dir/head.before"
+  git -C "$dir/copy" for-each-ref > "$dir/refs.before"
+  cp "$dir/home/state/preserved.meta" "$dir/meta.before"
+  cp "$dir/home/state/preserved.status" "$dir/status.before"
+}
+
+assert_preserve_copy() {
+  local dir=$1
+  cmp -s "$dir/index.before" "$dir/copy/.git/index" || fail 'preservation changed index bytes'
+  cmp -s "$dir/head.before" "$dir/copy/.git/HEAD" || fail 'preservation changed HEAD bytes'
+  git -C "$dir/copy" for-each-ref > "$dir/refs.after"
+  cmp -s "$dir/refs.before" "$dir/refs.after" || fail 'preservation moved or deleted refs'
+  [ "$(cat "$dir/copy/kept.txt")" = landed ] || fail 'preservation changed tracked files'
+  assert_present "$dir/tasktmp/proof" 'preservation deleted task evidence'
+  assert_present "$dir/home/state/preserved.inbox/handled/001.msg" 'preservation deleted inbox'
+  [ ! -s "$dir/runtime.log" ] || fail 'preservation invoked endpoint or pool cleanup'
+}
+
+preserve_supervision() {
+  # shellcheck source=bin/fm-supervision-lib.sh
+  . "$ROOT/bin/fm-supervision-lib.sh"
+  fm_supervision_status "$1/home/state"
+  printf '%s:%s\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_NEEDED"
+}
+
+test_preserve_copy_and_monitor_retirement() {
+  local dir
+  dir=$(make_preserve_case preserve-copy)
+  printf 'turn evidence\n' > "$dir/home/state/preserved.turn-ended"
+  printf '#!/bin/sh\n' > "$dir/home/state/preserved.check.sh"
+  preserve_snapshot "$dir"
+  [ "$(preserve_supervision "$dir")" = 1:true ] || fail 'fixture did not require supervision'
+  run_preserve_case "$dir" > "$dir/output" 2>&1 || { cat "$dir/output"; fail 'preservation refused completed work'; }
+  assert_preserve_copy "$dir"
+  assert_absent "$dir/home/state/preserved.meta" 'monitoring metadata survived retirement'
+  assert_absent "$dir/home/state/preserved.status" 'status still wakes retired task'
+  assert_absent "$dir/home/state/preserved.turn-ended" 'turn end still wakes retired task'
+  cmp -s "$dir/meta.before" "$dir/home/data/preserved/retired-task/task.meta" || fail 'original metadata lost'
+  cmp -s "$dir/status.before" "$dir/home/data/preserved/retired-task/preserved.status" || fail 'status evidence lost'
+  [ "$(preserve_supervision "$dir")" = 0:false ] || fail 'last task still requires supervision'
+  run_preserve_case "$dir" >/dev/null || fail 'repeat retirement was not idempotent'
+  assert_preserve_copy "$dir"
+  pass 'preserve-worktree retires monitoring idempotently and preserves files, index, HEAD, refs and evidence'
+}
+
+test_preserve_other_work_still_needs_supervision() {
+  local dir
+  dir=$(make_preserve_case preserve-other)
+  printf 'kind=ship\n' > "$dir/home/state/other.meta"
+  run_preserve_case "$dir" >/dev/null || fail 'retirement with another task failed'
+  [ "$(preserve_supervision "$dir")" = 1:true ] || fail 'retirement hid other live work'
+  pass 'preservation removes only its own supervision requirement'
+}
+
+test_preserve_refusals() {
+  local dir scenario
+  for scenario in active working decision dirty unlanded validation ambiguous force stale-evidence secondmate; do
+    dir=$(make_preserve_case "preserve-$scenario")
+    case "$scenario" in
+      working) printf 'working: unfinished\n' > "$dir/home/state/preserved.status" ;;
+      secondmate)
+        sed 's/kind=ship/kind=secondmate/' "$dir/home/state/preserved.meta" > "$dir/replacement-meta"
+        mv "$dir/replacement-meta" "$dir/home/state/preserved.meta" ;;
+      decision) printf 'needs-decision [key=choice]: unresolved\ndone: unrelated terminal declaration\n' >> "$dir/home/state/preserved.status" ;;
+      dirty) printf 'uncommitted\n' > "$dir/copy/extra.txt" ;;
+      unlanded)
+        printf 'new work\n' > "$dir/copy/extra.txt"
+        git -C "$dir/copy" add extra.txt
+        git -C "$dir/copy" -c user.name=test -c user.email=test@example.invalid commit -qm unlanded ;;
+      stale-evidence)
+        mkdir -p "$dir/home/data/preserved/retired-task"
+        printf 'spawn_gen=another-generation\n' > "$dir/home/data/preserved/retired-task/task.meta" ;;
+    esac
+    preserve_snapshot "$dir"
+    case "$scenario" in
+      active) FM_PRESERVE_COMMAND=codex run_preserve_case "$dir" > "$dir/output" 2>&1 ;;
+      ambiguous) FM_PRESERVE_COMMAND=python run_preserve_case "$dir" > "$dir/output" 2>&1 ;;
+      validation) FM_PRESERVE_RUN=running run_preserve_case "$dir" > "$dir/output" 2>&1 ;;
+      force) run_preserve_case "$dir" --force > "$dir/output" 2>&1 ;;
+      *) run_preserve_case "$dir" > "$dir/output" 2>&1 ;;
+    esac && fail "preservation accepted $scenario" || true
+    cmp -s "$dir/meta.before" "$dir/home/state/preserved.meta" || fail "$scenario changed metadata on refusal"
+    cmp -s "$dir/status.before" "$dir/home/state/preserved.status" || fail "$scenario changed status on refusal"
+    assert_preserve_copy "$dir"
+  done
+  pass 'preservation refuses active, unfinished, unresolved, dirty, unlanded and ambiguous work without mutation'
+}
+
+test_preserve_backlog_retry() {
+  local dir real_tasks
+  dir=$(make_preserve_case preserve-backlog)
+  real_tasks=$(command -v tasks-axi)
+  printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
+  tasks-axi add preserved 'preservation fixture' --kind ship --file "$dir/home/data/backlog.md" >/dev/null
+  tasks-axi start preserved --file "$dir/home/data/backlog.md" >/dev/null
+  cat > "$dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+[ "\$1" != done ] || exit 1
+exec '$real_tasks' "\$@"
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  preserve_snapshot "$dir"
+  if run_preserve_case "$dir" > "$dir/output" 2>&1; then fail 'failed backlog close reported success'; fi
+  assert_absent "$dir/home/state/preserved.meta" 'expected final close phase was not reached'
+  assert_present "$dir/home/state/preserved.backlog-close" 'failed close lost replay marker'
+  rm "$dir/fakebin/tasks-axi"
+  run_preserve_case "$dir" > "$dir/retry-output" 2>&1 || { cat "$dir/retry-output"; fail 'pending close retry failed'; }
+  assert_absent "$dir/home/state/preserved.backlog-close" 'retry did not conclude pending close'
+  tasks-axi show preserved --file "$dir/home/data/backlog.md" | grep -q 'state: done' || fail 'retry did not close backlog'
+  assert_preserve_copy "$dir"
+  pass 'preservation uses generation-bound backlog replay after an interrupted close'
+}
+
+test_preserve_interrupted_monitor_cleanup() {
+  local dir real_rm
+  dir=$(make_preserve_case preserve-cleanup-retry)
+  real_rm=$(command -v rm)
+  printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
+  tasks-axi add preserved 'interrupted preservation fixture' --kind ship --file "$dir/home/data/backlog.md" >/dev/null
+  tasks-axi start preserved --file "$dir/home/data/backlog.md" >/dev/null
+  printf 'turn evidence\n' > "$dir/home/state/preserved.turn-ended"
+  cat > "$dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+case "\$*" in *preserved.turn-ended*) exit 1 ;; esac
+exec '$real_rm' "\$@"
+SH
+  chmod +x "$dir/fakebin/rm"
+  preserve_snapshot "$dir"
+  if run_preserve_case "$dir" > "$dir/output" 2>&1; then fail 'interrupted monitor cleanup reported success'; fi
+  assert_present "$dir/home/state/preserved.meta" 'interrupted cleanup lost active metadata'
+  assert_absent "$dir/home/state/preserved.status" 'fixture did not reach partial cleanup'
+  assert_absent "$dir/home/state/preserved.backlog-close" 'unfinished cleanup published replay authority'
+  tasks-axi show preserved --file "$dir/home/data/backlog.md" | grep -q 'state: in_flight' || fail 'unfinished cleanup closed backlog'
+  rm "$dir/fakebin/rm"
+  run_preserve_case "$dir" > "$dir/retry-output" 2>&1 || { cat "$dir/retry-output"; fail 'monitor cleanup retry failed'; }
+  assert_absent "$dir/home/state/preserved.meta" 'retry did not retire metadata'
+  tasks-axi show preserved --file "$dir/home/data/backlog.md" | grep -q 'state: done' || fail 'cleanup retry left backlog in flight'
+  assert_preserve_copy "$dir"
+  pass 'interrupted monitoring cleanup resumes from evidence without hiding unfinished retirement'
+}
+
+test_preserve_scout_completion_gate() {
+  local dir
+  dir=$(make_preserve_case preserve-scout)
+  sed 's/kind=ship/kind=scout/' "$dir/home/state/preserved.meta" > "$dir/meta-scout"
+  mv "$dir/meta-scout" "$dir/home/state/preserved.meta"
+  printf 'scratch\n' > "$dir/copy/scratch.txt"
+  git -C "$dir/copy" add scratch.txt
+  if run_preserve_case "$dir" > "$dir/output" 2>&1; then fail 'scout without report was retired'; fi
+  grep -q 'has no report' "$dir/output" || fail 'missing report fixture failed before report guard'
+  mkdir -p "$dir/home/data/preserved"
+  printf 'Completed investigation. No unresolved decisions.\n' > "$dir/home/data/preserved/report.md"
+  if run_preserve_case "$dir" > "$dir/output" 2>&1; then fail 'scout without completion gate was retired'; fi
+  grep -q 'completion gate' "$dir/output" || fail 'completion fixture failed before completion guard'
+  FM_HOME="$dir/home" bash "$ROOT/bin/fm-captain-hold.sh" complete preserved --none >/dev/null || fail 'scout gate setup failed'
+  preserve_snapshot "$dir"
+  run_preserve_case "$dir" > "$dir/output" 2>&1 || { cat "$dir/output"; fail 'completed scout preservation failed'; }
+  assert_preserve_copy "$dir"
+  [ "$(cat "$dir/copy/scratch.txt")" = scratch ] || fail 'scout scratch changed'
+  assert_present "$dir/home/data/preserved/report.md" 'scout report was lost'
+  pass 'scout report and completion gates remain required while scratch and staged index survive'
+}
+
+test_preserve_unverified_backends_refuse() {
+  local dir backend
+  for backend in zellij orca cmux; do
+    dir=$(make_preserve_case "preserve-$backend")
+    sed '/^window=/d' "$dir/home/state/preserved.meta" > "$dir/replacement-meta"
+    mv "$dir/replacement-meta" "$dir/home/state/preserved.meta"
+    printf 'backend=%s\n' "$backend" >> "$dir/home/state/preserved.meta"
+    case "$backend" in
+      zellij) printf 'window=lab:7\nzellij_session=lab\nzellij_tab_id=3\nzellij_pane_id=7\n' ;;
+      orca) printf 'window=fm-preserved\nterminal=term-7\norca_worktree_id=worktree-9::%s/copy\n' "$dir" ;;
+      cmux) printf 'window=workspace-1:surface-2\ncmux_workspace_id=workspace-1\ncmux_surface_id=surface-2\n' ;;
+    esac >> "$dir/home/state/preserved.meta"
+    preserve_snapshot "$dir"
+    if run_preserve_case "$dir" > "$dir/output" 2>&1; then fail "$backend preservation accepted unverified liveness"; fi
+    grep -q 'no recovery-grade stopped-worker proof' "$dir/output" || { cat "$dir/output"; fail "$backend did not reach proof refusal"; }
+    cmp -s "$dir/meta.before" "$dir/home/state/preserved.meta" || fail "$backend refusal changed metadata"
+    assert_preserve_copy "$dir"
+  done
+  pass 'Zellij, Orca and cmux preservation fail closed on their existing unverified recovery surfaces'
+}
+
+test_preserve_copy_and_monitor_retirement
+test_preserve_other_work_still_needs_supervision
+test_preserve_refusals
+test_preserve_backlog_retry
+test_preserve_interrupted_monitor_cleanup
+test_preserve_scout_completion_gate
+test_preserve_unverified_backends_refuse
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

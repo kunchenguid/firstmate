@@ -179,7 +179,22 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--preserve-worktree]
+#
+# --preserve-worktree retires a completed ship/scout's monitoring without
+# returning its pool slot, deleting branches, changing its files/index/HEAD,
+# reaping processes, or closing its endpoint. Stop the worker with fm-control
+# first; the existing recovery-grade classifier must prove dead or gone.
+# Backends without that proof refuse. Active validation, open decisions, and
+# unlanded ship work still refuse; --force cannot be combined with this mode.
+# Landed-work checks do not fetch in this mode: fetch missing proof separately
+# and retry. The original metadata and any retired runtime artifacts survive
+# in data/<id>/retired-task/; tasktmp, inbox, hooks and report stay in place.
+# The ordinary backlog close transaction remains the retirement owner; retry
+# the same command after an interruption. An archive from another incarnation
+# refuses rather than overwriting evidence. Default teardown is unchanged.
+# The activity ledger captures final status without emitting task.cleaned_up,
+# whose contract requires removal of the local copy.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -383,18 +398,24 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
+  sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'
+  exit 0
+fi
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
 fi
 ID=$1
 FORCE=
+PRESERVE_WORKTREE=0
 LEGACY_RECORD_GIVEN=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --preserve-worktree) PRESERVE_WORKTREE=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -402,6 +423,11 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ "$PRESERVE_WORKTREE" = 1 ]; then
+  [ -z "$FORCE" ] || { echo 'error: --preserve-worktree cannot be combined with --force' >&2; exit 2; }
+  # Even read-only git status may refresh the index unless optional locks are off.
+  export GIT_OPTIONAL_LOCKS=0
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -511,6 +537,41 @@ CONTROL_LOCK_HELD=1
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
+PRESERVE_ARCHIVE="$DATA/$ID/retired-task"
+preserve_archive_validate() {
+  local path
+  for path in "$DATA" "$DATA/$ID" "$PRESERVE_ARCHIVE"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      fm_backlog_directory_present "$path" 'retirement evidence directory' || return 1
+    fi
+  done
+}
+
+# A repeat after the final metadata removal needs no backend action. A failed
+# backlog write is resumed by the same generation-bound replay as bootstrap.
+if [ "$PRESERVE_WORKTREE" = 1 ] && [ ! -e "$META" ] && [ ! -L "$META" ]; then
+  META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+  fm_lock_acquire_wait "$META_LOCK"
+  META_LOCK_HELD=1
+  [ ! -e "$META" ] && [ ! -L "$META" ] || { echo 'error: task appeared while locking; retry' >&2; exit 1; }
+  preserve_archive_validate || exit 1
+  fm_backlog_record_present "$PRESERVE_ARCHIVE/task.meta" 'retired task evidence' "$PRESERVE_ARCHIVE" || exit 1
+  fm_backlog_meta_spawn_gen "$PRESERVE_ARCHIVE/task.meta" "$PRESERVE_ARCHIVE" || exit 1
+  PRESERVE_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+  fm_backlog_record_present "$PRESERVE_ARCHIVE/retirement-ready" 'retirement completion evidence' "$PRESERVE_ARCHIVE" || exit 1
+  [ "$(cat "$PRESERVE_ARCHIVE/retirement-ready")" = "$PRESERVE_SPAWN_GEN" ] || exit 1
+  if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
+    fm_backlog_close_marker_validate "$STATE/$ID.backlog-close" "$DATA" "$ID" "$STATE" || exit 1
+    [ "$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN" = "$PRESERVE_SPAWN_GEN" ] || exit 1
+    fm_backlog_close_marker_replay "$STATE" "$STATE/$ID.backlog-close" "$DATA" || exit 1
+  fi
+  fm_lock_release "$META_LOCK"
+  META_LOCK_HELD=0
+  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+  echo "teardown $ID already retired; worktree and evidence preserved at $PRESERVE_ARCHIVE"
+  exit 0
+fi
+
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -524,6 +585,9 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+if [ "$PRESERVE_WORKTREE" = 1 ]; then
+  case "$TEARDOWN_META_KIND" in ship|scout) ;; *) echo 'error: --preserve-worktree supports ships and scouts only' >&2; exit 1 ;; esac
+fi
 # Retiring a persistent secondmate is main's alone in both postures; the kind
 # is read under the metadata lock (role partition: bin/fm-lease-lib.sh).
 [ "$TEARDOWN_META_KIND" != secondmate ] || fm_lease_forbid_branch "secondmate retirement (fm-teardown)"
@@ -634,7 +698,7 @@ fi
 # Cleanup never closes a captain call (see the header). Asked here, before any
 # destructive step, so "cannot tell" can refuse while everything is intact.
 TEARDOWN_BACKLOG_TRANSITION=close
-if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ] || [ "$PRESERVE_WORKTREE" = 1 ]; then
   TEARDOWN_CAPTAIN_OPEN_STATUS=0
   TEARDOWN_CAPTAIN_OPEN_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
@@ -648,6 +712,10 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
       exit 1
       ;;
   esac
+  if [ "$PRESERVE_WORKTREE" = 1 ] && [ "$TEARDOWN_BACKLOG_TRANSITION" != close ]; then
+    echo 'REFUSED: preserve-worktree retirement cannot retire an open captain call.' >&2
+    exit 1
+  fi
 fi
 
 REMOTE_HANDOFF_DIR_PRESENT=0
@@ -1497,6 +1565,7 @@ pr_number_from_target() {
 ensure_commit_object() {
   local target=$1 commit=$2 n
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  [ "$PRESERVE_WORKTREE" != 1 ] || return 1
   n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
   git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
@@ -1586,8 +1655,13 @@ content_in_default() {
   local name=${BASE_BRANCH:-} ref default_tree merged_tree
   [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
+    if [ "$PRESERVE_WORKTREE" = 1 ]; then
+      ref=$(git -C "$WT" ls-remote --exit-code origin "refs/heads/$name" 2>/dev/null | awk 'NR == 1 { print $1 }') || return 1
+      [ -n "$ref" ] || return 1
+    else
+      git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+      ref="refs/remotes/origin/$name"
+    fi
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
@@ -3324,8 +3398,84 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
+preserve_worktree_preflight() {
+  local endpoint absence status_file="$STATE/$ID.status" branch inventory selection
+  [ "$PRESERVE_WORKTREE" = 1 ] || return 0
+  teardown_owns_worktree || { echo 'REFUSED: task no longer owns its recorded worktree.' >&2; return 1; }
+  inspectable_git_worktree "$WT" || { echo 'REFUSED: preservation requires the recorded git worktree.' >&2; return 1; }
+  fm_backlog_meta_spawn_gen "$META" "$STATE" || return 1
+  preserve_archive_validate || return 1
+  if [ -d "$PRESERVE_ARCHIVE" ]; then
+    fm_backlog_record_present "$PRESERVE_ARCHIVE/task.meta" 'retired task evidence' "$PRESERVE_ARCHIVE" || return 1
+    cmp -s "$META" "$PRESERVE_ARCHIVE/task.meta" || {
+      echo 'REFUSED: retirement evidence belongs to different task metadata.' >&2; return 1;
+    }
+    # Cleanup may have retired the status presentation before an interruption.
+    [ -e "$status_file" ] || status_file="$PRESERVE_ARCHIVE/$ID.status"
+  fi
+  fm_backlog_record_present "$status_file" 'completed task status' "${status_file%/*}" || return 1
+  # Retirement requires explicit decision closure, even if a terminal worker
+  # declaration would supersede an old event in ordinary current-state display.
+  if [ -n "$(status_open_decisions "$status_file" unknown)" ] \
+      || [ "$(status_line_verb "$(status_current_line "$status_file" "$KIND")")" != 'done' ]; then
+    echo 'REFUSED: preserve-worktree retirement requires completed work with no open status decision.' >&2
+    return 1
+  fi
+  if ! fm_control_backend_state_verified "$BACKEND"; then
+    echo "REFUSED: $BACKEND has no recovery-grade stopped-worker proof for preservation." >&2
+    return 1
+  fi
+  endpoint=$(fm_backend_agent_state "$BACKEND" "$T") || return 1
+  case "$endpoint" in
+    dead) ;;
+    missing)
+      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T") || return 1
+      [ "${absence%%$'\t'*}" = gone ] || {
+        echo "REFUSED: endpoint absence is unproven: ${absence#*$'\t'}" >&2; return 1;
+      }
+      ;;
+    *) echo "REFUSED: worker endpoint is $endpoint; stop it with fm-control before preservation." >&2; return 1 ;;
+  esac
+  if [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || command -v no-mistakes >/dev/null 2>&1; }; then
+    branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD) || return 1
+    inventory=$(fm_nm_run_checked "$WT" "$NM_TEARDOWN_TIMEOUT" axi) || {
+      echo 'REFUSED: cannot read validation inventory for preservation.' >&2; return 1;
+    }
+    selection=$(fm_nm_select_run "$branch" "$inventory" "$WT" "$NM_TEARDOWN_TIMEOUT")
+    case "$selection" in
+      absent|selected\|*\|completed\|*|selected\|*\|failed\|*|selected\|*\|cancelled\|*) ;;
+      *) echo "REFUSED: active or unproven validation prevents preservation: $selection" >&2; return 1 ;;
+    esac
+  fi
+}
+
+preserve_worktree_archive() {
+  local stage artifact
+  [ "$PRESERVE_WORKTREE" = 1 ] || return 0
+  if [ -d "$PRESERVE_ARCHIVE" ]; then
+    for artifact in "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" \
+        "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration" "$STATE/$ID.pr-poll-retirement" \
+        "$STATE/$ID.merge-authority" "$STATE/$ID.check-trust"; do
+      [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+      cmp -s "$artifact" "$PRESERVE_ARCHIVE/${artifact##*/}" || {
+        echo "REFUSED: runtime evidence changed during retirement: $artifact" >&2; return 1;
+      }
+    done
+    return 0
+  fi
+  mkdir -p "$DATA/$ID" || return 1
+  stage=$(mktemp -d "$DATA/$ID/.retired-task.XXXXXX") || return 1
+  for artifact in "$STATE/$ID".*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    cp -pR -- "$artifact" "$stage/" || return 1
+  done
+  cp -p -- "$META" "$stage/task.meta" || return 1
+  mv -- "$stage" "$PRESERVE_ARCHIVE"
+}
+
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+preserve_worktree_preflight || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3441,6 +3591,7 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   else
     safety_rc=$?
     if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+      [ "$PRESERVE_WORKTREE" != 1 ] || exit 1
       cleanup_stale_lock_for_safety_check "$WT" || exit 1
       validate_worktree_teardown_safety || exit 1
     else
@@ -3458,12 +3609,14 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$PRESERVE_WORKTREE" != 1 ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
+
+preserve_worktree_archive || exit 1
 
 BACKLOG_CLOSED=0
 BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
@@ -3521,7 +3674,7 @@ teardown_legacy_stamp_rollback() {
   fi
   BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
-  if ! fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+  if [ "$PRESERVE_WORKTREE" != 1 ] && ! fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
       "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
       "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
     if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ] \
@@ -3541,6 +3694,46 @@ else
   else
     BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
   fi
+fi
+
+if [ "$PRESERVE_WORKTREE" = 1 ]; then
+  # All work and completion guards ran against the original metadata. Only
+  # monitoring artifacts are retired, with their original bytes archived first.
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID" || {
+    echo 'error: cannot retire an outcome that has not reached its parent channel.' >&2
+    exit 1
+  }
+  remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+  retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+  [ ! -e "$CONFIG/fleet-ledger" ] || "$SCRIPT_DIR/fm-fleet-ledger.sh" appended "$CONFIG" "$STATE/$ID.status" || true
+  status_retire_presentation_task "$STATE" "$ID" || exit 1
+  fm_wake_queue_prune_task "$STATE" "$ID" "$T" || exit 1
+  rm -f -- "$STATE/$ID.turn-ended" || exit 1
+  # Publish replay authority only AFTER retiring monitoring. Until this point
+  # an interruption keeps metadata, so bootstrap cannot hide unfinished cleanup.
+  PRESERVE_READY=$(mktemp "$PRESERVE_ARCHIVE/.ready.XXXXXX") || exit 1
+  fm_backlog_meta_spawn_gen "$META" "$STATE" || exit 1
+  printf '%s\n' "$FM_BACKLOG_META_SPAWN_GEN" > "$PRESERVE_READY" || exit 1
+  fm_backlog_atomic_transition publish "$PRESERVE_READY" "$PRESERVE_ARCHIVE/retirement-ready" \
+    'retirement completion evidence' "$PRESERVE_ARCHIVE" || exit 1
+  if [ "$BACKLOG_CLOSED" = 1 ]; then
+    fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+      "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || exit 1
+    fm_backlog_atomic_transition close "$META" "$STATE/$ID.backlog-close" \
+      "$DATA" "$ID" "$STATE" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || {
+      echo 'error: retirement close is pending; retry --preserve-worktree or let startup replay it.' >&2
+      exit 1
+    }
+  else
+    fm_backlog_atomic_transition remove "$META" 'task record' "$STATE" || exit 1
+  fi
+  fm_lock_release "$META_LOCK"
+  META_LOCK_HELD=0
+  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+  echo "teardown $ID retired monitoring; worktree $WT and evidence $PRESERVE_ARCHIVE preserved"
+  backlog_refresh_reminder
+  exit 0
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
