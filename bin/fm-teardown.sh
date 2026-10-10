@@ -42,7 +42,9 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
+# hard-resets/removes the worktree and kills its processes. That refusal changes
+# nothing but an exited agent's presentation, which bin/fm-presentation-park.sh
+# collapses to its parked stub. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
@@ -3435,6 +3437,14 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+# A refusal keeps the worktree, the record, and the endpoint; it still collapses
+# an exited agent's presentation to its parked stub (bin/fm-presentation-park.sh
+# owns that, never closes on this trigger, and leaves a live agent alone).
+park_refused_presentation() {
+  [ "$KIND" = secondmate ] && return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-presentation-park.sh" "$ID" --trigger teardown-refused >&2 || true
+}
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -3442,8 +3452,9 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     safety_rc=$?
     if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
       cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
+      validate_worktree_teardown_safety || { park_refused_presentation; exit 1; }
     else
+      park_refused_presentation
       exit 1
     fi
   fi

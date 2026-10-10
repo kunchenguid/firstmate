@@ -773,6 +773,16 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
 }
 
+# fm_backend_herdr_projection_parked_workspace_label: the same label while the
+# task's agent has exited and its presentation is parked
+# (fm_backend_herdr_park_endpoint). Only the concise part gains "parked: "; the
+# U+2514 prefix and the exact · p:<token> suffix are unchanged, so every token
+# correlator and the child-order grammar still match. The journal keeps the
+# ordinary label, which fm_backend_herdr_unpark_endpoint restores.
+fm_backend_herdr_projection_parked_workspace_label() {  # <task-id> <projection-id>
+  printf '└ parked: %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+}
+
 # fm_backend_herdr_presentation_session_lock_path: one account-private lock
 # path per live named Herdr session/socket, shared across every Firstmate home
 # of this OS account that uses that session.
@@ -3648,6 +3658,156 @@ fm_backend_herdr_endpoint_confirmed_gone() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
   presence=$(fm_backend_herdr_pane_presence_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   [ "$presence" = dead ]
+}
+
+# fm_backend_herdr_park_stub_label: the tab label a parked task's stub carries.
+fm_backend_herdr_park_stub_label() {  # <task-id>
+  printf 'parked: %s' "$1"
+}
+
+# fm_backend_herdr_park_workspace_labels: resolve the exact projected
+# workspace a parked stub may relabel. Sets FM_BACKEND_HERDR_PARK_WS_ID,
+# FM_BACKEND_HERDR_PARK_WS_LABEL (the journal's ordinary label) and
+# FM_BACKEND_HERDR_PARK_WS_PARKED, or leaves all three empty when the task has
+# no readable journal or its token-bearing workspace is not exactly the one
+# holding <pane-id> (flat layout, or any ambiguity): then only the tab changes.
+fm_backend_herdr_park_workspace_labels() {  # <session> <pane-id> <task-id> <journal>
+  local session=$1 pane=$2 id=$3 journal=$4 ws token
+  FM_BACKEND_HERDR_PARK_WS_ID=
+  FM_BACKEND_HERDR_PARK_WS_LABEL=
+  FM_BACKEND_HERDR_PARK_WS_PARKED=
+  [ -n "$journal" ] && [ -f "$journal" ] || return 0
+  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 0
+  ws=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
+  [ -n "$ws" ] || return 0
+  fm_backend_herdr_projection_endpoint_matches_journal "$session" "$ws" "$journal" "$id" || return 0
+  FM_BACKEND_HERDR_PARK_WS_ID=$ws
+  FM_BACKEND_HERDR_PARK_WS_LABEL=$(fm_backend_herdr_projection_workspace_label "$id" "$token")
+  FM_BACKEND_HERDR_PARK_WS_PARKED=$(fm_backend_herdr_projection_parked_workspace_label "$id" "$token")
+}
+
+fm_backend_herdr_live_label() {  # <session> <tab|workspace> <id>
+  fm_backend_herdr_cli "$1" "$2" get "$3" 2>/dev/null | jq -r ".result.$2.label // empty" 2>/dev/null
+}
+
+# fm_backend_herdr_park_endpoint: collapse the presentation of one exact task
+# endpoint whose agent has exited, and print what happened:
+#   closed       the exact pane was closed and confirmed gone (mode close)
+#   parked       the exact task tab reads "parked: <id>" and, on the projected
+#                layout, its workspace reads "└ parked: <id> · p:<token>"
+#                (mode stub)
+#   gone         the pane was already gone; nothing was changed
+#   ineligible:<why>  nothing was changed (return 3)
+# bin/fm-presentation-park.sh owns when each mode is chosen; this function owns
+# only the Herdr mechanics and the destroy-grade agent-free proof.
+#
+# Eligibility is positive evidence only. The exact recorded pane must still sit
+# in the exact recorded tab, Herdr must report no agent or a stale registration
+# (fm_backend_herdr_pane_agent_state), and the process view must be shell-only
+# (fm_backend_herdr_pane_process_state), which a registration-free live harness
+# would fail. Every other read - live, unknown, unreadable, a moved pane - is
+# ineligible, never a reason to close. The proof is re-read under the session
+# presentation lock immediately before any mutation.
+#
+# The stub changes labels only, and only from their ordinary or parked value.
+# Workspace, tab, and pane ids, the projection token, the journal, and the pane
+# with its shell (which keeps the Treehouse slot in use) are untouched, and
+# fm_backend_herdr_unpark_endpoint restores both labels on relaunch.
+fm_backend_herdr_park_eligibility() {  # <session> <pane-id> <tab-id>
+  local session=$1 pane=$2 tab=$3 state proc current_tab
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  case "$state" in
+    dead) printf 'gone'; return 0 ;;
+    no-agent|stale-agent) ;;
+    *) printf 'ineligible:agent-%s' "$state"; return 0 ;;
+  esac
+  proc=$(fm_backend_herdr_pane_process_state "$session" "$pane")
+  [ "$proc" = shell ] || { printf 'ineligible:process-%s' "$proc"; return 0; }
+  current_tab=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null \
+    | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
+  [ "$current_tab" = "$tab" ] || { printf 'ineligible:pane-moved'; return 0; }
+  printf 'eligible'
+}
+
+fm_backend_herdr_park_endpoint() {  # <session> <pane-id> <tab-id> <close|stub> <task-id> [<journal>]
+  local session=$1 pane=$2 tab=$3 mode=$4 id=$5 journal=${6:-} verdict stub current lock_path attempt=0 lock_held=0 rc=0
+  [ -n "$session" ] && [ -n "$pane" ] && [ -n "$tab" ] && [ -n "$id" ] || { printf 'ineligible:incomplete-endpoint'; return 3; }
+  case "$mode" in close|stub) ;; *) printf 'ineligible:unknown-mode'; return 3 ;; esac
+  verdict=$(fm_backend_herdr_park_eligibility "$session" "$pane" "$tab")
+  case "$verdict" in
+    eligible) ;;
+    gone) printf 'gone'; return 0 ;;
+    *) printf '%s' "$verdict"; return 3 ;;
+  esac
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
+  fi
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") \
+    || { printf 'ineligible:presentation-lock-unresolved'; return 3; }
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$lock_path"; then
+      lock_held=1
+      break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ "$lock_held" = 1 ] || { printf 'ineligible:presentation-lock-contended'; return 3; }
+  verdict=$(fm_backend_herdr_park_eligibility "$session" "$pane" "$tab")
+  if [ "$verdict" != eligible ]; then
+    fm_lock_release "$lock_path" || true
+    printf '%s' "$verdict"
+    [ "$verdict" = gone ] && return 0
+    return 3
+  fi
+  if [ "$mode" = stub ]; then
+    stub=$(fm_backend_herdr_park_stub_label "$id")
+    current=$(fm_backend_herdr_live_label "$session" tab "$tab")
+    case "$current" in
+      "fm-$id") fm_backend_herdr_cli "$session" tab rename "$tab" "$stub" >/dev/null 2>&1 || true ;;
+    esac
+    [ "$(fm_backend_herdr_live_label "$session" tab "$tab")" = "$stub" ] || rc=1
+    fm_backend_herdr_park_workspace_labels "$session" "$pane" "$id" "$journal"
+    if [ "$rc" = 0 ] && [ -n "$FM_BACKEND_HERDR_PARK_WS_ID" ]; then
+      current=$(fm_backend_herdr_live_label "$session" workspace "$FM_BACKEND_HERDR_PARK_WS_ID")
+      if [ "$current" = "$FM_BACKEND_HERDR_PARK_WS_LABEL" ]; then
+        fm_backend_herdr_cli "$session" workspace rename "$FM_BACKEND_HERDR_PARK_WS_ID" \
+          "$FM_BACKEND_HERDR_PARK_WS_PARKED" >/dev/null 2>&1 || true
+      fi
+      [ "$(fm_backend_herdr_live_label "$session" workspace "$FM_BACKEND_HERDR_PARK_WS_ID")" \
+        = "$FM_BACKEND_HERDR_PARK_WS_PARKED" ] || rc=1
+    fi
+    fm_lock_release "$lock_path" || true
+    [ "$rc" = 0 ] || { printf 'failed:rename-unconfirmed'; return 1; }
+    printf 'parked'
+    return 0
+  fi
+  fm_backend_herdr_kill_serialized "$session" "$pane"
+  fm_lock_release "$lock_path" || true
+  [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" = dead ] \
+    || { printf 'failed:close-unconfirmed'; return 1; }
+  printf 'closed'
+}
+
+# fm_backend_herdr_unpark_endpoint: give a relaunched task's exact tab, and its
+# exact projected workspace, their ordinary labels back when they still carry
+# the parked ones. Best-effort and exact: any other label is left alone, and a
+# failure only warns.
+fm_backend_herdr_unpark_endpoint() {  # <session> <pane-id> <task-id> [<journal>]
+  local session=$1 pane=$2 id=$3 journal=${4:-} tab
+  tab=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
+  [ -n "$tab" ] || return 0
+  if [ "$(fm_backend_herdr_live_label "$session" tab "$tab")" = "$(fm_backend_herdr_park_stub_label "$id")" ]; then
+    fm_backend_herdr_cli "$session" tab rename "$tab" "fm-$id" >/dev/null 2>&1 \
+      || echo "warning: herdr tab $tab of task $id still carries its parked label" >&2
+  fi
+  fm_backend_herdr_park_workspace_labels "$session" "$pane" "$id" "$journal"
+  [ -n "$FM_BACKEND_HERDR_PARK_WS_ID" ] || return 0
+  if [ "$(fm_backend_herdr_live_label "$session" workspace "$FM_BACKEND_HERDR_PARK_WS_ID")" = "$FM_BACKEND_HERDR_PARK_WS_PARKED" ]; then
+    fm_backend_herdr_cli "$session" workspace rename "$FM_BACKEND_HERDR_PARK_WS_ID" "$FM_BACKEND_HERDR_PARK_WS_LABEL" >/dev/null 2>&1 \
+      || echo "warning: herdr workspace $FM_BACKEND_HERDR_PARK_WS_ID of task $id still carries its parked label" >&2
+  fi
 }
 
 # fm_backend_herdr_classify_agent_status: map a raw `agent get` agent_status

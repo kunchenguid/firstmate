@@ -488,7 +488,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
+# .wedge-escalations-, .park-swept-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -1498,6 +1498,31 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   printf '%s %s' "$agent_state" "$id" > "$marker"
   clear_write_tracking "$key"
   wake "$reason"
+}
+
+# Sweep one stale ordinary crew endpoint's exited presentation. The decision is
+# bin/fm-presentation-park.sh's (trigger sweep: current status done or paused, a
+# positively agent-free endpoint, close only for landed work, else the parked
+# stub); this only rate-limits it to once per stale pane hash through the
+# window's .park-swept- marker. Returns 0 only when the endpoint is now gone, so
+# the caller skips the rest of this window's triage.
+presentation_park_sweep() {  # <window> <task> <pane-hash>
+  local win=$1 task=$2 h=$3 marker out
+  [ -n "$task" ] && [ "$(window_backend "$win")" = herdr ] || return 1
+  marker="$STATE/.park-swept-$(window_key "$win")"
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$h" ] || return 1
+  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-presentation-park.sh" "$task" --trigger sweep 2>/dev/null) || out=
+  case "$out" in
+    presentation=closed*|presentation=gone*)
+      rm -f "$marker"
+      triage_log "swept exited presentation ($out): $win"
+      return 0
+      ;;
+    presentation=parked*) triage_log "parked exited presentation ($out): $win" ;;
+  esac
+  printf '%s' "$h" > "$marker"
+  return 1
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
@@ -3090,6 +3115,11 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
+        # A done or paused crew whose agent has exited loses its bare-shell
+        # presentation here; a closed endpoint has nothing left to triage.
+        if [ "$kind" != secondmate ] && presentation_park_sweep "$w" "$task" "$h"; then
+          continue
+        fi
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;

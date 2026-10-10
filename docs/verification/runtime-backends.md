@@ -1676,6 +1676,34 @@ ok - agent get distinguishes leftover-shell (dead/no-agent) from live idle Pi
 ok - pane get agent_status lag cannot keep an exited occupant classified alive
 ```
 
+### Parked presentation
+
+Measured 2026-10-07 on macOS arm64 with Herdr 0.9.1, Treehouse 2.3.0, and omp 18.x in an isolated `fm-lab-` session, with real omp agents launched under a real `treehouse get` subshell in a scratch pool.
+
+- After omp exits, the pane keeps `shell -> treehouse -> subshell` with `fm_backend_agent_state` = `dead` (`pane_agent_state` = `stale-agent`, process view `shell`); the strict lone-idle-shell proof fails because the foreground subshell is not the pane's shell.
+- Closing such a pane ends the subshell and releases the slot: a dirty slot then reads `dirty`, and a clean slot whose HEAD is merged into `origin/main` reads `available` and was handed to the next `treehouse get`.
+- With the landed-only close rule, `bin/fm-control.sh <id> exit` on a task with a pushed, unmerged HEAD reported `presentation=parked` (tab `parked: <id>`, workspace `└ parked: <id> · p:<token>`); a sweep of a paused unmerged task and a refused teardown also parked.
+  While parked, a fresh `treehouse get --lease` took a new slot; after the branch was merge-committed into `origin/main` the next fresh lease still skipped the parked slot (its shell kept it in use), and `bin/fm-control.sh relaunch` resumed omp in place on the same endpoint and slot.
+  `exit` then reported `presentation=closed` for the now-landed work, keeping the record. A live omp, a task with no record, and an unrelated pane stayed unchanged.
+- `bin/fm-control.sh <id> exit` on base `99da16d9` reported `already-stopped` and left the bare-shell workspace.
+
+`tests/fm-presentation-park-e2e.test.sh` refreshes the verdicts against the installed binary:
+
+```sh
+bin/fm-test-run.sh tests/fm-presentation-park-e2e.test.sh
+```
+
+```text
+ok - real herdr: a live agent's endpoint is never parked or closed
+ok - real herdr: exit with uncommitted work keeps everything and shows a parked stub with its token, idempotently
+ok - real herdr: relaunching a parked stub reuses the endpoint and restores both labels
+ok - real herdr: a refused teardown keeps source and record and shows only the parked stub
+ok - real herdr: the watcher closes a paused exited presentation whose work is landed, idempotently
+ok - real herdr: unmerged work stays one parked stub and resumes in place after its branch later lands
+ok - real herdr: exit of landed work closes the presentation, and relaunch refuses a reassigned slot
+ok - real herdr: the unrelated pane and the live agent survived every park
+```
+
 ### Endpoint recovery classification
 
 Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) in an isolated `fm-lab-` session.

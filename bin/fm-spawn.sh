@@ -1888,6 +1888,17 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
   }
+  # A parked task whose exited presentation was closed no longer keeps its
+  # Treehouse slot in use (bin/fm-presentation-park.sh), so the pool may have
+  # handed that slot to another task since. Its claim then names that task, and
+  # relaunching into it would put two tasks in one copy.
+  if [ "$KIND" != secondmate ]; then
+    fm_treehouse_slot_owner_state "$RELAUNCH_WT" "$ID"
+    if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ]; then
+      echo "error: task $ID's recorded worktree '$RELAUNCH_WT' is a Treehouse slot now claimed by task ${FM_TREEHOUSE_SLOT_OWNER_ID:-unknown}; refusing to relaunch into another task's copy (this task's pushed branch is unaffected)" >&2
+      exit 1
+    fi
+  fi
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
     [ -n "$FIRSTMATE_HOME" ] || FIRSTMATE_HOME=$RELAUNCH_WT
@@ -3692,6 +3703,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+    # A parked stub (bin/fm-presentation-park.sh) gets its ordinary tab and
+    # projected workspace labels back before the replacement agent starts.
+    [ "$BACKEND" != herdr ] || fm_backend_herdr_unpark_endpoint "$SES" "${T#*:}" "$ID" \
+      "$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")"
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the

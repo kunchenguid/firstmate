@@ -32,10 +32,15 @@
 #              an idle agent (Devin's revert picker) sends its later presses
 #              only after the first press rendered a running turn, and
 #              otherwise reports `cancel=not-running` having sent one press.
-#   exit       Stop the agent, preserving its terminal endpoint, worktree, and
-#              every uncommitted change. Interrupts first when the task reads
-#              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
+#   exit       Stop the agent, preserving its worktree and every uncommitted
+#              change. Interrupts first when the task reads busy, then submits
+#              the harness's exit command. Postcondition: the backend's
+#              recovery-grade classifier reports the agent gone. The task stays
+#              recorded (parked), and bin/fm-presentation-park.sh then collapses
+#              its exited presentation - on Herdr it closes the endpoint only
+#              when the work is landed and otherwise keeps it under a
+#              "parked: <id>" tab - reported as a trailing
+#              presentation=<verdict> that never fails the verb.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
@@ -91,9 +96,10 @@
 #              running.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
-# agent and preserves everything else; removing a worktree, killing an
-# endpoint, or discarding work stays with bin/fm-teardown.sh, which owns the
-# landed-work test.
+# agent and preserves its worktree and record; the only endpoint it may close is
+# the exited agent's own terminal, through bin/fm-presentation-park.sh. Removing
+# a worktree, retiring a record, or discarding work stays with
+# bin/fm-teardown.sh, which owns the landed-work test.
 #
 # `resume` is not a verb: it is not deterministic across the verified adapters
 # (bin/fm-control-lib.sh's header owns that reasoning). `relaunch` covers the
@@ -1174,7 +1180,13 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
-    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    # The agent is stopped and the task stays recorded, so collapse its exited
+    # presentation; bin/fm-presentation-park.sh owns close versus stub, and a
+    # failure there never turns a verified stop into a failed verb.
+    presentation=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-presentation-park.sh" "$ID" --trigger exit 2>/dev/null) \
+      || presentation=${presentation:-"presentation=unchanged task=$ID reason=park-failed"}
+    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT ${presentation/ task=$ID/}"
     ;;
   relaunch)
     do_relaunch

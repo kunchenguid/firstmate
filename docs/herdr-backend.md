@@ -19,6 +19,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
 | The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
+| What happens to a task's terminal after its agent exits | [Parked presentation](#parked-presentation) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
@@ -489,6 +490,32 @@ Any of these preserves the candidate and lets session startup continue with at m
 [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence for the focus-flash test.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#attached-foreground-viewer) owns the active versioned evidence and the re-run trigger for the attached-viewer test.
 
+## Parked presentation
+
+A crewmate's agent runs inside an interactive shell under the `treehouse get` subshell that holds its pool slot, so when the agent exits that shell stays behind.
+[`bin/fm-presentation-park.sh`](../bin/fm-presentation-park.sh) is the single owner of collapsing that leftover for a task whose record stays; its header owns the exact rules.
+Three callers ask for it:
+
+- `bin/fm-control.sh <id> exit`, after the stop is proven.
+- The watcher, once per stale pane hash, for an ordinary crew whose current status is `done` or `paused`; any other or unreadable status is left alone.
+- `bin/fm-teardown.sh`, when it refuses because the worktree holds unlanded work.
+
+Nothing is touched unless Herdr reports no agent, or a stale registration, on the exact recorded pane in the exact recorded tab and the process view is shell-only.
+A live, unknown, or moved endpoint is left alone, and the proof is re-read under the session presentation lock before any change.
+
+| Verdict | When | What changes |
+| --- | --- | --- |
+| `closed` | Exit or sweep, and the work is landed: clean worktree, no commit off a remote, and a HEAD contained in origin's default branch. | The exact pane is closed, and a projected workspace goes with it. The record, journal, claim, and worktree stay for teardown. |
+| `parked` | Every still-resumable task, and always on a teardown refusal. | The tab reads `parked: <id>` and a projected workspace reads `└ parked: <id> · p:<token>`. Ids, the token, the journal, the pane, and its shell stay. |
+
+The close rule follows from Treehouse 2.3.0: an interactive slot is held only while a process runs in it, and there is no supported way to reserve an existing slot.
+Closing the shell therefore releases the slot, so only landed work closes.
+A parked stub keeps its shell, so its slot stays the task's and `relaunch` resumes in place, even after the branch later lands.
+When a closed landed slot is later handed on, `bin/fm-spawn.sh --relaunch` refuses rather than share another task's copy, and the record's teardown runs records-only as for any reassigned slot.
+
+The parked workspace label keeps the U+2514 prefix and the exact token suffix, so token correlation and child ordering still match; the journal keeps the ordinary label, and a relaunch that adopts the endpoint restores both labels before the new agent starts.
+`tests/fm-presentation-park-e2e.test.sh` pins every verdict against the real binary, and [`verification/runtime-backends.md`](verification/runtime-backends.md#parked-presentation) records the real-agent lab proof.
+
 ## Default-tab prune safety
 
 `herdr workspace create` seeds one default tab.
@@ -855,6 +882,7 @@ tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh
 tests/fm-herdr-pi-stale-registration-live-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-control-herdr-smoke.test.sh
+tests/fm-presentation-park-e2e.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
