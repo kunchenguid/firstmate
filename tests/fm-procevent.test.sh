@@ -3668,6 +3668,19 @@ out=$(read_out) || fail "read failed on a short expanded list"
 assert_contains "$out" "complete: no" "an expanded list shorter than its declared count was certified as complete"
 pass "read never certifies a content block it could not fully parse"
 
+# Lavish writes a block with no items as an inline empty list, for example
+# beside a fatal artifact failure. That is a complete empty read, while the
+# same key carrying anything else stays uncertified.
+printf 'session:\n  file: /a.html\n  status: feedback\nprompts: []\nartifact_failures[1]{kind,detail,severity}:\n  artifact-asset-unavailable,an image could not load,fatal\n' > "$READ"
+out=$(read_out) || fail "read failed on an inline empty prompt list"
+assert_contains "$out" "declared_items: 0" "an inline empty list declared items"
+assert_contains "$out" "malformed_items: 0" "an inline empty list was reported malformed"
+assert_contains "$out" "complete: yes" "an inline empty list was not certified as a complete empty read"
+printf 'session:\n  file: /a.html\n  status: feedback\nprompts: [hidden words]\n' > "$READ"
+out=$(read_out) || fail "read failed on an inline non-empty prompt list"
+assert_contains "$out" "complete: no" "an inline list carrying text was certified as complete"
+pass "read certifies an inline empty prompt list and nothing else inline"
+
 # The keyed-answer commands read the same expanded shape with their rules unchanged.
 cat > "$READ" <<'EOF'
 session:

@@ -817,6 +817,13 @@ cmd_read() {
           ($want, @fields) = ($1, split /,/, $2);
           next;
         }
+        # Lavish writes a block with no items as an inline empty list, for
+        # example beside a fatal artifact failure. That is a framed empty
+        # read, not a block this reader cannot frame.
+        if ($line =~ /^(?:prompts|feedback):\s*\[\]\s*$/) {
+          $want = 0;
+          last;
+        }
         # A content block this reader cannot frame is never an empty read.
         if ($line =~ /^(?:prompts|feedback)/) {
           $malformed++;
