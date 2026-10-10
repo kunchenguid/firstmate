@@ -27,6 +27,10 @@ STALL_REPLACEMENT_PID=
 STALL_JOB_GROUP=
 QUIET_WORKER_PID=
 SCAN_LANE_PID=
+DRIFT_SLEEP_PID=
+DRIFT_SERVE_PID=
+DRIFT_PEER_PID=
+DRIFT_THIEF_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -40,6 +44,15 @@ cleanup_remote_job_fixture() {
   [ -z "$REPLACEMENT_OWNER_PID" ] || kill -KILL "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
   [ -z "$QUIET_WORKER_PID" ] || kill -KILL "$QUIET_WORKER_PID" 2>/dev/null || true
   [ -z "$SCAN_LANE_PID" ] || kill -KILL "$SCAN_LANE_PID" 2>/dev/null || true
+  [ -z "$DRIFT_SLEEP_PID" ] || kill -KILL "$DRIFT_SLEEP_PID" 2>/dev/null || true
+  [ -z "$DRIFT_PEER_PID" ] || kill -KILL "$DRIFT_PEER_PID" 2>/dev/null || true
+  [ -z "$DRIFT_THIEF_PID" ] || kill -KILL "$DRIFT_THIEF_PID" 2>/dev/null || true
+  if [ -n "$DRIFT_SERVE_PID" ]; then
+    kill -KILL "$DRIFT_SERVE_PID" 2>/dev/null || true
+    # The readiness heartbeat is a child of the serve and keeps running if the
+    # parent is killed without it.
+    pkill -KILL -P "$DRIFT_SERVE_PID" 2>/dev/null || true
+  fi
   local stall_pid
   for stall_pid in "$STALL_WORKER_PID" "$STALL_REPLACEMENT_PID"; do
     [ -n "$stall_pid" ] || continue
@@ -865,7 +878,9 @@ done
 ! ( FM_REMOTE_JOB_STATE_ROOT="$LOST_STATE"; fm_remote_job_probe "$LOST_HOME" ) \
   || fail "a worker without its ownership lock kept readiness fresh"
 assert_absent "$LOST_STATE/worker.lock" "the ownership lock reappeared before TERM"
-kill -TERM "$LOST_TERM_PID"
+# The serve loop exits on its own once the lock is gone, so TERM may land
+# after that exit. It remains the backstop if the loop has not noticed yet.
+kill -TERM "$LOST_TERM_PID" 2>/dev/null || true
 for _ in $(seq 1 100); do
   kill -0 "$LOST_TERM_PID" 2>/dev/null || break
   sleep 0.05
@@ -1513,5 +1528,153 @@ RESTART_SUPERVISOR_PID=
 assert_grep "remote job worker exited 3 times; stopping the supervisor" "$TMP_ROOT/restart-supervisor.err" \
   "the restart guard did not explain why it stopped"
 pass "barely healthy worker failures remain bounded by the restart guard"
+
+# A clock step moves procps lstart for a process that is still alive. The
+# stored start used to be that string, so a second --serve treated the live
+# owner as dead, took worker.lock, and the old loop kept claiming. An 8-second
+# legacy lstart must still match. A start days away is pid reuse and must not.
+# The live serve must exit once another serve owns the lock, and a claim whose
+# start is only a few seconds off must not be deleted.
+DRIFT_HOME="$TMP_ROOT/drift-account"
+DRIFT_STATE="$TMP_ROOT/drift-state"
+DRIFT_CLAIM="$DRIFT_STATE/jobs/job-driftclaim"
+mkdir -p "$DRIFT_HOME" "$DRIFT_CLAIM/.claim"
+bash -c 'exec -a fm-remote-job-worker.sh sleep 120' &
+DRIFT_SLEEP_PID=$!
+sleep 0.2
+DRIFT_LSTART=$(/bin/ps -p "$DRIFT_SLEEP_PID" -o lstart=) \
+  || fail "the drift fixture could not read a process start"
+if [ "$(uname)" = Darwin ]; then
+  DRIFT_NEAR=$(date -j -v+8S -f '%a %b %e %H:%M:%S %Y' "$DRIFT_LSTART" '+%a %b %e %H:%M:%S %Y') \
+    || fail "the drift fixture could not shift a process start"
+  DRIFT_FAR=$(date -j -v+2d -f '%a %b %e %H:%M:%S %Y' "$DRIFT_LSTART" '+%a %b %e %H:%M:%S %Y') \
+    || fail "the drift fixture could not build a reused-pid start"
+else
+  DRIFT_NEAR=$(date -d "$DRIFT_LSTART + 8 seconds" '+%a %b %e %H:%M:%S %Y') \
+    || fail "the drift fixture could not shift a process start"
+  DRIFT_FAR=$(date -d "$DRIFT_LSTART + 2 days" '+%a %b %e %H:%M:%S %Y') \
+    || fail "the drift fixture could not build a reused-pid start"
+fi
+DRIFT_TOKEN=$(fm_remote_job_process_start_token "$DRIFT_SLEEP_PID") \
+  || fail "the drift fixture could not read a stable start token"
+fm_remote_job_start_matches "$DRIFT_TOKEN" "$DRIFT_SLEEP_PID" \
+  || fail "the stable start token did not match its live process"
+fm_remote_job_start_matches "$DRIFT_NEAR" "$DRIFT_SLEEP_PID" \
+  || fail "an 8-second lstart drift looked like a dead owner"
+if fm_remote_job_start_matches "$DRIFT_FAR" "$DRIFT_SLEEP_PID"; then
+  fail "a two-day start gap still matched the live process"
+fi
+printf '%s\n' "$DRIFT_HOME" > "$DRIFT_CLAIM/home"
+printf '%s\n' "$(($(date +%s) + 3600))" > "$DRIFT_CLAIM/queue_deadline"
+printf '1\n' > "$DRIFT_CLAIM/seq"
+printf 'queued\n' > "$DRIFT_CLAIM/state"
+printf '%s\n' "$DRIFT_SLEEP_PID" > "$DRIFT_CLAIM/.claim/owner"
+printf '%s\n' "$DRIFT_NEAR" > "$DRIFT_CLAIM/.claim/owner_start"
+chmod 700 "$DRIFT_STATE" "$DRIFT_STATE/jobs" "$DRIFT_CLAIM" "$DRIFT_CLAIM/.claim"
+chmod 600 "$DRIFT_CLAIM/home" "$DRIFT_CLAIM/queue_deadline" "$DRIFT_CLAIM/seq" \
+  "$DRIFT_CLAIM/state" "$DRIFT_CLAIM/.claim/owner" "$DRIFT_CLAIM/.claim/owner_start"
+HOME="$DRIFT_HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+  FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$DRIFT_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/drift-serve.out" 2> "$TMP_ROOT/drift-serve.err" &
+DRIFT_SERVE_PID=$!
+for _ in $(seq 1 100); do
+  [ -f "$DRIFT_STATE/worker.ready" ] && [ -f "$DRIFT_STATE/worker.lock/pid" ] && break
+  sleep 0.05
+done
+assert_present "$DRIFT_STATE/worker.ready" "the drift serve did not become ready"
+[ "$(tr -d '\n' < "$DRIFT_STATE/worker.lock/pid")" = "$DRIFT_SERVE_PID" ] \
+  || fail "the drift serve did not publish its own lock pid"
+if [ -r /proc/self/stat ]; then
+  case "$(tr -d '\n' < "$DRIFT_STATE/worker.lock/start")" in
+    stat:[0-9]*) ;;
+    *) fail "the drift serve did not publish a stable start token" ;;
+  esac
+fi
+sleep 0.4
+assert_present "$DRIFT_CLAIM/.claim" "an 8-second claim start was deleted while its owner was alive"
+printf '%s\n' "$DRIFT_NEAR" > "$DRIFT_STATE/worker.lock/start"
+HOME="$DRIFT_HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+  FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$DRIFT_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/drift-peer.out" 2> "$TMP_ROOT/drift-peer.err" &
+DRIFT_PEER_PID=$!
+for _ in $(seq 1 40); do
+  kill -0 "$DRIFT_PEER_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$DRIFT_PEER_PID" 2>/dev/null; then
+  fail "a second serve kept running against a live owner whose lstart had drifted 8 seconds"
+fi
+set +e
+wait "$DRIFT_PEER_PID"
+DRIFT_PEER_RC=$?
+set -e
+DRIFT_PEER_PID=
+[ "$DRIFT_PEER_RC" -eq 0 ] || fail "a second serve rejected a live owner over an 8-second lstart drift"
+[ "$(tr -d '\n' < "$DRIFT_STATE/worker.lock/pid")" = "$DRIFT_SERVE_PID" ] \
+  || fail "a second serve took worker.lock from a live owner over an 8-second lstart drift"
+kill -0 "$DRIFT_SERVE_PID" 2>/dev/null \
+  || fail "the original serve exited while it still owned the lock"
+printf '%s\n' "$DRIFT_FAR" > "$DRIFT_STATE/worker.lock/start"
+# The heartbeat touches worker.ready about once a second only while the
+# recorded start still matches. The serve keeps forking short-lived helpers,
+# so a child pid is not the signal. Two quiet seconds means it stopped.
+DRIFT_READY_STABLE=0
+DRIFT_READY_MTIME=
+for _ in $(seq 1 40); do
+  if [ "$(uname)" = Darwin ]; then
+    DRIFT_READY_NOW=$(stat -f %m "$DRIFT_STATE/worker.ready")
+  else
+    DRIFT_READY_NOW=$(stat -c %Y%N "$DRIFT_STATE/worker.ready")
+  fi
+  if [ "$DRIFT_READY_NOW" = "$DRIFT_READY_MTIME" ]; then
+    DRIFT_READY_STABLE=$((DRIFT_READY_STABLE + 1))
+    [ "$DRIFT_READY_STABLE" -ge 8 ] && break
+  else
+    DRIFT_READY_STABLE=0
+    DRIFT_READY_MTIME=$DRIFT_READY_NOW
+  fi
+  sleep 0.25
+done
+[ "$DRIFT_READY_STABLE" -ge 8 ] || fail "the readiness heartbeat stayed up after the lock start stopped matching"
+touch -d '2000-01-01 00:00:00' "$DRIFT_STATE/worker.ready" "$DRIFT_STATE/worker.lock"
+HOME="$DRIFT_HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+  FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$DRIFT_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/drift-thief.out" 2> "$TMP_ROOT/drift-thief.err" &
+DRIFT_THIEF_PID=$!
+for _ in $(seq 1 80); do
+  kill -0 "$DRIFT_SERVE_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$DRIFT_SERVE_PID" 2>/dev/null; then
+  fail "the original serve kept running after another serve took worker.lock"
+fi
+set +e
+wait "$DRIFT_SERVE_PID"
+DRIFT_SERVE_RC=$?
+set -e
+DRIFT_SERVE_PID=
+[ "$DRIFT_SERVE_RC" -eq 0 ] || fail "the disowned serve did not exit cleanly"
+for _ in $(seq 1 80); do
+  [ -f "$DRIFT_STATE/worker.lock/pid" ] && \
+    [ "$(tr -d '\n' < "$DRIFT_STATE/worker.lock/pid")" = "$DRIFT_THIEF_PID" ] && break
+  sleep 0.1
+done
+[ "$(tr -d '\n' < "$DRIFT_STATE/worker.lock/pid" 2>/dev/null || true)" = "$DRIFT_THIEF_PID" ] \
+  || fail "a genuinely stale lock was not reclaimed"
+assert_grep "worker ownership lock was taken by another serve" "$TMP_ROOT/drift-serve.err" \
+  "the disowned serve did not say why it stopped"
+kill -TERM "$DRIFT_THIEF_PID" 2>/dev/null || true
+wait "$DRIFT_THIEF_PID" 2>/dev/null || true
+DRIFT_THIEF_PID=
+kill -TERM "$DRIFT_SLEEP_PID" 2>/dev/null || true
+wait "$DRIFT_SLEEP_PID" 2>/dev/null || true
+DRIFT_SLEEP_PID=
+pass "a clock-stepped lstart does not surrender a live worker lock"
 
 echo "ALL TESTS PASSED"
