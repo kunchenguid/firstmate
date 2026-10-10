@@ -100,6 +100,10 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 printf 'treehouse %s\n' "$*" >> "$FM_FAKE_CALL_LOG"
+# A spawn leases the worktree its pane then reports.
+for arg in "$@"; do
+  [ "$arg" != --lease ] || { printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0; }
+done
 exit 0
 SH
   chmod +x "$fakebin/tmux" "$fakebin/treehouse"

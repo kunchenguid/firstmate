@@ -440,16 +440,41 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+# fm_fake_exit0 <fakebin> <tool...>: each tool succeeds with no output, except
+# `treehouse`, which gets fm_fake_treehouse so a spawn can lease its worktree.
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift
   for tool in "$@"; do
+    if [ "$tool" = treehouse ]; then
+      fm_fake_treehouse "$fakebin"
+      continue
+    fi
     cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
     chmod +x "$fakebin/$tool"
   done
+}
+
+# fm_fake_treehouse <fakebin>: a treehouse whose `get --lease` prints the
+# leased worktree - FM_FAKE_LEASE_PATH when set, otherwise the fake pane path
+# FM_FAKE_PANE_PATH, so the pane bin/fm-spawn.sh then moves reports the same
+# directory. Every call is appended to FM_FAKE_TREEHOUSE_LOG when that is set;
+# every other subcommand succeeds with no output.
+fm_fake_treehouse() {
+  cat > "$1/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+if [ "${1:-}" = get ]; then
+  for arg in "$@"; do
+    [ "$arg" != --lease ] || { printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}"; exit 0; }
+  done
+fi
+exit 0
+SH
+  chmod +x "$1/treehouse"
 }
 
 # fm_fake_crash_injector <fakebin>

@@ -3801,16 +3801,68 @@ test_kill_is_best_effort() {
 test_current_path_reads_cwd() {
   local dir log resp fb out
   dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # Verified pitfall (herdr-verification-p2.md): .result.pane.cwd is frozen at
-  # pane-creation time and never updates; .foreground_cwd tracks the live
-  # running process (e.g. a treehouse get subshell) and is what must be read.
-  printf '{"result":{"pane":{"cwd":"/tmp/pane-creation-dir","foreground_cwd":"/tmp/fake-worktree"}}}\n' > "$resp/1.out"
+  # Verified pitfall: .result.pane.cwd is the pane's top-level shell's cwd and
+  # does not follow a subshell; .foreground_cwd tracks the live running process
+  # (e.g. a treehouse get subshell) and is what must be read.
+  printf '{"result":{"pane":{"cwd":"/tmp/pane-top-level-dir","foreground_cwd":"/tmp/fake-worktree"}}}\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
-  [ "$out" = "/tmp/fake-worktree" ] || fail "current_path should read foreground_cwd (the live process), not the frozen creation-time cwd, got '$out'"
+  [ "$out" = "/tmp/fake-worktree" ] || fail "current_path should read foreground_cwd (the live process), not the top-level shell's cwd, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' "current_path did not call pane get"
-  pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
+  pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the top-level shell's cwd"
+}
+
+# A Herdr session restore resumes a task's agent in the pane's top-level shell
+# directory, which for a spawned worker is the main project copy. The predicate
+# reports only a live agent outside the recorded worktree, reading the agent
+# probe only once the directory is outside. FM_PROBE_AGENT stands in for the
+# process-level agent probe, which its own tests above own.
+test_task_outside_worktree_reports_only_a_live_agent_outside() {
+  local dir log resp fb main wt out rc
+  dir="$TMP_ROOT/outside-worktree"; rm -rf "$dir"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  main="$dir/main"; wt="$dir/pool/wt"
+  mkdir -p "$main" "$wt/sub" "$dir/state"
+  ln -s "$dir/pool" "$dir/pool-link"
+  fb=$(make_herdr_fakebin "$dir")
+  printf 'window=default:w1:p2\nbackend=herdr\nkind=ship\nworktree=%s\n' "$dir/pool-link/wt" > "$dir/state/t1.meta"
+  outside() {  # <foreground-cwd> <agent-state> [meta]
+    rm -f "$resp"/*.out "$resp/.count" "$dir/probed"
+    printf '{"result":{"pane":{"cwd":"%s","foreground_cwd":"%s"}}}\n' "$main" "$1" > "$resp/1.out"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_PROBE_AGENT="$2" FM_PROBED="$dir/probed" \
+      bash -c '
+        . "$0/bin/fm-backend.sh"
+        fm_backend_source herdr
+        fm_backend_herdr_target_ready() { fm_backend_herdr_parse_target "$1"; }
+        fm_backend_herdr_agent_state() { : > "$FM_PROBED"; printf "%s" "$FM_PROBE_AGENT"; }
+        fm_backend_task_outside_worktree "$1"
+      ' "$ROOT" "${3:-$dir/state/t1.meta}"
+  }
+  out=$(outside "$main" alive); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = "$main" ] || fail "a live agent in the main copy should be reported with its directory, got rc=$rc '$out'"
+  out=$(outside "$main" dead); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "an agent-less restored shell is positively not misplaced, got rc=$rc '$out'"
+  out=$(outside "$main" unreadable); rc=$?
+  [ "$rc" -eq 2 ] && [ -z "$out" ] || fail "an unreadable agent state proves neither way, got rc=$rc '$out'"
+  out=$(outside "$wt/sub" alive); rc=$?
+  [ "$rc" -eq 1 ] || fail "a directory beneath the physical worktree is inside it, got rc=$rc '$out'"
+  [ ! -e "$dir/probed" ] || fail "an agent inside its worktree should not cost an agent probe"
+  out=$(outside "$wt" alive); rc=$?
+  [ "$rc" -eq 1 ] || fail "the worktree itself is inside, got rc=$rc"
+  out=$(outside "$dir/pool/wt-other" alive); rc=$?
+  [ "$rc" -eq 0 ] || fail "a sibling whose name only starts with the worktree's is outside, got rc=$rc"
+  out=$(outside "" alive); rc=$?
+  [ "$rc" -eq 2 ] || fail "an unreadable foreground directory proves neither way, got rc=$rc"
+  : > "$log"
+  printf 'window=default:w1:p2\nbackend=herdr\nkind=secondmate\nworktree=%s\n' "$wt" > "$dir/state/s1.meta"
+  out=$(outside "$main" alive "$dir/state/s1.meta"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a secondmate home is not a task worktree, got rc=$rc"
+  printf 'window=sess:fm-t1\nbackend=tmux\nkind=ship\nworktree=%s\n' "$wt" > "$dir/state/t2.meta"
+  out=$(outside "$main" alive "$dir/state/t2.meta"); rc=$?
+  [ "$rc" -eq 1 ] || fail "only Herdr restores panes, so other backends are never reported, got rc=$rc"
+  [ ! -s "$log" ] || fail "a secondmate or non-Herdr task must not read the pane: $(cat "$log")"
+  pass "fm_backend_task_outside_worktree: reports only a live Herdr ship or scout agent outside its physical worktree, and an unreadable pane as unknown"
 }
 
 # --- busy_state (semantic agent state) ---------------------------------------
@@ -6017,6 +6069,7 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
+test_task_outside_worktree_reports_only_a_live_agent_outside
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent

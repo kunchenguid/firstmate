@@ -22,7 +22,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
-| What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
+| What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) and [Agents resumed by a session restore](#agents-resumed-by-a-session-restore) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
 | Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
 | Stopping or deleting Herdr sessions during verification | [Destructive lab safety](#destructive-lab-safety) |
@@ -482,6 +482,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 | `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
 | `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
+| `tests/fm-herdr-restore-misplaced-worker-e2e.test.sh` | A session restore resuming a top-level-shell worker in its worktree and a subshell-shaped worker in its main copy, the misplaced-worker proof, the refused doorbell, and the single watcher wake in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
 | `tests/fm-backend-herdr-stale-active-tab-e2e.test.sh` | Proves a persisted-focused tab still closes when no foreground client is attached. |
 | `tests/fm-herdr-attached-viewer-live-e2e.test.sh` | Proves the other half against a real attached viewer, which `bin/fm-herdr-lab.sh viewer start` supplies over a pty sized before the fork. |
@@ -669,11 +670,30 @@ No Herdr-specific copy of that protocol exists.
 ### Husks after a server restart
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids.
-The underlying harness processes and live agent registrations do not survive.
+The underlying harness processes do not survive, and a pane comes back as a fresh shell in the directory Herdr persisted for it.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
 
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
+
+### Agents resumed by a session restore
+
+Herdr's `[session] resume_agents_on_restore` setting, on by default, resumes an agent pane whose official integration reported a session reference, such as Claude's.
+The restored pane re-runs the agent's resume command, for example `claude --resume <session-id>`, when the pane is first spawned, which can be when a client attaches or views it rather than at server start.
+That command runs in the pane's persisted directory, which is the pane's top-level shell directory, not the directory of a subshell inside it.
+The setting is server-wide, so Firstmate leaves it to the operator, and Herdr exposes no per-pane opt-out.
+
+A ship or scout spawn therefore leases its worktree with `treehouse get --lease` and moves the pane's top-level shell into it before the agent starts, so a restore resumes the worker in its own worktree ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns the acquisition).
+The durable lease also keeps the slot the task's while no process runs in it, for example after a reboot before the restored pane is viewed.
+Panes spawned before that change entered the worktree through a `treehouse get` subshell, so their top-level shell, and a restore, sit in the main project copy.
+Under a Firstmate home, Claude there also walks up to Firstmate's own `CLAUDE.md` and shows its external-imports dialog, which Escape and Enter both decline ([Claude harness reference](../.agents/skills/harness-adapters/references/harness/claude.md#workspace-trust)).
+
+Firstmate never drives a worker it can see running outside its recorded worktree, which covers those older panes.
+[`fm_backend_task_outside_worktree`](../bin/fm-backend.sh) is the one proof: a live agent in a Herdr ship or scout pane whose foreground directory is neither the recorded worktree nor beneath it.
+The doorbell types nothing into such a pane, and the watcher surfaces it once per directory as a stale wake naming both paths, skipping its other checks for that pane.
+Recover it with `fm-control.sh <id> relaunch`, which stops the resumed agent, returns the pane's shell to the worktree, and starts a fresh agent there from the instructions on disk.
+`exit` and `relaunch` refuse while the external-imports dialog is open, so a person closes that tab instead, and the relaunch then reclaims the task in a new pane created in the worktree.
+`tests/fm-herdr-restore-misplaced-worker-e2e.test.sh` reproduces both pane shapes across a restore in a guarded lab ([verification](verification/runtime-backends.md#herdr-session-restore-resumes-a-worker-in-its-main-copy)).
 
 ### Stale agent registrations
 

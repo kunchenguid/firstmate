@@ -921,6 +921,73 @@ test_exit_names_a_picker_that_renders_after_the_submit() {
   pass "fm-control exit: a picker that renders after the submit returned is named when the stop wait times out"
 }
 
+imports_dialog_screen() {
+  printf '%s\n' \
+    '  Allow external CLAUDE.md file imports?' \
+    '' \
+    "  This project's CLAUDE.md or .claude/rules imports files outside the current working directory. Never allow this for third-party repositories." \
+    '' \
+    '  ❯ No, disable external imports' \
+    '    Yes, allow external imports' \
+    '' \
+    '  Enter to confirm · Esc to cancel'
+}
+
+# Escape and Enter both record a decision on this dialog, so no lifecycle
+# verb may press either while it is open, busy or not.
+test_lifecycle_verbs_never_answer_the_imports_dialog() {
+  local dir out rc gen
+  dir=$(new_case imports-interrupt)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  imports_dialog_screen > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "interrupt on the imports dialog should refuse"$'\n'"$out"
+  assert_contains "$out" "blocked on a prompt: Claude external CLAUDE.md imports dialog. Refusing to type Escape into it." \
+    "the interrupt refusal should name the dialog and the key it withheld"
+  [ ! -s "$dir/fake/keys" ] || fail "interrupt must send no key to the imports dialog, got: $(keys_sent "$dir")"
+
+  dir=$(new_case imports-busy-exit)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  imports_dialog_screen > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit of a busy agent on the imports dialog should refuse"$'\n'"$out"
+  assert_contains "$out" "blocked on a prompt: Claude external CLAUDE.md imports dialog" \
+    "the busy exit refusal should name the dialog"
+  [ ! -s "$dir/fake/keys" ] || fail "a busy exit must not interrupt into the imports dialog, got: $(keys_sent "$dir")"
+  [ ! -s "$dir/fake/literal" ] || fail "a busy exit must not type into the imports dialog"
+
+  dir=$(new_case imports-idle-exit)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  imports_dialog_screen > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit on the imports dialog should refuse"$'\n'"$out"
+  assert_contains "$out" "blocked on a prompt: Claude external CLAUDE.md imports dialog. Refusing to type Enter into it." \
+    "the exit refusal should name the dialog"
+  [ ! -s "$dir/fake/keys" ] || fail "exit must send no key to the imports dialog, got: $(keys_sent "$dir")"
+  [ ! -s "$dir/fake/literal" ] || fail "exit must not type into the imports dialog"
+  pass "fm-control interrupt and exit send no key to Claude's external-imports dialog"
+}
+
+# Escape is the exit picker's harmless cancel, so interrupt still closes it.
+test_interrupt_still_cancels_the_background_picker() {
+  local dir out rc
+  dir=$(new_case picker-interrupt)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  exit_picker_screen > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "interrupt on the background-task exit picker should deliver"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "interrupt should press Escape once on the picker, got: $(keys_sent "$dir")"
+  assert_not_contains "$out" "blocked on a prompt" "the picker must not refuse an interrupt"
+  pass "fm-control interrupt still cancels the background-task exit picker with Escape"
+}
+
 test_idle_agent_is_not_interrupted() {
   local dir out rc gen
   dir=$(new_case idle)
@@ -1208,6 +1275,8 @@ test_exit_drops_meta_busy_gen_with_the_sidecar
 test_exit_refuses_an_open_background_picker
 test_exit_refuses_the_confirming_enter
 test_exit_names_a_picker_that_renders_after_the_submit
+test_lifecycle_verbs_never_answer_the_imports_dialog
+test_interrupt_still_cancels_the_background_picker
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait

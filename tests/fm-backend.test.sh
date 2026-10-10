@@ -863,7 +863,12 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  # The spawn leases the same worktree the pane reports.
+  fm_fake_treehouse "$fb"
+  mv "$fb/treehouse" "$fb/treehouse-lease"
+  # shellcheck disable=SC2016 # The generated script expands these at run time.
+  printf '#!/usr/bin/env bash\nFM_FAKE_LEASE_PATH=${FM_FAKE_LEASE_PATH:-%s} exec "%s" "$@"\n' "$wt" "$fb/treehouse-lease" > "$fb/treehouse"
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -967,7 +972,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   mkdir -p "$state" "$config"
   log="$TMP_ROOT/symlink-spawn-$label.log"
 
-  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_FAKE_LEASE_PATH="$wt" run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   rc=$?
   expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix when the backend reports $first_reply cwd"$'\n'"$out"
   assert_contains "$out" "worktree=$wt" \

@@ -108,6 +108,9 @@ case "${1:-}" in
       [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && printf '%s\n' "$holder" > "$FM_FAKE_TREEHOUSE_LEASE_FILE"
       printf 'leased worktree for %s\n' "${holder:-unknown}" >&2
       printf '%s\n' "$FM_FAKE_TREEHOUSE_HOME"
+    elif [ -n "${FM_FAKE_PANE_PATH:-}" ]; then
+      # A ship or scout spawn leases the worktree its pane then reports.
+      printf '%s\n' "$FM_FAKE_PANE_PATH"
     fi
     exit 0
     ;;
@@ -117,6 +120,8 @@ case "${1:-}" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --force) ;;
+        --if-lease-holder|--if-lease-id) shift ;;
+        --if-lease-holder=*|--if-lease-id=*) ;;
         *) target=$1 ;;
       esac
       shift

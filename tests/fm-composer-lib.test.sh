@@ -1231,7 +1231,67 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
   pass "picker text quoted above a normal composer is not read as a live picker"
 }
 
+# The external-imports dialog exactly as a restored worker pane rendered it.
+imports_dialog_screen() {  # [selected-option]
+  local yes='  ' no='❯ '
+  if [ "${1:-no}" = yes ]; then
+    yes='❯ '
+    no='  '
+  fi
+  printf '%s\n' \
+    '──────────────────────────────────────────────────────────────────' \
+    '  Allow external CLAUDE.md file imports?' \
+    '' \
+    "  This project's CLAUDE.md or .claude/rules imports files outside the current working directory. Never allow this for third-party repositories." \
+    '' \
+    '  External imports:' \
+    '    /home/user/firstmate/AGENTS.md' \
+    '' \
+    '  Important: Only use Claude Code with files you trust. Accessing untrusted files may pose security risks https://code.claude.com/docs/en/security' \
+    '' \
+    "  ${no}No, disable external imports" \
+    "  ${yes}Yes, allow external imports" \
+    '' \
+    '  Enter to confirm · Esc to cancel'
+}
+
+test_external_imports_dialog_is_named_and_blocks_retry() {
+  local out rc sink enters
+  out=$(fm_composer_blocking_dialog "$(imports_dialog_screen)"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the recorded imports dialog should match"
+  [ "$out" = 'Claude external CLAUDE.md imports dialog' ] || fail "dialog name was '$out'"
+  out=$(fm_composer_blocking_dialog "$(imports_dialog_screen yes)"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the imports dialog with its approving row selected should match too"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '● The dialog reads "Allow external CLAUDE.md file imports?" with "❯ No, disable external imports" selected.' \
+    "+    '  Allow external CLAUDE.md file imports?' \\" \
+    "+    '  ❯ No, disable external imports' \\" \
+    "+    '  Enter to confirm · Esc to cancel'" \
+    '' \
+    '╭──────────────╮' \
+    '│ > next steer │' \
+    '╰──────────────╯')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "imports-dialog text quoted above a normal composer must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  FM_TEST_PICKER_SCREEN=$(imports_dialog_screen)
+  FM_TEST_PICKER_ENTERS=$(mktemp)
+  : > "$FM_TEST_PICKER_ENTERS"
+  fm_composer_dialog_sink_prepare || fail "the dialog sink could not be prepared"
+  sink=$FM_COMPOSER_DIALOG_SINK
+  out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_picker_state win 3 0)
+  [ "$(cat "$sink")" = 'Claude external CLAUDE.md imports dialog' ] \
+    || fail "classify should note the imports dialog, got '$(cat "$sink")'"
+  fm_composer_dialog_sink_release
+  enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+  [ "$out" = unknown ] || fail "the imports dialog must stop the retry as unknown, got '$out'"
+  [ "$enters" -eq 1 ] || fail "the imports dialog must receive no retried Enter, got $enters"
+  rm -f "$FM_TEST_PICKER_ENTERS"
+  unset FM_TEST_PICKER_SCREEN FM_TEST_PICKER_ENTERS
+  pass "the Claude external-imports dialog is named, quoted text is not, and no retry Enter answers it"
+}
+
 test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
+test_external_imports_dialog_is_named_and_blocks_retry

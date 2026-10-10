@@ -1671,7 +1671,8 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
-# fm_composer_blocking_dialog: name a screen whose next Enter would answer it.
+# fm_composer_blocking_dialog: name a screen whose next Enter or Escape would
+# answer it.
 # Prints the name and returns 0 only for the recorded structure of one dialog:
 # the heading on its own line, then its selected row alone on a row, with the
 # recorded footer as the last non-blank row. A heading buried in a sentence,
@@ -1681,19 +1682,53 @@ EOF
 # and prints nothing.
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
+# Recorded 2026-10-05 on Claude Code 2.1.285 in a restored worker pane: the
+# external CLAUDE.md imports dialog, whose selected row is either option
+# because Enter and Escape both record a decision for the project.
+FM_COMPOSER_DIALOG_EXIT_PICKER='Claude background-task exit picker'
+FM_COMPOSER_DIALOG_IMPORTS='Claude external CLAUDE.md imports dialog'
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
   local screen=${1-}
   [ -n "$screen" ] || return 1
-  if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
-    /^[ \t]*Background work is running[ \t\r]*$/ { heading = 1 }
-    heading && /^[ \t]*❯ 1\. Exit and stop tasks[ \t\r]*$/ { selected = 1 }
-    /[^ \t\r]/ { last = $0 }
-    END { exit !(selected && last ~ /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/) }
-  '; then
-    printf '%s' 'Claude background-task exit picker'
+  if fm_composer_dialog_shape "$screen" 'Background work is running' \
+       '1[.] Exit and stop tasks'; then
+    printf '%s' "$FM_COMPOSER_DIALOG_EXIT_PICKER"
+    return 0
+  fi
+  if fm_composer_dialog_shape "$screen" 'Allow external CLAUDE[.]md file imports[?]' \
+       '(No, disable|Yes, allow) external imports'; then
+    printf '%s' "$FM_COMPOSER_DIALOG_IMPORTS"
     return 0
   fi
   return 1
+}
+
+# fm_composer_dialog_answered_by: whether pressing <key> on the named dialog
+# records an answer rather than only closing it. Enter confirms the selected
+# row of every recognised dialog. Escape is the picker's harmless cancel, but
+# on the imports dialog it records a decline. Any other key or an unknown
+# dialog counts as answering, so a caller never presses into one it cannot
+# classify.
+fm_composer_dialog_answered_by() {  # <dialog-name> <key>
+  case "$1:$2" in
+    "$FM_COMPOSER_DIALOG_EXIT_PICKER:Escape") return 1 ;;
+  esac
+  return 0
+}
+
+# fm_composer_dialog_shape: whether <screen> holds <heading> alone on a row,
+# then a selected `❯ <row>` alone on a later row, with Claude's select footer
+# as the last non-blank row. Both patterns are anchored EREs without escapes.
+fm_composer_dialog_shape() {  # <screen> <heading-ere> <selected-row-ere>
+  printf '%s\n' "$1" | fm_composer_strip_ansi \
+    | FM_DIALOG_HEADING="^[[:space:]]*$2[[:space:]]*\$" \
+      FM_DIALOG_SELECTED="^[[:space:]]*❯ $3[[:space:]]*\$" LC_ALL=C awk '
+    BEGIN { h = ENVIRON["FM_DIALOG_HEADING"]; s = ENVIRON["FM_DIALOG_SELECTED"] }
+    $0 ~ h { heading = 1 }
+    heading && $0 ~ s { selected = 1 }
+    /[^ \t\r]/ { last = $0 }
+    END { exit !(selected && last ~ /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/) }
+  '
 }
 
 # A command substitution drops a shell variable, and every composer read runs

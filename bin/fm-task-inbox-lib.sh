@@ -341,8 +341,11 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # other than our own doorbell (the watcher re-rings later), 2 the backend send
 # failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
-# acknowledgement move is the only delivery signal.
+# typed; recovery owns the record), 4 skipped because the task's agent runs
+# outside its recorded worktree (nothing typed; FM_TASK_INBOX_MISPLACED_DIR
+# names the directory it runs in; fm_backend_task_outside_worktree owns the
+# proof). No return value is delivery proof; the acknowledgement move is the
+# only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
@@ -354,10 +357,17 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict meta misplaced=
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
+  # The task record sits beside its inbox: <state>/<id>.inbox -> <state>/<id>.meta.
+  meta=${rec%/*}
+  meta=${meta%.inbox}.meta
+  [ ! -f "$meta" ] || misplaced=$(fm_backend_task_outside_worktree "$meta") || misplaced=
+  # shellcheck disable=SC2034 # Read by the ring's callers after a return of 4.
+  FM_TASK_INBOX_MISPLACED_DIR=$misplaced
+  [ -z "$misplaced" ] || return 4
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi

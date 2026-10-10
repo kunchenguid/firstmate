@@ -20,7 +20,7 @@ Claude gates a folder it has never seen behind an interactive workspace-trust di
 `--dangerously-skip-permissions` does not cover that gate: `claude --help` records that the dialog is skipped only in non-interactive mode, through `-p` or a non-TTY stdout, and a spawned pane is interactive.
 Every claude spawn therefore pre-registers the directory its pane starts in before launch, and the dialog does not appear: the task worktree for a ship or scout, and the home itself for a `--secondmate` spawn, in either seeded shape (a leased worktree or a standalone clone).
 
-A second, separate dialog - "Allow external CLAUDE.md file imports?" - renders whenever a loaded CLAUDE.md chain reaches outside the project tree, which every crewmate's does through the captain's own `~/.claude/CLAUDE.md` importing `~/.claude/RTK.md`.
+A second, separate dialog - "Allow external CLAUDE.md file imports?" - renders whenever a loaded CLAUDE.md chain reaches outside the project tree, for example a user `~/.claude/CLAUDE.md` importing another file, or a session started in a project copy under a Firstmate home, where Claude walks up to Firstmate's own `CLAUDE.md` and its `@AGENTS.md` import.
 `--setting-sources project,local` (the minimal worker tool surface) does not suppress it either, and it gates the pane exactly like the trust dialog: cursor on "No, disable external imports", no way to move the selection from firstmate's steering plane.
 
 `../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for both the worktree and its primary checkout in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, where a home's worker account pin decides `CLAUDE_CONFIG_DIR` (`../../../docs/configuration.md` "Worker account pin"), for a ship or scout spawn; a secondmate spawn registers only its own home entry, since a secondmate home has no separate primary-checkout entry to carry import consent forward from.
@@ -30,12 +30,15 @@ Both flags `false` is Claude Code's default entry for a project never asked, not
 The why-two-entries mechanism and the consent-gating logic live in the script's own header comment, which is the one owner for that contract; the fact worth repeating here is that `../../../bin/fm-spawn.sh` refuses the spawn when the trust flag fails to land, rather than launching a worker that would wedge on that dialog.
 
 Never try to answer either dialog with a key.
-Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and both dialogs render with the cursor on their declining option, which means a sent Enter ends the session instead of accepting.
+Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and both dialogs render with the cursor on their declining option, which means a sent Enter picks the declining option instead of accepting.
 A visible trust dialog means pre-registration did not take effect (or the project entry already carries an explicit decline) - inspect the store and the spawn's error output rather than sending keys.
 A visible external-imports dialog is expected, not a failure signal, whenever the project entry has no prior explicit approval on record - the common first-spawn case.
 `fm-control.sh <id> interrupt` delivers Escape, which is the safe way to clear a wedged workspace-trust dialog for inspection without answering it.
-Escape on the external-imports dialog is different: it records a permanent decline (`hasClaudeMdExternalIncludesApproved: false`, `hasClaudeMdExternalIncludesWarningShown: true`) that `../../../bin/fm-claude-trust.sh` then correctly refuses to override on every later spawn for that project.
-Leave a pane showing the external-imports dialog alone and have a person answer it interactively instead of interrupting it.
+The external-imports dialog is different: Escape and Enter both answer it, and both record a permanent decline (`hasClaudeMdExternalIncludesApproved: false`, `hasClaudeMdExternalIncludesWarningShown: true`) for that project directory, which `../../../bin/fm-claude-trust.sh` then correctly refuses to override on every later spawn for that project.
+A steering doorbell ends in Enter, so a routine steer or watcher re-ring would answer it too.
+Firstmate's own tools therefore recognise the open dialog and refuse instead of pressing anything: `fm-control.sh` `interrupt` and `exit` stop with `blocked on a prompt`, and a doorbell types nothing ([`fm_composer_blocking_dialog`](../../../../../bin/fm-composer-lib.sh) owns the recognised dialogs).
+The safe handling is to leave the pane alone and have a person answer the dialog interactively, choosing "Yes, allow external imports" only for a project they trust.
+A worker showing it in a main project copy rather than its worktree was resumed there by a Herdr session restore and must not be answered at all; [Agents resumed by a session restore](../../../../../docs/herdr-backend.md#agents-resumed-by-a-session-restore) owns that recovery.
 To recover from an already-recorded decline, remove both flags from the project's entry in `~/.claude.json` and approve the imports dialog once by hand.
 
 The once-per-machine bypass-permissions confirmation is a third, separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.

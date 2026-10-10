@@ -2468,10 +2468,11 @@ fm_backend_herdr_agent_alive() {  # <target>
 # A same-labeled tab already existing no longer means an automatic refusal:
 # herdr persists and restores its whole session layout (workspaces/tabs/
 # panes) across a server restart, including a reboot, and a restored fm-<id>
-# task tab comes back a HUSK - a dead pane, or (today, and unconditionally
-# once a future `resume_agents_on_restore = false` config ships) a plain
-# agent-less shell sitting in the saved cwd, never the crewmate that used to
-# be there. Before this fix, every fleet respawn after such a restart needed
+# task tab comes back a HUSK - a dead pane, or a plain agent-less shell
+# sitting in the saved cwd - unless Herdr's default-on
+# `resume_agents_on_restore` resumed its agent there, in which case it is live
+# and this refuses (docs/herdr-backend.md "Agents resumed by a session
+# restore"). Before this fix, every fleet respawn after such a restart needed
 # the operator to manually close each husk pane first before firstmate could
 # spawn into it again. fm_backend_herdr_tab_is_husk classifies the existing
 # tab's pane conservatively (dead or no-agent only; anything live or
@@ -3065,18 +3066,42 @@ fm_backend_herdr_target_ready() {  # <target>
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.
 #
-# Verified pitfall: `pane get`'s `.result.pane.cwd` is the pane's cwd AT
-# CREATION TIME - the top-level shell's cwd - and does NOT update when that
-# shell `cd`s or enters a subshell (as `treehouse get` does). Reading it here
-# would make fm-spawn.sh's worktree-discovery poll never see the pane "leave"
-# the project directory, since `cwd` stays frozen at the original path forever.
+# Verified pitfall: `pane get`'s `.result.pane.cwd` is the pane's TOP-LEVEL
+# shell's cwd, and does NOT change when that shell enters a subshell (as
+# `treehouse get` does). Reading it here would make fm-spawn.sh's
+# worktree-discovery poll never see the pane "leave" the project directory.
 # `.result.pane.foreground_cwd` tracks the ACTUALLY RUNNING foreground
 # process's cwd instead, which is what changes when `treehouse get` enters its
 # worktree subshell - confirmed live against a real treehouse acquisition.
+# The top-level `cwd` is also the directory Herdr persists and restores a pane
+# in, so a task pane restored after a server restart comes back in the project
+# directory, not the worktree (docs/herdr-backend.md "Agents resumed by a
+# session restore").
 fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+}
+
+# fm_backend_herdr_outside_worktree: print the pane's foreground directory and
+# return 0 only when it is neither <worktree> nor beneath it AND a live agent
+# holds the pane. Returns 1 on positive evidence that no agent runs outside:
+# the directory is inside the worktree, or the agent reads dead or missing.
+# Returns 2 when the directory or the agent state cannot be read, which proves
+# neither.
+fm_backend_herdr_outside_worktree() {  # <target> <worktree>
+  local cwd here wt
+  [ -n "$2" ] || return 2
+  cwd=$(fm_backend_herdr_current_path "$1")
+  [ -n "$cwd" ] || return 2
+  here=$(CDPATH='' cd -- "$cwd" 2>/dev/null && pwd -P) || here=$cwd
+  wt=$(CDPATH='' cd -- "$2" 2>/dev/null && pwd -P) || wt=$2
+  case "$here/" in "${wt%/}"/*) return 1 ;; esac
+  case "$(fm_backend_herdr_agent_state "$1" 2>/dev/null)" in
+    alive) printf '%s' "$cwd" ;;
+    dead|missing) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

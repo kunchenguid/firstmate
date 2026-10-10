@@ -1282,6 +1282,35 @@ The watcher does not read the picker: a pane parked on it keeps the ordinary sta
 No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
 Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 
+### Claude external CLAUDE.md imports dialog
+
+Recorded 2026-10-05 from a real Claude Code 2.1.285 worker pane that a Herdr session restore had resumed in a main project copy, read by Firstmate's own pane capture.
+The dialog renders its heading `Allow external CLAUDE.md file imports?` alone on a row, then `❯ No, disable external imports` selected above `Yes, allow external imports`, with `Enter to confirm · Esc to cancel` as the last non-blank row.
+On that machine Escape on the dialog recorded `hasClaudeMdExternalIncludesApproved: false` with `hasClaudeMdExternalIncludesWarningShown: true` for the project in `~/.claude.json`, and Enter on the preselected row records the same decline.
+`fm_composer_blocking_dialog` recognises it by that structure with either row selected, so a doorbell types nothing, and `fm-control.sh` `interrupt` and `exit` refuse before pressing Escape or Enter.
+The same strings quoted above a normal composer are not the dialog.
+No live guard drives a real Claude into this dialog yet, because reaching it needs a trusted scratch project written into the operator's `~/.claude.json`; `tests/fm-composer-lib.test.sh` and `tests/fm-control.test.sh` pin the recorded screen.
+
+### Herdr session restore resumes a worker in its main copy
+
+Measured 2026-10-08 on Herdr 0.7.5 in a guarded named lab with the default `[session] resume_agents_on_restore`:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-herdr-restore-misplaced-worker-e2e.test.sh
+```
+
+```text
+ok - a live agent in its worktree is not reported, in either shape
+ok - a pane whose top-level shell is in its worktree is restored and resumed in that worktree
+ok - a Herdr restore resumes a subshell-shaped agent in the main copy the pane was created in
+ok - the resumed agent is reported outside its recorded worktree, naming the main copy
+ok - the doorbell types nothing into the misplaced agent and keeps the record
+ok - the watcher surfaces a misplaced worker once and skips its other checks
+```
+
+The persisted pane directory is the pane's top-level shell directory: a pane whose top-level shell ran `cd` into the worktree persisted and resumed in the worktree, which is the shape a spawn now produces by leasing its worktree, while a pane whose shell entered the worktree through an interactive subshell persisted the directory it was created in.
+A restored agent pane spawned only once a viewer attached, and it typed `claude --resume <session-id>` into a shell in that persisted directory.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

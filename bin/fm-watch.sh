@@ -499,6 +499,34 @@ window_key() {  # <window>
   printf '%s' "${key//./_}"
 }
 
+# A ship or scout agent running outside its recorded worktree - a Herdr session
+# restore resumes one in the project directory the pane was created in - must
+# not be driven from here, so this runs before the inbox ring. It is surfaced
+# once per directory it is seen in; .misplaced-<key> remembers that directory
+# and is cleared only on positive evidence that the agent is no longer outside,
+# never on an unreadable read. Returns 0 when the window is misplaced so the
+# caller skips its other checks this poll.
+misplaced_worker_check() {  # <window> <task>
+  local w=$1 task=$2 key meta dir reason rc=0
+  key=$(window_key "$w")
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 1
+  dir=$(fm_backend_task_outside_worktree "$meta") || rc=$?
+  case "$rc" in
+    0) ;;
+    1) rm -f "$STATE/.misplaced-$key"; return 1 ;;
+    *) return 1 ;;
+  esac
+  [ "$(cat "$STATE/.misplaced-$key" 2>/dev/null)" != "$dir" ] || return 0
+  reason="stale: $w (worker agent runs in $dir, outside its recorded worktree $(fm_meta_get "$meta" worktree), as a Herdr session restore leaves it; no doorbell is typed into it; stop it and recover the worker)"
+  fm_wake_append stale "$w" "$reason" || exit 1
+  if ! { printf '%s\n' "$dir" > "$STATE/.misplaced-$key"; } 2>/dev/null; then
+    echo "error: stale wake was queued for $task but its misplaced-worker marker could not be written" >&2
+    exit 1
+  fi
+  wake "$reason"
+}
+
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   local w=$1 task=$2 rec=$3 reason
   reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
@@ -574,6 +602,9 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
+      # Placed outside its worktree since the check above: the next poll's
+      # misplaced_worker_check surfaces it, so this attempt spends no budget.
+      [ "$ring_rc" -ne 4 ] || return 0
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
@@ -3050,6 +3081,10 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    # A worker outside its worktree gets no doorbell and no stale triage here.
+    if [ -n "$task" ] && misplaced_worker_check "$w" "$task"; then
+      continue
+    fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"

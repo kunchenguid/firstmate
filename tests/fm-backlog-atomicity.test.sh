@@ -1345,6 +1345,29 @@ test_dispatch_leaves_no_record_when_the_transition_fails() {
   pass "a failed backlog transition fails the dispatch loudly and leaves no record"
 }
 
+# A transition failure rolls the record back after the agent has launched, so
+# the aborted spawn must not return the leased slot out from under that agent:
+# it leaves the lease for the operator and says how to return it.
+test_dispatch_keeps_the_lease_when_rolling_back_after_launch() {
+  local case_dir id out rc=0 log
+  id=atomic-dispatch-keeps-lease-b4
+  case_dir=$(make_home dispatch-keeps-lease "$id")
+  add_item "$case_dir" "$id"
+  break_verb "$case_dir" start
+  log="$case_dir/treehouse.log"
+
+  out=$(FM_FAKE_TREEHOUSE_LOG="$log" run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn reported success though the backlog transition failed"
+  assert_contains "$out" "could not be moved to In flight" \
+    "spawn failed without explaining the backlog transition failure"
+  assert_grep "get --lease" "$log" "spawn did not lease its worktree"
+  assert_no_grep "return " "$log" \
+    "the aborted spawn returned the leased worktree under its launched agent"
+  assert_contains "$out" "leaving task $id's leased worktree $case_dir/wt in place" \
+    "the aborted spawn did not report the lease it left for the operator"
+  pass "a rollback after launch leaves the leased worktree to the operator"
+}
+
 test_dispatch_reports_an_incomplete_record_rollback() {
   local case_dir id meta out rc=0
   id=atomic-dispatch-remove-failure-b5
@@ -3061,6 +3084,7 @@ test_dispatch_reports_a_backlog_read_failure
 test_dispatch_refuses_a_closed_item
 test_dispatch_refuses_to_commit_without_a_published_record
 test_dispatch_leaves_no_record_when_the_transition_fails
+test_dispatch_keeps_the_lease_when_rolling_back_after_launch
 test_dispatch_reports_an_incomplete_record_rollback
 test_dispatch_reports_an_incomplete_busy_rollback
 test_dispatch_rolls_back_before_a_failed_launch_delivery
