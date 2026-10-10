@@ -210,6 +210,7 @@ It does this in its own separate, hard-coded loop, independent of two other owne
 - Pi's `lockOwnership()`.
 
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
+On Windows/Git Bash, a lock holding a tagged `win:<pid>` identity is outside this process table, so the wrapper instead asks the library's `fm_session_lock_owned_by_self`, whose Windows process-boundary bridge owns that identity.
 
 ### Exit codes
 

@@ -35,7 +35,8 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   handle      drain, claim the task's lease, report, acknowledge, release
 #   captain     the same as handle, but report verdict captain naming the rows
 #               the drain presented
-#   hold-lease  the same, but leave the lease held (the host must release it)
+#   hold-lease  the same, but leave the lease held (the host must release it),
+#               logging its check line while held
 #   return      handle, but the captain returns (the record is archived) before
 #               the turn ends
 #   return-silent the same, but the routine outcome is silent
@@ -97,6 +98,7 @@ case "$mode" in
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
+    [ "$mode" != hold-lease ] || "$FM_REPO/bin/fm-lease.sh" check "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     if [ "$mode" = captain ] || [ "$mode" = captain-held ] \
       || [ "$mode" = captain-close-before-return ]; then
       "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict captain \
@@ -2914,6 +2916,35 @@ test_host_outside_the_lock_owner_stands_down() {
   pass "host: a host outside the session-lock owner stands down without arming"
 }
 
+test_tagged_lock_holder_reaches_the_engine_whole() {
+  local home first
+  home=$(make_home tagged-holder away)
+  echo hold-lease > "$home/stub-mode"
+  # A Windows/Git Bash home: uname reports MINGW and ps -W lists the session
+  # harness the lock names as win:7204; every other ps question is the real one.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" MINGW64_NT-10.0-26200\n' > "$home/fakebin/uname"
+  cat > "$home/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = -W ] || exec /bin/ps "$@"
+printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+printf '%s\n' '  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe'
+SH
+  chmod +x "$home/fakebin/uname" "$home/fakebin/ps"
+  printf 'win:7204\n' > "$home/state/.lock"
+  FM_HOME="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$home/fakebin:$PATH" CLAUDE_PID=7204 \
+    bash -c '"$0" park > "$FM_HOME/host.out" 2>&1; printf "%s\n" "$?" > "$FM_HOME/host.rc"' "$HOST" 2>> "$home/claude.err" &
+  wait_until 150 watcher_live "$home" || fail "tagged: the host never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 || fail "tagged: the wake was not handled: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log")"
+  first="$home/engine-call.1"
+  assert_re '^holder=win:7204$' "$first" "the engine's lease holder must be the tagged session-lock holder, whole"
+  assert_re '^branch win:7204 [0-9]+ live$' "$home/engine-lease.log" \
+    "the engine's lease must record the tagged holder whole and read live"
+  kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
+  wait_until 200 host_exited "$home" || fail "tagged: the host did not stop on TERM"
+  pass "host: a Windows-tagged session-lock holder reaches the engine's lease whole"
+}
+
 test_superseded_host_leaves_the_owner_untouched() {
   local home owner watcher lock_pid
   home=$(make_home superseded away)
@@ -3027,4 +3058,5 @@ test_first_cycle_status_streams_and_owner_options_reach_it
 test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
+test_tagged_lock_holder_reaches_the_engine_whole
 test_superseded_host_leaves_the_owner_untouched
