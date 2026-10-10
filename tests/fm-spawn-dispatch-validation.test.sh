@@ -281,7 +281,7 @@ test_refusals_and_retry() {
 }
 
 test_timeout_and_bounds() {
-  local behavior out rc start elapsed pid state i
+  local behavior out rc start elapsed pid state
   for behavior in timeout oversize; do
     make_case "$behavior" task
     validator "$behavior"
@@ -295,7 +295,7 @@ test_timeout_and_bounds() {
       assert_contains "$out" 'exit 124' 'hang did not reach the production timeout'
       assert_contains "$out" 'validator is hanging' 'timeout discarded validator stderr'
       pid=$(cat "$CASE_DIR/child-pid")
-      for i in $(seq 1 50); do
+      for _ in $(seq 1 50); do
         state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ') || state=
         case "$state" in ''|Z*) break ;; esac
         sleep 0.1
