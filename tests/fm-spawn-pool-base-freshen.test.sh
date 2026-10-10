@@ -453,12 +453,11 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
-# A slot left on a stale submodule pin is the field failure this diagnosis exists
-# for: a refresh moved the superproject and left the submodule behind, so the
-# refusal fires a spawn later, on a slot whose own `git status` looks clean to the
-# operator. Nothing here is converged - the gate only has to say why. The fixture
-# only builds the repositories; the residue itself is produced by a real spawn, so
-# these tests cover the reset that actually strands the submodule.
+# Submodule drift is the field failure these cases cover: a reset moved the
+# superproject across a pin move and left the submodule checkout behind, so the
+# slot's status shows only the gitlink. `treehouse get` produces it with
+# read-tree, and a reset --hard does the same. A spawn converges drift it can
+# prove pushed with a fresh fetch, and refuses everything else untouched.
 make_submodule_case() {  # <name> <id>
   local name=$1 id=$2 case_dir home project origin pool publisher fakebin sub subpin1 subpin2 advanced
   case_dir="$TMP_ROOT/$name"
@@ -513,21 +512,174 @@ $1
 EOF
 }
 
-# The first of two consecutive spawns: it succeeds, resets the superproject onto
-# the base that moved the pin, and leaves the submodule checkout on the pin the
-# old base recorded. That reset is what strands the slot, so every case below
-# starts from residue this code path actually produced rather than a hand-built one.
-strand_submodule_pin_via_spawn() {  # <seed-id>
-  local id=$1 out status
-  fm_test_spawn_brief "$HOME_DIR" "$id"
+# Strand a slot the way `treehouse get` does: move the superproject onto the
+# base that moved the pin without touching the submodule checkout.
+strand_submodule_pin() {
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" reset --quiet --hard origin/main
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$ADVANCED_SHA" ] \
+    || fail "the fixture did not move the pooled base across the moved submodule pin"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
+    || fail "the fixture did not strand the submodule on the pin the old base recorded"
+}
+
+# The spawn's own base reset moves the pin; the worker must still start clean,
+# on the submodule commit the new base records.
+test_spawn_converges_pin_moved_by_its_own_reset() {
+  local rec id out status
+  id='pool-sub-reset-moves-r1'
+  rec=$(make_submodule_case sub-reset-moves "$id")
+  read_submodule_case "$rec"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "the spawn that moves the submodule pin should succeed"
-  assert_contains "$out" "spawned $id" "the spawn that moves the submodule pin did not report success"
+  expect_code 0 "$status" "a spawn whose base reset moves a submodule pin should launch"$'\n'"$out"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$ADVANCED_SHA" ] \
-    || fail "the first spawn did not move the pooled base across the moved submodule pin"
-  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
-    || fail "the first spawn did not strand the submodule on the pin the old base recorded"
+    || fail "the spawn did not refresh the base that moved the pin"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN2" ] \
+    || fail "the spawn left the submodule on the pin the old base recorded"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "the spawn launched the worker on a drifted slot: $(git -C "$POOL_DIR" status --porcelain)"
+  pass "a spawn whose own base reset moves a submodule pin launches on the new pin"
+}
+
+# A slot already stranded by an earlier reset is converged, not refused, once a
+# fresh fetch proves the stranded commit is pushed.
+test_drifted_slot_converges_after_fresh_fetch() {
+  local rec id out status
+  id='pool-sub-drifted-r1'
+  rec=$(make_submodule_case sub-drifted "$id")
+  read_submodule_case "$rec"
+  strand_submodule_pin
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a slot whose only deviation is a pushed submodule pin should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN2" ] \
+    || fail "the spawn did not move the drifted submodule onto the recorded pin"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "the spawn launched the worker on a drifted slot: $(git -C "$POOL_DIR" status --porcelain)"
+  pass "a slot stranded on a pushed submodule pin converges and launches"
+}
+
+# A remote-tracking ref whose upstream branch was deleted still vouches for its
+# commit locally. The fresh, pruning fetch must withdraw that vouch, so a commit
+# no remote branch holds any more is refused as uncommitted work and kept. The
+# slot is still on the old base, so the refusal must also leave it there.
+test_pruned_upstream_branch_no_longer_proves_containment() {
+  local rec id out status orphan before
+  id='pool-sub-pruned-r1'
+  rec=$(make_submodule_case sub-pruned "$id")
+  read_submodule_case "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$before" != "$ADVANCED_SHA" ] || fail "the fixture slot already holds the advanced base"
+  git -C "$CASE_DIR/sub-origin" checkout --quiet -b gone "$SUBPIN1"
+  printf 'only on a branch about to be deleted\n' > "$CASE_DIR/sub-origin/gone.txt"
+  git -C "$CASE_DIR/sub-origin" add gone.txt
+  git -C "$CASE_DIR/sub-origin" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm gone
+  orphan=$(git -C "$CASE_DIR/sub-origin" rev-parse HEAD)
+  git -C "$POOL_DIR/ui" fetch --quiet origin
+  git -C "$POOL_DIR/ui" checkout --quiet "$orphan"
+  git -C "$CASE_DIR/sub-origin" checkout --quiet "$SUBPIN1"
+  git -C "$CASE_DIR/sub-origin" branch -q -D gone
+  git -C "$POOL_DIR/ui" branch -r --contains "$orphan" | grep -q 'origin/gone' \
+    || fail "fixture did not leave a stale remote-tracking ref vouching for the commit"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn converged a submodule commit no remote branch holds any more"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "a commit vouched for only by a pruned ref was not refused as uncommitted work"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$orphan" ] \
+    || fail "spawn moved the submodule off a commit no remote branch holds"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the superproject while refusing the slot"
+  pass "a pruned upstream branch no longer proves containment; the commit is refused and kept"
+}
+
+test_narrowed_refspec_refreshes_every_containment_branch() {
+  local rec id out status scenario topic before fresh_topic
+  for scenario in drifted reset live-topic; do
+    id="pool-sub-narrowed-$scenario-r1"
+    rec=$(make_submodule_case "sub-narrowed-$scenario" "$id")
+    read_submodule_case "$rec"
+    git -C "$CASE_DIR/sub-origin" checkout --quiet -b topic "$SUBPIN1"
+    printf 'topic work that must remain reachable\n' > "$CASE_DIR/sub-origin/topic.txt"
+    git -C "$CASE_DIR/sub-origin" add topic.txt
+    git -C "$CASE_DIR/sub-origin" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm topic
+    topic=$(git -C "$CASE_DIR/sub-origin" rev-parse HEAD)
+    git -C "$POOL_DIR/ui" fetch --quiet origin
+    git -C "$POOL_DIR/ui" checkout --quiet "$topic"
+    git -C "$POOL_DIR/ui" config --replace-all remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+    if [ "$scenario" = reset ]; then
+      git -C "$POOL_DIR" add ui
+      git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm topic-pin
+      [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+        || fail "fixture did not leave the slot clean before its own reset"
+    fi
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    if [ "$scenario" = live-topic ]; then
+      printf 'fresh topic tip\n' >> "$CASE_DIR/sub-origin/topic.txt"
+      git -C "$CASE_DIR/sub-origin" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qam advance-topic
+      fresh_topic=$(git -C "$CASE_DIR/sub-origin" rev-parse HEAD)
+    else
+      git -C "$CASE_DIR/sub-origin" checkout --quiet "$SUBPIN1"
+      git -C "$CASE_DIR/sub-origin" branch -q -D topic
+    fi
+    git -C "$POOL_DIR/ui" fetch --quiet --prune origin
+    [ "$(git -C "$POOL_DIR/ui" rev-parse origin/topic)" = "$topic" ] \
+      || fail "fixture did not retain origin/topic outside the narrowed refspec"
+
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    if [ "$scenario" = live-topic ]; then
+      expect_code 0 "$status" "a live origin branch outside the configured refspec should prove containment"$'\n'"$out"
+      [ "$(git -C "$POOL_DIR/ui" rev-parse origin/topic)" = "$fresh_topic" ] \
+        || fail "spawn did not freshly fetch the live topic branch"
+      [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN2" ] \
+        || fail "spawn did not converge the submodule onto the new pin"
+      [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+        || fail "spawn launched with submodule drift"
+    else
+      [ "$status" -ne 0 ] || fail "spawn trusted a deleted topic outside the configured refspec ($scenario)"
+      assert_contains "$out" "cannot prove pushed" "spawn did not explain the failed containment proof"
+      [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$topic" ] \
+        || fail "spawn moved the submodule off the deleted topic commit"
+      assert_grep 'topic work that must remain reachable' "$POOL_DIR/ui/topic.txt" \
+        "spawn discarded the topic work"
+      [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+      if [ "$scenario" = drifted ]; then
+        [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+          || fail "spawn reset the superproject despite pre-existing unsafe drift"
+      else
+        [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$ADVANCED_SHA" ] \
+          || fail "fixture did not exercise containment after the spawn's base reset"
+      fi
+    fi
+    pass "narrowed origin refspec: $scenario consults freshly fetched branch tips only"
+  done
+}
+
+# Only origin is fetched, so only origin may vouch: a remote-tracking ref of any
+# other remote can be just as stale as a pruned one and proves nothing.
+test_another_remotes_ref_does_not_prove_containment() {
+  local rec id out status kept
+  id='pool-sub-other-remote-r1'
+  rec=$(make_submodule_case sub-other-remote "$id")
+  read_submodule_case "$rec"
+  strand_submodule_pin
+  printf 'held only by a stale mirror ref\n' > "$POOL_DIR/ui/mirror.txt"
+  git -C "$POOL_DIR/ui" add mirror.txt
+  git -C "$POOL_DIR/ui" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm mirror-only
+  kept=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
+  git -C "$POOL_DIR/ui" update-ref refs/remotes/mirror/kept "$kept"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn converged a submodule commit only a non-origin remote ref holds"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "a commit vouched for only by another remote's ref was not refused as uncommitted work"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$kept" ] \
+    || fail "spawn moved the submodule off a commit origin does not hold"
+  pass "another remote's ref does not prove containment; the commit is refused and kept"
 }
 
 test_stale_submodule_pin_explains_itself() {
@@ -535,7 +687,7 @@ test_stale_submodule_pin_explains_itself() {
   id='pool-stale-pin-r7'
   rec=$(make_submodule_case stale-pin "$id")
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-stale-pin-seed-r7'
+  strand_submodule_pin
   git -C "$POOL_DIR" remote remove origin
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   before_sub=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
@@ -570,7 +722,8 @@ test_unpushed_submodule_commit_is_still_uncommitted_work() {
   id='pool-sub-unpushed-r10'
   rec=$(make_submodule_case sub-unpushed "$id")
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-sub-unpushed-seed-r10'
+  # The slot stays on the old base, so a refusal that moved the superproject
+  # before refusing would be visible below.
   # A commit made inside the submodule and never pushed leaves the submodule work
   # tree clean and the pins different - the same two facts a stale pin shows. Any
   # checkout of the recorded pin would move HEAD off this commit and leave it
@@ -585,6 +738,7 @@ test_unpushed_submodule_commit_is_still_uncommitted_work() {
   [ "$unpushed" != "$(git -C "$POOL_DIR" rev-parse "HEAD:ui")" ] \
     || fail "fixture did not leave the recorded pin different from what is checked out"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$before" != "$ADVANCED_SHA" ] || fail "the fixture slot already holds the advanced base"
   before_sub=$unpushed
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -612,7 +766,7 @@ test_work_inside_submodule_is_still_uncommitted_work() {
   id='pool-sub-work-r8'
   rec=$(make_submodule_case sub-work "$id")
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-sub-work-seed-r8'
+  strand_submodule_pin
   # Put the submodule back on the pin the base records, so the ONLY deviation is
   # real work inside it. This must never be softened into a stale-pin diagnosis.
   git -C "$POOL_DIR/ui" checkout --quiet "$SUBPIN2"
@@ -635,7 +789,7 @@ test_stale_pin_carrying_real_work_is_not_called_stale() {
   id='pool-sub-both-r9'
   rec=$(make_submodule_case sub-both "$id")
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-sub-both-seed-r9'
+  strand_submodule_pin
   # Stale pin AND real work inside it: calling this merely stale would be wrong, so
   # the refusal must stay the conservative one.
   printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
@@ -657,7 +811,7 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   id='pool-sub-mixed-r11'
   rec=$(make_submodule_case sub-mixed "$id")
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-sub-mixed-seed-r11'
+  strand_submodule_pin
   # Git sorts status paths, so the stale 'ui' entry is scanned before this file.
   # The conservative verdict must not arrive contradicted by a stale-pin line.
   printf 'notes the operator still wants\n' > "$POOL_DIR/zz-notes.txt"
@@ -893,6 +1047,11 @@ test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool
 test_empty_only_included_origin_config_section_launches_pool
 test_inactive_conditional_origin_include_launches_pool
+test_spawn_converges_pin_moved_by_its_own_reset
+test_drifted_slot_converges_after_fresh_fetch
+test_pruned_upstream_branch_no_longer_proves_containment
+test_narrowed_refspec_refreshes_every_containment_branch
+test_another_remotes_ref_does_not_prove_containment
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work

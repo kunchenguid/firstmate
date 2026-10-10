@@ -282,22 +282,35 @@
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
-#   task worktree. When an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch (or uses --base-branch, described
-#   above), and resets to its tip. When none is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
-#   A slot whose only deviation is a stale submodule gitlink is refused by that
-#   same clean check, but is reported as a stale checkout naming each submodule
-#   and both pins; nothing is converged or removed, and no remedy is suggested.
-#   That report is only reached when each submodule's checked-out commit is
-#   already contained in one of its remotes, so a submodule carrying an unpushed
-#   commit keeps the conservative uncommitted-work refusal instead. That
-#   containment test reads local refs only and never fetches, so this gate stays
-#   usable offline; a stale remote-tracking ref can therefore make an unpushed
-#   commit look contained, which is exactly why no remedy command is printed.
+#   task worktree, except for the provably safe submodule drift described below.
+#   When an origin configuration is detected, spawn fetches it, resolves the
+#   current remote default branch (or uses --base-branch, described above), and
+#   resets to its tip. When none is detected, spawn skips that remote freshness
+#   check and launches from the clean worktree's current HEAD. Relaunch reuses
+#   the recorded worktree without fetching or resetting its base. An unreachable
+#   detected origin, unresolved default branch, or other non-clean worktree
+#   refuses a fresh spawn rather than risking stale history or discarding work.
+#   A slot whose only deviation is submodule drift - each entry a gitlink whose
+#   submodule work tree is clean but checked out on a different commit than the
+#   pin - is converged rather than refused, because `treehouse get` resets the
+#   superproject with read-tree and never moves submodule checkouts, so every
+#   pin move on the base would otherwise strand the next slot it hands out.
+#   Drift already present is proven before the base reset; a failed proof leaves
+#   the superproject unmoved. After the reset, initialized submodules that differ
+#   from the new pins are checked again and converged individually.
+#   Each proof freshly fetches and prunes every origin branch with an explicit
+#   all-heads refspec, ignoring configured fetch mappings, and requires the
+#   checked-out commit to be reachable from those branch tips, excluding
+#   origin/HEAD. Other remotes and stale refs cannot vouch for convergence.
+#   A failed proof (including an unpushed commit, no submodule origin, or failed
+#   fetch) refuses launch without moving that submodule. An unavailable pin or
+#   failed pin checkout also refuses launch. A post-reset refusal does not undo
+#   the base reset or earlier submodule convergence; launch requires a clean
+#   final worktree. Uninitialized submodules stay uninitialized.
+#   With no superproject origin, drift is always refused without convergence.
+#   If every drifted commit is contained in local remote-tracking refs, the
+#   refusal names each submodule and both pins as a stale checkout; otherwise it
+#   reports uncommitted work. These refs may be stale, so no remedy is printed.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -3437,29 +3450,15 @@ validate_spawn_worktree() { # <source> <inspect-target>
   fi
 }
 
-# A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
-# an earlier refresh moved the superproject and left the submodule checkout on
-# the pin the previous base recorded. The refusal still stands and this gate
-# never touches the slot; it only names the cause, because "is not clean" while
-# the operator's own `git status` reads clean gives neither a cause nor a remedy.
-# A pin is only reported as stale when the commit the slot holds is already
-# contained in one of the submodule's remotes. Anything that cannot be proven
-# contained - an unpushed commit, a submodule with no remote, a git error - falls
-# through to the conservative uncommitted-work refusal, as does any entry that is
-# not exactly a clean submodule sitting on a different pin. The diagnosis is
-# buffered and only emitted once every entry qualifies, so it can never
-# contradict the verdict.
-#
-# No remedy command is printed, deliberately. That containment check reads local
-# refs only and never fetches, because this gate has to stay usable offline. A
-# remote-tracking ref that has gone stale - its upstream branch deleted or
-# force-pushed, and never pruned - therefore still reads as containment, so a
-# commit that is really unpushed can look contained. Naming the submodule and both
-# pins is what the operator actually needs; printing a checkout command on a
-# judgement that can be fooled could cost them that commit, so the remedy is left
-# to the operator, who can see the whole picture.
-describe_stale_submodule_pins() { # <worktree> <status>
-  local worktree=$1 status=$2 line path want have unpushed lines=
+# Submodule drift: a gitlink whose submodule work tree is clean but checked out
+# on a different commit than the pin. `treehouse get` resets the superproject
+# with read-tree, and the base reset below uses reset --hard; neither moves a
+# submodule checkout, so every pin move on the base leaves the slot drifted.
+# Prints the drifted paths, or fails when any status entry is something else
+# (real work in the superproject or inside a submodule), so the caller keeps
+# the conservative uncommitted-work refusal for anything that is not pure drift.
+spawn_submodule_drift_paths() { # <worktree> <status>
+  local worktree=$1 status=$2 line path want have paths=
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case $line in ' M '*) path=${line#' M '} ;; *) return 1 ;; esac
@@ -3468,14 +3467,70 @@ describe_stale_submodule_pins() { # <worktree> <status>
     want=$(git -C "$worktree" rev-parse --verify --quiet "HEAD:$path" 2>/dev/null) || return 1
     have=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
     [ "$want" != "$have" ] || return 1
+    paths+="$path"$'\n'
+  done <<EOF
+$status
+EOF
+  [ -n "$paths" ] || return 1
+  printf '%s' "$paths"
+}
+
+# Diagnosis-only path for a slot without a superproject origin; see the header.
+# Buffer the report until every path qualifies, so a later failure cannot leave
+# a stale-checkout diagnosis alongside the conservative uncommitted-work verdict.
+describe_stale_submodule_pins() { # <worktree> <paths>
+  local worktree=$1 paths=$2 path want have unpushed lines=
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    want=$(git -C "$worktree" rev-parse --verify --quiet "HEAD:$path" 2>/dev/null) || return 1
+    have=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
     unpushed=$(git -C "$worktree/$path" log --format=%H --max-count=1 "$have" --not --remotes -- 2>/dev/null) || return 1
     [ -z "$unpushed" ] || return 1
     lines+="error: submodule '$path' is checked out at $have, but this base records $want"$'\n'
   done <<EOF
-$status
+$paths
 EOF
   [ -n "$lines" ] || return 1
   printf '%s' "$lines" >&2
+}
+
+# The header owns the convergence contract. The explicit all-heads refspec and
+# empty refmap are safety-critical: configured mappings may omit a branch whose
+# stale tracking ref would otherwise survive pruning and falsely vouch for HEAD.
+# The origin/HEAD alias is excluded because it is not a fetched branch tip.
+# Regression: tests/fm-spawn-pool-base-freshen.test.sh,
+# test_narrowed_refspec_refreshes_every_containment_branch. Nothing is moved here.
+spawn_submodule_checkout_contained() { # <worktree> <path>
+  local sub=$1/$2 have unpushed
+  [ -z "$(git -C "$sub" status --porcelain 2>/dev/null)" ] || return 1
+  git -C "$sub" config --get remote.origin.url >/dev/null 2>&1 || return 1
+  git -C "$sub" fetch --quiet --prune --refmap= origin '+refs/heads/*:refs/remotes/origin/*' >/dev/null 2>&1 || return 1
+  have=$(git -C "$sub" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
+  unpushed=$(git -C "$sub" log --format=%H --max-count=1 "$have" --not --exclude=origin/HEAD --remotes=origin -- 2>/dev/null) || return 1
+  [ -z "$unpushed" ]
+}
+
+# Post-reset convergence under the header's contract. The proof must be repeated
+# here because the base reset can introduce drift absent from the pre-reset check.
+converge_spawn_submodules() { # <worktree>
+  local worktree=$1 mode sha stage path have
+  while IFS=$' \t' read -r mode sha stage path; do
+    [ "$mode" = 160000 ] || continue
+    [ -e "$worktree/$path/.git" ] || continue
+    have=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || {
+      echo "error: could not read the checkout of submodule '$path' in pooled worktree '$worktree'; refusing to launch" >&2
+      return 1
+    }
+    [ "$have" != "$sha" ] || continue
+    if ! spawn_submodule_checkout_contained "$worktree" "$path"; then
+      echo "error: submodule '$path' in pooled worktree '$worktree' is checked out at $have, which a fresh fetch of its origin cannot prove pushed; refusing to move it onto pin $sha or launch" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" submodule --quiet update --checkout -- "$path" >/dev/null 2>&1; then
+      echo "error: could not check out pin $sha for submodule '$path' in pooled worktree '$worktree'; refusing to launch" >&2
+      return 1
+    fi
+  done < <(git -C "$worktree" -c core.quotePath=false ls-files --stage 2>/dev/null)
 }
 
 spawn_worktree_has_origin_config() { # <worktree>
@@ -3493,18 +3548,33 @@ spawn_worktree_has_origin_config() { # <worktree>
 }
 
 freshen_spawn_worktree_base() { # <worktree> [<base-branch>]
-  local worktree=$1 base=${2:-} default target expected actual status
+  local worktree=$1 base=${2:-} default target expected actual status drift path
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
   }
   if [ -n "$status" ]; then
-    if describe_stale_submodule_pins "$worktree" "$status"; then
-      echo "error: pooled worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
-    else
+    drift=$(spawn_submodule_drift_paths "$worktree" "$status") || {
       echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+      return 1
+    }
+    if ! spawn_worktree_has_origin_config "$worktree"; then
+      if describe_stale_submodule_pins "$worktree" "$drift"; then
+        echo "error: pooled worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
+      else
+        echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+      fi
+      return 1
     fi
-    return 1
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      spawn_submodule_checkout_contained "$worktree" "$path" && continue
+      echo "error: submodule '$path' in pooled worktree '$worktree' holds a commit a fresh fetch of its origin cannot prove pushed" >&2
+      echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+      return 1
+    done <<EOF
+$drift
+EOF
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
     [ -z "$base" ] || {
@@ -3545,6 +3615,12 @@ freshen_spawn_worktree_base() { # <worktree> [<base-branch>]
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    return 1
+  fi
+  converge_spawn_submodules "$worktree" || return 1
+  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || status='unreadable'
+  if [ -n "$status" ]; then
+    echo "error: pooled worktree '$worktree' is not clean after refreshing its base to '$target'; refusing to launch" >&2
     return 1
   fi
 }
