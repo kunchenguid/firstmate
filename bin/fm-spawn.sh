@@ -196,6 +196,10 @@
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   capacity.
+#   Goodnight: while state/.goodnight exists, new spawns refuse with exit 76
+#   before worker allocation, including batches and --secondmate spawns.
+#   --relaunch continues an existing recorded task through its usual checks.
+#   The goodnight skill owns entry, the morning list, and scheduling policy.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -686,9 +690,6 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
-# set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -831,6 +832,13 @@ done
   echo "error: --$want_value requires a value" >&2
   exit 1
 }
+if [ "$RELAUNCH" -eq 0 ] && fm_goodnight_active "$STATE"; then
+  echo "deferred: goodnight is active ($STATE/.goodnight); new dispatch waits for /goodmorning or /gm" >&2
+  exit 76
+fi
+# Run the watcher guard only after the scheduling hold has been checked.
+# Batch children skip it so it runs once for the whole invocation.
+[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || {
   echo "error: --harness requires a non-empty value" >&2
   exit 1
@@ -1575,7 +1583,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     [ "$KIND" != scout ] || pair_args+=(--scout)
     pair_rc=0
     FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair_args[@]}" || pair_rc=$?
-    if [ "$pair_rc" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
+    if [ "$pair_rc" -eq 76 ]; then
+      echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - goodnight became active, so it stays queued" >&2
+      [ "$rc" -ne 0 ] || rc=76
+    elif [ "$pair_rc" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
       echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - its project is at capacity, so it stays queued" >&2
       [ "$rc" -ne 0 ] || rc=$FM_PROJECT_CAPACITY_DEFER_EXIT
     elif [ "$pair_rc" -ne 0 ]; then

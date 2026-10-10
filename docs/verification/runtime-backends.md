@@ -6,6 +6,75 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Goodnight scheduling enforcement
+
+Verified on 2026-10-09 with GNU Bash 5.3.9 on Linux using the portable public-interface regression:
+
+```sh
+bash bin/fm-test-run.sh --jobs 1 tests/fm-spawn-batch.test.sh tests/fm-control-relaunch.test.sh tests/fm-secondmate-liveness.test.sh
+```
+
+Observed output:
+
+```text
+ok - goodnight defers new spawns and batches before backend allocation until the hold is lifted
+ok - fm_goodnight_active holds on empty, malformed, and dangling records and clears only on absence
+ok - goodnight allows recorded in-flight relaunch through fm-control while fresh dispatch remains deferred
+ok - goodnight preserves live probes and defers absent mates without recovery accounting; lifting restores recovery
+```
+
+The spawn regression selects tmux, Herdr, zellij, Orca, and cmux for ships, scouts, secondmates, raw commands, and batches, observing exit 76 before backend allocation.
+The control regression relaunches a recorded in-flight task with the marker present, observes a completed transaction with its worktree and endpoint preserved, and then observes exit 76 for a fresh spawn while the hold remains active.
+The shared liveness regression exercises `full` and `poll` modes with alive, dead, and missing tmux, Herdr, and remote endpoints.
+Alive endpoints retain their classification during the hold, and full remote probes retain readiness and route-drift checks.
+Repeated dead and missing probes during the hold preserve their raw state and return `skipped` before the caller's attempt-bound checks, without killing or respawning endpoints or changing attempt ledgers; a hold entered after probing also defers relaunch before its mutations.
+After lifting, the same endpoint remains recoverable and records one attempt and a successful relaunch.
+These cases verify the scheduling boundary with a stubbed backend and no real harness.
+The [goodnight skill](../../.agents/skills/goodnight/SKILL.md) owns the policy; `bin/fm-spawn.sh` owns the refusal mechanics.
+
+The liveness subject can also be refreshed on its own with the same Bash version:
+
+```sh
+bash bin/fm-test-run.sh --jobs 1 tests/fm-secondmate-liveness.test.sh
+```
+
+Its startup case observed:
+
+```text
+ok - sweep: an already-live secondmate under goodnight stays silent and distinguishable in verbose diagnostics
+```
+
+The startup subject returned exit 0 with the same Bash version when run alongside the spawn subject:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-spawn-batch.test.sh tests/fm-session-start.test.sh
+```
+
+Its goodnight case observed:
+
+```text
+ok - startup preserves goodnight and prints its entry-date morning pointer alongside quiet mode
+```
+
+That case uses an older UTC entry date and a simultaneous quiet record, then an unreadable entry time, without clearing the hold.
+
+The primary integration review inspected these existing entry points on the same date:
+
+| Primary surface | Existing startup integration inspected |
+| --- | --- |
+| Claude | `.claude/settings.json` calls `bin/fm-sessionstart-run.sh`. |
+| Codex exec | `.codex/hooks.json` calls the same run wrapper. |
+| Codex interactive TUI | No tracked native startup channel, as recorded in [session-open tiers](../sessionstart-nudge.md#session-open-tiers); the AGENTS.md run-once instruction remains the entry point. |
+| Pi and pi-signed | `.pi/extensions/fm-primary-turnend-guard.ts` calls the run wrapper; `bin/fm-supervision-instructions.sh` selects the same Pi protocol for both. |
+| OpenCode | `.opencode/plugins/fm-primary-sessionstart-nudge.js` invokes the nudge wrapper. |
+| Grok | `.grok/hooks/fm-primary-sessionstart-nudge.json` invokes the nudge wrapper. |
+| Cursor | `.cursor/hooks.json` calls `bin/fm-sessionstart-cursor.sh`. |
+| omp | `.omp/extensions/fm-primary-turnend-guard.ts` calls the run wrapper. |
+| Kimi | Its [primary limit](../../.agents/skills/harness-adapters/references/harness/kimi.md#crew-turn-end-hook-and-primary-limit) remains outside native primary turn-end scope. |
+
+The digest and AGENTS.md trigger changes use these existing transports; no harness adapter, rendered-signal classifier, or runtime backend implementation changed.
+No new claim of native command invocation or live harness compatibility is made by this portable regression.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

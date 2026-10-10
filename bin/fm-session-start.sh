@@ -48,6 +48,8 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
+#                       the goodnight hold (state/.goodnight) with its
+#                       morning-list pointer,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read, each bounded and crash-
@@ -935,6 +937,20 @@ for status in "$STATE"/*.status; do
   print_status_tail "$status"
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+
+subsection "GOODNIGHT"
+if fm_goodnight_active "$STATE"; then
+  GOODNIGHT_ENTERED=$(head -n 1 "$STATE/.goodnight" 2>/dev/null || true)
+  case "$GOODNIGHT_ENTERED" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z)
+      printf 'active since %s; morning list: %s/goodnight/%s.md\n' "$GOODNIGHT_ENTERED" "$DATA" "${GOODNIGHT_ENTERED%%T*}"
+      ;;
+    *) printf 'active; entry time unreadable, inspect morning lists under %s/goodnight/\n' "$DATA" ;;
+  esac
+  printf 'Load /goodnight and read the morning list. Ask whether to lift the hold with /goodmorning; until then it remains active.\n'
+else
+  printf '(inactive)\n'
+fi
 
 subsection "AFK"
 # The away posture is the record (bin/fm-afk-contract.sh); the legacy flag

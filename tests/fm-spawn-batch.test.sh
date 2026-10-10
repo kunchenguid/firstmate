@@ -4,9 +4,7 @@
 # These exercise argument routing only: each spawn attempt fails fast at the
 # missing-brief check, which is reached before any tmux/treehouse side effect, so
 # the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the
-# live watcher guard / state. Parser and path-scoping cases are table-driven; the
-# only behavior asserted on its own is "a multi-pair batch does not stop after the
-# first failure".
+# live watcher guard / state. Also covers the goodnight hold and presence predicate.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -143,6 +141,62 @@ test_scout_batch_refuses_delivery_flags() {
   pass "scout batch refuses ship delivery flags instead of ignoring them"
 }
 
+goodnight_spawn() {
+  local home=$1
+  shift
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" "$@" 2>&1
+}
+
+test_goodnight_hold() {
+  local home="$TMP_ROOT/goodnight" out status backend args
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects/none"
+  git init -q "$home/projects/none"
+  printf '2026-10-09T22:15:00Z\n' > "$home/state/.goodnight"
+  # The common guard must run before every backend's allocator or probe.
+  for backend in tmux herdr zellij orca cmux; do
+    for args in 'ship projects/none --mode no-mistakes --yolo off' \
+      'scout projects/none --scout' 'mate --secondmate' 'raw projects/none echo' \
+      'batch-a=projects/none batch-b=projects/none --mode direct-PR --yolo off'; do
+      # shellcheck disable=SC2086 # Intentional argument table.
+      out=$(goodnight_spawn "$home" $args --backend "$backend")
+      status=$?
+      [ "$status" -eq 76 ] || fail "goodnight $backend $args returned $status instead of 76: $out"
+      assert_contains "$out" 'deferred: goodnight is active' 'hold refusal missing'
+    done
+  done
+  [ ! -e "$home/state/ship.meta" ] || fail 'hold published worker metadata'
+  [ ! -e "$home/data/ship" ] || fail 'hold created task material'
+
+  rm "$home/state/.goodnight"
+  out=$(goodnight_spawn "$home" morning projects/none codex --scout)
+  assert_contains "$out" 'task morning has no brief' 'lifting marker did not restore ordinary validation'
+  pass 'goodnight defers new spawns and batches before backend allocation until the hold is lifted'
+}
+
+test_goodnight_presence() {
+  local state="$TMP_ROOT/goodnight-presence"
+  mkdir -p "$state"
+  FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_goodnight_active "$2" && exit 1
+    : > "$2/.goodnight"
+    fm_goodnight_active "$2" || exit 1
+    printf "malformed\n" > "$2/.goodnight"
+    fm_goodnight_active "$2" || exit 1
+    rm "$2/.goodnight"
+    ln -s "$2/missing" "$2/.goodnight"
+    fm_goodnight_active "$2" || exit 1
+    rm "$2/.goodnight"
+    fm_goodnight_active "$2" && exit 1
+    exit 0
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || fail 'goodnight presence did not fail closed'
+  pass 'fm_goodnight_active holds on empty, malformed, and dangling records and clears only on absence'
+}
+
+test_goodnight_hold
+test_goodnight_presence
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
