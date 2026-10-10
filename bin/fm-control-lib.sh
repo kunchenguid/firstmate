@@ -372,11 +372,22 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
 # pointing at a retired generation. Prints zero or more absolute paths, one per
 # line: worktree-resident hook files and firstmate-owned state tokens only,
 # never a harness's own managed config.
-fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
-  local harness=${1-} wt=${2-} state=${3-} id=${4-}
+fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [kind]
+  local harness=${1-} wt=${2-} state=${3-} id=${4-} kind=${5-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
-    claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
+    # A secondmate's .claude/settings.local.json belongs to the captain.
+    # Retire only the firstmate-owned settings file the launch passes to
+    # --settings and the Stop pointer that carries the same busy generation.
+    # A crewmate's hook file is the worktree settings.local.json.
+    claude)
+      if [ "$kind" = secondmate ]; then
+        printf '%s\n' "$state/$id.claude-settings.json"
+        printf '%s\n' "$wt/.fm-busy-stop"
+      else
+        printf '%s\n' "$wt/.claude/settings.local.json"
+      fi
+      ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     omp) printf '%s\n' "$state/$id.omp-ext.ts" ;;
