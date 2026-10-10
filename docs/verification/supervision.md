@@ -578,6 +578,41 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+The Codex foreground-checkpoint behavior was exercised hermetically on 2026-09-14 with real watcher processes and isolated home state.
+That run observed an announced recovery remain announced through a quiet checkpoint, a never-announced generation surface once, and a durable wake appended during a live checkpoint resurface.
+Its announced-recovery fixture had no unacknowledged durable queue row, so it did not establish that the old behavior reproduced the regression; the revised counterfactual fixture and result are recorded separately below.
+This state transition depends on Firstmate's checkpoint wrapper rather than vendor output, so no live Codex prompt was required.
+
+```sh
+bin/fm-test-run.sh tests/fm-watch-checkpoint.test.sh
+```
+
+Observed output:
+
+```text
+ok - an announced recovery is not reannounced by the next foreground checkpoint
+ok - a never-announced recovery still surfaces once from a foreground checkpoint
+ok - a queue append during a foreground checkpoint still resurfaces
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=11750
+```
+
+On 2026-10-07 the announced-recovery fixture was revised so it reproduces the original failure.
+It appends a durable queue row, lets a first checkpoint announce that recovery generation while the row stays unacknowledged, then runs a second checkpoint and asserts it supervises for its full bound with the generation and row unchanged.
+The fixture was run on its own in an isolated copy of the test file, once with the checkpoint wrapper as committed and once with its `FM_WATCH_FOREGROUND_CHECKPOINT=1` export removed.
+The full file was not used for this record because its earlier quiet-checkpoint case failed on the verifying host before reaching the fixture.
+
+Observed output with the checkpoint distinction:
+
+```text
+ok - an announced recovery is not reannounced by the next foreground checkpoint
+```
+
+Observed output without the checkpoint distinction:
+
+```text
+not ok - announced recovery checkpoint exit: expected exit 124, got 0
+```
+
 Deterministic entry points:
 
 ```sh
@@ -586,6 +621,7 @@ tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-watch-arm.test.sh
 tests/fm-watch-recovery-loop.test.sh
+tests/fm-watch-checkpoint.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh

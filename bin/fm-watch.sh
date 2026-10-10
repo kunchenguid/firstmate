@@ -2136,19 +2136,20 @@ fm_active_check_stop() {
   FM_ACTIVE_CHECK_PGID=
 }
 
-# Stop-signal dispositions, installed with the EXIT trap below. HUP and TERM
-# keep bash's native fatal-signal handling, which runs watcher_cleanup through
-# the EXIT trap and then exits on every supported bash. A trap body such as
-# 'exit 1' is not reliable for them: bash 5.2 runs a pending trap inside the
-# parse of the next command substitution, the body then fails to parse ("trap:
-# line 2: unexpected EOF while looking for matching `)'", or nothing at all),
-# and the signal is consumed, so a stop request could leave this watcher
-# polling forever while its stopper waits (fixed upstream in bash 5.3). Bash
-# 3.2 holds HUP and TERM until a running command substitution's child exits, so
-# fm_backend_capture pane reads go through watcher_capture instead. INT keeps
-# its trap because bash ignores a direct SIGINT while a child runs.
+# Stop-signal dispositions, installed with the EXIT trap below. TERM records a
+# stop request for the main loop to exit at its next boundary, which runs
+# watcher_cleanup through the EXIT trap without an 'exit' trap body. Such a body
+# is unreliable: bash 5.2 can parse a pending trap inside the next command
+# substitution and fail to parse the trap body, consuming the signal and leaving
+# the watcher polling forever (fixed upstream in bash 5.3). HUP keeps native
+# fatal handling. Bash 3.2 holds HUP and TERM until a running command
+# substitution's child exits, so fm_backend_capture pane reads go through
+# watcher_capture instead. INT keeps its trap because bash ignores a direct
+# SIGINT while a child runs.
+FM_WATCH_STOP_STATUS=
 watcher_stop_signals() {
-  trap - HUP TERM
+  trap 'FM_WATCH_STOP_STATUS=143' TERM
+  trap - HUP
   trap 'exit 1' INT
 }
 
@@ -2492,7 +2493,8 @@ WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
+  && [ "${FM_WATCH_FOREGROUND_CHECKPOINT:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
     echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
     exit 1
@@ -2678,6 +2680,8 @@ resurface_after_downtime() {
 }
 
 while :; do
+  [ -z "$FM_WATCH_STOP_STATUS" ] || exit "$FM_WATCH_STOP_STATUS"
+
   # Home-gone exit: a deleted home, state directory, or code root means this
   # watcher's world is gone (a torn-down temporary home or a discarded
   # disposable checkout). Exit with a logged reason rather than writing state
