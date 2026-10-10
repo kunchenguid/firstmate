@@ -434,9 +434,34 @@ fm_live_gate() {
 # cannot be reported as an unparseable build simply for answering `--version`
 # with nothing.
 
+fm_test_fake_simctl() {
+  local fakebin=$1
+  cat > "$fakebin/xcrun" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = simctl ]; then
+  printf 'simctl %s\n' "${*:2}" >> "${FM_SIMCTL_LOG:-/dev/null}"
+fi
+if [ "${1:-} ${2:-} ${3:-}" = "simctl list devices" ]; then
+  cat "${FM_FAKE_SIMCTL_LIST_FILE:-/dev/null}"
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = "simctl shutdown" ] &&
+  jq -e --arg udid "${3:-}" '.devices[][]? | select(.udid == $udid and .state == "Shutdown")' \
+    "${FM_FAKE_SIMCTL_LIST_FILE:-/dev/null}" >/dev/null 2>&1; then
+  exit 1
+fi
+if [ "${1:-} ${2:-}" = "simctl delete" ] && [ "${FM_FAKE_SIMCTL_DELETE_FAIL:-0}" = 1 ]; then
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/xcrun"
+}
+
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
+  fm_test_fake_simctl "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -855,3 +880,7 @@ fm_test_base_path_sans() {
   done
   printf '%s\n' "$dir"
 }
+
+FM_TEST_SIMCTL_BIN=$(fm_test_tmproot fm-test-simctl) || return 1
+fm_test_fake_simctl "$FM_TEST_SIMCTL_BIN" || return 1
+export PATH="$FM_TEST_SIMCTL_BIN:$PATH"

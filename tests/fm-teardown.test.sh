@@ -81,7 +81,7 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
-  add_simctl_stub "$case_dir"
+  fm_test_fake_simctl "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -676,35 +676,6 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
-# Drop an xcrun fake into the case's fakebin so teardown's simulator cleanup is
-# hermetic on every host. Every `simctl` invocation is appended to
-# FM_SIMCTL_LOG as `simctl <subcommand> <args>`; `simctl list devices -j`
-# answers with the JSON file named by FM_FAKE_SIMCTL_LIST_FILE (empty when
-# unset); a `simctl delete` exits 1 when FM_FAKE_SIMCTL_DELETE_FAIL=1.
-# Args: case_dir
-add_simctl_stub() {
-  local case_dir=$1
-  cat > "$case_dir/fakebin/xcrun" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = simctl ]; then
-  printf 'simctl %s\n' "${*:2}" >> "${FM_SIMCTL_LOG:-/dev/null}"
-fi
-if [ "${1:-} ${2:-} ${3:-}" = "simctl list devices" ]; then
-  cat "${FM_FAKE_SIMCTL_LIST_FILE:-/dev/null}"
-  exit 0
-fi
-if [ "${1:-} ${2:-}" = "simctl shutdown" ] &&
-  jq -e --arg udid "${3:-}" '.devices[][]? | select(.udid == $udid and .state == "Shutdown")' \
-    "${FM_FAKE_SIMCTL_LIST_FILE:-/dev/null}" >/dev/null 2>&1; then
-  exit 1
-fi
-if [ "${1:-} ${2:-}" = "simctl delete" ] && [ "${FM_FAKE_SIMCTL_DELETE_FAIL:-0}" = 1 ]; then
-  exit 1
-fi
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/xcrun"
-}
 
 test_local_only_fork_remote_allows() {
   local case_dir rc

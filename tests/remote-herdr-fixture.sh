@@ -29,6 +29,7 @@
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
   mkdir -p "$remote_root/bin"
+  fm_test_fake_simctl "$remote_root/bin"
   cat > "$script" <<SH
 #!/usr/bin/env bash
 set -u
