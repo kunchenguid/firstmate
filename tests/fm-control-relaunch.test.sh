@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -488,6 +490,45 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+relaunch_keeps_an_armed_pr_poll_authenticated() {  # <trace on|off>
+  local trace=$1 dir out rc state url=https://github.com/example/repo/pull/23
+  dir=$(new_case "pr-poll-trace-$trace" rl23)
+  add_ship_task "$dir" rl23 claude
+  state="$dir/home/state"
+  if [ "$trace" = on ]; then
+    printf '%s\n' "$$" > "$state/.lock"
+    printf '%s on\n' "$$" > "$state/.trace-context-effective"
+  fi
+  printf 'pr=%s\n' "$url" >> "$state/rl23.meta"
+  chmod 0600 "$state/rl23.meta"
+  fm_pr_url_parse "$url" || fail "fixture PR URL did not parse"
+  ( fm_pr_poll_prepare "$state" rl23 "$FM_PR_PROVIDER" "$url" "$FM_PR_HOST" "$FM_PR_PATH" \
+      "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" && fm_pr_poll_publish_prepared ) \
+    || fail "could not arm the PR poll fixture"
+  fm_pr_poll_artifacts_valid "$state" rl23 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR poll fixture must authenticate before relaunch"
+
+  out=$(run_control "$dir" rl23 relaunch --note "continuing review work"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl23 control_relaunch_tx)" ] \
+    || fail "the relaunch must record its transaction so the poll check is not vacuous"
+  if [ "$trace" = on ]; then
+    fm_trace_context_valid "$(meta_field "$dir" rl23 traceparent)" \
+      || fail "the traced relaunch must record its carrier so the poll check is not vacuous"
+  fi
+  fm_pr_poll_artifacts_valid "$state" rl23 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "a relaunch must leave an armed PR poll authenticated for the watcher"$'\n'"$(cat "$state/rl23.meta")"
+  pass "fm-control relaunch: an armed PR merge poll stays authenticated (trace $trace)"
+}
+
+test_relaunch_keeps_an_armed_pr_poll_authenticated() {
+  relaunch_keeps_an_armed_pr_poll_authenticated off
+}
+
+test_traced_relaunch_keeps_an_armed_pr_poll_authenticated() {
+  relaunch_keeps_an_armed_pr_poll_authenticated on
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2493,6 +2534,8 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_pr_poll_authenticated
+test_traced_relaunch_keeps_an_armed_pr_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
