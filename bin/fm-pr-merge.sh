@@ -101,10 +101,11 @@
 # absent stops the merge before any state is recorded.
 #
 # A Forgejo merge is refused unless every pre-merge condition holds, each read
-# live at merge time: the pull request is open, mergeable is true, and the
-# combined commit status at the exact current head is success (an unconfigured
-# status, reported as "none", refuses rather than being treated as nothing to
-# check, the same reading GitLab's null head_pipeline gets above). Every
+# live at merge time: the pull request is open, not a draft, mergeable is
+# true, and the combined commit status at the exact current head, read across
+# every status page, is success (an unconfigured status, reported as "none",
+# refuses rather than being treated as nothing to check, the same reading
+# GitLab's null head_pipeline gets above). Every
 # failing condition is reported, not just the first. tea exposes no head-
 # binding flag on its own merge subcommand, so the verified head is instead
 # passed as head_commit_id to a direct call against Forgejo/Gitea's REST API
@@ -1727,7 +1728,10 @@ case "$PROVIDER" in
     # "tea api" reports an HTTP-level failure with exit status 0 (also
     # verified against a real instance), so that output is kept only for the
     # failure report below; the merge is judged solely by reading the pull
-    # request back through forgejo_confirm_merged.
+    # request back through forgejo_confirm_merged. Only an unreadable read-back
+    # (status 2) is retried, a bounded number of times, so a transient read
+    # failure after a landed merge is not reported as unmerged; a definite
+    # merged=false stops at once.
     forgejo_confirm_attempt=1
     while :; do
       forgejo_confirm_rc=0
