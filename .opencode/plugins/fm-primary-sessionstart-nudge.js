@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { clientFromCtx, subscribeEvents } from "./lib/fm-opencode-v2-adapter.js";
 
 const handledSessions = new Set();
 
@@ -57,4 +58,15 @@ export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }
       }
     },
   };
+};
+
+export default {
+  id: "fm-primary-sessionstart-nudge",
+  async setup(ctx) {
+    const hooks = await FmPrimarySessionstartNudge({
+      client: clientFromCtx(ctx),
+      directory: ctx.location?.directory,
+    });
+    return subscribeEvents(ctx, hooks, "fm-primary-sessionstart-nudge");
+  },
 };

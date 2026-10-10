@@ -1060,6 +1060,159 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
+test_opencode_v2_plugin_fires_on_execution_end() {
+  local plugin repo out status terminal
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  # v2 publishes no session.idle: a turn ends with a terminal
+  # session.execution.* event, which must still run the guard.
+  for terminal in succeeded failed interrupted; do
+    repo="$TMP_ROOT/opencode-v2-plugin-$terminal"
+    git init -q "$repo"
+    mkdir -p "$repo/bin"
+    cat > "$repo/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard-fired\n' >&2
+exit 2
+EOF
+    chmod +x "$repo/bin/fm-turnend-guard.sh"
+    out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" REPO="$repo" TERMINAL="$terminal" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+const envelope = (type) => ({ id: type, created: 0, type, data: { sessionID: "session-v2" } });
+const ctx = {
+  location: { directory: process.env.REPO },
+  session: { prompt: async (arg) => prompts.push(arg) },
+  event: {
+    subscribe: async function* () {
+      yield envelope("session.execution.started");
+      yield envelope(`session.execution.${process.env.TERMINAL}`);
+      // A live subscription only stops when the plugin is torn down; keep
+      // this stream open so its end is not reported as an unexpected stop.
+      await new Promise(() => {});
+    },
+  },
+};
+await mod.default.setup(ctx);
+for (let i = 0; i < 40 && prompts.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+if (prompts.length !== 1) {
+  console.error(`expected one guard prompt, got ${prompts.length}`);
+  process.exit(1);
+}
+if (prompts[0].sessionID !== "session-v2" || !prompts[0].text.includes("guard-fired")) {
+  console.error(`unexpected guard prompt: ${JSON.stringify(prompts[0])}`);
+  process.exit(1);
+}
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "OpenCode v2 plugin must run the guard on session.execution.$terminal: $out"
+  done
+  pass ".opencode primary plugin: v2 default export runs the guard when a turn's execution ends"
+}
+
+test_opencode_v2_plugin_reports_unexpected_subscription_stop() {
+  local plugin repo out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  repo="$TMP_ROOT/opencode-v2-subscription-stop"
+  git init -q "$repo"
+  mkdir -p "$repo/bin"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" REPO="$repo" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const reported = [];
+const originalError = console.error;
+console.error = (...args) => {
+  reported.push(args.join(" "));
+};
+const ctx = {
+  location: { directory: process.env.REPO },
+  session: { prompt: async () => {} },
+  event: {
+    subscribe: async function* () {
+      // The stream ends on its own while the plugin is still live: an
+      // unexpected stop that must be reported, not silently discarded.
+      yield { id: "evt_1", created: 0, type: "session.execution.started", data: {} };
+    },
+  },
+};
+await mod.default.setup(ctx);
+for (let i = 0; i < 40 && reported.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+console.error = originalError;
+if (reported.length === 0) {
+  console.error("v2 event subscription stop was not reported");
+  process.exit(1);
+}
+if (!reported[0].includes("fm-primary-turnend-guard") || !reported[0].includes("subscription")) {
+  console.error(`unexpected subscription-stop report: ${reported[0]}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode v2 plugin must report an unexpected event-subscription stop: $out"
+  [ -z "$out" ] || fail "OpenCode v2 subscription-stop test printed output: $out"
+  pass ".opencode primary plugin: unexpected v2 event-subscription stop is reported"
+}
+
+test_opencode_v2_plugin_denies_shell_tool_via_setup() {
+  local plugin repo out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-cd-check.js"
+  repo="$TMP_ROOT/opencode-v2-cd-check"
+  git init -q "$repo"
+  mkdir -p "$repo/bin"
+  cat > "$repo/bin/fm-cd-pretool-check.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'cd-guard denied\n' >&2
+exit 2
+EOF
+  chmod +x "$repo/bin/fm-cd-pretool-check.sh"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" REPO="$repo" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let hook;
+const ctx = {
+  location: { directory: process.env.REPO },
+  tool: {
+    hook: async (name, handler) => {
+      if (name !== "execute.before") throw new Error(`unexpected tool hook: ${name}`);
+      hook = handler;
+    },
+  },
+};
+await mod.default.setup(ctx);
+if (!hook) {
+  console.error("v2 setup did not install an execute.before hook");
+  process.exit(1);
+}
+let denied = null;
+try {
+  await hook({ tool: "shell", input: { command: "cd /tmp" } });
+} catch (error) {
+  denied = error.message;
+}
+if (!denied || !denied.includes("cd-guard denied")) {
+  console.error(`stray shell cd was not denied: ${denied}`);
+  process.exit(1);
+}
+await hook({ tool: "read", input: { filePath: "x" } });
+await hook({ tool: "shell", input: {} });
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode v2 setup must deny a stray shell cd command: $out"
+  pass ".opencode primary plugin: v2 setup installs the shell tool-hook denial"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -2244,6 +2397,9 @@ test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
+test_opencode_v2_plugin_fires_on_execution_end
+test_opencode_v2_plugin_reports_unexpected_subscription_stop
+test_opencode_v2_plugin_denies_shell_tool_via_setup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy

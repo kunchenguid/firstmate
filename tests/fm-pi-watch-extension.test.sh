@@ -4125,6 +4125,7 @@ test_opencode_plugin_package_boundary_is_explicit_esm() {
   cp "$ROOT/.opencode/plugins/package.json" "$fixture/plugins/package.json"
   cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$fixture/plugins/lib/fm-operational-input.js"
+  cp "$ROOT/.opencode/plugins/lib/fm-opencode-v2-adapter.js" "$fixture/plugins/lib/fm-opencode-v2-adapter.js"
   out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 await import(pathToFileURL(process.env.PLUGIN).href);
@@ -4185,6 +4186,72 @@ EOF
   expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
   [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
+}
+
+test_opencode_v2_watch_arm_setup_arms_the_watcher() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-v2-arm-root"
+  home="$TMP_ROOT/opencode-v2-arm-home"
+  log="$TMP_ROOT/opencode-v2-arm.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" \
+    FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const ctx = {
+  location: { directory: process.env.WORKTREE },
+  session: { prompt: async () => {} },
+  event: {
+    subscribe: async function* () {
+      // v2 event envelope: payload under `data`, and a turn ends with a
+      // terminal session.execution.* event that the adapter maps onto idle.
+      yield {
+        id: "evt_1",
+        created: 0,
+        type: "session.execution.succeeded",
+        data: { sessionID: "session-v2" },
+      };
+      // A live subscription only stops when the plugin is torn down; keep
+      // this stream open so its end is not reported as an unexpected stop.
+      await new Promise(() => {});
+    },
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await mod.default.setup(ctx);
+// The arm starts through a cold login shell; under load that can outrun a
+// short span, so give it a generous window (matching the suite's budget
+// comment above) rather than reproducing a host-timing flake.
+for (let i = 0; i < 600 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watch arm did not run through v2 setup");
+  process.exit(1);
+}
+const arm = readFileSync(process.env.FM_ARM_LOG, "utf8");
+if (!arm.includes("arm")) {
+  console.error(arm);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode v2 watch-arm setup must arm the watcher on execution end: $out"
+  [ -z "$out" ] || fail "OpenCode v2 watch-arm arming test printed output: $out"
+  pass "OpenCode watcher arms through the v2 default export setup"
 }
 
 test_opencode_primary_watch_plugin_sources_effective_config() {
@@ -5239,6 +5306,7 @@ test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
+test_opencode_v2_watch_arm_setup_arms_the_watcher
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope

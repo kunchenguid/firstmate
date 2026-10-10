@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { clientFromCtx, subscribeEvents } from "./lib/fm-opencode-v2-adapter.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
@@ -94,4 +95,15 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
       }
     },
   };
+};
+
+export default {
+  id: "fm-primary-turnend-guard",
+  async setup(ctx) {
+    const hooks = await FmPrimaryTurnendGuard({
+      client: clientFromCtx(ctx),
+      directory: ctx.location?.directory,
+    });
+    return subscribeEvents(ctx, hooks, "fm-primary-turnend-guard");
+  },
 };
