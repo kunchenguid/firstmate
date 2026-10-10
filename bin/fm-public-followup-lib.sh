@@ -311,16 +311,16 @@ fm_pf_deliverable_keys() {
 # other, so a singular route off github.com and a plural route on it are both
 # refused, as are an owner or repo of "." or "..".
 fm_pf_pr_url_valid() {
-  local url=$1 rest host owner repo route
+  local review_url=$1 rest host owner repo route
   local LC_ALL=C
-  case "$url" in
+  case "$review_url" in
     *'/-/merge_requests/'*)
       (
         if ! declare -F fm_pr_url_parse >/dev/null 2>&1; then
           # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
           . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
         fi
-        fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gitlab ]
+        fm_pr_url_parse "$review_url" && [ "$FM_PR_PROVIDER" = gitlab ]
       )
       return $?
       ;;
@@ -328,8 +328,8 @@ fm_pf_pr_url_valid() {
   local label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
   local segment='[A-Za-z0-9._-]+'
   local pattern="^https://${label}(\\.${label})*/${segment}/${segment}/(pull|pulls)/[1-9][0-9]*\$"
-  [[ "$url" =~ $pattern ]] || return 1
-  rest=${url#https://}
+  [[ "$review_url" =~ $pattern ]] || return 1
+  rest=${review_url#https://}
   host=${rest%%/*}; rest=${rest#*/}
   owner=${rest%%/*}; rest=${rest#*/}
   repo=${rest%%/*}; rest=${rest#*/}
