@@ -731,13 +731,113 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
   return 2
 }
 
+# The markdown backend's done_keep retention (docs/configuration.md) rotates a
+# closed row out of data/backlog.md into the configured archive (default
+# data/done-archive.md) once it ages past the kept count. tasks-axi's own
+# `show` can never read that row back: its markdown grammar only recognizes
+# in-flight/queued/done-prefixed section headers, so the archive's own
+# "## Archived <date>" headers parse every row beneath them as unstructured
+# text, not a task. This reads the archive file directly with the same row
+# grammar bin/fm-backlog-handoff.sh uses for the live backlog, never writes to
+# it, and accepts a match only when its body already carries a recorded
+# resolution - the identical bar verify_hold_durable applies to a live row.
+captain_markdown_archive_path() {  # <root> <data-dir>; prints the resolved archive path
+  local root=$1 data=$2 configured
+  configured=$(LC_ALL=C awk '
+    function trim(v) { sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); return v }
+    # A "#" inside a quoted value belongs to the value; only an unquoted one
+    # starts a comment.
+    function strip_comment(s,   i, c, q) {
+      q = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q != "") { if (c == q) q = "" }
+        else if (c == "\"" || c == sprintf("%c", 39)) q = c
+        else if (c == "#") return substr(s, 1, i - 1)
+      }
+      return s
+    }
+    BEGIN { insection = 0 }
+    {
+      line = strip_comment($0)
+      line = trim(line)
+      if (line ~ /^\[[^]]+\]$/) { insection = (line == "[markdown]"); next }
+      if (!insection) next
+      if (line ~ /^archive[[:space:]]*=/) {
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        gsub(/^"|"$/, "", line); gsub(/^'\''|'\''$/, "", line)
+        print line
+      }
+    }
+  ' "$root/.tasks.toml" 2>/dev/null | tail -1)
+  if [ -z "$configured" ]; then
+    printf '%s/done-archive.md\n' "$data"
+    return 0
+  fi
+  case "$configured" in
+    /*) printf '%s\n' "$configured" ;;
+    *) printf '%s/%s\n' "$root" "$configured" ;;
+  esac
+}
+
+# Print the body of the done row for <entry> in the markdown backend's
+# configured archive; returns 1 for a non-markdown backend, an absent archive,
+# or an absent row. Read-only: never mutates the archive. A repeated id keeps
+# its newest occurrence, matching how archive blocks accumulate
+# chronologically.
+archived_row_body() {  # <entry>
+  local entry=$1 data root backend archive
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  backend=$(fm_tasks_axi_backend "$root") || return 1
+  [ "$backend" = markdown ] || return 1
+  archive=$(captain_markdown_archive_path "$root" "$data")
+  [ -f "$archive" ] || return 1
+  LC_ALL=C awk -v key="$entry" '
+    /^- \[[ x]\] / {
+      checked = ($0 ~ /^- \[x\] /)
+      rest = $0
+      sub(/^- \[[ x]\] +/, "", rest)
+      id = rest
+      sub(/[ \t].*/, "", id)
+      if (id == key && checked) {
+        capturing = 1
+        matched = 1
+        body = ""
+      } else {
+        capturing = 0
+      }
+      next
+    }
+    /^##[[:space:]]+/ { capturing = 0; next }
+    capturing {
+      line = $0
+      sub(/^  /, "", line)
+      body = body line "\n"
+    }
+    END { if (matched) { printf "%s", body; exit 0 } exit 1 }
+  ' "$archive"
+}
+
+# Print "<entry> archived-answer" when the archived done row for <entry>
+# already carries a recorded resolution; returns 1 otherwise.
+resolve_archived_answer_entry() {  # <entry>
+  local entry=$1 body
+  body=$(archived_row_body "$entry") || return 1
+  body_has_resolution_record "$body" || return 1
+  printf '%s archived-answer' "$entry"
+}
+
 # Resolve one inventory entry or channel key to the task that carries it: the
 # exact task id when it exists, else the legacy derived identity, else - on the
-# beads backend - the migrated row the markdown-to-beads hold migration wrote.
-# Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
-# migrated-prefix, so a caller can record which evidence carried the attestation.
+# beads backend - the migrated row the markdown-to-beads hold migration wrote,
+# else - on the markdown backend - a done row the archive rotated the entry
+# into that already carries a recorded resolution.
+# Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note,
+# migrated-prefix, or archived-answer, so a caller can record which evidence
+# carried the attestation.
 resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
-  local origin=$1 entry=$2 legacy migrated rc
+  local origin=$1 entry=$2 legacy migrated archived rc
   if task_show "$entry"; then
     printf '%s exact' "$entry"
     return 0
@@ -756,8 +856,16 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
     2) return 2 ;;
     124) return 124 ;;
   esac
+  archived=$(resolve_archived_answer_entry "$entry") && {
+    printf '%s' "$archived"
+    return 0
+  }
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
+    archived=$(resolve_archived_answer_entry "$legacy") && {
+      printf '%s' "$archived"
+      return 0
+    }
     fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $legacy also resolves to nothing"
   fi
   fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)"
@@ -879,14 +987,22 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   fi
   id=${resolved%% *}
   how=${resolved##* }
-  verify_hold_durable "$id"
-  id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
-  validate_slug backend-task-id "$id"
-  stored=$(body_hold_origin "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
   origin_id=$origin
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     origin_id=$(task_identity "$origin") || exit $?
-    [ "$id" != "$origin_id" ] || refuse_self_inventory "$origin" "$entry"
+  fi
+  # archived-answer already proved durability by finding a recorded resolution
+  # in the archive row itself; the id no longer exists in the live backlog by
+  # design, so verify_hold_durable's task_show would misreport it as absent.
+  if [ "$how" = archived-answer ]; then
+    stored=$(body_hold_origin "$(archived_row_body "$id")")
+  else
+    verify_hold_durable "$id"
+    id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
+    validate_slug backend-task-id "$id"
+    stored=$(body_hold_origin "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
+    [ "$id" != "$origin_id" ] || [ "$origin" = "$BINDING_ANY" ] || [ -z "$origin" ] \
+      || refuse_self_inventory "$origin" "$entry"
   fi
   if [ -n "$stored" ]; then
     if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
