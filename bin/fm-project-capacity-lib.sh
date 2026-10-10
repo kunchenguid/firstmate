@@ -10,7 +10,7 @@
 # it only to spend full-context turns retrying the resource. A deferred task
 # keeps its queued backlog item and is dispatched again when a place frees.
 # Without a declaration nothing changes and dispatch stays uncapped
-# (AGENTS.md section 7).
+# (the `task-lifecycle` skill).
 #
 # This file is the single owner of the declaration format, of what holds a
 # place, and of the admission verdict. docs/configuration.md "Project capacity"

@@ -311,7 +311,7 @@ EOF
   pass "fm-startup-network: a report-publication failure is failed, diagnosed, and still wakes"
 }
 
-# A clean success is not captain-facing progress (AGENTS.md section 8): it must
+# A clean success is not captain-facing progress (the `supervision-protocol` skill): it must
 # never become a main-blocking wake row, whether or not a session was there to
 # claim and harvest it inline. The result stays durable and readable through
 # `report` either way.

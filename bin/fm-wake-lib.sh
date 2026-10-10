@@ -387,7 +387,7 @@ fm_afk_daemon_owns_supervision() {
 # as "away". Only an exact first-line "quiet" ever reads as "quiet" -
 # kunchenguid/firstmate#2356's standing captain-present quiet mode, entered
 # only through /quiet and exited only through an explicit /quiet off
-# (AGENTS.md section 8's away-mode stub).
+# (the `supervision-protocol` skill's away-mode stub).
 fm_afk_mode() {
   local state=$1 mode
   mode=$(head -n 1 "$state/.afk" 2>/dev/null) || { printf '%s\n' away; return 0; }

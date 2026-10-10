@@ -56,8 +56,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # Verified backend adapters. Extend only after a backend gets its own
-# bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
-# section 4's harness-verification discipline. herdr is verified (P2;
+# bin/backends/<name>.sh and empirical verification, mirroring the harness-dispatch
+# skill's harness-verification discipline. herdr is verified (P2;
 # data/fm-backend-design-d7/herdr-addendum.md) and has its own required CI lane,
 # with current coverage in docs/herdr-backend.md and
 # docs/verification/runtime-backends.md. zellij is EXPERIMENTAL (P3;
