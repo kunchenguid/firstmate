@@ -216,7 +216,7 @@ if ! fm_brief_task_content_valid "$SCOUT_BRIEF"; then
   exit 1
 fi
 if ADDRESS_LINE=$(fm_brief_intent_address_line "$SCOUT_BRIEF"); then
-  echo "error: $SCOUT_BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the requirement in neutral words without a Captain label or address before promotion, since the heading already records provenance" >&2
+  echo "error: $SCOUT_BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before promotion, since the heading already records provenance" >&2
   exit 1
 fi
 if fm_brief_task_heading_present "$SCOUT_BRIEF" "## Captain's intent"; then
@@ -226,7 +226,7 @@ else
   INTENT_BODY=$(fm_brief_marked_captain_words "$TASK_BODY")
 fi
 if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
-  echo "error: $SCOUT_BRIEF has no provenance-marked Captain's intent; add the requirement in neutral words before promotion" >&2
+  echo "error: $SCOUT_BRIEF has no provenance-marked Captain's intent; add the captain's actual words before promotion" >&2
   exit 1
 fi
 
