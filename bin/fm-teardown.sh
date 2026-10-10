@@ -3750,7 +3750,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 if [ "${ID#pool-}" = "$ID" ] && command -v xcrun >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   for sim_udid in $(xcrun simctl list devices -j 2>/dev/null |
     jq -r --arg n "fm-$ID" '.devices[][]? | select(.name == $n) | .udid' 2>/dev/null); do
-    xcrun simctl shutdown "$sim_udid" >/dev/null 2>&1
+    xcrun simctl shutdown "$sim_udid" >/dev/null 2>&1 || true
     xcrun simctl delete "$sim_udid" >/dev/null 2>&1 || echo "warning: could not delete simulator fm-$ID ($sim_udid)" >&2
   done
 fi

@@ -81,6 +81,7 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  add_simctl_stub "$case_dir"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -692,6 +693,11 @@ if [ "${1:-} ${2:-} ${3:-}" = "simctl list devices" ]; then
   cat "${FM_FAKE_SIMCTL_LIST_FILE:-/dev/null}"
   exit 0
 fi
+if [ "${1:-} ${2:-}" = "simctl shutdown" ] &&
+  jq -e --arg udid "${3:-}" '.devices[][]? | select(.udid == $udid and .state == "Shutdown")' \
+    "${FM_FAKE_SIMCTL_LIST_FILE:-/dev/null}" >/dev/null 2>&1; then
+  exit 1
+fi
 if [ "${1:-} ${2:-}" = "simctl delete" ] && [ "${FM_FAKE_SIMCTL_DELETE_FAIL:-0}" = 1 ]; then
   exit 1
 fi
@@ -711,11 +717,12 @@ test_local_only_fork_remote_allows() {
   printf 'fm-branch-outcome-index-v1\t5\t0\t-\n' > "$case_dir/state/.task-x1.branch-outcome-index"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_SIMCTL_LOG="$case_dir/simctl.log" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
+  assert_grep "simctl list devices" "$case_dir/simctl.log" "fork-allow: teardown did not use the shared simulator stub"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
   [ ! -e "$case_dir/state/.task-x1.branch-outcome-index" ] \
     || fail "fork-allow: teardown left the task's branch outcome index behind"
@@ -4674,8 +4681,7 @@ test_teardown_deletes_only_the_task_owned_simulator() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "task work"
   add_fork_with_pushed_branch "$case_dir"
-  add_simctl_stub "$case_dir"
-  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-TASK-X1","name":"fm-task-x1","state":"Shutdown"},{"udid":"SIM-UNRELATED","name":"fm-other-task","state":"Booted"},{"udid":"SIM-UNRELATED-2","name":"some-simulator","state":"Shutdown"}]}}' \
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-TASK-X1","name":"fm-task-x1","state":"Shutdown"},{"udid":"SIM-TASK-X1-BOOTED","name":"fm-task-x1","state":"Booted"},{"udid":"SIM-UNRELATED","name":"fm-other-task","state":"Booted"},{"udid":"SIM-UNRELATED-2","name":"some-simulator","state":"Shutdown"}]}}' \
     > "$case_dir/simctl-devices.json"
 
   rc=0
@@ -4687,6 +4693,12 @@ test_teardown_deletes_only_the_task_owned_simulator() {
     "sim-cleanup: the task-owned simulator was not shut down"
   assert_grep "simctl delete SIM-TASK-X1" "$case_dir/simctl.log" \
     "sim-cleanup: the task-owned simulator was not deleted"
+  assert_grep "simctl shutdown SIM-TASK-X1-BOOTED" "$case_dir/simctl.log" \
+    "sim-cleanup: the booted task-owned simulator was not shut down"
+  assert_grep "simctl delete SIM-TASK-X1-BOOTED" "$case_dir/simctl.log" \
+    "sim-cleanup: cleanup stopped before deleting the booted simulator"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "sim-cleanup: shutdown failure prevented task record removal"
   if grep -q 'SIM-UNRELATED' "$case_dir/simctl.log"; then
     fail "sim-cleanup: teardown touched an unrelated simulator: $(cat "$case_dir/simctl.log")"
   fi
@@ -4699,7 +4711,6 @@ test_teardown_tolerates_absent_task_simulator() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "task work"
   add_fork_with_pushed_branch "$case_dir"
-  add_simctl_stub "$case_dir"
   printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-UNRELATED","name":"fm-other-task","state":"Shutdown"}]}}' \
     > "$case_dir/simctl-devices.json"
 
@@ -4722,7 +4733,6 @@ test_teardown_simulator_delete_failure_only_warns() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "task work"
   add_fork_with_pushed_branch "$case_dir"
-  add_simctl_stub "$case_dir"
   printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-TASK-X1","name":"fm-task-x1","state":"Shutdown"}]}}' \
     > "$case_dir/simctl-devices.json"
 
@@ -4734,6 +4744,10 @@ test_teardown_simulator_delete_failure_only_warns() {
   expect_code 0 "$rc" "sim-delete-fails: a failed simulator delete must not fail teardown"
   assert_grep "warning: could not delete simulator fm-task-x1 (SIM-TASK-X1)" "$case_dir/stderr" \
     "sim-delete-fails: the delete failure did not surface as a warning"
+  assert_grep "simctl delete SIM-TASK-X1" "$case_dir/simctl.log" \
+    "sim-delete-fails: shutdown failure prevented the delete attempt"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "sim-delete-fails: simulator cleanup failure prevented task record removal"
   pass "a failed simulator delete is a warning, not a teardown failure"
 }
 
@@ -4743,7 +4757,6 @@ test_teardown_pool_task_id_never_queries_simctl() {
   write_meta "$case_dir" local-only ship pool-3
   wt_commit "$case_dir" "pool work"
   add_fork_with_pushed_branch "$case_dir" pool-3
-  add_simctl_stub "$case_dir"
   printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-POOL-3","name":"fm-pool-3","state":"Shutdown"}]}}' \
     > "$case_dir/simctl-devices.json"
 
