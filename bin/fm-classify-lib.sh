@@ -2127,7 +2127,7 @@ _fm_status_open_activities_stream() {
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      done|failed|needs-decision|blocked|"$resolve"|"$held")
+      done|needs-validation|failed|needs-decision|blocked|"$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;

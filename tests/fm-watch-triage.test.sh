@@ -399,6 +399,10 @@ resolved [key=phase7]: Phase 7 completed and moved to Done
 paused [key=legal]: awaiting external counsel
 resolved [key=legal]: legal item returned to the queue
 working [key=phase8]: Phase 8 started
+working [key=validation-working]: implementation started
+paused [key=validation-paused]: implementation paused
+needs-validation [key=validation-working]: committed c118078, 706 tests
+needs-validation [key=validation-paused]: committed c118079, 707 tests
 EOF
   activity=$(status_open_activities "$state/activity.status")
   printf '%s' "$activity" | grep -F $'phase8\tworking\tPhase 8 started' >/dev/null \
@@ -409,6 +413,10 @@ EOF
     && fail "a same-key terminal event did not supersede the older working phase"
   printf '%s' "$activity" | grep -F $'legal\t' >/dev/null \
     && fail "a keyed resolved event did not close the declared pause"
+  printf '%s' "$activity" | grep -F $'validation-working\t' >/dev/null \
+    && fail "a keyed validation handoff did not close the implementation phase"
+  printf '%s' "$activity" | grep -F $'validation-paused\t' >/dev/null \
+    && fail "a keyed validation handoff did not close the paused implementation phase"
   printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
