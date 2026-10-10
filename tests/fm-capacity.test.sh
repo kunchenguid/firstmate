@@ -179,6 +179,11 @@ run_capacity_jq() {
   PATH="$fakebin:$PATH" FM_HOME="$home" "$CAPACITY" "$@" 2>&1
 }
 
+# capacity_doc <home> <fakebin>: the --json document alone, stderr dropped.
+capacity_doc() {
+  PATH="$2:$PATH" FM_HOME="$1" "$CAPACITY" --json 2>/dev/null
+}
+
 test_config_keys_parse_and_refuse_guessing() {
   local home fakebin out rc
   home=$(make_home keys 1 0)
@@ -232,17 +237,19 @@ test_fresh_beat_replaces_probes() {
   assert_contains "$out" 'capacity: free_lanes=3 reason=ok lanes=1 target=4 secondmates=0 load1=9.00 cores=8 ' \
     "a fresh ok beat must replace the raw load probe"
   assert_contains "$out" 'Pressure: ok from beat.' "the summary must name the beat basis"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals 'beat|ok|13.5|25.2|0.29|0.5|1.25|24.7|false|disk:500|beat-host' \
     "$(printf '%s\n' "$doc" | jq -r '.pressure | [.basis,.level,.avail_gb,.total_gb,.runq_per_core,.swap_rate_pps_1m,.mem_stall_pct,.load1,.on_battery,(.disks[0] | "\(.label):\(.free_gb)")] | join("|")')|$(printf '%s\n' "$doc" | jq -r .machine)" \
     "the document must carry the beat's own numbers and host"
   write_beat "$home/beat.json" warn 13.5 25.2 0.29 2.0 false "swapping 410 pages/s"
   out=$(run_capacity_jq "$home" "$fakebin")
   assert_contains "$out" 'free_lanes=0 reason=pressure ' "a warn beat must close lanes"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
-  assert_equals 'false|pressure warn: swapping 410 pages/s' \
-    "$(printf '%s\n' "$doc" | jq -r '"\(.verdict.admit)|\(.verdict.reasons | join(","))"')" \
-    "the verdict must refuse with the beat's reason"
+  doc=$(capacity_doc "$home" "$fakebin")
+  assert_equals 'false|pressure warn|pressure_why=1' \
+    "$(printf '%s\n' "$doc" | jq -r '"\(.verdict.admit)|\(.verdict.reasons | join(","))|\(.pressure.why | join(","))"')" \
+    "the verdict must refuse with the beat's level and only count its reasons"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CAPACITY" --json 2>&1 >/dev/null)
+  assert_contains "$out" 'fm-capacity: reason: pressure warn: swapping 410 pages/s' "the beat's own reason must stay on stderr"
   pass "a fresh beat replaces probes, and its warn level closes lanes with its reason"
 }
 
@@ -254,29 +261,29 @@ test_late_stale_missing_and_malformed_beats() {
   printf '4\npressure-file %s\n' "$home/beat.json" > "$home/config/lane-capacity"
   write_beat "$home/beat.json" ok 13.5 25.2 0.29 2.0 false
   fm_touch_epoch "$((now - 45))" "$home/beat.json"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals 'beat|true' "$(printf '%s\n' "$doc" | jq -r '"\(.pressure.basis)|\(.pressure.why | any(test("^beat-host: beat 4[5-9] s old$")))"')" \
     "a late beat must still count, with its age in why"
   fm_touch_epoch "$((now - 600))" "$home/beat.json"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals 'probe|ok|true' "$(printf '%s\n' "$doc" | jq -r '"\(.pressure.basis)|\(.pressure.level)|\(.pressure.why | any(test("^beat-host: beat 60[0-9] s old$")))"')" \
     "a stale beat must fall back to probes with its age in why"
   out=$(run_capacity_jq "$home" "$fakebin")
   assert_contains "$out" 'capacity: free_lanes=3 reason=ok ' "a stale beat must not close lanes"
   rm -f "$home/beat.json"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals 'probe|pressure-file 1: beat absent' "$(printf '%s\n' "$doc" | jq -r '"\(.pressure.basis)|\(.pressure.why | join(","))"')" \
     "a missing beat must fall back to probes"
   printf '{not json' > "$home/beat.json"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals 'probe|pressure-file 1: beat unreadable' "$(printf '%s\n' "$doc" | jq -r '"\(.pressure.basis)|\(.pressure.why | join(","))"')" \
     "a malformed beat must fall back to probes"
   printf '{"schema":"lookout.beat","schema_version":"2.0","machine":{}}' > "$home/beat.json"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals 'probe|pressure-file 1: not a lookout.beat 1.x document' "$(printf '%s\n' "$doc" | jq -r '"\(.pressure.basis)|\(.pressure.why | join(","))"')" \
     "a foreign document must fall back to probes"
   fakebin=$(make_probes "$TMP_ROOT/p-stale-none" "" "" "" "")
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals 'none|unknown|true' "$(printf '%s\n' "$doc" | jq -r '"\(.pressure.basis)|\(.pressure.level)|\(.verdict.admit)"')" \
     "no beat and no probe must leave pressure unknown without refusing"
   pass "late beats count, and stale, missing, malformed, or foreign beats fall back to probes"
@@ -289,13 +296,57 @@ test_several_pressure_files() {
   write_beat "$home/vm.json" ok 13.5 25.2 0.29 2.0 false "" 700
   write_beat "$home/win.json" critical 2.0 64 1.5 9.0 false "memory 6% available" 40
   printf '4\nmin-disk-gb 60\npressure-file %s\npressure-file %s\n' "$home/vm.json" "$home/win.json" > "$home/config/lane-capacity"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
-  assert_equals 'critical|13.5|2|beat-host: memory 6% available' \
+  doc=$(capacity_doc "$home" "$fakebin")
+  assert_equals 'critical|13.5|2|beat-host: pressure_why=1' \
     "$(printf '%s\n' "$doc" | jq -r '.pressure | "\(.level)|\(.avail_gb)|\(.disks | length)|\(.why | join(","))"')" \
     "the worst fresh level must win while the first fresh file supplies memory"
-  assert_equals 'disk: beat-host disk 40 GB free, under 60 GB,pressure critical: beat-host: memory 6% available' \
+  assert_equals 'disk: beat-host disk 40 GB free, under 60 GB,pressure critical' \
     "$(printf '%s\n' "$doc" | jq -r '.verdict.reasons | join(",")')" "every fresh disk row must count against min-disk-gb"
   pass "several pressure files: worst level wins, first supplies memory, every disk counts"
+}
+
+test_beat_with_missing_fields() {
+  local home fakebin out doc
+  home=$(make_home sparse 1 0)
+  fakebin=$(make_probes "$TMP_ROOT/p-sparse" 24.00 60 32 20971520)
+  cat > "$home/beat.json" <<'JSON'
+{"schema":"lookout.beat","schema_version":"1.0","host":"mac-host",
+ "machine":{"load":{"runq_per_core":0.2},"mem":{"total_gb":16,"swap_rate_pps_1m":0},
+  "on_battery":false,"pressure":{"level":"ok","why":[]},
+  "beat":{"errors":["sensor /dev/x unreadable","psi absent"]}}}
+JSON
+  printf '4
+min-avail-gb 2
+min-disk-gb 60
+max-load1 20
+pressure-file %s
+' "$home/beat.json" > "$home/config/lane-capacity"
+  doc=$(capacity_doc "$home" "$fakebin")
+  assert_equals 'beat|ok|null|16|null|null|false|beat_errors=2|mac-host' \
+    "$(printf '%s\n' "$doc" | jq -r '.pressure | [.basis,.level,.avail_gb,.total_gb,.mem_stall_pct,.load1,.on_battery,(.why | join(","))] | map(tostring) | join("|")')|$(printf '%s\n' "$doc" | jq -r .machine)" \
+    "missing beat fields must stay empty, not shift later fields"
+  assert_equals 'disk: home 20.0 GB free, under 60 GB,load: 24.00 over its max-load1 20' \
+    "$(printf '%s\n' "$doc" | jq -r '.verdict.reasons | join(",")')" \
+    "limits must fall back to probes where the beat is silent"
+  printf '%s\n' "$doc" > "$TMP_ROOT/sparse-doc.json"
+  assert_no_grep /dev/x "$TMP_ROOT/sparse-doc.json" "beat error text must never be published"
+  out=$(run_capacity_jq "$home" "$fakebin")
+  assert_contains "$out" 'capacity: free_lanes=0 reason=disk,load ' "probe fallbacks must close lanes"
+  pass "a beat with missing fields keeps its fields aligned and limits fall back to probes"
+}
+
+test_cap_only_memory_rule_unchanged() {
+  local home fakebin out
+  home=$(make_home cap-only 1 0)
+  fakebin=$(make_probes "$TMP_ROOT/p-cap-only" 0.50 11 8 20971520)
+  printf '%s\n' 8589934592 > "$fakebin/memsize"
+  printf '4\n' > "$home/config/lane-capacity"
+  out=$(run_capacity "$home" "$fakebin")
+  assert_contains "$out" 'capacity: free_lanes=3 reason=ok ' "a cap-only config must keep the under-10-percent memory rule"
+  printf '4\nmin-avail-gb 0\n' > "$home/config/lane-capacity"
+  out=$(run_capacity "$home" "$fakebin")
+  assert_contains "$out" 'capacity: free_lanes=0 reason=memory ' "min-avail-gb must apply the lane footprint"
+  pass "the lane footprint memory rule applies only with min-avail-gb"
 }
 
 test_limits_and_admit() {
@@ -379,6 +430,11 @@ test_publish_document() {
   expect_code 0 "$rc" "publish with invalid config"
   assert_equals 'invalid|null|false' "$(jq -r '"\(.cap.status)|\(.cap.target)|\(.verdict.admit)"' "$home/state/lane-capacity.json")" \
     "an invalid config must be published as invalid"
+  printf '6\n/mnt/c/fm-tower-reserved.flag tower\n' > "$home/config/lane-capacity"
+  FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 run_capacity_jq "$home" "$fakebin" --publish >/dev/null
+  assert_equals 'config/lane-capacity: line 2: unknown key' "$(jq -r '.verdict.reasons | join(",")' "$home/state/lane-capacity.json")" \
+    "an invalid config line must be published by its line and a fixed reason"
+  assert_no_grep fm-tower "$home/state/lane-capacity.json" "a config line's raw text must never be published"
   pass "publish is opt-in, private, throttled, records boots, and publishes an invalid config as invalid"
 }
 
@@ -397,21 +453,21 @@ SH
   chmod +x "$fakebin/ioreg" "$fakebin/quota-axi"
   printf '3\ncaptain-idle 300\nquota-provider claude\n' > "$home/config/lane-capacity"
   printf '%s\n' 12000000000 > "$fakebin/idle-ns"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals 'present|{"provider":"claude","runway":"projected_exhaustion"}' \
     "$(printf '%s\n' "$doc" | jq -c -r '"\(.captain)|\(.quota | tojson)"')" "recent input must read present, quota its all-models runway"
   printf '%s\n' 900000000000 > "$fakebin/idle-ns"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals idle "$(printf '%s\n' "$doc" | jq -r .captain)" "old input must read idle"
   printf 'version: 2\nwords: |\n  gone\n' > "$home/state/.afk-contract"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals away "$(printf '%s\n' "$doc" | jq -r .captain)" "an away record must read away"
   printf '%s\n' "$doc" > "$TMP_ROOT/captain-doc.json"
   assert_no_grep 900000 "$TMP_ROOT/captain-doc.json" "raw idle time must never be published"
   assert_no_grep HIDIdleTime "$TMP_ROOT/captain-doc.json" "raw idle input must never be published"
   printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/quota-axi"
   rm -f "$home/state/.afk-contract" "$fakebin/ioreg"
-  doc=$(run_capacity_jq "$home" "$fakebin" --json)
+  doc=$(capacity_doc "$home" "$fakebin")
   assert_equals 'unknown|unknown' "$(printf '%s\n' "$doc" | jq -r '"\(.captain)|\(.quota.runway)"')" \
     "unreadable presence and quota must read unknown"
   pass "captain presence and quota runway publish derived words only, unknown when unreadable"
@@ -462,6 +518,8 @@ test_config_keys_parse_and_refuse_guessing
 test_fresh_beat_replaces_probes
 test_late_stale_missing_and_malformed_beats
 test_several_pressure_files
+test_beat_with_missing_fields
+test_cap_only_memory_rule_unchanged
 test_limits_and_admit
 test_publish_document
 test_captain_and_quota
