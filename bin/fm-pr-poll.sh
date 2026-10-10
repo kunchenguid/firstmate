@@ -56,9 +56,23 @@ case "$provider" in
     [ "$host" = github.com ] || exit 0
     owner=${path%%/*}
     repo=${path#*/}
+    # Mirrors fm_pr_github_owner_valid in bin/fm-pr-lib.sh, including the one
+    # "_<short code>" suffix of an Enterprise Managed User login.
     [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
+    owner_base=$owner
     case "$owner" in
-      *[!A-Za-z0-9-]*|-*|*-|*--*) exit 0 ;;
+      *_*_*) exit 0 ;;
+      *_*)
+        owner_base=${owner%_*}
+        owner_suffix=${owner#*_}
+        [ "${#owner_suffix}" -ge 3 ] && [ "${#owner_suffix}" -le 8 ] || exit 0
+        case "$owner_suffix" in
+          *[!A-Za-z0-9]*) exit 0 ;;
+        esac
+        ;;
+    esac
+    case "$owner_base" in
+      ''|*[!A-Za-z0-9-]*|-*|*-|*--*) exit 0 ;;
     esac
     [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
     case "$repo" in
