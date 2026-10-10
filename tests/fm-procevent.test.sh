@@ -1433,6 +1433,15 @@ i=$((n - 1))
 case "${plan[$i]}" in
   interrupt)
     printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'; exit 1 ;;
+  interrupt-help|interrupt-multi-help|interrupt-extra|interrupt-overflow)
+    printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'
+    printf 'help[2]: Run `lavish-axi server --verbose` or inspect `~/.lavish-axi/server.log` (`LAVISH_AXI_STATE_DIR/server.log` when set) for server startup or crash diagnostics,Re-run the last `lavish-axi poll <html-file>` command after the server is healthy\n'
+    case "${plan[$i]}" in
+      interrupt-multi-help) printf 'help: retry\nhelp[12]: retry again\n' ;;
+      interrupt-extra) printf 'unexpected content\n' ;;
+      interrupt-overflow) printf 'help: '; printf 'x%.0s' {1..65536}; printf '\n' ;;
+    esac
+    exit 1 ;;
   near-interrupt)
     printf 'error: Lavish Editor poll response was interrupted \ncode: SERVER_ERROR\n'; exit 1 ;;
   other-server-error)
@@ -1495,6 +1504,35 @@ assert_contains "$(wake_payloads "$HRETRY")" "procevent lavish $retry_id 1" \
 assert_grep 'ship it' "$(first_result "$HRETRY" "$retry_id")" \
   "the announced result is the captain's feedback, not the interruption"
 pass "a transient Lavish poll interruption is retried quietly and never announced"
+
+# Lavish 0.1.78 appends help diagnostics; only those complete lines are retryable.
+for help_case in interrupt-help interrupt-multi-help interrupt-extra interrupt-overflow; do
+  HELP_HOME="$TMP_ROOT/$help_case-home"; new_home "$HELP_HOME"
+  HELP_ART="$TMP_ROOT/$help_case.html"
+  printf '<h1>help diagnostics</h1>\n' > "$HELP_ART"
+  lavish_session "$HELP_ART"
+  help_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$HELP_ART")
+  fm_test_track_procevent_home "$HELP_HOME"
+  LAVISH_COUNT="$TMP_ROOT/$help_case-count"; LAVISH_SCRIPT="$help_case feedback"
+  PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HELP_HOME" \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$HELP_ART" >/dev/null
+  PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HELP_HOME" reconcile >/dev/null
+  wait_for "$HELP_HOME/state/.wake-queue" || fail "$help_case produced no wake"
+  expected_polls=2
+  case "$help_case" in interrupt-extra|interrupt-overflow) expected_polls=1 ;; esac
+  [ "$(cat "$LAVISH_COUNT")" = "$expected_polls" ] || fail "$help_case poll count"
+  [ "$(count_results "$HELP_HOME" "$help_id")" = 1 ] || fail "$help_case result count"
+  [ "$(wake_payloads "$HELP_HOME" | grep -c .)" = 1 ] || fail "$help_case wake count"
+  if [ "$expected_polls" = 2 ]; then
+    assert_grep 'ship it' "$(first_result "$HELP_HOME" "$help_id")" "$help_case quietly retries"
+  else
+    PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$TMP_ROOT/$help_case-expected-count" \
+      LAVISH_SCRIPT="$help_case" lavish-axi poll "$HELP_ART" > "$TMP_ROOT/$help_case-expected" || true
+    cmp "$TMP_ROOT/$help_case-expected" "$(first_result "$HELP_HOME" "$help_id")" \
+      || fail "$help_case changed captured bytes"
+  fi
+  pass "$help_case preserves the narrow interrupted-poll retry contract"
+done
 
 # --- end-user-aligned regression: a retried poll does not resubmit the reply ---
 # The worker hands its round reply to the adapter once. When the first poll of
