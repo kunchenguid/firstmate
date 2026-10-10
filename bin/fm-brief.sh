@@ -692,6 +692,7 @@ $RULE1
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   Never add a "Generated with Claude Code" (or similar tool-attribution) footer to a commit message or PR description, and never add an agent name as a commit or PR co-author.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
