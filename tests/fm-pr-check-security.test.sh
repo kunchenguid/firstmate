@@ -1197,6 +1197,44 @@ test_live_artifact_single_link_and_privacy_validation() {
   pass "live poll and custom-check artifacts require private single-link files"
 }
 
+test_custom_registration_refuses_empty_content() {
+  local kind existing dir state rc
+  for kind in empty whitespace; do
+    for existing in absent present; do
+      dir="$TMP_ROOT/custom-registration-$kind-$existing"
+      state="$dir/home/state"
+      mkdir -p "$state"
+      case "$kind" in
+        empty) : > "$state/custom.check.sh" ;;
+        whitespace) printf ' \t\n\r\v\f \n' > "$state/custom.check.sh" ;;
+      esac
+      chmod 0700 "$state/custom.check.sh"
+      if [ "$existing" = present ]; then
+        printf 'existing receipt\nkeep these bytes\n' > "$state/custom.check-trust"
+        chmod 0600 "$state/custom.check-trust"
+        cp "$state/custom.check-trust" "$dir/original-trust"
+      fi
+      set +e
+      FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
+      rc=$?
+      set -e
+      [ "$rc" -eq 1 ] || fail "$kind custom check registration did not exit 1"
+      grep -F 'custom check is empty or whitespace-only' "$dir/register.err" >/dev/null \
+        || fail "$kind custom check refusal did not explain the empty content"
+      ! grep -F 'registered:' "$dir/register.out" "$dir/register.err" >/dev/null \
+        || fail "$kind custom check refusal reported registration"
+      if [ "$existing" = present ]; then
+        cmp -s "$dir/original-trust" "$state/custom.check-trust" \
+          || fail "$kind custom check refusal changed the existing trust receipt"
+      else
+        [ ! -e "$state/custom.check-trust" ] \
+          || fail "$kind custom check refusal created a trust receipt"
+      fi
+    done
+  done
+  pass "empty and whitespace-only custom checks are refused without changing trust receipts"
+}
+
 install_final_publication_fault() {
   local dir=$1
   cat > "$dir/fakebin/mv" <<'SH'
@@ -3475,6 +3513,7 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
+test_custom_registration_refuses_empty_content
 test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts
 test_device_rerecord_serializes_direct_rearm
