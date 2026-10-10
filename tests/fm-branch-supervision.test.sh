@@ -779,6 +779,12 @@ test_main_owned_actions_refuse_the_branch_actor() {
   [ "$status" -eq 6 ] || fail "branch fm-spawn exited $status, not 6: $out"
   assert_contains "$out" "new-task spawn (fm-spawn) refused" "spawn refusal lost its action label"
 
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch fm-spawn with no task id exited $status, not 6: $out"
+  assert_contains "$out" "new-task spawn (fm-spawn) refused" "missing-task refusal preceded the branch partition"
+
   # The same calls as MAIN fail on their ORDINARY validation instead - the
   # partition guard never fires for the main actor.
   out=$(FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" task-x 2>&1)
@@ -1308,7 +1314,7 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   fm_write_meta "$home/state/task-a.meta" "window=fm-task-a" "kind=ship"
   fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+    "$ROOT/bin/fm-spawn.sh" task-new projects/none --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 6 ] || fail "branch fm-spawn still hit the partition under the record: $out"
   assert_contains "$out" "main is parked" "the spawn relocation did not announce itself"
@@ -1316,12 +1322,12 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   assert_not_contains "$out" "caps concurrent workers" "one ordinary task under a cap of 2 was refused"
   fm_write_meta "$home/state/task-b.meta" "window=fm-task-b" "kind=ship"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+    "$ROOT/bin/fm-spawn.sh" task-new projects/none --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -eq 1 ] || fail "spend-cap refusal exited $status, not 1: $out"
   assert_contains "$out" "caps concurrent workers at 2 and 2 ordinary task(s) are live" "spend-cap refusal lost its count"
   # The cap binds main too: the posture, not the actor, is what caps spend.
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new projects/none --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -eq 1 ] || fail "main spawn past the cap exited $status, not 1: $out"
   assert_contains "$out" "caps concurrent workers" "main was not held to the spend cap"
@@ -1347,7 +1353,7 @@ fi
 exec "\$REAL" "\$@"
 WRAPPER
   chmod +x "$root/bin/fm-afk-contract.sh"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1) || true
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-spawn.sh" task-new projects/none --mode no-mistakes --yolo off 2>&1) || true
   assert_not_contains "$out" "caps concurrent workers" "a field-read after archive refused a main spawn via the spend cap"
   assert_not_contains "$out" "no readable spend cap" "a field-read after archive killed the spawn instead of restoring attended behavior"
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null || fail "away re-entry failed"
@@ -1359,7 +1365,7 @@ WRAPPER
   [ "$status" -eq 6 ] || fail "an archived record still relocated the merge (exit $status): $out"
   assert_contains "$out" "$refusal" "the attended refusal changed after archive"
   assert_not_contains "$out" "main is parked" "an archived record still announced a relocation"
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" task-new projects/none --mode no-mistakes --yolo off 2>&1)
   assert_not_contains "$out" "caps concurrent workers" "the spend cap outlived the record"
   # A record that no longer validates is absence too.
   printf 'version: 99\n' > "$home/state/.afk-contract"
@@ -1367,7 +1373,7 @@ WRAPPER
   status=$?
   [ "$status" -eq 6 ] || fail "an invalid record relocated the merge (exit $status): $out"
   assert_contains "$out" "$refusal" "the attended refusal changed under an invalid record"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new projects/none --mode no-mistakes --yolo off 2>&1)
   assert_not_contains "$out" "caps concurrent workers" "an invalid record refused a main spawn via the spend cap"
   assert_not_contains "$out" "no readable spend cap" "an invalid record refused a main spawn for an unreadable cap"
   # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
@@ -1405,20 +1411,20 @@ EOF
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null || fail "away entry failed"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$ROOT/bin/fm-spawn.sh" task-arbitrary --mode no-mistakes --yolo off 2>&1)
+    "$ROOT/bin/fm-spawn.sh" task-arbitrary projects/none --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -eq 1 ] || fail "an arbitrary branch spawn exited $status, not 1: $out"
   assert_contains "$out" "queued unblocked work" "an arbitrary id was dispatched under the record"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$ROOT/bin/fm-spawn.sh" task-queued --mode no-mistakes --yolo off 2>&1)
+    "$ROOT/bin/fm-spawn.sh" task-queued projects/none --mode no-mistakes --yolo off 2>&1)
   status=$?
   assert_not_contains "$out" "queued unblocked work" "a queued item was refused as if it were arbitrary: $out"
   [ "$status" -ne 6 ] || fail "a queued branch spawn hit the partition: $out"
   assert_contains "$out" "main is parked" "the queued spawn lost its relocation note"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$ROOT/bin/fm-spawn.sh" task-inflight --mode no-mistakes --yolo off 2>&1)
+    "$ROOT/bin/fm-spawn.sh" task-inflight projects/none --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -eq 1 ] || fail "an in-flight branch spawn exited $status, not 1: $out"
   assert_contains "$out" "queued unblocked work" "an in-flight row was dispatched by the away branch"
@@ -1453,14 +1459,14 @@ exec "\$REAL" "\$@"
 WRAPPER
   chmod +x "$root/bin/fm-afk-contract.sh"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$root/bin/fm-spawn.sh" task-queued --mode no-mistakes --yolo off 2>&1)
+    "$root/bin/fm-spawn.sh" task-queued projects/none --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -eq 6 ] || fail "an archived-after-early-guard spawn exited $status, not 6: $out"
   assert_contains "$out" "the supervision branch never performs this action" \
     "archiving between the early guard and the gate did not restore the attended refusal"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
-    "$ROOT/bin/fm-spawn.sh" task-arbitrary --mode no-mistakes --yolo off 2>&1)
+    "$ROOT/bin/fm-spawn.sh" task-arbitrary projects/none --mode no-mistakes --yolo off 2>&1)
   assert_not_contains "$out" "queued unblocked work" "main's attended spawn was held to the branch queued-work gate"
   pass "relocated branch spawn admits only already-queued dispatchable work, including on a manual-backend home"
 }
@@ -1477,10 +1483,10 @@ test_quiet_record_never_caps_a_present_captains_spawn() {
   FM_AFK_MODE=quiet FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null || fail "quiet entry failed"
   fm_write_meta "$home/state/task-a.meta" "window=fm-task-a" "kind=ship"
   fm_write_meta "$home/state/task-b.meta" "window=fm-task-b" "kind=ship"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new projects/none --mode no-mistakes --yolo off 2>&1)
   assert_not_contains "$out" "caps concurrent workers" "a quiet record capped a present captain's spawn"
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null 2>&1 || fail "away entry over quiet failed"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new projects/none --mode no-mistakes --yolo off 2>&1)
   assert_contains "$out" "caps concurrent workers at 1 and 2 ordinary task(s) are live" "the away record's cap no longer binds"
   pass "a quiet-mode record never caps a present captain's spawn, while the away record's cap still binds"
 }
@@ -1522,7 +1528,7 @@ WRAPPER
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null || fail "away entry failed"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
-    "$root/bin/fm-spawn.sh" task-q1 --mode no-mistakes --yolo off \
+    "$root/bin/fm-spawn.sh" task-q1 projects/none --mode no-mistakes --yolo off \
     > "$home/q1.out" 2>&1 &
   i=0
   while [ ! -f "$home/early-cap-passed" ]; do

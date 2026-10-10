@@ -4,6 +4,7 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   A missing or empty task-id is refused before launch; a missing or empty project-dir is also refused for ship or scout spawns, including batch pairs, with an actionable argument error. These checks run after the supervision-branch actor refusal (exit 6) and state-directory resolution, and before lock and spend-cap work; a batch refuses whole if any pair has a missing or empty task id or project dir. Project directories are not resolved before launch.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -641,22 +642,12 @@ if ! KEEP_AI_TRAILERS=$(fm_config_source_present "$CONFIG/keep-ai-trailers"); th
   exit 1
 fi
 SUB_HOME_MARKER=".fm-secondmate-home"
-if [ -e "$STATE" ] || [ -L "$STATE" ]; then
-  fm_backlog_directory_present "$STATE" "state directory" || {
-    echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
-    exit 1
-  }
-fi
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
-fm_backlog_directory_present "$STATE" "state directory" || {
-  echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
-  exit 1
-}
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -686,9 +677,6 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
-# set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -858,6 +846,38 @@ done
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
+}
+validate_positional_shape() {
+  [ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
+    echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+    return 1
+  }
+  if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
+    return 0
+  fi
+  [ "${#POS[@]}" -gt 1 ] && [ -n "${POS[1]:-}" ] || {
+    echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+    return 1
+  }
+}
+# Role partition: spawning NEW work is MAIN-owned while attended. A relaunch of
+# an existing task is legitimate branch recovery (fm-control drives it through
+# this same entrypoint), so only a fresh spawn refuses the branch actor. While
+# an away-posture record exists main is parked and a fresh spawn of queued work
+# relocates to the branch; the queue and spend-cap gates below still apply.
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+if [ "$RELAUNCH" -ne 1 ]; then
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+fi
+# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
+# set by the batch loop below), so the guard runs once for the batch, not once per pair.
+spawn_enter_state_directory() {
+  fm_backlog_directory_present "$STATE" "state directory" || {
+    echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  }
+  [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -1529,7 +1549,10 @@ spawn_herdr_presentation_order_lock_release() {
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
 # the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
-# the single path verbatim. A failed pair is reported and skipped; the rest still launch;
+# the single path verbatim. Every pair is first checked for id=repo shape, a valid task id,
+# and a missing or empty task id or project dir; any such error refuses the whole batch
+# before any pair runs. Project directories are resolved only by each pair's own spawn.
+# A failed pair is reported and skipped; the rest still launch;
 # exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
 # one (task ids are bare slugs), so they fall straight through to the logic below.
 idpart=${POS[0]:-}
@@ -1557,34 +1580,64 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
+  preflight_rc=0
   for pair in "${POS[@]}"; do
     case "$pair" in
-    *=*) : ;;
+    *=*)
+      pair_id=${pair%%=*}
+      pair_proj=${pair#*=}
+      ;;
     *)
       echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2
-      rc=2
+      preflight_rc=2
       continue
       ;;
     esac
     if [ "$KIND" = secondmate ]; then
       echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
-      rc=2
+      preflight_rc=2
       continue
     fi
-    pair_args=("${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}")
+    [ -n "$pair_id" ] || {
+      echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+      preflight_rc=2
+    }
+    if [ -n "$pair_id" ] && ! fm_task_id_creation_valid "$pair_id"; then
+      echo "error: invalid task id '$pair_id'" >&2
+      preflight_rc=2
+    fi
+    [ -n "$pair_proj" ] || {
+      echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+      preflight_rc=2
+    }
+  done
+  [ "$preflight_rc" -eq 0 ] || exit "$preflight_rc"
+  spawn_enter_state_directory
+
+  for pair in "${POS[@]}"; do
+    pair_id=${pair%%=*}
+    pair_proj=${pair#*=}
+    pair_args=("$pair_id" "$pair_proj" "${shared_args[@]+"${shared_args[@]}"}")
     [ "$KIND" != scout ] || pair_args+=(--scout)
     pair_rc=0
     FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair_args[@]}" || pair_rc=$?
     if [ "$pair_rc" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
-      echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - its project is at capacity, so it stays queued" >&2
+      echo "batch: DEFERRED $pair_id ($pair_proj) - its project is at capacity, so it stays queued" >&2
       [ "$rc" -ne 0 ] || rc=$FM_PROJECT_CAPACITY_DEFER_EXIT
     elif [ "$pair_rc" -ne 0 ]; then
-      echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
+      echo "batch: FAILED to spawn $pair_id ($pair_proj)" >&2
       rc=1
     fi
   done
   exit "$rc"
 fi
+if validate_positional_shape; then
+  :
+else
+  positional_status=$?
+  exit "$positional_status"
+fi
+spawn_enter_state_directory
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
@@ -1605,21 +1658,6 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
 elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
-fi
-# Role partition: spawning NEW work is MAIN-owned while attended. A relaunch of
-# an existing task is legitimate branch recovery (fm-control drives it through
-# this same entrypoint), so only a fresh spawn refuses the branch actor
-# (contract: bin/fm-lease-lib.sh; no-op in homes without a branch actor). While
-# the away-posture record exists main is parked and a fresh spawn of queued
-# work relocates to the branch, under the record's spend cap below - the same
-# cap main meets in that posture. Queued means a dispatchable backlog item:
-# one already queued at entry, or one the branch filed itself because the
-# captain's away words explicitly call for that work (its backlog note cites
-# the words); filing the item the captain asked for is not inventing work.
-# shellcheck source=bin/fm-lease-lib.sh
-. "$SCRIPT_DIR/fm-lease-lib.sh"
-if [ "$RELAUNCH" -ne 1 ]; then
-  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
 spawn_refuse_if_away_spend_cap() {
   local cap live meta
