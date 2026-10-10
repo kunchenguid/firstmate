@@ -1311,7 +1311,6 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
-
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
 
 **Universal requirements**
@@ -1319,21 +1318,23 @@ Required tools come in two parts: a universal toolchain every home needs regardl
 Every home requires:
 
 - node and git.
-- gh, with GitHub authentication through `gh auth login`.
 - no-mistakes v1.46.0 or newer.
-- Compatible gh-axi.
 - chrome-devtools-axi.
 - Compatible tasks-axi, as specified in "Backlog backend" above.
 - Compatible quota-axi.
 
+Registered GitHub projects additionally require `gh`, GitHub authentication, and compatible `gh-axi`.
+Registered GitLab projects additionally require `glab` and GitLab authentication via `glab auth login`.
+Projects with an explicit `forge=gerrit` binding additionally require `gerrit-axi` and `jq` for Gerrit publishing; bootstrap does not probe Gerrit credentials.
+Local-only homes need neither forge delta.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
-
-In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+Across these requirements, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, gerrit-axi covers Gerrit publishing, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 Lavish is a presentation-only dependency for visual decisions and reports; nonvisual work can proceed with plain text when it is unavailable.
 
 **Backend requirements**
 
+In the applicable provider/backend deltas, gh-axi covers GitHub operations, chrome-devtools-axi covers browser operations, lavish-axi covers rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 `fm_backend_required_tools` in `bin/fm-backend.sh` owns the backend additions:
 
@@ -1348,12 +1349,12 @@ The per-backend delta is required only for the backend resolved from `FM_BACKEND
 The JSON-emitting adapters (`herdr`, `zellij`, `cmux`) need `jq` because their spawn and liveness paths parse backend JSON.
 Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`) uses `treehouse` for worktrees.
 
+The provider delta is required only for registered origins discovered under `projects/`.
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
-
 **Feature-specific requirements**
 
 - When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
@@ -1364,9 +1365,12 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 `tasks-axi` and `quota-axi` are essential bootstrap tools in every profile.
 
 - An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual`, a home with a configured non-markdown adapter or a markdown backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
-- An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
+- An absent or incompatible `gh-axi` for a registered GitHub project reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
 - An absent or board-incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with the 0.1.77 compatibility floor, install command, and explicit text fallback; compatible versions below 0.1.80 retain legacy board replies and report an upgrade recommendation for synchronous acceptance, while [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns diagnostic handling.
 - An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
+- For a registered GitLab project, an absent `glab` reports `MISSING: glab` with the platform-specific install command.
+- For a project with `forge=gerrit`, an absent `gerrit-axi` or `jq` reports `MISSING` with its install command; Gerrit credentials are not probed by bootstrap.
+- An unsupported registered origin reports `FORGE_UNSUPPORTED` and is skipped by forge-dependent refreshes.
 
 **Checkout diagnostics**
 
@@ -1376,7 +1380,6 @@ In a read-only session that did not get the fleet lock, the same line is advisor
 **Project refresh at startup**
 
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.
-
 - It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 - Normal completed runs keep local-only and no-origin skips silent.
 - If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
@@ -2362,6 +2365,8 @@ FM_SESSION_START_ENDPOINT_TIMEOUT=10   # seconds bounding each per-task endpoint
 FM_BACKLOG_ROW_TIMEOUT_SECS=10   # seconds bounding each backlog row read (bin/fm-backlog-transition-lib.sh); nonpositive or invalid values fall back to 10; the first bound hit latches the sweep so later reads return immediately, each still naming its own item
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (local steps only), or only (network steps only); see bin/fm-bootstrap.sh
+FM_GITHUB_HOSTS=github.com   # comma-separated GitHub/GitHub Enterprise hostnames recognized for registered-project forge detection
+FM_GITLAB_HOSTS=gitlab.com   # comma-separated GitLab hostnames recognized for registered-project forge detection
 FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the deferred inactive-outcome scan plus network checks, including the lock waits the worker makes before them; hitting it prints an actionable NETWORK_CHECKS line, and a lock a live process still holds at the deadline ends the worker with a failed-rerun record (publication and delivery are bounded by FM_SESSION_START_TIMEOUT the same way)
 FM_TASKS_AXI_COMPATIBLE=   # internal one-hop handoff of an already-computed tasks-axi compatibility verdict (0 or 1); consumed when bin/fm-tasks-axi-lib.sh is sourced
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands

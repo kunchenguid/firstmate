@@ -89,6 +89,21 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
+snapshot_clone_state() {
+  local project=$1 output=$2 head
+  {
+    if head=$(git -C "$project" symbolic-ref -q HEAD 2>/dev/null); then
+      printf 'HEAD=%s\n' "$head"
+    else
+      printf 'HEAD=%s\n' "$(git -C "$project" rev-parse -q --verify HEAD 2>/dev/null || true)"
+    fi
+    printf '%s\n' REFS
+    git -C "$project" for-each-ref --format='%(refname) %(objectname)'
+    printf '%s\n' WORKTREE
+    git -C "$project" status --porcelain --untracked-files=all
+  } > "$output"
+}
+
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
@@ -393,6 +408,47 @@ test_no_origin_skipped() {
   assert_contains "$out" "theta: skipped: no origin remote" "no-origin clone is skipped as before"
   assert_not_contains "$out" "STUCK" "no-origin skip is not escalated to STUCK"
   pass "no-origin clone is skipped (benign), not flagged STUCK"
+}
+
+test_unknown_origin_is_skipped_even_when_invoked_directly() {
+  local home project out before after
+  home="$TMP_ROOT/unknown-origin"
+  mkdir -p "$home/projects"
+  project="$home/projects/unknown"
+  mkdir -p "$project"
+  git init -q "$project"
+  git -C "$project" remote add origin https://code.example/team/project.git
+  before="$home/unknown-before"
+  after="$home/unknown-after"
+  snapshot_clone_state "$project" "$before"
+
+  out=$(run_sync "$home")
+  snapshot_clone_state "$project" "$after"
+
+  [ -z "$out" ] || fail "direct fleet-sync must silently skip an unsupported origin, got: $out"
+  cmp -s "$before" "$after" || fail "direct fleet-sync mutated an unsupported-origin clone"
+  pass "direct fleet-sync fails closed for unsupported forge origins"
+}
+
+test_explicit_gerrit_binding_allows_sync() {
+  local home clone out remote_url
+  home=$(new_home)
+  clone=$(build_pair "$home" gerrit-project)
+  advance_origin "$home" gerrit-project C1
+  remote_url=$(git -C "$clone" remote get-url origin)
+  git -C "$clone" remote set-url origin ssh://review.example:29418/team/project
+  git -C "$clone" config url."$remote_url".insteadOf ssh://review.example:29418/team/project
+  mkdir -p "$home/data"
+  printf -- '- gerrit-project [no-mistakes forge=gerrit] - review project (added 2026-09-15)\n' \
+    > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "gerrit-project: synced" \
+    "an explicit Gerrit binding must allow the normal clone refresh path"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "an explicit Gerrit binding did not fast-forward the clone"
+  pass "direct fleet-sync honors an explicit Gerrit binding"
 }
 
 test_local_only_skipped() {
@@ -756,6 +812,8 @@ test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
+test_unknown_origin_is_skipped_even_when_invoked_directly
+test_explicit_gerrit_binding_allows_sync
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves
