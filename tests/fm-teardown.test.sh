@@ -269,6 +269,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *"title,body"*) printf '%s\n' '{"title":"change","body":"public explanation"}' ; exit 0 ;;
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
