@@ -48,7 +48,7 @@ SH
 }
 
 test_fm_home_parameterization() {
-  local brief home_one home_two out
+  local brief home_one home_two out status_cmd
   home_one="$TMP_ROOT/home one"
   home_two="$TMP_ROOT/home-two"
   mkdir -p "$home_one/data" "$home_one/state" "$home_two/data" "$home_two/state"
@@ -62,16 +62,35 @@ test_fm_home_parameterization() {
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app --mode no-mistakes >/dev/null || fail "brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-a/brief.md"
   [ -f "$brief" ] || fail "brief was not written under FM_HOME/data"
-  grep -F ">> '$home_one/state/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
+  # shellcheck disable=SC2016 # Match literal scaffold placeholders and backticks.
+  status_cmd=$(sed -n '/{one short line}/s/^[[:space:]]*`\([^`]*\)`.*/\1/p' "$brief" | head -1)
+  status_cmd=${status_cmd//\{state\}/working}
+  status_cmd=${status_cmd//<epoch>/1790000000}
+  status_cmd=${status_cmd//\{one short line\}/home parameterization}
+  bash -c "$status_cmd" || fail "generated status command failed for task-a"
+  [ "$(cat "$home_one/state/task-a.status")" = 'working [at=1790000000]: home parameterization' ] \
+    || fail "generated status command wrote outside the selected FM_HOME for task-a"
 
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-b app --scout >/dev/null || fail "scout brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-b/brief.md"
-  grep -F ">> '$home_one/state/task-b.status'" "$brief" >/dev/null || fail "scout brief did not shell-quote FM_HOME state path"
+  # shellcheck disable=SC2016 # Match literal scaffold placeholders and backticks.
+  status_cmd=$(sed -n '/{one short line}/s/^[[:space:]]*`\([^`]*\)`.*/\1/p' "$brief" | head -1)
+  status_cmd=${status_cmd//\{state\}/working}; status_cmd=${status_cmd//<epoch>/1790000000}
+  status_cmd=${status_cmd//\{one short line\}/home parameterization}
+  bash -c "$status_cmd" || fail "generated scout status command failed"
+  [ "$(cat "$home_one/state/task-b.status")" = 'working [at=1790000000]: home parameterization' ] \
+    || fail "generated scout status command wrote outside the selected FM_HOME"
 
   FM_HOME="$home_one" FM_SECONDMATE_CHARTER='ops domain' "$ROOT/bin/fm-brief.sh" task-c --secondmate app >/dev/null \
     || fail "secondmate brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-c/brief.md"
-  grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
+  # shellcheck disable=SC2016 # Match literal scaffold placeholders and backticks.
+  status_cmd=$(sed -n '/{one short line}/s/^[[:space:]]*`\([^`]*\)`.*/\1/p' "$brief" | head -1)
+  status_cmd=${status_cmd//\{state\}/working}; status_cmd=${status_cmd//<epoch>/1790000000}
+  status_cmd=${status_cmd//\{one short line\}/home parameterization}
+  bash -c "$status_cmd" || fail "generated secondmate status command failed"
+  [ "$(cat "$home_one/state/task-c.status")" = 'working [at=1790000000]: home parameterization' ] \
+    || fail "generated secondmate status command wrote outside the selected FM_HOME"
 
   # A pushed ship worktree, and a gh that supplies no forge head, so the PR
   # check stays offline and its named-head gate reads the worktree's HEAD.

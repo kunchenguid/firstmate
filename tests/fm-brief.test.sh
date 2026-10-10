@@ -748,8 +748,15 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   )
   cmp -s "$baseline" "$brief" \
     || fail "relative FM_HOME changed charter bytes compared with the same absolute home"
-  assert_grep ">> '$home/state/relative-home.status'" "$brief" \
-    "relative FM_HOME did not render an absolute secondmate status path"
+  # shellcheck disable=SC2016 # Match literal scaffold placeholders and backticks.
+  status=$(sed -n '/{one short line}/s/^[[:space:]]*`\([^`]*\)`.*/\1/p' "$brief" | head -1)
+  status=${status//\{state\}/working}
+  status=${status//<epoch>/1790000000}
+  status=${status//\{one short line\}/relative home}
+  bash -c "$status" || fail "relative FM_HOME status command failed"
+  assert_equals 'working [at=1790000000]: relative home' \
+    "$(cat "$home/state/relative-home.status")" \
+    "relative FM_HOME status destination"
 
   brief="$home/data/relative-state/brief.md"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state_override" FM_SECONDMATE_CHARTER=x \
@@ -764,8 +771,15 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   )
   cmp -s "$baseline" "$brief" \
     || fail "relative FM_STATE_OVERRIDE changed charter bytes compared with the same absolute state directory"
-  assert_grep ">> '$state_override/relative-state.status'" "$brief" \
-    "relative FM_STATE_OVERRIDE did not render an absolute secondmate status path"
+  # shellcheck disable=SC2016 # Match literal scaffold placeholders and backticks.
+  status=$(sed -n '/{one short line}/s/^[[:space:]]*`\([^`]*\)`.*/\1/p' "$brief" | head -1)
+  status=${status//\{state\}/working}
+  status=${status//<epoch>/1790000001}
+  status=${status//\{one short line\}/relative state}
+  bash -c "$status" || fail "relative FM_STATE_OVERRIDE status command failed"
+  assert_equals 'working [at=1790000001]: relative state' \
+    "$(cat "$state_override/relative-state.status")" \
+    "relative FM_STATE_OVERRIDE status destination"
 
   brief="$data_override/relative-data/brief.md"
   FM_HOME="$home" FM_DATA_OVERRIDE="$data_override" FM_SECONDMATE_CHARTER=x \
@@ -780,8 +794,15 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   )
   cmp -s "$baseline" "$brief" \
     || fail "relative FM_DATA_OVERRIDE changed charter bytes compared with the same absolute data directory"
-  assert_grep ">> '$home/state/relative-data.status'" "$brief" \
-    "relative FM_DATA_OVERRIDE changed the absolute default status path"
+  # shellcheck disable=SC2016 # Match literal scaffold placeholders and backticks.
+  status=$(sed -n '/{one short line}/s/^[[:space:]]*`\([^`]*\)`.*/\1/p' "$brief" | head -1)
+  status=${status//\{state\}/working}
+  status=${status//<epoch>/1790000002}
+  status=${status//\{one short line\}/relative data}
+  bash -c "$status" || fail "relative FM_DATA_OVERRIDE status command failed"
+  assert_equals 'working [at=1790000002]: relative data' \
+    "$(cat "$home/state/relative-data.status")" \
+    "relative FM_DATA_OVERRIDE default status destination"
 
   err="$root/unresolved.err"
   (
@@ -856,8 +877,8 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # and run it. The stamp must be a value the worker supplies, so the command
     # may not carry an unevaluated substitution that a file-write tool would
     # copy through verbatim.
-    # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
-    append=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$brief")
+    # shellcheck disable=SC2016 # Match literal scaffold placeholders and backticks.
+    append=$(sed -n '/{one short line}/s/^[[:space:]]*`\([^`]*\)`.*/\1/p' "$brief")
     now=$(date +%s)
     append=${append//\{state\}/done}
     append=${append//\{one short line\}/test event}
