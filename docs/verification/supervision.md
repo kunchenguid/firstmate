@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, supervision-host, and wedge-alarm guarantees.
+This record supports current session-start, turn-end, watcher-continuity, supervision-host, restricted Pi supervision, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -801,3 +801,23 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Restricted Pi supervision
+
+This evidence supports [pi-restricted-supervision.md](../pi-restricted-supervision.md)'s tool-set check, lock anchoring, and drain acknowledgement.
+It was measured on 2026-09-30 on Linux x86_64 with Pi 0.99.1 and Node 22.22.2, in disposable homes with an offline faux provider, so no model turn reached a provider.
+
+The default-on live guard refreshes it:
+
+```text
+$ tests/fm-pi-restricted-supervision-live-e2e.test.sh
+ok - Pi 0.99.1: a restricted session holds the lock and drains then acknowledges through the real scripts
+ok - Pi 0.99.1: a session with Pi's default tools takes no lock and drains nothing
+```
+
+Manual launches in a disposable home with the watcher extension also loaded and one ship task whose ready report named a change while its worker copy was missing:
+
+| Launch | Observed |
+| --- | --- |
+| `--no-builtin-tools --no-extensions`, restricted then watcher extension | active tools `fm_drain`, `fm_deliver`, `fm_watch_arm_pi`; line 1 of the lock named the Pi process; the watcher armed; the first interval pass reported `could not arm merge monitoring for t1 ... error: named head cannot be verified: worktree missing` and armed nothing |
+| `--no-extensions` only | active tools `read`, `bash`, `edit`, `write`, `fm_drain`, `fm_deliver`, `fm_watch_arm_pi`; no lock was taken, the watcher did not arm, and the screen showed `restricted supervision refused: this session also exposes read, bash, edit, write; ...` |
