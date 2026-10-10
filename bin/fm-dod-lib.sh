@@ -6,13 +6,14 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [base-branch]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
 # contract.
 # The optional third argument is the task's full ship-branch name (a project's
-# registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
-# and is the immutable task branch rendered in every delivery contract.
+# registered prefix, or an explicit --branch-name, may replace the legacy `fm/`
+# one); it defaults to `fm/<task-id>` and is the immutable task branch rendered
+# in every delivery contract.
 # The optional fifth argument is the task's base branch from bin/fm-brief.sh
 # --base-branch; empty means the repository default. A named base is the branch
 # the worker starts from, never pushes to, and targets with its pull request, and
@@ -105,6 +106,8 @@
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
 # a worker off a remote is exactly the rule that changes when the forge does.
+# An optional base branch after the forge names the integration branch the rule
+# must keep the worker off; empty keeps today's default-branch sentence.
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-pr-lib.sh"
@@ -135,7 +138,8 @@ EOF
 # Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a
 # caller cannot reach a half-rendered contract. local-only is refused rather than
 # rendered with an inert annotation: it publishes nothing, and its landing
-# fast-forwards local main with content the review server has never seen.
+# fast-forwards the recorded integration branch or local default with content the
+# review server has never seen.
 fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   local forge=$1 mode=$2 caller=$3
   case "$forge" in
@@ -382,11 +386,18 @@ EOF
 # modes so the one push, the Change-Id rule, and the ready report are written
 # once. gerrit-axi owns the squash mechanics; this names the one call and what
 # to read back from it.
-fm_gerrit_publish_block() {
+fm_gerrit_publish_block() {  # [base-branch]
+  local base=${1:-} publish_step
+  if [ -n "$base" ]; then
+    printf -v publish_step '%q' "$base"
+    publish_step="2. Run \`gerrit-axi publish --squash --json --branch $publish_step\` so the change targets that named branch."
+  else
+    publish_step="2. Run \`gerrit-axi publish --squash --json\`, adding \`--branch <b>\` only when the task names a target branch other than the server's default."
+  fi
   cat <<EOF
 Publish from this copy with \`gerrit-axi\`, never with \`git push\`:
 1. Run \`git fetch origin\` so the server's branch tip is in this repository; \`gerrit-axi\` reads its base off the server and refuses when that tip is not here.
-2. Run \`gerrit-axi publish --squash --json\`, adding \`--branch <b>\` only when the task names a target branch other than the server's default.
+$publish_step
    It is one push to \`refs/for/<branch>\` that turns every commit since your branch left the server's branch into ONE change carrying the oldest commit's message, so that message is the review description: make it the one you want reviewed.
    It keeps any \`Change-Id\` a commit already carries and stamps one into the oldest commit when it has none, rewriting your local branch's messages only.
    Never edit, remove, or regenerate a \`Change-Id\`: a different one creates a different change and orphans the first one's review, while the same one adds a patch set to it.
@@ -422,7 +433,7 @@ Gerrit has no pull requests, so there is nothing to open; publishing creates the
 The task is complete only when committed on your branch.
 When it is implemented and committed, publish it.
 EOF
-      fm_gerrit_publish_block
+      fm_gerrit_publish_block "$base"
       cat <<EOF
 Do NOT run /no-mistakes.
 EOF
@@ -457,7 +468,7 @@ When the run's outcome is passed, passed-with-skips, or passed-with-override and
 The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; your report is how they reach the captain.
 After publishing and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
 EOF
-      fm_gerrit_publish_block
+      fm_gerrit_publish_block "$base"
       ;;
     direct-PR:*)
       cat <<EOF
@@ -500,6 +511,13 @@ That first \`done:\` is the handoff that starts the pipeline, which owns the pus
 ${nm_base}
 EOF
       fm_nm_driving_block "$forge"
+      if [ -n "$base" ]; then
+        cat <<EOF
+
+When starting no-mistakes, pass \`no-mistakes axi run --base-branch $base_q\` so the pipeline opens the PR against that named integration branch for this run only.
+Do not open against the repo default and retarget later, and do not change repo \`pr.base_branch\` settings.
+EOF
+      fi
       cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.

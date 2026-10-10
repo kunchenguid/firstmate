@@ -76,8 +76,16 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
-[ -n "$DEFAULT" ] || DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -n 1 | cut -d= -f2- || true)
+if [ -n "$RECORDED_BASE" ]; then
+  if ! git check-ref-format --branch "$RECORDED_BASE" >/dev/null 2>&1; then
+    echo "error: task $ID has an invalid recorded base branch '$RECORDED_BASE'" >&2
+    exit 1
+  fi
+  DEFAULT=$RECORDED_BASE
+else
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+fi
 
 BRANCH=$(grep '^branch=' "$META" | cut -d= -f2- || true)
 [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -142,6 +150,8 @@ resolve_pr_head() {
 
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
+KIND=$(grep '^kind=' "$META" | tail -n 1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
   if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
@@ -151,26 +161,50 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+if [ "$MODE" = local-only ]; then
+  BASE_REF="refs/heads/$DEFAULT"
+  BASE_LABEL=$DEFAULT
+elif [ "$KIND" = scout ] && git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+  if ! REMOTE_BASES=$(git -C "$PROJ" ls-remote --heads origin "refs/heads/$DEFAULT" 2>/dev/null); then
+    echo "error: could not check remote base origin/$DEFAULT; refusing to review against an unknown base" >&2
+    exit 1
+  fi
+  if [ -n "$REMOTE_BASES" ]; then
+    if ! git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet; then
+      echo "error: could not fetch remote base origin/$DEFAULT; refusing to review against a cached ref" >&2
+      exit 1
+    fi
+    BASE_REF="refs/remotes/origin/$DEFAULT"
+    BASE_LABEL="origin/$DEFAULT"
+  else
+    BASE_REF="refs/heads/$DEFAULT"
+    BASE_LABEL=$DEFAULT
+  fi
+elif git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  if ! git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet; then
+    echo "error: could not fetch remote base origin/$DEFAULT; refusing to review against a cached ref" >&2
+    exit 1
+  fi
+  BASE_REF="refs/remotes/origin/$DEFAULT"
+  BASE_LABEL="origin/$DEFAULT"
 else
-  BASE="$DEFAULT"
+  BASE_REF="refs/heads/$DEFAULT"
+  BASE_LABEL=$DEFAULT
 fi
 
-git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
+git -C "$WT" rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null || { echo "error: base $BASE_LABEL does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
-echo "diff base: $BASE"
-if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
-  echo "no changes vs $BASE"
+echo "diff base: $BASE_LABEL"
+if git -C "$WT" diff --quiet "$BASE_REF...$COMPARE_REF" --; then
+  echo "no changes vs $BASE_LABEL"
   exit 0
 fi
 
-git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
+git -C "$WT" diff --stat "$BASE_REF...$COMPARE_REF" --
 if ! "$STAT_ONLY"; then
   echo
-  git -C "$WT" diff "$BASE...$COMPARE_REF" --
+  git -C "$WT" diff "$BASE_REF...$COMPARE_REF" --
 fi

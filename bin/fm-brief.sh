@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>|--branch-name <name>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -44,7 +44,8 @@
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                the configured merge authority approves, firstmate merges to local main
+#                the configured merge authority approves, firstmate merges to the
+#                local default branch (a local-only task cannot carry a base)
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # --branch-prefix <prefix> optionally overrides the ship branch's "fm/" prefix, so
@@ -59,6 +60,9 @@
 # standing per-project preference, and firstmate resolves it per task at intake
 # and passes the explicit flag. Refused on --scout and --secondmate: a scout
 # makes no branch and a charter is not a delivery contract.
+# --branch-name <name> replaces that prefix-plus-id crew branch with one full
+# git branch name. It is mutually exclusive with --branch-prefix, refused on
+# scout and secondmate, and cannot equal --base-branch.
 # --base-branch <branch> starts the task from origin's <branch> instead of the
 # repository default, for work that belongs on a named integration, feature, or
 # release branch. It writes a "Base branch: <branch>" line under `# Setup`, which
@@ -195,6 +199,8 @@ MODE=
 MODE_SET=0
 BRANCH_PREFIX=fm/
 BRANCH_PREFIX_SET=0
+BRANCH_NAME=
+BRANCH_NAME_SET=0
 BASE_BRANCH=
 BASE_BRANCH_SET=0
 FORGE=none
@@ -211,6 +217,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
+      branch-name) BRANCH_NAME=$a; BRANCH_NAME_SET=1 ;;
       base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
@@ -228,6 +235,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --branch-prefix) want_value="branch-prefix" ;;
     --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=}; BRANCH_PREFIX_SET=1 ;;
+    --branch-name) want_value="branch-name" ;;
+    --branch-name=*) BRANCH_NAME=${a#--branch-name=}; BRANCH_NAME_SET=1 ;;
     --base-branch) want_value="base-branch" ;;
     --base-branch=*) BASE_BRANCH=${a#--base-branch=}; BASE_BRANCH_SET=1 ;;
     --forge) want_value=forge ;;
@@ -242,6 +251,8 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$BRANCH_NAME_SET" -eq 0 ] || [ -n "$BRANCH_NAME" ] || { echo "error: --branch-name requires a non-empty value" >&2; exit 1; }
+[ "$BASE_BRANCH_SET" -eq 0 ] || [ -n "$BASE_BRANCH" ] || { echo "error: --base-branch requires a non-empty value" >&2; exit 1; }
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -266,6 +277,18 @@ fi
 # decision, but it still only makes sense where a branch is actually created.
 if [ "$KIND" != ship ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
   echo "error: --branch-prefix applies only to ship briefs; a scout makes no branch and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+if [ "$KIND" != ship ] && [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  echo "error: --branch-name applies only to ship briefs; a scout makes no branch and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && [ "$BASE_BRANCH_SET" -eq 1 ]; then
+  echo "error: --base-branch applies only to ship and scout briefs; a secondmate already owns its home" >&2
+  exit 1
+fi
+if [ "$BRANCH_NAME_SET" -eq 1 ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+  echo "error: --branch-name and --branch-prefix are mutually exclusive; pass the full crew branch or the prefix, not both" >&2
   exit 1
 fi
 case "$BRANCH_PREFIX" in
@@ -301,10 +324,30 @@ if [ "$BASE_BRANCH_SET" -eq 1 ]; then
   fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-brief.sh --base-branch" || exit 1
 fi
 ID=${POS[0]}
-BRANCH="$BRANCH_PREFIX$ID"
-if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
-  echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
-  exit 1
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  BRANCH=$BRANCH_NAME
+  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch-name is not a usable git branch name: $BRANCH" >&2
+    exit 1
+  fi
+else
+  BRANCH="$BRANCH_PREFIX$ID"
+  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+    exit 1
+  fi
+fi
+if [ "$BASE_BRANCH_SET" -eq 1 ]; then
+  if ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+    echo "error: --base-branch is not a usable git branch name: $BASE_BRANCH" >&2
+    exit 1
+  fi
+  if [ "$KIND" = ship ]; then
+    if [ "$BASE_BRANCH" = "$BRANCH" ]; then
+      echo "error: --base-branch cannot be the crew branch ($BRANCH); choose a different base branch" >&2
+      exit 1
+    fi
+  fi
 fi
 printf -v BRANCH_Q '%q' "$BRANCH"
 
@@ -608,6 +651,7 @@ $HERDR_SECTION
 
 # Setup
 $SETUP_BASE
+
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
