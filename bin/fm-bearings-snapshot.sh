@@ -15,8 +15,9 @@
 # for registered remote homes under one shared collection budget and may atomically
 # refresh its parent-side ledger cache. It MAY surface PR URLs already recorded in
 # task meta (recorded_prs), but performs no live GitHub discovery or checks. Live PR
-# discovery/checks happen ONLY under --include-prs; all gh coupling lives in that
-# branch and never in the canonical snapshot. The default output states explicitly
+# discovery/checks happen ONLY under --include-prs; issue discovery and closing
+# references happen ONLY under --include-issues. Forge coupling lives in those
+# branches and never in the canonical snapshot. The default output states explicitly
 # (the prs: line and the omitted[] surfaces) what was not requested, so an absence is
 # never ambiguous.
 #
@@ -76,6 +77,7 @@
 # Flags:
 #   (default)        compact projection with bounded remote-ledger collection, TOON
 #   --json           the same projected model as JSON (machine/debug; parity form)
+#   --include-issues ALSO read registered GitHub issues and closing PR references
 #   --include-prs    ALSO do live GitHub open-PR discovery + checks
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
@@ -133,7 +135,7 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 
 usage() {
   cat <<'EOF'
-usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
+usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--include-issues] [--fields <list>]
                                [--all-in-flight] [--all-decisions]
                                [--all-secondmates] [--all-landed]
                                [--all-reports] [--all-queued]
@@ -168,10 +170,33 @@ Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
+--include-issues adds issue_visibility, a report-only projection from the canonical
+  issue_sources in main and already-collected secondmate homes. No verdict is stored.
+  Only an open task citing the issue URL (any #fragment or ?query stripped,
+  owner/repo compared case-insensitively, the number exact) or an open
+  closing-reference PR covers an issue. A citing task parks it when its hold-kind is parked or future (the
+  tasks-axi hold --kind parked|future vocabulary) or its hold-until is still in the
+  future; holds of other kinds with no future hold-until still cover it. All other
+  measured rows are uncertain. Children never cover parents. Assignees, labels,
+  closed PRs and completed task citations are evidence only. Identity is
+  owner/repo#number plus URL.
+  issue_visibility contains complete, proven_clear, known/checked repo counts,
+  unmeasured_homes, repos (coverage/reason/counts), rows (flat parent-linked issue
+  records with per-class child counts), and omitted disclosures. Counts are lower
+  bounds when incomplete; unmeasured rows have no inferred coverage class.
+  FM_BEARINGS_ISSUE_REPOS (10), FM_BEARINGS_ISSUE_LIMIT (40, maximum 100),
+  FM_BEARINGS_ISSUE_ROWS (80), FM_BEARINGS_ISSUE_BUDGET (20 seconds total),
+  FM_BEARINGS_ISSUE_MAX_BYTES (262144 per repo) and FM_BEARINGS_ISSUE_MAX_AGE
+  (300 seconds for a home summary) bound reads and output. Closing references and
+  timeline PR mentions are separate evidence; only the former can cover an issue.
+  Nested connections and per-issue task evidence have a 20-row cap. Every incomplete connection, error or exhausted bound is disclosed;
+  no pagination absence is interpreted as clear. Forge support is github.com only.
+  Uncertain rows belong only in Charted Next and never admit or dispatch work.
 EOF
 }
 
 FORMAT=toon
+INCLUDE_ISSUES=0
 INCLUDE_PRS=0
 ALL_REPORTS=0
 ALL_QUEUED=0
@@ -187,6 +212,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
     --include-prs) INCLUDE_PRS=1 ;;
+    --include-issues) INCLUDE_ISSUES=1 ;;
     --all-reports) ALL_REPORTS=1 ;;
     --all-queued) ALL_QUEUED=1 ;;
     --all-in-flight) ALL_IN_FLIGHT=1 ;;
@@ -693,8 +719,189 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_unhealthy == 0 and ($unhealthy_all | length) > $unhealthy_n then {surface:("unhealthy_endpoints showing \($unhealthy_n) of \($unhealthy_all | length)"), reveal:"--all-unhealthy"} else empty end),
         (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then {surface:("PR repositories showing \($pr_repos_shown) of \($pr_repos_total)"), reveal:"--all-pr-repos"} else empty end),
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
+        {surface:"registered-project issue visibility", reveal:"--include-issues"},
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
+
+# Live issue enrichment consumes only the canonical snapshot's local facts.
+# A single GraphQL window per repo bounds both issues and their evidence. The
+# reverse closing-reference connection is forge-owned, never body-keyword logic.
+issue_visibility_json() (
+  set -eu
+  local_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-issues.XXXXXX")
+  trap 'rm -rf -- "$local_dir"' EXIT
+  repo_cap=${FM_BEARINGS_ISSUE_REPOS:-10}
+  issue_cap=${FM_BEARINGS_ISSUE_LIMIT:-40}
+  row_cap=${FM_BEARINGS_ISSUE_ROWS:-80}
+  budget=${FM_BEARINGS_ISSUE_BUDGET:-20}
+  byte_cap=${FM_BEARINGS_ISSUE_MAX_BYTES:-262144}
+  max_age=${FM_BEARINGS_ISSUE_MAX_AGE:-300}
+  for bound in "$repo_cap" "$issue_cap" "$row_cap" "$budget" "$byte_cap" "$max_age"; do
+    validate_bound issue-visibility "$bound"
+  done
+  [ "$issue_cap" -le 100 ] || { echo 'fm-bearings-snapshot: issue limit must not exceed 100' >&2; exit 2; }
+  printf '%s' "$SNAP" > "$local_dir/snapshot.json"
+  jq --arg now "$NOW" --argjson max_age "$max_age" '
+    def sources_valid:
+      .schema == "fm-issue-sources.v1"
+      and (.projects.complete|type)=="boolean" and (.projects.records|type)=="array"
+      and (.tasks.complete|type)=="boolean" and (.tasks.records|type)=="array"
+      and all(.projects.records[]; .repo==null or (.repo|type=="string" and test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")))
+      and all(.tasks.records[]; (.id|type)=="string" and (.state=="queued" or .state=="in_flight") and (.issue_urls|type)=="array"
+        and all(.issue_urls[]; type=="string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+$")));
+    ([{owner:"(main)",sources:.issue_sources,current:true}]
+      + [.secondmate_current.records[]? | {owner:.id,sources:.issue_sources,
+          current:(.provenance.selected=="structured-home" and .freshness.status=="fresh"
+            and .freshness.age_seconds != null and .freshness.age_seconds >= 0 and .freshness.age_seconds <= $max_age)}])
+    | map((try (.sources|sources_valid) catch false) as $valid
+        | . + {usable:(.current and $valid),sources:(if $valid then .sources else null end)})
+    | {homes:.,repos:([.[] | select(.usable) | .sources.projects.records[] | .repo // empty | ascii_downcase] | unique)}
+  ' "$local_dir/snapshot.json" > "$local_dir/sources.json"
+  : > "$local_dir/repos.jsonl"
+  : > "$local_dir/issues.jsonl"
+  start=$SECONDS
+  index=0
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    index=$((index + 1)); reason=; complete=false
+    remaining=$((budget - SECONDS + start))
+    if [ "$index" -gt "$repo_cap" ]; then reason='repository limit'
+    elif [ "$remaining" -le 0 ]; then reason='issue read budget exhausted'
+    elif ! command -v gh-axi >/dev/null 2>&1; then reason='gh-axi unavailable'
+    else
+      query=$(cat <<EOF
+query { repository(owner:"${repo%%/*}",name:"${repo#*/}") {
+  nameWithOwner issues(first:$issue_cap,states:OPEN,orderBy:{field:CREATED_AT,direction:ASC}) {
+    totalCount pageInfo { hasNextPage } nodes {
+      number url title state updatedAt parent { url number repository { nameWithOwner } }
+      subIssuesSummary { total completed }
+      labels(first:20) { totalCount pageInfo { hasNextPage } nodes { name } }
+      assignees(first:20) { totalCount pageInfo { hasNextPage } nodes { login } }
+      timelineItems(first:20,itemTypes:[CROSS_REFERENCED_EVENT]) {
+        totalCount pageInfo { hasNextPage } nodes {
+          ... on CrossReferencedEvent { source { __typename ... on PullRequest { url state updatedAt } } }
+        }
+      }
+      closedByPullRequestsReferences(first:20,includeClosedPrs:true) {
+        totalCount pageInfo { hasNextPage } nodes { url state updatedAt }
+      }
+    }
+  }
+} }
+EOF
+)
+      # gh-axi renders JSON as TOON. Transport an explicit base64 scalar instead;
+      # --full and the envelope's truncated:false must both survive before decode.
+      # Bound stdout before staging, including responses from an incompatible tool.
+      # shellcheck disable=SC2016 # Positional parameters expand in the timed child.
+      if fm_run_timed "$remaining" bash -o pipefail -c '
+        GH_PROMPT_DISABLED=1 gh-axi api POST graphql --field "query=$1" --jq "@base64" --full | head -c "$2"
+      ' _ "$query" "$((byte_cap + 1))" > "$local_dir/response" 2>/dev/null \
+        && [ "$(wc -c < "$local_dir/response" | tr -d ' ')" -le "$byte_cap" ] \
+        && grep -qx '  truncated: false' "$local_dir/response" \
+        && sed -n 's/^  body: \([A-Za-z0-9+/=]*\)$/\1/p' "$local_dir/response" \
+          | jq -Rse 'rtrimstr("\n") | @base64d | fromjson' > "$local_dir/decoded.json" 2>/dev/null; then
+        if jq -e --arg repo "$repo" '
+          def connection:
+            type=="object" and (.nodes|type)=="array" and (.totalCount|type)=="number"
+            and .totalCount >= 0 and (.pageInfo.hasNextPage|type)=="boolean";
+          (.errors // [] | length)==0 and (.data.repository.nameWithOwner|ascii_downcase)==($repo|ascii_downcase)
+          and (.data.repository.issues|connection)
+          and all(.data.repository.issues.nodes[];
+            .state=="OPEN" and (.number|type)=="number" and (.url|type)=="string"
+            and .number > 0 and (.number|floor)==.number
+            and (.url|ascii_downcase)==("https://github.com/"+($repo|ascii_downcase)+"/issues/"+(.number|tostring))
+            and (.title|type)=="string" and (.updatedAt|type)=="string"
+            and (.subIssuesSummary.total|type)=="number" and (.subIssuesSummary.completed|type)=="number"
+            and (.parent==null or (.parent.url|type=="string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+$")))
+            and all(.labels.nodes[]; .name|type=="string")
+            and all(.assignees.nodes[]; .login|type=="string")
+            and (.labels|connection) and (.assignees|connection)
+            and (.timelineItems|connection)
+            and (.closedByPullRequestsReferences|connection)
+            and all(.closedByPullRequestsReferences.nodes[]; (.url|type)=="string" and (.state=="OPEN" or .state=="CLOSED" or .state=="MERGED")))
+        ' "$local_dir/decoded.json" >/dev/null 2>&1; then
+          repo=$(jq -r ' .data.repository.nameWithOwner' "$local_dir/decoded.json")
+          complete=$(jq '
+            def full: .pageInfo.hasNextPage==false and .totalCount==(.nodes|length);
+            .data.repository.issues | full
+              and ([.nodes[].url]|unique|length)==(.nodes|length)
+              and all(.nodes[]; (.labels|full) and (.assignees|full) and (.timelineItems|full) and (.closedByPullRequestsReferences|full))
+          ' "$local_dir/decoded.json")
+          [ "$complete" = true ] || reason='incomplete or truncated issue/evidence connection'
+          jq -c --arg repo "$repo" '.data.repository.issues.nodes[] | . + {repo:$repo}' \
+            "$local_dir/decoded.json" >> "$local_dir/issues.jsonl"
+        else reason='forge response unavailable, partial, or invalid'; fi
+      else reason='forge read failed, timed out, or exceeded byte bound'; fi
+    fi
+    jq -nc --arg repo "$repo" --arg reason "$reason" --argjson complete "$complete" \
+      '{repo:$repo,complete:$complete,reason:(if $reason=="" then null else $reason end)}' >> "$local_dir/repos.jsonl"
+  done <<EOF
+$(jq -r '.repos[]' "$local_dir/sources.json")
+EOF
+  jq -n --slurpfile sources "$local_dir/sources.json" --slurpfile repos "$local_dir/repos.jsonl" \
+    --slurpfile issues "$local_dir/issues.jsonl" --slurpfile snapshot "$local_dir/snapshot.json" \
+    --arg now "$NOW" --argjson cap "$row_cap" '
+    def counts:
+      {covered:([.[]|select(.classification=="covered")]|length),
+       parked:([.[]|select(.classification=="parked")]|length),
+       uncertain:([.[]|select(.classification=="uncertain")]|length),
+       unmeasured:([.[]|select(.classification=="unmeasured")]|length)};
+    ($sources[0].homes) as $homes
+    | ([ $homes[] | select(.usable) | . as $h | .sources.tasks.records[] | . + {owner:$h.owner} ]) as $tasks
+    | ($snapshot[0].secondmate_current) as $mates
+    | (all($homes[]; .usable and .sources.projects.complete and .sources.tasks.complete)
+       and ($mates.truncated // 0)==0 and $mates.registry.complete != false) as $local_complete
+    | ([ $issues[] as $issue
+      | ($issue.url|ascii_downcase) as $issue_key
+      | ([$tasks[] | select([.issue_urls[]|ascii_downcase]|index($issue_key))
+          | . + {parked:(.hold_kind=="parked" or .hold_kind=="future" or (.hold_until!=null and .hold_until > ($now|split("T")[0])))}]) as $links
+      | ([$snapshot[0].backlog.records[] | select(.state=="done")
+           | select([(.issue_urls // [])[]|ascii_downcase]|index($issue_key)) | {id,owner:"(main)"}]) as $completed
+      | ($repos[] | select(.repo==$issue.repo)) as $coverage
+      | ($local_complete and $coverage.complete) as $measured
+      | {id:($issue.repo+"#"+($issue.number|tostring)),repo:$issue.repo,url:$issue.url,
+         title:($issue.title[:160]),updated_at:$issue.updatedAt,
+         parent:($issue.parent.url // null),child_scope:$issue.subIssuesSummary,
+         classification:(if $measured|not then "unmeasured"
+           elif any($links[]; .parked|not) or any($issue.closedByPullRequestsReferences.nodes[]; .state=="OPEN") then "covered"
+           elif ($links|length)>0 then "parked" else "uncertain" end),
+         tasks:($links[:20]|map({id,owner,state,parked,hold_kind,hold_reason,hold_until,last_activity})),
+         tasks_omitted:([0,($links|length)-20]|max),
+         completed_tasks:$completed[:20],completed_tasks_omitted:([0,($completed|length)-20]|max),
+         assignees:[$issue.assignees.nodes[].login],labels:[$issue.labels.nodes[].name],
+         pull_requests:$issue.closedByPullRequestsReferences.nodes,
+         referenced_prs:[$issue.timelineItems.nodes[].source | select(.__typename=="PullRequest") | {url,state,updatedAt}]} ]) as $all
+    | ($all | map(. as $parent | . + {children:([$all[]|select(.parent==$parent.url)]|counts)})
+        | sort_by([(.parent // .url), (if .parent==null then 0 else 1 end),.id])) as $grouped
+    | {schema:"fm-issue-visibility.v1",known:($repos|length),checked:([$repos[]|select(.complete)]|length),
+       complete:($local_complete and all($repos[];.complete) and ($all|length <= $cap) and all($all[];.tasks_omitted==0 and .completed_tasks_omitted==0)),
+       proven_clear:($local_complete and all($repos[];.complete) and ($all|length <= $cap) and all($all[];.tasks_omitted==0 and .completed_tasks_omitted==0)
+         and all($all[];.classification=="covered" or .classification=="parked")),
+       unmeasured_homes:([$homes[]|select((.usable and .sources.projects.complete and .sources.tasks.complete)|not)]|length),
+       homes:[$homes[] | {owner,measured:(.usable and .sources.projects.complete and .sources.tasks.complete),
+         projects_omitted:(.sources.projects.omitted // null),tasks_omitted:(.sources.tasks.omitted // null),
+         links_omitted:([.sources.tasks.records[]?.omitted_links // 0]|add // 0),
+         unresolved_projects:[.sources.projects.records[]? | select(.repo==null) | {name,reason}]}],
+       counts:($all|counts),rows:$grouped[:$cap],rows_omitted:([0,($all|length)-$cap]|max),
+       repos:[$repos[] as $r | $r + {counts:([$all[]|select(.repo==$r.repo)]|counts),
+         measured:($r.complete and $local_complete)}],
+       omitted:([
+         $homes[] | select((.usable and .sources.projects.complete and .sources.tasks.complete)|not)
+           | {surface:("issue visibility: "+.owner+" local project/task coverage unmeasured"),reveal:"refresh or inspect canonical issue_sources and its bounds"}
+       ] + [$repos[]|select(.complete|not)|{surface:("issue visibility: "+.repo+" unmeasured: "+.reason),reveal:"retry --include-issues or raise issue read bounds"}]
+         + [if $local_complete|not then {surface:"issue visibility: incomplete home coverage; no all-clear",reveal:"inspect canonical home and registry coverage"} else empty end]
+         + [$all[]|select(.tasks_omitted>0)|{surface:("issue visibility: "+.id+" task evidence omitted: "+(.tasks_omitted|tostring)),reveal:"inspect canonical task issue links"}]
+         + [$all[]|select(.completed_tasks_omitted>0)|{surface:("issue visibility: "+.id+" completed-task evidence omitted: "+(.completed_tasks_omitted|tostring)),reveal:"inspect canonical backlog issue links"}]
+         + [if ($all|length)>$cap then {surface:("issue visibility showing \($cap) of \($all|length) observed issues"),reveal:"raise FM_BEARINGS_ISSUE_ROWS"} else empty end])}'
+)
+
+if [ "$INCLUDE_ISSUES" = 1 ]; then
+  ISSUE_VISIBILITY=$(issue_visibility_json) || exit $?
+  MODEL=$(printf '%s\n%s\n' "$MODEL" "$ISSUE_VISIBILITY" | jq -s '
+    .[1] as $issues | .[0] | .issue_visibility=$issues
+    | .omitted = ([.omitted[]|select(.reveal != "--include-issues")] + $issues.omitted)') || exit 1
+fi
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"
