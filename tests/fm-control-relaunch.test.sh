@@ -2001,6 +2001,14 @@ make_herdr_stub() {  # <case-dir>
 set -u
 D=$FM_FAKE_DIR
 printf '%s\n' "$*" >> "$D/herdr-log"
+arg_after() {  # <flag> <args...>: the value following <flag>, if any
+  local flag=$1
+  shift
+  while [ "$#" -gt 1 ]; do
+    [ "$1" = "$flag" ] && { printf '%s' "$2"; return 0; }
+    shift
+  done
+}
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
   if [ -f "$D/herdr-stopped" ]; then
     printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":false}}\n'
@@ -2070,22 +2078,65 @@ case "${1:-} ${2:-}" in
     esac
     exit 0 ;;
   'workspace list')
-    printf '{"result":{"workspaces":[]}}\n'
+    # herdr-layout, when a case stages one, is the session's workspace list:
+    # the launcher's own focused `firstmate` workspace plus whatever the case
+    # or a projected create adds.
+    if [ -f "$D/herdr-layout" ]; then
+      jq -c '{result: {workspaces: .}}' "$D/herdr-layout"
+    else
+      printf '{"result":{"workspaces":[]}}\n'
+    fi
     exit 0 ;;
   'workspace create')
     if [ -f "$D/herdr-workspace-create-fails" ]; then
       echo 'error: workspace create failed' >&2
       exit 1
     fi
+    if [ -f "$D/herdr-layout" ]; then
+      label=$(arg_after --label "$@")
+      jq --arg label "$label" \
+        '. + [{workspace_id: "wsproj", label: $label, focused: false, active_tab_id: "seedtab"}]' \
+        "$D/herdr-layout" > "$D/herdr-layout.tmp" && mv "$D/herdr-layout.tmp" "$D/herdr-layout"
+      printf '{"result":{"workspace":{"workspace_id":"wsproj"},"tab":{"tab_id":"seedtab"},"root_pane":{"pane_id":"%%8"}}}\n'
+      exit 0
+    fi
     printf '{"result":{"workspace":{"workspace_id":"wsnew"},"tab":{"tab_id":"seedtab"}}}\n'
     exit 0 ;;
   'tab list')
-    printf '{"result":{"tabs":[]}}\n'
+    # The projected workspace converges to its one task tab: the seeded tab is
+    # already gone, so the prune has nothing to close.
+    case "$(arg_after --workspace "$@")" in
+      wsparent) printf '{"result":{"tabs":[{"tab_id":"ptab","label":"firstmate","focused":true}]}}\n' ;;
+      wsproj) printf '{"result":{"tabs":[{"tab_id":"tabnew","label":"%s","focused":false}]}}\n' \
+        "$(cat "$D/herdr-task-label" 2>/dev/null)" ;;
+      *) printf '{"result":{"tabs":[]}}\n' ;;
+    esac
+    exit 0 ;;
+  'pane list')
+    case "$(arg_after --workspace "$@")" in
+      wsproj)
+        if [ -f "$D/herdr-projection-stray-pane" ]; then
+          # The fresh space never converges to its one task pane.
+          printf '{"result":{"panes":[{"pane_id":"%%9","tab_id":"tabnew"},{"pane_id":"%%10","tab_id":"tabnew"}]}}\n'
+        else
+          printf '{"result":{"panes":[{"pane_id":"%%9","tab_id":"tabnew"}]}}\n'
+        fi ;;
+      *) printf '{"result":{"panes":[]}}\n' ;;
+    esac
+    exit 0 ;;
+  'session list')
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"%s/herdr.sock"}]}\n' \
+      "$(arg_after --session "$@")" "$D"
     exit 0 ;;
   'tab create')
+    if [ -f "$D/herdr-tab-create-fails" ]; then
+      echo 'error: tab create failed' >&2
+      exit 1
+    fi
     # The re-created endpoint. Recording it lets a case prove the pane the
     # record ends up naming is the one this call minted.
     printf '%s\n' "$*" >> "$D/herdr-created-tabs"
+    arg_after --label "$@" > "$D/herdr-task-label"
     printf '{"result":{"tab":{"tab_id":"tabnew"},"root_pane":{"pane_id":"%%9"}}}\n'
     # From here on the new pane is the one that reads back.
     printf '%s' '%9' > "$D/herdr-pane"
@@ -2394,6 +2445,177 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner() {
   pass "reclaim: a herdr secondmate whose endpoint is gone is sent to its own respawn owner"
 }
 
+# --- herdr: a rebind keeps the presentation-space shape ----------------------
+#
+# A fresh spawn places a crewmate in its own one-task presentation workspace, so
+# a reclaim of a destroyed endpoint must not drop the replacement into the
+# launcher's own workspace as a foreign tab. These cases stage the session's
+# workspace list (the home's `firstmate` workspace, focused) and the task's
+# earlier presentation journal, then read where the replacement tab landed.
+
+OLD_PROJECTION_TOKEN=AAAAAAAAAAAAAAAAAAAAAA
+
+# stage_herdr_presentation <case-dir> <id> <on|off> [extra-workspace-json]
+stage_herdr_presentation() {
+  local dir=$1 id=$2 preference=$3 extra=${4:-}
+  mkdir -p "$dir/home/config"
+  printf '%s\n' "$preference" > "$dir/home/config/herdr-presentation-spaces"
+  printf '[{"workspace_id":"wsparent","label":"firstmate","focused":true,"active_tab_id":"ptab"}%s]\n' \
+    "${extra:+,$extra}" > "$dir/fake/herdr-layout"
+  # The task's earlier projection, bound to the endpoint that is now gone.
+  {
+    echo "version=2"
+    echo "task_id=$id"
+    echo "projection_id=$OLD_PROJECTION_TOKEN"
+    echo "home=$dir/home"
+    echo "session=fmlab"
+    echo "workspace_id=ws1"
+    echo "tab_id=tab1"
+    echo "pane_id=%7"
+    echo "parent_workspace_id=wsparent"
+    echo "parent_label=firstmate"
+    echo "workspace_label=└ $id · p:$OLD_PROJECTION_TOKEN"
+    echo "task_label=fm-$id"
+  } > "$dir/home/state/$id.herdr-presentation"
+}
+
+presentation_field() {  # <case-dir> <id> <key>
+  grep "^$3=" "$1/home/state/$2.herdr-presentation" | tail -1 | cut -d= -f2-
+}
+
+test_herdr_rebind_recreates_a_presentation_space() {
+  local dir out rc=0 log created token
+  herdr_case_or_skip gone-herdr-projected rl78 fmlab '%none' || {
+    echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  stage_herdr_presentation "$dir" rl78 on
+
+  out=$(run_spawn "$dir" rl78 --relaunch --harness claude) || rc=$?
+  log=$(cat "$dir/fake/herdr-log")
+  expect_code 0 "$rc" "a herdr rebind with presentation spaces on should succeed"$'\n'"$out"$'\n'"$log"
+
+  assert_contains "$log" "workspace create" \
+    "a rebind with presentation spaces on must re-create the task's own presentation space"
+  created=$(cat "$dir/fake/herdr-created-tabs")
+  assert_contains "$created" "--workspace wsproj" \
+    "the replacement tab must open in the fresh presentation space"
+  assert_not_contains "$created" "--workspace wsparent" \
+    "the replacement must never land as a foreign tab in the launcher's own workspace"
+  [ -z "$(grep -v -- '--session fmlab$' <<<"$log" | grep -v '^status --json$' || true)" ] \
+    || fail "the projected rebind used a herdr session the record does not name: $log"
+  [ "$(meta_field "$dir" rl78 herdr_workspace_id)" = wsproj ] \
+    || fail "the rebound record should name the fresh presentation space, got $(meta_field "$dir" rl78 herdr_workspace_id)"
+  [ "$(meta_field "$dir" rl78 window)" = 'fmlab:%9' ] \
+    || fail "the rebound endpoint should be the new pane, got $(meta_field "$dir" rl78 window)"
+  token=$(presentation_field "$dir" rl78 projection_id)
+  [ -n "$token" ] && [ "$token" != "$OLD_PROJECTION_TOKEN" ] \
+    || fail "the orphaned journal should be replaced by a fresh projection, got token '$token'"
+  [ "$(presentation_field "$dir" rl78 version)" = 2 ] \
+    || fail "the fresh projection should publish an exact restart binding"
+  [ "$(presentation_field "$dir" rl78 workspace_id)" = wsproj ] \
+    && [ "$(presentation_field "$dir" rl78 pane_id)" = '%9' ] \
+    && [ "$(presentation_field "$dir" rl78 parent_workspace_id)" = wsparent ] \
+    || fail "the fresh binding should name the new space, its pane, and the launcher parent: $(cat "$dir/home/state/rl78.herdr-presentation")"
+  assert_contains "$log" "workspace create --cwd $dir/wt --label └ rl78 · p:$token" \
+    "the presentation space must open in the recorded worktree under the fresh token"
+  pass "reclaim: a herdr rebind re-creates the task's own presentation space instead of a tab in the launcher's workspace"
+}
+
+test_herdr_rebind_stays_flat_when_presentation_is_off() {
+  local dir out rc=0 log
+  herdr_case_or_skip gone-herdr-flat-off rl79 fmlab '%none' || {
+    echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  stage_herdr_presentation "$dir" rl79 off
+  rm -f "$dir/home/state/rl79.herdr-presentation"
+
+  out=$(run_spawn "$dir" rl79 --relaunch --harness claude) || rc=$?
+  log=$(cat "$dir/fake/herdr-log")
+  expect_code 0 "$rc" "a herdr rebind with presentation spaces off should succeed"$'\n'"$out"$'\n'"$log"
+  assert_not_contains "$log" "workspace create" "presentation off must not create a presentation space"
+  assert_contains "$(cat "$dir/fake/herdr-created-tabs")" "--workspace wsparent" \
+    "presentation off keeps the flat tab in the launcher's workspace"
+  assert_absent "$dir/home/state/rl79.herdr-presentation" "presentation off must not publish a presentation journal"
+  [ "$(meta_field "$dir" rl79 herdr_workspace_id)" = wsparent ] \
+    || fail "the flat rebind should name the launcher's workspace, got $(meta_field "$dir" rl79 herdr_workspace_id)"
+  pass "reclaim: with presentation spaces off a herdr rebind keeps the flat layout"
+}
+
+test_herdr_rebind_keeps_a_journal_whose_space_is_still_present() {
+  local dir out rc=0 log before
+  herdr_case_or_skip gone-herdr-journal-live rl80 fmlab '%none' || {
+    echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  stage_herdr_presentation "$dir" rl80 on \
+    "{\"workspace_id\":\"wsold\",\"label\":\"└ rl80 · p:$OLD_PROJECTION_TOKEN\",\"focused\":false,\"active_tab_id\":\"oldtab\"}"
+  before=$(cat "$dir/home/state/rl80.herdr-presentation")
+
+  out=$(run_spawn "$dir" rl80 --relaunch --harness claude) || rc=$?
+  log=$(cat "$dir/fake/herdr-log")
+  expect_code 0 "$rc" "a rebind whose old space survives should still succeed flat"$'\n'"$out"$'\n'"$log"
+  assert_not_contains "$log" "workspace create" \
+    "a journal that still names a present space must not be replaced by a second projection"
+  assert_contains "$(cat "$dir/fake/herdr-created-tabs")" "--workspace wsparent" \
+    "the rebind falls back to the flat tab"
+  [ "$(cat "$dir/home/state/rl80.herdr-presentation")" = "$before" ] \
+    || fail "a journal naming a present space must be retained untouched"
+  assert_contains "$out" "not confirmed gone" "the fallback should say why it stayed flat"
+  pass "reclaim: a herdr rebind keeps a journal whose space survives and stays flat"
+}
+
+# A projected create that fails after the old journal was retired keeps the
+# fresh journal quarantined for recovery and never falls back to a flat tab.
+# Abort cleanup gets authority only when both creates returned exact IDs: then
+# the exit path targets exactly the minted task and seeded panes (%9, %8);
+# otherwise it touches no pane at all.
+test_herdr_rebind_projection_failure_quarantines_its_journal() {
+  local fault id dir out rc log token cleanup
+  for fault in workspace-create-fails tab-create-fails projection-stray-pane; do
+    case "$fault" in
+      workspace-create-fails) id=rl81 cleanup=0 ;;
+      tab-create-fails) id=rl82 cleanup=0 ;;
+      projection-stray-pane) id=rl83 cleanup=1 ;;
+    esac
+    herdr_case_or_skip "gone-herdr-projection-$fault" "$id" fmlab '%none' || {
+      echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+      return 0
+    }
+    dir=$HERDR_CASE_DIR
+    stage_herdr_presentation "$dir" "$id" on
+    : > "$dir/fake/herdr-$fault"
+
+    rc=0
+    out=$(run_spawn "$dir" "$id" --relaunch --harness claude) || rc=$?
+    log=$(cat "$dir/fake/herdr-log")
+    expect_code 1 "$rc" "a failed projected rebind ($fault) must refuse"$'\n'"$out"$'\n'"$log"
+    assert_contains "$log" "workspace create" "the rebind ($fault) should have attempted the projection"
+    token=$(presentation_field "$dir" "$id" projection_id)
+    [ -n "$token" ] && [ "$token" != "$OLD_PROJECTION_TOKEN" ] \
+      || fail "the retired journal should be replaced by a fresh one ($fault), got token '$token'"
+    [ "$(presentation_field "$dir" "$id" version)" = 1 ] \
+      || fail "a failed create must leave its journal unbound and quarantined ($fault): $(cat "$dir/home/state/$id.herdr-presentation")"
+    assert_not_contains "$(cat "$dir/fake/herdr-created-tabs" 2>/dev/null)" "--workspace wsparent" \
+      "a failed projection must not fall back to a flat tab in the launcher's workspace ($fault)"
+    assert_not_contains "$log" "workspace close" "abort cleanup never closes a workspace ($fault)"
+    if [ "$cleanup" = 1 ]; then
+      assert_contains "$log" "pane get %9 --session fmlab" \
+        "exact abort cleanup should target the minted task pane ($fault)"
+      assert_contains "$log" "pane get %8 --session fmlab" \
+        "exact abort cleanup should target the seeded pane ($fault)"
+    else
+      assert_not_contains "$log" "pane get %9" "an ambiguous create grants no abort cleanup ($fault)"
+      assert_not_contains "$log" "pane get %8" "an ambiguous create grants no abort cleanup ($fault)"
+    fi
+  done
+  pass "reclaim: a failed projected rebind quarantines its fresh journal and cleans up only exact panes"
+}
+
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
@@ -2560,5 +2782,9 @@ test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
+test_herdr_rebind_recreates_a_presentation_space
+test_herdr_rebind_stays_flat_when_presentation_is_off
+test_herdr_rebind_keeps_a_journal_whose_space_is_still_present
+test_herdr_rebind_projection_failure_quarantines_its_journal
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight

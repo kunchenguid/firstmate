@@ -323,16 +323,18 @@ fm_backend_herdr_presentation_default_supported() {  # <state-dir> [<session>]
   return 1
 }
 
-# fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>]: the one gate
-# bin/fm-spawn.sh consults before projecting this home's children into
-# disposable one-task workspaces (docs/herdr-backend.md "Presentation spaces"
-# owns the full contract). An explicit "off" or "on" is obeyed as written; a
-# home that configured nothing is projected only at or above the version floor,
-# and otherwise falls back to the flat layout with one warning. Sets
+# fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>] [<session>]:
+# the one gate bin/fm-spawn.sh consults before projecting this home's children
+# into disposable one-task workspaces (docs/herdr-backend.md "Presentation
+# spaces" owns the full contract). An explicit "off" or "on" is obeyed as
+# written; a home that configured nothing is projected only at or above the
+# version floor, and otherwise falls back to the flat layout with one warning.
+# <session> defaults to the ambient one; a rebind passes the session its record
+# names so the floor is read from the server the projection will live on. Sets
 # FM_BACKEND_HERDR_PRESENTATION_PREFERENCE for the new-projection boundary to
 # distinguish an unconfigured default from an explicit opt-in.
-fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
-  local config_dir=${1:-} state_dir=${2:-} preference
+fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>] [<session>]
+  local config_dir=${1:-} state_dir=${2:-} session=${3:-} preference
   preference=$(fm_backend_herdr_presentation_preference "$config_dir")
   # bin/fm-spawn.sh reads this out-parameter after sourcing this adapter.
   # shellcheck disable=SC2034
@@ -341,7 +343,7 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
     off) return 1 ;;
     on) return 0 ;;
   esac
-  fm_backend_herdr_presentation_default_supported "$state_dir"
+  fm_backend_herdr_presentation_default_supported "$state_dir" "$session"
 }
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
@@ -2564,6 +2566,7 @@ EOF
 # workspace and its normal fm-<id> task tab without looking up, adopting, or
 # reusing any existing workspace.
 # The caller must atomically publish the projection journal first.
+# <session> defaults to the ambient one; a rebind passes its recorded session.
 # This function sets exact response-derived globals and prints nothing:
 #   FM_BACKEND_HERDR_PROJECTION_SESSION
 #   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
@@ -2575,8 +2578,8 @@ EOF
 # CLEANUP_SAFE becomes 1 only after both creates returned complete exact IDs.
 # A missing, failed, or malformed create response stays ambiguous and grants no
 # cleanup authority.
-fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label>
-  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before active_tab
+fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label> [<session>]
+  local cwd=$1 workspace_label=$2 task_label=$3 session=${4:-} out tabs panes tab_count pane_count focus_before active_tab
   FM_BACKEND_HERDR_PROJECTION_SESSION=""
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=""
   FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=""
@@ -2586,7 +2589,7 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
   FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
 
   fm_backend_herdr_version_check || return 1
-  session=$(fm_backend_herdr_session)
+  [ -n "$session" ] || session=$(fm_backend_herdr_session)
   fm_backend_herdr_server_ensure "$session" || return 1
   focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "error: herdr presentation workspace create could not capture exact active workspace and tab; refusing a focus-unsafe projection" >&2

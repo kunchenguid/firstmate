@@ -130,6 +130,9 @@
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
 #   opt in below that floor; an empty file remains the historical opt-in form.
+#   A ship/scout --relaunch rebind of a proven-gone endpoint takes the same
+#   projected shape in its recorded session once any earlier journal is proven
+#   orphaned (docs/herdr-backend.md "Presentation journal").
 #   A clean fresh task first writes state/<id>.herdr-presentation atomically,
 #   then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
@@ -3630,6 +3633,110 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
   esac
 }
 
+# spawn_herdr_projection_create_bind <session> <cwd> <home> <parent> <parent-label>:
+# the create-and-bind steps a fresh projected spawn and a projected rebind
+# share once each has passed its own entry checks and holds the session's
+# presentation focus lock. Publishes a new journal, creates the one-task
+# workspace under the exact <parent>, arms exact abort cleanup, and binds the
+# journal. A create failure exits, arming abort cleanup only when both creates
+# returned exact IDs. Sets HERDR_PROJECTED=1 and the endpoint globals.
+spawn_herdr_projection_create_bind() { # <session> <cwd> <home> <parent> <parent-label>
+  local session=$1 cwd=$2 home=$3 parent=$4 parent_label=$5 token label home_id
+  token=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
+  label=$(fm_backend_herdr_projection_workspace_label "$ID" "$token")
+  if ! FM_HOME="$home" fm_backend_herdr_projection_create_task "$cwd" "$label" "$W" "$session"; then
+    if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+      HERDR_PROJECTION_ABORT_CLEANUP=1
+      HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
+      HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+      HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+    fi
+    exit 1
+  fi
+  HERDR_PROJECTED=1
+  HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
+  HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+  HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+  HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+  HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+  HERDR_PROJECTION_ABORT_CLEANUP=1
+  HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+  HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+  HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+  fm_backend_herdr_projection_order_best_effort "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$parent_label" "$parent"
+  home_id=$(fm_backend_herdr_projection_home_identity "$home" 2>/dev/null || true)
+  if [ -n "$home_id" ] &&
+    fm_backend_herdr_projection_live_binding_matches \
+      "$HERDR_SES" "$token" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+      "$parent" "$parent_label" "$label" "$W" &&
+    fm_backend_herdr_projection_journal_bind \
+      "$HERDR_PRESENTATION_JOURNAL" "$ID" "$home_id" "$HERDR_SES" \
+      "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+      "$parent" "$parent_label" "$label" "$W"; then
+    :
+  else
+    echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
+  fi
+}
+
+# A rebind replaces an endpoint already proven gone, so a presentation journal
+# left by the task's previous projection may be retired only when the token
+# workspace it names is confirmed gone from the rebind's own session. Anything
+# else - unreadable, malformed, bound to another session, or still present -
+# is retained untouched and the caller keeps the flat fallback.
+spawn_herdr_rebind_retire_journal() { # <session> <journal>
+  local session=$1 journal=$2
+  { [ -e "$journal" ] || [ -L "$journal" ]; } || return 0
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$ID" || return 1
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] &&
+    [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ]; then
+    return 1
+  fi
+  fm_backend_herdr_projection_token_workspace_gone "$session" "$journal" "$ID" || return 1
+  rm -f "$journal"
+}
+
+# spawn_herdr_rebind_projection <session>: re-create a rebind's endpoint in a
+# fresh one-task presentation workspace, the same shape a fresh spawn takes,
+# under the launcher's exact parent workspace in the RECORDED session. Sets
+# HERDR_PROJECTED=1 and the endpoint globals on success. Every non-mutating
+# reason it cannot project safely leaves HERDR_PROJECTED=0 for the flat
+# fallback; a failure after the new journal is published exits like a fresh
+# projected create, with exact abort cleanup armed when the creates were exact.
+spawn_herdr_rebind_projection() { # <session>
+  local session=$1 launcher_status parent parent_label
+  HERDR_PROJECTED=0
+  fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE" "$session" || return 0
+  spawn_herdr_presentation_order_lock_acquire "$session" || {
+    echo "warning: herdr presentation focus lock unavailable; re-creating $ID's endpoint in the ordinary flat layout" >&2
+    return 0
+  }
+  # A claimed-but-broken launcher identity (status 1) is not decided here: the
+  # flat container below runs the same check and owns that refusal's message.
+  set +e
+  HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" fm_backend_herdr_launcher_identity "$session" 2>/dev/null
+  launcher_status=$?
+  set -e
+  parent_label=$(fm_backend_herdr_workspace_label)
+  case "$launcher_status" in
+  0) parent=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID ;;
+  2) parent=$(fm_backend_herdr_projection_parent_workspace_exact "$session" "$parent_label" 2>/dev/null || true) ;;
+  *) parent= ;;
+  esac
+  if [ -z "$parent" ]; then
+    [ "$launcher_status" != 2 ] ||
+      echo "warning: herdr presentation parent is absent or ambiguous; re-creating $ID's endpoint in the ordinary flat layout" >&2
+    spawn_herdr_presentation_order_lock_release
+    return 0
+  fi
+  if ! spawn_herdr_rebind_retire_journal "$session" "$HERDR_PRESENTATION_JOURNAL"; then
+    echo "warning: herdr presentation journal for $ID still names a space that is not confirmed gone; retaining it and re-creating the endpoint in the ordinary flat layout" >&2
+    spawn_herdr_presentation_order_lock_release
+    return 0
+  fi
+  spawn_herdr_projection_create_bind "$session" "$WT" "$FM_HOME" "$parent" "$parent_label"
+}
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -3705,60 +3812,67 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # (fm_control_endpoint_absence_verdict owns that argument). tmux and every
     # secondmate were already refused, so there is no dispatch left to make.
     #
-    # This deliberately uses the FLAT container shape rather than Herdr's
-    # presentation projection: projection is a presentation-only layout that is
-    # never endpoint or ownership authority, and flat is already the documented
-    # fallback for every recovery it cannot bind exactly
-    # (docs/herdr-backend.md "Presentation spaces").
+    # When presentation spaces are enabled, the endpoint is re-created in a
+    # fresh one-task presentation workspace, the same shape a fresh spawn
+    # takes, so a reclaimed worker never lands as a foreign tab inside the
+    # launcher's own workspace. Projection stays presentation-only, never
+    # endpoint or ownership authority, and every case it cannot create safely
+    # keeps the FLAT container shape below (docs/herdr-backend.md
+    # "Presentation spaces").
     #
-    # KNOWN LIMITATION (bead fm-herdr-rebind-leak-20260913): the tab minted
+    # KNOWN LIMITATION (bead fm-herdr-rebind-leak-20260913): a FLAT tab minted
     # below is registered with no abort cleanup, so a later refusal leaves that
     # pane behind and a retry mints another. Documented in
     # docs/agent-control.md rather than fixed here, because the remedy is
-    # machinery the ordinary flat spawn path does not have either.
+    # machinery the ordinary flat spawn path does not have either. A projected
+    # rebind arms the same exact abort cleanup a fresh projection does.
     #
-    # Re-create the tab under the RECORDED herdr session. Without the explicit
-    # session the container would resolve from the AMBIENT one
+    # Re-create the endpoint under the RECORDED herdr session. Without the
+    # explicit session the container would resolve from the AMBIENT one
     # (${HERDR_SESSION:-default}), so reclaiming a task recorded on a named
     # session from a seat that is not in it would silently relocate the task
     # onto another herdr server - an identity change, published as a
     # self-consistent but wrong record.
     HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
-    HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
-      fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
-      # container_ensure returns 1 for several unrelated reasons - a failed
-      # version check, a server that will not start, an ambiguous workspace
-      # label, a cross-session launcher identity, a failed workspace create -
-      # and each already printed its own accurate message. Add only what this
-      # layer actually knows, and name the session mismatch solely when there
-      # IS one, rather than asserting a cause this condition cannot establish.
-      #
-      # A seat with NO herdr pane never reaches the cross-session guard at all:
-      # fm_backend_herdr_launcher_identity returns 2 for it and the placement
-      # falls back to the recorded session's labeled container, which is what
-      # makes a plain ssh or cron reclaim work. Its ambient session still reads
-      # `default` (fm_backend_herdr_session's fallback), so the inequality alone
-      # would fire for EVERY named-session task reclaimed from a plain shell and
-      # send the operator chasing a session mismatch that was never the cause.
-      HERDR_AMBIENT_SES=$(fm_backend_herdr_session)
-      if [ -n "$RELAUNCH_LAUNCHER_PANE_ID" ] && [ "$HERDR_AMBIENT_SES" != "$HERDR_REBIND_SES" ]; then
-        echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; this seat is running in herdr session '$HERDR_AMBIENT_SES', and a reclaim never moves a task to another session" >&2
-      else
-        echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; see the refusal above for what failed" >&2
-      fi
-      exit 1
-    }
-    CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
-    HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
-    HERDR_SES=${CONTAINER%%:*}
-    HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+    spawn_herdr_rebind_projection "$HERDR_REBIND_SES"
+    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
+        fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
+        # container_ensure returns 1 for several unrelated reasons - a failed
+        # version check, a server that will not start, an ambiguous workspace
+        # label, a cross-session launcher identity, a failed workspace create -
+        # and each already printed its own accurate message. Add only what this
+        # layer actually knows, and name the session mismatch solely when there
+        # IS one, rather than asserting a cause this condition cannot establish.
+        #
+        # A seat with NO herdr pane never reaches the cross-session guard at all:
+        # fm_backend_herdr_launcher_identity returns 2 for it and the placement
+        # falls back to the recorded session's labeled container, which is what
+        # makes a plain ssh or cron reclaim work. Its ambient session still reads
+        # `default` (fm_backend_herdr_session's fallback), so the inequality alone
+        # would fire for EVERY named-session task reclaimed from a plain shell and
+        # send the operator chasing a session mismatch that was never the cause.
+        HERDR_AMBIENT_SES=$(fm_backend_herdr_session)
+        if [ -n "$RELAUNCH_LAUNCHER_PANE_ID" ] && [ "$HERDR_AMBIENT_SES" != "$HERDR_REBIND_SES" ]; then
+          echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; this seat is running in herdr session '$HERDR_AMBIENT_SES', and a reclaim never moves a task to another session" >&2
+        else
+          echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; see the refusal above for what failed" >&2
+        fi
+        exit 1
+      }
+      CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+      HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+      HERDR_SES=${CONTAINER%%:*}
+      HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
-    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
-      echo "error: herdr did not return a tab/pane id for $W" >&2
-      exit 1
+      if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+        echo "error: herdr did not return a tab/pane id for $W" >&2
+        exit 1
+      fi
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     SES=$HERDR_SES
@@ -3890,44 +4004,8 @@ else
             echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
             spawn_herdr_presentation_order_lock_release
           else
-            HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
-            if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
-              if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
-                HERDR_PROJECTION_ABORT_CLEANUP=1
-                HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
-                HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-                HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-              fi
-              exit 1
-            fi
-            HERDR_PROJECTED=1
-            HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
-            HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
-            HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
-            HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-            HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-            HERDR_PROJECTION_ABORT_CLEANUP=1
-            HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-            HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-            fm_backend_herdr_projection_order_best_effort \
-              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
-            HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
-            if [ -n "$HERDR_HOME_ID" ] &&
-              fm_backend_herdr_projection_live_binding_matches \
-                "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
-                "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
-                "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" &&
-              fm_backend_herdr_projection_journal_bind \
-                "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
-                "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
-              :
-            else
-              echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
-            fi
+            spawn_herdr_projection_create_bind "$HERDR_SES" "$PROJ_ABS" "$HERDR_LABEL_HOME" \
+              "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL"
           fi
         else
           echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection" >&2
