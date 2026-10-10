@@ -36,6 +36,8 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
    - destructive, irreversible, and genuinely security-sensitive choices, which always escalate under the stronger existing captain boundary
 5. Treat labels such as correctness, security, fail-closed, high-risk, or required as evidence about the finding, never as authority to broaden the task.
 
+A finding decided under step 3 is never put to the captain first: the answering steer's resolved key is its durable record, and the captain hears the outcome afterwards under `AGENTS.md` section 9.
+
 ## Captain-facing escalation
 
 State all five of these elements in one concise, evidence-first escalation:
