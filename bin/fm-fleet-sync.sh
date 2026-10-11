@@ -45,6 +45,11 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# Reuse fm-ff-lib.sh's one stale-index.lock recovery (ff_maybe_clear_stale_index_lock)
+# on the project-clone fast-forward path below, so a clone orphaned by a killed git
+# process self-heals exactly as the secondmate sync already does.
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -428,12 +433,20 @@ sync_project() {
     return 0
   }
   if ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
-    reason="fast-forward failed"
-    if [ -n "$merge_output" ]; then
-      reason="$reason: $(first_line "$merge_output")"
+    # A killed git process can orphan the clone's index.lock, after which every
+    # fast-forward fails forever on "Unable to create ...index.lock: File exists".
+    # Recover once: clear the lock only when provably stale (fm-lock-lib.sh, via
+    # fm-ff-lib.sh's shared helper) and retry the fast-forward a single time; any
+    # other failure, or an unproven lock, keeps today's skip.
+    if ! ff_maybe_clear_stale_index_lock "$PROJ" "$label" "$merge_output" \
+      || ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
+      reason="fast-forward failed"
+      if [ -n "$merge_output" ]; then
+        reason="$reason: $(first_line "$merge_output")"
+      fi
+      echo "$label: skipped: $reason"
+      return 0
     fi
-    echo "$label: skipped: $reason"
-    return 0
   fi
   after=$(git -C "$PROJ" rev-parse --short "$DEFAULT") || {
     echo "$label: skipped: fast-forward completed but cannot read local $DEFAULT"

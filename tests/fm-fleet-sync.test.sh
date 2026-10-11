@@ -643,6 +643,64 @@ test_transient_packed_refs_lock_self_clears() {
   pass "a transient packed-refs.lock that self-clears is retried without a force-remove"
 }
 
+# --- index.lock (fast-forward) recovery tests -------------------------------
+
+# The fast-forward step's own orphaned index.lock: a killed git process leaves a
+# 0-byte .git/index.lock (the takeone shape), after which `git merge --ff-only`
+# fails forever on "Unable to create ...index.lock: File exists". The shared
+# fm-ff-lib.sh helper clears it ONLY when provably stale and retries once - the
+# same proof and path the secondmate sync already uses - so the clone catches up.
+test_orphaned_stale_index_lock_recovers() {
+  local home fakebin clone out err
+  home=$(new_home)
+  fakebin="$home/fb-idxstale"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_pair "$home" idxstale)
+  advance_origin "$home" idxstale C1
+  : > "$clone/.git/index.lock"        # the orphaned 0-byte lock, exactly as left
+  lsof_no_holder "$fakebin"           # provably no live holder
+  out="$home/out-idxstale"; err="$home/err-idxstale"
+
+  set +e
+  FM_FF_STALE_INDEX_LOCK_AGE_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" idxstale
+  set -e
+
+  assert_grep "removed provably-stale git lock" "$err" \
+    "stale index.lock: fleet-sync did not clear the provably-stale lock"
+  assert_contains "$(cat "$out")" "idxstale: synced" \
+    "stale index.lock: clone did not sync after recovery"
+  assert_absent "$clone/.git/index.lock" "stale index.lock: lock should be gone after removal"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "stale index.lock: clone HEAD not at origin/main after recovery"
+  pass "orphaned provably-stale index.lock is cleared and the clone fast-forwards"
+}
+
+test_live_index_lock_is_never_removed() {
+  local home fakebin clone out err before
+  home=$(new_home)
+  fakebin="$home/fb-idxlive"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_pair "$home" idxlive)
+  advance_origin "$home" idxlive C1
+  : > "$clone/.git/index.lock"
+  lsof_live_holder "$fakebin"         # a live process holds the lock file
+  before=$(head_sha "$clone")
+  out="$home/out-idxlive"; err="$home/err-idxlive"
+
+  set +e
+  FM_FF_STALE_INDEX_LOCK_AGE_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" idxlive
+  set -e
+
+  assert_grep "not provably stale" "$err" "live index.lock: refusal diagnostic missing"
+  assert_no_grep "removed provably-stale git lock" "$err" \
+    "live index.lock: fleet-sync force-removed a live lock"
+  assert_contains "$(cat "$out")" "idxlive: skipped: fast-forward failed" \
+    "live index.lock: fleet-sync did not skip"
+  assert_present "$clone/.git/index.lock" "live index.lock: lock must never be removed"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "live index.lock: clone advanced despite the refusal"
+  pass "a live index.lock is never removed and the fast-forward is skipped"
+}
+
 test_non_clone_dir_never_syncs_the_enclosing_repo() {
   local home before out after
   home=$(build_enclosing_home nonclone)
@@ -770,6 +828,8 @@ test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
+test_orphaned_stale_index_lock_recovers
+test_live_index_lock_is_never_removed
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs
