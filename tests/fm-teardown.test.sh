@@ -76,7 +76,27 @@ REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
-REAL_LSOF_FOR_TEST=$(command -v lsof)
+
+# Where this host actually keeps lsof, PATH or not - macOS ships it only as
+# /usr/sbin/lsof and agent shells routinely drop /usr/sbin from PATH, so a
+# PATH-only lookup left REAL_LSOF_FOR_TEST empty and every fakebin lsof stub
+# that execs the real one silently failed. Empty when the host
+# genuinely has none.
+host_lsof_path() {
+  local resolved dir
+  if resolved=$(command -v lsof 2>/dev/null) && [ -n "$resolved" ]; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  for dir in /usr/sbin /sbin /usr/bin /bin; do
+    [ -x "$dir/lsof" ] || continue
+    printf '%s\n' "$dir/lsof"
+    return 0
+  done
+  printf '%s\n' ""
+}
+
+REAL_LSOF_FOR_TEST=$(host_lsof_path)
 export REAL_LSOF_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
@@ -675,6 +695,9 @@ backlog_row_state() {
 
 # Build the teardown test's executable search path without lsof, regardless of
 # whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
+# PATH is only half the picture: teardown resolves lsof through fm_lsof_bin,
+# which also probes the standard system locations, so a case that wants "this
+# host has no lsof at all" must ALSO pass FM_LSOF_FALLBACK_DIRS="".
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
@@ -5000,7 +5023,7 @@ EOF
   chmod +x "$case_dir/fakebin/tmux"
 
   rc=0
-  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_LSOF_FALLBACK_DIRS="" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
@@ -5011,6 +5034,52 @@ EOF
   assert_grep "reaping leaked worktree process group" "$case_dir/stderr" \
     "lsof-absent-process-group-reap: teardown did not use the process-group fallback"
   pass "missing lsof falls back to reaping the tmux pane process group"
+}
+
+# lsof off PATH is not lsof absent. macOS ships it ONLY as
+# /usr/sbin/lsof (no /usr/bin/lsof, none from Homebrew), and agent sessions
+# routinely run a PATH without /usr/sbin. Resolving purely off PATH demoted
+# those sessions to the process-group fallback, so a leaked worktree process
+# survived teardown with nothing but a warning - in production, not only tests.
+test_lsof_off_path_but_installed_still_reaps_worktree_process() {
+  local case_dir rc pid path_without_lsof fallback_dir lsof_real
+  lsof_real=$(host_lsof_path)
+  if [ -z "$lsof_real" ]; then
+    pass "an lsof installed off PATH still drives the reap (not exercised: this host has no lsof)"
+    return 0
+  fi
+  case_dir=$(make_case lsof-off-path-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+  PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
+    && fail "lsof-off-path-reap: fixture path unexpectedly exposes lsof"
+
+  # Stands in for /usr/sbin: lsof is installed, just not anywhere on PATH.
+  fallback_dir="$case_dir/off-path-sbin"
+  mkdir -p "$fallback_dir"
+  ln -sf "$lsof_real" "$fallback_dir/lsof"
+
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "lsof-off-path-reap: setup sleeper did not start"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_LSOF_FALLBACK_DIRS="$fallback_dir" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "lsof-off-path-reap: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "lsof-off-path-reap: leaked worktree process survived teardown"
+  fi
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "lsof-off-path-reap: teardown did not report reaping the leaked process"
+  assert_no_grep "lsof is unavailable" "$case_dir/stderr" \
+    "lsof-off-path-reap: teardown degraded to the no-lsof path with lsof installed off PATH"
+  pass "an lsof installed off PATH (macOS /usr/sbin) still drives the leaked-process reap"
 }
 
 test_lsof_error_refuses_before_removal() {
@@ -6083,6 +6152,7 @@ test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
+test_lsof_off_path_but_installed_still_reaps_worktree_process
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
