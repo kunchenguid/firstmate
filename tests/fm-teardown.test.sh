@@ -42,6 +42,11 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (z1) supervision branch + pushed branch + recorded PR OPEN        -> REFUSE (merge proof)
+#   (z2) supervision branch + pushed branch + PR MERGED at HEAD       -> ALLOW
+#   (z3) supervision branch + pushed branch + gh error                -> REFUSE (fail-safe)
+#   (z4) main + pushed branch + recorded PR OPEN                      -> ALLOW  (as (d))
+#   (z5) supervision branch + worktree gone + recorded PR OPEN|MERGED -> REFUSE|ALLOW
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -414,6 +419,31 @@ echo "error: gh unavailable" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Override gh so PR 7 reports <state> (OPEN, MERGED, or ERROR for an unreachable
+# forge) with head <head>, for every read fm-pr-check, the armed merge poll, and
+# teardown make. Each pr view call is logged to <case>/gh.log.
+add_gh_pr_state_for_head() {
+  local case_dir=$1 state=$2 head=$3
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "gh \$*" >> '$case_dir/gh.log'
+case "\${1:-} \${2:-}" in
+  "pr view")
+    [ '$state' != ERROR ] || { echo "error: forge unreachable" >&2; exit 1; }
+    case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' '$state' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"isDraft"*) printf '%s\n' '{"isDraft":false}' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+      *"--json state "*) printf '%s\n' '$state' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: unsupported gh stub call" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
 }
 
 # Override fakebin/treehouse so `treehouse return --force <wt>` fails with a
@@ -1351,6 +1381,141 @@ test_gh_error_and_content_absent_refuses() {
   expect_code 1 "$rc" "gh-error: teardown should refuse when the PR lookup errors and content is not landed"
   grep -q REFUSED "$case_dir/stderr" || fail "gh-error: no REFUSED line in stderr"
   pass "gh lookup error with content not in default refuses (fail-safe)"
+}
+
+# A finished PR worker's task as the supervision branch meets it: the branch is
+# pushed to origin, so every commit is on a remote, and fm-pr-check recorded the
+# PR and armed its merge poll while the forge reports <state>.
+# Args: case_dir mode state
+setup_pushed_pr_task() {
+  local case_dir=$1 mode=$2 state=$3 head
+  write_meta "$case_dir" "$mode" ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_state_for_head "$case_dir" "$state" "$head"
+  seed_backlog_in_flight "$case_dir"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+  assert_present "$case_dir/state/task-x1.check.sh" "setup: fm-pr-check armed no merge poll"
+  : > "$case_dir/gh.log"
+}
+
+run_branch_teardown() {
+  FM_SUPERVISION_ACTOR=branch run_teardown "$@"
+}
+
+# The refusal left the task, its merge poll, and its backlog item exactly as the
+# real merge will need them. Args: case_dir label
+assert_branch_teardown_refused() {
+  local case_dir=$1 label=$2
+  grep -q 'REFUSED: .*not proven merged' "$case_dir/stderr" \
+    || fail "$label: no merge-proof refusal in stderr: $(cat "$case_dir/stderr")"
+  grep -q 'supervision branch only cleans up merged work' "$case_dir/stderr" \
+    || fail "$label: the refusal does not say why the branch was refused"
+  assert_present "$case_dir/state/task-x1.meta" "$label: the task record was removed"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "$label: the backlog item left In flight: $(backlog_row_state "$case_dir")"
+}
+
+test_branch_teardown_of_pushed_open_pr_refuses() {
+  local case_dir rc mode
+  for mode in direct-PR no-mistakes; do
+    case_dir=$(make_case "branch-pushed-open-$mode")
+    setup_pushed_pr_task "$case_dir" "$mode" OPEN
+
+    set +e
+    run_branch_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "branch-pushed-open ($mode): the branch must not tear down an open PR"
+    assert_branch_teardown_refused "$case_dir" "branch-pushed-open ($mode)"
+    assert_present "$case_dir/state/task-x1.check.sh" "branch-pushed-open ($mode): the merge poll was removed"
+    assert_present "$case_dir/state/task-x1.pr-poll" "branch-pushed-open ($mode): the merge poll sidecar was removed"
+    assert_present "$case_dir/wt/feature.txt" "branch-pushed-open ($mode): the worktree was returned"
+    grep -q 'pr view' "$case_dir/gh.log" \
+      || fail "branch-pushed-open ($mode): teardown never asked the forge"
+  done
+  pass "supervision branch teardown of a pushed branch with an open PR refuses and keeps the merge poll (z1)"
+}
+
+test_branch_teardown_of_pushed_merged_pr_allows() {
+  local case_dir rc
+  case_dir=$(make_case branch-pushed-merged)
+  setup_pushed_pr_task "$case_dir" direct-PR MERGED
+
+  set +e
+  run_branch_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "branch-pushed-merged: the branch should tear down a merged PR: $(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "branch-pushed-merged: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "branch-pushed-merged: the task record was kept"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "branch-pushed-merged: the backlog item was not closed: $(backlog_row_state "$case_dir")"
+  pass "supervision branch teardown of a pushed branch whose PR merged at HEAD succeeds (z2)"
+}
+
+test_branch_teardown_refuses_when_forge_unreachable() {
+  local case_dir rc head
+  case_dir=$(make_case branch-pushed-gh-error)
+  setup_pushed_pr_task "$case_dir" direct-PR OPEN
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_state_for_head "$case_dir" ERROR "$head"
+
+  set +e
+  run_branch_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "branch-pushed-gh-error: an unreachable forge is not merge proof"
+  assert_branch_teardown_refused "$case_dir" "branch-pushed-gh-error"
+  assert_present "$case_dir/state/task-x1.check.sh" "branch-pushed-gh-error: the merge poll was removed"
+  pass "supervision branch teardown refuses when the forge cannot be reached (z3)"
+}
+
+test_main_teardown_of_pushed_open_pr_still_allows() {
+  local case_dir rc
+  case_dir=$(make_case main-pushed-open)
+  setup_pushed_pr_task "$case_dir" direct-PR OPEN
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "main-pushed-open: main's teardown of a pushed branch should be unchanged: $(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "main-pushed-open: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "main-pushed-open: the task record was kept"
+  pass "main teardown of a pushed branch with an open PR still succeeds, as for fork-pushed contributions (z4)"
+}
+
+test_branch_teardown_of_gone_worktree_needs_merged_pr() {
+  local case_dir rc state
+  for state in OPEN MERGED; do
+    case_dir=$(make_case "branch-gone-$state")
+    write_windowless_legacy_meta "$case_dir" direct-PR ship "$case_dir/missing-wt"
+    append_pr_meta_url "$case_dir"
+    add_gh_pr_state_for_head "$case_dir" "$state" 0000000000000000000000000000000000000000
+    seed_backlog_in_flight "$case_dir"
+
+    set +e
+    run_branch_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    if [ "$state" = OPEN ]; then
+      expect_code 1 "$rc" "branch-gone-OPEN: a gone worktree is not merge proof"
+      assert_branch_teardown_refused "$case_dir" "branch-gone-OPEN"
+    else
+      expect_code 0 "$rc" "branch-gone-MERGED: a merged recorded PR should allow cleanup: $(cat "$case_dir/stderr")"
+      assert_absent "$case_dir/state/task-x1.meta" "branch-gone-MERGED: the task record was kept"
+    fi
+  done
+  pass "supervision branch teardown of a task whose worktree is gone requires its recorded PR to be merged (z5)"
 }
 
 # Write a meta that predates the spawn_gen field entirely. Args: case_dir mode kind
@@ -4691,6 +4856,11 @@ test_untracked_only_refusal_diagnostic
 test_tracked_edit_refusal_diagnostic
 test_mixed_refusal_diagnostic
 test_gh_error_and_content_absent_refuses
+test_branch_teardown_of_pushed_open_pr_refuses
+test_branch_teardown_of_pushed_merged_pr_allows
+test_branch_teardown_refuses_when_forge_unreachable
+test_main_teardown_of_pushed_open_pr_still_allows
+test_branch_teardown_of_gone_worktree_needs_merged_pr
 test_legacy_record_without_the_flag_refuses
 test_windowless_legacy_record_with_gone_worktree_tears_down
 test_windowless_legacy_record_tears_down_with_the_legacy_flag
