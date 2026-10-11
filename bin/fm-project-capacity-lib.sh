@@ -51,9 +51,9 @@
 # scout or local-only ship reports done, or when a task's record is removed.
 # No-mistakes and direct-PR ships keep their place after done until their PR
 # handoff or cleanup. Paused, blocked, or waiting workers without completion
-# keep their place. Bookkeeping events after done do not restore occupancy;
-# only a later working event does. A worker steered back into work after its
-# PR handoff is not counted again.
+# keep their place. Later captain-held, resolved, needs-decision, paused, or
+# blocked events do not restore occupancy; only a later working event does.
+# A worker steered back into work after its PR handoff is not counted again.
 # The declaration is matched by the spawning clone's directory name, so clones
 # of one origin share the cap only when they use that same directory name. A
 # clone of that origin under a different directory name finds no declaration
@@ -69,8 +69,8 @@
 # count. A spawn on an uncapped project can still publish a holder for a capped
 # same-origin clone, so every backend takes that lock whenever the declaration
 # caps any project; Orca, which otherwise never takes it, is included. Freeing a
-# place needs no lock, because removing a record or adding pr= only ever lowers
-# the count.
+# place needs no lock, because removing a record, adding pr=, or reporting done
+# as a scout or local-only ship only ever lowers the count.
 #
 # Requires bin/fm-wake-lib.sh (root home, local homes, project lock path),
 # bin/fm-secondmate-registry-lib.sh (which the local-homes walk reads),
