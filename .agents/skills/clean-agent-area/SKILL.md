@@ -9,85 +9,92 @@ metadata:
 
 # Clean agent area
 
-## 铁律
+## Hard rules
 
-- 先审后动；本 skill 只审计、分类并提出流程，不执行删除、移动、截断或其他破坏性修改。
-- 不得删除未落地工作，也不得在引用关系未确认时删除任何对象。
-- 每一步记录路径、命令、输出摘要与核验结果，保留可追溯证据。
-- 任何破坏性动作都必须先取得船长对具体对象和动作的明确授权。
-- 一次只清理足够解决当前空间需求的最小量，不批量扫荡。
-- 不得使用 `--force` 或强制删除绕过守卫。
+- Audit before any action; this skill only classifies and prescribes a process and never deletes, moves, truncates, or otherwise changes anything.
+- Never remove unlanded work or remove an object before its references are understood.
+- Record evidence at every step, including the paths, commands, output summaries, and verification results.
+- Destructive actions require the captain's explicit authorization for the specific object and action.
+- Clean only the smallest amount sufficient for the current need; do not sweep in bulk.
+- Never use `--force` or forced deletion to bypass a guard.
+- Pool-wide metadata inspection is allowed, but never read, copy, write, delete, move, or rename another worker's slot contents, or export sibling-slot paths or contents outside the private home.
 
-## 触发条件
+## Trigger
 
-- 仅当船长明确要求清理 agent 区域、腾出 agent 区域空间，或调查该区域的磁盘空间问题时加载本 skill。
+- Load this skill only when the captain explicitly asks to clean or free agent-area space, or investigate an agent-area disk-space issue.
 
-## 只读审计
+## Read-only audit
 
-所有审计命令必须只读；不要运行会清理、修复、回收或改变文件的命令。
+All audit commands must be read-only; do not run commands that clean, repair, reclaim, or otherwise change files or pool state.
 
-按下列三个根分别盘点，并为每项记录路径、占用、归属者和最近使用时间；可用 `du -sh`、`stat`、`find -print` 与 `ps` 收集证据，最近使用时间用文件系统可见的访问或修改时间并注明采用的字段。
+Inventory these roots and record each candidate's path, size, owner, and most recent available use time; identify whether each timestamp is access or modification time and disclose platform limitations.
 
 ```sh
-# ① 本家：将 FM_HOME 解析为实际操作家目录后执行。
+# 1. This Firstmate home's state and data. Resolve FM_HOME to the actual operational home first.
 for root in "$FM_HOME/state" "$FM_HOME/data"; do
-  [ -d "$root" ] && du -sh "$root" && find "$root" -mindepth 1 -maxdepth 3 -exec stat -f '%N | %z bytes | owner=%Su | mtime=%Sm | atime=%Sa' {} \;
+  [ -d "$root" ] || continue
+  du -sh "$root"
+  find "$root" -mindepth 1 -maxdepth 3 -type f -exec sh -c '
+    for path do
+      size=$(wc -c < "$path" | tr -d " ")
+      if stat -c "%n | %s bytes | owner=%U | mtime=%y | atime=%x" "$path" 2>/dev/null; then :
+      elif stat -f "%N | %z bytes | owner=%Su | mtime=%Sm | atime=%Sa" "$path" 2>/dev/null; then :
+      else printf "%s | %s bytes | owner/time unavailable\n" "$path" "$size"; fi
+    done
+  ' sh {} +
 done
 
-# ② Harness 家目录：只检查存在的根目录，不递归读取文件内容。
-for root in "$HOME/.pi/agent" "$HOME/.codex" "$HOME/.no-mistakes" "$HOME/.claude" "$HOME/.config/opencode"; do
-  [ -d "$root" ] && du -sh "$root" && find "$root" -mindepth 1 -maxdepth 3 -exec stat -f '%N | %z bytes | owner=%Su | mtime=%Sm | atime=%Sa' {} \;
-done
+# 2. Harness-owned roots: derive applicable locations and active-session checks from the supported harness adapters.
+# Do not guess, enumerate, or recursively inventory host-specific harness directories.
 
-# ③ 隔离副本池：只允许通过支持的状态摘要查看全池元数据；不要运行 destroy、return、prune 或其他改变池状态的命令。
+# 3. Isolated-copy pool: request the supported aggregate metadata view only.
 if command -v treehouse >/dev/null 2>&1; then treehouse status; fi
 ```
 
-允许对整个隔离副本池做只读元数据审计。不得读取、写入、复制、删除、移动或重命名其他工作者的槽内容；不得将兄弟槽路径或内容导出到私有家目录之外。用任务记录和服务清单确认归属者及引用关系，不能仅凭旧时间或目录名称推断可删；不得仅凭池状态摘要提出清理其他工作者的槽。
+The platform-specific `stat` forms are attempted as alternatives; if neither works, the portable byte count is retained and unavailable metadata is explicitly reported.
 
-## 三态分类表
+The pool status view may expose metadata for all slots, including identifiers, paths, sizes, state, holder processes or owners, and timestamps; do not recursively inventory slot contents. Use task records and service inventories to establish ownership and references, never infer eligibility from age or a directory name alone. Metadata alone is insufficient to propose cleanup of another worker's slot; refer its disposition to the captain without exporting its path outside the private home.
 
-“可直接清理”仅表示审计分类上没有引用且可再生成，不授予删除权限；执行删除仍须船长对具体对象给字。
+## Three-state classification
 
-| 对象 | 分类 | 判定与检查步骤 | 建议动作 |
+“Unconditionally cleanable” describes only an item without references that can be regenerated; it does not authorize deletion. The captain must still explicitly authorize every destructive action.
+
+| Object | Classification | Decision and checks | Suggested action |
 | --- | --- | --- | --- |
-| `state/.watch-triage.log` | 条件清理 | 核对内容与任务记录，确认仅为 watcher 调试日志、尺寸受限，且没有其他证据或引用依赖该日志；任一项无法确认即不得列入候选。 | 核验后可列入最小候选，记录占用和用途。 |
-| 已收工任务 `data/<id>/` 中 scratch 或临时件 | 条件清理 | 核验任务已收工；逐项确认对象仅为 scratch/临时件且无引用，保留 `report.md` 与调查证据；任一项不符即不得列入候选。 | 核验后逐项列入最小候选。 |
-| `~/.pi/agent/models.json.bak-*` | 条件清理 | 核对引用关系并确认备份可再生成；保留最近一份，其余只有在无引用且可再生成时才列入候选。 | 逐项记录核验结果，仅列出通过项。 |
-| 主家自己产的临时演示件 | 条件清理 | 核验所有权，确认由主家生成、仅供临时演示且无引用；任何条件无法确认即不得列入候选。 | 核验后可列入最小候选。 |
-| `~/.pi/agent/sessions` | 条件清理 | 逐个确认不是当前会话，并且未被 `state/branch-session/`、未收工任务或未完成监督分支引用；任一引用存在或无法确认即禁止删该会话。 | 仅对通过全部检查的会话逐项申请授权。 |
-| `~/.codex` | 条件清理 | 确认没有任何正在运行的 Codex 会话或任务；用当前进程与任务记录交叉核验，无法确认即禁止删。 | 等空闲后逐项申请授权。 |
-| `state/*.status` 与 `state/*.meta` | 条件清理 | 只允许任务收工时由 `bin/fm-teardown.sh` 按其守卫删除；不得手动删除，尤其不得手删活任务记录，因为呈现游标按字节偏移引用它们，会破坏呈现与决策折叠。 | 任务收工交给 teardown；不得自行删文件。 |
-| `data/<id>/` 整目录 | 条件清理 | 同时确认任务已收工且交付物已归档到其他位置；任一条件不成立即禁止整目录删除。 | 核对归档位置后逐任务申请授权。 |
-| `~/.treehouse` 脏槽 | 条件清理 | 必须同时确认无活 pane 占用、未落地内容已抢救并逐字节核验、且船长已具体授权；不得动 in-use 或 leased 槽，也不得动别人的兄弟槽。仅在上述条件成立后，先用 `treehouse destroy <path> --include-unlanded` dry-run 检视，再由获授权者确认后加 `--yes`；没有授权不得运行破坏动作。 | 不批量；把单一槽的 dry-run 证据与核验结果交船长。 |
-| `~/.no-mistakes` | 条件清理 | 只有 daemon 空闲且无活跃 run 时才可评估；该 daemon 归主家管理，其他人不得绕过或直接处置。 | 转交主家确认和执行。 |
-| `state/pending-replies/expired/` | 条件清理 | 确认每条记录对应任务均已收工；有活任务或无法对应即不得删。 | 仅列出已收工关联项供授权。 |
-| `state/<id>.inbox/handled/` | 条件清理 | 确认对应任务已收工；活任务或归属不明时不得删。 | 仅列出已收工关联项供授权。 |
-| watcher 内部件：`.hash-*`、`.count-*`、`.stale-*`、`.stale-since-*`、`.churn-since-*`、`.paused-*`、`.wedge-escalations-*`、`.writing-*`、`.waiting-*`、`.seen-*`、`.hb-surfaced-*`、`.last-*`、`.heartbeat-streak`、`.watch.lock`、`.wake-queue*`、`.watcher-down`、`.last-watcher-beat`、`.startup-network.*` | 禁止清理 | 这些均为 watcher 或启动监督内部状态。 | 不得列入候选。 |
-| `state/.branch-outcomes*` 及其游标 | 禁止清理 | 是持久监督结果及读取位置。 | 不得列入候选。 |
-| `state/.*-open-decisions-cursor` | 可直接清理 | 删除后会触发一次完整的 open-decisions 重折叠。 | 可列入候选；仍须船长对具体路径和动作给字。 |
-| `state/.status-presentation-cursor` | 禁止清理 | 维护状态呈现位置；删除可能导致已呈现状态重放。 | 不得列入候选。 |
-| `state/.afk-contract` 与 `state/.afk` | 禁止清理 | 持久的 away/quiet 委托记录。 | 不得列入候选。 |
-| treehouse leased 或 in-use 槽 | 禁止清理 | 由工作或租约占用；不得回收、返回或移动。 | 不得列入候选。 |
-| 任何未收工任务的 `state/` 与 `data/` 记录 | 禁止清理 | 活任务记录可能包含工作、交付物、决策或引用。 | 不得列入候选。 |
-| `data/captain.md`、`data/captain-shared.md`、`data/learnings.md`、`data/secondmates.md`、`data/projects.md`、`data/backlog.md` | 禁止清理 | 属于持久偏好、知识、登记或队列记录。 | 不得列入候选。 |
+| `state/.watch-triage.log` | Unconditionally cleanable | Firstmate's operational-home layout identifies this size-capped absorbed-wake debug log as unused and safe to delete; preserve the audit record of its observed size. | May be proposed as a minimal candidate; deletion still requires the captain's specific authorization. |
+| Scratch or temporary items inside a finished task's `data/<id>/` | Conditional cleanup | Verify the task is finished and each item is scratch or temporary with no references; preserve `report.md` and investigation evidence. | Propose only individually verified items. |
+| `state/.<id>.open-decisions-cursor` | Unconditionally cleanable | Deleting the cursor causes one full open-decision re-fold and loses no decision state. | May be proposed with the one-time recomputation cost disclosed; deletion still requires the captain's specific authorization. |
+| Firstmate-created temporary demonstration artifacts | Conditional cleanup | Verify Firstmate ownership, temporary demonstration purpose, and absence of references. | Propose only individually verified artifacts. |
+| `state/*.status` and `state/*.meta` | Conditional cleanup | Only task teardown may remove these as part of finishing a task under `bin/fm-teardown.sh`; never manually delete active-task records, because byte-offset presentation cursors refer to them. | Leave lifecycle cleanup to teardown. |
+| A complete `data/<id>/` directory | Conditional cleanup | Verify both that the task is finished and that its deliverables are archived elsewhere; otherwise do not remove the directory. | Propose only after recording the archive location. |
+| A dirty isolated-copy pool slot | Conditional cleanup | Do not prescribe a destruction command. Present the evidence and let the captain decide disposition; never disturb an in-use or leased slot or another worker's sibling slot. | Escalate that specific slot's disposition to the captain. |
+| Firstmate's no-mistakes data | Conditional cleanup | Evaluate only when the daemon is idle and no run is active; the daemon is managed by Firstmate and must not be bypassed. | Refer the assessment and any action to Firstmate. |
+| `state/pending-replies/expired/` | Conditional cleanup | Confirm every associated task is finished; an active or unidentified task association prohibits cleanup. | Propose only entries tied to finished tasks. |
+| `state/<id>.inbox/handled/` | Conditional cleanup | Confirm the associated task is finished; an active or unidentified task prohibits cleanup. | Propose only entries tied to finished tasks. |
+| Watcher internals: `.hash-*`, `.count-*`, `.stale-*`, `.stale-since-*`, `.churn-since-*`, `.paused-*`, `.wedge-escalations-*`, `.writing-*`, `.waiting-*`, `.seen-*`, `.hb-surfaced-*`, `.last-*`, `.heartbeat-streak`, `.watch.lock`, `.wake-queue*`, `.watcher-down`, `.last-watcher-beat`, and `.startup-network.*` | Prohibited | These are watcher or startup-supervision state. | Never propose cleanup. |
+| `state/.branch-outcomes*` and their cursors | Prohibited | These hold durable supervision outcomes and processing position. | Never propose cleanup. |
+| `state/.status-presentation-cursor` | Prohibited | It maintains fleet-wide status-presentation offsets and identity. | Never propose cleanup. |
+| `state/.afk-contract` and `state/.afk` | Prohibited | These are durable away or quiet delegation records. | Never propose cleanup. |
+| Leased or in-use isolated-copy slots | Prohibited | A task or lease occupies the slot. | Never propose cleanup or alter the slot. |
+| Any `state/` or `data/` record belonging to an unfinished task | Prohibited | It may contain active work, deliverables, decisions, or references. | Never propose cleanup. |
+| `data/captain.md`, `data/captain-shared.md`, `data/learnings.md`, `data/secondmates.md`, `data/projects.md`, and `data/backlog.md` | Prohibited | These are durable preference, knowledge, registry, or queue records. | Never propose cleanup. |
 
-权威机制以 `bin/fm-teardown.sh` 和 `docs/configuration.md` 为准；本表不替代它们的守卫。
+The supported task-close lifecycle is owned by `bin/fm-teardown.sh`, and the operational-home layout is documented in `.agents/skills/operational-home-layout/SKILL.md`; this skill adds a captain-authorized, cross-area triage that classifies references and retention before any action, which those owners do not provide.
 
-## 流程
+## Process
 
-1. 只读审计三个根目录，记录每个候选的路径、占用、归属、最近使用时间和证据来源。
-2. 按三态分类表判断；条件清理必须逐条记录条件核验，条件不成立或证据不足即标记禁止清理。
-3. 只对本家拥有的对象向船长提供候选表，列为“路径 / 占用 / 归属 / 分类 / 删除条件 / 建议动作”，并明确哪些动作仍需船长给字；兄弟槽的路径与内容不得导出私有家目录。
-4. 等待船长对具体路径和动作授权；没有给字只停留在审计与建议，不执行删除。
-5. 获授权后先抢救或备份相关内容，并逐字节核验副本；核验失败即停止，不删除源内容。
-6. 只处理已批准且足以满足当前需求的最小量，不扩展到相邻对象或批量清理。
-7. 清理者核验处理前后字节数及相关服务、进程仍存活，并确认目标状态符合批准范围。
-8. 记录结果、释放空间证据、未处理项及可用回滚方式；无法证明实际释放空间时不得声称已释放容量。
+1. Perform the read-only audit of the applicable roots and record each candidate's path, size, owner, latest-use evidence, and evidence source.
+2. Apply the three-state table; record each required check, and treat failed or uncertain conditions as prohibited.
+3. Give the captain a table with columns “path / size / owner / classification / deletion conditions / suggested action”; show only Firstmate-owned candidates and keep sibling-slot identifiers and paths within the private home.
+4. Wait for the captain's explicit authorization naming the object and action; without it, stop at audit and recommendations.
+5. After authorization, rescue or back up the relevant content and verify the copy byte for byte; if verification fails, stop without changing the source.
+6. Perform only the approved minimum amount and do not expand to adjacent objects or bulk cleanup.
+7. Verify before-and-after byte counts and that relevant services and processes remain alive; confirm the resulting state matches the authorization.
+8. Record the outcome, measured space change, untreated items, and available rollback method; do not claim freed capacity without evidence.
 
-## 反例
+## Examples of what not to do
 
-- 把脏隔离副本池当垃圾批量清理，会毁掉其他工作者尚未落地的工作。
-- 把未收工任务目录当作整理习惯清掉，会丢失任务记录、证据或交付物。
-- 使用强制删除绕过守卫，会让正在使用的数据或服务失去保护。
-- 不核验前后占用就声称已释放若干 GB，会把估算冒充实际结果。
+- Treating dirty pool slots as bulk trash can destroy another worker's unlanded work.
+- Removing an unfinished task directory as a housekeeping habit can lose task records, evidence, or deliverables.
+- Bypassing guards with forced deletion can destroy data or interrupt active services.
+- Claiming a measured space reduction without before-and-after verification turns an estimate into a false result.
