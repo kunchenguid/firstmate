@@ -8,7 +8,8 @@
 # Like fm-fleet-view.sh it never parses fleet state itself, and it never
 # mutates fleet state, steers workers, or merges anything.
 # Colour uses ANSI escapes only when stdout is a TTY and NO_COLOR is unset.
-# Width comes from COLUMNS, else tput; below four usable columns the board
+# Width and height come from the tty on every live frame (so a resize re-lays
+# out at once), else COLUMNS/LINES; below four usable columns the board
 # degrades to stacked columns.
 # The live loop draws on the terminal's alternate screen and never emits more
 # lines than the terminal is tall: each column is a viewport over its full
@@ -203,17 +204,26 @@ snapshot() {
   if [ -n "$SNAPSHOT_FILE" ]; then cat -- "$SNAPSHOT_FILE"; else "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; fi
 }
 
-term_height() {
-  local size=
-  [ -n "${LINES:-}" ] || size=$({ stty size </dev/tty; } 2>/dev/null) || size=
-  printf '%s\n' "${LINES:-${size% *}}"
+# term_dim <h|w>: terminal height or width. On the live board the tty itself is
+# asked on every call, so a resize shows up in the next frame; COLUMNS/LINES
+# (fixed at launch) only serve when there is no tty to ask.
+LIVE=0
+term_dim() {
+  local size="" v=""
+  [ "$LIVE" = 1 ] && size=$({ stty size </dev/tty; } 2>/dev/null)
+  if [ "$1" = h ]; then v=${size% *}; else v=${size#* }; fi
+  case "$v" in ''|*[!0-9]*|0) v= ;; esac
+  if [ -z "$v" ]; then
+    if [ "$1" = h ]; then v=${LINES:-}; else v=${COLUMNS:-}; fi
+  fi
+  if [ -z "$v" ] && [ "$LIVE" != 1 ]; then
+    size=$({ stty size </dev/tty; } 2>/dev/null) || size=
+    if [ "$1" = h ]; then v=${size% *}; else v=${size#* }; fi
+  fi
+  printf '%s\n' "$v"
 }
-
-term_width() {
-  local size=
-  [ -n "${COLUMNS:-}" ] || size=$({ stty size </dev/tty; } 2>/dev/null) || size=
-  printf '%s\n' "${COLUMNS:-${size#* }}"
-}
+term_height() { term_dim h; }
+term_width() { term_dim w; }
 
 # render <width> <rows> <focus> <offsets-json> <live>: draw a snapshot; with
 # <live> true the first line printed is the clamped scroll offsets.
@@ -271,6 +281,7 @@ fi
 # The tty stays unechoed for the whole session so keys typed while the board is
 # busy never print as ^[[C, and the snapshot is fetched in the background so
 # keys keep registering and the board keeps redrawing while it runs.
+LIVE=1
 saved_tty=$(stty -g 2>/dev/null) || saved_tty=
 [ -n "$saved_tty" ] && stty -echo -icanon 2>/dev/null
 snap_file=$(mktemp "${TMPDIR:-/tmp}/fm-dashboard.XXXXXX") || exit 1
