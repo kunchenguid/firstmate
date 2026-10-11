@@ -814,6 +814,63 @@ test_worker_account_pin_follows_the_relaunch() {
   pass "fm-control relaunch: the replacement follows the home's current worker account pin"
 }
 
+# A pool task recorded on its second account: relaunch stays there while the
+# file declares it, refuses before stopping once it does not, and moves only on
+# an explicit --account.
+test_relaunch_keeps_the_recorded_pool_account() {
+  local dir out rc id=rl-acct-pool
+  dir=$(new_case acct-pool "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/work" "$dir/mon"
+  : > "$dir/work/.credentials.json"
+  : > "$dir/mon/.credentials.json"
+  printf '%s\n' "$dir/work" "$dir/mon" > "$dir/home/config/claude-account"
+  printf 'account=%s\n' "$dir/mon" >> "$dir/home/state/$id.meta"
+  out=$(run_control "$dir" "$id" relaunch --note "keep the recorded account"); rc=$?
+  expect_code 0 "$rc" "a relaunch on a still-declared recorded account should succeed"$'\n'"$out"
+  assert_contains "$out" "account=$dir/mon" "the relaunch report should name the recorded account"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/mon" ] || fail "the relaunched record should keep the recorded account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/mon'" \
+    "the replacement should launch on the recorded account, not the pool's first line"
+
+  printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
+  printf claude > "$dir/fake/command"
+  : > "$dir/fake/literal"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  out=$(run_control "$dir" "$id" relaunch --note "recorded account removed"); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded account is no longer declared must refuse"
+  assert_contains "$out" "task $id was launched on Claude account '$dir/mon', which config/claude-account no longer declares" \
+    "the refusal should name the recorded account"
+  assert_contains "$out" "relaunch with --account <entry>" "the refusal should name the deliberate switch"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a removed recorded account must refuse before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "a removed recorded account must refuse before any lifecycle input is sent"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "a refused relaunch must leave the task record untouched"
+
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch); rc=$?
+  expect_code 1 "$rc" "fm-spawn --relaunch must apply the same recorded-account rule"
+  assert_contains "$out" "which config/claude-account no longer declares" "fm-spawn --relaunch should name the removed account"
+  [ ! -s "$dir/fake/literal" ] || fail "a direct fm-spawn --relaunch must refuse before launching"
+  printf claude > "$dir/fake/command"
+
+  out=$(run_control "$dir" "$id" relaunch --account "$dir/work" --note "switch accounts"); rc=$?
+  expect_code 0 "$rc" "an explicit --account should move the task deliberately"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "the switched record should carry the explicit account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" "the replacement should launch on the explicit account"
+
+  printf '%s\n' "$dir/work" "$dir/mon" > "$dir/home/config/claude-account"
+  printf claude > "$dir/fake/command"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --account "$dir/other" --note "undeclared account"); rc=$?
+  expect_code 1 "$rc" "an undeclared explicit --account must refuse"
+  assert_contains "$out" "--account '$dir/other' is not declared in config/claude-account" "the refusal should name the undeclared entry"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "an undeclared --account must refuse before the running agent stops"
+  out=$(run_control "$dir" "$id" exit --account "$dir/work"); rc=$?
+  expect_code 1 "$rc" "--account applies to relaunch only"
+  pass "fm-control relaunch: a pool task keeps its recorded account, refuses once it is undeclared, and switches only on --account"
+}
+
 test_pi_exclude_tools_follow_the_relaunch() {
   local dir out rc id=rl-pi-excl
   dir=$(new_case pi-exclude "$id")
@@ -2548,6 +2605,7 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
+test_relaunch_keeps_the_recorded_pool_account
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one

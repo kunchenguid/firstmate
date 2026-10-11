@@ -230,6 +230,79 @@ test_malformed_pins_refuse_before_launch() {
   pass "malformed, relative, CR-terminated, empty, extra-line, missing-root, and non-file pins refuse before launch"
 }
 
+test_claude_pool_defaults_to_the_first_line_and_account_selects_another() {
+  local out rc id=acct-pool
+  new_case pool claude
+  signed_in_claude_root "$CASE/work"
+  signed_in_claude_root "$CASE/mon"
+  signed_in_claude_root "$HOME_DIR/user-home/.claude"
+  printf '%s\n' "$CASE/work" "$CASE/mon" ordinary > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id-first"); rc=$?
+  expect_code 0 "$rc" "a pool spawn without --account should launch on the first line: $out"
+  assert_contains "$out" "account=$CASE/work" "the spawn should report the pool's first line"
+  assert_grep "account=$CASE/work" "$HOME_DIR/state/$id-first.meta" "the task record should carry the first line"
+  [ "$(cat "$CASE/claude-checks")" = "$CASE/work" ] \
+    || fail "only the selected account should be sign-in checked: $(cat "$CASE/claude-checks")"
+  : > "$CASE/claude-checks"
+  out=$(spawn_ship "$id-mon" --account "$CASE/mon"); rc=$?
+  expect_code 0 "$rc" "--account naming a declared line should launch on it: $out"
+  assert_contains "$out" "account=$CASE/mon" "the spawn should report the selected account"
+  assert_grep "account=$CASE/mon" "$HOME_DIR/state/$id-mon.meta" "the task record should carry the selected account"
+  [ "$(cat "$CASE/claude-checks")" = "$CASE/mon" ] \
+    || fail "the sign-in check should ask about the selected account only: $(cat "$CASE/claude-checks")"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/mon" "$CASE/claude-worker" "the worker should run under the selected account"
+  assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "a selected pool account must still shed ambient credentials"
+  out=$(spawn_ship "$id-ord" --account=ordinary); rc=$?
+  expect_code 0 "$rc" "--account ordinary should launch on the default login: $out"
+  assert_contains "$out" "account=ordinary" "the spawn should report the ordinary account"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=unset" "$CASE/claude-worker" "the ordinary pool line must drop an ambient root"
+  pass "a Claude pool launches on its first line by default and on any declared line named by --account"
+}
+
+test_claude_pool_and_account_refusals() {
+  local out rc id=acct-pool-bad n=0 body
+  new_case pool-refusals claude
+  signed_in_claude_root "$CASE/work"
+  mkdir -p "$CASE/mon"
+  out=$(spawn_ship "$id-nofile" --account ordinary); rc=$?
+  expect_code 1 "$rc" "--account without config/claude-account must refuse"
+  assert_refused_before_launch "$id-nofile" "$out" "--account 'ordinary' needs config/claude-account"
+  printf '%s\n' "$CASE/work" "$CASE/mon" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id-undeclared" --account "$CASE/other"); rc=$?
+  expect_code 1 "$rc" "an undeclared --account must refuse"
+  assert_refused_before_launch "$id-undeclared" "$out" "--account '$CASE/other' is not declared in config/claude-account"
+  out=$(spawn_ship "$id-prefix" --account "$CASE/wor"); rc=$?
+  expect_code 1 "$rc" "--account must match a declared line exactly"
+  assert_refused_before_launch "$id-prefix" "$out" "is not declared in config/claude-account"
+  out=$(spawn_ship "$id-out" --account "$CASE/mon"); rc=$?
+  expect_code 1 "$rc" "a signed-out selected account must refuse even when the first line is signed in"
+  assert_refused_before_launch "$id-out" "$out" "config/claude-account pins Claude workers to $CASE/mon, which is not signed in"
+  out=$(spawn_ship "$id-codex" --harness codex --account "$CASE/work"); rc=$?
+  expect_code 1 "$rc" "--account for another harness must refuse"
+  assert_refused_before_launch "$id-codex" "$out" "applies only to Claude launches, not 'codex'"
+  out=$(spawn_ship "$id-pi" --harness pi --model openai-codex/gpt-5.5 --account "$CASE/work"); rc=$?
+  expect_code 1 "$rc" "--account for Pi must refuse"
+  assert_refused_before_launch "$id-pi" "$out" "applies only to Claude launches, not 'pi'"
+  out=$(spawn_ship "$id-empty" --account ''); rc=$?
+  expect_code 1 "$rc" "an empty --account must refuse"
+  assert_refused_before_launch "$id-empty" "$out" "--account requires a non-empty value"
+  for body in "$CASE/work"$'\n'"$CASE/work" "$CASE/work"$'\n\n'"$CASE/mon" \
+    "$CASE/work"$'\n''relative/root' "$CASE/work"$'\n'"$CASE/mon"$'\r' "$CASE/work"$'\n'"$CASE/missing"; do
+    n=$((n + 1))
+    printf '%s' "$body" > "$HOME_DIR/config/claude-account"
+    out=$(spawn_ship "$id-malformed-$n"); rc=$?
+    expect_code 1 "$rc" "malformed pool #$n must refuse"
+    assert_refused_before_launch "$id-malformed-$n" "$out" "config/claude-account"
+  done
+  assert_contains "$out" "-> $CASE/missing" "a pool with an unusable later root should name that root"
+  printf '%s\n' "$CASE/work" "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id-dup"); rc=$?
+  assert_refused_before_launch "$id-dup" "$out" "must hold one account per line - 'ordinary' or an absolute path - each distinct"
+  pass "a pool refuses --account outside Claude, without a file, undeclared, signed out, or empty, and refuses malformed pools"
+}
+
 test_pi_pin_selects_the_root_and_the_declared_provider() {
   local out rc id=acct-pi launch
   new_case pi-pin pi
@@ -389,6 +462,8 @@ test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
 test_claude_ordinary_pin_unsets_the_config_root
 test_malformed_pins_refuse_before_launch
+test_claude_pool_defaults_to_the_first_line_and_account_selects_another
+test_claude_pool_and_account_refusals
 test_pi_pin_selects_the_root_and_the_declared_provider
 test_pi_pin_refusals
 test_pi_extension_provider_and_old_pi_fall_back_to_the_model_listing
