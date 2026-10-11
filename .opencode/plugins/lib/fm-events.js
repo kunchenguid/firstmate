@@ -23,7 +23,7 @@ export function subscribeFirstmateEvents(ctx, types, handler) {
         if (controller.signal.aborted) return;
         // Durable execution events have no top-level location in V2.
         const location = event.location ?? event.data?.location
-          ?? (await ctx.session.get({ sessionID: event.data.sessionID })).location;
+          ?? (event.data?.sessionID && (await ctx.session.get({ sessionID: event.data.sessionID })).location);
         if (!location?.directory || resolve(location.directory) !== directory) return;
         if ((location.workspaceID ?? "") !== (ctx.location.workspaceID ?? "")) return;
         if (!controller.signal.aborted) return handler(event);
