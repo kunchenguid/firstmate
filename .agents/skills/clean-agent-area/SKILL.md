@@ -2,7 +2,7 @@
 name: clean-agent-area
 description: >-
   Use only when the captain explicitly asks to clean or free space in the agent area, or investigate low disk space there.
-user-invocable: true
+user-invocable: false
 metadata:
   internal: true
 ---
