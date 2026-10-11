@@ -3726,21 +3726,22 @@ test_capture_calls_pane_read() {
   fb=$(make_herdr_fakebin "$dir")
   # Requesting 250 (already >= the 200 floor) passes straight through as the
   # fetch bound; the adapter then trims to the caller's requested 250 lines
-  # locally, so all 3 fake lines survive.
+  # locally, so all 3 fake lines survive. --format ansi is what keeps the read
+  # passive: a text recent read can scroll an idle alternate-screen agent.
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 250' "$ROOT" )
   [ "$out" = $'line one\nline two\nline three' ] || fail "capture did not pass through pane read output, got '$out'"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250' \
-    "capture did not call pane read with the right pane id and line bound"
-  pass "fm_backend_herdr_capture: calls 'pane read <pane> --source recent --lines N' with the session set"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250'$'\x1f''--format'$'\x1f''ansi' \
+    "capture did not call pane read with the right pane id, line bound, and passive ANSI format"
+  pass "fm_backend_herdr_capture: calls 'pane read <pane> --source recent --lines N --format ansi' with the session set"
 }
 
 test_capture_works_around_small_lines_bug() {
   local dir log resp fb out
-  # Verified herdr v0.7.1 bug (herdr-verification-p2.md): `pane read --lines N`
-  # for a small N (below the pane's viewport height) returns EMPTY, not the
-  # last N lines. The adapter must never ask herdr for a small --lines bound -
-  # it always fetches >= 200 and trims locally with tail.
+  # Herdr releases before 0.9.0 return EMPTY for `pane read --lines N` when N
+  # is below the pane's blank-padded viewport, not the last N lines. The
+  # adapter must never ask herdr for a small --lines bound - it always fetches
+  # >= 200 and trims locally with tail.
   dir="$TMP_ROOT/capture-small"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf 'a\nb\nc\nd\ne\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
@@ -3749,7 +3750,75 @@ test_capture_works_around_small_lines_bug() {
   [ "$out" = $'d\ne' ] || fail "a small --lines request should still return the last N lines (trimmed locally), got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''--lines'$'\x1f''200' \
     "capture should request a generous fetch (>=200), never the caller's small N, from herdr's own --lines flag"
-  pass "fm_backend_herdr_capture: works around the verified small-N '--lines' bug by over-fetching and trimming locally"
+  pass "fm_backend_herdr_capture: works around the small-N '--lines' empty read by over-fetching and trimming locally"
+}
+
+# The byte shapes below are herdr 0.9.1's real ANSI read of a Claude Code
+# pane (docs/verification/runtime-backends.md "Herdr", Capture row): SGR-only
+# escapes, `\r\n` row endings, styled trailing blanks, the composer's U+00A0
+# after its glyph, and blank styled rows below the content. Herdr's text format
+# returns the same rows with trailing whitespace and trailing blank rows gone.
+test_capture_converts_ansi_to_plain_text() {
+  local dir log resp fb out want
+  dir="$TMP_ROOT/capture-ansi"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\033[0m\033[1mheader\033[0m   \r\n\r\n\033[38;2;153;153;153m\342\235\257\302\240\033[0m\r\n\033[2m  ctrl+c to stop\033[0m \r\n\033[0m   \r\n\r\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 40' "$ROOT" )
+  want=$'header\n\n\342\235\257\n  ctrl+c to stop'
+  [ "$out" = "$want" ] || fail "capture should convert herdr's ANSI read to herdr's plain text shape, got $(printf '%s' "$out" | od -c | head -5)"
+  : > "$resp/.count"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT" )
+  [ "$out" = $'\342\235\257\n  ctrl+c to stop' ] || fail "the caller's bound should count converted content rows, not trailing styled blanks, got '$out'"
+  pass "fm_backend_herdr_capture: strips SGR, carriage returns, trailing whitespace and trailing blank rows before trimming"
+}
+
+# The guard is the regression protection for the worker-pane flicker: herdr
+# 0.8.0+ serves a TEXT read of recent output for an idle alternate-screen
+# agent by injecting wheel scrolls, so no adapter read may take that shape.
+test_cli_refuses_harvesting_reads() {
+  local dir log resp fb shape out status
+  dir="$TMP_ROOT/cli-harvest-guard"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"
+  fb=$(make_herdr_fakebin "$dir")
+  for shape in 'pane read w1:p2' \
+               'pane read w1:p2 --lines 40' \
+               'pane read w1:p2 --source recent --lines 200' \
+               'pane read w1:p2 --source=recent' \
+               'pane read w1:p2 --source recent-unwrapped' \
+               'pane read w1:p2 --source recent --format text' \
+               'pane read w1:p2 --format=text --source recent' \
+               'agent read w1:p2' \
+               'agent read w1:p2 --source recent --lines 200'; do
+    : > "$log"
+    # shellcheck disable=SC2086 # the shape is deliberately word-split into argv
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; shift; fm_backend_herdr_cli default "$@"' "$ROOT" _ $shape 2>&1 )
+    status=$?
+    [ "$status" -ne 0 ] || fail "a harvesting read '$shape' must be refused, got status 0"
+    assert_contains "$out" "alternate-screen" "the refusal of '$shape' should name the harvest it prevents"
+    [ ! -s "$log" ] || fail "a harvesting read '$shape' must never reach herdr, but herdr was called: $(tr '\037' ' ' < "$log")"
+  done
+  for shape in 'pane read w1:p2 --source recent --lines 200 --format ansi' \
+               'pane read w1:p2 --format=ansi' \
+               'pane read w1:p2 --ansi' \
+               'pane read w1:p2 --raw' \
+               'pane read w1:p2 --source visible' \
+               'pane read w1:p2 --source=visible --lines 40' \
+               'pane read w1:p2 --source detection' \
+               'agent read w1:p2 --ansi' \
+               'agent read w1:p2 --source visible' \
+               'pane get w1:p2' \
+               'pane send-keys w1:p2 --source'; do
+    : > "$log"; : > "$resp/.count"
+    # shellcheck disable=SC2086 # the shape is deliberately word-split into argv
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; shift; fm_backend_herdr_cli default "$@"' "$ROOT" _ $shape >/dev/null 2>&1 \
+      || fail "a passive call '$shape' must pass the harvest guard"
+    assert_contains "$(cat "$log")" "$(printf '%s' "$shape" | cut -d' ' -f1-2 | tr ' ' '\037')" \
+      "a passive call '$shape' should reach herdr"
+  done
+  pass "fm_backend_herdr_cli: refuses every harvesting text read of recent output before it reaches herdr and passes passive reads"
 }
 
 test_capture_preserves_pane_read_failure() {
@@ -6013,6 +6082,8 @@ test_parse_target
 test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
+test_capture_converts_ansi_to_plain_text
+test_cli_refuses_harvesting_reads
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
