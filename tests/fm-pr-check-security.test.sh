@@ -3490,7 +3490,7 @@ test_device_renumbered_poll_stays_armed() {
   [ "$rc" -eq 0 ] || fail "renumbered poll watcher failed: $(cat "$dir/watch.err")"
   out=$(cat "$dir/watch.out")
   case "$out" in
-    *'rejected unauthenticated state checks'*) fail "watcher refused a poll whose only change was a renumbered volume: $out" ;;
+    *'rejected untrusted state checks'*) fail "watcher refused a poll whose only change was a renumbered volume: $out" ;;
   esac
   [ "$(grep -c '^check: .*task-a\.check\.sh: merged$' "$dir/watch.out")" -eq 1 ] \
     || fail "renumbered poll did not surface its merge exactly once: $out"
@@ -3611,7 +3611,7 @@ SH
     [ "$rc" -eq 0 ] || fail "$mutation watcher failed: $(cat "$dir/watch.err")"
     out=$(cat "$dir/watch.out")
     case "$out" in
-      "check: rejected unauthenticated state checks:"*"task-a.check.sh"*) ;;
+      "check: rejected untrusted state checks:"*"task-a.check.sh"*) ;;
       *) fail "$mutation on a renumbered registration was not refused: $out" ;;
     esac
     [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$registration_sha" ] \

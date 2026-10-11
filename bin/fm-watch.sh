@@ -138,7 +138,7 @@
 #                          source owned closes that episode); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
-#   check: rejected unauthenticated state checks: <paths>
+#   check: rejected untrusted state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
@@ -3772,8 +3772,8 @@ EOF
       pr_poll_control_release || exit 1
     done
     if [ -n "$rejected_checks" ]; then
-      reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      reason="check: rejected untrusted state checks:$rejected_checks"
+      fm_wake_append check untrusted-state-checks "$reason" || exit 1
       touch "$STATE/.last-check"
       wake "$reason"
     fi
