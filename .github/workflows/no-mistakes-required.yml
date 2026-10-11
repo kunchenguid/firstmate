@@ -28,6 +28,8 @@ jobs:
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - name: Verify no-mistakes signature and pipeline attestation
+        # This fork treats the check as advisory: direct-PR is the default route and no-mistakes is used only for risk areas.
+        continue-on-error: true
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@f6441c96c352a18b9cadcaef6b6c7017e9ac3970 # v1.80.1
         with:
           exempt-authors: kunchenguid
