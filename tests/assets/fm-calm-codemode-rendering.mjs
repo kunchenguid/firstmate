@@ -5,8 +5,9 @@ import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
 const { ToolExecutionComponent } = await import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`));
-const { initTheme, theme } = await import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`));
-const { Container, Text, setCapabilities } = await import(pathToFileURL(`${process.env.PI_TUI_PACKAGE_DIR}/dist/index.js`));
+const { getEditorTheme, initTheme, theme } = await import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`));
+const { BUILTIN_SLASH_COMMANDS } = await import(pathToFileURL(`${packageRoot}/dist/core/slash-commands.js`));
+const { CombinedAutocompleteProvider, Container, Editor, Text, setCapabilities } = await import(pathToFileURL(`${process.env.PI_TUI_PACKAGE_DIR}/dist/index.js`));
 const extension = await import(pathToFileURL(process.env.EXT));
 const visibility = await import(pathToFileURL(process.env.VISIBILITY));
 initTheme("dark");
@@ -15,15 +16,24 @@ setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 /** Ignore unrelated presentation notifications in this isolated fixture. */
 function ignoreNotification() {}
 
+/** Let the editor's asynchronous autocomplete request settle, failing instead of hanging. */
+async function waitForAutocomplete(editor) {
+  for (let attempt = 0; attempt < 100 && !editor.isShowingAutocomplete(); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  assert(editor.isShowingAutocomplete(), "Pi's editor never opened slash-command autocomplete");
+}
+
 /** Capture only supported extension registrations and presentation lifecycle effects. */
 function registerCalm(supported = true, hasUI = true) {
   const handlers = new Map();
   const tools = [];
   const warnings = [];
+  const autocompleteWrappers = [];
+  const editor = new Editor({ requestRender: ignoreNotification, terminal: { rows: 44, columns: 120 } }, getEditorTheme());
   let resolver;
   let command;
   let terminalInput;
-  let editorText = "";
   const pi = {
     events: { emit: ignoreNotification },
     /** Capture lifecycle binding for a real session-start simulation. */
@@ -44,8 +54,10 @@ function registerCalm(supported = true, hasUI = true) {
     } : {}),
   };
   const ui = {
-    /** Return the current export/share command for the submit hook. */
-    getEditorText: () => editorText,
+    /** Read the real editor the way Pi's interactive mode does. */
+    getEditorText: () => editor.getExpandedText(),
+    /** Collect autocomplete wrappers for Pi's stacking order over its built-in slash commands. */
+    addAutocompleteProvider(wrapper) { autocompleteWrappers.push(wrapper); },
     /** Start with Pi's ordinary collapsed presentation. */
     getToolsExpanded: () => false,
     /** Capture the exact terminal-input adapter and return its disposal callback. */
@@ -62,12 +74,26 @@ function registerCalm(supported = true, hasUI = true) {
   };
   extension.default(pi);
   handlers.get("session_start")({}, { ui, hasUI });
+  const builtInProvider = new CombinedAutocompleteProvider(BUILTIN_SLASH_COMMANDS, process.cwd());
+  editor.setAutocompleteProvider(autocompleteWrappers.reduce((provider, wrap) => wrap(provider), builtInProvider));
+  /** Deliver one key in Pi's TUI order: terminal input listeners, then the focused editor. */
+  function press(key) {
+    terminalInput(key);
+    editor.handleInput(key);
+  }
   return { resolver, tools, warnings, command, ui,
-    /** Exercise the same submit hook exports and shares use, without publication. */
-    submit(text) {
-      editorText = text;
-      terminalInput("\r");
-      editorText = "";
+    /**
+     * Type a command and press Enter, optionally after slash autocomplete opens and Down selects another item.
+     * The dispatch callback runs inside the editor's submit, where Pi runs /export and /share, without publication.
+     */
+    async submit(text, { autocomplete = false, down = 0, dispatch = ignoreNotification } = {}) {
+      let submission;
+      editor.onSubmit = (submitted) => { submission = { text: submitted, rendering: dispatch() }; };
+      for (const key of text) press(key);
+      if (autocomplete) await waitForAutocomplete(editor);
+      for (let move = 0; move < down; move++) press("\x1b[B");
+      press("\r");
+      return submission;
     },
   };
 }
@@ -144,24 +170,56 @@ assert.equal(JSON.stringify(result), serialized, "presentation mutated results o
 if (presentations.length > 1) {
   const { createToolHtmlRenderer } = await import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`));
   const original = presentations[0];
-  visibility.setCalmPresentation(true);
-  for (const command of ["/export test.html", "/share"]) {
-    calm.submit(command);
-    const live = row(calm.resolver("codemode", () => original));
-    const lookup = () => calm.resolver("codemode", () => original);
-    const exporter = createToolHtmlRenderer({ getToolDefinition: lookup, getToolRenderers: lookup, theme, cwd: process.cwd() });
-    const stockExporter = createToolHtmlRenderer({ getToolDefinition: () => original, getToolRenderers: () => original, theme, cwd: process.cwd() });
-    const args = { code: 'text(await tools.fm_branch_outcomes({recent:2}));' };
-    const exportedCall = exporter.renderCall(command, "codemode", args);
-    assert.equal(exportedCall, stockExporter.renderCall(command, "codemode", args), `${command} changed stock call rendering`);
-    assert(exportedCall.includes("tools.fm_branch_outcomes"));
-    const exportedResult = exporter.renderResult(command, "codemode", result.content, result.details, false);
-    assert.deepEqual(exportedResult, stockExporter.renderResult(command, "codemode", result.content, result.details, false), `${command} changed stock result rendering`);
-    assert(exportedResult.expanded.includes("RAW_OUTPUT_17"));
-    await new Promise(resolve => setTimeout(resolve, 0));
+  const lookup = () => calm.resolver("codemode", () => original);
+  const exporter = createToolHtmlRenderer({ getToolDefinition: lookup, getToolRenderers: lookup, theme, cwd: process.cwd() });
+  const stockExporter = createToolHtmlRenderer({ getToolDefinition: () => original, getToolRenderers: () => original, theme, cwd: process.cwd() });
+  const exportArgs = { code: 'text(await tools.fm_branch_outcomes({recent:2}));' };
+  /** Render one Codemode entry the way Pi's /export and /share handlers do. */
+  const exportCodemode = (renderer) => ({
+    call: renderer.renderCall("exported", "codemode", exportArgs),
+    result: renderer.renderResult("exported", "codemode", result.content, result.details, false),
+  });
+  const stockExport = exportCodemode(stockExporter);
+  assert(stockExport.call.includes("tools.fm_branch_outcomes"));
+  assert(stockExport.result.expanded.includes("RAW_OUTPUT_17"));
+  const submissions = [
+    { typed: "/export test.html", submitted: "/export test.html", exports: true },
+    { typed: "/share", submitted: "/share", exports: true },
+    { typed: "/export", autocomplete: true, submitted: "/export", exports: true },
+    { typed: "/exp", autocomplete: true, submitted: "/export", exports: true },
+    { typed: "/sha", autocomplete: true, submitted: "/share", exports: true },
+    { typed: "/s", autocomplete: true, down: 2, submitted: "/share", exports: true },
+    { typed: "/s", autocomplete: true, submitted: "/settings", exports: false },
+    { typed: "/ses", autocomplete: true, submitted: "/session", exports: false },
+  ];
+  for (const calmActive of [true, false]) {
+    visibility.setCalmPresentation(calmActive);
+    const live = row(lookup());
     live.updateResult(result);
-    assert.deepEqual(live.render(80), [], `a row constructed during ${command} stayed visible`);
+    const presented = live.render(80);
+    assert.equal(presented.length === 0, calmActive, "the live Codemode row ignored Calm");
+    for (const { typed, submitted, exports, ...keys } of submissions) {
+      const label = `${typed}${keys.autocomplete ? " via autocomplete" : ""} with Calm ${calmActive ? "on" : "off"}`;
+      let constructed;
+      const submission = await calm.submit(typed, { ...keys,
+        /** Redraw and construct live rows, then export, all inside the submission. */
+        dispatch() {
+          live.invalidate();
+          const redrawn = live.render(80);
+          constructed = row(lookup());
+          return { redrawn, exported: exportCodemode(exporter) };
+        },
+      });
+      assert.equal(submission?.text, submitted, `${label} submitted the wrong command`);
+      if (exports) assert.deepEqual(submission.rendering.exported, stockExport, `${label} changed stock Codemode export/share output`);
+      else assert.deepEqual(submission.rendering.redrawn, presented, `${label} rendered live rows as if exporting`);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert.deepEqual(live.render(80), presented, `${label} did not restore the live Codemode row`);
+      constructed.updateResult(result);
+      assert.deepEqual(constructed.render(80), presented, `a row constructed during ${label} lost Calm's presentation`);
+    }
   }
+  visibility.setCalmPresentation(true);
   setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: false });
   const image = row(calm.resolver("codemode", () => original), undefined, { showImages: true });
   image.updateResult({ ...result, content: [{ type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR1kAAAAASUVORK5CYII=" }] });

@@ -263,6 +263,7 @@ const context = {
     getToolsExpanded() {
       return false;
     },
+    addAutocompleteProvider() {},
     onTerminalInput() {
       return () => {};
     },
@@ -1028,6 +1029,7 @@ const ctx = {
   ui: {
     getEditorText: () => "",
     getToolsExpanded: () => false,
+    addAutocompleteProvider() {},
     onTerminalInput: () => () => {},
     setHiddenThinkingLabel() {},
     setStatus() {},
@@ -1241,6 +1243,7 @@ const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-
 const earlyActivationUi = {
   getEditorText: () => "",
   getToolsExpanded: () => false,
+  addAutocompleteProvider() {},
   onTerminalInput: () => () => {},
   setHiddenThinkingLabel() {},
   setStatus() {},
@@ -1539,6 +1542,7 @@ const commandContext = {
   ui: {
     getEditorText: () => editorText,
     getToolsExpanded: () => expanded,
+    addAutocompleteProvider() {},
     onTerminalInput(handler) {
       terminalInputHandler = handler;
       return () => {
@@ -1885,6 +1889,7 @@ const components = [];
 const ui = {
   getEditorText: () => "",
   getToolsExpanded: () => false,
+  addAutocompleteProvider() {},
   onTerminalInput: () => () => {},
   setHiddenThinkingLabel(value) {
     // Pi's own fan-out: every mounted assistant row re-runs its layout.
@@ -3646,6 +3651,7 @@ const ui = {
   },
   getEditorText: () => "",
   getToolsExpanded: () => false,
+  addAutocompleteProvider() {},
   onTerminalInput: () => () => {},
   setHiddenThinkingLabel() {},
   setStatus() {},

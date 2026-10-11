@@ -141,6 +141,12 @@ function refreshStandardShell(
   return box;
 }
 
+/** Report whether submitted editor text runs Pi's /export or /share command. */
+function isExportCommand(text: string): boolean {
+  const input = text.trim();
+  return input === "/share" || input === "/export" || input.startsWith("/export ");
+}
+
 export default function (pi: ExtensionAPI) {
   installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
@@ -515,18 +521,10 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);
     removeTerminalInputHandler?.();
-    removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
-      if (!getKeybindings().matches(data, "tui.input.submit")) return undefined;
-
-      const input = ctx.ui.getEditorText().trim();
-      if (
-        input !== "/share" &&
-        input !== "/export" &&
-        !input.startsWith("/export ")
-      ) {
-        return undefined;
-      }
-
+    let handlingSubmitKey = false;
+    /** Render Calm's tool rows through their stock renderers until this submission's export or share has run. */
+    const beginStockExportRendering = (): void => {
+      if (exportRendering) return;
       exportRendering = true;
       setCalmStockExportRendering(true);
       publishPresentationState();
@@ -546,8 +544,25 @@ export default function (pi: ExtensionAPI) {
         repaintCalmToolRows();
         ctx.ui.setStatus("firstmate-calm", undefined);
       }, 0);
+    };
+    removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
+      handlingSubmitKey = getKeybindings().matches(data, "tui.input.submit");
+      if (handlingSubmitKey && isExportCommand(ctx.ui.getEditorText())) beginStockExportRendering();
       return undefined;
     });
+    // Pi's editor applies a selected slash completion and submits it on the same Enter,
+    // after terminal input listeners have already read the uncompleted text.
+    ctx.ui.addAutocompleteProvider((current) => ({
+      triggerCharacters: current.triggerCharacters,
+      getSuggestions: current.getSuggestions.bind(current),
+      shouldTriggerFileCompletion: current.shouldTriggerFileCompletion?.bind(current),
+      /** Delegate the completion, entering stock export rendering when this Enter submits /export or /share. */
+      applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+        const completion = current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+        if (handlingSubmitKey && isExportCommand(completion.lines.join("\n"))) beginStockExportRendering();
+        return completion;
+      },
+    }));
   });
 
   pi.on("agent_start", (_event, ctx) => {
