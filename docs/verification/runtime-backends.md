@@ -2169,6 +2169,22 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
 In TUI mode, its `/supervision-model` model list is drawn with Pi's own `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder` through the extension context's `ui.custom` surface, which is what bounds and searches a long catalog.
 
+Routine PR-link activation was verified on 2026-10-04 against Pi 1.0.1 in its default fullscreen mode, with Apple Terminal as the attached terminal and Pi's automatic hyperlink capability detection left unchanged.
+The extension's real custom-message renderer and a stock `InteractiveMode` rendered `https://github.com/connectwithclayton/toolroll/pull/148`, and Pi's own fullscreen OSC 8 column lookup recovered that exact destination from the URL's visible cells.
+Both the focused portable case and the live fullscreen guard reject a longer `/files` URL instead of linking only its pull-request prefix.
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - branch owns accepted wakes with a stable prefix and deterministic verdict-driven delivery
+ok - real Pi SDK 1.0.1 gives only a canonical PR URL its exact fullscreen click target
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 1.0.1
+```
+
 Processing-retry visibility was verified on 2026-09-27 against Pi 0.87.1 with a local intercepted provider stream, without credentials or an external provider request:
 
 ```sh

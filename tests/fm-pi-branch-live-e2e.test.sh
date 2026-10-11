@@ -685,10 +685,12 @@ if [ "$status" -ne 0 ] || [ "$out" != "EFFORT_OK" ]; then
 fi
 pass "real Pi SDK $PI_VERSION reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level"
 
-# Fifth probe: the real SDK contract deterministic captain delivery rests on.
+# Fifth probe: the real SDK contracts deterministic outcome delivery rests on.
 # ExtensionAPI.appendEntry must synchronously insert the registered custom entry
 # into an active InteractiveMode transcript, persist it across SessionManager
-# reopen, and keep it out of model context. No model is selected or prompted.
+# reopen, and keep it out of model context. A rendered routine notification's
+# PR URL must also resolve through the same OSC 8 column lookup Pi's fullscreen
+# mouse path uses. No model is selected or prompted.
 PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" DELIVERY_DIR="$TMP_ROOT/delivery-sessions" \
   DELIVERY_AGENT_DIR="$TMP_ROOT/delivery-agent-dir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
   node --input-type=module > "$TMP_ROOT/delivery-output" 2>&1 <<'EOF'
@@ -706,6 +708,9 @@ const {
   initTheme,
 } = await import(
   pathToFileURL(`${pkg}/dist/index.js`).href
+);
+const { getOsc8LinkAtColumn, stripTerminalSequences, visibleWidth } = await import(
+  pathToFileURL(`${pkg}/node_modules/@earendil-works/pi-tui/dist/index.js`).href
 );
 initTheme("dark");
 const sessions = resolve(process.env.DELIVERY_DIR);
@@ -760,13 +765,49 @@ const record = {
   silent: false,
 };
 capturedApi.appendEntry("fm-branch-visible-outcome", record);
+const pullUrl = "https://github.com/connectwithclayton/toolroll/pull/148";
+capturedApi.sendMessage({
+  customType: "fm-branch-merge",
+  content: `⛵ fm-toolroll-ci: CI fix merged: ${pullUrl}.`,
+  display: true,
+});
+const longerPullUrl = `${pullUrl}/files`;
+capturedApi.sendMessage({
+  customType: "fm-branch-merge",
+  content: `⛵ fm-toolroll-ci: Review files: ${longerPullUrl}`,
+  display: true,
+});
 
-const rendered = interactive.chatContainer.render(240).join("\n");
+const renderedLines = interactive.chatContainer.render(240);
+const rendered = renderedLines.join("\n");
 if (!rendered.includes("⚓") || !rendered.includes(`[seq ${record.seq}]`) || !rendered.includes(record.task) || !rendered.includes(record.summary)) {
   throw new Error(`active Pi transcript did not immediately render the exact outcome: ${rendered}`);
 }
 if (rendered.split(record.summary).length !== 2) {
   throw new Error(`active Pi transcript rendered the outcome more than once: ${rendered}`);
+}
+const linkedLine = renderedLines.find((line) => stripTerminalSequences(line).includes(pullUrl));
+if (!linkedLine) throw new Error(`active Pi transcript did not render the routine PR URL: ${rendered}`);
+const visibleLine = stripTerminalSequences(linkedLine);
+const linkColumn = visibleWidth(visibleLine.slice(0, visibleLine.indexOf(pullUrl)));
+if (getOsc8LinkAtColumn(linkedLine, linkColumn) !== pullUrl) {
+  throw new Error(`Pi's fullscreen click resolver cannot recover the exact routine PR destination: ${JSON.stringify(linkedLine)}`);
+}
+if (!visibleLine.includes(`${pullUrl}.`)) {
+  throw new Error(`active Pi transcript did not preserve sentence punctuation after the routine PR URL: ${JSON.stringify(linkedLine)}`);
+}
+if (getOsc8LinkAtColumn(linkedLine, linkColumn + pullUrl.length) !== undefined) {
+  throw new Error(`Pi's fullscreen click resolver included sentence punctuation in the PR destination: ${JSON.stringify(linkedLine)}`);
+}
+const longerLine = renderedLines.find((line) => stripTerminalSequences(line).includes(longerPullUrl));
+if (!longerLine) throw new Error(`active Pi transcript did not render the longer PR URL: ${rendered}`);
+const longerVisibleLine = stripTerminalSequences(longerLine);
+const longerLinkColumn = visibleWidth(longerVisibleLine.slice(0, longerVisibleLine.indexOf(longerPullUrl)));
+for (let offset = 0; offset < pullUrl.length; offset += 1) {
+  const destination = getOsc8LinkAtColumn(longerLine, longerLinkColumn + offset);
+  if (destination !== undefined) {
+    throw new Error(`Pi's fullscreen click resolver partially linked a longer PR path to ${destination}: ${JSON.stringify(longerLine)}`);
+  }
 }
 
 const reopened = SessionManager.open(manager.getSessionFile(), sessions);
@@ -788,7 +829,7 @@ out=$(cat "$TMP_ROOT/delivery-output")
 if [ "$status" -ne 0 ] || [ "$out" != "DELIVERY_OK" ]; then
   fail "real-SDK visible outcome delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION immediately renders appendEntry in the active transcript, persists it across reopen, and excludes it from model context"
+pass "real Pi SDK $PI_VERSION gives only a canonical PR URL its exact fullscreen click target"
 
 # Sixth probe: the vendor event contract watcher continuity rests on, against
 # the real AgentSession and ExtensionRunner with the tracked watcher extension

@@ -198,6 +198,7 @@ The branch prompt's "Verdict: routine or captain" section owns the distinction b
 
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
 A task-level routine no-change outcome or a no-change heartbeat explicitly reported with `silent=true` is delivered without a rendered note; the branch prompt owns task-level eligibility, and every other routine outcome still appends a rendered, sailboat-prefixed note.
+In Pi's fullscreen chat, an exact canonical GitHub pull-request URL in that routine note is clickable; a longer path such as `/pull/148/files` remains plain text instead of exposing a partial pull-request link.
 
 ## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
 

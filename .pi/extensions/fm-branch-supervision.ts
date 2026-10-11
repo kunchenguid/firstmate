@@ -100,7 +100,7 @@ import {
   type ExtensionCommandContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
+import { Box, Container, fuzzyFilter, hyperlink, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
@@ -165,6 +165,7 @@ const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
+const GITHUB_PULL_REQUEST_URL = /(?<![A-Za-z0-9])https:\/\/github\.com\/[A-Za-z0-9.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*(?=\.(?:$|\s|[)\]}'"])|$|[^A-Za-z0-9_./?#-])/g;
 // The processing half of the captain-outcome contract. The visible entry
 // above is the DISPLAY: crash-safe and exact-once. This hidden, typed request
 // is the PROCESSING: it opens the one turn in which main acts on the outcome,
@@ -2430,8 +2431,20 @@ ${context.command}
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
     const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
     const outputPad = 1;
+    let cursor = 0;
+    let renderedRest = "";
+    for (const match of rest.matchAll(GITHUB_PULL_REQUEST_URL)) {
+      const start = match.index;
+      const url = match[0];
+      renderedRest += theme.fg("dim", rest.slice(cursor, start));
+      // Fullscreen Pi resolves OSC 8 targets itself before component mouse
+      // handling, including when the attached terminal cannot open OSC 8.
+      renderedRest += hyperlink(theme.fg("accent", url), url);
+      cursor = start + url.length;
+    }
+    renderedRest += theme.fg("dim", rest.slice(cursor));
     return new Text(
-      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
+      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${renderedRest}`,
       outputPad,
       0,
     );
