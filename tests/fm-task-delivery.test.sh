@@ -377,7 +377,10 @@ STUB
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
     awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
+    # Live promotion instructions append the classified CI witness contract that
+    # spawn appends for an ordinary brief; the Definitions of done precede it.
+    awk '/^# Current CI witness contract$/ { exit } /^# Definition of done$/ { emit=1 } emit' "$payload" \
+      | sed '${/^$/d;}' > "$delivered_dod"
     cmp -s "$brief_dod" "$delivered_dod" \
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
   done
@@ -1647,6 +1650,45 @@ test_spawn_requires_the_brief_to_carry_the_selected_branch
 test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
+# The launch brief and live promotion instructions are the generated worker
+# interface: each carries exactly one CI witness contract, with a real class.
+assert_one_ci_contract() {  # <generated-file> <class> <label>
+  if [ "$(grep -c '^# Current CI witness contract$' "$1")" != 1 ] \
+    || [ "$(grep -c '^CI destination class: ' "$1")" != 1 ] \
+    || ! grep -qx "CI destination class: $2" "$1"; then
+    fail "$3: expected exactly one CI witness contract classed $2"
+  fi
+}
+
+test_spawn_and_promotion_classify_the_explicit_task_project() {
+  local rec home proj fakebin out id
+  rec=$(make_home ci-task-binding '- proj [no-mistakes] - fixture')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  git -C "$proj" remote add origin https://github.com/upstream/repo.git
+  git -C "$proj" remote set-url --push origin git@github.com:contributor/repo.git
+  id=ci-bound-ship
+  FM_HOME="$home" "$BRIEF" "$id" unrelated-scaffold-name --mode no-mistakes >/dev/null
+  fill_brief_subsections "$home/data/$id/brief.md" 'Ship this contribution.' 'Use the resolved task project.'
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  assert_one_ci_contract "$home/data/$id/launch-brief.md" fork-contribution 'ordinary spawn launch brief'
+  id=ci-bound-promoted
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" unrelated-scaffold-name --scout >/dev/null
+  fill_brief_subsections "$home/data/$id/brief.md" 'Ship this contribution.' 'Use the resolved task project.'
+  out=$(FM_HOME="$home" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1) \
+    || fail "bound-project promotion failed: $out"
+  assert_one_ci_contract "$home/data/$id/ship-instructions.md" fork-contribution 'live promotion instructions'
+  assert_grep 'ci_destination=fork-contribution' "$home/state/$id.meta" 'promotion omitted destination metadata'
+  rm -f "$home/state/$id.meta"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  assert_one_ci_contract "$home/data/$id/launch-brief.md" fork-contribution "promoted brief relaunched through spawn: $out"
+  pass 'spawn and promotion classify the explicit task project through the same entry point'
+}
+
+
+test_spawn_and_promotion_classify_the_explicit_task_project
 test_spawn_and_promote_require_filled_task_subsections
 test_project_mode_resolves_branch_prefix
 echo "# all fm-task-delivery tests passed"

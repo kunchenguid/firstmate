@@ -98,7 +98,11 @@
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed/passed-with-override/passed-with-skips -> done,
 #      failed -> failed, cancelled -> unknown (no verdict unless the green
-#      delivery safeguard below applies). A cancelled outcome takes precedence
+#      delivery safeguard below applies, or, taking precedence over it,
+#      bin/fm-ci-witness.sh recorded ci_witness_run= for this exact run when its
+#      explicit abort ended a structurally unwitnessed CI monitor: then the worker's witness done is
+#      read through fm_dod_accept_ship_done, which binds the recorded witness
+#      head, and reports done or blocked). A cancelled outcome takes precedence
 #      over an interrupted step's failed status or outstanding gate findings;
 #      it does not rewrite historical events or backlog records.
 #      passed-with-override is a passing outcome
@@ -754,6 +758,19 @@ EOF
   [ "$(nm_ci_checks_state)" = green ]
 }
 
+# 0 when this exact cancelled run is the one the task's recorded CI witness
+# ended and the worker's current done reports that witness.
+nm_cancelled_run_is_recorded_witness() {
+  local run_id
+  [ "$LOG_VERB" = "done" ] || return 1
+  case "$(status_line_note "$LOG_LINE")" in
+    *"CI absent"*|*"published, waiting on upstream"*) ;;
+    *) return 1 ;;
+  esac
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] && [ "$(meta_value ci_witness_run)" = "$run_id" ]
+}
+
 # Apply the header's terminal-delivery safeguard. The earlier green log cannot
 # prove current PR disposition: a subsequent close can itself end the monitor.
 nm_reclassify_failed_run_as_held_green() {
@@ -1095,7 +1112,10 @@ if [ "$HAVE_RUN" = 1 ]; then
             RUN_STATE=failed; RUN_DETAIL="run failed"
           fi ;;
         cancelled)
-          if nm_reclassify_failed_run_as_held_green; then :; else
+          if nm_cancelled_run_is_recorded_witness; then
+            emit_ship_status_done "CI witness recorded; run cancelled by the witness abort"
+          elif nm_reclassify_failed_run_as_held_green; then :
+          else
             RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
           fi ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
@@ -1128,7 +1148,10 @@ if [ "$HAVE_RUN" = 1 ]; then
             RUN_STATE=failed; RUN_DETAIL="run failed"
           fi ;;
         cancelled)
-          if nm_reclassify_failed_run_as_held_green; then :; else
+          if nm_cancelled_run_is_recorded_witness; then
+            emit_ship_status_done "CI witness recorded; run cancelled by the witness abort"
+          elif nm_reclassify_failed_run_as_held_green; then :
+          else
             RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
           fi ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;

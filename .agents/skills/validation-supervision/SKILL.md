@@ -29,4 +29,6 @@ Resume fleet supervision immediately after the decision lands.
 Judge validation by the resolved state line from [`bin/fm-crew-state.sh`](../../../bin/fm-crew-state.sh), whose header owns outcome mappings and CI-monitor/daemon exceptions, never by shell liveness, the last status event, or a raw run record.
 Workers parked at approval or fix-review must follow the active gate help.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
-The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+The worker reports the PR at the ready outcome owned by `bin/fm-dod-lib.sh`, without waiting for merge monitoring to finish.
+For a `ci-witness` escalation, use `bin/fm-ci-witness.sh` only as its header specifies: `--skip` at a parked CI gate, then reattach the worker to the pipeline's next gate or outcome.
+Run that helper with `--record` after a passing structural-exception outcome, or directly on a running CI monitor, before resolving the witness decision; its enforced evidence and `bin/fm-dod-lib.sh` own the CI exception policy, including the explicit abort that labels the run cancelled.
