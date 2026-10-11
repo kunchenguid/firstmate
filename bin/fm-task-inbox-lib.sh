@@ -76,8 +76,8 @@
 # the due action is `retry`: once the worker has no open decision of its own,
 # the watcher rings once more and spends the mark
 # whatever the result, so the record never rings a third time and never
-# escalates. The one exception is the Orca backend, where a ring deferred or
-# failed after a restart retarget keeps the mark for later eligible polls
+# escalates. The one exception is the Orca backend, where any nonzero ring
+# status keeps the mark for later eligible polls, including restart retargets
 # (still never escalating). A waiting worker does not poll its inbox (bin/fm-brief.sh), so
 # without this retry the record could sit unread until a checkpoint. A pending ordinary record's
 # ladder rings the same inbox, so the retry waits behind it, and an
@@ -490,7 +490,8 @@ fm_task_inbox_mark_retry() {  # <state-dir> <task-id> <record-path>
   { printf '%s\n' "${3##*/}" > "$dir/.retry-ring"; } 2>/dev/null
 }
 
-# Spend the retry mark after a status-0 ring, only while it still names that record:
+# Clear the retry mark when the caller spends it under the header's policy,
+# only while it still names that record:
 # a newer mark written meanwhile is owed its own retry and survives. Fails only
 # when the processed record's mark stays behind.
 fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>

@@ -693,8 +693,7 @@ inbox_steer_check() {  # <window> <task>
       ring_rc=0
       FM_COMPOSER_HARNESS=$(window_harness "$w") \
         fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
-      # An Orca ring deferred or failed after retargeting keeps its retry mark;
-      # every other backend spends the one retry whatever the result.
+      # Retry-mark retention is owned by bin/fm-task-inbox-lib.sh's header.
       if { [ "$backend" != orca ] || [ "$ring_rc" -eq 0 ]; } && ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
         reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
         fm_wake_append stale "$w" "$reason" || exit 1

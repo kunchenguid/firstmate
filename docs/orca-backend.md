@@ -58,7 +58,7 @@ Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the w
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
 Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
 
-`fm-peek.sh` reads with `orca terminal read`.
+`fm-peek.sh` reads the recorded terminal with `orca terminal read`; it does not follow send-time retargeting.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
 Replacement panes showing a blocking dialog refuse text and Enter; an explicit Ctrl-C remains available.
 After resolving a replacement pane, an inbox ring defers if its composer is unreadable or unproven, holds other input, or shows delivery-busy state; a proven pending own doorbell is reused without appending another copy.
@@ -71,7 +71,7 @@ Duplicate retries are an accepted cost.
 Draft and busy deferral applies to inbox rings; explicit typed text and Enter retain their existing semantics subject to the dialog guard and typed submission rule below.
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
 If typed submission Enter changes the endpoint from the one that received the literal text, verification stops without retyping or further Enter attempts; an empty replacement composer cannot confirm text typed elsewhere.
-`fm-send.sh` exits 3 with an unconfirmed-submission message directing the caller to inspect the replacement before deciding whether to resend.
+`fm-send.sh` exits 3 with an unconfirmed-submission message directing the caller to inspect the replacement pane for the recorded worktree in Orca's UI before deciding whether to resend.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
