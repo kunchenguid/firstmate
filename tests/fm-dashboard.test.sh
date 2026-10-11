@@ -94,7 +94,29 @@ test_rejects_bad_interval() {
   pass "invalid --interval is refused"
 }
 
+test_rows_clip_to_viewport_with_position_marker() {
+  local out n
+  out=$(COLUMNS=160 "$DASH" --once --rows 14 --snapshot "$FIXTURE")
+  n=$(printf '%s\n' "$out" | wc -l)
+  [ "$n" -le 14 ] || fail "clipped frame must not exceed --rows, got $n lines"$'\n'"$out"
+  assert_contains "$out" "cards 1-1 of 4" "tall column shows its position"
+  assert_contains "$out" "cards 1-1 of 2" "short column shows its position"
+  assert_contains "$out" "▶ QUEUED" "focused column is marked"
+  assert_not_contains "$out" "ask-task" "cards past the viewport are scrolled out"
+  out=$(COLUMNS=160 "$DASH" --once --rows 20 --focus 2 --scroll 2 --snapshot "$FIXTURE")
+  assert_contains "$out" "cards 3-4 of 4" "scrolling moves the window"
+  assert_contains "$out" "▶ WAITING ON CAPTAIN" "focus follows --focus"
+  assert_contains "$out" "ask-task" "scrolled card appears"
+  out=$(COLUMNS=160 "$DASH" --once --rows 20 --focus 2 --scroll 99 --snapshot "$FIXTURE")
+  assert_contains "$out" "cards 4-4 of 4" "scroll clamps to the last card"
+  out=$(COLUMNS=50 "$DASH" --once --rows 18 --focus 1 --snapshot "$FIXTURE")
+  assert_contains "$out" "[IN FLIGHT]" "narrow board shows the focused column"
+  assert_contains "$out" "cards 1-1 of 1" "narrow board shows position"
+  pass "--rows clips each column to a scrollable viewport with a position marker"
+}
+
 test_wide_board_lays_columns_side_by_side
+test_rows_clip_to_viewport_with_position_marker
 test_narrow_board_stacks_and_places_cards
 test_done_limit_keeps_most_recent
 test_live_snapshot_of_empty_home

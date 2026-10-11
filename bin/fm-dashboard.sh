@@ -9,6 +9,11 @@
 # Colour uses ANSI escapes only when stdout is a TTY and NO_COLOR is unset.
 # Width comes from COLUMNS, else tput; below four usable columns the board
 # degrades to stacked columns.
+# The live loop draws on the terminal's alternate screen and never emits more
+# lines than the terminal is tall: each column is a viewport over its full
+# cards, scrolled with up/down (j/k), focus moved with left/right (h/l), and
+# its header shows the position ("cards 1-4 of 14").  Below four columns of
+# width only the focused column is shown.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,16 +21,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
   cat <<'EOF'
 usage: fm-dashboard.sh [--once] [--interval SECONDS] [--done N] [--snapshot FILE]
+                       [--rows N] [--focus 0-3] [--scroll N]
 
 Show firstmate's work as a kanban board in the terminal, refreshing until q.
   --once           print one frame and exit
   --interval S     seconds between refreshes (default 5)
   --done N         recent Done cards to show (default 6)
   --snapshot FILE  render this fm-fleet-snapshot.sh --json file instead of a live snapshot
+  --rows N         clip the frame to N lines, each column a scrollable viewport
+                   (the live loop on a terminal always does this)
+  --focus C        with --rows, the focused column, 0 (Queued) to 3 (Done)
+  --scroll N       with --rows, the first card shown in the focused column
+Keys: up/down or k/j scroll the focused column, left/right or h/l change it, q quits.
 EOF
 }
 
-ONCE=0 INTERVAL=5 DONE_MAX=6 SNAPSHOT_FILE=
+ONCE=0 INTERVAL=5 DONE_MAX=6 SNAPSHOT_FILE='' ROWS=0 FOCUS=0 SCROLL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -33,12 +44,19 @@ while [ $# -gt 0 ]; do
     --interval) INTERVAL=${2:-}; shift ;;
     --done) DONE_MAX=${2:-}; shift ;;
     --snapshot) SNAPSHOT_FILE=${2:-}; shift ;;
+    --rows) ROWS=${2:-}; shift ;;
+    --focus) FOCUS=${2:-}; shift ;;
+    --scroll) SCROLL=${2:-}; shift ;;
     *) usage >&2; exit 2 ;;
   esac
   shift
 done
 case "$INTERVAL" in ''|*[!0-9]*|0) echo "fm-dashboard: --interval must be a positive integer" >&2; exit 2 ;; esac
 case "$DONE_MAX" in ''|*[!0-9]*) echo "fm-dashboard: --done must be a non-negative integer" >&2; exit 2 ;; esac
+
+case "$ROWS" in ''|*[!0-9]*) echo "fm-dashboard: --rows must be a non-negative integer" >&2; exit 2 ;; esac
+case "$FOCUS" in [0-3]) ;; *) echo "fm-dashboard: --focus must be 0-3" >&2; exit 2 ;; esac
+case "$SCROLL" in ''|*[!0-9]*) echo "fm-dashboard: --scroll must be a non-negative integer" >&2; exit 2 ;; esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-dashboard: jq not found" >&2; exit 1; }
 
@@ -50,6 +68,7 @@ RENDER='
   def paint($s): if $color and $s != "" then "\u001b[\($s)m" + . + "\u001b[0m" else . end;
   def rep($n): if $n > 0 then . * $n else "" end;
   def trunc($n): if length <= $n then . elif $n < 2 then .[:$n] else .[:$n-1] + "…" end;
+  def fit($w): reduce .[] as [$t, $s] ({r: [], left: $w}; .r += [[$t[:.left], $s]] | .left = ([.left - ($t | length), 0] | max)) | .r;
   def chunks($n): if length <= $n then [.] else [.[:$n]] + (.[$n:] | chunks($n)) end;
   def dash: if . == null or . == "" then "-" else tostring end;
   def seg($t; $s): [[$t, $s]];
@@ -72,12 +91,34 @@ RENDER='
       + (if $c.pr then [$c.pr | chunks($iw)[] | seg("│ "; $bs) + seg(.; "4;34")] else [] end)
       + [seg("╰" + ("─" | rep($w - 1)); $bs)];
 
-  def column($col; $w):
-    [seg($col.name | trunc($w); $col.style + ";1")]
-    + [seg(($col.motto + " (\($col.cards | length))") | trunc($w); "2;3")]
+  # Whole cards from $off that fit in $body lines; the first is clipped if taller.
+  def viewport($cards; $w; $bs; $off; $body):
+    ($cards | map(card(.; $w; $bs))) as $cs
+    | reduce range($off; $cs | length) as $i ({lines: [], n: 0, stop: false};
+        if .stop then .
+        else ($cs[$i] | length) as $h
+          | if (.lines | length) + $h <= $body or .n == 0
+            then .lines += $cs[$i] | .n += 1 else .stop = true end
+        end)
+    | .lines |= .[:$body];
+
+  # $body 0 renders every card; otherwise the column is a viewport over them.
+  def column($col; $w; $body; $off; $focused):
+    ($col.cards | length) as $t
+    | [seg((if $focused then "▶ " else "" end) + $col.name | trunc($w); $col.style + ";1")]
+    + [seg(($col.motto + " (\($t))") | trunc($w); "2;3")]
     + [seg("═" | rep($w); $col.style)]
-    + (if ($col.cards | length) == 0 then [seg("  calm waters" | trunc($w); "2")]
-       else [$col.cards[] | card(.; $w; $col.style)[]] end);
+    + (if $body == 0 then
+         (if $t == 0 then [seg("  calm waters" | trunc($w); "2")]
+          else [$col.cards[] | card(.; $w; $col.style)[]] end)
+       else
+         viewport($col.cards; $w; $col.style; $off; $body) as $v
+         | [seg((if $t == 0 then "cards 0 of 0"
+                 else "cards \($off + 1)-\($off + $v.n) of \($t)"
+                   + (if $off > 0 then " ↑" else "" end)
+                   + (if $off + $v.n < $t then " ↓" else "" end) end) | trunc($w); "2")]
+         + (if $t == 0 then [seg("  calm waters" | trunc($w); "2")] else $v.lines end)
+       end);
 
   def task_card($t; $note): {
     id: $t.id,
@@ -121,25 +162,43 @@ RENDER='
        cards: ([$records[] | select(.state == "done")] | .[:$done_max] | map(record_card(.; null)))}
     ] as $cols
   | (.fm_home // "firstmate" | split("/") | map(select(. != "")) | last // "firstmate") as $fleet
-  | [
-      (seg("⚓ FIRSTMATE"; "1;33") + seg("  ·  ship'"'"'s log of the "; "2") + seg($fleet; "1;37") + seg(" fleet"; "2") | out(0)),
-      (seg("\($cols[1].cards | length) under sail · \($cols[0].cards | length) in the hold · \($cols[2].cards | length) awaiting the captain · \($cols[3].cards | length) made port"; "1") | out(0)),
-      (seg("logged \(.generated // "-")" + (if $once then "" else " · refresh \($interval)s · q to quit" end); "2") | out(0)),
+  | ($cols | to_entries | map(
+      [([($offsets[.key] // 0), 0] | max), ([(.value.cards | length) - 1, 0] | max)] | min)) as $offs
+  | ($width >= 4 * 24 + 3) as $wide
+  | ($rows > 0) as $clip
+  | ([$rows - 4 - 4 - (if $wide then 0 else 1 end), 1] | max) as $body
+  | ([
+      [
+      (seg("⚓ FIRSTMATE"; "1;33") + seg("  ·  ship'"'"'s log of the "; "2") + seg($fleet; "1;37") + seg(" fleet"; "2") | fit(if $clip then $width else 100000 end) | out(0)),
+      (seg("\($cols[1].cards | length) under sail · \($cols[0].cards | length) in the hold · \($cols[2].cards | length) awaiting the captain · \($cols[3].cards | length) made port"; "1") | fit(if $clip then $width else 100000 end) | out(0)),
+      (seg("logged \(.generated // "-")" + (if $once then "" else " · refresh \($interval)s · q to quit" end); "2") | fit(if $clip then $width else 100000 end) | out(0)),
       ""
     ][],
-    (if $width >= 4 * 24 + 3 then
+    (if $wide then
        (($width - 3) / 4 | floor) as $cw
-       | ($cols | map(column(.; $cw))) as $blocks
+       | ($cols | to_entries | map(column(.value; $cw; (if $clip then $body else 0 end); $offs[.key]; $clip and .key == $focus))) as $blocks
        | ($blocks | map(length) | max) as $h
        | range(0; $h) as $i
        | [$blocks[] | (.[$i] // []) | out($cw)] | join(" ") | sub(" +$"; "")
+     elif $clip then
+       (seg($cols | to_entries | map(if .key == $focus then "[" + .value.name + "]" else .value.name end) | join(" · ") | trunc($width); "2") | out(0)),
+       ($cols[$focus] | column(.; [$width, 20] | max; $body; $offs[$focus]; true)[] | out(0))
      else
-       $cols[] | (column(.; [$width, 20] | max)[] | out(0)), ""
+       $cols[] | (column(.; [$width, 20] | max; 0; 0; false)[] | out(0)), ""
      end)
+    ]) as $lines
+  | (if $clip then $lines[:$rows] else $lines end) as $shown
+  | if $live then ($offs | map(tostring) | join(" ")), $shown[] else $shown[] end
 '
 
 snapshot() {
   if [ -n "$SNAPSHOT_FILE" ]; then cat -- "$SNAPSHOT_FILE"; else "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; fi
+}
+
+term_height() {
+  local size=
+  [ -n "${LINES:-}" ] || size=$({ stty size </dev/tty; } 2>/dev/null) || size=
+  printf '%s\n' "${LINES:-${size% *}}"
 }
 
 term_width() {
@@ -148,13 +207,24 @@ term_width() {
   printf '%s\n' "${COLUMNS:-${size#* }}"
 }
 
-frame() {  # <width>
-  local json width=$1
-  json=$(snapshot) || return $?
+# render <width> <rows> <focus> <offsets-json> <live>: draw a snapshot; with
+# <live> true the first line printed is the clamped scroll offsets.
+render() {
+  local width=$2
   case "$width" in ''|*[!0-9]*) width=80 ;; esac
-  printf '%s\n' "$json" | jq -r --argjson color "$COLOR" --argjson width "$width" \
+  printf '%s\n' "$1" | jq -r --argjson color "$COLOR" --argjson width "$width" \
     --argjson once "$([ "$ONCE" = 1 ] && echo true || echo false)" \
-    --argjson interval "$INTERVAL" --argjson done_max "$DONE_MAX" "$RENDER"
+    --argjson interval "$INTERVAL" --argjson done_max "$DONE_MAX" \
+    --argjson rows "$3" --argjson focus "$4" --argjson offsets "$5" --argjson live "$6" "$RENDER"
+}
+
+frame() {  # <width>
+  local json offs="[0,0,0,0]"
+  json=$(snapshot) || return $?
+  [ "$ROWS" -gt 0 ] && offs=$(printf '[%s,%s,%s,%s]' "$([ "$FOCUS" = 0 ] && echo "$SCROLL" || echo 0)" \
+    "$([ "$FOCUS" = 1 ] && echo "$SCROLL" || echo 0)" "$([ "$FOCUS" = 2 ] && echo "$SCROLL" || echo 0)" \
+    "$([ "$FOCUS" = 3 ] && echo "$SCROLL" || echo 0)")
+  render "$json" "$1" "$ROWS" "$FOCUS" "$offs" false
 }
 
 if [ "$ONCE" = 1 ]; then
@@ -162,21 +232,73 @@ if [ "$ONCE" = 1 ]; then
   exit $?
 fi
 
-if [ -t 1 ]; then
-  tput civis 2>/dev/null || true
-  trap 'tput cnorm 2>/dev/null || true; printf "\n"' EXIT
+draw() {  # <text>: repaint in place, one terminal row per line, no scroll
+  local -a lines
+  local i last
+  mapfile -t lines <<<"$1"
+  last=$((${#lines[@]} - 1))
+  printf '\033[H'
+  for i in "${!lines[@]}"; do
+    printf '%s\033[K' "${lines[$i]}"
+    [ "$i" -lt "$last" ] && printf '\n'
+  done
+  printf '\033[J'
+}
+
+if [ ! -t 1 ]; then
+  trap 'exit 0' INT TERM
+  while :; do
+    out=$(frame "$(term_width)" 2>&1)
+    printf '%s\n' "$out"
+    if [ -t 0 ]; then
+      key=
+      read -rsn1 -t "$INTERVAL" key || true
+      case "$key" in q|Q) exit 0 ;; esac
+    else
+      sleep "$INTERVAL"
+    fi
+  done
 fi
+
+# Live terminal: alternate screen, viewport per column, keyboard scrolling.
+tput civis 2>/dev/null || true
+printf '\033[?1049h'
+trap 'printf "\033[?1049l"; tput cnorm 2>/dev/null || true' EXIT
 trap 'exit 0' INT TERM
+trap ':' WINCH
+focus=0 offs="0 0 0 0" json='' deadline=0
 while :; do
-  # Re-read the terminal size each frame so a resize is picked up.
-  out=$(frame "$(term_width)" 2>&1)
-  [ -t 1 ] && printf '\033[H\033[2J'
-  printf '%s\n' "$out"
-  if [ -t 0 ]; then
-    key=
-    read -rsn1 -t "$INTERVAL" key || true
-    case "$key" in q|Q) exit 0 ;; esac
-  else
-    sleep "$INTERVAL"
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    json=$(snapshot 2>&1) || true
+    deadline=$((SECONDS + INTERVAL))
   fi
+  rows=$(term_height)
+  case "$rows" in ''|*[!0-9]*|0) rows=24 ;; esac
+  # shellcheck disable=SC2086  # $offs is four space-separated integers
+  set -- $offs
+  out=$(render "$json" "$(term_width)" "$rows" "$focus" "[$1,$2,$3,$4]" true 2>&1)
+  case "${out%%$'\n'*}" in
+    *[!0-9\ ]*|'') ;;
+    *) offs=${out%%$'\n'*}; out=${out#*$'\n'} ;;
+  esac
+  draw "$out"
+  key=
+  if [ -t 0 ]; then
+    read -rsn1 -t "$((deadline - SECONDS > 0 ? deadline - SECONDS : 1))" key || true
+  else
+    sleep 1
+  fi
+  if [ "$key" = $'\033' ]; then
+    read -rsn2 -t 0.05 rest || rest=
+    case "$rest" in '[A') key=k ;; '[B') key=j ;; '[C') key=l ;; '[D') key=h ;; *) key= ;; esac
+  fi
+  # shellcheck disable=SC2086
+  set -- $offs
+  case "$key" in
+    q|Q) exit 0 ;;
+    j) arr=("$@"); arr[focus]=$((arr[focus] + 1)); offs="${arr[*]}" ;;
+    k) arr=("$@"); [ "${arr[focus]}" -gt 0 ] && arr[focus]=$((arr[focus] - 1)); offs="${arr[*]}" ;;
+    l) [ "$focus" -lt 3 ] && focus=$((focus + 1)) ;;
+    h) [ "$focus" -gt 0 ] && focus=$((focus - 1)) ;;
+  esac
 done
