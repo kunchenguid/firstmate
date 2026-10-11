@@ -24,8 +24,11 @@ TMP_ROOT=$(fm_test_tmproot fm-gotmp-tests)
 make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
-  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data" "$fake/config"
   fm_test_fake_simctl "$fake/bin"
+  # Opt this fake home into the task-Simulator cleanup bin/fm-teardown.sh
+  # gates behind config/teardown-simulator-cleanup=on.
+  printf 'on\n' > "$fake/config/teardown-simulator-cleanup"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   # fm-backend.sh is real, while its adapter is stubbed so this temp-cleanup
@@ -139,8 +142,11 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # not error and must not remove anything.
   local id=td-absent-z3
   local fake="$TMP_ROOT/$id-root"
-  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data" "$fake/config"
   fm_test_fake_simctl "$fake/bin"
+  # Opt this fake home into the task-Simulator cleanup bin/fm-teardown.sh
+  # gates behind config/teardown-simulator-cleanup=on.
+  printf 'on\n' > "$fake/config/teardown-simulator-cleanup"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'

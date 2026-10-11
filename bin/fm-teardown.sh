@@ -5,9 +5,12 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
-# When xcrun and jq are available, teardown attempts to shut down and delete
+# When this home opts in through config/teardown-simulator-cleanup=on and
+# xcrun and jq are available, teardown attempts to shut down and delete
 # every Simulator named exactly fm-<task-id> on this host; no creation or
-# ownership record is consulted.
+# ownership record is consulted. An absent file, or any value other than on
+# after whitespace is stripped and case is ignored, performs no Simulator
+# cleanup at all.
 # Ordinary teardown does this after endpoint and per-task temp cleanup;
 # forced secondmate cleanup also applies it recursively to each descendant
 # before removing that descendant's task record.
@@ -3205,8 +3208,11 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_task_simulators() {
-  local id=$1 sim_udid
-  if ! [[ "$id" =~ ^pool-[0-9]+$ ]] && command -v xcrun >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  local id=$1 sim_udid sim_cleanup=off
+  if [ -f "$CONFIG/teardown-simulator-cleanup" ]; then
+    sim_cleanup=$(tr -d '[:space:]' < "$CONFIG/teardown-simulator-cleanup" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+  fi
+  if [ "$sim_cleanup" = on ] && ! [[ "$id" =~ ^pool-[0-9]+$ ]] && command -v xcrun >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     for sim_udid in $(xcrun simctl list devices -j 2>/dev/null |
       jq -r --arg n "fm-$id" '.devices[][]? | select(.name == $n) | .udid' 2>/dev/null); do
       xcrun simctl shutdown "$sim_udid" >/dev/null 2>&1 || true

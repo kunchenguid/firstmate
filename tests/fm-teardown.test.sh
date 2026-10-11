@@ -82,6 +82,10 @@ make_case() {
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
   fm_test_fake_simctl "$fakebin"
+  # Opt this case into the task-Simulator cleanup bin/fm-teardown.sh gates
+  # behind config/teardown-simulator-cleanup=on; the absent/unrecognized-value
+  # cases below remove or rewrite the file.
+  printf 'on\n' > "$case_dir/config/teardown-simulator-cleanup"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -4811,6 +4815,70 @@ test_teardown_non_numeric_pool_task_deletes_simulator() {
   pass "non-numeric pool task ids still delete their simulator"
 }
 
+test_teardown_simulator_cleanup_skips_an_absent_switch() {
+  local case_dir rc
+  case_dir=$(make_case sim-switch-absent)
+  rm -f "$case_dir/config/teardown-simulator-cleanup"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "task work"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-TASK-X1","name":"fm-task-x1","state":"Shutdown"}]}}' \
+    > "$case_dir/simctl-devices.json"
+
+  rc=0
+  FM_FAKE_SIMCTL_LIST_FILE="$case_dir/simctl-devices.json" FM_SIMCTL_LOG="$case_dir/simctl.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "sim-switch-absent: teardown should succeed"
+  [ ! -s "$case_dir/simctl.log" ] \
+    || fail "sim-switch-absent: teardown queried simctl without the opt-in: $(cat "$case_dir/simctl.log")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "sim-switch-absent: the task record was retained"
+  pass "an absent teardown-simulator-cleanup file performs no simulator cleanup"
+}
+
+test_teardown_simulator_cleanup_skips_an_unrecognized_value() {
+  local case_dir rc
+  case_dir=$(make_case sim-switch-unknown)
+  printf 'enabled\n' > "$case_dir/config/teardown-simulator-cleanup"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "task work"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-TASK-X1","name":"fm-task-x1","state":"Shutdown"}]}}' \
+    > "$case_dir/simctl-devices.json"
+
+  rc=0
+  FM_FAKE_SIMCTL_LIST_FILE="$case_dir/simctl-devices.json" FM_SIMCTL_LOG="$case_dir/simctl.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "sim-switch-unknown: teardown should succeed"
+  [ ! -s "$case_dir/simctl.log" ] \
+    || fail "sim-switch-unknown: teardown queried simctl on an unrecognized value: $(cat "$case_dir/simctl.log")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "sim-switch-unknown: the task record was retained"
+  pass "an unrecognized teardown-simulator-cleanup value performs no simulator cleanup"
+}
+
+test_teardown_simulator_cleanup_accepts_on_after_normalization() {
+  local case_dir rc
+  case_dir=$(make_case sim-switch-on-mixed)
+  printf '  On \n' > "$case_dir/config/teardown-simulator-cleanup"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "task work"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"SIM-TASK-X1","name":"fm-task-x1","state":"Shutdown"}]}}' \
+    > "$case_dir/simctl-devices.json"
+
+  rc=0
+  FM_FAKE_SIMCTL_LIST_FILE="$case_dir/simctl-devices.json" FM_SIMCTL_LOG="$case_dir/simctl.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "sim-switch-on-mixed: teardown should succeed"
+  assert_grep "simctl delete SIM-TASK-X1" "$case_dir/simctl.log" \
+    "sim-switch-on-mixed: a whitespace-padded mixed-case on did not enable cleanup"
+  pass "teardown-simulator-cleanup accepts on with whitespace stripped and case ignored"
+}
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -4928,5 +4996,8 @@ test_teardown_simulator_delete_failure_only_warns
 test_teardown_pool_task_id_never_queries_simctl
 
 test_teardown_non_numeric_pool_task_deletes_simulator
+test_teardown_simulator_cleanup_skips_an_absent_switch
+test_teardown_simulator_cleanup_skips_an_unrecognized_value
+test_teardown_simulator_cleanup_accepts_on_after_normalization
 
 test_forced_secondmate_teardown_cleans_descendant_simulators
