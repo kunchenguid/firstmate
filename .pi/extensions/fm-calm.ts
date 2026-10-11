@@ -47,6 +47,7 @@ import {
 import {
   calmPresentationHides,
   calmPresentationIsActive,
+  calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
@@ -290,23 +291,29 @@ export default function (pi: ExtensionAPI) {
   function wrapCodemodePresentation(original: ToolPresentation): ToolPresentation {
     const renderCall = original.renderCall!;
     const renderResult = original.renderResult!;
+    let liveRow = false;
 
     return {
-      renderShell: "self",
+      /**
+       * Claim the row's framing. Only a live transcript row reads this; Pi's HTML exporter
+       * frames slots itself, so a resolution it makes keeps the installed presentation.
+       */
+      get renderShell(): "self" {
+        liveRow = true;
+        return "self";
+      },
       /** Hide the entire script shell, or delegate to the installed call renderer. */
       renderCall(args, theme, context) {
-        rememberCalmToolRow(context.state, context.invalidate);
-        if (exportRendering) return renderCall(args, theme, context);
-        if (calmPresentationHides("assistant-tool-call")) return new Container();
+        if (!liveRow) return renderCall(args, theme, context);
+        if (calmPresentationIsActive() && !calmTranscriptClassIsVisible("assistant-tool-call")) return new Container();
         const shell = standardShellFor(context.state);
         shell.call = renderCall(args, theme, { ...context, lastComponent: shell.call });
         return original.renderShell === "self" ? shell.call : refreshStandardShell(shell, theme, context);
       },
       /** Hide nested-call summaries and output, or delegate to the installed result renderer. */
       renderResult(result, options, theme, context) {
-        rememberCalmToolRow(context.state, context.invalidate);
-        if (exportRendering) return renderResult(result, options, theme, context);
-        if (calmPresentationHides("tool-result")) return new Container();
+        if (!liveRow) return renderResult(result, options, theme, context);
+        if (calmPresentationIsActive() && !calmTranscriptClassIsVisible("tool-result")) return new Container();
         const shell = standardShellFor(context.state);
         shell.result = renderResult(result, options, theme, { ...context, lastComponent: shell.result });
         if (original.renderShell === "self") return shell.result;

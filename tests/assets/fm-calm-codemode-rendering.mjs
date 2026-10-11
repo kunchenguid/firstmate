@@ -1,6 +1,7 @@
 /** Verify Codemode presentation through Calm's extension API and Pi's real components. */
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
@@ -182,6 +183,21 @@ if (presentations.length > 1) {
   const stockExport = exportCodemode(stockExporter);
   assert(stockExport.call.includes("tools.fm_branch_outcomes"));
   assert(stockExport.result.expanded.includes("RAW_OUTPUT_17"));
+  const { createReadToolDefinition } = await import(pathToFileURL(`${packageRoot}/dist/core/tools/index.js`));
+  const readTool = calm.tools.find((tool) => tool.name === "read");
+  const stockRead = createReadToolDefinition(process.cwd());
+  const readArgs = { path: "sample.txt" };
+  const readResult = { content: [{ type: "text", text: "READ_PRIVATE" }], details: {}, isError: false };
+  /** Render one read entry the way Pi's /export and /share handlers do. */
+  const exportRead = (definition) => {
+    const renderer = createToolHtmlRenderer({ getToolDefinition: () => definition, getToolRenderers: () => definition, theme, cwd: process.cwd() });
+    return {
+      call: renderer.renderCall("exported-read", "read", readArgs),
+      result: renderer.renderResult("exported-read", "read", readResult.content, readResult.details, false),
+    };
+  };
+  const stockReadExport = exportRead(stockRead);
+  assert(stockReadExport.result.expanded.includes("READ_PRIVATE"));
   const submissions = [
     { typed: "/export test.html", submitted: "/export test.html", exports: true },
     { typed: "/share", submitted: "/share", exports: true },
@@ -196,8 +212,14 @@ if (presentations.length > 1) {
     visibility.setCalmPresentation(calmActive);
     const live = row(lookup());
     live.updateResult(result);
+    const liveRead = new ToolExecutionComponent("read", "live-read", readArgs, { showImages: false }, readTool, { requestRender: ignoreNotification }, process.cwd());
+    liveRead.markExecutionStarted();
+    liveRead.setArgsComplete();
+    liveRead.updateResult(readResult);
     const presented = live.render(80);
+    const presentedRead = liveRead.render(80);
     assert.equal(presented.length === 0, calmActive, "the live Codemode row ignored Calm");
+    assert.equal(presentedRead.length === 0, calmActive, "the live read row ignored Calm");
     for (const { typed, submitted, exports, ...keys } of submissions) {
       const label = `${typed}${keys.autocomplete ? " via autocomplete" : ""} with Calm ${calmActive ? "on" : "off"}`;
       let constructed;
@@ -205,20 +227,44 @@ if (presentations.length > 1) {
         /** Redraw and construct live rows, then export, all inside the submission. */
         dispatch() {
           live.invalidate();
-          const redrawn = live.render(80);
+          liveRead.invalidate();
+          const redrawn = { codemode: live.render(80), read: liveRead.render(80) };
           constructed = row(lookup());
-          return { redrawn, exported: exportCodemode(exporter) };
+          return { redrawn, exported: exportCodemode(exporter), exportedRead: exportRead(readTool) };
         },
       });
       assert.equal(submission?.text, submitted, `${label} submitted the wrong command`);
-      if (exports) assert.deepEqual(submission.rendering.exported, stockExport, `${label} changed stock Codemode export/share output`);
-      else assert.deepEqual(submission.rendering.redrawn, presented, `${label} rendered live rows as if exporting`);
+      assert.deepEqual(submission.rendering.exported, stockExport, `${label} changed stock Codemode export/share output`);
+      assert.deepEqual(submission.rendering.redrawn.codemode, presented, `${label} changed a live Codemode row`);
+      if (exports) assert.deepEqual(submission.rendering.exportedRead, stockReadExport, `${label} changed stock read export/share output`);
+      else assert.deepEqual(submission.rendering.redrawn.read, presentedRead, `${label} rendered live rows as if exporting`);
       await new Promise(resolve => setTimeout(resolve, 0));
-      assert.deepEqual(live.render(80), presented, `${label} did not restore the live Codemode row`);
+      assert.deepEqual(live.render(80), presented, `${label} did not keep the live Codemode row`);
+      assert.deepEqual(liveRead.render(80), presentedRead, `${label} did not restore the live read row`);
       constructed.updateResult(result);
       assert.deepEqual(constructed.render(80), presented, `a row constructed during ${label} lost Calm's presentation`);
     }
+    for (const [typed, autocomplete] of [["/share", false], ["/sha", true]]) {
+      const label = `delayed ${typed}${autocomplete ? " via autocomplete" : ""} with Calm ${calmActive ? "on" : "off"}`;
+      let finishAuth;
+      const auth = new Promise(resolve => { finishAuth = resolve; });
+      const submission = await calm.submit(typed, { autocomplete,
+        /** Await credentials and real file I/O before the HTML export, as Pi's share can. */
+        dispatch: () => auth.then(() => readFile(process.env.EXT)).then(() => exportCodemode(exporter)),
+      });
+      assert.equal(submission?.text, "/share", `${label} submitted the wrong command`);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      live.invalidate();
+      assert.deepEqual(live.render(80), presented, `${label} changed a live Codemode row while sharing`);
+      const constructed = row(lookup());
+      constructed.updateResult(result);
+      assert.deepEqual(constructed.render(80), presented, `a row constructed during ${label} lost Calm's presentation`);
+      finishAuth();
+      assert.deepEqual(await submission.rendering, stockExport, `${label} changed stock Codemode share output`);
+      assert.deepEqual(live.render(80), presented, `${label} changed a live Codemode row after sharing`);
+    }
   }
+  assert.equal(JSON.stringify(result), serialized, "export or share mutated results or nested calls");
   visibility.setCalmPresentation(true);
   setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: false });
   const image = row(calm.resolver("codemode", () => original), undefined, { showImages: true });
