@@ -1624,6 +1624,52 @@ EOF
   pass "fm-project-mode: --branch-prefix resolves order-independently and defaults to the legacy fm/ prefix"
 }
 
+test_project_mode_resolves_default_branch() {
+  local home out err status
+  home="$TMP_ROOT/project-mode-default-branch/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- plainproj [direct-PR] - fixture with no default branch (added 2026-01-01)
+- ccproj [no-mistakes default-branch=main] - fixture with a registered default branch (added 2026-01-01)
+- leadingproj [default-branch=release/2.x direct-PR +yolo branch=fix/] - fixture with the default branch first (added 2026-01-01)
+- emptyproj [direct-PR default-branch=] - fixture with an empty default branch (added 2026-01-01)
+- badproj [direct-PR default-branch=a..b] - fixture with an invalid default branch (added 2026-01-01)
+- typomodeproj [no-mistake default-branch=main] - fixture with a typo'd mode (added 2026-01-01)
+
+EOF
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --default-branch plainproj 2>/dev/null)
+  [ "$out" = "" ] || fail "a project with no default-branch= token must resolve to no default branch (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --default-branch ccproj 2>/dev/null)
+  [ "$out" = "main" ] || fail "a registered default-branch= was not resolved (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" ccproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "a default-branch= token must not change the mode/yolo output (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" leadingproj 2>/dev/null)
+  [ "$out" = "direct-PR on" ] || fail "a default-branch= token before the mode must not be mistaken for the mode (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --default-branch leadingproj 2>/dev/null)
+  [ "$out" = "release/2.x" ] || fail "a default-branch= token before the mode was not resolved (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix leadingproj 2>/dev/null)
+  [ "$out" = "fix/" ] || fail "a default-branch= token disturbed the branch prefix (got '$out')"
+
+  for out in emptyproj badproj; do
+    err=$(FM_HOME="$home" "$PROJECT_MODE" --default-branch "$out" 2>&1 >/dev/null)
+    status=$?
+    expect_code 3 "$status" "an invalid default-branch= for $out must be refused"
+    assert_contains "$err" "invalid default branch" "the $out refusal did not explain itself"
+    [ -z "$(FM_HOME="$home" "$PROJECT_MODE" --default-branch "$out" 2>/dev/null)" ] \
+      || fail "a refused default-branch= for $out still printed a branch"
+  done
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --default-branch typomodeproj 2>/dev/null)
+  [ "$out" = "" ] || fail "an unknown mode must not trust the malformed entry's default branch (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --default-branch never-registered 2>/dev/null)
+  [ "$out" = "" ] || fail "an unregistered project must resolve to no default branch (got '$out')"
+  out=$(FM_HOME="$TMP_ROOT/project-mode-default-branch/no-registry-home" "$PROJECT_MODE" --default-branch anyproj 2>/dev/null)
+  [ "$out" = "" ] || fail "an absent registry must resolve to no default branch (got '$out')"
+  pass "fm-project-mode: --default-branch resolves order-independently and refuses an invalid branch"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -1649,4 +1695,5 @@ test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_spawn_and_promote_require_filled_task_subsections
 test_project_mode_resolves_branch_prefix
+test_project_mode_resolves_default_branch
 echo "# all fm-task-delivery tests passed"
