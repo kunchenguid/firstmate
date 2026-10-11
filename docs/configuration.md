@@ -410,6 +410,28 @@ Run every routine Firstmate backlog command through [`bin/fm-tasks-axi.sh`](../b
 Like lifecycle transitions, it addresses this home's backlog and archive from any working directory.
 Bootstrap reports a code-root `data/backlog.md` or `data/done-archive.md` that is not this home's own file as a `BACKLOG_RECONCILE: code-root ...` line, even in a read-only session.
 
+## New-task preflight (config/spawn-preflight)
+
+An optional executable `$FM_HOME/config/spawn-preflight` can enforce a home-owned prerequisite, such as a free-disk guard.
+`FM_CONFIG_OVERRIDE` selects a different configuration directory when set.
+`fm-spawn.sh` invokes it with the task ID as its sole argument before creating task state, a worktree, or an endpoint, including before local secondmate inheritance or remote secondmate dispatch.
+It runs for new ship, scout, and secondmate spawns, and separately for each new task in a batch; `--relaunch` skips it.
+A zero exit permits the remaining spawn checks; a nonzero exit refuses the spawn with exit 1 and names the hook.
+Hook output goes to stderr, and an absent or non-executable hook is skipped.
+Keep the hook read-only if refusal must leave no changes, because Firstmate does not roll back writes made by the hook itself.
+Regression coverage lives in `tests/fm-spawn-preflight.test.sh` and `tests/fm-control-relaunch.test.sh`.
+
+## Task Simulator cleanup (config/teardown-simulator-cleanup)
+
+The optional local, gitignored `$FM_HOME/config/teardown-simulator-cleanup` value switch opts this home into Simulator removal during `fm-teardown.sh` cleanup.
+`FM_CONFIG_OVERRIDE` selects a different configuration directory when set.
+The file's content is whitespace-stripped and case-folded: only the value `on` enables cleanup, while an absent file or any other value performs no Simulator cleanup at all and teardown behaves exactly as before the capability existed.
+When enabled, teardown attempts to shut down and delete every Simulator named exactly `fm-<task-id>` on the host; no creation or ownership record is consulted.
+Task IDs matching `pool-<digits>` are exempt so persistent pool Simulators survive, and unrelated device names are never touched.
+Cleanup requires both `xcrun` and `jq` and is best-effort: an absent device or unavailable tools do not block task-record cleanup, shutdown failure does not prevent deletion, and deletion failure only warns.
+[`bin/fm-teardown.sh`'s header](../bin/fm-teardown.sh) owns cleanup ordering and forced secondmate descendant handling; regression coverage lives in `tests/fm-teardown.test.sh` and `tests/fm-gotmp.test.sh`.
+The switch is a home-local preference and is not inherited by secondmate homes.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.

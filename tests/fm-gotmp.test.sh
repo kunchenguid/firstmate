@@ -11,34 +11,11 @@
 # metadata publication, and the pane environment export.
 set -u
 
-# This suite does not source tests/lib.sh, so exempt its teardown subprocess from
-# the gate-lifecycle refusal (bin/fm-gate-refuse-lib.sh) the way lib.sh does for
-# the rest of the suite: the no-mistakes gate runs this suite from a gate worktree,
-# which the guard would otherwise refuse.
-export FM_GATE_REFUSE_BYPASS=1
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
-
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  exit 1
-}
-
-pass() {
-  printf 'ok - %s\n' "$1"
-}
-
-TMP_ROOT=
-
-cleanup() {
-  if [ -n "${TMP_ROOT:-}" ]; then
-    rm -rf "$TMP_ROOT"
-  fi
-}
-trap cleanup EXIT
-
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
+TMP_ROOT=$(fm_test_tmproot fm-gotmp-tests)
 
 # Build a fake FM_HOME/FM_ROOT so the real fm-teardown.sh (symlinked in) resolves
 # state and helper scripts inside it. Stub the helper scripts fm-teardown calls so no
@@ -47,7 +24,11 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
-  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data" "$fake/config"
+  fm_test_fake_simctl "$fake/bin"
+  # Opt this fake home into the task-Simulator cleanup bin/fm-teardown.sh
+  # gates behind config/teardown-simulator-cleanup=on.
+  printf 'on\n' > "$fake/config/teardown-simulator-cleanup"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   # fm-backend.sh is real, while its adapter is stubbed so this temp-cleanup
@@ -68,6 +49,7 @@ SH
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
+  ln -s "$ROOT/bin/fm-supervision-engine-lib.sh" "$fake/bin/fm-supervision-engine-lib.sh"
   # Lifecycle serialization, status presentation retirement, and shared adapter
   # ownership are sourced by teardown.
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
@@ -147,8 +129,9 @@ test_teardown_removes_tasktmp_dir() {
   # Sanity: dir + contents exist before teardown.
   [ -d "$task_tmp/gotmp" ] || fail "precondition: gotmp missing before teardown"
   # Run the REAL teardown against the fake root.
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  FM_HOME="$fake" FM_SIMCTL_LOG="$fake/simctl.log" PATH="$fake/bin:$PATH" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero with a valid tasktmp"
+  assert_grep "simctl list devices" "$fake/simctl.log" "teardown did not use the fixture xcrun"
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
@@ -159,7 +142,11 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # not error and must not remove anything.
   local id=td-absent-z3
   local fake="$TMP_ROOT/$id-root"
-  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data" "$fake/config"
+  fm_test_fake_simctl "$fake/bin"
+  # Opt this fake home into the task-Simulator cleanup bin/fm-teardown.sh
+  # gates behind config/teardown-simulator-cleanup=on.
+  printf 'on\n' > "$fake/config/teardown-simulator-cleanup"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'
@@ -175,6 +162,7 @@ SH
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
+  ln -s "$ROOT/bin/fm-supervision-engine-lib.sh" "$fake/bin/fm-supervision-engine-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
@@ -228,8 +216,9 @@ kind=ship
 mode=no-mistakes
 yolo=off
 META
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  FM_HOME="$fake" FM_SIMCTL_LOG="$fake/simctl.log" PATH="$fake/bin:$PATH" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero when tasktmp= was absent"
+  assert_grep "simctl list devices" "$fake/simctl.log" "teardown did not use the fixture xcrun"
   pass "fm-teardown skips gracefully when tasktmp= is absent (backward compat)"
 }
 
@@ -241,8 +230,9 @@ test_teardown_skips_gracefully_when_dir_missing() {
   [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake
   fake=$(make_fake_root "$id" "$task_tmp")
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  FM_HOME="$fake" FM_SIMCTL_LOG="$fake/simctl.log" PATH="$fake/bin:$PATH" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero when tasktmp dir was missing"
+  assert_grep "simctl list devices" "$fake/simctl.log" "teardown did not use the fixture xcrun"
   [ ! -e "$task_tmp" ] || fail "teardown created/left the tasktmp dir unexpectedly"
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"
 }

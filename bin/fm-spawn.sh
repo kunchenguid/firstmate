@@ -1590,6 +1590,14 @@ fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
   exit 2
 }
+# docs/configuration.md "New-task preflight" owns the home hook contract.
+if [ "$RELAUNCH" -eq 0 ] && [ -x "$CONFIG/spawn-preflight" ]; then
+  if ! "$CONFIG/spawn-preflight" "$ID" >&2; then
+    echo "error: spawn of $ID refused by $CONFIG/spawn-preflight" >&2
+    exit 1
+  fi
+fi
+
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
   BRANCH="$BRANCH_PREFIX$ID"
   if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then

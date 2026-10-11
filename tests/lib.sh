@@ -38,6 +38,12 @@ umask 022
 # shellcheck source=tests/git-config-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
 
+# The shared fake-xcrun writer lives in its own helper so suites that cannot
+# take this library's reporters and traps (tests/herdr-test-safety.sh's
+# real-Herdr consumers, tests/remote-herdr-fixture.sh) install the same stub.
+# shellcheck source=tests/simctl-stub-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/simctl-stub-helpers.sh"
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
@@ -432,11 +438,13 @@ fm_live_gate() {
 # uses to crash the process under test deterministically. fm_fake_version_tool
 # drops a stub for a tool whose installed version bootstrap gates, so a fixture
 # cannot be reported as an unparseable build simply for answering `--version`
-# with nothing.
+# with nothing. The fake `xcrun` every fakebin carries comes from
+# fm_test_fake_simctl in tests/simctl-stub-helpers.sh.
 
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
+  fm_test_fake_simctl "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -855,3 +863,7 @@ fm_test_base_path_sans() {
   done
   printf '%s\n' "$dir"
 }
+
+FM_TEST_SIMCTL_BIN=$(fm_test_tmproot fm-test-simctl) || return 1
+fm_test_fake_simctl "$FM_TEST_SIMCTL_BIN" || return 1
+export PATH="$FM_TEST_SIMCTL_BIN:$PATH"

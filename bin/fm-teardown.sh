@@ -5,6 +5,12 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# docs/configuration.md "Task Simulator cleanup" owns the opt-in, device
+# selection, pool exemption, and best-effort failure contracts.
+# Ordinary teardown runs Simulator cleanup after endpoint and per-task temp cleanup;
+# forced secondmate cleanup also applies it recursively to each descendant
+# before removing that descendant's task record, using the invoking home's
+# configuration rather than each descendant home's switch.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -3193,6 +3199,20 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   return 1
 }
 
+cleanup_task_simulators() {
+  local id=$1 sim_udid sim_cleanup=off
+  if [ -f "$CONFIG/teardown-simulator-cleanup" ]; then
+    sim_cleanup=$(tr -d '[:space:]' < "$CONFIG/teardown-simulator-cleanup" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+  fi
+  if [ "$sim_cleanup" = on ] && ! [[ "$id" =~ ^pool-[0-9]+$ ]] && command -v xcrun >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    for sim_udid in $(xcrun simctl list devices -j 2>/dev/null |
+      jq -r --arg n "fm-$id" '.devices[][]? | select(.name == $n) | .udid' 2>/dev/null); do
+      xcrun simctl shutdown "$sim_udid" >/dev/null 2>&1 || true
+      xcrun simctl delete "$sim_udid" >/dev/null 2>&1 || echo "warning: could not delete simulator fm-$id ($sim_udid)" >&2
+    done
+  fi
+}
+
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
   sub_state="$home/state"
@@ -3295,6 +3315,7 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
+    cleanup_task_simulators "$child_id"
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
@@ -3745,6 +3766,8 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# The header owns Simulator cleanup ordering.
+cleanup_task_simulators "$ID"
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {
