@@ -2629,6 +2629,36 @@ test_relaunch_override_replaces_the_recorded_claude_store() {
   pass "fm-control relaunch: FM_CLAUDE_CONFIG_DIR launches on and records a new store"
 }
 
+test_relaunch_override_returns_to_the_default_claude_store() {
+  local dir out rc
+  dir=$(new_case store-override-default cs8)
+  add_ship_task "$dir" cs8 claude
+  add_recorded_store "$dir" cs8
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    FM_TEST_CLAUDE_CONFIG_OVERRIDE=default \
+    run_control "$dir" cs8 relaunch --note "back to default account"); rc=$?
+  expect_code 0 "$rc" "a default-store override should relaunch"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "env -u CLAUDE_CONFIG_DIR " \
+    "a default-store override must strip CLAUDE_CONFIG_DIR from the launch"
+  assert_no_grep "store-work" "$dir/fake/literal" "the default override must replace the recorded store in the launch"
+  assert_no_grep "store-personal" "$dir/fake/literal" "the default override must not adopt the ambient store"
+  [ "$(meta_field "$dir" cs8 claude_config_dir)" = default ] \
+    || fail "the default override must record the default marker, got '$(meta_field "$dir" cs8 claude_config_dir)'"
+
+  # The recorded marker now governs later recovery under the same ambient store.
+  : > "$dir/fake/literal"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_spawn "$dir" cs8 --relaunch); rc=$?
+  expect_code 0 "$rc" "a relaunch after the default override should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "env -u CLAUDE_CONFIG_DIR " \
+    "a relaunch after the default override must stay on the default store"
+  assert_no_grep "store-personal" "$dir/fake/literal" "a relaunch after the default override adopted the ambient store"
+  [ "$(meta_field "$dir" cs8 claude_config_dir)" = default ] \
+    || fail "a relaunch after the default override must keep the default marker"
+  pass "fm-control relaunch: FM_CLAUDE_CONFIG_DIR=default returns a recorded task to Claude's default store durably"
+}
+
 test_missing_recorded_claude_store_refuses_before_stopping_the_agent() {
   local dir out rc before
   dir=$(new_case store-missing cs4)
@@ -2831,6 +2861,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight
 test_control_relaunch_reuses_the_recorded_claude_store
 test_spawn_relaunch_reuses_the_recorded_claude_store
 test_relaunch_override_replaces_the_recorded_claude_store
+test_relaunch_override_returns_to_the_default_claude_store
 test_missing_recorded_claude_store_refuses_before_stopping_the_agent
 test_harness_switch_carries_the_recorded_claude_store
 test_secondmate_relaunch_and_respawn_reuse_the_recorded_claude_store

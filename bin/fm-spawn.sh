@@ -426,8 +426,8 @@
 #   marker 'default' when none was set), and every relaunch or secondmate respawn of that task reuses the record instead
 #   of the invoking process's ambient CLAUDE_CONFIG_DIR, so automatic recovery
 #   keeps the task on the account it was launched with. FM_CLAUDE_CONFIG_DIR=<dir>
-#   on the call is the only way to change it; it launches with and records the
-#   new store. A recorded or override store that is not an existing directory
+#   (or 'default' for Claude's own default store) on the call is the only way to
+#   change it; it launches with and records the new store. A recorded or override store that is not an existing directory
 #   refuses before any endpoint exists. bin/fm-claude-store-lib.sh owns the
 #   full precedence contract.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:

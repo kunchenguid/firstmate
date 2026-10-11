@@ -84,7 +84,7 @@
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
 #              A claude replacement keeps the task's recorded Claude config
-#              store unless FM_CLAUDE_CONFIG_DIR names another, and a store
+#              store unless FM_CLAUDE_CONFIG_DIR names another (or 'default'), and a store
 #              that no longer exists refuses before the old agent is stopped
 #              (bin/fm-claude-store-lib.sh).
 #              Records a durable checkpoint and that note, exits the old agent,

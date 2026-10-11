@@ -13,8 +13,9 @@
 #
 # Contract, evaluated for one claude launch of one task:
 #   1. FM_CLAUDE_CONFIG_DIR, when set non-empty, is the deliberate override. It
-#      must be an absolute path to an existing directory. It launches with that
-#      store and records it, replacing any earlier record.
+#      must be an absolute path to an existing directory, or the literal
+#      'default' to return the task to Claude's own default store. It launches
+#      with that store and records it, replacing any earlier record.
 #   2. Otherwise a non-empty claude_config_dir= in the task's existing
 #      state/<id>.meta wins, and the ambient CLAUDE_CONFIG_DIR is ignored for
 #      this task. A recorded directory that no longer exists refuses the launch
@@ -67,9 +68,13 @@ fm_claude_store_resolve() {
   override=${FM_CLAUDE_CONFIG_DIR:-}
   if [ -n "$override" ]; then
     case "$override" in
+    default)
+      FM_CLAUDE_STORE=default
+      return 0
+      ;;
     /*) ;;
     *)
-      FM_CLAUDE_STORE_ERROR="FM_CLAUDE_CONFIG_DIR '$override' is not an absolute path; name the Claude config store directory absolutely"
+      FM_CLAUDE_STORE_ERROR="FM_CLAUDE_CONFIG_DIR '$override' is not an absolute path; name the Claude config store directory absolutely, or use 'default' for Claude's own default store"
       return 1
       ;;
     esac
@@ -86,7 +91,7 @@ fm_claude_store_resolve() {
   fi
   if [ -n "$recorded" ]; then
     [ -d "$recorded" ] || {
-      FM_CLAUDE_STORE_ERROR="the task's recorded Claude config store '$recorded' (claude_config_dir= in $meta) no longer exists; refusing rather than launching on a different account - restore that directory or relaunch with FM_CLAUDE_CONFIG_DIR=<store> to choose one deliberately"
+      FM_CLAUDE_STORE_ERROR="the task's recorded Claude config store '$recorded' (claude_config_dir= in $meta) no longer exists; refusing rather than launching on a different account - restore that directory or relaunch with FM_CLAUDE_CONFIG_DIR=<store> (or 'default') to choose one deliberately"
       return 1
     }
     FM_CLAUDE_STORE=$recorded
