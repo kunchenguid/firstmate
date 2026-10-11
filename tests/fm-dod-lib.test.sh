@@ -382,6 +382,19 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+test_pr_based_dod_documents_task_unique_body_path() {
+  local mode out
+  for mode in direct-PR no-mistakes; do
+    out="$TMP_ROOT/dod-body-$mode.md"
+    fm_dod_block "$mode" dod-body-task > "$out"
+    assert_grep '/tmp/fm-dod-body-task/pr-description.md' "$out" \
+      "$mode: DoD must name the task-unique forge body path"
+    assert_grep '/tmp/pr-body.md' "$out" \
+      "$mode: DoD must warn against the shared pr-body path"
+  done
+  pass "PR-based DoD documents task-unique forge body paths"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -442,6 +455,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_pr_based_dod_documents_task_unique_body_path
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the

@@ -114,6 +114,8 @@
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-forge-lib.sh
+. "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-forge-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
   local state=$1 task_id=$2 root=$3
@@ -400,6 +402,17 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
+# PR/issue body paths for GitHub forge work; written once for ship contracts that
+# use gh-axi (direct-PR and no-mistakes on forge=none).
+fm_dod_gh_forge_body_block() {  # <task-id>
+  local id=$1 body_path
+  body_path=$(fm_forge_body_file "$id")
+  cat <<EOF
+When a pull request or issue body does not fit inline, pass \`--body\` or write the text only to \`$body_path\` and pass \`--body-file\` that path to \`gh-axi\` (or \`bin/fm-gh-axi.sh\`, which refuses fixed shared names such as \`/tmp/pr-body.md\`).
+Never use a fixed shared filename under \`/tmp\` for forge body text; lanes share \`/tmp\` and will clobber each other.
+EOF
+}
+
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q
@@ -467,6 +480,9 @@ Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft$pr_base.
+EOF
+      fm_dod_gh_forge_body_block "$id"
+      cat <<EOF
 Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
@@ -500,6 +516,7 @@ That first \`done:\` is the handoff that starts the pipeline, which owns the pus
 ${nm_base}
 EOF
       fm_nm_driving_block "$forge"
+      fm_dod_gh_forge_body_block "$id"
       cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.

@@ -669,6 +669,7 @@ case "$MODE" in
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
+FORGE_BODY=$(fm_forge_body_file "$ID")
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -692,6 +693,7 @@ $RULE1
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   For pull request or issue body text, pass \`--body\` when it fits; otherwise write only to \`$FORGE_BODY\` and pass that path to \`--body-file\` (or call \`$FM_ROOT/bin/fm-gh-axi.sh\`, which refuses fixed shared paths such as \`/tmp/pr-body.md\`).
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

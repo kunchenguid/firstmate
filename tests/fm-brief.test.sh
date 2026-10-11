@@ -323,6 +323,20 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+test_ship_brief_names_task_unique_forge_body() {
+  local home id brief
+  home="$TMP_ROOT/forge-body-home"
+  write_registry "$home"
+  id="brief-forge-body-a1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "/tmp/fm-$id/pr-description.md" "$brief" \
+    "ship brief must name the task-unique forge body path in rule 3"
+  assert_grep 'fm-gh-axi.sh' "$brief" \
+    "ship brief must mention the gh-axi wrapper"
+  pass "ship brief documents task-unique forge body paths"
+}
+
 # A PR-based ship must not report done on a draft, which cannot be merged; a
 # lane that deliberately holds a draft declares a wait instead. local-only opens
 # no PR, so it must not carry the requirement.
@@ -1473,6 +1487,7 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_ship_brief_names_task_unique_forge_body
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
