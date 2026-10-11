@@ -41,23 +41,25 @@
 # stop starts a fresh supervisor. Handover is finished once the supervisor
 # is dead: when another session's watcher still holds the lock, the
 # checkpoint reports that watcher as already running. A checkpoint from any
-# other session leaves the owner's supervisor running. The lock directory is written before the detached
-# supervisor exists, with the hook pid in `starting`, and neither a second
-# stop nor a handover treats that directory as stale until `pid` is recorded
-# or the hook pid is dead. Stops that overlap take
-# state/.codex-idle-continuity-claim.lock in turn to check, reclaim and
-# create that directory, so only one of them starts a supervisor. An arm
-# cycle that ends because another owner took or ended the watcher is a
+# other session leaves the owner's supervisor running. The lock directory is
+# written before the detached supervisor exists, with the hook pid in
+# `starting`, and neither a second stop nor a handover treats that directory
+# as stale until `pid` is recorded or the hook pid is dead. A stop checks,
+# reclaims and creates that directory only while it holds
+# state/.codex-idle-continuity-claim.lock, and a stop that finds that mutex
+# held starts nothing, so overlapping stops start at most one supervisor. An
+# arm cycle that ends because another owner took or ended the watcher is a
 # handover, not a failure. A later `attached watcher ... stalled` line is a
 # failure even when an earlier line said `watcher: attached`.
 #
 # When the recorded Codex owner exits, or this supervisor receives TERM or
-# INT, it stops a watcher only when the last `watcher: started` or
+# INT, it runs the home-wide `--stop` only when the last `watcher: started` or
 # `watcher: attached` line says this supervisor started that watcher. An arm
 # that attached, including after its own watcher gave the lock away, is
 # following a watcher someone else holds, and a home-wide `--stop` would
-# take that watcher down with the supervisor. An arm that has not printed
-# either line is left to exit on its own.
+# take that watcher down with the supervisor. In every case the supervisor
+# then sends TERM to its arm, so an arm that has not printed either line
+# still ends.
 #
 # The arm after a queued close is a handling successor
 # (FM_WATCH_PREDECESSOR_ARM_PID, as bin/fm-claude-stop-autoarm.sh passes): the
