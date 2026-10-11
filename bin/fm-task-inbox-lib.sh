@@ -32,14 +32,14 @@
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
 #   <task>.inbox/.retry-ring   name of a fire-and-forget record still owed its
-#                              retry ring (fm_task_inbox_mark_retry)
+#                              one retry ring (fm_task_inbox_mark_retry)
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
 #   at=<utc timestamp>
 #   body-terminator=1          present on records written with a synthetic final newline
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
-#                              (it still gets a retry ring; see below)
+#                              (it still gets one retry ring; see below)
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
@@ -74,10 +74,11 @@
 # fm-send's ring at enqueue did not land
 # (fm_task_inbox_ring returned 1 or 2) it marks the record, and one grace later
 # the due action is `retry`: once the worker has no open decision of its own,
-# the watcher spends the mark only when fm_task_inbox_ring returns 0.
-# Deferral or failure retains the mark for later eligible polls, including
-# an Orca restart retarget; these retries never escalate.
-# A waiting worker does not poll its inbox (bin/fm-brief.sh), so
+# the watcher rings once more and spends the mark
+# whatever the result, so the record never rings a third time and never
+# escalates. The one exception is the Orca backend, where a ring deferred or
+# failed after a restart retarget keeps the mark for later eligible polls
+# (still never escalating). A waiting worker does not poll its inbox (bin/fm-brief.sh), so
 # without this retry the record could sit unread until a checkpoint. A pending ordinary record's
 # ladder rings the same inbox, so the retry waits behind it, and an
 # acknowledged record drops its mark. The remote steer leg has no watcher

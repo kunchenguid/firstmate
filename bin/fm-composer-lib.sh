@@ -2468,8 +2468,10 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
       fi
       return 0
     fi
-    if [ "$key_rc" -ne 0 ]; then
-      if [ "$key_rc" -eq 4 ] && [ -n "$resolved_target_var" ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+    # Only a caller that passes resolved-target-var (Orca) stops on a failed
+    # Enter; every other backend keeps verifying the composer as before.
+    if [ "$key_rc" -ne 0 ] && [ -n "$resolved_target_var" ]; then
+      if [ "$key_rc" -eq 4 ] && [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
         printf 'inbox-deferred'
       else
         printf 'send-failed'
