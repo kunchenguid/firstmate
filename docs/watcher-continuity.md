@@ -50,6 +50,7 @@ A failed follow-up never cancels continuity restoration.
 OpenCode 2 delivers no `session.idle` and no `session.status` to a plugin subscription, though both remain in its published event schema.
 The OpenCode plugins therefore read a turn end as a `session.step.ended` whose `finish` is not `tool-calls`; a `tool-calls` step is the agent loop continuing into a further step, not the end of the turn.
 `.opencode/plugins/lib/fm-opencode-contract.js` owns that rule and every other plugin-contract fact these adapters share, so the watch-arm, turn-end, cd-check, pretool-check, session-start-nudge, and spawn-generated busy-state adapters cannot drift apart on it.
+The spawn-generated busy-state adapter also closes a failed or interrupted execution by its ID-bearing `session.execution.failed` or `session.execution.interrupted` event; the preceding `session.step.failed` has no session ID and does not clear another active session.
 
 Two further OpenCode 2 properties shape these adapters:
 

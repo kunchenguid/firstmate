@@ -2801,31 +2801,29 @@ sub is_json_bool {
 }
 sub validate_effort_marker {
   my ($config, $marker, $path) = @_;
-  my @fields = qw(previousBuildModelPresent previousBuildModel previousBuildVariantPresent previousBuildVariant);
-  if (!exists $marker->{managedBuildModel}) {
-    grep { exists $marker->{$_} } @fields
-      and die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate effort marker\n";
-    return;
-  }
-  is_json_string($marker->{managedBuildModel})
-    && is_json_string($marker->{managedBuildVariant})
-    && exists($marker->{previousBuildModelPresent})
-    && is_json_bool($marker->{previousBuildModelPresent})
-    && exists($marker->{previousBuildVariantPresent})
-    && is_json_bool($marker->{previousBuildVariantPresent})
-    && ($marker->{previousBuildModelPresent}
-      ? exists($marker->{previousBuildModel}) && is_json_string($marker->{previousBuildModel})
-      : !exists($marker->{previousBuildModel}))
-    && ($marker->{previousBuildVariantPresent}
-      ? exists($marker->{previousBuildVariant}) && is_json_string($marker->{previousBuildVariant})
-      : !exists($marker->{previousBuildVariant}))
-    or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate effort marker\n";
   my $agent = $config->{agent};
   my $build = ref($agent) eq 'HASH' ? $agent->{build} : undef;
-  ref($build) eq 'HASH'
-    && is_json_string($build->{model}) && $build->{model} eq $marker->{managedBuildModel}
-    && is_json_string($build->{variant}) && $build->{variant} eq $marker->{managedBuildVariant}
-    or die "fm-spawn: cannot safely update OpenCode config $path: agent.build changed since Firstmate configured effort\n";
+  for my $field (qw(Model Variant)) {
+    my $managed = "managedBuild$field";
+    my $present = "previousBuild${field}Present";
+    my $previous = "previousBuild$field";
+    if (exists $marker->{$managed}) {
+      is_json_string($marker->{$managed})
+        && exists($marker->{$present})
+        && is_json_bool($marker->{$present})
+        && ($marker->{$present}
+          ? exists($marker->{$previous}) && is_json_string($marker->{$previous})
+          : !exists($marker->{$previous}))
+        or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate effort marker\n";
+      my $build_field = lc($field);
+      ref($build) eq 'HASH'
+        && is_json_string($build->{$build_field})
+        && $build->{$build_field} eq $marker->{$managed}
+        or die "fm-spawn: cannot safely update OpenCode config $path: agent.build changed since Firstmate configured effort\n";
+    } elsif (exists($marker->{$present}) || exists($marker->{$previous})) {
+      die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate effort marker\n";
+    }
+  }
 }
 if ($file_exists) {
   open my $input, '<:raw', $path or die "fm-spawn: cannot read OpenCode config $path: $!\n";
@@ -2926,61 +2924,74 @@ if (exists $marker->{managedPermissionWildcard}) {
   $config->{permission} = $permission;
 }
 validate_effort_marker($config, $marker, $path);
+if ($is_default && exists $marker->{managedBuildModel}) {
+  my $agent = $config->{agent};
+  my $build = $agent->{build};
+  if ($marker->{previousBuildModelPresent}) {
+    $build->{model} = $marker->{previousBuildModel};
+  } else {
+    delete $build->{model};
+  }
+  delete $marker->{managedBuildModel};
+  delete $marker->{previousBuildModelPresent};
+  delete $marker->{previousBuildModel};
+  delete $agent->{build} unless keys %$build;
+  delete $config->{agent} unless keys %$agent;
+}
 if (!$is_default && defined($variant) && length($variant)) {
   my $agent = $config->{agent};
-  if (!exists $marker->{managedBuildModel}) {
-    if (!exists($config->{agent})) {
-      $agent = {};
-    } elsif (ref($agent) ne 'HASH') {
-      die "fm-spawn: cannot safely update OpenCode config $path: agent must be an object\n";
-    }
-    my $build = $agent->{build};
-    if (!exists($agent->{build})) {
-      $build = {};
-    } elsif (ref($build) ne 'HASH') {
-      die "fm-spawn: cannot safely update OpenCode config $path: agent.build must be an object\n";
-    }
-    for my $key (qw(model variant)) {
-      exists($build->{$key}) && !is_json_string($build->{$key})
-        and die "fm-spawn: cannot safely update OpenCode config $path: agent.build.$key is not a string\n";
-    }
+  if (!exists($config->{agent})) {
+    $agent = {};
+  } elsif (ref($agent) ne 'HASH') {
+    die "fm-spawn: cannot safely update OpenCode config $path: agent must be an object\n";
+  }
+  my $build = $agent->{build};
+  if (!exists($agent->{build})) {
+    $build = {};
+  } elsif (ref($build) ne 'HASH') {
+    die "fm-spawn: cannot safely update OpenCode config $path: agent.build must be an object\n";
+  }
+  for my $key (qw(model variant)) {
+    exists($build->{$key}) && !is_json_string($build->{$key})
+      and die "fm-spawn: cannot safely update OpenCode config $path: agent.build.$key is not a string\n";
+  }
+  if (!exists($marker->{managedBuildModel})) {
     $marker->{previousBuildModelPresent} = exists($build->{model}) ? JSON::PP::true : JSON::PP::false;
     $marker->{previousBuildModel} = $build->{model} if exists $build->{model};
+  }
+  if (!exists($marker->{managedBuildVariant})) {
     $marker->{previousBuildVariantPresent} = exists($build->{variant}) ? JSON::PP::true : JSON::PP::false;
     $marker->{previousBuildVariant} = $build->{variant} if exists $build->{variant};
   }
-  $agent = {} unless ref($agent) eq 'HASH';
-  my $build = $agent->{build};
-  $build = {} unless ref($build) eq 'HASH';
   $build->{model} = $model;
   $build->{variant} = $variant;
   $agent->{build} = $build;
   $config->{agent} = $agent;
   $marker->{managedBuildModel} = $model;
   $marker->{managedBuildVariant} = $variant;
-} elsif (!$is_default && exists $marker->{managedBuildModel}) {
+} elsif (!$is_default && (exists $marker->{managedBuildModel} || exists $marker->{managedBuildVariant})) {
   my $agent = $config->{agent};
   my $build = ref($agent) eq 'HASH' ? $agent->{build} : undef;
-  if ($marker->{previousBuildModelPresent}) {
-    exists($marker->{previousBuildModel}) && is_json_string($marker->{previousBuildModel})
-      or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate effort marker\n";
-    $build->{model} = $marker->{previousBuildModel};
-  } else {
-    delete $build->{model};
+  if (exists $marker->{managedBuildModel}) {
+    if ($marker->{previousBuildModelPresent}) {
+      $build->{model} = $marker->{previousBuildModel};
+    } else {
+      delete $build->{model};
+    }
+    delete $marker->{managedBuildModel};
+    delete $marker->{previousBuildModelPresent};
+    delete $marker->{previousBuildModel};
   }
-  if ($marker->{previousBuildVariantPresent}) {
-    exists($marker->{previousBuildVariant}) && is_json_string($marker->{previousBuildVariant})
-      or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate effort marker\n";
-    $build->{variant} = $marker->{previousBuildVariant};
-  } else {
-    delete $build->{variant};
+  if (exists $marker->{managedBuildVariant}) {
+    if ($marker->{previousBuildVariantPresent}) {
+      $build->{variant} = $marker->{previousBuildVariant};
+    } else {
+      delete $build->{variant};
+    }
+    delete $marker->{managedBuildVariant};
+    delete $marker->{previousBuildVariantPresent};
+    delete $marker->{previousBuildVariant};
   }
-  delete $marker->{managedBuildModel};
-  delete $marker->{managedBuildVariant};
-  delete $marker->{previousBuildModelPresent};
-  delete $marker->{previousBuildModel};
-  delete $marker->{previousBuildVariantPresent};
-  delete $marker->{previousBuildVariant};
   delete $agent->{build} unless keys %$build;
   delete $config->{agent} unless keys %$agent;
 }
@@ -5129,12 +5140,14 @@ export default {
         await busyEvent("busy", "session-step-started");
         return;
       }
-      if (event.type === "session.step.failed") {
-        activeSessions.clear();
-        await busyEvent("idle", "session-step-failed");
-        return;
-      }
-      const ended = turnEndedSessionID(event);
+      const terminalExecution = [
+        "session.execution.succeeded",
+        "session.execution.failed",
+        "session.execution.interrupted",
+      ].includes(event.type) && typeof event.data?.sessionID === "string"
+        ? event.data.sessionID
+        : null;
+      const ended = turnEndedSessionID(event) ?? terminalExecution;
       if (!ended) return;
       if (activeSessions.delete(ended) && activeSessions.size === 0) {
         await busyEvent("idle", "session-step-ended");

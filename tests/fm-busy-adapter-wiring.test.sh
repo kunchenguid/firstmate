@@ -208,6 +208,10 @@ oc_step_failed() {  # <location>
   printf '{"type":"session.step.failed","data":{},"location":{"directory":"%s"}}' "$1"
 }
 
+oc_execution_end() {  # <event-type> <sessionID> <location>
+  printf '{"type":"%s","data":{"sessionID":"%s"},"location":{"directory":"%s"}}' "$1" "$2" "$3"
+}
+
 test_opencode_plugin_semantic_lifecycle() {
   local rec id=busy-oc-1 out state plugin
   rec=$(make_spawn_case oc-lifecycle opencode "$id")
@@ -257,9 +261,18 @@ test_opencode_plugin_semantic_lifecycle() {
     "$(oc_step_started ses_main "$WT_DIR")" \
     "$(oc_step_started ses_child "$WT_DIR")" \
     "$(oc_step_failed "$WT_DIR")" \
-    "$(oc_turn_end ses_main "$WT_DIR")") || fail "failed-step drive failed: $out"
+    "$(oc_execution_end session.execution.failed ses_child "$WT_DIR")") || fail "failed-step drive failed: $out"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "idle opencode-plugin" ] || fail "a failed step must clear unidentifiable active sessions, got '$out'"
+  [ "$out" = "busy opencode-plugin" ] || fail "one failed session must leave another active session busy, got '$out'"
+
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses_main "$WT_DIR")" \
+    "$(oc_step_started ses_child "$WT_DIR")" \
+    "$(oc_step_failed "$WT_DIR")" \
+    "$(oc_execution_end session.execution.failed ses_child "$WT_DIR")" \
+    "$(oc_turn_end ses_main "$WT_DIR")") || fail "failed-child recovery drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "a failed child and completed parent must classify idle, got '$out'"
 
   # A tool-calls step is the agent loop continuing, not a turn end.
   out=$(drive_oc_plugin "$plugin" "$WT_DIR" \

@@ -784,13 +784,13 @@ test_opencode_threads_model_and_effort_variant() {
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$default_id" "$PROJ_DIR" --model default)
   status=$?
-  expect_code 0 "$status" "default model should clear only the OpenCode model pin"
+  expect_code 0 "$status" "default model should clear every Firstmate model pin"
   perl -MJSON::PP -e '
     my $config = decode_json(do { local $/; <> });
     die "model pin remains" if exists $config->{model};
     die "permission changed" unless $config->{permission}{"*"} eq "allow";
     die "permission rules changed" unless $config->{permission}{read} eq "ask";
-    die "effort model changed" unless $config->{agent}{build}{model} eq "anthropic/claude-sonnet-4-5";
+    die "build-agent model pin remains" if exists $config->{agent}{build}{model};
     die "effort variant changed" unless $config->{agent}{build}{variant} eq "high";
     die "other build settings changed" unless $config->{agent}{build}{temperature} == 0.3 && $config->{agent}{build}{steps} == 8;
     die "provider settings changed" unless $config->{provider}{custom}{npm} eq "custom/provider";
@@ -798,7 +798,7 @@ test_opencode_threads_model_and_effort_variant() {
     die "model marker remains" if exists $marker->{managedModel};
     die "permission marker was lost" unless $marker->{managedPermissionWildcard} eq "allow";
     die "effort marker was lost" unless $marker->{managedBuildVariant} eq "high";
-  ' "$cfg" || fail "default model launch changed permission or effort settings"
+  ' "$cfg" || fail "default model launch retained a Firstmate model pin or changed permission or effort"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$unsupported_id" "$PROJ_DIR" \
     --model anthropic/claude-sonnet-4-5 --effort medium)
@@ -814,7 +814,7 @@ test_opencode_threads_model_and_effort_variant() {
     die "other build settings changed" unless $config->{agent}{build}{temperature} == 0.3 && $config->{agent}{build}{steps} == 8;
     die "effort ownership marker remains" if exists $config->{"x-firstmate-model-pin"}{managedBuildModel};
   ' "$cfg" || fail "unsupported effort did not restore the prior build-agent settings"
-  pass "opencode stores settings in merged worktree config and default clears only model"
+  pass "opencode stores settings in merged config and default clears Firstmate model pins"
 }
 
 # OpenCode v2 dropped --model, so the model axis is not dropped with it: it
