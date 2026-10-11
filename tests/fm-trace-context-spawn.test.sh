@@ -378,6 +378,49 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
   pass "failed traceparent metadata append removes the carrier from the launched task"
 }
 
+test_codex_shell_traceparent_follows_delivery() {
+  local delivery rec out status meta carrier launch
+  for delivery in success send-failure metadata-failure; do
+    rec=$(make_spawn_case "tc-codex-$delivery")
+    read_case_record "$rec"
+    fm_fake_exit0 "$FAKEBIN_DIR" codex
+    : > "$HOME_DIR/config/trace-context"
+    start_trace_session "$HOME_DIR"
+
+    case "$delivery" in
+      send-failure)
+        out=$(FM_FAKE_TRACEPARENT_SEND_FAIL=1 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR" --harness codex)
+        ;;
+      metadata-failure)
+        out=$(FM_FAKE_TRACE_METADATA_APPEND_FAIL=1 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR" --harness codex)
+        ;;
+      success)
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR" --harness codex)
+        ;;
+    esac
+    status=$?
+    expect_code 0 "$status" "Codex trace delivery $delivery should launch: $out"
+    meta="$HOME_DIR/state/$CASE_ID.meta"
+    launch=$(cat "$LAUNCH_LOG")
+    case "$delivery" in
+      success)
+        carrier=$(meta_traceparent "$meta")
+        fm_trace_context_valid "$carrier" || fail "Codex success did not record a valid carrier"
+        assert_contains "$launch" "shell_environment_policy.set.TRACEPARENT=\"$carrier\"" \
+          "Codex tool shells did not receive the recorded carrier"
+        ;;
+      *)
+        [ -z "$(meta_traceparent "$meta")" ] || fail "Codex $delivery recorded a carrier that was not delivered"
+        assert_contains "$launch" 'shell_environment_policy.set.TRACEPARENT=""' \
+          "Codex tool shells retained a failed carrier after $delivery"
+        assert_contains "$launch" 'unset TRACEPARENT;' \
+          "Codex pane retained a failed carrier after $delivery"
+        ;;
+    esac
+  done
+  pass "Codex tool shells receive only the recorded trace carrier"
+}
+
 test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   local base prim sm id log fake out status
   base="$TMP_ROOT/duplicate-secondmate"
@@ -606,6 +649,7 @@ test_disabled_writes_and_injects_neither
 test_failed_delivery_omits_metadata_and_still_launches
 test_unsafe_delivery_refuses_to_append_launch
 test_failed_metadata_append_unsets_carrier_and_still_launches
+test_codex_shell_traceparent_follows_delivery
 test_duplicate_secondmate_spawn_does_not_converge_trace_context
 test_relaunch_reuses_recorded_carrier
 test_session_start_freezes_env_override_and_ignores_later_edits

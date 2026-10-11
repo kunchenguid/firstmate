@@ -582,7 +582,7 @@ test_codex_omits_max_effort_for_unsupported_model() {
 # a crewmate runs hook-free, a secondmate keeps the project hooks that carry its
 # own primary-session turn-end guard and session-start digest.
 test_codex_crewmate_launch_disables_the_hook_layer() {
-  local rec id out status launch
+  local rec id out status launch home_real state_real
   id=profile-codex-hooks-z4c
   rec=$(make_spawn_case profile-codex-hooks codex "$id")
   read_case_record "$rec"
@@ -601,11 +601,53 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
   # launch rather than any hook.
   assert_contains "$launch" "notify=" \
     "codex crewmate launch lost the turn-end notify program"
+  home_real=$(CDPATH='' cd -- "$HOME_DIR" && pwd -P) \
+    || fail "cannot resolve the crewmate home"
+  state_real=$(CDPATH='' cd -- "$HOME_DIR/state" && pwd -P) \
+    || fail "cannot resolve the crewmate state dir"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_HOME=\"$home_real\"'" \
+    "codex crewmate launch did not pin its own home into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_TASK_INBOX=\"$state_real/$id.inbox\"'" \
+    "codex crewmate launch did not pin its steering inbox into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_ROOT_OVERRIDE=\"\"'" \
+    "codex crewmate launch did not pass an empty root override into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_STATE_OVERRIDE=\"$state_real\"'" \
+    "codex crewmate launch did not pass its state override into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_TASK_ID=\"$id\"'" \
+    "codex crewmate launch did not pin its task id into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.GOTMPDIR=\"/tmp/fm-$id/gotmp\"'" \
+    "codex crewmate launch did not pin GOTMPDIR into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.TRACEPARENT=\"\"'" \
+    "codex crewmate launch did not pin an empty TRACEPARENT into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.LAVISH_AXI_HOST=\"\"'" \
+    "codex crewmate launch did not pin an empty Lavish host into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.COMPACT_ADVISER_DISABLE=\"1\"'" \
+    "codex crewmate launch did not pin the compact-adviser switch into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.GIT_CONFIG_COUNT=\"1\"'" \
+    "codex crewmate launch did not pin the trailer-stripping git config into tool shells"
   pass "a codex crewmate launches with no hook layer and keeps its turn-end signal"
 }
 
+test_codex_keep_ai_trailers_clears_git_config_count() {
+  local rec id out status launch
+  id=profile-codex-keep-trailers-z4e
+  rec=$(make_spawn_case profile-codex-keep-trailers codex "$id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/config/keep-ai-trailers"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with keep-ai-trailers should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-c 'shell_environment_policy.set.GIT_CONFIG_COUNT=\"0\"'" \
+    "codex launch with keep-ai-trailers did not clear GIT_CONFIG_COUNT in tool shells"
+  assert_not_contains "$launch" "shell_environment_policy.set.GIT_CONFIG_KEY_0" \
+    "codex launch with keep-ai-trailers still pinned a hooksPath override"
+  pass "keep-ai-trailers sets GIT_CONFIG_COUNT=0 in the Codex tool-shell environment"
+}
+
 test_codex_secondmate_launch_keeps_the_hook_layer() {
-  local rec id sm out status launch
+  local rec id sm out status launch sm_real home_real
   id=profile-codex-secondmate-hooks-z4d
   rec=$(make_spawn_case profile-codex-secondmate-hooks codex "$id")
   read_case_record "$rec"
@@ -618,6 +660,18 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--disable hooks" \
     "codex secondmate launch disabled the project hooks its own primary supervision depends on"
+  sm_real=$(CDPATH='' cd -- "$sm" && pwd -P) || fail "cannot resolve the secondmate home"
+  home_real=$(CDPATH='' cd -- "$HOME_DIR" && pwd -P) || fail "cannot resolve the primary home"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_HOME=\"$sm_real\"'" \
+    "codex secondmate launch did not pin the secondmate home into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=\"$home_real\"'" \
+    "codex secondmate launch did not pin the primary home into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_ROOT_OVERRIDE=\"\"'" \
+    "codex secondmate launch did not clear a daemon-inherited root override"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_SUPERVISION_MODEL=\"persistent\"'" \
+    "codex secondmate launch did not pin its supervision model into tool shells"
+  assert_contains "$launch" "-c 'shell_environment_policy.set.FM_TASK_ID=\"\"'" \
+    "codex secondmate launch did not clear FM_TASK_ID in tool shells"
   pass "a codex secondmate keeps the project hook layer its primary session runs on"
 }
 
@@ -2206,6 +2260,7 @@ test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
 test_codex_crewmate_launch_disables_the_hook_layer
+test_codex_keep_ai_trailers_clears_git_config_count
 test_codex_secondmate_launch_keeps_the_hook_layer
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

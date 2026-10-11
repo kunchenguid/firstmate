@@ -1951,6 +1951,89 @@ shell_quote() {
   printf "'"
 }
 
+# Quote $1 as a TOML basic string, including the surrounding double quotes.
+# Codex -c values are TOML. A value that parses as a non-string would set the
+# wrong thing, and a value that fails to parse is rejected by the launch.
+codex_toml_basic_string() {
+  local value=$1 i c out='"' slash=$'\\'
+  for ((i = 0; i < ${#value}; i++)); do
+    c=${value:i:1}
+    if [ "$c" = "$slash" ]; then
+      out+="$slash$slash"
+      continue
+    fi
+    case "$c" in
+      '"') out+="$slash\"" ;;
+      $'\n') out+="${slash}n" ;;
+      $'\r') out+="${slash}r" ;;
+      $'\t') out+="${slash}t" ;;
+      *) out+=$c ;;
+    esac
+  done
+  printf '%s"' "$out"
+}
+
+# One repeatable Codex -c assignment, shell-quoted, with a trailing space.
+codex_shell_environment_flag() { # <key> <value>
+  local key=$1 value=$2 toml
+  toml=$(codex_toml_basic_string "$value")
+  printf -- '-c %s ' "$(shell_quote "shell_environment_policy.set.${key}=${toml}")"
+}
+
+# Per-launch shell environment for a Codex worker or secondmate.
+# Tool shells spawned for a Codex session inherit the shared app-server daemon's
+# environment, which is whichever home started that daemon.
+# shell_environment_policy.set is applied to those shells and overrides it.
+# Codex lifecycle hooks do not receive this policy; .codex/hooks.json sets
+# FM_HOME from the hook's own root instead.
+# $1 is the home those shells must see. $2 is worker or secondmate. A secondmate
+# also receives its cleared overrides, the primary home, the frozen trace
+# decision, and the supervision model ($3, $4, $5), matching the pane prefix
+# above the launch. Workers pass through this process's override variables,
+# including empty, so a daemon started under another home cannot leak its own.
+codex_shell_environment_flags() {
+  local home=$1 role=$2 flags=''
+  flags+=$(codex_shell_environment_flag FM_HOME "$home")
+  flags+=$(codex_shell_environment_flag FM_TASK_INBOX "$STATE_REAL/$ID.inbox")
+  if [ "$role" = secondmate ]; then
+    flags+=$(codex_shell_environment_flag FM_ROOT_OVERRIDE "")
+    flags+=$(codex_shell_environment_flag FM_STATE_OVERRIDE "")
+    flags+=$(codex_shell_environment_flag FM_DATA_OVERRIDE "")
+    flags+=$(codex_shell_environment_flag FM_PROJECTS_OVERRIDE "")
+    flags+=$(codex_shell_environment_flag FM_CONFIG_OVERRIDE "")
+    flags+=$(codex_shell_environment_flag FM_PUBLIC_FOLLOWUP_PRIMARY_HOME "$3")
+    flags+=$(codex_shell_environment_flag FM_TRACE_CONTEXT "$4")
+    flags+=$(codex_shell_environment_flag FM_SUPERVISION_MODEL "$5")
+  else
+    flags+=$(codex_shell_environment_flag FM_ROOT_OVERRIDE "${FM_ROOT_OVERRIDE:-}")
+    flags+=$(codex_shell_environment_flag FM_STATE_OVERRIDE "${FM_STATE_OVERRIDE:-}")
+    flags+=$(codex_shell_environment_flag FM_DATA_OVERRIDE "${FM_DATA_OVERRIDE:-}")
+    flags+=$(codex_shell_environment_flag FM_PROJECTS_OVERRIDE "${FM_PROJECTS_OVERRIDE:-}")
+    flags+=$(codex_shell_environment_flag FM_CONFIG_OVERRIDE "${FM_CONFIG_OVERRIDE:-}")
+  fi
+  if [ "$role" = secondmate ]; then
+    flags+=$(codex_shell_environment_flag FM_TASK_ID "")
+  else
+    flags+=$(codex_shell_environment_flag FM_TASK_ID "$ID")
+  fi
+  flags+=$(codex_shell_environment_flag GOTMPDIR "$TASK_TMP/gotmp")
+  flags+=$(codex_shell_environment_flag TRACEPARENT "${SPAWN_TRACEPARENT:-}")
+  if [ "${LAVISH_AXI_HOST_CONFIG_PRESENT:-0}" = 1 ]; then
+    flags+=$(codex_shell_environment_flag LAVISH_AXI_HOST "$LAVISH_AXI_HOST")
+  else
+    flags+=$(codex_shell_environment_flag LAVISH_AXI_HOST "")
+  fi
+  flags+=$(codex_shell_environment_flag COMPACT_ADVISER_DISABLE 1)
+  if [ "${KEEP_AI_TRAILERS:-0}" = 0 ]; then
+    flags+=$(codex_shell_environment_flag GIT_CONFIG_COUNT 1)
+    flags+=$(codex_shell_environment_flag GIT_CONFIG_KEY_0 core.hooksPath)
+    flags+=$(codex_shell_environment_flag GIT_CONFIG_VALUE_0 "$GIT_HOOKS_DIR")
+  else
+    flags+=$(codex_shell_environment_flag GIT_CONFIG_COUNT 0)
+  fi
+  printf '%s' "$flags"
+}
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -2129,9 +2212,9 @@ launch_template() {
   # secondmate launch deliberately keeps hooks on.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __CODEXSHELLENV__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" __CODEXSHELLENV__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -5458,6 +5541,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
+      SPAWN_TRACEPARENT=
     fi
   else
     TRACE_SEND_STATUS=$?
@@ -5466,7 +5550,29 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
       exit 1
     fi
     LAUNCH="unset TRACEPARENT; $LAUNCH"
+    SPAWN_TRACEPARENT=
   fi
+fi
+# Codex tool shells run under the shared app-server daemon, not under this
+# pane, so the exports above never reach them. The per-session -c policy is
+# what gives each launch its own home. A raw launch is the caller's command
+# and is left unchanged. A generated launch that lost the placeholder stops
+# here: launching without it would silently reuse whichever home started the
+# daemon.
+if [ "$HARNESS" = codex ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if [ "$KIND" = secondmate ]; then
+    codex_shell_env=$(codex_shell_environment_flags "$PROJ_ABS" secondmate "$FM_HOME" "$SPAWN_TRACE_EFFECTIVE" "$supervision_model")
+  else
+    codex_shell_env=$(codex_shell_environment_flags "$FM_HOME" worker)
+  fi
+  LAUNCH=${LAUNCH//__CODEXSHELLENV__/$codex_shell_env}
+  case "$LAUNCH" in
+    *'shell_environment_policy.set.FM_HOME='*) ;;
+    *)
+      echo "error: codex launch is missing its per-session shell environment; tool shells would inherit the shared app-server daemon's home" >&2
+      exit 1
+      ;;
+  esac
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
