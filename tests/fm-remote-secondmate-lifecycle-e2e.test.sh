@@ -48,6 +48,7 @@ cleanup() {
     . "$ROOT/bin/fm-remote-job-lib.sh"
     fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
+  find "$TMP_ROOT" -type d -name '*.git-hooks' -exec chmod u+w {} +
   rm -rf -- "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -57,8 +58,16 @@ trap cleanup EXIT
 # the same clone and fast-forward path as a second Mac.
 (
   cd "$ROOT" || exit
-  tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
+  tar --exclude="./${TMP_ROOT#"$ROOT"/}" --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
+mkdir -p "$TMP_ROOT/codex-home"
+printf '%s\n' '{"models":[{"slug":"gpt-9-astra","description":"Frontier"}]}' > "$TMP_ROOT/codex-home/models_cache.json"
+mv "$REMOTE_ROOT/bin/fm-model-tier.sh" "$REMOTE_ROOT/bin/fm-model-tier-catalog.sh"
+cat > "$REMOTE_ROOT/bin/fm-model-tier.sh" <<SH
+#!/usr/bin/env bash
+CODEX_HOME='$TMP_ROOT/codex-home' exec '$REMOTE_ROOT/bin/fm-model-tier-catalog.sh' "\$@"
+SH
+chmod +x "$REMOTE_ROOT/bin/fm-model-tier.sh"
 cat > "$REMOTE_ROOT/bin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -274,7 +283,7 @@ remote_env() {
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
   FM_FAKE_SSH_MODE="${FM_FAKE_SSH_MODE:-normal}" \
-  FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
+  FM_FAKE_REMOTE_CWD="$REMOTE_ROOT" \
   FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
   FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \
   FM_FAKE_DOCTOR_LOG="$DOCTOR_LOG" \
@@ -328,13 +337,49 @@ seed_env() {
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
   FM_FAKE_SSH_MODE="${FM_FAKE_SSH_MODE:-normal}" \
-  FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
+  FM_FAKE_REMOTE_CWD="$REMOTE_ROOT" \
   FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
   FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \
   FM_FAKE_DOCTOR_LOG="$DOCTOR_LOG" \
   FM_FAKE_DOCTOR_REPAIRED="$TMP_ROOT/doctor.repaired" \
   "$@"
 }
+
+# Focused portable tier coverage: SSH, Herdr, and the harness are simulated;
+# both homes execute the real launch and replacement scripts.
+if [ "${1:-}" = --model-tiers-only ]; then
+  jq '.lifecycle = true' "$HERDR_STATE" > "$HERDR_STATE.tmp"
+  mv "$HERDR_STATE.tmp" "$HERDR_STATE"
+  FM_SECONDMATE_CHARTER='Exercise remote model tiers.' \
+    remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REMOTE_HOME" alpha >/dev/null \
+    || fail "could not seed the simulated remote home"
+  CODEX_HOME="$TMP_ROOT/missing-parent-catalog" \
+    remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --tier strong >/dev/null \
+    || fail "host-local discovery launch failed"
+  assert_grep 'model=gpt-9-astra' "$PARENT/state/ios.meta" "parent did not record host discovery"
+  assert_grep 'tier=strong' "$REMOTE_HOME/state/parent-route/ios.meta" "host lost the launch tier"
+  printf 'Simulated SSH, Herdr, and harness; real product scripts. Host launch record:\n'
+  cat "$REMOTE_HOME/state/parent-route/ios.meta"
+  printf '%s\n' '{"models":[{"slug":"gpt-10-astra","description":"Frontier","supported_reasoning_levels":[{"effort":"high"}]}]}' > "$TMP_ROOT/codex-home/models_cache.json"
+  remote_env "$ROOT/bin/fm-remote-secondmate-relaunch.sh" ios codex default high strong >/dev/null \
+    || fail "host-local tier replacement failed"
+  assert_grep 'model=gpt-10-astra' "$PARENT/state/ios.meta" "replacement reused the old model"
+  assert_grep 'model=gpt-10-astra' "$REMOTE_HOME/state/parent-route/ios.meta" "host did not rediscover the tier"
+  assert_grep 'tier=strong' "$PARENT/state/ios.meta" "replacement lost the tier"
+  printf 'Host replacement record after catalog update:\n'
+  cat "$REMOTE_HOME/state/parent-route/ios.meta"
+  remote_env "$ROOT/bin/fm-remote-secondmate-relaunch.sh" ios codex gpt-6-luna high >/dev/null \
+    || fail "pinned host-local replacement failed"
+  assert_grep 'model=gpt-6-luna' "$REMOTE_HOME/state/parent-route/ios.meta" "host ignored the model pin"
+  assert_no_grep '^tier=' "$REMOTE_HOME/state/parent-route/ios.meta" "host retained an overridden tier"
+  assert_no_grep '^tier=' "$PARENT/state/ios.meta" "parent retained an overridden tier"
+  printf 'Host replacement record after explicit model pin:\n'
+  cat "$REMOTE_HOME/state/parent-route/ios.meta"
+  remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null \
+    || fail "could not retire the simulated remote endpoint"
+  pass "simulated remote launch and replacement use host discovery and preserve pins"
+  exit 0
+fi
 
 REAL_GIT=$(command -v git)
 cat > "$FAKEBIN/git" <<SH
@@ -843,7 +888,11 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
-out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+out=$(CODEX_HOME="$TMP_ROOT/missing-parent-catalog" remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --tier strong)
+assert_grep 'tier=strong' "$PARENT/state/ios.meta" "remote route lost the requested tier"
+assert_grep 'model=gpt-9-astra' "$PARENT/state/ios.meta" "parent did not record the remote discovery result"
+assert_grep 'tier=strong' "$REMOTE_HOME/state/parent-route/ios.meta" "host launch lost the tier"
+assert_grep 'model=gpt-9-astra' "$REMOTE_HOME/state/parent-route/ios.meta" "host did not resolve its own catalog"
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"

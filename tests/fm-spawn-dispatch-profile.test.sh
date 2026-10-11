@@ -67,6 +67,23 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  mkdir -p "$home/codex-home"
+  cat > "$home/codex-home/models_cache.json" <<'JSON'
+{
+  "models": [
+    {
+      "slug": "gpt-5.6-luna",
+      "priority": 1,
+      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}, {"effort": "max"}]
+    },
+    {
+      "slug": "gpt-5",
+      "priority": 2,
+      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}]
+    }
+  ]
+}
+JSON
   for id in "$@"; do
     fm_test_spawn_brief "$home" "$id"
   done
@@ -115,6 +132,7 @@ run_spawn() {
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
+    CODEX_HOME="${CODEX_HOME:-$home/codex-home}" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
 

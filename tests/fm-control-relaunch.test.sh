@@ -45,6 +45,7 @@ relaunch_cleanup() {
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  find "$TMP_ROOT" -type d -name '*.git-hooks' -exec chmod u+w {} +
   rm -rf "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
@@ -363,6 +364,45 @@ SH
 }
 
 # --- 1. same-harness relaunch -----------------------------------------------
+
+test_relaunch_discovers_the_recorded_tier_again() {
+  local dir out rc
+  dir=$(new_case tier-relauch rl-tier)
+  add_ship_task "$dir" rl-tier codex
+  printf codex > "$dir/fake/command"
+  printf codex > "$dir/fake/becomes"
+  printf 'model=gpt-5-astra\ntier=strong\neffort=high\n' >> "$dir/home/state/rl-tier.meta"
+  mkdir -p "$dir/user-home/.codex"
+  printf '%s\n' '{"models":[{"slug":"gpt-9-astra","description":"Frontier","supported_reasoning_levels":[{"effort":"high"}]}]}' > "$dir/user-home/.codex/models_cache.json"
+  out=$(CODEX_HOME="$dir/user-home/.codex" run_control "$dir" rl-tier relaunch --note "continue task"); rc=$?
+  expect_code 0 "$rc" "tier replacement should succeed: $out"
+  assert_contains "$out" "model=gpt-9-astra" "receipt must report the confirmed replacement model"
+  assert_grep 'tier=strong' "$dir/home/state/rl-tier.meta" "replacement lost tier"
+  assert_grep 'model=gpt-9-astra' "$dir/home/state/rl-tier.meta" "replacement reused the old model"
+  assert_grep "codex --model 'gpt-9-astra'" "$dir/fake/literal" "replacement did not launch discovered model"
+  pass "replacement launches rediscover the recorded tier"
+}
+
+test_relaunch_refuses_unsupported_tier_effort_before_stop() {
+  local dir out rc
+  dir=$(new_case tier-effort-refusal rl-tier-max)
+  add_ship_task "$dir" rl-tier-max codex
+  printf codex > "$dir/fake/command"
+  printf codex > "$dir/fake/becomes"
+  printf 'model=gpt-5-astra\ntier=strong\neffort=max\n' >> "$dir/home/state/rl-tier-max.meta"
+  cp "$dir/home/state/rl-tier-max.meta" "$dir/meta.before"
+  cp "$dir/home/data/rl-tier-max/brief.md" "$dir/brief.before"
+  mkdir -p "$dir/user-home/.codex"
+  printf '%s\n' '{"models":[{"slug":"gpt-9-astra","description":"Frontier","supported_reasoning_levels":[{"effort":"high"}]}]}' > "$dir/user-home/.codex/models_cache.json"
+  out=$(CODEX_HOME="$dir/user-home/.codex" run_control "$dir" rl-tier-max relaunch --note "continue task"); rc=$?
+  expect_code 1 "$rc" "unsupported replacement effort must refuse: $out"
+  assert_contains "$out" "does not support effort 'max'" "refusal must identify unsupported effort"
+  [ "$(cat "$dir/fake/command")" = codex ] || fail "refused replacement stopped the running worker"
+  assert_no_grep '/exit' "$dir/fake/literal" "refused replacement sent an exit command"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl-tier-max.meta" || fail "refusal changed the task record"
+  cmp -s "$dir/brief.before" "$dir/home/data/rl-tier-max/brief.md" || fail "refusal changed task instructions"
+  pass "tier effort validation refuses relaunch before stopping the worker"
+}
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
@@ -983,6 +1023,54 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     || fail "the configured effort token should come with the pin"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
+}
+
+test_secondmate_model_pin_overrides_recorded_tier() {
+  local dir home out rc
+  dir=$(new_case smtierpin sm3)
+  home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'codex gpt-6-luna high\n' > "$home/config/secondmate-harness"
+  mkdir -p "$home/data/sm3"
+  printf '# secondmate brief\n' > "$home/data/sm3/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm3"
+    echo "endpoint_task_id=sm3"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=codex"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=gpt-6-astra"
+    echo "tier=strong"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm3.meta"
+  printf '%s\n' "fm-sm3" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  printf codex > "$dir/fake/command"
+  # Keep the fixture home outside its fixture code root even with a
+  # worktree-local TMPDIR; the real spawn rejects nested secondmate homes.
+  ln -s "$ROOT/bin" "$dir/proj/bin"
+  out=$(FM_ROOT_OVERRIDE="$dir/proj" run_control "$dir" sm3 relaunch); rc=$?
+  expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
+  [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
+    || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
+  [ "$(journal_field "$dir" sm3 to_model)" = gpt-6-luna ] \
+    || fail "the configured model token should come with the pin"
+  [ "$(journal_field "$dir" sm3 to_effort)" = high ] \
+    || fail "the configured effort token should come with the pin"
+  assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
+  [ -z "$(meta_field "$dir" sm3 tier)" ] || fail "configured model must clear the inherited tier"
+  assert_grep 'model=gpt-6-luna' "$home/state/sm3.meta" "configured model was not persisted"
+  assert_grep "codex --model 'gpt-6-luna'" "$dir/fake/literal" "configured model was not launched"
+  pass "secondmate model pin overrides the recorded tier"
 }
 
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
@@ -2486,8 +2574,17 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+if [ "${1:-}" = --model-tiers-only ]; then
+  test_relaunch_discovers_the_recorded_tier_again
+  test_relaunch_refuses_unsupported_tier_effort_before_stop
+  test_secondmate_model_pin_overrides_recorded_tier
+  exit 0
+fi
+
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
+test_relaunch_discovers_the_recorded_tier_again
+test_relaunch_refuses_unsupported_tier_effort_before_stop
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -2513,6 +2610,7 @@ test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_secondmate_model_pin_overrides_recorded_tier
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes

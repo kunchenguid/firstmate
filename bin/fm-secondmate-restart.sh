@@ -127,6 +127,7 @@ PLACEMENT=()
 HOST=()
 HARNESS=()
 MODEL=()
+TIER=()
 EFFORT=()
 RESTART_PID=()
 RESTART_RESULT=()
@@ -164,11 +165,14 @@ report_unreached() {  # <id> <reason>
 
 restart_mate() {  # <array-index>
   local i=$1 id restart_out restart_rc restart_reason ran_on
+  local -a remote_args
   id=${IDS[$i]}
   if [ "${PLACEMENT[i]}" = remote ]; then
+    remote_args=("$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}")
+    [ -z "${TIER[i]:-}" ] || remote_args+=("${TIER[i]}")
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-remote-secondmate-relaunch.sh" \
-      "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" < /dev/null 2>&1)
+      "${remote_args[@]}" < /dev/null 2>&1)
     restart_rc=$?
   else
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -258,6 +262,7 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
   HOST[i]=""
   HARNESS[i]=""
   MODEL[i]=""
+  TIER[i]=""
   EFFORT[i]=""
   if ! fm_secondmate_restart_capable "$STATE/$id.meta"; then
     REASON[i]=$FM_SECONDMATE_RESTART_REASON
@@ -278,6 +283,10 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     [ -n "${HARNESS[i]}" ] || HARNESS[i]=$FM_SECONDMATE_RESTART_HARNESS
     MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
     EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
+    if [ "${HARNESS[i]}" = "$FM_SECONDMATE_RESTART_HARNESS" ] \
+       && { [ -z "${MODEL[i]}" ] || [ "${MODEL[i]}" = default ]; }; then
+      TIER[i]=$(fm_meta_get "$STATE/$id.meta" tier)
+    fi
     case "${EFFORT[i]}" in
       ''|low|medium|high|xhigh|max|ultra) ;;
       *) EFFORT[i]="" ;;
