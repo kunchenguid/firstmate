@@ -2,7 +2,8 @@
 # Merge a task's PR or MR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
-# addressed through gh by the derived owner and repository; a GitLab merge
+# addressed through gh by the derived owner and repository at the pull request's
+# own host, github.com or any other GitHub host; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded. A Gerrit change
 # is refused outright: that adapter is read-only, and the refusal at the parse
@@ -638,7 +639,7 @@ github_read_required_contexts() {
   FM_PR_GITHUB_REQUIRED_ERROR=
   branch_path=$(github_urlencode_path_segment "$base")
 
-  if ! branch_json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$branch_path" 2>/dev/null) \
+  if ! branch_json=$(fm_gh_at "$PR_HOST" gh api "repos/$PR_OWNER/$PR_REPO/branches/$branch_path" 2>/dev/null) \
     || [ -z "$branch_json" ] \
     || ! classic=$(printf '%s' "$branch_json" | jq -c '
       if type != "object" or (.protected | type) != "boolean" then
@@ -666,7 +667,7 @@ github_read_required_contexts() {
     FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
 }the branch rules for base branch $base could not be read"
   else
-    if ! rules_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" 2>"$api_err"); then
+    if ! rules_json=$(fm_gh_at "$PR_HOST" gh api --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" 2>"$api_err"); then
       api_err_text=$(cat "$api_err" 2>/dev/null)
       if ! github_branch_rules_unavailable_on_plan "$api_err_text"; then
         FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
@@ -723,7 +724,7 @@ github_verify_mergeable() {
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(fm_gh_at "$PR_HOST" gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -816,7 +817,7 @@ EOF
   fi
   producers='[]'
   if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
-    if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
+    if ! runs=$(fm_gh_at "$PR_HOST" gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
       || [ -z "$runs" ] \
       || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
         [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
@@ -878,7 +879,7 @@ github_read_outcome_with_gh() {
   local state='' merged='' queued='' base=''
 
   # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
-  if ! fields=$(gh api graphql \
+  if ! fields=$(fm_gh_at "$PR_HOST" gh api graphql \
     -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged isInMergeQueue baseRefName}}}' \
     -F "owner=$PR_OWNER" -F "repo=$PR_REPO" -F "number=$PR_NUMBER" \
     --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring), "queued=" + (.isInMergeQueue | tostring), "base=" + (.baseRefName // "")' \
@@ -914,7 +915,7 @@ FIELDS
 
 github_read_outcome_with_gh_axi() {
   local output state
-  if ! output=$(gh-axi pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null); then
+  if ! output=$(fm_gh_at "$PR_HOST" gh-axi pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null); then
     return 1
   fi
   if ! state=$(printf '%s\n' "$output" | awk '
@@ -1009,7 +1010,7 @@ github_read_queue_method() {
   [ -n "$FM_PR_GITHUB_BASE" ] || return 0
   branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE")
   api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-queue-rules.XXXXXX") || return 0
-  if ! methods=$(gh api \
+  if ! methods=$(fm_gh_at "$PR_HOST" gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" \
     --jq '.[] | select(.type == "merge_queue") | "merge_method=" + (.parameters.merge_method // "")' \
     2>"$api_err"); then
@@ -1385,7 +1386,7 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
     merge_status=0
-    merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    merge_output=$(fm_gh_at "$PR_HOST" gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
     if [ "$merge_status" -eq 0 ]; then

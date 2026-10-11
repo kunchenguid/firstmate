@@ -1061,8 +1061,8 @@ apply_pending_retained_artifact() {  # <task-id>
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
     --pr|--report)
-      if [ "${args[0]}" = --pr ] && fm_backlog_pr_is_gerrit_change "${args[1]-}"; then
-        RETAINED_CLOSE_ARGS=(--note "Gerrit change ${args[1]}")
+      if [ "${args[0]}" = --pr ] && fm_backlog_pr_link_is_note_only "${args[1]-}"; then
+        RETAINED_CLOSE_ARGS=(--note "$(fm_backlog_pr_link_note "${args[1]}")")
         return 0
       fi
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0

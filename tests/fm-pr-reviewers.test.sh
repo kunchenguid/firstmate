@@ -17,6 +17,7 @@ command -v jq >/dev/null 2>&1 \
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 set -o pipefail
+printf '%s\n' "${GH_HOST-unset}" >> "${FM_TEST_GH_HOST_LOG:-/dev/null}"
 serve() {
   case "$*" in
     "api /repos/o/r/pulls/7 --jq "*)
@@ -111,6 +112,27 @@ test_refusals_exit_nonzero() {
   pass "argument and lookup refusals exit nonzero"
 }
 
+test_github_host_reaches_every_gh_call() {
+  local log="$TMP_ROOT/gh-host.log" out
+  unset GH_HOST
+  : > "$log"
+  out=$(FM_TEST_GH_HOST_LOG="$log" PATH="$FAKEBIN:$PATH" "$SCRIPT" https://git.example.org/o/r/pull/7) \
+    || fail "a pull request on another GitHub host was refused: $out"
+  assert_contains "$out" $'carol\t2 recent commits' "reviewers were not read from the other host"
+  [ "$(wc -l < "$log")" -eq 4 ] || fail "expected the pull request, files, and two commit reads, saw: $(cat "$log")"
+  [ "$(sort -u "$log")" = git.example.org ] \
+    || fail "every gh call must target the pull request's host, saw: $(sort -u "$log")"
+
+  : > "$log"
+  FM_TEST_GH_HOST_LOG="$log" PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7 >/dev/null \
+    || fail "the github.com pull request was refused"
+  [ "$(sort -u "$log")" = unset ] \
+    || fail "github.com must not select a host, saw: $(sort -u "$log")"
+  pass "a pull request on another GitHub host is read at that host and github.com is untouched"
+}
+
+
 test_candidates_use_api_logins_and_unique_commit_counts
 test_only_author_evidence_says_no_candidates
 test_refusals_exit_nonzero
+test_github_host_reaches_every_gh_call

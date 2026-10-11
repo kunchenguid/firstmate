@@ -26,6 +26,7 @@ cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 set -o pipefail
 head=c2eac54c17a1ddc2633ad51b83e21e5fe888142e
+printf '%s\n' "${GH_HOST-unset}" >> "${FM_TEST_GH_HOST_LOG:-/dev/null}"
 serve() {
   case "$*" in
     "pr view "*" --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq "*)
@@ -269,6 +270,26 @@ test_refusals_exit_nonzero() {
   pass "argument and lookup refusals exit nonzero"
 }
 
+test_github_host_reaches_every_gh_call() {
+  local log="$TMP_ROOT/gh-host.log" out
+  unset GH_HOST
+  : > "$log"
+  out=$(FM_TEST_GH_HOST_LOG="$log" FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED \
+    PATH="$FAKEBIN:$PATH" "$SCRIPT" https://ghe.example.com/o/r/pull/7) \
+    || fail "a pull request on another GitHub host was refused: $out"
+  [ "$(wc -l < "$log")" -eq 3 ] || fail "expected the view, checks, and reviews reads, saw: $(cat "$log")"
+  [ "$(sort -u "$log")" = ghe.example.com ] \
+    || fail "every gh call must target the pull request's host, saw: $(sort -u "$log")"
+
+  : > "$log"
+  FM_TEST_GH_HOST_LOG="$log" FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED \
+    PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7 >/dev/null \
+    || fail "the github.com pull request was refused"
+  [ "$(sort -u "$log")" = unset ] \
+    || fail "github.com must not select a host, saw: $(sort -u "$log")"
+  pass "a pull request on another GitHub host is read at that host and github.com is untouched"
+}
+
 test_clean_pr_is_silent_and_ignores_skipped_checks
 test_terminal_state_is_the_whole_report
 test_draft_is_a_blocker
@@ -284,3 +305,4 @@ test_no_reported_checks_is_unverified
 test_help_states_what_silence_means_and_what_is_out_of_scope
 test_unknown_mergeability_is_a_blocker
 test_refusals_exit_nonzero
+test_github_host_reaches_every_gh_call

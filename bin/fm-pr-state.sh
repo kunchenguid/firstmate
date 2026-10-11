@@ -54,7 +54,7 @@ PATH_PART=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 ENDPOINT="/repos/$PATH_PART/pulls/$NUMBER"
 
-CORE=$(gh pr view "$URL" \
+CORE=$(fm_gh_at "$FM_PR_HOST" gh pr view "$URL" \
   --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq '
   "state=\(.state | ascii_downcase)",
   "merged_at=\(.mergedAt // "")",
@@ -106,7 +106,7 @@ esac
 GH_STDERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-state.XXXXXX") \
   || die "could not create temporary file"
 trap 'rm -f "$GH_STDERR"' EXIT INT TERM
-if ! REQUIRED=$(gh pr checks "$URL" --required --json name,state,bucket --jq '
+if ! REQUIRED=$(fm_gh_at "$FM_PR_HOST" gh pr checks "$URL" --required --json name,state,bucket --jq '
   .[]
   | select(.bucket != "pass" and .bucket != "skipping")
   | "REQUIRED CHECK: \(.name) (\(.state))"' 2>"$GH_STDERR"); then
@@ -128,7 +128,7 @@ fi
 
 if [ "$REVIEW_DECISION" = CHANGES_REQUESTED ]; then
   printf 'REVIEW DECISION: CHANGES_REQUESTED\n'
-  REVIEWS=$(gh api "$ENDPOINT/reviews?per_page=100" --paginate --jq '
+  REVIEWS=$(fm_gh_at "$FM_PR_HOST" gh api "$ENDPOINT/reviews?per_page=100" --paginate --jq '
     .[]
     | select(.user.login != null and .commit_id != null and .submitted_at != null)
     | [.user.login, .state, .commit_id, .submitted_at]
