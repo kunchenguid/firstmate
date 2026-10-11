@@ -287,10 +287,114 @@ PY
   pass "live board marks cards that changed column and drops the marker after the timeout"
 }
 
+# last_frame <live_keys-output>: the text after the final repaint.
+last_frame() { printf '%s' "${1##*$'\033[H'}"; }
+
+test_live_mouse_click_focuses_column() {
+  command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; return 0; }
+  local out
+  # 160 columns: the four columns start at x = 1, 41, 81, 121.
+  out=$(live_keys '' '\x1b[<0;85;8M') || fail "live run failed"
+  assert_contains "$(last_frame "$out")" "▶ WAITING ON CAPTAIN" "a click inside a column focuses it"
+  assert_contains "$out" $'\033[?1000h' "mouse reporting is switched on"
+  assert_contains "$out" $'\033[?1006h' "SGR mouse mode is switched on"
+  assert_contains "$out" $'\033[?1006l\033[?1000l' "mouse reporting is switched off on exit"
+  assert_contains "$out" "ECHO_AFTER_EXIT=True" "terminal echo is restored on exit"
+  out=$(live_keys '' '\x1b[<2;85;8M\x1b[<0;85;8m\x1b[<0;85;2M') || fail "live run failed"
+  assert_contains "$(last_frame "$out")" "▶ QUEUED" "right click, release, and header click change nothing"
+  pass "a left click focuses the column under the pointer, and mouse reporting is restored on exit"
+}
+
+test_live_mouse_wheel_scrolls_column_under_pointer() {
+  command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; return 0; }
+  local out last
+  out=$(live_keys '' '\x1b[<65;85;8M\x1b[<65;85;8M\x1b[<65;85;8M') || fail "live run failed"
+  last=$(last_frame "$out")
+  assert_contains "$last" "cards 4-4 of 4" "wheel down scrolls the column under the pointer"
+  assert_contains "$last" "▶ QUEUED" "wheel does not move focus"
+  out=$(live_keys '' '\x1b[<0;125;8M\x1b[<65;40;8M') || fail "live run failed"
+  assert_contains "$(last_frame "$out")" "cards 2-2 of 2" "wheel off any column scrolls the focused one"
+  out=$(live_keys '' '\x1b[<65;85;8M\x1b[<65;85;8M\x1b[<64;85;8M') || fail "live run failed"
+  assert_contains "$(last_frame "$out")" "cards 2-2 of 4" "wheel up scrolls back"
+  pass "the wheel scrolls the column under the pointer, else the focused column"
+}
+
+test_live_mixed_mouse_and_key_burst_applies_in_order() {
+  command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; return 0; }
+  local out last
+  # click col 2, ignored right click / release / unknown CSI (whose final byte
+  # is the l key), h, click col 3, h, then three wheel steps over col 2.
+  out=$(live_keys '' '\x1b[<0;85;8M\x1b[<2;125;8M\x1b[<0;125;8m\x1b[?25lh\x1b[<0;125;8Mh\x1b[<65;85;8M\x1b[<65;85;8M\x1b[<65;85;8M') \
+    || fail "live run failed"
+  last=$(last_frame "$out")
+  assert_contains "$last" "▶ WAITING ON CAPTAIN" "clicks and keys land on the final column"
+  assert_contains "$last" "cards 4-4 of 4" "the wheel steps after them apply"
+  assert_not_contains "$last" "▶ DONE" "an out-of-order or misread sequence would land elsewhere"
+  pass "a burst of mixed mouse and key input is applied in order"
+}
+
+test_live_mouse_follows_resize_and_tab_line() {
+  command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; return 0; }
+  local bin=$TMP_ROOT/mousebin out
+  mkdir -p "$bin"
+  cp "$DASH" "$bin/fm-dashboard.sh"
+  printf '#!/usr/bin/env bash\ncat %q\n' "$FIXTURE" > "$bin/fm-fleet-snapshot.sh"
+  chmod +x "$bin/fm-fleet-snapshot.sh"
+  out=$(python3 -I - "$bin/fm-dashboard.sh" <<'PY'
+import fcntl, os, pty, select, struct, sys, termios, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ.update(NO_COLOR="1", COLUMNS="160", LINES="40", TERM="xterm")
+    os.execv("/usr/bin/env", ["env", "bash", sys.argv[1], "--interval", "30"])
+def size(r, c):
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", r, c, 0, 0))
+def pump(secs):
+    buf, end = b"", time.time() + secs
+    while time.time() < end:
+        if select.select([fd], [], [], 0.05)[0]:
+            try: buf += os.read(fd, 65536)
+            except OSError: break
+    return buf.decode("utf-8", "replace")
+def frame(s):
+    return s.split("\x1b[H")[-1]
+size(40, 160)
+pump(1.5)
+size(40, 100)       # wide, but columns now start at x = 1, 26, 51, 76
+pump(1.0)
+os.write(fd, b"\x1b[<0;60;8M")     # x=60 is column 2 only under the new layout
+a = frame(pump(1.0))
+size(30, 50)        # narrow tab line: [QUEUED] . IN FLIGHT . WAITING ON CAPTAIN . DONE
+pump(1.0)
+os.write(fd, b"\x1b[<0;47;5M")     # DONE tab
+b = frame(pump(1.0))
+os.write(fd, b"\x1b[<0;15;5M")     # IN FLIGHT tab
+c = frame(pump(1.0))
+os.write(fd, b"\x1b[<0;15;9M")     # a body click on the narrow layout changes nothing
+d = frame(pump(0.6))
+os.write(fd, b"q")
+pump(0.5)
+os.waitpid(pid, 0)
+print("RESIZED_CLICK=" + str("▶ WAITING ON CAPTAIN" in a))
+print("TAB_DONE=" + str("[DONE]" in b))
+print("TAB_FLIGHT=" + str("[IN FLIGHT]" in c))
+print("BODY_CLICK_IGNORED=" + str(d == "" or "[IN FLIGHT]" in d))
+PY
+  ) || fail "mouse resize run failed"
+  assert_contains "$out" "RESIZED_CLICK=True" "a click after a resize uses the new column positions"
+  assert_contains "$out" "TAB_DONE=True" "clicking a name in the narrow tab line selects that column"
+  assert_contains "$out" "TAB_FLIGHT=True" "another tab can be selected"
+  assert_contains "$out" "BODY_CLICK_IGNORED=True" "a click in the narrow body keeps the focus"
+  pass "mouse clicks follow resizes and the narrow tab line"
+}
+
 test_wide_board_lays_columns_side_by_side
 test_live_keys_never_echo_during_refresh
 test_live_key_burst_applies_every_step
 test_live_board_relayouts_on_resize
+test_live_mouse_click_focuses_column
+test_live_mouse_wheel_scrolls_column_under_pointer
+test_live_mixed_mouse_and_key_burst_applies_in_order
+test_live_mouse_follows_resize_and_tab_line
 test_live_board_marks_moved_cards_until_they_expire
 test_rows_clip_to_viewport_with_position_marker
 test_narrow_board_stacks_and_places_cards

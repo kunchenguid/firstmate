@@ -16,6 +16,10 @@
 # cards, scrolled with up/down (j/k), focus moved with left/right (h/l), and
 # its header shows the position ("cards 1-4 of 14").  Below four columns of
 # width only the focused column is shown.
+# The mouse works too (terminal mouse reporting, SGR mode): a left click on a
+# column focuses it - on the narrow layout, a click on its name in the tab line -
+# and the wheel scrolls the column under the pointer, else the focused one.
+# Holding Shift gives the terminal's own text selection back.
 # The live loop remembers each card's column from the previous snapshot: a card
 # that turns up in a different column is drawn in a highlight colour with one
 # extra "moved from <COLUMN>" line for FM_DASHBOARD_MOVE_SECONDS (default 30)
@@ -40,6 +44,8 @@ Show firstmate's work as a kanban board in the terminal, refreshing until q.
   --focus C        with --rows, the focused column, 0 (Queued) to 3 (Done)
   --scroll N       with --rows, the first card shown in the focused column
 Keys: up/down or k/j scroll the focused column, left/right or h/l change it, q quits.
+Mouse: click a column to focus it, wheel scrolls the column under the pointer
+(hold Shift to select text with the terminal's own selection).
 EOF
 }
 
@@ -194,18 +200,30 @@ RENDER='
   | ($cols | to_entries | map(
       [([($offsets[.key] // 0), 0] | max), ([(.value.cards | length) - 1, 0] | max)] | min)) as $offs
   | ($width >= 4 * 24 + 3) as $wide
+  | (($width - 3) / 4 | floor) as $cw
   | ($rows > 0) as $clip
   | ([$rows - 4 - 4 - (if $wide then 0 else 1 end), 1] | max) as $body
   | ([
-      [
       (seg("⚓ FIRSTMATE"; "1;33") + seg("  ·  ship'"'"'s log of the "; "2") + seg($fleet; "1;37") + seg(" fleet"; "2") | fit(if $clip then $width else 100000 end) | out(0)),
       (seg("\($cols[1].cards | length) under sail · \($cols[0].cards | length) in the hold · \($cols[2].cards | length) awaiting the captain · \($cols[3].cards | length) made port"; "1") | fit(if $clip then $width else 100000 end) | out(0)),
       (seg("logged \(.generated // "-")" + (if $once then "" else " · refresh \($interval)s · q to quit" end); "2") | fit(if $clip then $width else 100000 end) | out(0)),
       ""
-    ][],
+    ]) as $head
+  # Where a click lands, from the same widths the columns are drawn with:
+  # "c <first row> <x0 x1>..." per column on the wide layout, "t <row> <x0 x1>..."
+  # per name in the tab line of the narrow one (1-based terminal cells).
+  | (($head | length) + 1) as $y0
+  | (if $wide then
+       ["c", $y0] + [range(0; 4) | (1 + . * ($cw + 1)) as $x | $x, $x + $cw - 1]
+     else
+       ["t", $y0] + ($cols | to_entries | reduce .[] as $e ({p: 1, r: []};
+           (($e.value.name | length) + (if $e.key == $focus then 2 else 0 end)) as $l
+           | .r += [.p, ([.p + $l - 1, $width] | min)] | .p += $l + 3) | .r)
+     end | map(tostring) | join(" ")) as $layout
+  | ([
+      $head[],
     (if $wide then
-       (($width - 3) / 4 | floor) as $cw
-       | ($cols | to_entries | map(column(.value; $cw; (if $clip then $body else 0 end); $offs[.key]; $clip and .key == $focus))) as $blocks
+       ($cols | to_entries | map(column(.value; $cw; (if $clip then $body else 0 end); $offs[.key]; $clip and .key == $focus))) as $blocks
        | ($blocks | map(length) | max) as $h
        | range(0; $h) as $i
        | [$blocks[] | (.[$i] // []) | out($cw)] | join(" ") | sub(" +$"; "")
@@ -217,7 +235,7 @@ RENDER='
      end)
     ]) as $lines
   | (if $clip then $lines[:$rows] else $lines end) as $shown
-  | if $live then ($offs | map(tostring) | join(" ")), ($cur | tojson), ($mvs | tojson), $shown[] else $shown[] end
+  | if $live then ($offs | map(tostring) | join(" ")), ($cur | tojson), ($mvs | tojson), $layout, $shown[] else $shown[] end
 '
 
 snapshot() {
@@ -246,8 +264,9 @@ term_height() { term_dim h; }
 term_width() { term_dim w; }
 
 # render <width> <rows> <focus> <offsets-json> <live> [<prev-json> <moves-json>]:
-# draw a snapshot; with <live> true the first three lines printed are the
-# clamped scroll offsets, the card-to-column map, and the active moves.
+# draw a snapshot; with <live> true the first four lines printed are the
+# clamped scroll offsets, the card-to-column map, the active moves, and the
+# click layout.
 render() {
   local width=$2 prev=${7:-null} moves=${8:-}
   [ -n "$moves" ] || moves='{}'
@@ -300,7 +319,8 @@ if [ ! -t 1 ]; then
   done
 fi
 
-# Live terminal: alternate screen, viewport per column, keyboard scrolling.
+# Live terminal: alternate screen, viewport per column, keyboard and mouse
+# (button reporting in SGR mode, switched off again by cleanup).
 # The tty stays unechoed for the whole session so keys typed while the board is
 # busy never print as ^[[C, and the snapshot is fetched in the background so
 # keys keep registering and the board keeps redrawing while it runs.
@@ -313,28 +333,81 @@ cleanup() {
   [ -n "$fetch_pid" ] && kill "$fetch_pid" 2>/dev/null
   rm -f "$snap_file"
   [ -n "$saved_tty" ] && stty "$saved_tty" 2>/dev/null
-  printf '\033[?1049l'
+  printf '\033[?1006l\033[?1000l\033[?1049l'
   tput cnorm 2>/dev/null || true
 }
 tput civis 2>/dev/null || true
-printf '\033[?1049h'
+printf '\033[?1049h\033[?1000h\033[?1006h'
 trap cleanup EXIT
 trap 'exit 0' INT TERM
 dirty=1
 trap 'dirty=1' WINCH
 
 # read_key <timeout>: set key from the tty, mapping arrow escapes to k/j/l/h.
+# An SGR mouse press sets key=mouse with mb/mx/my (button, column, row); a
+# release and every other escape sequence is consumed whole and reads as no key.
 read_key() {
-  local rest
+  local c seq='' n
   key=
   if [ -t 0 ]; then read -rsn1 -t "$1" key && [ -n "$key" ] || return 1; else sleep "$1"; return 1; fi
-  if [ "$key" = $'\033' ]; then
-    read -rsn2 -t 0.05 rest || rest=
-    case "$rest" in '[A') key=k ;; '[B') key=j ;; '[C') key=l ;; '[D') key=h ;; *) key= ;; esac
-  fi
+  [ "$key" = $'\033' ] || return 0
+  key=
+  read -rsn1 -t 0.05 c || return 0
+  case "$c" in
+    O) read -rsn1 -t 0.05 c || return 0
+       case "$c" in A) key=k ;; B) key=j ;; C) key=l ;; D) key=h ;; esac
+       return 0 ;;
+    '[') ;;
+    *) return 0 ;;
+  esac
+  # CSI: parameter bytes up to one final letter (or ~).
+  for ((n = 0; n < 32; n++)); do
+    read -rsn1 -t 0.05 c || break
+    seq+=$c
+    case "$c" in [A-Za-z~]) break ;; esac
+  done
+  case "$seq" in
+    A) key=k ;; B) key=j ;; C) key=l ;; D) key=h ;;
+    '<'*';'*';'*M)
+      IFS=';' read -r mb mx my <<<"${seq#<}"
+      my=${my%M}
+      case "$mb$mx$my" in ''|*[!0-9]*) ;; *) key=mouse ;; esac ;;
+  esac
+  return 0
 }
 
-focus=0 offs="0 0 0 0" json='' deadline=0 key='' prev_map=null moves='{}'
+# mouse_event: apply the press in mb/mx/my. A left click on a column (or its
+# tab) focuses it; the wheel moves the column under the pointer, else the
+# focused one. Other buttons are ignored.
+mouse_event() {
+  local mode=${lay[0]:-} y0=${lay[1]:-0} col=-1 dir=0 i
+  local -a arr
+  (( mb & 32 )) && return
+  case $((mb & 67)) in 0) ;; 64) dir=-1 ;; 65) dir=1 ;; *) return ;; esac
+  if [ "$dir" = 0 ] && [ "$mode" = t ]; then
+    [ "$my" -eq "$y0" ] || return
+  fi
+  if [ "$mode" = c ] || { [ "$mode" = t ] && [ "$dir" = 0 ]; }; then
+    if [ "$mode" = t ] || [ "$my" -ge "$y0" ]; then
+      for i in 0 1 2 3; do
+        [ "$mx" -ge "${lay[2 * i + 2]}" ] && [ "$mx" -le "${lay[2 * i + 3]}" ] && col=$i
+      done
+    fi
+  fi
+  if [ "$dir" = 0 ]; then
+    [ "$col" -ge 0 ] && [ "$col" != "$focus" ] && { focus=$col; dirty=1; }
+    return 0
+  fi
+  [ "$col" -ge 0 ] || col=$focus
+  read -ra arr <<<"$offs"
+  arr[col]=$((arr[col] + dir))
+  [ "${arr[col]}" -ge 0 ] || arr[col]=0
+  offs="${arr[*]}"
+  dirty=1
+}
+
+focus=0 offs="0 0 0 0" json='' deadline=0 key='' prev_map=null moves='{}' mb=0 mx=0 my=0
+lay=()
 while :; do
   if [ -n "$fetch_pid" ] && ! kill -0 "$fetch_pid" 2>/dev/null; then
     wait "$fetch_pid" 2>/dev/null
@@ -363,6 +436,7 @@ while :; do
           offs=${out%%$'\n'*}; out=${out#*$'\n'}
           prev_map=${out%%$'\n'*}; out=${out#*$'\n'}
           moves=${out%%$'\n'*}; out=${out#*$'\n'}
+          read -ra lay <<<"${out%%$'\n'*}"; out=${out#*$'\n'}
           ;;
       esac
     fi
@@ -380,6 +454,7 @@ while :; do
       k) arr=("$@"); [ "${arr[focus]}" -gt 0 ] && arr[focus]=$((arr[focus] - 1)); offs="${arr[*]}"; dirty=1 ;;
       l) [ "$focus" -lt 3 ] && focus=$((focus + 1)); dirty=1 ;;
       h) [ "$focus" -gt 0 ] && focus=$((focus - 1)); dirty=1 ;;
+      mouse) mouse_event ;;
     esac
     read_key 0.01 || break
   done
