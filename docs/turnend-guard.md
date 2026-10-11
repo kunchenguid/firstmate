@@ -206,7 +206,7 @@ With `state/.afk` absent the daemon lock proves nothing and the strict watcher p
 
 ### Guard grace and the poll cadence
 
-`bin/fm-watch.sh` touches `state/.last-watcher-beat` once per cycle, immediately before its terminal wait (`event_wait_or_sleep`) as well as at the top of the next cycle.
+`bin/fm-watch.sh` touches `state/.last-watcher-beat` once per cycle at the top of the poll loop, and every second at startup from the moment the singleton lock is claimed until the blocking recovery-marker transitions finish; that startup beat and those transitions' lock waits both end at the watcher stall bound, so a wedged startup still goes stale.
 A healthy watcher's beacon can therefore legitimately age up to `FM_POLL` seconds between touches.
 
 A fixed 300-second grace default stops correctly bounding staleness once a home's `FM_POLL` reaches or exceeds it.

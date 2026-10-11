@@ -60,9 +60,13 @@
 # reordering. Terminal URLs settle separately before the forge budget starts
 # and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# attempted at most once per poll and its observation applied to every owner.
-# A final observation applies
+# unmeasured, rather than being mislabeled unavailable. A URL whose
+# observation fails is retried once while the budget still covers a full
+# observation reserve, so a transient forge failure or a head that moved
+# mid-read costs one extra read rather than a false unavailable wake; only a
+# second consecutive failure records the error. Each distinct URL is
+# otherwise attempted at most once per poll and its observation applied to
+# every owner. A final observation applies
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
 # next URL that still has a full observation reserve; only a genuine forge
@@ -397,6 +401,14 @@ poll() {
     observed=0
     observe "$url" || observed=$?
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
+    # One retry while the budget still covers a full observation: a transient
+    # forge failure or a head that moved mid-read costs one extra observation
+    # rather than a false unavailable error and wake.
+    if [ "$observed" -ne 0 ] && [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ]; then
+      observed=0
+      observe "$url" || observed=$?
+      [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
+    fi
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;

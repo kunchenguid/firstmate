@@ -70,28 +70,32 @@ wait_live() {
 # machine a short fixed budget can reap a round before the cycle it asserts on
 # ever ran - and then every "no wake, no marker" assertion passes vacuously
 # while every "marker written" assertion fails spuriously.
-# The liveness beacon is touched at the TOP of every poll, so this drops any
-# beacon left by an earlier round, waits for THIS watcher to write a fresh one
-# (some poll's top), then waits for that one to advance (the next poll's top) -
-# and the whole cycle in between is what the caller's assertions describe.
+# The liveness beacon is touched at the TOP of every poll, and also during
+# startup until the blocking recovery-marker transitions finish, so this drops
+# any beacon left by an earlier round, waits for THIS watcher to write a fresh
+# one (a startup beat or some poll's top), then waits for two more advances -
+# a whole cycle once startup is done - and the cycle in between is what the
+# caller's assertions describe.
 # 0 if the watcher is still alive after a completed cycle, 1 if it exited.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
-  local state=$1 pid=$2 limit=${3:-300} beat first now i=0
+  local state=$1 pid=$2 limit=${3:-300} beat prev now advances=0 i=0
   beat="$state/.last-watcher-beat"
   rm -f "$beat"
-  first=""
+  prev=""
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    first=$(file_mtime "$beat")
-    [ -n "$first" ] && break
+    prev=$(file_mtime "$beat")
+    [ -n "$prev" ] && break
     sleep 0.1
     i=$((i + 1))
   done
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
     now=$(file_mtime "$beat")
-    if [ -n "$now" ] && [ "$now" != "$first" ]; then
-      return 0
+    if [ -n "$now" ] && [ "$now" != "$prev" ]; then
+      prev=$now
+      advances=$((advances + 1))
+      [ "$advances" -ge 2 ] && return 0
     fi
     sleep 0.1
     i=$((i + 1))
@@ -6240,6 +6244,54 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+test_startup_beat_lands_before_blocking_startup_locks() {
+  local dir state fakebin out pid holder i
+  dir=$(make_case startup-beat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # A live holder on the wake-queue lock blocks the watcher's recovery-marker
+  # startup transitions before the first poll; the startup beat must still land
+  # so a racing arm never refuses a live watcher as a stale-heartbeat holder.
+  # The holder keeps the lock until the test creates the release marker.
+  (
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$state/.wake-queue.lock" || exit 1
+    : > "$dir/holding"
+    i=0
+    while [ "$i" -lt 300 ] && [ ! -e "$dir/release" ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    fm_lock_release "$state/.wake-queue.lock" || true
+  ) &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$dir/holding" ]; do
+    kill -0 "$holder" 2>/dev/null || fail 'lock holder died before taking the wake-queue lock'
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/holding" ] || fail 'lock holder did not take the wake-queue lock'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  # The beacon must appear while the watcher is still blocked before its first
+  # poll and the lock is still held.
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "watcher exited during blocked startup: $(cat "$out")"; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/release" ] && { reap "$pid"; fail 'lock holder released before the startup beat landed'; }
+  [ -e "$state/.last-watcher-beat" ] || { reap "$pid"; fail 'the watcher beat did not land while startup was blocked on the wake-queue lock'; }
+  # Once the holder releases, the poll loop takes over and the beacon advances.
+  : > "$dir/release"
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "watcher did not poll after the startup lock cleared: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "blocked-startup watcher printed a wake: $(cat "$out")"; }
+  reap "$pid"
+  wait "$holder" 2>/dev/null || true
+  pass 'a watcher blocked on a startup lock beats at lock claim and polls once it clears'
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_signal_records_heartbeat_endpoint() {
@@ -6740,6 +6792,7 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
+test_startup_beat_lands_before_blocking_startup_locks
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
