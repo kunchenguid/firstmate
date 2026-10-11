@@ -149,6 +149,19 @@
 # These refusals are not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Nothing of this task's
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
+# A two-record collision has one explicit recovery, including a legacy collision
+# with no claim and a collision whose validated claim names the expected current
+# owner:
+# `fm-teardown.sh <obsolete> --force --retire-stale-owner <current>`. It locks
+# both same-home records plus the Treehouse project, proves that they are the
+# only two records naming one canonical project slot, requires the obsolete
+# endpoint to be agent-free and the shared slot plus obsolete tasktmp to have no
+# cwd-rooted process, then retires only the obsolete task's records and backlog
+# transition. It never reads the flag as age or ordering evidence, never closes
+# an endpoint, and never touches the shared checkout, branch, processes, claim,
+# or current-owner record. Unknown, remote, cross-home, cross-project,
+# non-Treehouse, Orca, third-owner, path-drifted, live-agent, unsafe-claim, and
+# changing evidence all refuse before the close marker is written.
 # Orca is not a pool slot and proves its path through
 # require_orca_worktree_path_match instead.
 # Orca tasks use the same safety checks, then close the recorded terminal and
@@ -179,10 +192,13 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--retire-stale-owner <current-task-id>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --retire-stale-owner <current-task-id> is the records-only recovery above.
+#   It requires --force as explicit discard authority and names the expected
+#   current owner; ordinary --force never implies or enables this recovery.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -390,11 +406,21 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+STALE_OWNER_RECOVERY_ID=
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --retire-stale-owner)
+      if [ -n "$STALE_OWNER_RECOVERY_ID" ] || [ "$#" -lt 2 ] \
+         || ! fm_task_id_path_safe "$2"; then
+        echo "error: --retire-stale-owner requires one valid expected current-owner task id" >&2
+        exit 2
+      fi
+      STALE_OWNER_RECOVERY_ID=$2
+      shift
+      ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -402,6 +428,16 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ -n "$STALE_OWNER_RECOVERY_ID" ]; then
+  [ "$STALE_OWNER_RECOVERY_ID" != "$ID" ] || {
+    echo "error: --retire-stale-owner must name a task other than obsolete task $ID" >&2
+    exit 2
+  }
+  [ "$FORCE" = --force ] || {
+    echo "error: stale-owner retirement requires --force as explicit discard authority" >&2
+    exit 2
+  }
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -451,6 +487,11 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
 fi
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
+STALE_OWNER_CONTROL_LOCK=
+STALE_OWNER_CONTROL_LOCK_HELD=0
+STALE_OWNER_META=
+STALE_OWNER_META_LOCK=
+STALE_OWNER_META_LOCK_HELD=0
 SM_LIVENESS_LOCK=
 META_LOCK=
 META_LOCK_HELD=0
@@ -480,6 +521,14 @@ teardown_release_locks() {
   if [ -n "${LOCAL_REGISTRY_LOCK:-}" ]; then
     fm_lock_release "$LOCAL_REGISTRY_LOCK" || true
     LOCAL_REGISTRY_LOCK=
+  fi
+  if [ "$STALE_OWNER_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$STALE_OWNER_META_LOCK" || true
+    STALE_OWNER_META_LOCK_HELD=0
+  fi
+  if [ "$STALE_OWNER_CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$STALE_OWNER_CONTROL_LOCK" || true
+    STALE_OWNER_CONTROL_LOCK_HELD=0
   fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
@@ -524,6 +573,19 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+if [ -n "$STALE_OWNER_RECOVERY_ID" ]; then
+  case "$TEARDOWN_META_KIND" in
+    ship|scout) ;;
+    *)
+      echo "REFUSED: stale-owner retirement applies only to an ordinary local Treehouse ship or scout; nothing was changed" >&2
+      exit 1
+      ;;
+  esac
+  [ -z "$(fm_meta_get "$META" remote_host)" ] || {
+    echo "REFUSED: stale-owner retirement does not cross a remote task route; nothing was changed" >&2
+    exit 1
+  }
+fi
 # Retiring a persistent secondmate is main's alone in both postures; the kind
 # is read under the metadata lock (role partition: bin/fm-lease-lib.sh).
 [ "$TEARDOWN_META_KIND" != secondmate ] || fm_lease_forbid_branch "secondmate retirement (fm-teardown)"
@@ -1118,6 +1180,10 @@ fi
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
+if [ "$TEARDOWN_WINDOWLESS_SHAPE" = 1 ] && [ -n "$STALE_OWNER_RECOVERY_ID" ]; then
+  echo "REFUSED: stale-owner retirement for obsolete task $ID and expected current owner $STALE_OWNER_RECOVERY_ID: the obsolete record has no endpoint that can prove its agent absent; nothing was changed" >&2
+  exit 1
+fi
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
   BACKEND=tmux
   T=
@@ -2337,17 +2403,6 @@ teardown_live_slot_path() {
   canonical_existing_dir "$WT"
 }
 
-# Every local Firstmate state directory whose records can name a pool slot this
-# task's slot might also be; bin/fm-wake-lib.sh's fm_local_firstmate_state_dirs
-# owns the walk and what it refuses.
-collect_local_firstmate_states() {
-  fm_local_firstmate_state_dirs "$1" || {
-    echo "REFUSED: $FM_LOCAL_FIRSTMATE_ERROR; nothing was changed" >&2
-    return 1
-  }
-  TREEHOUSE_OWNER_STATES=("${FM_LOCAL_FIRSTMATE_STATES[@]}")
-}
-
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
@@ -2358,8 +2413,8 @@ require_exclusive_worktree_slot_record() {
   # block the claimant's own teardown behind it.
   fm_treehouse_slot_owner_state "$slot" "$record_id"
   [ "$FM_TREEHOUSE_SLOT_OWNER" != other ] || return 0
-  collect_local_firstmate_states "$record_state" || return 1
-  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
+  fm_treehouse_collect_local_states "$record_state" || return 1
+  for state_dir in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
       # Identity, not spelling: the same record reached through a differently
@@ -3324,8 +3379,435 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
-require_owned_task_worktree_slot || exit 1
+stale_owner_refuse() {
+  echo "REFUSED: stale-owner retirement for obsolete task $ID and expected current owner $STALE_OWNER_RECOVERY_ID: $*; nothing was changed" >&2
+  return 1
+}
+
+STALE_OWNER_META_VALUE=
+stale_owner_meta_value_once() {  # <meta> <field> <required: 0|1>
+  local meta=$1 field=$2 required=$3 count
+  STALE_OWNER_META_VALUE=
+  count=$(LC_ALL=C awk -F= -v key="$field" '$1 == key { count++ } END { print count + 0 }' "$meta" 2>/dev/null) \
+    || return 1
+  if [ "$count" -gt 1 ] || { [ "$required" = 1 ] && [ "$count" -ne 1 ]; }; then
+    return 1
+  fi
+  [ "$count" -eq 1 ] || return 0
+  STALE_OWNER_META_VALUE=$(fm_meta_get "$meta" "$field")
+}
+
+stale_owner_file_fingerprint() {  # <path> <required: 0|1>
+  local path=$1 required=$2
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    [ "$required" = 0 ] || return 1
+    printf 'absent\n'
+    return 0
+  fi
+  [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+  git hash-object "$path" 2>/dev/null
+}
+
+stale_owner_untracked_fingerprint() {  # <canonical-slot>
+  local slot=$1 rel fp target executable aggregate=
+  # `git diff HEAD` covers tracked contents and modes, while status covers the
+  # untracked names only. Bind every untracked file's bytes (and symlink target)
+  # too, using length prefixes so unusual path bytes cannot alias one another.
+  git -C "$slot" status --porcelain=v2 -z --untracked-files=all >/dev/null 2>&1 || return 1
+  git -C "$slot" ls-files --others --exclude-standard -z >/dev/null 2>&1 || return 1
+  while IFS= read -r -d '' rel; do
+    case "$rel" in
+      /*|../*|*/../*|*/..) return 1 ;;
+    esac
+    if [ -L "$slot/$rel" ]; then
+      target=$(readlink "$slot/$rel") || return 1
+      fp=$(printf 'symlink:%s' "$target" | git hash-object --stdin 2>/dev/null) || return 1
+      executable='link'
+    elif [ -f "$slot/$rel" ]; then
+      fp=$(git hash-object --no-filters -- "$slot/$rel" 2>/dev/null) || return 1
+      if [ -x "$slot/$rel" ]; then executable=x; else executable=-; fi
+    else
+      return 1
+    fi
+    aggregate+="${#rel}:$rel:$executable:$fp;"
+  done < <(git -C "$slot" ls-files --others --exclude-standard -z 2>/dev/null)
+  printf '%s' "$aggregate" | git hash-object --stdin 2>/dev/null
+}
+
+stale_owner_command_fingerprint() {  # <command> [arg...]
+  local tmp fp rc=0
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-stale-owner-fingerprint.XXXXXX") || return 1
+  "$@" > "$tmp" 2>/dev/null || rc=1
+  if [ "$rc" -eq 0 ]; then
+    fp=$(git hash-object "$tmp" 2>/dev/null) || rc=1
+  fi
+  rm -f "$tmp"
+  [ "$rc" -eq 0 ] || return 1
+  printf '%s\n' "$fp"
+}
+
+stale_owner_slot_fingerprint() {  # <canonical-slot>
+  local slot=$1 marker pool_state meta_fp current_fp marker_fp pool_fp head branch diff_fp status_fp untracked_fp
+  meta_fp=$(stale_owner_file_fingerprint "$META" 1) || return 1
+  current_fp=$(stale_owner_file_fingerprint "$STALE_OWNER_META" 1) || return 1
+  marker=$(fm_treehouse_slot_owner_marker "$slot") || return 1
+  marker_fp=$(stale_owner_file_fingerprint "$marker" 0) || return 1
+  pool_state="$(dirname "$(dirname "$slot")")/treehouse-state.json"
+  pool_fp=$(stale_owner_file_fingerprint "$pool_state" 1) || return 1
+  head=$(git -C "$slot" rev-parse --verify HEAD 2>/dev/null) || return 1
+  branch=$(git -C "$slot" symbolic-ref --quiet --short HEAD 2>/dev/null || printf 'HEAD\n')
+  diff_fp=$(stale_owner_command_fingerprint git -C "$slot" diff --binary HEAD) || return 1
+  status_fp=$(stale_owner_command_fingerprint git -C "$slot" status --porcelain=v2 -z --untracked-files=all) || return 1
+  untracked_fp=$(stale_owner_untracked_fingerprint "$slot") || return 1
+  printf '%s\n' "$meta_fp|$current_fp|$marker_fp|$pool_fp|$head|$branch|$diff_fp|$status_fp|$untracked_fp" \
+    | git hash-object --stdin 2>/dev/null
+}
+
+stale_owner_record_set_validate() {  # <canonical-slot>
+  local slot=$1 state_dir other other_id field count other_path other_slot matched
+  local obsolete_seen=0 current_seen=0 matches=0
+  fm_treehouse_collect_local_states "$STATE" || return 1
+  for state_dir in "${FM_TREEHOUSE_OWNER_STATES[@]}"; do
+    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || {
+      stale_owner_refuse "a local state directory is unavailable or unsafe at $state_dir"
+      return 1
+    }
+    for other in "$state_dir"/*.meta; do
+      [ -e "$other" ] || [ -L "$other" ] || continue
+      [ -f "$other" ] && [ ! -L "$other" ] && [ -r "$other" ] || {
+        stale_owner_refuse "task ownership evidence is unreadable or unsafe at $other"
+        return 1
+      }
+      matched=0
+      for field in worktree home; do
+        count=$(LC_ALL=C awk -F= -v key="$field" '$1 == key { count++ } END { print count + 0 }' "$other" 2>/dev/null) \
+          || {
+            stale_owner_refuse "task ownership evidence could not be read at $other"
+            return 1
+          }
+        [ "$count" -le 1 ] || {
+          stale_owner_refuse "task ownership evidence is ambiguous at $other ($field appears $count times)"
+          return 1
+        }
+        [ "$count" -eq 1 ] || continue
+        other_path=$(fm_meta_get "$other" "$field")
+        [ -n "$other_path" ] || continue
+        if [ "$other_path" = "$WT" ]; then
+          other_slot=$slot
+        else
+          other_slot=$(canonical_existing_dir "$other_path" 2>/dev/null || true)
+        fi
+        [ "$other_slot" = "$slot" ] || continue
+        [ "$field" = worktree ] || {
+          stale_owner_refuse "task $(basename "$other" .meta) also names the shared slot as a home"
+          return 1
+        }
+        matched=1
+      done
+      [ "$matched" -eq 1 ] || continue
+      matches=$((matches + 1))
+      other_id=$(basename "$other" .meta)
+      if [ "$other_id" = "$ID" ] && [ "$other" -ef "$META" ]; then
+        obsolete_seen=$((obsolete_seen + 1))
+      elif [ "$other_id" = "$STALE_OWNER_RECOVERY_ID" ] && [ "$other" -ef "$STALE_OWNER_META" ]; then
+        current_seen=$((current_seen + 1))
+      else
+        stale_owner_refuse "third owner evidence names task $other_id at $other"
+        return 1
+      fi
+    done
+  done
+  [ "$matches" -eq 2 ] && [ "$obsolete_seen" -eq 1 ] && [ "$current_seen" -eq 1 ] || {
+    stale_owner_refuse "the shared slot does not have exactly the obsolete and expected current-owner records"
+    return 1
+  }
+}
+
+STALE_OWNER_SLOT=
+STALE_OWNER_EVIDENCE=
+STALE_OWNER_OBSOLETE_ENDPOINT_STATE=
+stale_owner_evidence_validate() {  # <initial|recheck>
+  local phase=$1 obsolete_kind obsolete_backend obsolete_remote
+  local current_project current_worktree current_kind current_backend current_remote current_tasktmp
+  local obsolete_project_real current_project_real obsolete_slot current_slot current_home_real claim_home_real
+  local obsolete_tasktmp_real='' current_tasktmp_real=''
+  local endpoint_backend endpoint_target endpoint_state endpoint_absence snapshot
+
+  stale_owner_meta_value_once "$META" project 1 || {
+    stale_owner_refuse "the obsolete record has unreadable or ambiguous project evidence"
+    return 1
+  }
+  [ -n "$STALE_OWNER_META_VALUE" ] || {
+    stale_owner_refuse "the obsolete record has no project"
+    return 1
+  }
+  obsolete_project_real=$(canonical_existing_dir "$STALE_OWNER_META_VALUE") || {
+    stale_owner_refuse "the obsolete record's project cannot be canonicalized"
+    return 1
+  }
+  stale_owner_meta_value_once "$META" worktree 1 || {
+    stale_owner_refuse "the obsolete record has unreadable or ambiguous worktree evidence"
+    return 1
+  }
+  [ -n "$STALE_OWNER_META_VALUE" ] || {
+    stale_owner_refuse "the obsolete record has no worktree"
+    return 1
+  }
+  obsolete_slot=$(canonical_existing_dir "$STALE_OWNER_META_VALUE") || {
+    stale_owner_refuse "the obsolete record's worktree cannot be canonicalized"
+    return 1
+  }
+  stale_owner_meta_value_once "$META" kind 0 || {
+    stale_owner_refuse "the obsolete record's kind is ambiguous"
+    return 1
+  }
+  obsolete_kind=${STALE_OWNER_META_VALUE:-ship}
+  case "$obsolete_kind" in ship|scout) ;; *)
+    stale_owner_refuse "the obsolete record is not an ordinary task"
+    return 1
+    ;;
+  esac
+  stale_owner_meta_value_once "$META" backend 0 || {
+    stale_owner_refuse "the obsolete record's backend is ambiguous"
+    return 1
+  }
+  obsolete_backend=${STALE_OWNER_META_VALUE:-tmux}
+  [ "$obsolete_backend" != orca ] || {
+    stale_owner_refuse "Orca-owned worktrees are not Treehouse stale-owner recovery candidates"
+    return 1
+  }
+  stale_owner_meta_value_once "$META" remote_host 0 || {
+    stale_owner_refuse "the obsolete record's remote route is ambiguous"
+    return 1
+  }
+  obsolete_remote=$STALE_OWNER_META_VALUE
+  [ -z "$obsolete_remote" ] || {
+    stale_owner_refuse "the obsolete record is remote"
+    return 1
+  }
+
+  stale_owner_meta_value_once "$STALE_OWNER_META" project 1 || {
+    stale_owner_refuse "the expected current-owner record has unreadable or ambiguous project evidence"
+    return 1
+  }
+  current_project=$STALE_OWNER_META_VALUE
+  current_project_real=$(canonical_existing_dir "$current_project") || {
+    stale_owner_refuse "the expected current-owner project cannot be canonicalized"
+    return 1
+  }
+  [ "$current_project_real" = "$obsolete_project_real" ] || {
+    stale_owner_refuse "the two records name different canonical projects"
+    return 1
+  }
+  stale_owner_meta_value_once "$STALE_OWNER_META" worktree 1 || {
+    stale_owner_refuse "the expected current-owner record has unreadable or ambiguous worktree evidence"
+    return 1
+  }
+  current_worktree=$STALE_OWNER_META_VALUE
+  current_slot=$(canonical_existing_dir "$current_worktree") || {
+    stale_owner_refuse "the expected current-owner worktree cannot be canonicalized"
+    return 1
+  }
+  [ "$current_slot" = "$obsolete_slot" ] || {
+    stale_owner_refuse "the two records do not name the same canonical slot"
+    return 1
+  }
+  if ! fm_treehouse_pool_slot "$obsolete_project_real" "$obsolete_slot" \
+     || ! fm_treehouse_pool_slot "$current_project_real" "$current_slot"; then
+    stale_owner_refuse "both records do not prove one managed Treehouse project slot"
+    return 1
+  fi
+
+  stale_owner_meta_value_once "$STALE_OWNER_META" kind 0 || {
+    stale_owner_refuse "the expected current-owner kind is ambiguous"
+    return 1
+  }
+  current_kind=${STALE_OWNER_META_VALUE:-ship}
+  case "$current_kind" in ship|scout) ;; *)
+    stale_owner_refuse "the expected current owner is not an ordinary task"
+    return 1
+  esac
+  stale_owner_meta_value_once "$STALE_OWNER_META" backend 0 || {
+    stale_owner_refuse "the expected current-owner backend is ambiguous"
+    return 1
+  }
+  current_backend=${STALE_OWNER_META_VALUE:-tmux}
+  [ "$BACKEND" != orca ] && [ "$current_backend" != orca ] || {
+    stale_owner_refuse "Orca-owned worktrees are not Treehouse stale-owner recovery candidates"
+    return 1
+  }
+  stale_owner_meta_value_once "$STALE_OWNER_META" remote_host 0 || {
+    stale_owner_refuse "the expected current-owner remote route is ambiguous"
+    return 1
+  }
+  current_remote=$STALE_OWNER_META_VALUE
+  [ -z "$current_remote" ] || {
+    stale_owner_refuse "the expected current-owner record is remote"
+    return 1
+  }
+  fm_backend_validate_task_endpoint "$STALE_OWNER_META" "$STALE_OWNER_RECOVERY_ID" || {
+    stale_owner_refuse "the expected current-owner endpoint identity is invalid"
+    return 1
+  }
+
+  stale_owner_record_set_validate "$obsolete_slot" || return 1
+  fm_treehouse_slot_owner_state "$obsolete_slot" "$STALE_OWNER_RECOVERY_ID"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    absent) ;;
+    mine)
+      [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] || {
+        stale_owner_refuse "the slot claim names the expected current owner without a home"
+        return 1
+      }
+      current_home_real=$(canonical_existing_dir "$FM_HOME") || return 1
+      claim_home_real=$(canonical_existing_dir "$FM_TREEHOUSE_SLOT_OWNER_HOME") || {
+        stale_owner_refuse "the slot claim's home cannot be canonicalized"
+        return 1
+      }
+      [ "$claim_home_real" = "$current_home_real" ] || {
+        stale_owner_refuse "the slot claim assigns the expected task id to another home"
+        return 1
+      }
+      ;;
+    other)
+      stale_owner_refuse "the slot claim names task $FM_TREEHOUSE_SLOT_OWNER_ID instead of expected current owner $STALE_OWNER_RECOVERY_ID"
+      return 1
+      ;;
+    *)
+      stale_owner_refuse "the slot's owner claim is unreadable or ambiguous"
+      return 1
+      ;;
+  esac
+
+  if ! fm_backend_validate_task_endpoint "$META" "$ID" >/dev/null 2>&1; then
+    stale_owner_refuse "the obsolete endpoint identity is invalid or absent"
+    return 1
+  fi
+  endpoint_backend=$FM_BACKEND_VALIDATED_BACKEND
+  endpoint_target=$FM_BACKEND_VALIDATED_TARGET
+  fm_control_backend_state_verified "$endpoint_backend" || {
+    stale_owner_refuse "the obsolete endpoint has no recovery-grade agent-state classifier"
+    return 1
+  }
+  endpoint_state=$(fm_backend_agent_state "$endpoint_backend" "$endpoint_target")
+  if [ "$endpoint_state" = missing ]; then
+    endpoint_absence=$(fm_control_endpoint_absence_verdict "$endpoint_backend" "$endpoint_target")
+    case "${endpoint_absence%%$'\t'*}" in
+      gone) ;;
+      dead) endpoint_state=dead ;;
+      *)
+        stale_owner_refuse "the obsolete endpoint reads missing, but its absence cannot be proven"
+        return 1
+        ;;
+    esac
+  fi
+  case "$endpoint_state" in dead|missing) ;; *)
+    stale_owner_refuse "the obsolete endpoint reads '$endpoint_state', not confidently agent-free"
+    return 1
+  esac
+  STALE_OWNER_OBSOLETE_ENDPOINT_STATE=$endpoint_state
+
+  stale_owner_meta_value_once "$META" tasktmp 0 || {
+    stale_owner_refuse "the obsolete tasktmp evidence is ambiguous"
+    return 1
+  }
+  TASK_TMP=$STALE_OWNER_META_VALUE
+  stale_owner_meta_value_once "$STALE_OWNER_META" tasktmp 0 || {
+    stale_owner_refuse "the expected current-owner tasktmp evidence is ambiguous"
+    return 1
+  }
+  current_tasktmp=$STALE_OWNER_META_VALUE
+  [ -z "$TASK_TMP" ] || [ "$TASK_TMP" = "/tmp/fm-$ID" ] || {
+    stale_owner_refuse "the obsolete tasktmp does not match its deterministic task path"
+    return 1
+  }
+  [ -z "$current_tasktmp" ] || [ "$current_tasktmp" = "/tmp/fm-$STALE_OWNER_RECOVERY_ID" ] || {
+    stale_owner_refuse "the expected current-owner tasktmp does not match its deterministic task path"
+    return 1
+  }
+  if [ -n "$TASK_TMP" ] && { [ -e "$TASK_TMP" ] || [ -L "$TASK_TMP" ]; }; then
+    [ -d "$TASK_TMP" ] && [ ! -L "$TASK_TMP" ] && [ -O "$TASK_TMP" ] \
+      && [ -z "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] || {
+      stale_owner_refuse "the obsolete tasktmp path is unsafe"
+      return 1
+    }
+    obsolete_tasktmp_real=$(canonical_existing_dir "$TASK_TMP") || return 1
+    [ "$obsolete_tasktmp_real" != "$obsolete_slot" ] || {
+      stale_owner_refuse "the obsolete tasktmp resolves to the shared slot"
+      return 1
+    }
+  fi
+  if [ -n "$current_tasktmp" ] && { [ -e "$current_tasktmp" ] || [ -L "$current_tasktmp" ]; }; then
+    [ -d "$current_tasktmp" ] && [ ! -L "$current_tasktmp" ] || {
+      stale_owner_refuse "the expected current-owner tasktmp path is unsafe"
+      return 1
+    }
+    current_tasktmp_real=$(canonical_existing_dir "$current_tasktmp") || return 1
+  fi
+  if [ -n "$obsolete_tasktmp_real" ] && [ "$obsolete_tasktmp_real" = "$current_tasktmp_real" ]; then
+    stale_owner_refuse "the obsolete and current-owner records share one tasktmp path"
+    return 1
+  fi
+  if ! task_pids_under_roots "$obsolete_slot" "$TASK_TMP"; then
+    stale_owner_refuse "process ownership under the shared slot or obsolete tasktmp could not be read"
+    return 1
+  fi
+  [ -z "$TASK_PIDS" ] || {
+    stale_owner_refuse "processes still have a current working directory under the shared slot or obsolete tasktmp: $(printf '%s' "$TASK_PIDS" | tr '\n' ' ')"
+    return 1
+  }
+
+  snapshot=$(stale_owner_slot_fingerprint "$obsolete_slot") || {
+    stale_owner_refuse "the locked ownership and checkout evidence could not be fingerprinted"
+    return 1
+  }
+  if [ "$phase" = initial ]; then
+    STALE_OWNER_SLOT=$obsolete_slot
+    STALE_OWNER_EVIDENCE=$snapshot
+  elif [ "$obsolete_slot" != "$STALE_OWNER_SLOT" ] || [ "$snapshot" != "$STALE_OWNER_EVIDENCE" ]; then
+    stale_owner_refuse "the ownership or checkout evidence changed during verification"
+    return 1
+  fi
+}
+
+stale_owner_recovery_prepare() {
+  STALE_OWNER_META="$STATE/$STALE_OWNER_RECOVERY_ID.meta"
+  [ -f "$STALE_OWNER_META" ] && [ ! -L "$STALE_OWNER_META" ] || {
+    stale_owner_refuse "the expected current-owner record is absent or unsafe at $STALE_OWNER_META"
+    return 1
+  }
+  [ ! "$META" -ef "$STALE_OWNER_META" ] || {
+    stale_owner_refuse "the two task names resolve to one ambiguous record"
+    return 1
+  }
+  STALE_OWNER_CONTROL_LOCK="$STATE/.control-$STALE_OWNER_RECOVERY_ID.lock"
+  fm_lock_try_acquire "$STALE_OWNER_CONTROL_LOCK" || {
+    stale_owner_refuse "another lifecycle action is running for the expected current owner"
+    return 1
+  }
+  STALE_OWNER_CONTROL_LOCK_HELD=1
+  STALE_OWNER_META_LOCK=$(fm_meta_lock_path "$STALE_OWNER_META") || return 1
+  fm_lock_try_acquire "$STALE_OWNER_META_LOCK" || {
+    stale_owner_refuse "the expected current-owner record is changing"
+    return 1
+  }
+  STALE_OWNER_META_LOCK_HELD=1
+  fm_backlog_record_present "$STALE_OWNER_META" "expected current-owner record" "$STATE" || {
+    stale_owner_refuse "$FM_BACKLOG_TRANSITION_ERROR"
+    return 1
+  }
+  stale_owner_evidence_validate initial || return 1
+  TEARDOWN_SLOT_REASSIGNED=1
+  TEARDOWN_SLOT_REASSIGNED_TO=$STALE_OWNER_RECOVERY_ID
+  TEARDOWN_SLOT_REASSIGNED_HOME=$FM_HOME
+}
+
+if [ -n "$STALE_OWNER_RECOVERY_ID" ]; then
+  stale_owner_recovery_prepare || exit 1
+else
+  require_exclusive_task_worktree_slot || exit 1
+  require_owned_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3458,11 +3940,19 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ -z "$STALE_OWNER_RECOVERY_ID" ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+fi
+
+# Bind the records-only authorization to a second complete read immediately
+# before the crash-safe close marker. Both task records and the project remain
+# locked, and any changed endpoint, process, claim, checkout, or record refuses
+# before recovery state can authorize a later replay.
+if [ -n "$STALE_OWNER_RECOVERY_ID" ]; then
+  stale_owner_evidence_validate recheck || exit 1
 fi
 
 BACKLOG_CLOSED=0
@@ -3550,10 +4040,11 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+if [ "$KIND" != secondmate ] && [ -z "$STALE_OWNER_RECOVERY_ID" ] \
+   && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
-elif [ "$KIND" != secondmate ]; then
+elif [ "$KIND" != secondmate ] && [ -z "$STALE_OWNER_RECOVERY_ID" ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
 if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend" ]; then
@@ -3564,10 +4055,15 @@ fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
-"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+# A records-only stale-owner retirement performs no process lifecycle action.
+if [ -z "$STALE_OWNER_RECOVERY_ID" ]; then
+  "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+if [ -n "$STALE_OWNER_RECOVERY_ID" ]; then
+  :
+elif [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
@@ -3639,7 +4135,7 @@ teardown_herdr_journal_orphaned() {
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
+if [ -z "$STALE_OWNER_RECOVERY_ID" ] && [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
@@ -3656,7 +4152,9 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+if [ -n "$STALE_OWNER_RECOVERY_ID" ]; then
+  :
+elif [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
@@ -3699,7 +4197,7 @@ fi
 # the locked close. Only a structured not-found proves the pane gone; unknown
 # presence, missing or malformed endpoint identity, and missing confirmation
 # machinery all refuse.
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ -z "$STALE_OWNER_RECOVERY_ID" ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
@@ -3741,10 +4239,15 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+if [ -z "$STALE_OWNER_RECOVERY_ID" ]; then
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+fi
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Records-only stale-owner retirement deliberately leaves every external path.
+if [ -z "$STALE_OWNER_RECOVERY_ID" ] && [ -n "$TASK_TMP" ]; then
+  rm -rf "$TASK_TMP"
+fi
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {
@@ -3763,7 +4266,7 @@ teardown_launch_home_token() {
   printf '%s' "$hash"
 }
 LAUNCH_HOME_TOKEN=$(teardown_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
-if [ -n "$LAUNCH_HOME_TOKEN" ]; then
+if [ -z "$STALE_OWNER_RECOVERY_ID" ] && [ -n "$LAUNCH_HOME_TOKEN" ]; then
   rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
@@ -3795,7 +4298,8 @@ rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
 # live projected workspace - a version 2 binding of some other pane, or a
 # version 1 attempt whose token-bearing workspace is still present - which the
 # session-start sweep alone may judge (header).
-if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+if [ -z "$STALE_OWNER_RECOVERY_ID" ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   if teardown_herdr_journal_orphaned; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
   else
@@ -3835,7 +4339,8 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
+if [ -z "$STALE_OWNER_RECOVERY_ID" ] \
+   && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 # A secondmate retirement may remove the home containing an overridden control
@@ -3843,7 +4348,9 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
-if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
+if [ -n "$STALE_OWNER_RECOVERY_ID" ]; then
+  echo "teardown $ID complete (explicit stale-owner retirement; shared Treehouse slot $WT left untouched for expected current owner $STALE_OWNER_RECOVERY_ID; obsolete endpoint $STALE_OWNER_OBSOLETE_ENDPOINT_STATE)"
+elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"

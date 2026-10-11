@@ -720,8 +720,8 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   out=$(run_spawn "$id" --scout)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
-  assert_contains "$out" "could not claim Treehouse pool slot" \
-    "spawn did not name the unclaimable slot as the reason"
+  assert_contains "$out" "unreadable or ambiguous owner claim" \
+    "spawn did not name the unclaimable ownership evidence as the reason"
   [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
@@ -741,6 +741,192 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
     || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+}
+
+# Treehouse leases the interactive worker process, while Firstmate owns the task
+# until its durable record is retired. A host crash can therefore make a slot
+# look free to Treehouse first. Spawn must reconcile that mismatch before it
+# replaces the claim or refreshes the shared checkout.
+test_pool_slot_recorded_owner_refuses_reuse_before_mutation() {
+  local rec id obsolete out status before old_hash foreign claim_hash
+
+  id='pool-slot-new-owner-r1'
+  obsolete='pool-slot-old-owner-r1'
+  rec=$(make_case slot-recorded-owner "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  fm_write_meta "$HOME_DIR/state/$obsolete.meta" \
+    "window=firstmate:fm-$obsolete" "endpoint_task_id=$obsolete" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  old_hash=$(git hash-object "$HOME_DIR/state/$obsolete.meta")
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn reused a Treehouse slot still named by a local task record"
+  assert_contains "$out" "still records that Treehouse slot" \
+    "spawn did not explain the durable-owner refusal"
+  assert_contains "$out" "$obsolete" "spawn did not name the recorded owner"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused slot reuse published new task metadata"
+  [ "$(git hash-object "$HOME_DIR/state/$obsolete.meta")" = "$old_hash" ] \
+    || fail "refused slot reuse changed the existing task record"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "refused slot reuse refreshed or reset the shared checkout"
+  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
+    || fail "refused slot reuse replaced an absent claim"
+
+  id='pool-slot-new-ambiguous-r1'
+  obsolete='pool-slot-old-ambiguous-r1'
+  rec=$(make_case slot-recorded-ambiguous "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  fm_write_meta "$HOME_DIR/state/$obsolete.meta" \
+    "window=firstmate:fm-$obsolete" "endpoint_task_id=$obsolete" \
+    "worktree=$POOL_DIR" "worktree=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=scout"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn reused a slot beside ambiguous durable ownership evidence"
+  assert_contains "$out" "unreadable or ambiguous" \
+    "spawn did not explain the ambiguous durable-owner refusal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "ambiguous-owner refusal published new task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "ambiguous-owner refusal refreshed or reset the shared checkout"
+  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
+    || fail "ambiguous-owner refusal wrote a new slot claim"
+
+  id='pool-slot-new-claimed-home-r1'
+  obsolete='pool-slot-old-claimed-home-r1'
+  rec=$(make_case slot-recorded-claimed-home "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  foreign="$CASE_DIR/foreign-home"
+  mkdir -p "$foreign/state"
+  fm_write_meta "$foreign/state/$obsolete.meta" \
+    "window=firstmate:fm-$obsolete" "endpoint_task_id=$obsolete" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=scout"
+  printf 'task=%s\nhome=%s\n' "$obsolete" "$foreign" > "$SLOT_CLAIM"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  old_hash=$(git hash-object "$foreign/state/$obsolete.meta")
+  claim_hash=$(git hash-object "$SLOT_CLAIM")
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn reused a slot still recorded in the claim's local home"
+  assert_contains "$out" "slot claim's local home" \
+    "spawn did not explain its extra-home ownership evidence"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "foreign-home refusal published new task metadata"
+  [ "$(git hash-object "$foreign/state/$obsolete.meta")" = "$old_hash" ] \
+    || fail "foreign-home refusal changed the existing task record"
+  [ "$(git hash-object "$SLOT_CLAIM")" = "$claim_hash" ] \
+    || fail "foreign-home refusal replaced the current slot claim"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "foreign-home refusal refreshed or reset the shared checkout"
+  pass "spawn refuses a Treehouse slot still named by a durable local owner before claim or checkout mutation"
+}
+
+test_pool_slot_claimed_owner_requires_a_record() {
+  local rec id owner out status before claim_hash foreign
+
+  for owner in scanned extra; do
+    id="pool-slot-claim-absent-$owner-r1"
+    rec=$(make_case "slot-claim-absent-$owner" "$id")
+    read_case_record "$rec"
+    lay_out_as_pool_slot
+    case "$owner" in
+      scanned) foreign=$HOME_DIR ;;
+      extra)
+        foreign="$CASE_DIR/foreign-home"
+        mkdir -p "$foreign/state"
+        ;;
+    esac
+    printf 'task=pool-slot-missing-owner-r1\nhome=%s\n' "$foreign" > "$SLOT_CLAIM"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    claim_hash=$(git hash-object "$SLOT_CLAIM")
+
+    out=$(run_spawn "$id" --scout)
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn replaced an absent $owner claim owner"
+    assert_contains "$out" "owner record is absent or unsafe" \
+      "absent $owner claim owner did not explain its refusal"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "absent $owner claim owner published task metadata"
+    [ "$(git hash-object "$SLOT_CLAIM")" = "$claim_hash" ] \
+      || fail "absent $owner claim owner replaced the slot claim"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "absent $owner claim owner refreshed or reset the shared checkout"
+  done
+  pass "a claimed owner without a record blocks reuse from scanned and extra homes"
+}
+
+test_pool_slot_exact_local_owner_can_reclaim() {
+  local rec id out status
+
+  id='pool-slot-exact-owner-r1'
+  rec=$(make_case slot-exact-owner "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "initial exact-owner slot spawn should launch"$'\n'"$out"
+
+  cat > "$FAKEBIN_DIR/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"status --json"*) printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  *"pane get"*) printf '{"error":{"code":"pane_not_found"}}\n' ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/herdr"
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=gone-session:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=scout" "backend=herdr" \
+    "herdr_session=gone-session" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1" "herdr_pane_id=w1:p1"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "an exact local owner should reclaim its Treehouse slot"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "exact-owner reclaim did not report success"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "exact-owner reclaim did not retain its Treehouse slot record"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "exact-owner reclaim did not retain its slot claim: $(cat "$SLOT_CLAIM")"
+  pass "an exact local task owner can reclaim its Treehouse slot"
+}
+
+test_pool_slot_exact_local_owner_refuses_live_endpoint() {
+  local rec id out status before
+
+  id='pool-slot-exact-owner-live-r1'
+  rec=$(make_case slot-exact-owner-live "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  cat > "$FAKEBIN_DIR/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"status --json"*) printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  *"pane get"*) printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' ;;
+  *"agent get"*) printf '{"result":{"agent":{"agent_status":"working"}}}\n' ;;
+  *"pane process-info"*) printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":123,"foreground_processes":[{"pid":123,"name":"codex","argv0":"codex","argv":["codex"]}]}}}\n' ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/herdr"
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=live-session:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=scout" "backend=herdr" \
+    "herdr_session=live-session" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1" "herdr_pane_id=w1:p1"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an exact local owner with a live endpoint reclaimed its slot"
+  assert_contains "$out" "cannot be proven agent-free" \
+    "live exact-owner refusal did not explain its endpoint guard"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "live exact-owner refusal refreshed or reset the shared checkout"
+  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
+    || fail "live exact-owner refusal wrote a slot claim"
+  pass "an exact local task owner with a live endpoint cannot reclaim its slot"
 }
 
 publish_feature_branch() { # <branch>
@@ -876,6 +1062,10 @@ test_scout_base_branch_refused_on_gerrit_forge() {
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_pool_slot_recorded_owner_refuses_reuse_before_mutation
+test_pool_slot_claimed_owner_requires_a_record
+test_pool_slot_exact_local_owner_can_reclaim
+test_pool_slot_exact_local_owner_refuses_live_endpoint
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_named_base_branch_starts_from_that_branch

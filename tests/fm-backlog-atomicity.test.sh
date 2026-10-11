@@ -2931,6 +2931,94 @@ test_dispatch_and_completion_are_structural() {
   pass "dispatch and completion transition structurally with evidence"
 }
 
+test_stale_owner_retirement_stages_crash_safe_backlog_closure() {
+  local case_dir home obsolete current slot marker out rc=0 current_hash real_tasks
+  obsolete=fm-stale-owner-old-b15
+  current=fm-stale-owner-current-b15
+  case_dir=$(make_home stale-owner-atomic)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$obsolete" scout
+  start_item "$case_dir" "$obsolete"
+  add_item "$case_dir" "$current" scout
+  start_item "$case_dir" "$current"
+
+  slot="$case_dir/pool/1/project"
+  mkdir -p "$case_dir/pool/1"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" "$slot"
+  ln -s pool/1/project "$case_dir/wt"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot" \
+    > "$case_dir/pool/treehouse-state.json"
+  fm_write_meta "$home/state/$obsolete.meta" \
+    "window=retired-session:p1" "endpoint_task_id=$obsolete" \
+    "worktree=$case_dir/wt" "project=$case_dir/project" "kind=scout" \
+    "spawn_gen=stale-owner-old-generation" "backend=herdr" \
+    "herdr_session=retired-session" "herdr_workspace_id=w1" \
+    "herdr_tab_id=t1" "herdr_pane_id=p1"
+  fm_write_meta "$home/state/$current.meta" \
+    "window=firstmate:fm-$current" "endpoint_task_id=$current" \
+    "worktree=$case_dir/wt" "project=$case_dir/project" "kind=scout" \
+    "spawn_gen=stale-owner-current-generation"
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+case " $* " in *" -d cwd "*) exit 0 ;; esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/lsof"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" status --json "*) printf '%s\n' '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  *" pane get "*) printf '%s\n' '{"error":{"code":"pane_not_found"}}' ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  current_hash=$(git hash-object "$home/state/$current.meta")
+  marker="$home/state/$obsolete.backlog-close"
+  real_tasks=$(command -v tasks-axi)
+
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --version) printf '%s\n' '0.2.6' ;;
+  done) echo 'error: backlog close interrupted' >&2; exit 1 ;;
+  *) exec "$real_tasks" "\$@" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+  out=$(run_teardown "$case_dir" "$obsolete" --force --retire-stale-owner "$current") || rc=$?
+  [ "$rc" -ne 0 ] || fail "stale-owner retirement reported success after backlog closure failed"
+  [ "$(row_state "$case_dir" "$obsolete")" = in_flight ] \
+    || fail "failed stale-owner retirement changed the live backlog state"
+  assert_absent "$home/state/$obsolete.meta" \
+    "failed stale-owner retirement did not atomically stage its obsolete record"
+  assert_present "$marker" \
+    "failed stale-owner retirement lost the pending backlog closure"
+  [ "$(git hash-object "$home/state/$current.meta")" = "$current_hash" ] \
+    || fail "failed stale-owner retirement changed the current-owner record"
+
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --version) printf '%s\n' '0.2.6' ;;
+  *) exec "$real_tasks" "\$@" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+  out=$(run_bootstrap "$case_dir") \
+    || fail "stale-owner retirement closure did not recover after backlog access was restored: $out"
+  [ "$(row_state "$case_dir" "$obsolete")" = "done" ] \
+    || fail "recovered stale-owner retirement left the backlog item outside Done"
+  assert_absent "$home/state/$obsolete.meta" \
+    "recovered stale-owner retirement retained the obsolete record"
+  assert_absent "$marker" \
+    "recovered stale-owner retirement retained its pending close"
+  [ "$(git hash-object "$home/state/$current.meta")" = "$current_hash" ] \
+    || fail "recovered stale-owner retirement changed the current-owner record"
+  [ "$(row_state "$case_dir" "$current")" = in_flight ] \
+    || fail "recovered stale-owner retirement changed the current-owner backlog row"
+  pass "stale-owner retirement stages an atomic, replayable backlog closure for only the obsolete record"
+}
+
 test_refused_teardown_leaves_the_item_live() {
   local case_dir home id out rc=0
   id=fm-structural-refusal-b15
@@ -3130,6 +3218,7 @@ test_spawn_refuses_an_unsafe_tasks_config_before_exempting_a_missing_backlog
 test_spawn_refuses_a_data_directory_symlinked_outside_the_home
 test_configured_adapter_refuses_a_data_directory_outside_the_home
 test_dispatch_and_completion_are_structural
+test_stale_owner_retirement_stages_crash_safe_backlog_closure
 test_refused_teardown_leaves_the_item_live
 test_environment_selected_adapter_is_not_forced_to_markdown
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
