@@ -30,6 +30,61 @@ export FM_TEST_NO_MISTAKES_FAKE_VERSION="no-mistakes version v${FM_TEST_NO_MISTA
 export FM_TEST_NO_MISTAKES_FAKE_VERSION_TS="${FM_TEST_NO_MISTAKES_FAKE_VERSION} 2026-06-27T00:02:18Z"
 export FM_TEST_GH_AXI_VERSION=0.1.29
 
+# Completion regression suites can exercise the agreed preview API before its
+# release, without installing a development dependency globally. A real
+# preview-capable consumer is used unchanged when supplied on PATH. Otherwise
+# this explicit read-only fixture delegates writes to the installed CLI; it is
+# not consumer integration evidence or a promise of backend write availability.
+fm_test_tasks_preview_cli() {  # <fakebin>
+  local fakebin=$1 real
+  real=$(command -v tasks-axi) || return 1
+  mkdir -p "$fakebin"
+  if tasks-axi 'done' --help 2>&1 | grep -q -- --dry-run \
+    && tasks-axi update --help 2>&1 | grep -q -- --dry-run; then
+    unset FM_TEST_TASKS_PREVIEW_FIXTURE
+    return 0
+  fi
+  export FM_TEST_TASKS_PREVIEW_FIXTURE=1
+  printf 'fixture: tasks-axi read-only preview API (real consumer integration requires its packaged build)\n'
+  cat > "$fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+set -u
+REAL='$real'
+ROOT='$ROOT'
+SH
+  cat >> "$fakebin/tasks-axi" <<'SH'
+case "${1:-} ${2:-}" in
+  'done --help'|'update --help')
+    "$REAL" "$@" || exit $?
+    printf '\n  --dry-run  Preview without writing\n'
+    exit 0 ;;
+esac
+preview=0
+for arg in "$@"; do [ "$arg" != --dry-run ] || preview=1; done
+[ "$preview" = 1 ] || exec "$REAL" "$@"
+# Read only this explicitly addressed fixture row and validate typed reviews.
+# The production consumer owns all real normalization and writes.
+verb=$1 id=$2
+shift 2
+file= previous=
+for arg in "$@"; do
+  case "$previous" in
+    --file) file=$arg ;;
+    --pr)
+      . "$ROOT/bin/fm-public-followup-lib.sh"
+      fm_pf_pr_url_valid "$arg" || { printf 'error: invalid typed review URL\n' >&2; exit 2; }
+      ;;
+  esac
+  previous=$arg
+done
+args=(show "$id")
+[ -z "$file" ] || args+=(--file "$file")
+"$REAL" "${args[@]}" >/dev/null || exit $?
+case "$verb" in done|update) printf '{"dry_run":true}\n' ;; *) exit 2 ;; esac
+SH
+  chmod +x "$fakebin/tasks-axi"
+}
+
 # --- fake no-mistakes -------------------------------------------------------
 
 # fm_test_fake_no_mistakes <fakebin>

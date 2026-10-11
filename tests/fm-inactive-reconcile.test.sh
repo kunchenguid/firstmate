@@ -409,7 +409,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   mkdir -p "$MATE/data/scout"
   printf '# findings\n' > "$MATE/data/scout/report.md"
   write_child "$MATE" boom 'failed: build broke'
-  write_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: PR https://example.test/owner/repo/pull/22'
+  write_child "$MATE" replaced-pr $'working: old PR https://github.com/owner/repo/pull/11\ndone: PR https://github.com/owner/repo/pull/22'
   awk '$0 !~ /^pr=/' "$MATE/state/replaced-pr.meta" > "$MATE/state/replaced-pr.meta.tmp"
   mv "$MATE/state/replaced-pr.meta.tmp" "$MATE/state/replaced-pr.meta"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -420,7 +420,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
     || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://github.com/owner/repo/pull/22 pr=https://github.com/owner/repo/pull/22 mode=no-mistakes yolo=off" \
     || fail "ledger fallback did not prefer the terminal ready line PR: $(cat "$MAIN/state/mate.status")"
   printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -439,11 +439,14 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   local id prose_key ready_key stamped_key placeholder_key scout_key
   make_world pr-provenance; bind_secondmate local
   write_child "$MATE" prose $'working: context in https://example.test/other/repo/pull/33\ndone: cleanup finished'
-  write_child "$MATE" ready 'done: PR https://example.test/owner/repo/pull/44 checks green'
-  write_child "$MATE" stamped 'done [at=1788576000]: PR https://example.test/owner/repo/pull/66 checks green'
-  write_child "$MATE" placeholder 'done [at=<epoch>]: PR https://example.test/owner/repo/pull/77 checks green'
+  write_child "$MATE" ready 'done: PR https://github.com/owner/repo/pull/44 checks green'
+  write_child "$MATE" stamped 'done [at=1788576000]: PR https://github.com/owner/repo/pull/66 checks green'
+  write_child "$MATE" placeholder 'done [at=<epoch>]: PR https://github.com/owner/repo/pull/77 checks green'
   write_child "$MATE" lookout 'done: PR https://example.test/owner/repo/pull/55'
-  for id in prose ready stamped placeholder; do
+  write_child "$MATE" gitlab 'done: PR https://gitlab.example.test/group/sub/project/-/merge_requests/7 checks green'
+  write_child "$MATE" forgejo 'done: PR https://forgejo.example.test/owner/repo/pulls/7'
+  write_child "$MATE" invalid 'done: PR https://gitlab.example.test/group/sub/project/-/merge_requests/0 checks green'
+  for id in prose ready stamped placeholder gitlab forgejo invalid; do
     awk '$0 !~ /^pr=/' "$MATE/state/$id.meta" > "$MATE/state/$id.meta.tmp"
     mv "$MATE/state/$id.meta.tmp" "$MATE/state/$id.meta"
   done
@@ -459,15 +462,18 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   scout_key=$(reported_outcome_key "$MATE" lookout 'done') || fail "scout receipt key missing"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$prose_key]: child prose done: cleanup finished mode=no-mistakes yolo=off" \
     || fail "a PR mentioned only in prose was claimed as the delivery: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$ready_key]: child ready done: PR https://example.test/owner/repo/pull/44 checks green pr=https://example.test/owner/repo/pull/44 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$ready_key]: child ready done: PR https://github.com/owner/repo/pull/44 checks green pr=https://github.com/owner/repo/pull/44 mode=no-mistakes yolo=off" \
     || fail "a ready-signal terminal line did not carry its PR: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$stamped_key]: child stamped done: PR https://example.test/owner/repo/pull/66 checks green pr=https://example.test/owner/repo/pull/66 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$stamped_key]: child stamped done: PR https://github.com/owner/repo/pull/66 checks green pr=https://github.com/owner/repo/pull/66 mode=no-mistakes yolo=off" \
     || fail "a stamped ready-signal terminal line did not carry its PR: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$placeholder_key]: child placeholder done: PR https://example.test/owner/repo/pull/77 checks green pr=https://example.test/owner/repo/pull/77 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$placeholder_key]: child placeholder done: PR https://github.com/owner/repo/pull/77 checks green pr=https://github.com/owner/repo/pull/77 mode=no-mistakes yolo=off" \
     || fail "a ready-signal line whose stamp was left unsubstituted lost its PR: $(cat "$MAIN/state/mate.status")"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$scout_key]: child lookout done: PR https://example.test/owner/repo/pull/55 mode=no-mistakes yolo=off" \
     || fail "a scout's ready-looking line carried a PR claim: $(cat "$MAIN/state/mate.status")"
-  pass "pr= requires the recorded PR or a ready-signal terminal line, whatever its stamp, and never a scout"
+  grep 'child gitlab done:' "$MAIN/state/mate.status" | grep -q ' pr=https://gitlab.example.test/group/sub/project/-/merge_requests/7 ' || fail 'GitLab ready URL was lost'
+  grep 'child forgejo done:' "$MAIN/state/mate.status" | grep -q ' pr=https://forgejo.example.test/owner/repo/pulls/7 ' || fail 'Forgejo ready URL was lost'
+  if grep 'child invalid done:' "$MAIN/state/mate.status" | grep -q ' pr='; then fail 'malformed ready URL claimed as delivery'; fi
+  pass "pr= requires the recorded PR or a canonical ready-signal terminal line, whatever its stamp, and never a scout"
 }
 
 # If a terminal ledger line lands while the authoritative state read is in

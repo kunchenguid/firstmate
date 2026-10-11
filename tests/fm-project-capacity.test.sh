@@ -23,6 +23,12 @@ TMP_ROOT=$(fm_test_tmproot fm-project-capacity)
 DEFER_EXIT=75
 HAVE_TASKS_AXI=0
 command -v tasks-axi >/dev/null 2>&1 && HAVE_TASKS_AXI=1
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
+if [ "$HAVE_TASKS_AXI" = 1 ]; then
+  fm_test_tasks_preview_cli "$TMP_ROOT/previewbin"
+  export PATH="$TMP_ROOT/previewbin:$PATH"
+fi
 
 # --- fixture ----------------------------------------------------------------
 

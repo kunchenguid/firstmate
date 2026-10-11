@@ -45,7 +45,7 @@ EOF
 # command that staged its job. Stop it before the shared fixture cleanup runs,
 # and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
 pf_test_cleanup() {
-  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
+  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid attempt worker_state
   if [ -n "$PF_TEST_LOCK_HOLDER" ]; then
     kill "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
     wait "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
@@ -53,7 +53,21 @@ pf_test_cleanup() {
   fi
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null || true
+      # This worker is detached, so wait(1) cannot reap it. TERM begins a
+      # shutdown that still writes job state; deleting its fixture immediately
+      # races those writes and can make rm fail with "Directory not empty".
+      for ((attempt=0; attempt<100; attempt++)); do
+        worker_state=$(ps -p "$pid" -o stat= 2>/dev/null) || worker_state=
+        case "$worker_state" in ''|*Z*) break ;; esac
+        sleep 0.1
+      done
+      case "$worker_state" in
+        ''|*Z*) ;;
+        *) printf 'not ok - fixture remote worker %s did not stop before cleanup\n' "$pid" >&2; return 1 ;;
+      esac
+    fi
   fi
   fm_test_cleanup
 }
@@ -63,6 +77,10 @@ trap 'pf_test_cleanup; exit 143' TERM
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
+fm_test_tasks_preview_cli "$TMP_ROOT/previewbin"
+export PATH="$TMP_ROOT/previewbin:$PATH"
 
 # A fakebin `curl` standing in for the relay. It logs every call so a test can
 # prove exactly how many public posts happened, and honours FAKE_FOLLOWUP_CODE so
@@ -3096,6 +3114,45 @@ test_unsafe_registration_entry_fails_remote_collection() {
   pass "unsafe registration entries fail collection without dropping staged results"
 }
 
+test_gitlab_review_url_consumer_parity() {
+  local url expected result consumer=0 lab="$TMP_ROOT/gitlab-url-parity" base
+  local -a valid invalid urls
+  # The shell predicate uses the shared namespace owner, with independent
+  # public-safe text limits still exercised by the existing event corpus.
+  . "$ROOT/bin/fm-public-followup-lib.sh"
+  base=https://gitlab.example.test/group/sub/project/-/merge_requests
+  valid=(https://gitlab.com/group/project/-/merge_requests/7 "$base/780" https://github.com/o/r/pull/7 https://forgejo.example.test/o/r/pulls/7)
+  invalid=("$base/0" "$base/0780" "$base/780junk" "$base/780/" "$base/780?x=1" "$base/780#x" " $base/780" "$base/780"$'\n' "$base/780"$'\001'
+    http://gitlab.com/o/r/-/merge_requests/7 https://Gitlab.com/o/r/-/merge_requests/7 https://user@gitlab.com/o/r/-/merge_requests/7 https://gitlab.com:443/o/r/-/merge_requests/7
+    https://gitlab.com/o%2Fr/r/-/merge_requests/7 https://gitlab.com/o/../r/-/merge_requests/7 https://gitlab.com/o//r/-/merge_requests/7 https://gitlab.com/o/-/r/-/merge_requests/7
+    https://gitlab.com/o/-repo/-/merge_requests/7 https://gitlab.com/o/r.git/-/merge_requests/7 https://github.com/o/r/-/merge_requests/7 https://github.com/o/r/pulls/7
+    https://forgejo.example.test/o/r/pull/7 https://gitlab.com/o/r/-/issues/7)
+  mkdir -p "$lab"
+  if [ "${FM_TEST_TASKS_PREVIEW_FIXTURE:-}" != 1 ] \
+    && tasks-axi update --help 2>&1 | grep -q -- --dry-run; then
+    consumer=1
+    tasks-axi add parity-test test --file "$lab/backlog.md" >/dev/null || fail 'could not seed URL parity row'
+    cp "$lab/backlog.md" "$lab/before.md"
+  else
+    printf 'skip: packaged GitLab consumer parity requires preview-capable tasks-axi; shell corpus still runs\n'
+  fi
+  for expected in accept reject; do
+    if [ "$expected" = accept ]; then urls=("${valid[@]}"); else urls=("${invalid[@]}"); fi
+    for url in "${urls[@]}"; do
+      result=reject
+      fm_pf_pr_url_valid "$url" && result=accept
+      [ "$result" = "$expected" ] || fail "shell review URL $expected mismatch: $url"
+      if [ "$consumer" = 1 ]; then
+        result=reject
+        tasks-axi update parity-test --pr "$url" --dry-run --json --file "$lab/backlog.md" >/dev/null 2>&1 && result=accept
+        [ "$result" = "$expected" ] || fail "packaged consumer review URL $expected mismatch: $url"
+        cmp -s "$lab/backlog.md" "$lab/before.md" || fail 'URL validation preview wrote backlog'
+      fi
+    done
+  done
+  pass 'canonical GitLab/GitHub/Forgejo reviews and malformed links agree without preview writes'
+}
+
 test_remote_route_loss_fails_brief_and_collection() {
   local home remote out command
   remote_fixture_prepare
@@ -3460,6 +3517,11 @@ test_emit_rules_agree_with_tasks_axi() {
   printf 'agree\n' > "$staging/.fm-secondmate-home"
   while IFS='|' read -r expected required outcome deliverables verdict mode; do
     [ -n "$expected" ] || continue
+    if [ "$verdict" = accept ] && [[ "$deliverables" = *'/-/merge_requests/'* ]] \
+      && { [ "${FM_TEST_TASKS_PREVIEW_FIXTURE:-}" = 1 ] || ! tasks-axi update --help 2>&1 | grep -q -- --dry-run; }; then
+      printf 'skip: public-event GitLab parity needs the packaged compatible tasks-axi build\n'
+      continue
+    fi
     n=$((n + 1))
     obligation="pf-agree-$n"
     while :; do
@@ -3569,6 +3631,9 @@ pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://user@github.com/example/repo/p
 pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12/files"}|reject
 pr-merged|["pr_url"]|pr-merged|{"pr_url":"github.com/example/repo/pull/12"}|reject
 pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com/acme/repo/pulls/12"}|accept
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://gitlab.com/group/project/-/merge_requests/780"}|accept
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://gitlab.example.test/group/sub/project/-/merge_requests/7"}|accept
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://gitlab.com/group/project/-/merge_requests/0"}|reject
 pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com/acme/repo/pull/12"}|reject
 pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pulls/12"}|reject
 pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/01"}|reject
@@ -3986,6 +4051,7 @@ test_remote_collection_transport_failure_is_loud
 test_remote_collection_refuses_unreadable_outbox
 test_invalid_registration_fails_remote_collection
 test_unsafe_registration_entry_fails_remote_collection
+test_gitlab_review_url_consumer_parity
 test_remote_route_loss_fails_brief_and_collection
 test_empty_remote_collection_is_healthy
 test_remote_brief_rejects_traversal_route_paths
