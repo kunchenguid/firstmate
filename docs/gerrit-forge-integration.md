@@ -228,15 +228,16 @@ On Gerrit, proposing requires push access to `refs/for/*` on the one shared repo
 That is the provisioning consequence, and it is why the vote boundary in section 5 matters more here rather than less: an identity that can already reach the shared repository is held back only by the grants its account does not hold, so the label permissions on that account carry weight a separate namespace would otherwise share.
 
 **The tool Firstmate calls cannot vote, and that is a requirement rather than an accident.**
-`gerrit-axi` adds exactly two writes to its queries.
-`publish` is one push to `refs/for/<branch>`, and `submit` is one call asking the server to submit one change, which the server may refuse.
-Its README states the boundary - "it never votes, replies, sets reviewers, or abandons" - and its own test suite enforces it by failing if `gerrit review`, a REST call to the review endpoint, or a label option on a push appears anywhere in the code.
+`gerrit-axi` adds exactly three writes to its queries.
+`publish` is one push to `refs/for/<branch>`, `message` posts one change-level message with no label, and `submit` is one call asking the server to submit one change, which the server may refuse.
+Its README states the boundary - "it never votes, writes an inline comment, sets reviewers, or abandons" - and its own test suite enforces it by failing if a REST call to the review endpoint or a label option on a push appears anywhere in the code, or if `gerrit review` appears anywhere but the one module that builds the message call, or there with any option but `--message`.
+A `no-mistakes` worker pipes `message` its summary on standard input after its final publish, and again on any patch set it publishes after that, to post the pipeline's findings and fixes on the change, because the squash carries only the oldest commit's message and the pipeline's fix commits never reach the review description.
 That tool lives in its own repository, so this design does not change it; section 5 argues why its powers stop where they do.
 Firstmate's own refusal to submit is a policy rather than a capability limit, and what it protects is the decisive vote rather than the submit: a submit only succeeds once someone has recorded a `Code-Review+2`, and that vote is a positive attributed claim that a named human approved, read as such by colleagues and by any audit of the repository.
 A server that permits self-approval is exactly what makes this a boundary Firstmate chooses rather than one it merely runs into, though the choice covers only Firstmate's own path: the server's label ACL on the worker account is what makes it binding on anything else.
 
 So the first two are Gerrit's shape, and the third is a deliberate policy plus a property of a tool this design does not itself write.
-Only the tool half could be changed by writing code, and it guards the tool's own path with the worker account's server-side label ACL behind it; section 5 argues that control and why the tool's powers stop at publish and submit.
+Only the tool half could be changed by writing code, and it guards the tool's own path with the worker account's server-side label ACL behind it; section 5 argues that control and why the tool's powers stop at publish, message, and submit.
 
 ## 5. Where responsibility sits: Firstmate or the forge tool
 
@@ -279,7 +280,7 @@ Add Gerrit to that provider set with that push step and the skip disappears, the
 
 `gerrit-axi` carries the shape mechanics.
 `publish --stack --topic <t>` makes each commit on HEAD its own change under the topic, `publish --squash` makes them one change, and either keeps every `Change-Id` a commit already carries and stamps one only where a commit has none.
-**It has publish and submit powers, and no voting powers at all.**
+**It has publish, message, and submit powers, and no voting powers at all.**
 It lives in a separate repository, so it is the one piece of this design that does not land beside the rest.
 
 Getting the risk boundary right matters more than the decision, because the intuitive cut is the wrong one.
