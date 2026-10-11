@@ -439,10 +439,13 @@ test_matrix_omp_status_row_bounds_bare_composer() {
 
 ❯
  󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K'
+  # A status row with no identity or spinner cell leaves the M-unit context
+  # cell as its only proof; before M units were recognized this idle pane
+  # read `pending` and the doorbell was skipped.
   idle_m=$'transcript line
 
 ❯
- π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 5.8%/1M ⟲ · (sub)'
+ ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 5.8%/1M ⟲ · (sub)'
   busy=$'transcript line
 
   ⎋ Working…
@@ -459,11 +462,12 @@ test_matrix_omp_status_row_bounds_bare_composer() {
     || fail "the unicode-preset omp status row must be recognized as furniture"
   _fm_composer_row_is_omp_status ' 󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K' \
     || fail "the nerd-preset omp status row must be recognized as furniture"
-  # A narrow pane wraps the long status line, so the M-unit context cell lands
-  # on a continuation row that carries no identity cell: only the context-cell
-  # alternative recognizes it, which is the fixed behavior.
+  # A status row with no identity cell is recognized by its context cell
+  # alone, in K or M units; no other unit is an omp context window.
   _fm_composer_row_is_omp_status '…-workspace · ⑂ detached · ◫ 5.8%/1M ⟲ · (sub)' \
-    || fail "the wrapped M-unit omp status row must be recognized as furniture"
+    || fail "an M-unit omp status row without an identity cell must be recognized as furniture"
+  _fm_composer_row_is_omp_status 'resize the cache · keep 5%/2G free' \
+    && fail "typed text with a G-unit ratio must not be mistaken for omp status furniture"
   _fm_composer_row_is_omp_status ' ⠧ 11s  · ◔ GPT-6-Astra' \
     || fail "the busy omp spinner row must be recognized as furniture"
   _fm_composer_row_is_omp_status 'fix the flaky test' \
