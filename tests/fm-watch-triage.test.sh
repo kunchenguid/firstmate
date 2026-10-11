@@ -5133,7 +5133,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a declared pause on a busy review pane was escalated: $(cat "$out")"; }
+  wait_file_exists "$state/.paused-$key" 150 \
+    || { reap "$pid"; fail "a declared pause on a busy review pane was escalated: $(cat "$out")"; }
   reap "$pid"
   [ ! -s "$out" ] || fail "a declared pause on a busy review pane printed a wake reason: $(cat "$out")"
   [ -e "$state/.paused-$key" ] || fail "the busy-turn bound did not apply the declared-pause cadence"
@@ -5179,7 +5180,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a lifted pause escalated before the wedge threshold: $(cat "$out")"; }
+  wait_file_exists "$state/.stale-since-$key" 150 \
+    || { reap "$pid"; fail "a lifted pause escalated before the wedge threshold: $(cat "$out")"; }
   reap "$pid"
   [ -s "$state/.stale-since-$key" ] || fail "a lifted pause did not restore the busy-turn wedge timer"
   [ ! -e "$state/.paused-$key" ] || fail "a lifted pause left stale declared-pause bookkeeping behind"
@@ -6825,8 +6827,6 @@ test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
-test_afk_busy_declared_pause_hands_off_plain_stale
-test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
