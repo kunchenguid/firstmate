@@ -918,6 +918,147 @@ test_home_seed_refuses_an_unresolvable_registry_posture() {
   pass "home seeding refuses a registry entry whose posture does not resolve"
 }
 
+# A registered project name may contain spaces (bin/fm-project-registry-lib.sh
+# owns where it ends). Seeding must carry that project's own registry entry,
+# posture included, into the secondmate home rather than a default line, list
+# it whole in the charter, and a reseed must replace that entry rather than
+# duplicate it. The "foo" row sits above "foo bar" so a first-word match would
+# pick the wrong entry.
+test_home_seed_preserves_spaced_project_posture() {
+  local home subhome parent_line sub_lines
+  home="$TMP_ROOT/spaced-posture-home"
+  subhome="$TMP_ROOT/spaced-posture-subhome"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/foo bar"
+  fm_git_add_origin "$home/projects/foo bar" "$TMP_ROOT/remotes/spaced-foo-bar.git"
+  parent_line='- foo bar [direct-PR +yolo branch=me/] - spaced project (added 2026-09-28)'
+  printf '%s\n' '- foo [local-only] - decoy (added 2026-09-28)' "$parent_line" > "$home/data/projects.md"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='design for foo bar' FM_SECONDMATE_SCOPE='design for foo bar' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' >/dev/null 2>&1 \
+    || fail "seed refused a registered project whose name contains a space"
+  [ "$(cat "$subhome/data/projects.md")" = "$parent_line" ] \
+    || fail "seed did not copy the spaced project's own registry entry: $(cat "$subhome/data/projects.md")"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" 'foo bar' 2>/dev/null)" = "direct-PR on" ] \
+    || fail "the seeded home lost the spaced project's registered posture"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" --branch-prefix 'foo bar' 2>/dev/null)" = "me/" ] \
+    || fail "the seeded home lost the spaced project's registered branch prefix"
+  if git -C "$subhome/projects/foo bar" remote get-url no-mistakes >/dev/null 2>&1; then
+    fail "seed initialized no-mistakes on a project registered direct-PR"
+  fi
+  assert_grep '- foo bar' "$subhome/data/charter.md" "the charter did not list the spaced project whole"
+  assert_no_grep '- bar' "$subhome/data/charter.md" "the charter split the spaced project name into words"
+
+  printf '%s\n' '- foo bar [no-mistakes] - stale entry (added 2026-01-01)' >> "$subhome/data/projects.md"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='design for foo bar' FM_SECONDMATE_SCOPE='design for foo bar' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' >/dev/null 2>&1 \
+    || fail "reseeding a spaced project into its existing home failed"
+  sub_lines=$(cat "$subhome/data/projects.md")
+  [ "$sub_lines" = "$parent_line" ] \
+    || fail "reseed did not replace the spaced project's stale entries: $sub_lines"
+  pass "home seeding carries a spaced project's registry entry and posture into the secondmate home"
+}
+
+# A name containing " - " or " [" cannot be told apart from a description or
+# annotation in a registry line (bin/fm-project-registry-lib.sh), so seeding and
+# reseeding refuse it before touching the home, its registry, clones or charter.
+test_home_seed_refuses_unrepresentable_project_name() {
+  local home subhome err name before_reg before_charter before_clones
+  home="$TMP_ROOT/unrepresentable-home"
+  subhome="$TMP_ROOT/unrepresentable-subhome"
+  err="$TMP_ROOT/unrepresentable.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/foo bar"
+  fm_git_add_origin "$home/projects/foo bar" "$TMP_ROOT/remotes/unrepresentable-foo-bar.git"
+  printf '%s\n' '- foo bar [direct-PR] - spaced project (added 2026-09-30)' > "$home/data/projects.md"
+  for name in 'Acme - Site' 'foo [x]'; do
+    fm_git_init_commit "$home/projects/$name"
+    fm_git_add_origin "$home/projects/$name" "$TMP_ROOT/remotes/unrepresentable-${name%% *}.git"
+    printf '%s\n' "- $name [direct-PR] - unrepresentable project (added 2026-09-30)" >> "$home/data/projects.md"
+    if FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+      "$ROOT/bin/fm-home-seed.sh" design "$subhome" "$name" >/dev/null 2>"$err"; then
+      fail "seed accepted the unrepresentable project name $name"
+    fi
+    assert_grep "project $name contains \" - \" or \" [\", which the project registry cannot tell apart" "$err" \
+      "seed refusal for $name did not explain the rule"
+    assert_absent "$subhome" "seed refusal for $name still created the secondmate home"
+    assert_absent "$home/data/secondmates.md" "seed refusal for $name still wrote the parent registry"
+  done
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' >/dev/null 2>&1 \
+    || fail "seed refused a spaced project name"
+  before_reg=$(cat "$subhome/data/projects.md")
+  before_charter=$(cat "$subhome/data/charter.md")
+  before_clones=$(ls "$subhome/projects")
+  for name in 'Acme - Site' 'foo [x]'; do
+    if FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+      "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' "$name" >/dev/null 2>"$err"; then
+      fail "reseed accepted the unrepresentable project name $name"
+    fi
+    assert_grep "project $name contains" "$err" "reseed refusal for $name did not explain the rule"
+    [ "$(cat "$subhome/data/projects.md")" = "$before_reg" ] || fail "reseed refusal for $name changed the registry"
+    [ "$(cat "$subhome/data/charter.md")" = "$before_charter" ] || fail "reseed refusal for $name changed the charter"
+    [ "$(ls "$subhome/projects")" = "$before_clones" ] || fail "reseed refusal for $name changed the clones"
+  done
+  pass "home seeding refuses a project name the registry cannot represent, before touching anything"
+}
+
+# Reseeding one project replaces only its own registry entries: sibling entries
+# whose names share a prefix stay byte-for-byte, and an entry whose description
+# contains " [" is replaced rather than duplicated.
+test_home_seed_reseed_keeps_sibling_entries() {
+  local home subhome project foo_line bar_line baz_line
+  home="$TMP_ROOT/reseed-sibling-home"
+  subhome="$TMP_ROOT/reseed-sibling-subhome"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  for project in foo 'foo bar' 'foo baz'; do
+    fm_git_init_commit "$home/projects/$project"
+    fm_git_add_origin "$home/projects/$project" "$TMP_ROOT/remotes/reseed-sibling-${project// /-}.git"
+  done
+  foo_line='- foo [direct-PR +yolo branch=f/] - short project (added 2026-09-30)'
+  bar_line='- foo bar [direct-PR branch=me/] - cloned [archived] project (added 2026-09-30)'
+  baz_line='- foo baz [direct-PR +yolo] - sibling project (added 2026-09-30)'
+  printf '%s\n' "$foo_line" "$bar_line" "$baz_line" > "$home/data/projects.md"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" foo 'foo bar' 'foo baz' >/dev/null 2>&1 \
+    || fail "seed refused three prefix-sharing projects"
+  printf '%s\n' '- foo bar - cloned [archived] project (added 2026-01-01)' >> "$subhome/data/projects.md"
+  for project in 1 2; do
+    FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+      "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' >/dev/null 2>&1 \
+      || fail "reseeding foo bar failed"
+  done
+  [ "$(cat "$subhome/data/projects.md")" = "$(printf '%s\n' "$foo_line" "$baz_line" "$bar_line")" ] \
+    || fail "reseeding foo bar did not keep its siblings and replace its own entries: $(cat "$subhome/data/projects.md")"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" foo 2>/dev/null)" = "direct-PR on" ] \
+    || fail "reseeding foo bar changed the foo posture"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" 'foo bar' 2>/dev/null)" = "direct-PR off" ] \
+    || fail "reseeding foo bar lost its own posture"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" 'foo baz' 2>/dev/null)" = "direct-PR on" ] \
+    || fail "reseeding foo bar changed the foo baz posture"
+  pass "reseeding a project keeps sibling registry entries and replaces its own"
+}
+
+test_home_seed_projectless_refusal_names_spaced_registry_entry() {
+  local home sub err
+  home="$TMP_ROOT/no-projects-spaced-home"
+  sub="$TMP_ROOT/no-projects-spaced-subhome"
+  err="$TMP_ROOT/no-projects-spaced.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data"
+  mark_firstmate_home "$sub"
+  printf '%s\n' '- foo bar [direct-PR] - retained spaced entry (added 2026-09-28)' > "$sub/data/projects.md"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    fail "project-less seed converted a home whose registry holds a spaced project"
+  fi
+  grep -F 'data/projects.md entries: foo bar' "$err" >/dev/null \
+    || fail "project-less refusal did not name the spaced registry entry whole: $(cat "$err")"
+  pass "project-less refusal names a spaced registry entry whole"
+}
+
 test_home_seed_refuses_registry_delimiter_home() {
   local home subhome err
   home="$TMP_ROOT/delimiter-home"
@@ -3051,6 +3192,10 @@ test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_an_unresolvable_registry_posture
+test_home_seed_preserves_spaced_project_posture
+test_home_seed_refuses_unrepresentable_project_name
+test_home_seed_reseed_keeps_sibling_entries
+test_home_seed_projectless_refusal_names_spaced_registry_entry
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

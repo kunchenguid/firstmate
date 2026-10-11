@@ -41,6 +41,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
+# shellcheck source=bin/fm-project-registry-lib.sh
+. "$SCRIPT_DIR/fm-project-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
@@ -500,6 +502,7 @@ EOF
 
 validate_seed_project() {
   local project=$1 src mode url mode_line
+  fm_project_registry_name_ok "$project" || return 1
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
@@ -678,11 +681,8 @@ seed_rollback() {
 }
 
 registry_line_for_project() {
-  local project=$1 line
   [ -f "$DATA/projects.md" ] || return 1
-  line=$(awk -v n="$project" '$1=="-" && $2==n { print; exit }' "$DATA/projects.md")
-  [ -n "$line" ] || return 1
-  printf '%s\n' "$line"
+  fm_project_registry_line "$DATA/projects.md" "$1"
 }
 
 project_mode_in_home() {
@@ -698,19 +698,12 @@ EOF
 }
 
 sync_project_registry() {
-  local home=$1 sub_reg tmp project line today names
+  local home=$1 sub_reg tmp project line today
   shift
   sub_reg="$home/data/projects.md"
   tmp="$sub_reg.tmp.$$"
-  names=$(printf '%s\n' "$@" | awk '{ printf "%s%s", sep, $0; sep="\034" }')
   if [ -f "$sub_reg" ]; then
-    awk -v names="$names" '
-      BEGIN {
-        split(names, a, "\034")
-        for (i in a) selected[a[i]]=1
-      }
-      !($1=="-" && ($2 in selected)) { print }
-    ' "$sub_reg" > "$tmp"
+    fm_project_registry_without "$sub_reg" "$@" > "$tmp"
   else
     : > "$tmp"
   fi
@@ -784,7 +777,7 @@ refuse_populated_projectless_home() {
     clones+=("$(basename "$project_path")")
   done
   if [ -f "$home/data/projects.md" ]; then
-    registry_entries=$(awk '$1 == "-" && $2 != "" { print $2 }' "$home/data/projects.md") || {
+    registry_entries=$(fm_project_registry_names "$home/data/projects.md") || {
       echo "error: cannot inspect existing project registry at $home/data/projects.md; resolve its access permissions or retire or clean this home before seeding with --no-projects" >&2
       return 1
     }
