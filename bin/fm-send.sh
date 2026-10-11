@@ -1285,7 +1285,7 @@ else
   empty)
     ;;
   endpoint-changed)
-    echo "fm-send: submission to $T is unconfirmed because Enter changed terminal endpoints; do not retype or blindly resend - inspect the replacement with fm-peek.sh before deciding whether to resend" >&2
+    echo "fm-send: submission to $T is unconfirmed because Enter changed terminal endpoints; do not retype or blindly resend - inspect the replacement pane for the recorded worktree in Orca's UI before deciding whether to resend" >&2
     exit 3
     ;;
   send-failed)

@@ -72,7 +72,8 @@ JS
   if [ "$mode" = restart ]; then
     [ "$rc" = 3 ] || fail "restart: expected unconfirmed exit 3, got $rc: $(cat "$fixture/out")"
     assert_contains "$(cat "$fixture/out")" "changed terminal endpoints" "restart did not explain the unconfirmed send"
-    assert_contains "$(cat "$fixture/out")" "fm-peek.sh" "restart did not provide an inspection action"
+    assert_contains "$(cat "$fixture/out")" "inspect the replacement pane for the recorded worktree in Orca's UI" "restart did not provide a usable inspection action"
+    assert_not_contains "$(cat "$fixture/out")" "fm-peek.sh" "restart directed inspection to the stale recorded endpoint"
     [ "$(cat "$fixture/enters")" = $'old\nlive' ] || fail "restart: Enter retried after endpoint change"
     [ ! -s "$fixture/submitted" ] || fail "restart unexpectedly submitted the lost command"
   else
