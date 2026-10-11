@@ -364,6 +364,14 @@ delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)
 $note" "$evidence"
 }
 
+# What a second mate's lookout on this home saw and did during the window, and
+# the reviews it still claims; bin/fm-lookout.sh owns the records and lines.
+lookout_snapshot() {  # <evidence-file> <since-epoch>
+  local lines
+  lines=$("$SCRIPT_DIR/fm-lookout.sh" brief --since "${2:-0}" 2>/dev/null) || return 0
+  append_evidence health "$lines" "$1"
+}
+
 # The supervision host's broken-session latch across the window, from its
 # ledger (state/.supervision-host.log) and latch record
 # (state/.supervision-host-health), both owned by bin/fm-supervision-host.sh.
@@ -712,6 +720,7 @@ return_reconcile() {
   if ! grep -q "^evidence$(printf '\t')health$(printf '\t')" "$evidence" 2>/dev/null; then
     health_snapshot "$evidence"
     engine_snapshot "$evidence" "$since"
+    lookout_snapshot "$evidence" "$since"
   fi
 
   while IFS="$(printf '\t')" read -r tag kind text; do

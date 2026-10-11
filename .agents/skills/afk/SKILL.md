@@ -25,6 +25,9 @@ Hold-for-return is the default and the only reach profile this release records: 
    It writes `state/.afk-contract` at once, with no separate confirmation step, then prints the entry announcement and the record's read-back.
    The words are the whole mandate: `bin/fm-afk-contract.sh` records them exactly as given, with no clause fields, verbs, ids, or merge-grant list, and by the captain's mandate no parser, tokenizer, classifier, or grammar reads them anywhere.
    Read `bin/fm-afk-contract.sh --help` for the flags rather than memorizing them.
+   `enter` first battens down before the night watch (`bin/fm-batten-down.sh`): disk, load, swap, the watcher beacon, and Midway when opted in.
+   When a check fails on the first entry, `enter` exits 4 and writes no record, so the captain is not away yet; relay each failed line and its fix, plus the reclaimable caches it lists, and enter again once they fix it, or with `--skip-batten-down` when they explicitly ask to go anyway.
+   While already away, a refresh or new words are recorded and failed checks only warn; relay those warnings too.
    Plain `/afk` with no words is a valid entry with no mandate; the announcement says no instructions were recorded.
    Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate at once, preserve the original session entry, and archive the superseded words for the return brief.
 2. **Per harness, after the record exists:**
@@ -63,6 +66,8 @@ Hold-for-return is the default and the only reach profile this release records: 
   Anything else holds for the return, a red merge never proceeds while away, local-only landing always waits for the captain, and only a wake the branch declines (including a broken branch or unsafe scan) or a watcher failure wakes main (`docs/pi-supervision-branch.md` "Postures").
 - On a non-Pi home that runs the supervision host, the host's engine is that branch under the same rules, and a wake it hands back reaches main through that harness's own wake path (`Stop hook feedback` on Claude, a `watcher` follow-up on Cursor, OpenCode, and omp, the arm's background-task-completed notification on Grok, the checkpoint's output on Codex) with a `supervision-host:` line: that is automatic supervision, never the captain's return, so handle it under the away posture ([supervision protocol](../../../docs/supervision-protocols/supervision-host.md)).
 - The session-start digest reports the posture under its AFK subsection, so a restart re-enters the posture from the record, not from memory.
+- A second mate may keep a lookout on this home and take the con of reviews it can build when supervision here dies (`docs/configuration.md` "Second-mate lookout on the flagship").
+  Before driving or routing a review, run `bin/fm-lookout.sh claimed <review>`; a review another vessel holds stays theirs until they release it, and the return brief lists what the lookout saw, did, and still holds.
 
 ## How to exit: the return
 

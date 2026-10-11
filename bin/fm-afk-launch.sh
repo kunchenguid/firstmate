@@ -68,11 +68,17 @@
 # Usage:
 #   fm-afk-launch.sh enter [--words-file <path> | --words <text>]
 #                          [--expected-return <UTC ISO 8601>] [--spend <n>]
+#                          [--skip-batten-down]
 #                              Write the away-posture record now, with no
 #                              separate confirmation, then print the entry
 #                              announcement and the read-back. With no words
 #                              while away it is a refresh; new words replace
 #                              the mandate. On Pi this is the whole entry.
+#                              A first away entry runs the batten-down check
+#                              (bin/fm-batten-down.sh, report on stderr);
+#                              a failed check refuses with exit 4 and writes
+#                              nothing, and --skip-batten-down enters anyway.
+#                              While already away, failed checks only warn.
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
@@ -367,7 +373,35 @@ fm_afk_launch_record_require() {
 }
 
 fm_afk_launch_enter() {
+  local arg skip_batten=0 report
+  local -a args=()
+  for arg in "$@"; do
+    if [ "$arg" = --skip-batten-down ]; then
+      skip_batten=1
+    else
+      args+=("$arg")
+    fi
+  done
   fm_afk_launch_catchup_pending && return 1
+  # The batten-down check guards the first entry to an unattended window. A
+  # refresh or new words while already away only warn, so the words still land.
+  if [ "${FM_AFK_MODE:-}" != quiet ]; then
+    if [ "$skip_batten" -eq 1 ]; then
+      fm_afk_launch_log "batten-down check skipped by --skip-batten-down"
+    elif fm_afk_contract_away_present "$FM_AFK_LAUNCH_STATE"; then
+      if ! report=$("$FM_AFK_LAUNCH_DIR/fm-batten-down.sh" 2>&1); then
+        printf '%s\n' "$report" >&2
+        fm_afk_launch_log "warning: already away, so the failed checks above do not block this update"
+      fi
+    elif ! report=$("$FM_AFK_LAUNCH_DIR/fm-batten-down.sh" 2>&1); then
+      printf '%s\n' "$report" >&2
+      fm_afk_launch_log "away mode was not entered; no record was written"
+      return 4
+    else
+      printf '%s\n' "$report" >&2
+    fi
+  fi
+  set -- ${args[@]+"${args[@]}"}
   if [ "${FM_AFK_MODE:-}" = quiet ]; then
     fm_afk_launch_quiet_needs_nothing
     case $? in

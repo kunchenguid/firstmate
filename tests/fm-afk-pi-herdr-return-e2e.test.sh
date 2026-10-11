@@ -23,6 +23,10 @@ set -u
 
 fm_live_gate opt-in FM_AFK_PI_HERDR_E2E herdr jq pi python3
 
+# Entry here is a fixture step, so the batten-down check that reads this machine's
+# health stays off (tests/fm-batten-down.test.sh owns it).
+export FM_BATTEN_DOWN=off
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervise-daemon.sh"
 # shellcheck source=/dev/null

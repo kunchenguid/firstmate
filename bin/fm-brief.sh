@@ -16,7 +16,7 @@
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
-#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects} [--lookout]
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -30,6 +30,9 @@
 #   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
 #   omitting both still fails loudly so an accidental omission is never silent.
+#   --lookout adds the lookout duty to a --secondmate charter: the mate keeps a
+#   lookout on the flagship with bin/fm-lookout.sh and takes the con of the
+#   overnight reviews it can build when the flagship's supervision is down.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
@@ -191,6 +194,7 @@ case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+LOOKOUT=0
 MODE=
 MODE_SET=0
 BRANCH_PREFIX=fm/
@@ -224,6 +228,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --lookout) LOOKOUT=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --branch-prefix) want_value="branch-prefix" ;;
@@ -315,6 +320,11 @@ fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
+  exit 1
+fi
+
+if [ "$LOOKOUT" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  echo "error: --lookout applies only to --secondmate charters" >&2
   exit 1
 fi
 
@@ -431,6 +441,19 @@ else
   PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
+LOOKOUT_SECTION=
+if [ "$LOOKOUT" -eq 1 ]; then
+  IFS= read -r -d '' LOOKOUT_SECTION <<'LOOKOUT' || true
+# Lookout duty
+You keep a lookout on the flagship, the main firstmate's home, while the captain is away; `bin/fm-lookout.sh` owns the mechanics and its `config/lookout` names the flagship.
+On startup, after reconciliation, run `bin/fm-lookout.sh stand`: it registers the lookout as your watcher's check, and running it again is harmless.
+The lookout restarts the flagship's watcher itself and publishes what it sees on your parent channel, so routine lookout events need nothing from you.
+When a lookout wake says you took the con, the captain has already routed you that work: drive each review it names to green with your normal crew lifecycle, and never publish or merge one.
+Those reviews are claimed for you; release each with `bin/fm-lookout.sh release <review>` when it is finished or handed back, and before you drive any other review run `bin/fm-lookout.sh claimed <review>` and leave one held by another vessel alone.
+When a lookout wake says you handed the con back, take no new reviews from it; finish or hand back the ones you still hold and release each.
+
+LOOKOUT
+fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
 
@@ -493,7 +516,7 @@ When a keyed phase ends without another reportable state, append \`resolved [key
 The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
-# Definition of done
+$LOOKOUT_SECTION# Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
 When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.

@@ -674,6 +674,25 @@ test_secondmate_no_projects_charter() {
   pass "fm-brief.sh: --no-projects scaffolds a project-less charter and guards misuse"
 }
 
+test_secondmate_lookout_duty_is_opt_in() {
+  local home status
+  home="$TMP_ROOT/lookout-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Build the iOS reviews.' \
+    "$ROOT/bin/fm-brief.sh" mini --secondmate --no-projects --lookout >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "a --lookout charter should scaffold"
+  assert_grep '# Lookout duty' "$home/data/mini/brief.md" "--lookout did not add the lookout duty"
+  assert_grep "run \`bin/fm-lookout.sh stand\`" "$home/data/mini/brief.md" "the lookout duty does not stand the lookout"
+  assert_grep 'never publish or merge one' "$home/data/mini/brief.md" "taking the con lost the no-publish rule"
+  assert_grep 'bin/fm-lookout.sh claimed <review>' "$home/data/mini/brief.md" "the lookout duty does not honour other claims"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Build the iOS reviews.' \
+    "$ROOT/bin/fm-brief.sh" plain --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep '# Lookout duty' "$home/data/plain/brief.md" "a charter without --lookout carried the lookout duty"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oops somerepo --mode no-mistakes --lookout >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "--lookout on a ship brief must fail"
+  pass "fm-brief.sh: --lookout adds the lookout duty to a second mate's charter, and only there"
+}
+
 test_secondmate_marked_request_reporting_contract() {
   local home brief
   home="$TMP_ROOT/marked-request-reporting-home"
@@ -1484,6 +1503,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_documented_global_replace_leaves_the_herdr_gate_intact
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
+test_secondmate_lookout_duty_is_opt_in
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds

@@ -203,6 +203,8 @@ It enters its poll loop immediately and keeps scanning signals, stale panes, and
 - Codex retains its bounded foreground checkpoint protocol.
 - Grok retains its tracked background-task notification protocol.
 
+- A second mate's lookout restarts a dead flagship watcher from another host by starting the same detached arm the Claude handling successor uses (`bin/fm-lookout.sh recover`, through `docs/configuration.md` "Second-mate lookout on the flagship"); on an away-daemon home it arms nothing and only checks the daemon is alive, and takes the con when a live daemon's beacon stays stale for `daemon_stall_secs`.
+
 No adapter starts a replacement with a fire-and-forget shell `&` from a model command.
 The Claude hook's detached handling successor is launched by the hook itself, which waits for the successor's status line before it exits.
 
