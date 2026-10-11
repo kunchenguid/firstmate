@@ -406,7 +406,7 @@ family_for_basename() {
     fm-supervision-host.test.sh|fm-host-mirror.test.sh)
       printf '%s\n' afk
       ;;
-    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-contributions.test.sh|\
+    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-contributions.test.sh|fm-dashboard.test.sh|\
     fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
