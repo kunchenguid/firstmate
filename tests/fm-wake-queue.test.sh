@@ -2839,6 +2839,8 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     "$queue_out" || true)
   [ "$advisory_count" -eq 1 ] \
     || { kill "$queue_holder" 2>/dev/null || true; fail "queue deadline did not emit exactly one holder advisory"; }
+  grep -F "live pid $queue_holder (command: " "$queue_out" | grep -Eq 'running [0-9:-]+\) after' \
+    || { kill "$queue_holder" 2>/dev/null || true; fail "queue deadline advisory omitted holder command and age"; }
   [ ! -s "$queue_err" ] \
     || { kill "$queue_holder" 2>/dev/null || true; fail "queue deadline leaked helper-process diagnostics"; }
   if grep "$(printf '\tsignal\t')" "$queue_out" >/dev/null \

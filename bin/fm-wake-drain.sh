@@ -809,6 +809,16 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   return "$rc"
 }
 
+# Names the lock holder's command and running time so a wedged holder is visible.
+describe_lock_holder() {
+  local pid=$1 cmd age
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  cmd=$(ps -o command= -p "$pid" 2>/dev/null | head -n 1 | cut -c1-200) || cmd=
+  age=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ') || age=
+  [ -n "$cmd" ] || return 0
+  printf ' (command: %s; running %s)' "$cmd" "${age:-unknown}"
+}
+
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$?
@@ -831,8 +841,8 @@ elif fm_lock_acquire_wait_bounded "$FM_WAKE_QUEUE_LOCK" "$PRESENTATION_LOCK_TIME
 else
   lock_rc=$?
   if [ "$lock_rc" -eq 124 ]; then
-    printf 'WAKE DRAIN SKIPPED: queue lock remains held by live pid %s after %ss; retry on the next drain.\n' \
-      "${FM_LOCK_HELD_PID:-unknown}" "$PRESENTATION_LOCK_TIMEOUT"
+    printf 'WAKE DRAIN SKIPPED: queue lock remains held by live pid %s%s after %ss; retry on the next drain.\n' \
+      "${FM_LOCK_HELD_PID:-unknown}" "$(describe_lock_holder "${FM_LOCK_HELD_PID:-}")" "$PRESENTATION_LOCK_TIMEOUT"
     exit 0
   fi
   printf 'wake drain: queue lock could not be acquired safely\n' >&2
