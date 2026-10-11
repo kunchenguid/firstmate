@@ -300,6 +300,41 @@ test_exit_types_each_harness_verified_command() {
   pass "fm-control exit: every verified harness gets its own verified exit command"
 }
 
+# OpenCode's composer exit key changed between major lines: 1.x exits on the
+# typed /exit, 2.x on a raw Ctrl-C. Spawn records the detected major in meta;
+# fm-control must send the key the recorded version's TUI understands. The
+# default adapter contract above (no opencode_version) already proves the
+# version-agnostic /exit fallback; this locks both recorded branches.
+test_opencode_exit_matches_recorded_major() {
+  local dir out rc
+  # 1.x: the recorded major keeps the typed /exit command.
+  dir=$(new_case exit-opencode1)
+  add_task "$dir" t1 opencode
+  printf 'opencode_version=1.18.32\n' >> "$dir/home/state/t1.meta"
+  alive_as "$dir" opencode
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on a recorded OpenCode 1.x task should succeed"$'\n'"$out"
+  [ "$(literals "$dir")" = /exit ] \
+    || fail "OpenCode 1.x exit must type /exit, got: $(literals "$dir")"
+  [ -z "$(keys_sent "$dir")" ] \
+    || fail "OpenCode 1.x exit must send no control key, got: $(keys_sent "$dir")"
+  assert_contains "$out" "stopped t1 harness=opencode" "OpenCode 1.x exit should report the stop"
+
+  # 2.x: the recorded major switches to a raw Ctrl-C and types nothing.
+  dir=$(new_case exit-opencode2)
+  add_task "$dir" t1 opencode
+  printf 'opencode_version=2.0.21\n' >> "$dir/home/state/t1.meta"
+  alive_as "$dir" opencode
+  out=$(FM_FAKE_INTERRUPT_STOPS_AGENT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on a recorded OpenCode 2.x task should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = C-c ] \
+    || fail "OpenCode 2.x exit must send a raw Ctrl-C, got keys: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] \
+    || fail "OpenCode 2.x exit must type no composer text, got: $(literals "$dir")"
+  assert_contains "$out" "stopped t1 harness=opencode" "OpenCode 2.x exit should report the stop"
+  pass "fm-control exit: a recorded OpenCode major picks /exit (1.x) or raw Ctrl-C (2.x)"
+}
+
 test_interrupt_sends_each_harness_verified_key() {
   local dir out rc harness expected key repeat clear got want
   for harness in $VERIFIED_HARNESSES; do
@@ -1173,6 +1208,7 @@ EOF
 }
 
 test_exit_types_each_harness_verified_command
+test_opencode_exit_matches_recorded_major
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
 test_devin_idle_interrupt_sends_one_press
