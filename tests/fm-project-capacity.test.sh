@@ -392,6 +392,38 @@ test_release_frees_a_place() {
   pass "a recorded PR handoff or a cleanup each frees exactly one place"
 }
 
+# A worker whose newest status event is done has finished and frees its place,
+# while a paused worker still holds one, and a finished worker steered back into
+# work counts again.
+test_finished_worker_frees_a_place() {
+  local case_dir home out rc=0
+  case_dir=$(make_case finished task-e task-f)
+  home="$case_dir/home"
+  declare_capacity "$home" "project 1"
+  write_live "$home" live-p "$case_dir/project"
+  printf 'paused [at=1791700000]: waiting on an upstream review\n' > "$home/state/live-p.status"
+  out=$(spawn_ship "$case_dir" task-e "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a paused worker did not hold its place: $out"
+  assert_contains "$out" "1 already hold a place (live-p)" "the paused worker was not named as the holder"
+
+  printf 'working [at=1791700100]: resumed\ndone [at=1791700200]: finished, waiting on landing\n' >> "$home/state/live-p.status"
+  rc=0
+  out=$(spawn_ship "$case_dir" task-e) || rc=$?
+  expect_code 0 "$rc" "a finished worker did not free its place: $out"
+  rc=0
+  out=$(spawn_ship "$case_dir" task-f "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "one finished worker freed two places: $out"
+  assert_contains "$out" "1 already hold a place (task-e)" "the new worker did not take the freed place"
+
+  printf 'working [at=1791700300]: steered back into work\n' >> "$home/state/live-p.status"
+  printf 'done [at=1791700400]: finished\n' >> "$home/state/task-e.status"
+  rc=0
+  out=$(spawn_ship "$case_dir" task-f "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a finished worker steered back into work was not counted again: $out"
+  assert_contains "$out" "1 already hold a place (live-p)" "the resumed worker was not named as the holder"
+  pass "a done worker frees its place, a paused one keeps it, and a resumed one counts again"
+}
+
 # Only workers on the same project identity hold places: a secondmate record, a
 # record for another project, and a scout on another project are ignored, while
 # a scout and a legacy record without kind= on this project count.
@@ -656,6 +688,7 @@ test_spaced_project_name_is_declared
 test_hash_prefixed_project_name_is_declared
 test_symlinked_home_counts_each_worker_once
 test_release_frees_a_place
+test_finished_worker_frees_a_place
 test_restart_does_not_count_its_own_record
 test_occupancy_counts_only_this_projects_workers
 test_capacity_is_shared_by_every_local_home
