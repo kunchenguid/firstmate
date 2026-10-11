@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$ROOT/bin/fm-treehouse-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 export FM_BACKEND=tmux
@@ -274,7 +276,7 @@ EOF
 }
 
 test_home_seed_uses_treehouse_acquired_home() {
-  local home acquired acquired_abs fakebin log lease out
+  local home acquired acquired_abs fakebin log lease out user_home expected_root
   home="$TMP_ROOT/dash-home"
   acquired="$TMP_ROOT/dash-acquired-home"
   mkdir -p "$home/projects" "$home/data" "$home/state"
@@ -285,8 +287,12 @@ test_home_seed_uses_treehouse_acquired_home() {
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fake")
   log="$TMP_ROOT/dash-fake/tmux.log"
   lease="$TMP_ROOT/dash-fake/lease"
+  user_home="$TMP_ROOT/dash-user-home"
+  mkdir -p "$user_home"
+  expected_root=$(HOME="$user_home" fm_treehouse_pool_root "$home")
 
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+  out=$(PATH="$fakebin:$PATH" HOME="$user_home" TREEHOUSE_ROOT="$TMP_ROOT/shared-treehouse" \
+    FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
     FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
@@ -294,6 +300,8 @@ test_home_seed_uses_treehouse_acquired_home() {
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report acquired home"
   grep -F 'treehouse get --lease --lease-holder dash' "$log" >/dev/null || fail "seed did not durably lease a home under the secondmate id"
+  grep -F "treehouse-env HOME=$expected_root TREEHOUSE_ROOT=$expected_root" "$log" >/dev/null \
+    || fail "leased home acquisition did not override inherited Treehouse roots"
   [ -f "$lease" ] || fail "seed did not record a treehouse lease"
   [ "$(cat "$lease")" = dash ] || fail "seed did not set the lease holder to the secondmate id"
   [ -f "$acquired/.fm-secondmate-home" ] || fail "seed did not mark acquired home"

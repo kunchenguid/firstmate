@@ -23,6 +23,8 @@ set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$ROOT/bin/fm-treehouse-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
@@ -56,7 +58,12 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FM_FAKE_LAUNCH_LOG"
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -104,12 +111,14 @@ EOF
 
 run_settle_spawn() {
   local id=$1
-  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  mkdir -p "$HOME_DIR/user-home"
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_LAUNCH_LOG="$HOME_DIR/launch.log" TREEHOUSE_ROOT="$HOME_DIR/shared-treehouse" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -132,6 +141,187 @@ test_single_stale_first_read_is_not_accepted() {
   assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
+}
+
+# The get command must carry the launching home's pool root, and the shell must
+# resume with its original HOME before the harness launch.
+test_spawn_get_uses_per_home_treehouse_root() {
+  local rec id out status expected_root expected_home
+  id=settle-per-home-root-z3
+  rec=$(make_settle_case settle-per-home-root "$id" 0)
+  read_settle_record "$rec"
+  mkdir -p "$HOME_DIR/user-home"
+  printf 'https://user:secret@example.invalid\n' > "$HOME_DIR/user-home/.git-credentials"
+  printf 'machine example.invalid login user password secret\n' > "$HOME_DIR/user-home/.netrc"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed while recording the per-home Treehouse root"
+  expected_home=$(cd "$HOME_DIR/user-home" && pwd -P)
+  expected_root=$(HOME="$expected_home" fm_treehouse_pool_root "$HOME_DIR")
+  case "$expected_root" in
+    "$expected_home"/*) ;;
+    *) fail "per-home Treehouse root '$expected_root' must live under the launching HOME, never inside the firstmate home" ;;
+  esac
+  assert_present "$expected_root/firstmate-home" "spawn did not prepare the per-home Treehouse root"
+  [ -L "$expected_root/.git-credentials" ] || fail "spawn did not bridge the launching HOME's Git credential store"
+  assert_grep "https://user:secret@example.invalid" "$expected_root/.git-credentials" \
+    "prepared pool root cannot read the launching HOME's Git credential store"
+  [ -L "$expected_root/.netrc" ] || fail "spawn did not bridge the launching HOME's netrc credential store"
+  assert_grep "machine example.invalid login user password secret" "$expected_root/.netrc" \
+    "prepared pool root cannot read the launching HOME's netrc credential store"
+  assert_grep "cd $PROJ_DIR && TREEHOUSE_ROOT=$expected_root HOME=$expected_root treehouse get Enter" "$HOME_DIR/launch.log" \
+    "treehouse get did not receive the per-home root"
+  assert_grep "export HOME=$expected_home Enter" "$HOME_DIR/launch.log" \
+    "spawn did not restore the launching HOME after Treehouse acquisition"
+  pass "fm-spawn.sh scopes treehouse get to the launching home's pool and restores HOME"
+}
+
+test_spawn_refuses_project_treehouse_config() {
+  local rec id out status config
+  id=settle-project-config-z4
+  rec=$(make_settle_case settle-project-config "$id" 0)
+  read_settle_record "$rec"
+  config="$PROJ_DIR/treehouse.toml"
+  : > "$config"
+  : > "$HOME_DIR/launch.log"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn should refuse a project treehouse.toml"
+  assert_contains "$out" "$config" "spawn refusal did not name the project treehouse.toml"
+  assert_no_grep "treehouse get" "$HOME_DIR/launch.log" \
+    "spawn attempted Treehouse acquisition despite the project treehouse.toml"
+  pass "fm-spawn.sh refuses project treehouse.toml before Treehouse acquisition"
+}
+
+test_spawn_refuses_repository_treehouse_config_for_subdirectory_project() {
+  local rec id out status config project_root
+  id=settle-repository-config-z5
+  rec=$(make_settle_case settle-repository-config "$id" 0)
+  read_settle_record "$rec"
+  project_root=$PROJ_DIR
+  mkdir -p "$project_root/subdirectory"
+  PROJ_DIR=$project_root/subdirectory
+  config=$project_root/treehouse.toml
+  : > "$config"
+  : > "$HOME_DIR/launch.log"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn should refuse a repository-root treehouse.toml for a subdirectory project"
+  assert_contains "$out" "$config" "spawn refusal did not name the repository-root treehouse.toml"
+  assert_no_grep "treehouse get" "$HOME_DIR/launch.log" \
+    "spawn attempted Treehouse acquisition despite the repository-root treehouse.toml"
+  pass "fm-spawn.sh refuses repository-root treehouse.toml for a subdirectory project"
+}
+
+test_pool_root_keeps_sha1_key_with_sha1sum_fallback() {
+  local shasum_bin sha1sum_bin root_with_shasum root_with_sha1sum status cut_path
+  shasum_bin="$HOME_DIR/shasum-tools"
+  sha1sum_bin="$HOME_DIR/sha1sum-tools"
+  mkdir -p "$shasum_bin" "$sha1sum_bin" "$HOME_DIR/user-home"
+  cut_path=$(command -v cut)
+  ln -sf "$cut_path" "$shasum_bin/cut"
+  ln -sf "$cut_path" "$sha1sum_bin/cut"
+  printf '%s\n' '#!/bin/sh' 'IFS= read -r input || :' "printf '%s  -\\n' 0123456789abcdef0123456789abcdef01234567" > "$shasum_bin/shasum"
+  printf '%s\n' '#!/bin/sh' 'IFS= read -r input || :' "printf '%s  -\\n' 0123456789abcdef0123456789abcdef01234567" > "$sha1sum_bin/sha1sum"
+  chmod +x "$shasum_bin/shasum" "$sha1sum_bin/sha1sum"
+
+  status=0
+  root_with_shasum=$(PATH="$shasum_bin" HOME="$HOME_DIR/user-home" fm_treehouse_pool_root "$HOME_DIR") || status=$?
+  expect_code 0 "$status" "pool root should resolve with the established shasum path"
+  status=0
+  root_with_sha1sum=$(PATH="$sha1sum_bin" HOME="$HOME_DIR/user-home" fm_treehouse_pool_root "$HOME_DIR") || status=$?
+  expect_code 0 "$status" "pool root should resolve when sha1sum is the only available hasher"
+  [ "$root_with_sha1sum" = "$root_with_shasum" ] || \
+    fail "sha1sum fallback changed the established pool key: '$root_with_shasum' != '$root_with_sha1sum'"
+  [ "${root_with_sha1sum##*/}" = 0123456789ab ] || fail "SHA-1 pool key was not truncated to its first 12 hex characters"
+  pass "Treehouse pool roots keep the established SHA-1 key with the sha1sum fallback"
+}
+
+test_pool_root_refuses_relative_override() {
+  local out status
+  status=0
+  out=$(FM_TREEHOUSE_POOL_BASE=relative-pools HOME="$HOME_DIR/user-home" \
+    fm_treehouse_pool_root "$HOME_DIR" 2>&1) || status=$?
+  expect_code 1 "$status" "relative Treehouse pool bases should be refused"
+  assert_contains "$out" "must be absolute" "relative pool-base refusal was not actionable"
+  pass "Treehouse pool roots refuse caller-relative overrides"
+}
+
+test_pool_root_refuses_filesystem_root_override() {
+  local out status
+  status=0
+  out=$(FM_TREEHOUSE_POOL_BASE=/ HOME="$HOME_DIR/user-home" \
+    fm_treehouse_pool_root "$HOME_DIR" 2>&1) || status=$?
+  expect_code 1 "$status" "the filesystem root should not be accepted as a Treehouse pool base"
+  assert_contains "$out" "must not be the filesystem root" "filesystem-root pool-base refusal was not actionable"
+  pass "Treehouse pool roots refuse the filesystem root as an override"
+}
+
+test_prepare_root_filters_treehouse_user_config() {
+  local user_home pool_root race_bin real_ln
+  user_home="$HOME_DIR/config-user-home"
+  pool_root="$HOME_DIR/prepared-pool"
+  mkdir -p "$user_home/.config/git" "$user_home/.config/treehouse" "$pool_root"
+  printf 'root = "/shared"\n' > "$user_home/.config/treehouse/config.toml"
+  ln -s "$user_home/.config" "$pool_root/.config"
+
+  HOME="$user_home" fm_treehouse_prepare_root "$HOME_DIR" "$pool_root" || \
+    fail "pool preparation failed while migrating the existing .config link"
+  [ -d "$pool_root/.config" ] && [ ! -L "$pool_root/.config" ] || \
+    fail "pool preparation did not replace the broad .config link with a real directory"
+  [ -L "$pool_root/.config/git" ] || fail "pool preparation did not bridge non-Treehouse user config"
+  [ ! -e "$pool_root/.config/treehouse" ] && [ ! -L "$pool_root/.config/treehouse" ] || \
+    fail "pool preparation exposed the user's Treehouse root configuration"
+
+  mkdir -p "$user_home/.config/gh"
+  ln -s "$user_home/.config/treehouse" "$pool_root/.config/treehouse"
+  race_bin="$HOME_DIR/config-race-bin"
+  real_ln=$(command -v ln)
+  mkdir -p "$race_bin"
+  printf '%s\n' '#!/bin/sh' \
+    "for arg do config_target=\$arg; done" \
+    "case \"\$config_target\" in */git) exit 91 ;; esac" \
+    "\"\$FM_REAL_LN\" \"\$@\"" \
+    'exit 1' > "$race_bin/ln"
+  chmod +x "$race_bin/ln"
+  HOME="$user_home" FM_REAL_LN="$real_ln" PATH="$race_bin:$PATH" \
+    fm_treehouse_prepare_root "$HOME_DIR" "$pool_root" || \
+    fail "pool preparation failed while refreshing filtered user config"
+  [ -L "$pool_root/.config/git" ] || fail "pool preparation replaced a valid config bridge"
+  [ -L "$pool_root/.config/gh" ] || fail "pool preparation did not bridge a newly added user config entry"
+  [ ! -e "$pool_root/.config/treehouse" ] && [ ! -L "$pool_root/.config/treehouse" ] || \
+    fail "pool preparation retained a stale Treehouse config link"
+  pass "Treehouse pool preparation bridges user config without exposing Treehouse root settings"
+}
+
+test_prepare_root_preserves_existing_real_treehouse_config() {
+  local user_home pool_root marker out status
+  user_home="$HOME_DIR/existing-config-user-home"
+  pool_root="$HOME_DIR/existing-config-pool"
+  marker="$pool_root/.config/treehouse/keep"
+  mkdir -p "$user_home" "${marker%/*}"
+  printf 'operator data\n' > "$marker"
+
+  status=0
+  out=$(HOME="$user_home" fm_treehouse_prepare_root "$HOME_DIR" "$pool_root" 2>&1) || status=$?
+  expect_code 1 "$status" "pool preparation should refuse an existing real .config/treehouse directory"
+  assert_contains "$out" "$pool_root/.config/treehouse" "pool preparation refusal did not name the preserved directory"
+  assert_grep "operator data" "$marker" "pool preparation deleted data from a real .config/treehouse directory"
+  pass "Treehouse pool preparation preserves an existing real .config/treehouse directory"
+}
+
+test_pool_root_recovery_uses_fixed_treehouse_layout() {
+  local pool_root worktree recovered
+  pool_root="$HOME_DIR/user-home/.treehouse/firstmate/0123456789ab"
+  worktree="$pool_root/.treehouse/.treehouse-deadbeef/slot/.treehouse"
+  recovered=$(fm_treehouse_root_for_worktree "$HOME_DIR" "$worktree") || \
+    fail "pool-root recovery failed for a .treehouse repository in the fixed Treehouse layout"
+  [ "$recovered" = "$pool_root" ] || \
+    fail "pool-root recovery did not use the fixed Treehouse layout: '$recovered' != '$pool_root'"
+  pass "Treehouse return recovers the pool root for a .treehouse repository"
 }
 
 # A pane that reports the real worktree from the very first read costs exactly
@@ -222,6 +412,15 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 }
 
 test_single_stale_first_read_is_not_accepted
+test_spawn_get_uses_per_home_treehouse_root
+test_spawn_refuses_project_treehouse_config
+test_spawn_refuses_repository_treehouse_config_for_subdirectory_project
+test_pool_root_keeps_sha1_key_with_sha1sum_fallback
+test_pool_root_refuses_relative_override
+test_pool_root_refuses_filesystem_root_override
+test_prepare_root_filters_treehouse_user_config
+test_prepare_root_preserves_existing_real_treehouse_config
+test_pool_root_recovery_uses_fixed_treehouse_layout
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline

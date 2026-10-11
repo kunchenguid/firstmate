@@ -20,6 +20,8 @@ set -u
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$ROOT/bin/fm-treehouse-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-tangle-guard)
 fm_git_identity fmtest fmtest@example.invalid
@@ -252,7 +254,7 @@ run_spawn_record() {
 }
 
 test_spawn_tmux_window_construction() {
-  local home proj fakebin rec wt out status
+  local home proj fakebin rec wt out status expected_root
   home="$TMP_ROOT/spawn-rec-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-rec-proj")
@@ -279,8 +281,9 @@ test_spawn_tmux_window_construction() {
     "must disable allow-rename on the spawned window"
 
   # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  expected_root=$(HOME="$home/user-home" fm_treehouse_pool_root "$home")
+  assert_grep "send-keys -t @spawnwid cd $proj && TREEHOUSE_ROOT=$expected_root HOME=$expected_root treehouse get Enter" "$rec" \
+    "treehouse get must carry the per-home root and use the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 

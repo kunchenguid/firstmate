@@ -43,6 +43,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-charter-lib.sh
@@ -388,12 +390,22 @@ seeded_origin_url() {
 }
 
 acquire_treehouse_home() {
-  local id=$1 home
-  # Durably lease a firstmate worktree from the pool. The lease persists with no
-  # live process and is skipped by later get/prune, so the home survives restarts
-  # until teardown or rollback returns it. treehouse prints only the worktree path
-  # to stdout (banners go to stderr), so command substitution captures the path.
-  home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
+  local id=$1 home pool_root
+  fm_treehouse_require_config_free_project "$FM_ROOT" || return 1
+  pool_root=$(fm_treehouse_pool_root "$FM_HOME") || {
+    echo "error: could not resolve the per-home Treehouse root from FM_HOME '$FM_HOME'" >&2
+    return 1
+  }
+  fm_treehouse_prepare_root "$FM_HOME" "$pool_root" || {
+    echo "error: could not prepare the per-home Treehouse root '$pool_root'" >&2
+    return 1
+  }
+  # Durably lease a firstmate worktree from the per-home pool. The lease persists
+  # with no live process and is skipped by later get/prune, so the home survives
+  # restarts until teardown or rollback returns it. treehouse prints only the
+  # worktree path to stdout (banners go to stderr), so command substitution
+  # captures the path.
+  home=$(cd "$FM_ROOT" && TREEHOUSE_ROOT="$pool_root" HOME="$pool_root" treehouse get --lease --lease-holder "$id") || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }
@@ -597,7 +609,7 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+  fm_treehouse_return "$FM_HOME" "$FM_ROOT" "$abs_home" >/dev/null || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }

@@ -89,6 +89,7 @@ SH
 #!/usr/bin/env bash
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+printf 'treehouse-env HOME=%s TREEHOUSE_ROOT=%s\n' "${HOME:-}" "${TREEHOUSE_ROOT:-}" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 case "${1:-}" in
   get)
     # Durable lease: print only the worktree path to stdout (banners to stderr),
