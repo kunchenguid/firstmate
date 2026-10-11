@@ -179,7 +179,14 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--archive-only [--disposition <inactive|awaiting-acceptance>] [--reason <text>]]
+#   --archive-only retires only the runtime record's active classification. It
+#   preserves the endpoint identity, local copy, branch, status history, inbox,
+#   validation evidence, and artifact links, and never closes the backlog row.
+#   It requires a terminal current-state proof and refuses live work, active
+#   validation, open answers, pending input, or a task-owned board. The
+#   awaiting-acceptance disposition keeps an in-flight row routable without
+#   treating its implementation as accepted or complete.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -363,6 +370,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -390,11 +399,27 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+ARCHIVE_ONLY=0
+ARCHIVE_DISPOSITION=inactive
+ARCHIVE_REASON=
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --archive-only) ARCHIVE_ONLY=1 ;;
+    --disposition)
+      [ "$#" -ge 2 ] || { echo "error: --disposition requires a value" >&2; exit 2; }
+      ARCHIVE_DISPOSITION=$2
+      shift
+      ;;
+    --disposition=*) ARCHIVE_DISPOSITION=${1#--disposition=} ;;
+    --reason)
+      [ "$#" -ge 2 ] || { echo "error: --reason requires a value" >&2; exit 2; }
+      ARCHIVE_REASON=$2
+      shift
+      ;;
+    --reason=*) ARCHIVE_REASON=${1#--reason=} ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -402,6 +427,23 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ "$ARCHIVE_ONLY" = 1 ] && [ -n "$FORCE" ]; then
+  echo "error: --archive-only cannot be combined with --force; it never discards work" >&2
+  exit 2
+fi
+if [ "$ARCHIVE_ONLY" != 1 ] && { [ "$ARCHIVE_DISPOSITION" != inactive ] || [ -n "$ARCHIVE_REASON" ]; }; then
+  echo "error: --disposition and --reason require --archive-only" >&2
+  exit 2
+fi
+case "$ARCHIVE_DISPOSITION" in
+  inactive|awaiting-acceptance) ;;
+  *) echo "error: --disposition must be inactive or awaiting-acceptance" >&2; exit 2 ;;
+esac
+case "$ARCHIVE_REASON" in
+  *[[:cntrl:]]*) echo "error: --reason contains a control character" >&2; exit 2 ;;
+esac
+[ -n "${ARCHIVE_REASON//[[:space:]]/}" ] || ARCHIVE_REASON='archive-only runtime retention'
+[ "${#ARCHIVE_REASON}" -le 1200 ] || { echo "error: --reason is too long" >&2; exit 2; }
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -511,6 +553,191 @@ CONTROL_LOCK_HELD=1
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
+archive_only_field() {
+  grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+archive_only_refuse() {
+  echo "REFUSED: archive-only retention for $ID: $1; every durable record and the local copy remain unchanged" >&2
+  return 1
+}
+
+archive_only_task_board() {
+  local rec owner handled
+  for rec in "$STATE/procevent"/*.source; do
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    owner=$(grep '^owner_task=' "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$owner" = "$ID" ] && return 0
+  done
+  for rec in "$STATE/procevent-inbox"/*.owner-task; do
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    handled=${rec%.owner-task}.handled
+    if [ -f "$handled" ] && [ ! -L "$handled" ]; then
+      continue
+    fi
+    grep -Fxq -- "$ID" "$rec" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+archive_only_pending_answer() {
+  local rec task
+  for rec in "$STATE/pending-replies"/*; do
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    task=$(grep '^task_id=' "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$task" = "$ID" ] && return 0
+  done
+  return 1
+}
+
+archive_only_pending_input() {
+  local rec
+  for rec in "$STATE/$ID.inbox"/*.msg; do
+    [ -f "$rec" ] && [ ! -L "$rec" ] && return 0
+  done
+  return 1
+}
+
+archive_only_write_record() {
+  local tmp line
+  tmp=$(umask 077; mktemp "$STATE/.${ID}.archive-only.XXXXXX") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      lifecycle=*|retained_mode=*|retained_at=*|retained_reason=*|retained_state=*|retained_source=*|retained_spawn_gen=*)
+        continue
+        ;;
+    esac
+    printf '%s\n' "$line" >> "$tmp" || { rm -f -- "$tmp"; return 1; }
+  done < "$META"
+  {
+    printf 'lifecycle=retained\n'
+    printf 'retained_mode=%s\n' "$ARCHIVE_DISPOSITION"
+    printf 'retained_at=%s\n' "$(date +%s)"
+    printf 'retained_reason=%s\n' "$ARCHIVE_REASON"
+    printf 'retained_state=%s\n' "$ARCHIVE_CURRENT_STATE"
+    printf 'retained_source=archive-only\n'
+    printf 'retained_spawn_gen=%s\n' "$(archive_only_field spawn_gen)"
+  } >> "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$META"
+}
+
+archive_only_task() {
+  local lifecycle mode state_line state_word state_source worker_line worker_state row_state open_decisions
+  lifecycle=$(archive_only_field lifecycle)
+  if [ "$lifecycle" = retained ]; then
+    mode=$(archive_only_field retained_mode)
+    if [ "$mode" != "$ARCHIVE_DISPOSITION" ]; then
+      archive_only_refuse "already retained with disposition $mode"
+      return 1
+    fi
+    case "$(archive_only_field retained_source):$(archive_only_field retained_at):$(archive_only_field retained_state)" in
+      archive-only:[0-9]*:done|archive-only:[0-9]*:failed)
+        [ -n "$(archive_only_field retained_reason)" ] || {
+          archive_only_refuse "the retained provenance is incomplete"
+          return 1
+        }
+        ;;
+      *)
+        archive_only_refuse "the retained provenance is malformed"
+        return 1
+        ;;
+    esac
+    if [ "$(archive_only_field retained_spawn_gen)" != "$(archive_only_field spawn_gen)" ]; then
+      archive_only_refuse "the retained provenance belongs to a different spawn generation"
+      return 1
+    fi
+    echo "archive-only $ID already retained (disposition=$mode)"
+    return 0
+  fi
+  if [ -n "$lifecycle" ]; then
+    archive_only_refuse "unrecognized lifecycle '$lifecycle'"
+    return 1
+  fi
+  if [ -z "$(archive_only_field spawn_gen)" ]; then
+    archive_only_refuse "the task record has no spawn generation to retain"
+    return 1
+  fi
+  if [ "$TEARDOWN_META_KIND" = secondmate ]; then
+    archive_only_refuse "persistent secondmate records have their own retirement owner"
+    return 1
+  fi
+  if ! fm_backlog_row_probe "$DATA" "$ID"; then
+    archive_only_refuse "backlog row is unavailable (${FM_BACKLOG_ROW_ERROR:-not found})"
+    return 1
+  fi
+  row_state=${FM_BACKLOG_ROW_STATE%% *}
+  if [ "$ARCHIVE_DISPOSITION" = inactive ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+    archive_only_refuse "the Done row still carries a deferred captain approval"
+    return 1
+  fi
+  case "$ARCHIVE_DISPOSITION:$row_state" in
+    inactive:done) ;;
+    inactive:*)
+      archive_only_refuse "inactive retention requires a Done backlog row, found $row_state"
+      return 1
+      ;;
+    awaiting-acceptance:in_flight) ;;
+    awaiting-acceptance:*)
+      archive_only_refuse "awaiting-acceptance retention requires an In flight backlog row, found $row_state"
+      return 1
+      ;;
+  esac
+  state_line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-crew-state.sh" "$ID" 2>/dev/null || true)
+  state_word=$(printf '%s\n' "$state_line" | sed -n 's/^state: \([^·]*\).*/\1/p' | tr -d '[:space:]')
+  state_source=$(printf '%s\n' "$state_line" | sed -n 's/.* · source: \([^·]*\).*/\1/p' | tr -d '[:space:]')
+  case "$state_word" in
+    done|failed) ;;
+    working|parked|blocked|paused)
+      archive_only_refuse "current state is $state_word${state_source:+ from $state_source}"
+      return 1
+      ;;
+    *)
+      archive_only_refuse "current state is unavailable${state_line:+ ($state_line)}"
+      return 1
+      ;;
+  esac
+  worker_line=$(fm_busy_classify_meta "$META" "$ID" "$STATE" 2>/dev/null || true)
+  worker_state=${worker_line%% *}
+  case "$worker_state" in
+    idle) ;;
+    busy)
+      archive_only_refuse "worker state is busy${worker_line#busy}"
+      return 1
+      ;;
+    *)
+      archive_only_refuse "worker state is unavailable${worker_line:+ ($worker_line)}"
+      return 1
+      ;;
+  esac
+  open_decisions=$(status_open_decisions "$STATE/$ID.status" "$TEARDOWN_META_KIND" 2>/dev/null || true)
+  if [ -n "$open_decisions" ]; then
+    archive_only_refuse "an open approval or answer remains routable"
+    return 1
+  fi
+  if archive_only_task_board; then
+    archive_only_refuse "a task-owned board remains registered"
+    return 1
+  fi
+  if archive_only_pending_answer; then
+    archive_only_refuse "a durable answer remains pending"
+    return 1
+  fi
+  if archive_only_pending_input; then
+    archive_only_refuse "pending steering input remains unread"
+    return 1
+  fi
+  ARCHIVE_CURRENT_STATE=$state_word
+  if ! archive_only_write_record; then
+    archive_only_refuse "the retained record could not be published atomically"
+    return 1
+  fi
+  echo "archive-only $ID retained (disposition=$ARCHIVE_DISPOSITION, state=$state_word)"
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
+}
+
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -537,6 +764,10 @@ if [ "$TEARDOWN_META_KIND" = secondmate ]; then
     exit 1
   }
   SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
+fi
+if [ "$ARCHIVE_ONLY" = 1 ]; then
+  archive_only_task || exit 1
+  exit 0
 fi
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=

@@ -152,6 +152,25 @@ valid_id() {
   return 0
 }
 
+retained_record_valid() { # <meta>
+  local meta=$1 lifecycle mode retained_at reason state source spawn_gen retained_spawn_gen
+  lifecycle=$(meta_field "$meta" lifecycle)
+  [ "$lifecycle" = retained ] || return 1
+  mode=$(meta_field "$meta" retained_mode)
+  retained_at=$(meta_field "$meta" retained_at)
+  reason=$(meta_field "$meta" retained_reason)
+  state=$(meta_field "$meta" retained_state)
+  source=$(meta_field "$meta" retained_source)
+  spawn_gen=$(meta_field "$meta" spawn_gen)
+  retained_spawn_gen=$(meta_field "$meta" retained_spawn_gen)
+  case "$mode" in inactive|awaiting-acceptance) ;; *) return 1 ;; esac
+  case "$retained_at" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$reason" ] || return 1
+  case "$state" in done|failed) ;; *) return 1 ;; esac
+  [ "$source" = archive-only ] || return 1
+  [ -n "$spawn_gen" ] && [ "$retained_spawn_gen" = "$spawn_gen" ]
+}
+
 sha256_text() {
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$1" | shasum -a 256 | awk '{print substr($1, 1, 32)}'
@@ -500,6 +519,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
+  retained_record_valid "$meta" && return 0
   status="$STATE/$id.status"
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")

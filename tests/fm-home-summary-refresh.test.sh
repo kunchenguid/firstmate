@@ -315,7 +315,9 @@ pass "live watcher cadence bounds publication staleness without signals"
 # silently recomputing a different view of the owning home.
 run_writer "$NOW_TWO" "$EPOCH_TWO" || fail "could not settle the ledger before the consumer check"
 jq '.state = "no_active_work" | .active_children = [] | .holds = []
-    | .counts.active_children = 0 | .counts.holds = 0' \
+    | .counts.active_children = 0 | .counts.holds = 0
+    | .retained = [{id:"retained-task",mode:"awaiting-acceptance",reason:"device acceptance pending"}]
+    | .warnings = [{kind:"retained_state_unavailable",id:"retained-task",reason:"endpoint state unavailable"}]' \
   "$HOME_DIR/state/home-summary.json" > "$HOME_DIR/state/home-summary.poisoned"
 mv -f "$HOME_DIR/state/home-summary.poisoned" "$HOME_DIR/state/home-summary.json"
 mkdir -p "$PARENT_HOME/state" "$PARENT_HOME/data" "$PARENT_HOME/config" "$PARENT_HOME/projects"
@@ -341,6 +343,8 @@ jq -e '
   and .secondmate_current.records[0].current.state == "no_active_work"
   and (.secondmate_current.records[0].active_children | length) == 0
   and (.secondmate_current.records[0].holds | length) == 0
+  and .secondmate_current.records[0].retained == [{id:"retained-task",mode:"awaiting-acceptance",reason:"device acceptance pending"}]
+  and .secondmate_current.records[0].warnings == [{kind:"retained_state_unavailable",id:"retained-task",reason:"endpoint state unavailable"}]
 ' "$TMP_ROOT/parent-snapshot.json" >/dev/null \
   || fail "fleet snapshot did not consume the published local ledger: $(jq -c '.secondmate_current.records[0]' "$TMP_ROOT/parent-snapshot.json")"
 pass "fleet snapshot consumes the published local ledger by default"

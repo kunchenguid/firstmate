@@ -390,6 +390,36 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_starts_a_fresh_retention_lifecycle() {
+  local dir out rc old_gen new_gen
+  dir=$(new_case retained-generation rl45)
+  add_ship_task "$dir" rl45 claude
+  old_gen=archived-rl45
+  printf '%s\n' \
+    "spawn_gen=$old_gen" \
+    'lifecycle=retained' \
+    'retained_mode=awaiting-acceptance' \
+    'retained_at=1791244800' \
+    'retained_reason=physical acceptance remains pending' \
+    'retained_state=done' \
+    'retained_source=archive-only' \
+    "retained_spawn_gen=$old_gen" \
+    'durable_note=keep this metadata' >> "$dir/home/state/rl45.meta"
+
+  out=$(run_control "$dir" rl45 relaunch --note "resume after acceptance review"); rc=$?
+  expect_code 0 "$rc" "a retained task should relaunch into a fresh lifecycle"$'\n'"$out"
+  new_gen=$(meta_field "$dir" rl45 spawn_gen)
+  [ -n "$new_gen" ] && [ "$new_gen" != "$old_gen" ] \
+    || fail "relaunch should publish a fresh spawn generation, got '$new_gen'"
+  [ "$(meta_field "$dir" rl45 durable_note)" = 'keep this metadata' ] \
+    || fail 'relaunch should preserve unrelated durable metadata'
+  for field in lifecycle retained_mode retained_at retained_reason retained_state retained_source retained_spawn_gen; do
+    [ -z "$(meta_field "$dir" rl45 "$field")" ] \
+      || fail "relaunch should clear prior retention field $field"
+  done
+  pass "fm-control relaunch: a new generation clears only the prior retained lifecycle"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -2489,6 +2519,7 @@ SH
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_starts_a_fresh_retention_lifecycle
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
