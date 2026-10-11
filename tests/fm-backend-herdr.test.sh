@@ -3813,6 +3813,30 @@ test_current_path_reads_cwd() {
   pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
 }
 
+test_current_path_keeps_a_windows_drive_in_titles() {
+  local dir log resp fb fbcy out wk
+  dir="$TMP_ROOT/cwd-drive"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  wk="$dir/worktree"; mkdir -p "$wk"
+  printf '{"result":{"pane":{"terminal_title_stripped":"C:/Users/name/worktree"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # A cygpath stand-in that only translates a path still carrying its drive:
+  # under the drive-dropping bug the candidate arrives as "/Users/..." and
+  # cannot become a directory, so the case cannot pass vacuously.
+  fbcy="$dir/fakebin-cygpath"; mkdir -p "$fbcy"
+  cat > "$fbcy/cygpath" <<SH
+#!/usr/bin/env bash
+case "\$2" in
+  C:/Users/name/worktree) printf '%s\n' "$wk" ;;
+  *) printf '%s\n' "\$2" ;;
+esac
+SH
+  chmod +x "$fbcy/cygpath"
+  out=$( PATH="$fbcy:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
+  [ "$out" = "$wk" ] || fail "a Windows drive path in the title must survive title parsing, got '$out'"
+  pass "fm_backend_herdr_current_path: a Windows drive path in a title keeps its drive"
+}
+
 # --- busy_state (semantic agent state) ---------------------------------------
 
 test_busy_state_working_maps_to_busy() {
@@ -6017,6 +6041,7 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
+test_current_path_keeps_a_windows_drive_in_titles
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent

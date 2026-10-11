@@ -202,7 +202,16 @@ test_backend_name_precedence() {
   [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "FM_BACKEND env should win over config/backend"
 
-  pass "fm_backend_name: FM_BACKEND env > config/backend > default tmux"
+  # Windows cannot spawn tmux at all (fm_backend_validate_spawn refuses it), so
+  # the undetected default there is herdr rather than a tmux default that could
+  # never launch a worker.
+  mkdir -p "$dir/fakebin-mingw" "$dir/empty-cfg"
+  printf '#!/bin/sh\necho MINGW64_NT-test\n' > "$dir/fakebin-mingw/uname"
+  chmod +x "$dir/fakebin-mingw/uname"
+  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; PATH="$dir/fakebin-mingw:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$dir/empty-cfg" fm_backend_name)" = herdr ] \
+    || fail "fm_backend_name should default to herdr on Windows with no env/config/detection markers"
+
+  pass "fm_backend_name: FM_BACKEND env > config/backend > default herdr on Windows / tmux elsewhere"
 }
 
 # fm_backend_detect: environment-marker runtime auto-detection (mirrors
@@ -579,7 +588,17 @@ test_backend_source_requires_adapter_file() {
 
 test_backend_validate_spawn_accepts_orca() {
   local out
-  fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Windows has no spawnable tmux at all: the refusal is the platform
+      # contract, not a fault in this case.
+      out=$(fm_backend_validate_spawn tmux 2>&1) && fail "fm_backend_validate_spawn should refuse tmux on Windows"
+      assert_contains "$out" "backend 'tmux' cannot spawn windows on Windows" "the Windows tmux refusal message changed"
+      ;;
+    *)
+      fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
+      ;;
+  esac
   fm_backend_validate_spawn herdr 2>/dev/null || fail "fm_backend_validate_spawn should accept herdr"
   fm_backend_validate_spawn zellij 2>/dev/null || fail "fm_backend_validate_spawn should accept zellij"
   fm_backend_validate_spawn orca 2>/dev/null || fail "fm_backend_validate_spawn should accept orca"

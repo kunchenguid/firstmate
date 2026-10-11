@@ -817,7 +817,14 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   expected_uid=$(id -u 2>/dev/null) || return 1
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
-  [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      [ "$owner" = "$expected_uid" ]
+      ;;
+    *)
+      [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+      ;;
+  esac
 }
 
 # Resolve the one verified running named-session socket path as an absolute
@@ -835,6 +842,9 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
+  if command -v cygpath >/dev/null 2>&1; then
+    socket=$(cygpath -u "$socket" 2>/dev/null || printf '%s' "$socket")
+  fi
   case "$socket" in
     /*) ;;
     *) return 1 ;;
@@ -3074,9 +3084,34 @@ fm_backend_herdr_target_ready() {  # <target>
 # process's cwd instead, which is what changes when `treehouse get` enters its
 # worktree subshell - confirmed live against a real treehouse acquisition.
 fm_backend_herdr_current_path() {  # <target>
+  local out cwd title candidate
   fm_backend_herdr_target_ready "$1" || return 0
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
-    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 0
+  cwd=$(printf '%s' "$out" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+  if [ -n "$cwd" ]; then
+    printf '%s' "$cwd"
+    return 0
+  fi
+  title=$(printf '%s' "$out" | jq -r '.result.pane.terminal_title_stripped // .result.pane.terminal_title // empty' 2>/dev/null)
+  case "$title" in
+    # A bare Windows path ("C:/Users/name/worktree", "C:\Users\name\worktree")
+    # must keep its drive: the prefix-stripping arms below read the colon as a
+    # "<label>: <path>" separator and would drop the drive before cygpath runs.
+    [A-Za-z]:/*|[A-Za-z]:\\*) candidate="$title" ;;
+    *:/*) candidate="/${title#*:*/}" ;;
+    *:\\[a-zA-Z]*) candidate="${title#*:}" ;;
+    /*) candidate="$title" ;;
+    *) candidate="" ;;
+  esac
+  if [ -n "$candidate" ]; then
+    if command -v cygpath >/dev/null 2>&1; then
+      candidate=$(cygpath -u "$candidate" 2>/dev/null || printf '%s' "$candidate")
+    fi
+    if [ -d "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

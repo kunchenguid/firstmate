@@ -537,6 +537,25 @@ fm_lock_discard_owner() {
   rmdir "$ownerdir" 2>/dev/null || true
 }
 
+# Reap the owner directories beside a real-directory lock. The Windows lock
+# shape has no symlink to read its owner back from, so every removal path has
+# to clear the siblings itself. A directory another LIVE process owns is left
+# alone: a contender prepares its owner before it can create the lock, and
+# sweeping that contender's directory made it lose an attempt on a lock that
+# had just become free.
+fm_lock_discard_owner_siblings() {  # <lockdir>
+  local lockdir=$1 ownerdir owner_pid me
+  fm_current_pid me || true
+  for ownerdir in "$lockdir".owner.*; do
+    [ -e "$ownerdir" ] || continue
+    owner_pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+    if [ -n "$owner_pid" ] && [ "$owner_pid" != "$me" ] && fm_pid_alive "$owner_pid"; then
+      continue
+    fi
+    fm_lock_discard_owner "$ownerdir"
+  done
+}
+
 fm_lock_remove_stray_owner_link() {
   local lockdir=$1 ownerdir=$2 stray
   stray="$lockdir/$(basename "$ownerdir")"
@@ -589,6 +608,31 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # MSYS symlinks need privileges the fleet cannot assume, so the lock is a
+      # real directory with its pid inside. The owner directory is prepared and
+      # exported FIRST: fm-procevent requires FM_LOCK_OWNER_DIR for the
+      # extension lifecycle, the extension host validates the
+      # "<lock>.owner.<suffix>" sibling shape, and preparing before the lock
+      # keeps a concurrent release from sweeping a contender's not-yet-owned
+      # directory (fm_lock_discard_owner_siblings skips live owners).
+      if fm_lock_prepare_owner "$ownerdir"; then
+        if mkdir "$lockdir" 2>/dev/null; then
+          local mypid
+          fm_current_pid mypid || mypid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+          if [ -n "$mypid" ] && { printf '%s\n' "$mypid" > "$lockdir/pid"; } 2>/dev/null; then
+            FM_LOCK_OWNER_DIR=$ownerdir
+            return 0
+          fi
+          rm -f "$lockdir/pid" 2>/dev/null || true
+          rmdir "$lockdir" 2>/dev/null || true
+        fi
+      fi
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+      ;;
+  esac
   if ! fm_lock_prepare_owner "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -617,6 +661,7 @@ fm_lock_remove_path() {
     return 0
   fi
   fm_lock_clean_known_files "$lockdir"
+  fm_lock_discard_owner_siblings "$lockdir"
   rmdir "$lockdir" 2>/dev/null
 }
 
@@ -1219,11 +1264,20 @@ fm_lock_try_acquire() {
     FM_LOCK_OWNER_DIR=
     return 1
   fi
-  if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
-    fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-    FM_LOCK_OWNER_DIR=
-    return 1
+  if [ -L "$steal" ]; then
+    if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
+      fm_lock_release "$steal"
+      FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+      FM_LOCK_OWNER_DIR=
+      return 1
+    fi
+  else
+    if [ "$(cat "$steal/pid" 2>/dev/null)" != "$current" ]; then
+      fm_lock_release "$steal"
+      FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+      FM_LOCK_OWNER_DIR=
+      return 1
+    fi
   fi
 
   primary_owner=
@@ -1386,6 +1440,7 @@ fm_lock_release() {
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"
+  fm_lock_discard_owner_siblings "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
 }
 

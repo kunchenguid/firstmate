@@ -27,13 +27,18 @@ unset _FM_SESSION_LOCK_LIB_DIR
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
 # omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+# Command Code Desktop is anchored the same way and carries a literal space in
+# its process name (verified live, Command Code Desktop 1.72.4 on Windows: the
+# native process table reports "Command Code.exe" for the app process whose pid
+# is the direct parent of a tool-call shell). Its path and argv evidence are
+# deliberately excluded, so only that exact process name can claim the lock.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi(\.exe)?$|^pi-signed(\.exe)?$|^omp(\.exe)?$|^agy(\.exe)?$|^antigravity(\.exe)?$|^[Cc]ommand [Cc]ode(\.exe)?$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy antigravity)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -47,6 +52,7 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 fm_harness_path_name() {  # <path>
   local path=$1 name
   [ -n "$path" ] || return 1
+  path=${path//\\//}
   for name in "${FM_HARNESS_NAMES[@]}"; do
     case "/$path/" in
       */"$name"/*) printf '%s' "$name"; return 0 ;;
@@ -72,6 +78,18 @@ fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
+  # The Codex desktop app's own helper processes carry a codex-prefixed name
+  # but are not harnesses: the command runner is spawned per tool call and
+  # dies with it, so a session lock anchored on one records a pid that goes
+  # dead while the session is still alive. Excluding them here lets the
+  # ancestry walk keep climbing to the codex app process itself, which
+  # lives as long as the session (verified against codex-desktop 0.159.2
+  # process names). Every evidence path below is skipped for them.
+  case "$base" in
+    codex-command-runner* | codex-code-mode-host* | codex-windows-sandbox-service* | codex-computer-use-swift*)
+      return 1
+      ;;
+  esac
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
@@ -84,6 +102,25 @@ fm_harness_process_matches() {  # <comm> <args>
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
+      # Pi's native Windows install runs its package entry point through
+      # node.exe, whose process name and executable path do not identify Pi.
+      # Normalize separators, then require the exact published package entry
+      # point so an unrelated Node tool cannot claim the session lock.
+      case "$base" in
+        node|node.exe|node-*|node[0-9]*)
+          if printf '%s' "$args" | tr '\\' '/' | grep -Fqi '/@earendil-works/pi-coding-agent/dist/bundle/cli.js'; then
+            return 0
+          fi
+          # Pi's native Windows install runs its own bundled runtime from
+          # %LOCALAPPDATA%\pi-node\current, and the Get-Process fallback below
+          # carries only that executable path. Matching the exact path
+          # component keeps the substitution safe: it identifies Pi's engine
+          # without trusting an arbitrary node path.
+          if printf '%s' "$argv0" | tr '\\' '/' | grep -Fq '/pi-node/'; then
+            return 0
+          fi
+          ;;
+      esac
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
@@ -95,6 +132,15 @@ fm_harness_process_matches() {  # <comm> <args>
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
+  # Antigravity: agy CLI, Antigravity desktop IDE, or Antigravity language_server.
+  case "$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')" in
+    agy|agy.exe|antigravity|antigravity.exe) return 0 ;;
+    language_server|language_server.exe)
+      if printf '%s' "$args" | tr '\\' '/' | grep -Fqi 'antigravity'; then
+        return 0
+      fi
+      ;;
+  esac
   return 1
 }
 
@@ -116,8 +162,177 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+# Git Bash's bundled ps does not support procps' -o selectors, and its PIDs are
+# not Windows process IDs. Read the native process tree once, beginning at this
+# Bash process's WINPID, so native Pi (node.exe) ancestry can be verified.
+#
+# The CIM query is preferred because it carries each process's command line,
+# which the argv[0] and Node entry-point evidence wants. When it returns
+# nothing - an agent sandbox can deny WMI, as the Codex desktop Windows sandbox
+# does - fall back to PowerShell 7 Get-Process, which still reports every
+# process's name and, through its Parent property, the whole chain. Get-Process
+# has no command line, so the executable path (or the process name when the
+# path is unreadable) is carried as the argument evidence; the exact-component
+# checks keep that substitute safe.
+fm_windows_powershell_program() {
+  local candidate
+  for candidate in powershell.exe pwsh pwsh.exe; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fm_windows_pwsh_program() {
+  local candidate
+  for candidate in pwsh pwsh.exe; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fm_windows_process_ancestry_records() {
+  local pids=() p wp winpid records powershell_program pwsh_program
+  powershell_program=$(fm_windows_powershell_program) || return 1
+  p=$$
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    wp=$(cat "/proc/$p/winpid" 2>/dev/null || true)
+    case "$wp" in
+      ''|*[!0-9]*) ;;
+      *) pids+=("$wp") ;;
+    esac
+    p=$(cat "/proc/$p/ppid" 2>/dev/null || break)
+  done
+  if [ "${#pids[@]}" -eq 0 ]; then
+    winpid=$(ps -l -p "$$" 2>/dev/null | awk 'NF >= 4 && $1 ~ /^[0-9]+$/ { print $4; exit }')
+    case "$winpid" in ''|*[!0-9]*) return 1 ;; esac
+    pids=("$winpid")
+  fi
+  records=$(FM_WINDOWS_PROCESS_PIDS="${pids[*]}" "$powershell_program" -NoLogo -NoProfile -NonInteractive -Command '
+    $ErrorActionPreference = "SilentlyContinue"
+    $all = Get-CimInstance Win32_Process
+    $byId = @{}
+    foreach ($p in $all) { $byId[[int]$p.ProcessId] = $p }
+    $seen = @{}
+    $pids = ($env:FM_WINDOWS_PROCESS_PIDS -split " ") | ForEach-Object { [int]$_ } | Where-Object { $_ -gt 0 }
+    foreach ($id in $pids) {
+      if ($seen[$id]) { continue }
+      $p = $byId[$id]
+      if (-not $p) { continue }
+      $seen[$id] = $true
+      $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$p.CommandLine))
+      Write-Output ("{0}|{1}|{2}|{3}" -f $p.ProcessId, $p.ParentProcessId, $p.Name, $encoded)
+    }
+    $lastId = if ($pids.Count -gt 0) { $byId[$pids[-1]].ParentProcessId } else { 0 }
+    $id = [int]$lastId
+    for ($i = 0; $i -lt 16 -and $id -gt 0; $i++) {
+      if ($seen[$id]) { break }
+      $p = $byId[$id]
+      if (-not $p) { break }
+      $seen[$id] = $true
+      $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$p.CommandLine))
+      Write-Output ("{0}|{1}|{2}|{3}" -f $p.ProcessId, $p.ParentProcessId, $p.Name, $encoded)
+      $id = [int]$p.ParentProcessId
+    }
+  ' 2>/dev/null | tr -d '\r')
+  if [ -z "$records" ] && pwsh_program=$(fm_windows_pwsh_program); then
+    records=$(FM_WINDOWS_PROCESS_PIDS="${pids[*]}" "$pwsh_program" -NoLogo -NoProfile -NonInteractive -Command '
+      $ErrorActionPreference = "SilentlyContinue"
+      function Get-FmParentId($child) {
+        try { if ($child.Parent) { return [int]$child.Parent.Id } } catch { }
+        return 0
+      }
+      function Write-FmRecord($target) {
+        $evidence = if ($target.Path) { [string]$target.Path } else { [string]$target.ProcessName }
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($evidence))
+        Write-Output ("{0}|{1}|{2}|{3}" -f [int]$target.Id, (Get-FmParentId $target), $target.ProcessName, $encoded)
+      }
+      $seen = @{}
+      $pids = ($env:FM_WINDOWS_PROCESS_PIDS -split " ") | ForEach-Object { [int]$_ } | Where-Object { $_ -gt 0 }
+      $next = 0
+      foreach ($id in $pids) {
+        if ($seen[$id]) { continue }
+        $target = Get-Process -Id $id
+        if (-not $target) { continue }
+        $seen[$id] = $true
+        Write-FmRecord $target
+        $next = Get-FmParentId $target
+      }
+      for ($i = 0; $i -lt 16 -and $next -gt 0; $i++) {
+        if ($seen[$next]) { break }
+        $target = Get-Process -Id $next
+        if (-not $target) { break }
+        $seen[$next] = $true
+        Write-FmRecord $target
+        $next = Get-FmParentId $target
+      }
+    ' 2>/dev/null | tr -d '\r')
+  fi
+  [ -n "$records" ] || return 1
+  printf '%s\n' "$records"
+}
+
+fm_windows_process_record() {  # <windows-pid> -> pid|ppid|name|base64-command-line
+  local pid=$1 records powershell_program pwsh_program
+  powershell_program=$(fm_windows_powershell_program) || return 1
+  records=$(FM_WINDOWS_PROCESS_PID="$pid" "$powershell_program" -NoLogo -NoProfile -NonInteractive -Command '
+    $ErrorActionPreference = "SilentlyContinue"
+    $p = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$env:FM_WINDOWS_PROCESS_PID)
+    if ($p) {
+      $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$p.CommandLine))
+      Write-Output ("{0}|{1}|{2}|{3}" -f $p.ProcessId, $p.ParentProcessId, $p.Name, $encoded)
+    }
+  ' 2>/dev/null | tr -d '\r')
+  if [ -z "$records" ] && pwsh_program=$(fm_windows_pwsh_program); then
+    records=$(FM_WINDOWS_PROCESS_PID="$pid" "$pwsh_program" -NoLogo -NoProfile -NonInteractive -Command '
+      $ErrorActionPreference = "SilentlyContinue"
+      $target = Get-Process -Id ([int]$env:FM_WINDOWS_PROCESS_PID)
+      if ($target) {
+        $evidence = if ($target.Path) { [string]$target.Path } else { [string]$target.ProcessName }
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($evidence))
+        $parentId = 0
+        try { if ($target.Parent) { $parentId = [int]$target.Parent.Id } } catch { }
+        Write-Output ("{0}|{1}|{2}|{3}" -f [int]$target.Id, $parentId, $target.ProcessName, $encoded)
+      }
+    ' 2>/dev/null | tr -d '\r')
+  fi
+  [ -n "$records" ] || return 1
+  printf '%s\n' "$records"
+}
+
+fm_windows_record_command_line() {  # <base64>
+  printf '%s' "$1" | base64 -d 2>/dev/null
+}
+
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      local records parent encoded
+      records=$(fm_windows_process_ancestry_records) || return 1
+      while IFS='|' read -r pid parent comm encoded; do
+        [ -n "$pid" ] || continue
+        args=$(fm_windows_record_command_line "$encoded") || args=
+        if fm_harness_process_matches "$comm" "$args"; then
+          printf '%s\n' "$pid"
+          printed=1
+          [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+          extending=1
+        elif [ "$extending" -eq 1 ]; then
+          break
+        fi
+      done <<EOF
+$records
+EOF
+      [ "$printed" -eq 1 ]
+      return
+      ;;
+  esac
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -166,6 +381,19 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      local record parent encoded
+      record=$(fm_windows_process_record "$pid") || return 1
+      [ -n "$record" ] || return 1
+      IFS='|' read -r _ parent comm encoded <<EOF
+$record
+EOF
+      args=$(fm_windows_record_command_line "$encoded") || args=
+      fm_harness_process_matches "$comm" "$args"
+      return
+      ;;
+  esac
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -206,6 +434,27 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
   if [ -z "$pids" ]; then
     pids=$(fm_harness_ancestry_pids) || return 1
   fi
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      local record parent encoded
+      while IFS= read -r pid; do
+        [ "$pid" = "$claude_pid" ] || continue
+        record=$(fm_windows_process_record "$pid") || return 1
+        [ -n "$record" ] || return 1
+        IFS='|' read -r _ parent comm encoded <<EOF
+$record
+EOF
+        args=$(fm_windows_record_command_line "$encoded") || args=
+        fm_harness_process_matches "$comm" "$args" || return 1
+        [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
+        printf '%s\n' "$id"
+        return 0
+      done <<EOF
+$pids
+EOF
+      return 1
+      ;;
+  esac
   while IFS= read -r pid; do
     [ "$pid" = "$claude_pid" ] || continue
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
@@ -363,6 +612,28 @@ fm_session_lock_inspect() {  # <state>
   case "$pid" in
     ''|*[!0-9]*)
       FM_LOCK_INSPECT_STATE=unknown
+      return 0
+      ;;
+  esac
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      local record parent comm encoded args
+      record=$(fm_windows_process_record "$pid") || record=
+      if [ -n "$record" ]; then
+        IFS='|' read -r _ parent comm encoded <<EOF
+$record
+EOF
+        args=$(fm_windows_record_command_line "$encoded") || args=
+        FM_LOCK_INSPECT_STATE=unknown
+        FM_LOCK_INSPECT_LIVE_HARNESS=false
+        if fm_harness_process_matches "$comm" "$args"; then
+          FM_LOCK_INSPECT_STATE=held
+          FM_LOCK_INSPECT_LIVE_HARNESS=true
+        fi
+        return 0
+      fi
+      FM_LOCK_INSPECT_STATE=stale
+      FM_LOCK_INSPECT_LIVE_HARNESS=false
       return 0
       ;;
   esac

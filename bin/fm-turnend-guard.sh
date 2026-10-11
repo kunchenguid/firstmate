@@ -206,6 +206,17 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   allow_supervised_stop
 fi
 
+# Extension mode (Pi / omp): the extension owns continuity, tearing down the
+# watcher on every actionable wake and respawning it between turns. A turn boundary
+# regularly lands in that hand-off, when the watcher lock is unheld and the
+# extension is live.
+if [ "$(fm_supervision_model)" = extension ] \
+  && [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$GRACE" ] \
+  && fm_watcher_lock_unheld "$STATE" \
+  && fm_extension_owns_supervision "$STATE" "$FM_ROOT"; then
+  allow_supervised_stop
+fi
+
 # Away mode transfers supervision ownership from the watcher to the away-mode
 # daemon, which runs the watcher one-shot and starts its replacement after every
 # wake (bin/fm-supervise-daemon.sh). A turn boundary regularly lands in that

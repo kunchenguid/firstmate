@@ -16,18 +16,20 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 Every command below ran inside the disposable firstmate task worktree or the named Herdr lab session.
 No captain fleet state was touched.
 
-## Detection: ancestry only, no marker
+## Detection: CLI ancestry and desktop marker
 
 ```
 $ agy --version
 1.2.0
 ```
 
-A live TUI's `/proc/<pid>/environ` carries no `AGY_*` or `ANTIGRAVITY_*` variable.
-It does carry `AGENT=1` and `CLAUDECODE=1`, both inherited from the launching environment, so neither is an agy identity and neither is promoted to a marker.
+A live CLI TUI's `/proc/<pid>/environ` carries no `AGY_*` or `ANTIGRAVITY_*` variable.
+It does carry `AGENT=1` and `CLAUDECODE=1`, both inherited from the launching environment, so neither is an agy identity for the CLI and neither is promoted to a marker there.
 Herdr's `pane process-info` for the same pane reports the foreground process as `name=agy` with `argv=["agy", ...]`, and `ps -o comm=` reports `agy`.
-`bin/fm-harness.sh` therefore matches the anchored process name `agy` alone, and the spawn clears `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` at the launch boundary.
-`tests/fm-agy-harness.test.sh` pins the anchored match, the rejection of unrelated names containing the fragment, and that an inherited `CLAUDECODE` never outranks a real `agy` ancestor once the spawn clears it.
+`bin/fm-harness.sh` therefore matches the anchored process name `agy` for the CLI, while its desktop path also recognizes the Antigravity `language_server` process through the desktop marker.
+That marker is detection evidence only; it does not make `language_server` a session-lock owner.
+The spawn clears `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` at the launch boundary.
+`tests/fm-agy-harness.test.sh` pins the anchored CLI match, the desktop language-server detection, the rejection of unrelated names containing the fragment, and that an inherited `CLAUDECODE` never outranks a real `agy` ancestor once the spawn clears it.
 
 ## Launch: positional prompt-interactive with auto-submit
 

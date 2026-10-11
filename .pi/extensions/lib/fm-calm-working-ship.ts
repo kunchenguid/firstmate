@@ -30,7 +30,7 @@ import {
   type CalmWorkingShipColor,
   type CalmWorkingShipRun,
   type CalmWorkingShipSprite,
-} from "./fm-calm-working-ship-sprite.ts";
+} from "../../../.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts";
 
 export { CALM_WORKING_SHIP_TICK_MS, CALM_WORKING_SHIP_TICKS_PER_MOVE };
 
