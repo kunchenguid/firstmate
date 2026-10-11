@@ -192,9 +192,55 @@ test_live_key_burst_applies_every_step() {
   pass "a burst of held arrow keys applies every step"
 }
 
+test_live_board_relayouts_on_resize() {
+  command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; return 0; }
+  local bin=$TMP_ROOT/resizebin out
+  mkdir -p "$bin"
+  cp "$DASH" "$bin/fm-dashboard.sh"
+  printf '#!/usr/bin/env bash\ncat %q\n' "$FIXTURE" > "$bin/fm-fleet-snapshot.sh"
+  chmod +x "$bin/fm-fleet-snapshot.sh"
+  out=$(python3 -I - "$bin/fm-dashboard.sh" <<'PY'
+import fcntl, os, pty, select, struct, sys, termios, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ.update(NO_COLOR="1", COLUMNS="160", LINES="40", TERM="xterm")
+    os.execv("/usr/bin/env", ["env", "bash", sys.argv[1], "--interval", "30"])
+def size(r, c):
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", r, c, 0, 0))
+def pump(secs):
+    buf, end = b"", time.time() + secs
+    while time.time() < end:
+        if select.select([fd], [], [], 0.05)[0]:
+            try: buf += os.read(fd, 65536)
+            except OSError: break
+    return buf.decode("utf-8", "replace")
+size(40, 160)
+wide = pump(2.0)
+size(30, 50)
+narrow = pump(1.5)
+os.write(fd, b"q")
+pump(0.5)
+os.waitpid(pid, 0)
+print("WIDE_SIDE_BY_SIDE=" + str("QUEUED" in wide and "IN FLIGHT" in wide and any(
+    "QUEUED" in l and "IN FLIGHT" in l for l in wide.splitlines())))
+import re
+def widest(s):
+    s = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "\n", s)
+    return max(len(l) for l in s.splitlines())
+print("NARROW_FITS=" + str(0 < widest(narrow) <= 50 < widest(wide)))
+print("NARROW_REDRAWN=" + str("QUEUED" in narrow))
+PY
+) || fail "resize run failed"
+  assert_contains "$out" "WIDE_SIDE_BY_SIDE=True" "initial frame uses the wide layout"
+  assert_contains "$out" "NARROW_REDRAWN=True" "resize triggers a redraw right away"
+  assert_contains "$out" "NARROW_FITS=True" "redraw uses the new, narrower width"
+  pass "live board re-lays out at the new size when the terminal is resized"
+}
+
 test_wide_board_lays_columns_side_by_side
 test_live_keys_never_echo_during_refresh
 test_live_key_burst_applies_every_step
+test_live_board_relayouts_on_resize
 test_rows_clip_to_viewport_with_position_marker
 test_narrow_board_stacks_and_places_cards
 test_finished_task_with_pr_waits_despite_stale_run_state
