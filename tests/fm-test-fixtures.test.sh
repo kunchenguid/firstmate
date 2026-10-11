@@ -323,7 +323,75 @@ SH
   pass "agent stand-in: a multicall sleep is refused, and the compiled stand-in survives a harness name"
 )
 
+# An inherited absolute GIT_DIR (a linked-worktree hook exports one) overrides
+# `git -C`, so fixture setup would commit, move refs, and register worktrees in
+# the caller's repository; GIT_INDEX_FILE and GIT_COMMON_DIR redirect the index
+# and refs the same way, and GIT_WORK_TREE breaks the setup outright. Each entry
+# point runs fm-teardown.test.sh's Git setup with each variable aimed in turn at
+# a disposable ambient clone, which must come through unchanged.
+test_inherited_git_location_isolation() (
+  local dir="$TMP_ROOT/git-location" before after var value helper rc
+  mkdir -p "$dir/runner/bin" "$dir/runner/tests"
+  fm_git_init_commit "$dir/ambient"
+  git -C "$dir/ambient" worktree add -q --detach "$dir/linked" main
+  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
+  cat > "$dir/setup.sh" <<'SH'
+case_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-git-location.XXXXXX")
+git init -q --bare "$case_dir/origin.git"
+git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+echo seed > "$case_dir/_seed/seed.txt"
+git -C "$case_dir/_seed" add seed.txt
+git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t commit -q -m "origin baseline"
+git -C "$case_dir/_seed" push -q origin main
+git clone -q "$case_dir/origin.git" "$case_dir/project"
+git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+[ "$(git -C "$case_dir/wt" log -1 --format=%s)" = "origin baseline" ]
+SH
+  { printf '#!/usr/bin/env bash\nset -eu\n'; cat "$dir/setup.sh"; } > "$dir/runner/tests/fm-test-run.test.sh"
+  chmod +x "$dir/runner/tests/fm-test-run.test.sh"
+
+  ambient_state() {
+    git -C "$dir/ambient" for-each-ref --format='%(refname) %(objectname)'
+    git -C "$dir/ambient" worktree list --porcelain
+    git -C "$dir/ambient" ls-files --stage
+    git -C "$dir/linked" ls-files --stage
+  }
+
+  before=$(ambient_state)
+  for var in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR; do
+    case $var in
+      GIT_DIR) value=$(git -C "$dir/linked" rev-parse --absolute-git-dir) ;;
+      GIT_WORK_TREE) value="$dir/linked" ;;
+      GIT_INDEX_FILE) value=$(git -C "$dir/linked" rev-parse --path-format=absolute --git-path index) ;;
+      GIT_COMMON_DIR) value=$(git -C "$dir/linked" rev-parse --path-format=absolute --git-common-dir) ;;
+    esac
+    for helper in lib herdr-test-safety runner-1 runner-2; do
+      rc=0
+      case $helper in
+        runner-*)
+          env "$var=$value" TMPDIR="$dir" "$dir/runner/bin/fm-test-run.sh" --jobs "${helper#runner-}" \
+            tests/fm-test-run.test.sh > "$dir/out.log" 2>&1 || rc=$?
+          [ "$rc" != 0 ] || assert_grep 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0' "$dir/out.log" \
+            "$helper did not execute the Git fixture under $var" ;;
+        *)
+          # shellcheck disable=SC2016 # expanded by the child bash
+          env "$var=$value" TMPDIR="$dir" bash -eu -c '. "$1"; . "$2"' _ "$ROOT/tests/$helper.sh" "$dir/setup.sh" \
+            > "$dir/out.log" 2>&1 || rc=$? ;;
+      esac
+      # The ambient check comes first: it is the escape this case exists to catch.
+      after=$(ambient_state)
+      [ "$before" = "$after" ] \
+        || fail "$helper fixture setup under $var changed the ambient repository: $(diff <(echo "$before") <(echo "$after"))"
+      [ "$rc" = 0 ] || fail "$helper fixture setup failed under $var: $(cat "$dir/out.log")"
+    done
+  done
+  pass "shared helpers and runner keep fixture Git off an inherited repository location"
+)
+
 test_git_config_isolation || fail "Git fixture config isolation"
+test_inherited_git_location_isolation || fail "Git fixture location isolation"
 test_agent_standin_survives_a_multicall_sleep || fail "agent stand-in multicall case"
 test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant
