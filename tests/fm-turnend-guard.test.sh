@@ -1018,7 +1018,7 @@ exit 2
 EOF
   chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
   # Runtime module-format warnings are host noise; this assertion owns plugin output only.
-  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+  NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node > "$worktree_dir/plugin.out" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 // OpenCode 2 plugin contract. The v1 (worktree, directory) pair is now
@@ -1069,8 +1069,8 @@ if (promptBody.includes("Resume supervision according to the session-start opera
   process.exit(1);
 }
 EOF
-)
   status=$?
+  out=$(cat "$worktree_dir/plugin.out")
   expect_code 0 "$status" "OpenCode plugin must run the guard from worktree even when directory is elsewhere"
   [ -z "$out" ] || fail "OpenCode plugin worktree-root test printed output: $out"
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"

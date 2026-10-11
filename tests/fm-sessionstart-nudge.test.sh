@@ -171,8 +171,8 @@ test_opencode_plugin_delivers_exact_nudge_once() {
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
-  out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
-    WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
+    WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module > "$root/plugin.out" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 // The OpenCode 2 plugin contract: the module default-exports a definition whose
@@ -204,7 +204,8 @@ for (let tick = 0; tick < 100 && prompts.length < 1; tick += 1) {
 if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.length}`);
 if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
 EOF
-  ) || status=$?
+  status=$?
+  out=$(cat "$root/plugin.out")
   expect_code 0 "$status" "OpenCode exact nudge delivery"
   [ -z "$out" ] || fail "OpenCode exact nudge delivery printed output: $out"
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"

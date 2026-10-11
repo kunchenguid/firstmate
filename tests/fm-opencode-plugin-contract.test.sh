@@ -422,7 +422,7 @@ SH
     PLUGIN="$PLUGIN_DIR/fm-primary-watch-arm.js" REPO="$repo" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
     FM_ARM_LOG="$TMP_ROOT/cleanup-arm.log" FM_STOP_FILE="$TMP_ROOT/cleanup.stop" \
-    FM_OPENCODE_ARM_READY_TIMEOUT_MS=50 \
+    FM_OPENCODE_ARM_READY_TIMEOUT_MS=10000 \
     FM_WATCH_REARM_RETRY_BASE_MS=500 FM_WATCH_REARM_RETRY_MAX_MS=500 FM_WATCH_REARM_RETRY_LIMIT=2 \
     node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -445,12 +445,10 @@ for (let i = 0; i < 300; i += 1) {
 }
 const beforeCleanup = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
 if (beforeCleanup !== 2) throw new Error(`expected actionable restoration successor, got ${beforeCleanup} arms`);
-// Let the unready successor time out and be retired, placing restoration in
-// its bounded retry delay when cleanup starts.
-await new Promise((resolve) => setTimeout(resolve, 120));
+// Unload once the successor has started, while restoration awaits readiness.
 
 await hooks.cleanup();
-// Give the in-flight restoration time to pass its retry delay.
+// Give any erroneous retry after retirement time to launch.
 await new Promise((resolve) => setTimeout(resolve, 600));
 const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
