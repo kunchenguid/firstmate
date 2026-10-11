@@ -1,7 +1,7 @@
 // Native SVG over the shipped durable-record reader. Missing observations never become zero.
-import { html, useState, hname } from './ui.js'
+import { html, useState, hname, dur } from './ui.js'
 const DAY = 86400, number = n => n == null ? 'Unknown' : n.toLocaleString('en-US', { maximumFractionDigits: 12 })
-const seconds = n => n == null ? 'Unknown' : `${number(n)} s`
+const seconds = n => n == null ? 'Unknown' : n < 60 ? '<1m' : dur(n)
 const bytes = n => n == null ? 'Unknown' : `≈${(n / 2 ** 30).toFixed(2)} GiB`
 const CAUSES = { captain: 'Your decision', lead: 'Lead reply', ci_queue: 'CI queue', memory_gate: 'Memory limit', credential_external: 'Login or external wait', review_merge: 'Review or merge', unknown: 'Unclassified' }
 const STAGES = { working: 'Working', resolved: 'Working', blocked: 'Blocked', failed: 'Failed', paused: 'Waiting', 'needs-decision': 'Decision needed', 'captain-held': 'Held', done: 'Finished' }
@@ -11,9 +11,9 @@ const Row = ({ name, value, note, title }) => html`<div class="i-row" title=${ti
 function Trend({ days }) {
   const max = Math.max(...days.flatMap(d => [d.median_seconds || 0, d.p85_seconds || 0]), 1)
   const y = v => 110 - v / max * 95, x = i => 68 + i * 510 / (days.length - 1)
-  return html`<section class="i-panel"><h2>Time to merge · last 7 days by UTC day (first partial)</h2><div class="i-key"><span>P50</span><span>P85</span><small>Seconds</small></div>
+  return html`<section class="i-panel"><h2>Time to merge · last 7 days by UTC day (first partial)</h2><div class="i-key"><span>P50</span><span>P85</span><small>Time</small></div>
     <svg class="i-trend" viewBox="0 0 600 140" role="img" aria-label="Recorded median and P85 time to merge by UTC day">
-      ${(days.some(d => d.known > 0) ? [0, max / 2, max] : []).map(v => html`<line x1="68" x2="578" y1=${y(v)} y2=${y(v)} stroke="var(--line)"/><text x="60" y=${y(v) + 4} text-anchor="end">${number(v)}</text>`)}
+      ${(days.some(d => d.known > 0) ? [0, max / 2, max] : []).map(v => html`<line x1="68" x2="578" y1=${y(v)} y2=${y(v)} stroke="var(--line)"/><text x="60" y=${y(v) + 4} text-anchor="end">${seconds(v)}</text>`)}
       ${['median_seconds', 'p85_seconds'].map((key, k) => html`<g class=${'i-series i-series-' + k}>
         <path d=${days.map((d, i) => d[key] == null ? '' : `${i && days[i - 1][key] != null ? 'L' : 'M'}${x(i)},${y(d[key])}`).join(' ')} fill="none"/>
         ${days.map((d, i) => d[key] == null ? '' : html`<circle cx=${x(i)} cy=${y(d[key])} r="3"><title>${d.day} ${k ? 'P85' : 'P50'}: ${seconds(d[key])}; ${d.known} timed, ${d.unknown} unknown</title></circle>`)}</g>`)}
