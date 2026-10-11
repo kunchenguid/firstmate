@@ -806,14 +806,27 @@ test_worker_account_pin_follows_the_relaunch() {
   [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "the relaunched record should carry the pinned account"
   assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" \
     "the replacement should launch under the pinned root"
+  [ "$(meta_field "$dir" "$id" claude_config_dir)" = "$dir/work" ] \
+    || fail "the pinned launch should record the pinned root as the task's Claude store"
+  # Removing the pin keeps the task on its recorded store, and an ambient
+  # credential or store in the relauncher must not outrank that store's login.
   rm "$dir/home/config/claude-account"
+  mkdir -p "$dir/store-personal"
   : > "$dir/fake/literal"
-  out=$(run_control "$dir" "$id" relaunch --note "pin removed"); rc=$?
+  out=$(ANTHROPIC_API_KEY=ambient-relauncher-key FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_control "$dir" "$id" relaunch --note "pin removed"); rc=$?
   expect_code 0 "$rc" "a relaunch after the pin is removed should succeed"$'\n'"$out"
   assert_no_grep "account=" "$dir/home/state/$id.meta" "a relaunch without a pin must drop the previous account from the record"
-  assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
-    "an unpinned replacement must launch exactly as before"
-  pass "fm-control relaunch: the replacement follows the home's current worker account pin"
+  [ "$(meta_field "$dir" "$id" claude_config_dir)" = "$dir/work" ] \
+    || fail "removing the pin must keep the recorded store, got '$(meta_field "$dir" "$id" claude_config_dir)'"
+  assert_contains "$(cat "$dir/fake/literal")" "-u ANTHROPIC_API_KEY " \
+    "a relaunch on the recorded store must shed the relauncher's ambient API key"
+  assert_contains "$(cat "$dir/fake/literal")" "-u CLAUDE_CODE_OAUTH_TOKEN " \
+    "a relaunch on the recorded store must shed an ambient OAuth token"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work' " \
+    "a relaunch after the pin is removed must stay on the recorded store"
+  assert_no_grep "store-personal" "$dir/fake/literal" "a relaunch after the pin is removed adopted the ambient store"
+  pass "fm-control relaunch: the replacement follows the pin, and keeps its recorded store with ambient credentials shed once the pin is gone"
 }
 
 test_pi_exclude_tools_follow_the_relaunch() {

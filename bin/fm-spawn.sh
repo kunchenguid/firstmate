@@ -428,7 +428,8 @@
 #   keeps the task on the account it was launched with. FM_CLAUDE_CONFIG_DIR=<dir>
 #   (or 'default' for Claude's own default store) on the call is the only way to
 #   change it; it launches with and records the new store. A recorded or override store that is not an existing directory
-#   refuses before any endpoint exists. bin/fm-claude-store-lib.sh owns the
+#   refuses before any endpoint exists. A launch on a named store (not
+#   'default') sheds the ambient credentials Claude ranks above its login. bin/fm-claude-store-lib.sh owns the
 #   full precedence contract.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
@@ -5769,28 +5770,25 @@ esac
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
 # Forward the task's resolved store onto the claude launch: the durable record
 # or deliberate override when there is one, otherwise firstmate's own store
-# (bin/fm-claude-store-lib.sh owns that choice). The 'default' marker removes
-# any inherited value so the launch stays on Claude's own default store.
-# A home's worker account pin replaces that forwarding: the launch names the
-# pinned root (or unsets the variable for the ordinary Claude account) and
-# sheds the environment credentials Claude ranks above the root's login.
-if [ -n "$WORKER_ACCOUNT" ]; then
+# (bin/fm-claude-store-lib.sh owns that choice), or a home's worker account
+# pin. A named store sheds the environment credentials Claude ranks above the
+# store's own login, so ambient auth in the relauncher cannot outrank it. The
+# 'default' marker removes any inherited value so the launch stays on Claude's
+# own default store; under a pin it sheds those credentials too.
+if [ "$HARNESS" = claude ]; then
+  if [ "$SPAWN_CLAUDE_STORE" != default ]; then
+    LAUNCH="$(fm_worker_account_claude_shed) CLAUDE_CONFIG_DIR=$(shell_quote "$SPAWN_CLAUDE_STORE") $LAUNCH"
+  elif [ -n "$WORKER_ACCOUNT" ]; then
+    LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $LAUNCH"
+  else
+    LAUNCH="env -u CLAUDE_CONFIG_DIR $LAUNCH"
+  fi
+elif [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
-  claude)
-    if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
-      LAUNCH="$(fm_worker_account_claude_shed) CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
-    else
-      LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $LAUNCH"
-    fi
-    ;;
   pi | pi-signed)
     LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     ;;
   esac
-elif [ "$HARNESS" = claude ] && [ "$SPAWN_CLAUDE_STORE" = default ]; then
-  LAUNCH="env -u CLAUDE_CONFIG_DIR $LAUNCH"
-elif [ "$HARNESS" = claude ] && [ -n "$SPAWN_CLAUDE_STORE" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$SPAWN_CLAUDE_STORE") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
