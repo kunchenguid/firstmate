@@ -1911,6 +1911,63 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+### Attended Codex continuation
+
+On 2026-10-08, the portable continuation suite passed on macOS with Python 3.9.6 and Bash 3.2.57.
+It drives real isolated watcher/queue/ACK processes with a controlled Orca transport and a Codex-shaped parent; this is not vendor lifecycle proof.
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-orca-continuation.test.sh
+```
+
+```text
+Ran 20 tests in 203.207s
+OK
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=203639
+```
+
+The twenty cases cover repeated successor-before-notify handoff and ACK replay, singleton reuse/refusal, owner death and restart, death during input, acceptance versus turn start, exact permitted retry, rejection/timeout, wrong receipt identities, primary/runtime/incarnation changes, successor failure, generation supersession, unconfirmed create, scoped rendering, second-stop behavior and cleanup.
+External inbox cases use the public note command and cover repeated cycles, interrupted ACK/duplicate observation, predecessor-close append, rejection/owner replacement, endpoint replacement, preservation of an attached peer and root ACK/new append before delivery confirmation.
+The attached-peer case verifies a new successor arm against the same peer watcher; its ordinary close then transfers watcher ownership before the next notification.
+Each owner-bearing fixture checks that its owner, arm and transport processes and watcher lock are absent after cleanup.
+That recorded run predates twenty-one later cases: the loaded-guard regression below, ended and restarted interrupted-handling re-presentation, a before-send refusal, a failed confirmed bootstrap, ensure during a live owner's re-arm, no relaunch over an unresolved ambiguous delivery, owner retention across a transient Orca observation failure, live reuse and dead-owner relaunch after an ACK plus fresh append, fail-closed rendering and ensure for an unverified in-scope binding, abandon-launch absent/unknown/wrong-generation, incomplete-list, live-process, live-terminal and moved-primary cases, the one-exact-retry bound, no presentation of a generation acknowledged during successor startup, a same-primary code-root change keeping an ambiguous episode, and live and dead-owner refusal of fresh input over an unacknowledged ambiguous delivery superseded by a routine append, including missing or malformed acknowledgement evidence and older acknowledgement history, a changed primary binding never resolving an ambiguous delivery, and a late owner refused for an abandoned launch.
+The suite now defines 41 cases; their current count and outcome belong to the pipeline Test evidence, not this record.
+The later loaded-guard regression passed separately in 3.324s and exercises two installed code paths against one actual fixture owner, including dead-watcher and second-stop controls:
+
+```sh
+FM_ORCA_TEST_CASE=ContinuationTests.test_loaded_guard_requires_the_owner_watcher_code_path bin/fm-test-run.sh tests/fm-codex-orca-continuation.test.sh
+```
+
+Linux portability is supported by the local process/flock implementation but has not been driven live here.
+
+The token-free installed Codex hook-feature guard passed on codex-cli 0.161.0:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+```text
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=5394
+```
+
+That proves the existing worker hook-disable posture, not primary continuation.
+The attended native attempt on Orca 1.4.222 on 2026-10-08 was NOT_PASS: after the assistant final, the actually loaded generic Stop guard blocked because its installed watcher path differed from the candidate owner's watcher path.
+No native task-completion event or subsequent accepted idle wake was established before bounded recovery.
+The installed Codex CLI version above does not identify the version of that already-running primary session.
+An isolated counterfactual kept the primary home and live watcher identity constant: identical guard code blocked with a mismatched watcher path and allowed with the coherent path; after watcher cleanup, a fresh beacon alone still blocked.
+The existing second-stop safety allowed without repairing continuity.
+The later candidate transport timeout is a separate unresolved observation; it does not explain the earlier Stop rejection.
+Before another attended test, install a coherent hook/adapter/watcher code root and prove Codex loaded that hook with real-primary scoping.
+Owner readiness, assistant final output and transport receipts alone do not establish native turn end or continuity.
+The read-only opt-in guard requires native final/completion/new-task events from two actual cycles and correlates them with exact receipts from one currently verified owner:
+
+```sh
+FM_CODEX_ORCA_CONTINUATION_LIVE=1 FM_HOME=<explicit-primary-home> FM_ORCA_CONTINUATION_EVENTS=<native-event-array.json> bin/fm-test-run.sh tests/fm-codex-orca-continuation-live-e2e.test.sh
+```
+
+Run it only from the actual primary after independently attended bounded testing.
+Its receipt correlation does not replace observer lifetime samples, root-owned drain/ACK evidence, cleanup, or proof that Codex loaded and executed the actual Stop hook.
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.

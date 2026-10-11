@@ -852,6 +852,26 @@ fm_recovery_marker_snapshot() {
   fm_lock_release "$lock"
 }
 
+# Bounded acknowledgement evidence beside the marker: one "<generation> <queue
+# sequence>" line per successful acknowledgement, written only after the marker
+# reads acked and the drain consumed every queued row. Consumers that must know
+# whether an earlier presented generation's rows were handled read it; a
+# missing or malformed file proves nothing. Failure to record never undoes the
+# acknowledgement itself.
+_fm_recovery_marker_record_ack_locked() {  # <marker> <generation>
+  local marker=$1 generation=$2 evidence="${1}.acked" seq tmp
+  seq=$(cat "${marker%/*}/.wake-queue.seq" 2>/dev/null || true)
+  case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+  [ ! -L "$evidence" ] || return 1
+  tmp=$(mktemp "${evidence}.tmp.XXXXXX") || return 1
+  if ! { if [ -f "$evidence" ]; then tail -n 63 "$evidence"; fi; printf '%s %s\n' "$generation" "$seq"; } > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! mv -f -- "$tmp" "$evidence"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 _fm_recovery_marker_ack() {
   local marker=$1 expected_generation=$2 lock tmp line
   [ -n "$expected_generation" ] || return 2
@@ -865,7 +885,11 @@ _fm_recovery_marker_ack() {
   line=$FM_RECOVERY_MARKER_TOKEN
   case "$line" in
     pending:*|announced:*) line="acked:${line#*:}" ;;
-    acked:*) fm_lock_release "$lock"; return 0 ;;
+    acked:*)
+      _fm_recovery_marker_record_ack_locked "$marker" "$expected_generation" || true
+      fm_lock_release "$lock"
+      return 0
+      ;;
     *) fm_lock_release "$lock"; return 1 ;;
   esac
   tmp=$(mktemp "${marker}.tmp.XXXXXX") || { fm_lock_release "$lock"; return 1; }
@@ -876,6 +900,7 @@ _fm_recovery_marker_ack() {
     fm_lock_release "$lock"
     return 1
   fi
+  _fm_recovery_marker_record_ack_locked "$marker" "$expected_generation" || true
   fm_lock_release "$lock"
 }
 

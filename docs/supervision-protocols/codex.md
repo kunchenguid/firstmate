@@ -1,5 +1,7 @@
 Mode: Codex foreground checkpoint.
 
+Verified attended Orca primaries use the [Orca-owned continuation](codex-orca.md), selected by the instruction renderer after checking current primary ownership and exact terminal identity.
+
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.

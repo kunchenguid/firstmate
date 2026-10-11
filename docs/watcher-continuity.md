@@ -200,7 +200,7 @@ It enters its poll loop immediately and keeps scanning signals, stale panes, and
 - No PreToolUse hook denies fleet commands based on watcher status.
 - A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 - Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
-- Codex retains its bounded foreground checkpoint protocol.
+- Codex uses the [verified Orca-owned protocol](supervision-protocols/codex-orca.md) where applicable and the [bounded foreground protocol](supervision-protocols/codex.md) elsewhere.
 - Grok retains its tracked background-task notification protocol.
 
 No adapter starts a replacement with a fire-and-forget shell `&` from a model command.
@@ -250,6 +250,8 @@ The acknowledgement retires the marker only when no rows remain after sequence-b
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, a watcher close during handling republishes the same generation as pending and forces one recovery turn even when no queue row remains, while the outstanding generation-bound acknowledgement stays valid.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
+Each retirement also appends one bounded `<generation> <queue sequence>` line to `state/.watcher-down.acked` (the newest 64 kept) after the marker reads acked; repeating the acknowledgement of an already-acked generation records it again.
+That evidence is what lets the [Orca/Codex continuation](supervision-protocols/codex-orca.md) tell an acknowledged ambiguous delivery from one whose generation was merely superseded by a later append; a missing or malformed file proves nothing, and failing to record it never undoes the acknowledgement.
 
 ## Per-actor acknowledgement
 
@@ -526,6 +528,6 @@ The other harnesses rely on these mechanisms:
 - Claude depends on the Stop `asyncRewake` rewake.
 - Cursor depends on its awaited stop-hook park.
 - Grok retains native background-completion notifications.
-- Codex retains bounded foreground checkpoints.
+- Codex's [instruction renderer](../bin/fm-supervision-instructions.sh) owns the runtime-specific protocol selection.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current cross-harness live evidence, the dated Stop-owned Claude auto-arm results, and exact opt-in commands.
