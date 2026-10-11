@@ -11,7 +11,9 @@
 # verb, regardless of order or count. These tests drive the REAL
 # status_line_verb / status_open_decisions / status_open_decisions_incremental
 # functions over crafted status files and assert their folded output, never the
-# fold's own source text. Also covers status_key_closing_verb, which reports how
+# fold's own source text. Also covers status_event_recorded: a recorded line
+# stays recorded across a later resolved line for its key. Also covers
+# status_key_closing_verb, which reports how
 # the status side currently reads one key so a consumer can tell a settled key
 # from one handed to a durable captain-held task (bin/fm-captain-hold.sh
 # diverged). Cross-drain cursor persistence and the incremental
@@ -561,3 +563,44 @@ test_declared_wait_survives_answers_past_the_event_window() {
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_bare_prose_cannot_open_or_close_a_decision
+
+# status_event_recorded is an idempotent retry check: a stamped retry matches,
+# and no later resolved line - for another key, outside the reserved-key
+# vocabulary, or the real close of that key - makes a recorded line new again.
+# The same holds for a note and a done line.
+test_recorded_line_stays_recorded_across_a_resolve() {
+  local dir f line
+  dir=$(case_dir episode)
+  f="$dir/task.status"
+  line='blocked [key=pending-reply-abc]: pending-reply-delivery-unknown: task=mate pending-reply-id=abc request=wake'
+  printf '%s\n' "$line" > "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "the open blocker was not recorded"
+  status_event_recorded "$f" \
+    "blocked [key=pending-reply-abc] [at=1700000000]: pending-reply-delivery-unknown: task=mate pending-reply-id=abc request=wake" \
+    || fail "a stamp made the recorded blocker look new"
+  printf '%s\n' 'resolved [key=other]: answered elsewhere' >> "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "another key's resolve made the blocker look new"
+  printf '%s\n' 'resolved [key=pending-reply-abc]: answered: not this library' >> "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "a reserved-key resolve outside the vocabulary made the blocker look new"
+  printf '%s\n' 'resolved [key=pending-reply-abc] [at=1700000001]: pending-reply-resolved: task=mate pending-reply-id=abc via=operator-resolve-key dismiss' >> "$f"
+  [ -z "$(status_open_decisions "$f")" ] \
+    || fail "the resolve did not close the decision: $(status_open_decisions "$f")"
+  status_event_recorded "$f" "$line" \
+    || fail "the resolve of its own key made the blocker look new"
+  printf '%s\n' 'note: remote document did not transfer for ios: data/reply/missing.md - absent' \
+    > "$dir/note.status"
+  printf '%s\n' 'resolved: closed the default decision' >> "$dir/note.status"
+  status_event_recorded "$dir/note.status" \
+    'note: remote document did not transfer for ios: data/reply/missing.md - absent' \
+    || fail "a resolve made a note look new"
+  printf '%s\n' 'done [corr=abcd]: shipped' > "$dir/done.status"
+  printf '%s\n' 'resolved [key=default]: closed' >> "$dir/done.status"
+  status_event_recorded "$dir/done.status" 'done [corr=abcd]: shipped' \
+    || fail "a resolve made a done line look new"
+  pass "a recorded line stays recorded across a later resolve"
+}
+
+test_recorded_line_stays_recorded_across_a_resolve

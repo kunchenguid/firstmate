@@ -64,6 +64,35 @@ test_passes_the_command_status_and_output_through() {
   pass "fm_exec_timed passes a command's status and output through unchanged"
 }
 
+# Exercise the installed system Bash explicitly, including stock macOS 3.2:
+# neither a top-level call nor a subshell may abort before starting its command.
+# Unset BASHPID so newer system Bash also covers the missing-variable case.
+test_system_bash_preserves_completion_and_signal_statuses() {
+  local mode status command out rc
+  for mode in top-level subshell; do
+    for status in 0 7 137 143; do
+      case "$status" in
+        137) command='echo ran; kill -KILL $$' ;;
+        143) command='echo ran; kill -TERM $$' ;;
+        *) command="echo ran; exit $status" ;;
+      esac
+      rc=0
+      out=$(PATH=$PERL_ONLY /bin/bash -c '
+        . "$1/bin/fm-timeout-lib.sh"
+        unset BASHPID
+        if [ "$2" = subshell ]; then
+          ( fm_exec_timed 5 1 bash -c "$3" )
+        else
+          fm_exec_timed 5 1 bash -c "$3"
+        fi
+      ' _ "$ROOT" "$mode" "$command" 2>&1) || rc=$?
+      [ "$rc" -eq "$status" ] || fail "system Bash $mode lost command status $status (rc=$rc: $out)"
+      [ "$out" = ran ] || fail "system Bash $mode did not run the command cleanly: $out"
+    done
+  done
+  pass "system Bash top-level and subshell calls preserve success, failure, and signal status"
+}
+
 # A command that honors TERM ends at the bound, long before the grace would
 # have forced it, and is gone afterwards.
 test_term_ends_a_cooperative_command_at_the_bound() {
@@ -109,7 +138,7 @@ test_the_bound_replaces_the_calling_shell() {
     rm -f "$dir/caller" "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
+      perl -e 'print getppid(), "\n"' > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
@@ -204,16 +233,16 @@ test_a_named_owner_that_is_gone_ends_the_command() {
 # fm_exec_timed - the watchdog then starts already reparented - is still
 # detected instead of leaving the command running to its bound.
 test_an_owner_that_dies_during_startup_ends_the_command() {
-  local dir watchdog started
+  local dir watchdog started pid
   dir="$TMP_ROOT/startup-owner"
   mkdir -p "$dir"
   # shellcheck disable=SC2016
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
+      perl -e "print getppid(), qq(\\n)" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
-      fm_exec_timed 60 1 bash -c "exec sleep 300"
+      fm_exec_timed 60 1 bash -c "echo \$\$ > \"\$1\"; exec sleep 300" _ "$2/pid"
     ) >/dev/null 2>&1 &
     exit 0
   ' _ "$ROOT" "$dir"
@@ -222,12 +251,50 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   started=$SECONDS
   while kill -0 "$watchdog" 2>/dev/null; do
     if [ "$((SECONDS - started))" -ge 15 ]; then
+      if [ -s "$dir/pid" ]; then
+        pid=$(cat "$dir/pid")
+        kill -KILL -- "-$pid" 2>/dev/null || true
+      fi
       kill -KILL "$watchdog" 2>/dev/null || true
       fail "a watchdog whose owner died during startup ran on toward its bound"
     fi
     sleep 0.02
   done
   pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
+}
+
+# A top-level calling shell has its own PID in $$, unlike a Bash subshell.
+# Capture its parent before exec: that parent can exit while the top-level
+# shell is still on its way into the watchdog.
+test_a_top_level_parent_that_dies_during_startup_ends_the_command() {
+  local dir watchdog started pid
+  dir="$TMP_ROOT/top-level-parent"
+  mkdir -p "$dir"
+  PATH=$PERL_ONLY bash -c '
+    bash -c '\''
+      . "$1/bin/fm-timeout-lib.sh"
+      echo "$$" > "$2/watchdog"
+      while kill -0 "$PPID" 2>/dev/null; do sleep 0.05; done
+      fm_exec_timed 60 1 bash -c "echo \$\$ > \"\$1\"; exec sleep 300" _ "$2/pid"
+    '\'' _ "$1" "$2" >/dev/null 2>&1 &
+    while [ ! -s "$2/watchdog" ]; do sleep 0.02; done
+    exit 0
+  ' _ "$ROOT" "$dir"
+  wait_for_file "$dir/watchdog"
+  watchdog=$(cat "$dir/watchdog")
+  started=$SECONDS
+  while kill -0 "$watchdog" 2>/dev/null; do
+    if [ "$((SECONDS - started))" -ge 15 ]; then
+      if [ -s "$dir/pid" ]; then
+        pid=$(cat "$dir/pid")
+        kill -KILL -- "-$pid" 2>/dev/null || true
+      fi
+      kill -KILL "$watchdog" 2>/dev/null || true
+      fail "top-level watchdog lost its pre-exec parent and ran toward its bound"
+    fi
+    sleep 0.02
+  done
+  pass "fm_exec_timed preserves a top-level shell's parent across exec startup"
 }
 
 # perl is preferred whenever it exists, because only its watchdog can reap a
@@ -328,6 +395,7 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
 }
 
 test_passes_the_command_status_and_output_through
+test_system_bash_preserves_completion_and_signal_statuses
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
 test_term_ends_a_cooperative_command_at_the_bound
@@ -337,6 +405,7 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_a_top_level_parent_that_dies_during_startup_ends_the_command
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
