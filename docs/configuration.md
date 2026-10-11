@@ -1543,7 +1543,7 @@ A malformed entry, such as a bare `example.com`, a wildcard, or embedded whitesp
 When the list is set, only matching mail wakes.
 `poll` records non-matching mail in its cursor so it never re-wakes, leaves it unread, and logs only a count, never the sender or subject; changing the list later does not resurface mail already withheld.
 A message whose header cannot be fetched has no verifiable sender, so it is held without a wake and retried on later polls instead of surfacing degraded.
-`read` likewise lists only matching mail plus a withheld count, and `status` prints the parsed list.
+`read` likewise lists only matching mail plus a withheld count.
 The list matches the claimed `From` address only; it does not authenticate the sender against spoofing.
 
 **Unfetchable headers**

@@ -9,7 +9,6 @@
 #                          plus a retry-set of previously unfetchable uids;
 #                          persists the retry-scan position and cap-1 turn flag.
 #   seen <cursor>          Print a cursor file (used by `status`).
-#   allow                  Print the parsed sender allow list (used by `status`).
 #
 # All configuration arrives through the environment, never through arguments,
 # so credentials never appear in argv or logs. read/poll use BODY.PEEK so mail
@@ -239,19 +238,6 @@ def cmd_send(to, subj, body):
     except Exception as e:
         print('fm-mail send error:', e)
         return 1
-
-
-def cmd_allow():
-    ok, allow = allow_or_report()
-    if not ok:
-        return 1
-    if allow is None:
-        print('sender allow list: unset (every sender surfaces)')
-        return 0
-    domains, addresses = allow
-    entries = sorted('@' + d for d in domains) + sorted(addresses)
-    print('sender allow list:', ', '.join(entries))
-    return 0
 
 
 def cmd_seen(cursor_path):
@@ -591,8 +577,6 @@ def main():
         return cmd_send(sys.argv[2], sys.argv[3], sys.argv[4])
     if cmd == 'seen':
         return cmd_seen(sys.argv[2] if len(sys.argv) > 2 else '')
-    if cmd == 'allow':
-        return cmd_allow()
     if cmd == 'poll_list':
         return cmd_poll_list()
     raise SystemExit('unknown command')

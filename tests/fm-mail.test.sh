@@ -2720,7 +2720,8 @@ test_poll_sender_allow_wakes_only_matching_senders() {
   for u in 81 82 83 85 86; do
     grep -qx -- "$u" "$home/state/.mail-seen" || fail "withheld uid $u is recorded so it never re-wakes"
   done
-  ! grep -qx 87 "$home/state/.mail-seen" || fail "a held uid stays unrecorded for the next poll"
+  grep -qx 87 "$home/state/.mail-seen" || fail "a held uid enters progress state"
+  grep -qx 87 "$home/state/.mail-retry" || fail "a held uid remains retryable"
   assert_no_grep 'store' "$home/imap.log" "the poll never stores a flag"
   assert_no_grep 'BODY[' "$home/imap.log" "the poll fetches only with BODY.PEEK, never marking mail read"
 
@@ -2730,9 +2731,52 @@ test_poll_sender_allow_wakes_only_matching_senders() {
   expect_code 0 "$rc" "follow-up allow-listed poll must succeed"
   assert_contains "$out" "no new mail" "withheld mail never re-wakes"
   assert_not_contains "$out" "withheld" "recorded withheld mail is not filtered again"
-  assert_contains "$out" "held 1 message(s)" "the held uid is retried"
+  assert_grep "fetch 87 " "$home/imap.log" "the held uid is retried"
   ! grep -Eq '^fetch 8[1-6] ' "$home/imap.log" || fail "recorded withheld uids are not fetched again"
   pass "fm-mail: a sender allow list wakes only matching From addresses and records the rest without a wake"
+}
+
+test_poll_held_prefix_progresses_and_recovers() {
+  local home out rc cap window u tail wakeq round
+  for cap in 20 1; do
+    home=$(allow_fixture "held-prefix-$cap")
+    window=$((cap * 4))
+    [ "$window" -ge "$((cap + 10))" ] || window=$((cap + 10))
+    tail=$((window + 1))
+    for ((u=1; u<=window; u++)); do
+      printf '%s|UNFETCHABLE\n' "$u"
+    done > "$home/mailbox"
+    printf '%s|From: later@example.com\\r\\nSubject: later\\r\\n\\r\\n\n' "$tail" >> "$home/mailbox"
+    rc=0
+    out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=@example.com FM_MAIL_POLL_MAX_WAKES="$cap" 2>&1) || rc=$?
+    expect_code 0 "$rc" "the held prefix poll succeeds"
+    assert_contains "$out" "held $window message(s)" "held headers are counted"
+    ! grep -qs 'check: mail' "$home/state/.wake-queue" || fail "held headers never wake"
+    for ((u=1; u<=window; u++)); do
+      grep -qx "$u" "$home/state/.mail-seen" || fail "held uid $u enters progress state"
+      grep -qx "$u" "$home/state/.mail-retry" || fail "held uid $u remains retryable"
+    done
+    for round in 1 2; do
+      rc=0
+      out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=@example.com FM_MAIL_POLL_MAX_WAKES="$cap" 2>&1) || rc=$?
+      expect_code 0 "$rc" "later polls succeed despite persistent failures"
+    done
+    assert_grep "mail:90009/$tail" "$home/state/.wake-queue" "later allowed mail wakes past the held prefix"
+    printf '1|From: blocked@evil.test\\r\\nSubject: hidden\\r\\n\\r\\n\n' > "$home/mailbox"
+    printf '%s|From: recovered@example.com\\r\\nSubject: recovered\\r\\n\\r\\n\n' "$window" >> "$home/mailbox"
+    for round in 1 2 3; do
+      rc=0
+      out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=@example.com FM_MAIL_POLL_MAX_WAKES="$cap" 2>&1) || rc=$?
+      expect_code 0 "$rc" "held retries recover through the rotating scan"
+    done
+    assert_grep "mail:90009/$window" "$home/state/.wake-queue" "an allowed recovered header wakes"
+    assert_no_grep 'hidden' "$home/state/.wake-queue" "a blocked recovered header never wakes"
+    ! grep -qx 1 "$home/state/.mail-retry" || fail "blocked recovery leaves the retry set"
+    ! grep -qx "$window" "$home/state/.mail-retry" || fail "allowed recovery leaves the retry set"
+    wakeq=$(grep -c 'check: mail' "$home/state/.wake-queue")
+    expect_code 2 "$wakeq" "later and recovered allowed mail each wake exactly once"
+  done
+  pass "fm-mail: held prefixes permit later mail and verified retry recovery"
 }
 
 test_poll_without_sender_allow_is_unchanged() {
@@ -2785,23 +2829,13 @@ test_sender_allow_malformed_entries_fail_clearly() {
   out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=', ,' 2>&1) || rc=$?
   expect_code 1 "$rc" "a list with no entries must fail rather than empty the filter"
   assert_contains "$out" "holds no entries" "an entry-less list is reported"
-  rc=0
-  out=$(allow_mail "$home" status FM_MAIL_SOURCE_ALLOW='example.com' 2>&1) || rc=$?
-  expect_code 0 "$rc" "status still succeeds with a malformed list"
-  assert_contains "$out" "malformed entries: 'example.com'" "status reports the malformed entry"
   pass "fm-mail: malformed sender allow-list entries fail read and poll naming the entry"
 }
 
-test_sender_allow_status_and_read() {
+test_sender_allow_read() {
   local home out rc=0 leak
   home=$(allow_fixture read)
   allow_mixed_mailbox "$home"
-  out=$(allow_mail "$home" status FM_MAIL_SOURCE_ALLOW=' Friend@Gmail.com,, @Example.COM ' 2>&1) || rc=$?
-  expect_code 0 "$rc" "status with an allow list must succeed"
-  assert_contains "$out" "sender allow list: @example.com, friend@gmail.com" "status prints the parsed list"
-  out=$(allow_mail "$home" status 2>&1)
-  assert_contains "$out" "sender allow list: unset" "status reports an unset list"
-  rc=0
   out=$(allow_mail "$home" read FM_MAIL_SOURCE_ALLOW='@example.com,friend@gmail.com' 2>&1) || rc=$?
   expect_code 0 "$rc" "allow-listed read must succeed"
   assert_contains "$out" "Subj: allowed-domain" "read lists an allowed-domain sender"
@@ -2810,7 +2844,7 @@ test_sender_allow_status_and_read() {
   for leak in $ALLOW_LEAKS; do
     assert_not_contains "$out" "$leak" "read never shows withheld mail ($leak)"
   done
-  pass "fm-mail: status prints the sender allow list and read withholds non-matching mail"
+  pass "fm-mail: read withholds non-matching mail"
 }
 
 test_missing_secret_fails_cleanly
@@ -2871,7 +2905,8 @@ test_read_tolerates_none_payload
 test_read_surfaces_unfetchable_uid
 test_invalid_port_fails_cleanly
 test_poll_sender_allow_wakes_only_matching_senders
+test_poll_held_prefix_progresses_and_recovers
 test_poll_without_sender_allow_is_unchanged
 test_poll_sender_allow_drops_filtered_retry_uid
 test_sender_allow_malformed_entries_fail_clearly
-test_sender_allow_status_and_read
+test_sender_allow_read

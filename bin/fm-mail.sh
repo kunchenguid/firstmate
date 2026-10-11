@@ -495,7 +495,7 @@ mail_poll() {
   # ok, retry, degraded, filtered, or held; an empty status is treated as ok
   # so a legacy four-field row still wakes. filtered (sender outside
   # FM_MAIL_SOURCE_ALLOW) is recorded in the cursor and dropped from the retry
-  # set without a wake; held (sender unverifiable) is left for the next poll.
+  # set without a wake; held (sender unverifiable) enters cursor/retry state.
   # Never marks anything read. Overlapping polls
   # are serialized on the mail-seen lock; each poll first heals a run
   # interrupted between its phases (mail_heal), so an overlapping poll or an
@@ -574,6 +574,16 @@ mail_poll() {
         continue
         ;;
       held)
+        if ! mail_retry_add "$uid"; then
+          echo "fm-mail: could not record retry for a held uid; retried on next poll" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
+        if ! mail_seen "$uid" && ! printf '%s\n' "$uid" >> "$CURSOR"; then
+          echo "fm-mail: could not record a held uid; retried on next poll" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
         held=$((held + 1))
         continue
         ;;
@@ -678,7 +688,6 @@ case "${1:-}" in
   status)
     echo "mail account: $FM_MAIL_USER"
     echo "imap: $IMAP_HOST:$IMAP_PORT smtp: $SMTP_HOST:$SMTP_PORT"
-    run_py allow || true
     run_py seen "$CURSOR" || true
     ;;
   poll)
