@@ -99,6 +99,40 @@ workflow_jobs() {
   ruby -ryaml -e 'puts YAML.load_file(ARGV[0]).fetch("jobs").keys' "$CI_WORKFLOW"
 }
 
+# Resolve one job's runs-on under a simulated event, head repository, and
+# FM_REVIEW_BOX value, printing "<job><TAB><comma-joined labels>". Only the
+# constructs this workflow uses are resolved: a parenthesized || / && chain,
+# == comparisons, and fromJSON('[...]'); a plain runner string passes through.
+resolve_runs_on() {
+  local event=$1 head_repo=$2 variable=$3
+  shift 3
+  ruby -ryaml -e '
+doc = YAML.load_file(ARGV[0])
+event, head_repo, variable = ARGV[1], ARGV[2], ARGV[3]
+context = {
+  "github.event_name" => event,
+  "github.event.pull_request.head.repo.full_name" => head_repo,
+  "github.repository" => "umeranjum17/firstmate",
+  "vars.FM_REVIEW_BOX" => variable,
+}
+ARGV[4..].each do |job|
+  raw = doc.fetch("jobs").fetch(job).fetch("runs-on").to_s.strip
+  match = raw.match(/\A\s*\$\{\{\s*(.*?)\s*\}\}\s*\z/m)
+  labels =
+    if match
+      inner = match[1]
+      inner = inner.gsub(%r{fromJSON\(([^)]*)\)}) { Regexp.last_match(1).gsub("\x27", "") }
+      context.each { |key, value| inner = inner.gsub(key, value.inspect) }
+      value = eval(inner) # rubocop:disable Security/Eval
+      value.is_a?(Array) ? value.join(",") : value.to_s
+    else
+      raw
+    end
+  puts "#{job}\t#{labels}"
+end
+' "$CI_WORKFLOW" "$event" "$head_repo" "$variable" "$@"
+}
+
 group_of() { printf '%s\n' "$1" | cut -f1; }
 cancel_of() { printf '%s\n' "$1" | cut -f2; }
 
@@ -249,7 +283,49 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+# The self-hosted review box backs a public repository, so untrusted fork pull
+# requests must never select it, while trusted runs use it only when the
+# FM_REVIEW_BOX repository variable opts in, so a maintainer can fall back to
+# GitHub-hosted runners by clearing that one variable instead of reverting.
+test_review_box_runner_selection_is_fork_safe() {
+  local moved job line
+  moved='test-coverage invariants'
+  for job in $moved; do
+    # Fork PR: never the box, even with the opt-in variable set.
+    line=$(resolve_runs_on pull_request "someuser/firstmate" 1 "$job") \
+      || fail "could not resolve $job runs-on"
+    [ "$(printf '%s' "$line" | cut -f2)" = "ubuntu-latest" ] \
+      || fail "a fork pull_request must never run $job on the review box, got $(printf '%s' "$line" | cut -f2)"
+    # Trusted PR with the opt-in variable set: the box.
+    line=$(resolve_runs_on pull_request "umeranjum17/firstmate" 1 "$job") \
+      || fail "could not resolve $job runs-on"
+    [ "$(printf '%s' "$line" | cut -f2)" = "self-hosted,review-box" ] \
+      || fail "a trusted PR must run $job on the review box when opted in, got $(printf '%s' "$line" | cut -f2)"
+    # Push to main with the opt-in variable set: the box.
+    line=$(resolve_runs_on push "" 1 "$job") \
+      || fail "could not resolve $job runs-on"
+    [ "$(printf '%s' "$line" | cut -f2)" = "self-hosted,review-box" ] \
+      || fail "a push to main must run $job on the review box when opted in, got $(printf '%s' "$line" | cut -f2)"
+    # Fallback: clearing the variable returns trusted runs to GitHub-hosted.
+    line=$(resolve_runs_on pull_request "umeranjum17/firstmate" 0 "$job") \
+      || fail "could not resolve $job runs-on"
+    [ "$(printf '%s' "$line" | cut -f2)" = "ubuntu-latest" ] \
+      || fail "clearing FM_REVIEW_BOX must fall back to ubuntu-latest for $job, got $(printf '%s' "$line" | cut -f2)"
+  done
+
+  # The lint partitions (ShellCheck peaks above the box's memory cap), the
+  # heavyweight shards, and the Herdr lane stay on GitHub-hosted runners.
+  for job in lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial tests-herdr; do
+    line=$(resolve_runs_on pull_request "umeranjum17/firstmate" 1 "$job") \
+      || fail "could not resolve $job runs-on"
+    [ "$(printf '%s' "$line" | cut -f2)" = "ubuntu-latest" ] \
+      || fail "$job must stay on ubuntu-latest, got $(printf '%s' "$line" | cut -f2)"
+  done
+  pass "review-box runner selection stays fork-safe and falls back on one variable"
+}
+
 test_ci_matrices_match_executable_partitions
+test_review_box_runner_selection_is_fork_safe
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_are_never_cancelled
