@@ -39,11 +39,11 @@ for root in "$HOME/.pi/agent" "$HOME/.codex" "$HOME/.no-mistakes" "$HOME/.claude
   [ -d "$root" ] && du -sh "$root" && find "$root" -mindepth 1 -maxdepth 3 -exec stat -f '%N | %z bytes | owner=%Su | mtime=%Sm | atime=%Sa' {} \;
 done
 
-# ③ 隔离副本池：只读列出占用；不要运行 treehouse destroy、return、prune 或其他改变池状态的命令。
-[ -d "$HOME/.treehouse" ] && du -sh "$HOME/.treehouse" && find "$HOME/.treehouse" -mindepth 1 -maxdepth 4 -exec stat -f '%N | %z bytes | owner=%Su | mtime=%Sm | atime=%Sa' {} \;
+# ③ 隔离副本池：只允许通过支持的状态摘要查看全池元数据；不要运行 destroy、return、prune 或其他改变池状态的命令。
+if command -v treehouse >/dev/null 2>&1; then treehouse status; fi
 ```
 
-用任务记录和服务清单确认归属者及引用关系，不能仅凭旧时间或目录名称推断可删。
+允许对整个隔离副本池做只读元数据审计。不得读取、写入、复制、删除、移动或重命名其他工作者的槽内容；不得将兄弟槽路径或内容导出到私有家目录之外。用任务记录和服务清单确认归属者及引用关系，不能仅凭旧时间或目录名称推断可删；不得仅凭池状态摘要提出清理其他工作者的槽。
 
 ## 三态分类表
 
@@ -78,7 +78,7 @@ done
 
 1. 只读审计三个根目录，记录每个候选的路径、占用、归属、最近使用时间和证据来源。
 2. 按三态分类表判断；条件清理必须逐条记录条件核验，条件不成立或证据不足即标记禁止清理。
-3. 向船长提供候选表，列为“路径 / 占用 / 归属 / 分类 / 删除条件 / 建议动作”，并明确哪些动作仍需船长给字。
+3. 只对本家拥有的对象向船长提供候选表，列为“路径 / 占用 / 归属 / 分类 / 删除条件 / 建议动作”，并明确哪些动作仍需船长给字；兄弟槽的路径与内容不得导出私有家目录。
 4. 等待船长对具体路径和动作授权；没有给字只停留在审计与建议，不执行删除。
 5. 获授权后先抢救或备份相关内容，并逐字节核验副本；核验失败即停止，不删除源内容。
 6. 只处理已批准且足以满足当前需求的最小量，不扩展到相邻对象或批量清理。
