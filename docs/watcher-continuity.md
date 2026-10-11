@@ -364,9 +364,10 @@ Branch acknowledgement retiring the check-row receipts of exactly its granted se
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
-When supervision is still needed and a cycle returns an actionable wake, the arm confirms a live watcher successor before it exits and links the successor in the cycle log.
+When supervision is still needed and a cycle returns an actionable wake, a standalone arm confirms a live watcher successor before it exits and links the successor in the cycle log.
 If it cannot confirm one, it queues a `watcher-successor-drop` check and reports failure with the cycle's missing successor.
-The `FM_WATCH_NO_AUTO_SUCCESSOR=1` test override disables that launch and exercises the same surfaced drop path.
+Adapters that own restoration set `FM_WATCH_NO_AUTO_SUCCESSOR=1` so their close handlers remain the successor owner; those arms queue the same check when no healthy watcher is present at close, while the adapter performs its own restoration.
+The regression suite uses the same override to exercise the surfaced drop path and repair a dropped chain without creating a duplicate watcher.
 An arm started without an actionable wake follows its existing close-resolution contract below.
 
 ### How an arm resolves a close
