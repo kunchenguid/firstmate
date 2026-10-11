@@ -826,6 +826,16 @@ test_worker_account_pin_follows_the_relaunch() {
   assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work' " \
     "a relaunch after the pin is removed must stay on the recorded store"
   assert_no_grep "store-personal" "$dir/fake/literal" "a relaunch after the pin is removed adopted the ambient store"
+
+  # The pin provenance is durable: a further relaunch still sheds.
+  : > "$dir/fake/literal"
+  out=$(ANTHROPIC_API_KEY=ambient-relauncher-key FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_control "$dir" "$id" relaunch --note "pin still removed"); rc=$?
+  expect_code 0 "$rc" "a second relaunch after the pin is removed should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "-u ANTHROPIC_API_KEY " \
+    "a second relaunch on the pin-derived store must still shed the ambient API key"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work' " \
+    "a second relaunch must stay on the recorded store"
   pass "fm-control relaunch: the replacement follows the pin, and keeps its recorded store with ambient credentials shed once the pin is gone"
 }
 

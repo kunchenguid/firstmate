@@ -29,6 +29,12 @@
 # For a non-claude launch the store is not used: no override is applied and an
 # existing record is carried forward unchanged, so switching a task back to
 # claude later still lands on its recorded account.
+# A store chosen by a Claude worker account pin is recorded with
+# claude_config_pinned=1. That provenance travels with the record under rule 2
+# (and through a non-claude launch), so a launch on it keeps shedding the
+# ambient credentials and provider selectors Claude ranks above the store's
+# login even after the pin is removed. An override or an ambient store carries
+# no provenance and is launched with the environment it was given.
 #
 # Callers: bin/fm-spawn.sh resolves before any endpoint, worktree, or trust
 # registration exists, exports the result as CLAUDE_CONFIG_DIR for the trust
@@ -41,10 +47,12 @@
 #   fm_claude_store_resolve <harness> [<existing-meta-file>]
 #     On success returns 0 and sets FM_CLAUDE_STORE to the store to launch with
 #     and record: a directory, the 'default' marker, or empty for a non-claude
-#     launch with no record. On refusal returns 1 and sets
-#     FM_CLAUDE_STORE_ERROR to a one-line reason.
+#     launch with no record, and sets FM_CLAUDE_STORE_PINNED to 1 when that
+#     store is a reused pin-derived record (empty otherwise). On refusal returns
+#     1 and sets FM_CLAUDE_STORE_ERROR to a one-line reason.
 
 FM_CLAUDE_STORE=
+FM_CLAUDE_STORE_PINNED=
 FM_CLAUDE_STORE_ERROR=
 
 # Echoes the last claude_config_dir= value in <meta>, or nothing. Needs
@@ -57,12 +65,17 @@ fm_claude_store_recorded() {
 
 # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
 fm_claude_store_resolve() {
-  local harness=$1 meta=${2:-} recorded override
+  local harness=$1 meta=${2:-} recorded pinned="" override
   FM_CLAUDE_STORE=
+  FM_CLAUDE_STORE_PINNED=
   FM_CLAUDE_STORE_ERROR=
   recorded=$(fm_claude_store_recorded "$meta")
+  if [ -n "$recorded" ] && [ "$(fm_meta_get "$meta" claude_config_pinned)" = 1 ]; then
+    pinned=1
+  fi
   if [ "$harness" != claude ]; then
     FM_CLAUDE_STORE=$recorded
+    FM_CLAUDE_STORE_PINNED=$pinned
     return 0
   fi
   override=${FM_CLAUDE_CONFIG_DIR:-}
@@ -87,6 +100,7 @@ fm_claude_store_resolve() {
   fi
   if [ "$recorded" = default ]; then
     FM_CLAUDE_STORE=default
+    FM_CLAUDE_STORE_PINNED=$pinned
     return 0
   fi
   if [ -n "$recorded" ]; then
@@ -95,6 +109,7 @@ fm_claude_store_resolve() {
       return 1
     }
     FM_CLAUDE_STORE=$recorded
+    FM_CLAUDE_STORE_PINNED=$pinned
     return 0
   fi
   FM_CLAUDE_STORE=${CLAUDE_CONFIG_DIR:-default}

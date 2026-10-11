@@ -1523,11 +1523,17 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   # A creatable path: this spawn now pre-registers workspace trust in that store
   # (bin/fm-claude-trust.sh), so an unwritable directory is a genuine blocker.
   # The forwarding assertion below is what this case proves and is unchanged.
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+  # The operator's provider selection travels with the pane's environment; a
+  # store that no worker account pin chose must not strip it.
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" CLAUDE_CODE_USE_BEDROCK=1 \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "-u CLAUDE_CODE_USE_BEDROCK" \
+    "a fresh spawn on the ambient store must keep the operator's CLAUDE_CODE_USE_BEDROCK provider selection"
+  assert_no_grep "claude_config_pinned=" "$HOME_DIR/state/$id.meta" \
+    "an ambient store must not be recorded as pin-derived"
   assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions $(claude_worker_add_dirs "$HOME_DIR" "$id")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   assert_grep "claude_config_dir=$CASE_DIR/claude-work" "$HOME_DIR/state/$id.meta" \

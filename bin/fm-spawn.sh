@@ -428,8 +428,9 @@
 #   keeps the task on the account it was launched with. FM_CLAUDE_CONFIG_DIR=<dir>
 #   (or 'default' for Claude's own default store) on the call is the only way to
 #   change it; it launches with and records the new store. A recorded or override store that is not an existing directory
-#   refuses before any endpoint exists. A launch on a named store (not
-#   'default') sheds the ambient credentials Claude ranks above its login. bin/fm-claude-store-lib.sh owns the
+#   refuses before any endpoint exists. A pin-derived store is recorded with
+#   claude_config_pinned=1 and keeps shedding the ambient credentials Claude
+#   ranks above its login after the pin is removed. bin/fm-claude-store-lib.sh owns the
 #   full precedence contract.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
@@ -2740,16 +2741,19 @@ elif [ "$KIND" = secondmate ] && [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.
   SPAWN_CLAUDE_STORE_META="$STATE/$ID.meta"
 fi
 # A Claude worker account pin replaces the store outright: the task records
-# the pinned root (or the 'default' marker for the ordinary Claude account),
-# and neither the record nor FM_CLAUDE_CONFIG_DIR applies.
+# the pinned root (or the 'default' marker for the ordinary Claude account)
+# with its pin provenance, and neither the record nor FM_CLAUDE_CONFIG_DIR
+# applies.
 if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   SPAWN_CLAUDE_STORE=${WORKER_ACCOUNT_ROOT:-default}
+  SPAWN_CLAUDE_STORE_PINNED=1
 else
   fm_claude_store_resolve "$HARNESS" "$SPAWN_CLAUDE_STORE_META" || {
     echo "error: $FM_CLAUDE_STORE_ERROR" >&2
     exit 1
   }
   SPAWN_CLAUDE_STORE=$FM_CLAUDE_STORE
+  SPAWN_CLAUDE_STORE_PINNED=$FM_CLAUDE_STORE_PINNED
   if [ "$HARNESS" = claude ] && [ "$SPAWN_CLAUDE_STORE" = default ]; then
     # Unset so bin/fm-claude-trust.sh registers trust in the default store the
     # launch below uses.
@@ -5500,7 +5504,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx claude_config_dir", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx claude_config_dir claude_config_pinned", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5536,8 +5540,10 @@ preserve_relaunch_meta() {
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
-  # claude_config_dir= is owned by bin/fm-claude-store-lib.sh.
+  # claude_config_dir= and claude_config_pinned= are owned by
+  # bin/fm-claude-store-lib.sh.
   [ -z "$SPAWN_CLAUDE_STORE" ] || echo "claude_config_dir=$SPAWN_CLAUDE_STORE"
+  [ -z "$SPAWN_CLAUDE_STORE_PINNED" ] || echo "claude_config_pinned=1"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
@@ -5771,17 +5777,17 @@ esac
 # Forward the task's resolved store onto the claude launch: the durable record
 # or deliberate override when there is one, otherwise firstmate's own store
 # (bin/fm-claude-store-lib.sh owns that choice), or a home's worker account
-# pin. A named store sheds the environment credentials Claude ranks above the
-# store's own login, so ambient auth in the relauncher cannot outrank it. The
-# 'default' marker removes any inherited value so the launch stays on Claude's
-# own default store; under a pin it sheds those credentials too.
+# pin. The 'default' marker removes any inherited value so the launch stays on
+# Claude's own default store. A pin-derived store, whether the pin is active or
+# only recorded, also sheds the environment credentials and provider selectors
+# Claude ranks above that store's login.
 if [ "$HARNESS" = claude ]; then
-  if [ "$SPAWN_CLAUDE_STORE" != default ]; then
-    LAUNCH="$(fm_worker_account_claude_shed) CLAUDE_CONFIG_DIR=$(shell_quote "$SPAWN_CLAUDE_STORE") $LAUNCH"
-  elif [ -n "$WORKER_ACCOUNT" ]; then
-    LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $LAUNCH"
+  claude_store_env='env'
+  [ -z "$SPAWN_CLAUDE_STORE_PINNED" ] || claude_store_env=$(fm_worker_account_claude_shed)
+  if [ "$SPAWN_CLAUDE_STORE" = default ]; then
+    LAUNCH="$claude_store_env -u CLAUDE_CONFIG_DIR $LAUNCH"
   else
-    LAUNCH="env -u CLAUDE_CONFIG_DIR $LAUNCH"
+    LAUNCH="$claude_store_env CLAUDE_CONFIG_DIR=$(shell_quote "$SPAWN_CLAUDE_STORE") $LAUNCH"
   fi
 elif [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
