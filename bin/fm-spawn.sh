@@ -5102,8 +5102,9 @@ EOF
     #   - the module default-exports a definition with an id and setup(ctx); a
     #     named export returning a hooks object is rejected at load, which is
     #     exactly how every firstmate plugin failed after the 2.0.20 upgrade;
-    #   - the event subscription is the whole server's stream, so every event is
-    #     filtered to this plugin instance's own location before it can act, and
+    #   - the event subscription is the whole server's stream, so located events
+    #     must match this plugin instance's own location, while unlocated terminal
+    #     execution events are accepted only for an already-active session ID;
     #     payloads are read from `data` rather than `properties`;
     #   - OpenCode 2 delivers no `session.status` and no `session.idle` to a
     #     plugin subscription at all (verified across repeated real sessions),
@@ -5118,6 +5119,10 @@ EOF
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state comes from OpenCode's step events: a step starting is active
 // work, and a step ending without asking for further tools is the turn ending.
+// Active session IDs are tracked together: only the last ending session writes
+// idle. ID-bearing terminal execution events also close failed/interrupted
+// sessions; accepting an unlocated terminal event requires that ID to be active,
+// so another location's failure cannot clear this worker's busy state.
 // The turn-end touch stays the watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
 const notifyTurnEnd = $busy_notify_turnend;

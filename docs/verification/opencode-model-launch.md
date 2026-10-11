@@ -37,7 +37,6 @@ That command exits 1.
 `opencode run --help` does still list `--model, -m string`, documented as "Model to use in the format provider/model#variant".
 `run` is the headless launch mode, so its flag says nothing about the interactive path.
 
-Because the default and the icms dispatch rules both resolve `opencode/space-bunny-free`, every such dispatch emitted the removed flag.
 `bin/fm-spawn.sh` therefore omits `--model` for this harness, and the model axis rides the worktree's own config instead.
 
 ## Dropping the flag alone does not keep the configured model
@@ -151,8 +150,7 @@ The busy-state and turn-end plugin contract is separate evidence owned by [super
 Only 2.0.26 on this host was measured.
 `opencode run` was used to read a session's recorded model cheaply; the guarantee claimed here is for the interactive launch, which was exercised directly.
 
-A project that ships its own committed `.opencode/opencode.json` keeps it byte-identical. Firstmate refuses that OpenCode launch with a diagnostic naming the conflicting file, because the higher-precedence tracked model would defeat a worktree-root override and OpenCode v2 provides no verified interactive model flag or environment override. Measurements on 2.0.26 confirmed that `./opencode.json` is lower precedence than `.opencode/opencode.json`, `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` are ignored, and `.opencode/opencode.jsonc` is not read. No alternate config path was found that can override the tracked file without changing it.
+Measurements on 2.0.26 confirmed that `./opencode.json` is lower precedence than `.opencode/opencode.json`, `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` are ignored, and `.opencode/opencode.jsonc` is not read.
+No alternate config path was found that can override the tracked file without changing it.
 
-For an untracked worktree config, Firstmate adds its pin with an `x-firstmate-model-pin` marker and preserves other parsed JSON settings. The marker records whether a prior model existed and its value, so a later launch can update the pin or restore that prior value when the requested model is `default`. Firstmate refuses to modify malformed JSON, invalid marker data, or a model value changed externally while marked as Firstmate-owned. The prior writer's exact compact model-only output is recognized as a legacy Firstmate pin and cleared on a default launch.
-
-The OpenCode 2.0.26 host check also established that `OPENCODE_CONFIG_CONTENT` is not a usable source for `permission` or `agent` settings. Firstmate now writes the permission allowlist and supported `agent.build.model` / `agent.build.variant` effort settings through the same worktree JSON merge. The marker tracks these managed values independently; a `default` model launch clears every Firstmate-authored model pin, including `agent.build.model`, restores any top-level or build-agent model value it displaced, and leaves permission, the effort variant, and unrelated config settings intact. The effort variant remains limited to the provider/effort combinations listed in the harness reference.
+The [OpenCode harness reference](../../.agents/skills/harness-adapters/references/harness/opencode.md#operating-facts) owns Firstmate's preserve-and-merge, default-restoration, permission, effort, and refusal policy; [`tests/fm-spawn-dispatch-profile.test.sh`](../../tests/fm-spawn-dispatch-profile.test.sh) covers that policy independently of these model-selection measurements.

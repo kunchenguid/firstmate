@@ -47,15 +47,8 @@ A failed follow-up never cancels continuity restoration.
 
 ### The OpenCode turn end
 
-OpenCode 2 delivers no `session.idle` and no `session.status` to a plugin subscription, though both remain in its published event schema.
-The OpenCode plugins therefore read a turn end as a `session.step.ended` whose `finish` is not `tool-calls`; a `tool-calls` step is the agent loop continuing into a further step, not the end of the turn.
-`.opencode/plugins/lib/fm-opencode-contract.js` owns that rule and every other plugin-contract fact these adapters share, so the watch-arm, turn-end, cd-check, pretool-check, session-start-nudge, and spawn-generated busy-state adapters cannot drift apart on it.
-The spawn-generated busy-state adapter also closes a failed or interrupted execution by its ID-bearing `session.execution.failed` or `session.execution.interrupted` event; the preceding `session.step.failed` has no session ID and does not clear another active session.
-
-Two further OpenCode 2 properties shape these adapters:
-
-- The plugin event subscription is the connected server's entire public stream, not one instance's, because one service process serves every location. Every adapter filters on its own `ctx.location.directory` before acting, so a worktree's plugins never answer for another location's sessions.
-- `ctx.location.project.canonical` names the canonical project root, which in a worktree is the primary checkout rather than the worktree. Adapters that must resolve their own firstmate root read `ctx.location.directory`, which is the worktree when there is one.
+[`.opencode/plugins/lib/fm-opencode-contract.js`](../.opencode/plugins/lib/fm-opencode-contract.js) owns OpenCode 2 turn-end detection, event-location filtering, root resolution, and the primary turn-end trigger's provider-failure limit.
+The spawn-generated busy-state adapter has separate terminal-execution handling; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns its active-session scoping invariant.
 
 ### Pi session replacement
 

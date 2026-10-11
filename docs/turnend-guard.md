@@ -272,7 +272,7 @@ The registrations in detail:
   [Runtime backend verification](verification/runtime-backends.md#secondmate-busy-contract) owns the live evidence.
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for the turn end in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `ctx.session.prompt` once when the guard returns 2.
-  OpenCode 2 delivers no `session.idle` to a plugin subscription, so the turn end is the last step of a turn; `docs/watcher-continuity.md` owns that mapping.
+  [`.opencode/plugins/lib/fm-opencode-contract.js`](../.opencode/plugins/lib/fm-opencode-contract.js) owns turn-end detection and its provider-failure limit.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - omp answers its blocking `session_stop` hook in `.omp/extensions/fm-primary-turnend-guard.ts`, passing the payload's own `stop_hook_active` to the shared guard.
   When the guard returns 2, it returns `{ continue: true, additionalContext }`, so the continuation is compelled rather than requested.
