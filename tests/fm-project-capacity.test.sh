@@ -392,36 +392,49 @@ test_release_frees_a_place() {
   pass "a recorded PR handoff or a cleanup each frees exactly one place"
 }
 
-# A worker whose newest status event is done has finished and frees its place,
-# while a paused worker still holds one, and a finished worker steered back into
-# work counts again.
 test_finished_worker_frees_a_place() {
-  local case_dir home out rc=0
-  case_dir=$(make_case finished task-e task-f)
-  home="$case_dir/home"
-  declare_capacity "$home" "project 1"
-  write_live "$home" live-p "$case_dir/project"
-  printf 'paused [at=1791700000]: waiting on an upstream review\n' > "$home/state/live-p.status"
-  out=$(spawn_ship "$case_dir" task-e "$case_dir/unused") || rc=$?
-  expect_code "$DEFER_EXIT" "$rc" "a paused worker did not hold its place: $out"
-  assert_contains "$out" "1 already hold a place (live-p)" "the paused worker was not named as the holder"
+  local case_dir home out rc mode kind event scenario
+  for scenario in no-mistakes direct-PR local-only scout; do
+    case_dir=$(make_case "finished-$scenario" task-e task-f)
+    home="$case_dir/home"
+    declare_capacity "$home" "project 1"
+    write_live "$home" live-p "$case_dir/project"
+    kind=ship
+    mode=$scenario
+    if [ "$scenario" = scout ]; then kind=scout; mode=no-mistakes; fi
+    sed -i "s/^kind=.*/kind=$kind/; s/^mode=.*/mode=$mode/" "$home/state/live-p.meta"
+    printf 'paused [at=1791700000]: waiting\n' > "$home/state/live-p.status"
+    rc=0
+    out=$(spawn_ship "$case_dir" task-e "$case_dir/unused") || rc=$?
+    expect_code "$DEFER_EXIT" "$rc" "a paused $scenario worker did not hold its place: $out"
 
-  printf 'working [at=1791700100]: resumed\ndone [at=1791700200]: finished, waiting on landing\n' >> "$home/state/live-p.status"
-  rc=0
-  out=$(spawn_ship "$case_dir" task-e) || rc=$?
-  expect_code 0 "$rc" "a finished worker did not free its place: $out"
-  rc=0
-  out=$(spawn_ship "$case_dir" task-f "$case_dir/unused") || rc=$?
-  expect_code "$DEFER_EXIT" "$rc" "one finished worker freed two places: $out"
-  assert_contains "$out" "1 already hold a place (task-e)" "the new worker did not take the freed place"
+    printf 'working [at=1791700100]: resumed\ndone [at=1791700200]: finished\n' >> "$home/state/live-p.status"
+    if [ "$kind" = ship ] && [ "$mode" != local-only ]; then
+      rc=0
+      out=$(spawn_ship "$case_dir" task-e "$case_dir/unused") || rc=$?
+      expect_code "$DEFER_EXIT" "$rc" "a $mode handoff released capacity before PR publication: $out"
+      assert_contains "$out" "1 already hold a place (live-p)" "the handoff worker was not counted"
+      continue
+    fi
+    for event in captain-held resolved needs-decision paused blocked; do
+      printf '%s [at=1791700250]: bookkeeping\n' "$event" >> "$home/state/live-p.status"
+    done
+    rc=0
+    out=$(spawn_ship "$case_dir" task-e) || rc=$?
+    expect_code 0 "$rc" "a finished $scenario worker did not free its place after bookkeeping: $out"
+    rc=0
+    out=$(spawn_ship "$case_dir" task-f "$case_dir/unused") || rc=$?
+    expect_code "$DEFER_EXIT" "$rc" "one finished worker freed two places: $out"
+    assert_contains "$out" "1 already hold a place (task-e)" "the new worker did not take the freed place"
 
-  printf 'working [at=1791700300]: steered back into work\n' >> "$home/state/live-p.status"
-  printf 'done [at=1791700400]: finished\n' >> "$home/state/task-e.status"
-  rc=0
-  out=$(spawn_ship "$case_dir" task-f "$case_dir/unused") || rc=$?
-  expect_code "$DEFER_EXIT" "$rc" "a finished worker steered back into work was not counted again: $out"
-  assert_contains "$out" "1 already hold a place (live-p)" "the resumed worker was not named as the holder"
-  pass "a done worker frees its place, a paused one keeps it, and a resumed one counts again"
+    printf 'working [at=1791700300]: resumed\n' >> "$home/state/live-p.status"
+    printf 'pr=123\n' >> "$home/state/task-e.meta"
+    rc=0
+    out=$(spawn_ship "$case_dir" task-f "$case_dir/unused") || rc=$?
+    expect_code "$DEFER_EXIT" "$rc" "a resumed $scenario worker was not counted again: $out"
+    assert_contains "$out" "1 already hold a place (live-p)" "the resumed worker was not named as the holder"
+  done
+  pass "only finished scouts and local-only ships release on done until working resumes"
 }
 
 # Only workers on the same project identity hold places: a secondmate record, a
