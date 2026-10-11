@@ -5129,6 +5129,11 @@ export default {
         await busyEvent("busy", "session-step-started");
         return;
       }
+      if (event.type === "session.step.failed") {
+        activeSessions.clear();
+        await busyEvent("idle", "session-step-failed");
+        return;
+      }
       const ended = turnEndedSessionID(event);
       if (!ended) return;
       if (activeSessions.delete(ended) && activeSessions.size === 0) {

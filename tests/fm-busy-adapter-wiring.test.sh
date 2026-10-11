@@ -204,6 +204,10 @@ oc_turn_end() {  # <sessionID> <location> [finish]
   printf '{"type":"session.step.ended","data":{"sessionID":"%s","finish":"%s"},"location":{"directory":"%s"}}' "$1" "${3:-stop}" "$2"
 }
 
+oc_step_failed() {  # <location>
+  printf '{"type":"session.step.failed","data":{},"location":{"directory":"%s"}}' "$1"
+}
+
 test_opencode_plugin_semantic_lifecycle() {
   local rec id=busy-oc-1 out state plugin
   rec=$(make_spawn_case oc-lifecycle opencode "$id")
@@ -248,6 +252,14 @@ test_opencode_plugin_semantic_lifecycle() {
     "$(oc_turn_end ses_main "$WT_DIR")") || fail "turn-end drive failed: $out"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "idle opencode-plugin" ] || fail "the latched session's turn end must classify idle, got '$out'"
+
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses_main "$WT_DIR")" \
+    "$(oc_step_started ses_child "$WT_DIR")" \
+    "$(oc_step_failed "$WT_DIR")" \
+    "$(oc_turn_end ses_main "$WT_DIR")") || fail "failed-step drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "a failed step must clear unidentifiable active sessions, got '$out'"
 
   # A tool-calls step is the agent loop continuing, not a turn end.
   out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
