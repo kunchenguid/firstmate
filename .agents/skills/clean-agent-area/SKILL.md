@@ -1,7 +1,7 @@
 ---
 name: clean-agent-area
 description: >-
-  Use when the captain asks to clean the agent area, free space, or investigate low disk space, and during routine maintenance when the main home identifies cleanup work.
+  Use when the captain asks to clean the agent area, free space, or investigate low disk space.
 user-invocable: true
 metadata:
   internal: true
@@ -21,7 +21,6 @@ metadata:
 ## 触发条件
 
 - 船长要求清理、腾空间、处理磁盘快满，或清 agent 区域时加载本 skill。
-- 例行维护中主家发现 agent 区域需要清理时也可主动加载。
 
 ## 只读审计
 
@@ -66,7 +65,8 @@ done
 | `state/<id>.inbox/handled/` | 条件清理 | 确认对应任务已收工；活任务或归属不明时不得删。 | 仅列出已收工关联项供授权。 |
 | watcher 内部件：`.hash-*`、`.count-*`、`.stale-*`、`.stale-since-*`、`.churn-since-*`、`.paused-*`、`.wedge-escalations-*`、`.writing-*`、`.waiting-*`、`.seen-*`、`.hb-surfaced-*`、`.last-*`、`.heartbeat-streak`、`.watch.lock`、`.wake-queue*`、`.watcher-down`、`.last-watcher-beat`、`.startup-network.*` | 禁止清理 | 这些均为 watcher 或启动监督内部状态。 | 不得列入候选。 |
 | `state/.branch-outcomes*` 及其游标 | 禁止清理 | 是持久监督结果及读取位置。 | 不得列入候选。 |
-| `state/.status-presentation-cursor` 与 `state/.*-open-decisions-cursor` | 禁止清理 | 游标维护状态呈现与决策折叠。 | 不得列入候选。 |
+| `state/.*-open-decisions-cursor` | 可直接清理 | 删除后会触发一次完整的 open-decisions 重折叠。 | 可列入候选；仍须船长对具体路径和动作给字。 |
+| `state/.status-presentation-cursor` | 禁止清理 | 维护状态呈现位置；删除可能导致已呈现状态重放。 | 不得列入候选。 |
 | `state/.afk-contract` 与 `state/.afk` | 禁止清理 | 持久的 away/quiet 委托记录。 | 不得列入候选。 |
 | treehouse leased 或 in-use 槽 | 禁止清理 | 由工作或租约占用；不得回收、返回或移动。 | 不得列入候选。 |
 | 任何未收工任务的 `state/` 与 `data/` 记录 | 禁止清理 | 活任务记录可能包含工作、交付物、决策或引用。 | 不得列入候选。 |
