@@ -24,9 +24,10 @@ mkdir -p "$FM_HOME"
 
 # start_stub <case-dir> [status] [kind]: serves one canned Responses payload
 # and records the request body at <case-dir>/request.json. kind is `ok` (a
-# successful turn), `error200` (HTTP 200 carrying an error payload), or
-# `garbage` (HTTP 200 carrying unparseable text); a non-200 status serves its
-# error payload at that status. Prints the server pid.
+# successful turn), `error200` (HTTP 200 carrying an error payload),
+# `reject200` (HTTP 200 carrying the incident-shaped transport-budget
+# rejection), or `garbage` (HTTP 200 carrying unparseable text); a non-200
+# status serves its error payload at that status. Prints the server pid.
 start_stub() {
   local dir=$1 status=${2:-200} kind=${3:-ok}
   cat > "$dir/stub.py" <<PY
@@ -43,6 +44,10 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
         elif kind == "error200":
             body = json.dumps({"error": {"message": "stub failure"}}).encode()
+            self.send_response(200)
+        elif kind == "reject200":
+            body = json.dumps({"error": {"code": "context_length_exceeded",
+                "message": "This request exceeds the browser transport budget (102400 tokens)."}}).encode()
             self.send_response(200)
         elif kind == "empty":
             body = json.dumps({}).encode()
@@ -302,6 +307,40 @@ test_bridge_failure_fails_closed() {
   pass "a failing bridge fails closed with its status"
 }
 
+test_structured_rejection_surfaces_bridge_diagnostic() {
+  local dir=$TMP_ROOT/reject pid out rc stderr
+  mkdir -p "$dir"
+  new_prompt
+  pid=$(start_stub "$dir" 200 reject200)
+  out=$(bash "$CONSULT" --prompt-file "$TMP_ROOT/prompt.txt" --mode plan --thread t-reject 2>"$dir/stderr.txt"); rc=$?
+  stop_stub "$pid"
+  [ "$rc" -ne 0 ] || fail "an HTTP-200 structured rejection must exit nonzero"
+  [ -z "$out" ] || fail "a rejected consult must produce empty stdout, got: $out"
+  stderr=$(cat "$dir/stderr.txt")
+  assert_contains "$stderr" "bridge rejected" "the failure must identify a bridge rejection"
+  assert_contains "$stderr" "context_length_exceeded" "the failure must carry the bridge's error code"
+  assert_contains "$stderr" "This request exceeds the browser transport budget (102400 tokens)." \
+    "the failure must preserve the bridge's message verbatim including its reported token count"
+  pass "an HTTP-200 structured rejection exits nonzero with the bridge's own diagnostic and empty stdout"
+}
+
+test_rejection_without_reported_size_invents_nothing() {
+  local dir=$TMP_ROOT/reject-nosize pid out rc stderr
+  mkdir -p "$dir"
+  new_prompt
+  pid=$(start_stub "$dir" 200 error200)
+  out=$(bash "$CONSULT" --prompt-file "$TMP_ROOT/prompt.txt" --mode plan --thread t-nosize 2>"$dir/stderr.txt"); rc=$?
+  stop_stub "$pid"
+  [ "$rc" -ne 0 ] || fail "a rejection with no reported size must exit nonzero"
+  [ -z "$out" ] || fail "a rejected consult must produce empty stdout, got: $out"
+  stderr=$(cat "$dir/stderr.txt")
+  assert_contains "$stderr" "stub failure" "the failure must preserve the bridge's message"
+  if printf '%s' "$stderr" | grep -q '[0-9]'; then
+    fail "stderr must not invent or substitute any size, got: $stderr"
+  fi
+  pass "a rejection without a reported size relays the bridge message and invents no number"
+}
+
 test_audit_request_shape
 test_plan_request_shape
 test_metadata_stamping
@@ -309,6 +348,8 @@ test_model_slug
 test_thread_propagation
 test_bridge_unavailable_fails_closed
 test_bridge_failure_fails_closed
+test_structured_rejection_surfaces_bridge_diagnostic
+test_rejection_without_reported_size_invents_nothing
 test_bridge_health_probe_verdicts
 test_bridge_health_unconfigured_stays_quiet
 test_bridge_health_configuration_evidence

@@ -20,7 +20,12 @@
 # stays external - this script never installs, authenticates, or repairs the
 # bridge. An unreachable or failing bridge is a reported prerequisite
 # (nonzero exit, diagnostic on stderr, no response on stdout), never a setup
-# step. docs/configuration.md "ChatGPT consultation channel" owns the
+# step. A rejection the bridge reports as a structured .error payload is a
+# genuine consult failure too: the bridge's own diagnostic - message and
+# code verbatim, including any token count it reports - goes to the caller
+# on stderr, stdout stays empty, and the bridge stays the sole authority on
+# why a turn failed; this script never estimates request size itself.
+# docs/configuration.md "ChatGPT consultation channel" owns the
 # user-facing contract.
 set -u
 
@@ -88,6 +93,21 @@ case "$HTTP" in
     exit 1
     ;;
 esac
+
+# Structured rejection first: an .error.message means the bridge refused
+# the turn (e.g. a transport-budget rejection at HTTP 200), so the bridge's
+# own code and message are the diagnostic - relayed verbatim, never parsed
+# or reconstructed, and never followed by a synthesized size.
+ERR=$(jq -r '.error.message // empty' "$RESPONSE" 2>/dev/null) || ERR=""
+if [ -n "$ERR" ]; then
+  ERR_CODE=$(jq -r '.error.code // empty' "$RESPONSE" 2>/dev/null) || ERR_CODE=""
+  if [ -n "$ERR_CODE" ]; then
+    printf 'fm-chatgpt: bridge rejected the request (%s): %s\n' "$ERR_CODE" "$ERR" >&2
+  else
+    printf 'fm-chatgpt: bridge rejected the request: %s\n' "$ERR" >&2
+  fi
+  exit 1
+fi
 
 TEXT=$(fm_chatgpt_response_text "$RESPONSE")
 [ -n "$TEXT" ] || {

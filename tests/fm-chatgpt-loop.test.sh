@@ -26,18 +26,26 @@ export FM_STATE_OVERRIDE="$HOME_DIR/state"
 # Stub consult: serves the real openai-responses shape through the stub
 # bridge port by delegating to the real consult script. The stub records the
 # prompt it was asked to consult.
+# start_stub <dir> [status] [mode_text] [kind]: serves the canned Responses
+# payload. kind `reject200` answers HTTP 200 with the incident-shaped
+# structured transport-budget rejection instead of an answer.
 start_stub() {
-  local dir=$1 status=${2:-200} mode_text=${3:-stubbed consultation answer}
+  local dir=$1 status=${2:-200} mode_text=${3:-stubbed consultation answer} kind=${4:-}
   cat > "$dir/stub.py" <<PY
 import http.server, json
 d = "$dir"
 status = $status
+kind = "$kind"
 answer = """$mode_text"""
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         open(d + "/request.json", "wb").write(self.rfile.read(n))
-        if status != 200:
+        if kind == "reject200":
+            body = json.dumps({"error": {"code": "context_length_exceeded",
+                "message": "This request exceeds the browser transport budget (102400 tokens)."}}).encode()
+            self.send_response(200)
+        elif status != 200:
             body = json.dumps({"error": {"message": "stub failure"}}).encode()
             self.send_response(status)
         else:
@@ -986,6 +994,55 @@ test_dispatch_effort_owns_single_flag() {
   pass "effort reaches the spawn once, from whichever single source supplied it, and conflicting sources refuse"
 }
 
+test_rejected_plan_consult_persists_nothing() {
+  local dir=$TMP_ROOT/rejplan pid rc state
+  mkdir -p "$dir"
+  new_task_files
+  make_spawn_stub "$dir"
+  pid=$(start_stub "$dir")
+  bash "$LOOP" init --task rejplan --objective-file "$TMP_ROOT/objective.txt" >/dev/null
+  bash "$LOOP" consult --stage audit --task rejplan >/dev/null
+  stop_stub "$pid"
+  bash "$LOOP" dispatch --stage audit --task rejplan -- wt p --mode local-only --yolo off >/dev/null
+  printf 'worker finding: transport budget too small\n' > "$dir/findings.txt"
+  bash "$LOOP" record-findings --task rejplan --file "$dir/findings.txt" >/dev/null
+  [ "$(loop_phase rejplan)" = "plan-consult" ] || fail "the fixture must reach plan-consult"
+  pid=$(start_stub "$dir" 200 "stubbed consultation answer" reject200)
+  local out
+  out=$(bash "$LOOP" consult --stage plan --task rejplan 2>&1); rc=$?
+  stop_stub "$pid"
+  state="$HOME_DIR/data/rejplan/chatgpt-loop.json"
+  [ "$rc" -ne 0 ] || fail "a rejected plan consult must exit nonzero"
+  [ "$(loop_phase rejplan)" = "plan-consult" ] || fail "a rejected consult must leave the phase at plan-consult, got $(loop_phase rejplan)"
+  [ -z "$(jq -r '.plan' "$state")" ] || fail "a rejected consult must store nothing in .plan"
+  local last_error
+  last_error=$(jq -r '.last_error' "$state")
+  assert_contains "$last_error" "bridge rejected" "last_error must identify the bridge rejection"
+  assert_contains "$last_error" "This request exceeds the browser transport budget (102400 tokens)." \
+    "last_error must carry the bridge's diagnostic verbatim including its reported token count"
+  assert_contains "$out" "bridge rejected" "the rejection must reach the caller's stderr"
+  pass "a rejected plan consult fails, holds the phase, stores no plan, and records the bridge's diagnostic"
+}
+
+test_rejected_audit_consult_persists_nothing() {
+  local dir=$TMP_ROOT/rejaudit pid rc state
+  mkdir -p "$dir"
+  new_task_files
+  pid=$(start_stub "$dir" 200 "stubbed consultation answer" reject200)
+  bash "$LOOP" init --task rejaudit --objective-file "$TMP_ROOT/objective.txt" >/dev/null
+  local out
+  out=$(bash "$LOOP" consult --stage audit --task rejaudit 2>&1); rc=$?
+  stop_stub "$pid"
+  state="$HOME_DIR/data/rejaudit/chatgpt-loop.json"
+  [ "$rc" -ne 0 ] || fail "a rejected audit consult must exit nonzero"
+  [ "$(loop_phase rejaudit)" = "audit-consult" ] || fail "a rejected audit consult must hold audit-consult, got $(loop_phase rejaudit)"
+  [ -z "$(jq -r '.audit_prompt' "$state")" ] || fail "a rejected consult must store nothing in .audit_prompt"
+  [ -z "$(jq -r '.audit_result' "$state")" ] || fail "a rejected consult must store nothing in .audit_result"
+  assert_contains "$(jq -r '.last_error' "$state")" "bridge rejected" "last_error must identify the bridge rejection"
+  assert_contains "$out" "102400 tokens" "the caller's stderr must carry the bridge's reported token count"
+  pass "a rejected audit consult fails, holds audit-consult, and stores no audit result"
+}
+
 test_full_loop_happy_path
 test_plan_consult_carries_explicit_context
 test_consult_failure_is_retryable
@@ -1024,3 +1081,5 @@ test_consult_inlines_evidence_verbatim
 test_record_findings_requires_nonempty
 test_record_findings_resolves_worker_report
 test_dispatch_effort_owns_single_flag
+test_rejected_plan_consult_persists_nothing
+test_rejected_audit_consult_persists_nothing
