@@ -7,6 +7,8 @@
 # Matrix:
 #   (a) pr= + reachable pr_head=, no remote pull ref -> offline fallback to recorded SHA
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
+#       (a GitLab merge-request pr= fetches refs/merge-requests/<iid>/head, the
+#       ref GitLab keeps for every merge request, exactly the same way)
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
@@ -213,6 +215,27 @@ test_stale_recorded_pr_head_loses_to_fetched_pull_head() {
   # Pre-fix behavior preferred reachable recorded pr_head= and would show stale-local.
   [ "$stale_sha" != "$PR_SHA" ] || fail "stale-recorded: fixture did not diverge recorded vs PR head"
   pass "fm-review-diff prefers freshly fetched PR head over a stale recorded pr_head="
+}
+
+test_gitlab_mr_meta_fetches_merge_request_head() {
+  local case_dir out stale_sha
+  case_dir=$(make_case gitlab-mr-head)
+  stale_and_pr_commits "$case_dir"
+  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/merge-requests/7/head"
+  write_task_meta "$case_dir" \
+    "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7" \
+    "pr_head=$stale_sha"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' \
+    "gitlab-mr-head: diff must use the fetched merge request head"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-mr-head: diff must not use the stale local or recorded content"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "gitlab-mr-head: fetch of refs/merge-requests/<iid>/head should succeed"
+  pass "fm-review-diff fetches refs/merge-requests/<iid>/head for a GitLab merge request"
 }
 
 test_pr_meta_fetches_pull_head_without_recorded_sha() {
@@ -573,6 +596,7 @@ test_opted_in_base_branch_stays_on_origin() {
 
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
+test_gitlab_mr_meta_fetches_merge_request_head
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning

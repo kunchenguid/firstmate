@@ -2,6 +2,7 @@
 
 Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
 The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
+The head-recording, `jq`-refusal, and squash-default evidence was collected on 2026-10-11.
 Every output is reproduced exactly.
 
 ## Versions
@@ -52,7 +53,7 @@ Two things about plain `glab` were established by running it, because assuming e
 
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
+The poll keeps reading glab's own field output, because `jq` is not one of firstmate's common tools and the poll must stay silent-safe without it; arming and merging, which refuse loudly rather than silently on a missing tool, require `jq` and read that JSON (see the sections below).
 Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
@@ -178,6 +179,31 @@ $ PATH="$noglab" fm-pr-check.sh e6 https://github.com/kunchenguid/firstmate/pull
 armed: state/e6.check.sh
 ```
 
+Arming a merge request also reads its JSON, so a missing `jq` refuses the same way, before any forge call and with nothing recorded (2026-10-11):
+
+```
+$ PATH="$nojq" fm-pr-check.sh e1 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
+error: watching a GitLab merge request requires jq on PATH
+$ echo $?
+1
+```
+
+## Arming records the merge request head (2026-10-11)
+
+`bin/fm-pr-check.sh` reads one JSON view of the merge request at arming and uses it twice: a `work_in_progress` draft refuses exactly like the GitHub arm-time draft refusal, and `sha` is recorded as `pr_head=`.
+Arming the merged fixture merge request records its head, matching the live head the 2026-08-22 merge refusal below verified:
+
+```
+$ fm-pr-check.sh e1 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
+armed: state/e1.check.sh
+$ grep -E '^(pr|pr_head)=' state/e1.meta
+pr=https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
+pr_head=33762fcf6777c8d993220d25fb541e56c48081b9
+```
+
+The public fixture holds no draft merge request, so the draft refusal is pinned by `tests/fm-pr-check-security.test.sh` against a fixture JSON rather than reproduced here.
+An unreadable draft state still does not refuse, matching how the head read is optional.
+
 ## Registration version
 
 The live registration tag is `fm-pr-poll-registration-v2`, which includes the provider tag.
@@ -243,7 +269,7 @@ The only exception is an attended `--allow-no-pipeline` on an explicit captain o
 Both refusals came after `pr=` was recorded and the merge poll was armed, as a failed live verification or `gh pr merge` does on the GitHub side, so a refusal still leaves the audit trail and the watch in place.
 
 A recorded `pr_head=` that no longer matches the live head is reported, and the live head is what gets verified.
-The stale value below was written into the task record by hand, because a GitLab task never records one on its own:
+The stale value below was written into the task record by hand, so it disagrees with what arming would have recorded:
 
 ```
 $ fm-pr-merge.sh e4 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
@@ -255,6 +281,8 @@ error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture
 ```
 
 The remaining refusal conditions, and the merge itself, are covered by `tests/fm-pr-merge.test.sh` against fixtures.
+Since 2026-10-11 a merge whose caller names no method merges with `--squash`, mirroring the GitHub default, because the fleet's recording and teardown machinery reasons on squash merges; a caller that wants another method names `--merge`, `--rebase`, or `--method`, and plain `glab` itself refuses a spelling it does not accept rather than merging with a method nobody verified.
+The squash default is pinned by the same test file; it was not exercised against a live merge request, for the same reason the merge itself was not.
 The conflict, unresolved-discussion, and running-pipeline conditions were additionally exercised against real merge requests on a private instance; those runs cannot be reproduced here, so their identifiers stay out of this record.
 The merge itself is not exercised against any live merge request, in either direction: `glab mr merge` has no dry run, so a live success path would mean merging someone's work to produce evidence.
 
@@ -268,9 +296,10 @@ It skips only that prompt; the conditions above are what authorize the merge.
 
 ## Why a recorded head is not the authority
 
-`bin/fm-pr-check.sh` records `pr_head=` only for GitHub, where `gh` exposes the head commit as a selectable field.
-It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` fetches a pull-request head from the remote when none is recorded, which a merge request has no ref for, so a GitLab task is diffed against its local branch under that script's warning ([architecture.md](architecture.md) owns that fallback).
+`bin/fm-pr-check.sh` records `pr_head=` for GitHub and GitLab alike: `gh` exposes the head commit as a selectable field, and the GitLab arm reads the merge request's JSON (see above).
+It is optional by design, and the other consumers treat it that way: `bin/fm-teardown.sh` proves a merge request landed through the merged state read plus a fetch of `refs/merge-requests/<iid>/head`, the ref GitLab keeps for every merge request including a merged one, and `bin/fm-review-diff.sh` fetches that same ref by default with a recorded `pr_head=` only as its offline fallback.
+A Gerrit task records none, because a Gerrit revision names one patch set and every amend or rebase is a new one.
 
-The merge path does not record one either, and deliberately does not depend on one.
+The merge path still does not depend on one, and deliberately so.
 A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.
 Reading the head live at merge time, reporting a recorded value that disagrees, and binding the merge to what was actually verified is what closes that gap.
