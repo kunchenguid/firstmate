@@ -287,8 +287,8 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
-# Extra "field=value" arguments are written before pr=, because
-# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
+# Extra "field=value" arguments may appear on either side of pr=, but each
+# field must belong to the parser's closed metadata key set.
 write_poll_meta() {
   local state=$1 id=$2 url=$3 case_dir
   case_dir=$(cd "$state/../.." && pwd)
@@ -537,6 +537,35 @@ EOF
   fm_pr_task_id_valid "$id" || fail "operational validator rejected a path-safe legacy task ID"
   ! fm_task_id_creation_valid "$id" || fail "creation validator accepted an overlong task ID"
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
+}
+
+test_metadata_identity_is_order_independent_and_closed() {
+  local dir meta url head
+  dir=$(make_case metadata-key-set)
+  meta="$dir/home/state/task-a.meta"
+  url=https://github.com/o/r/pull/41
+  head=0123456789abcdef0123456789abcdef01234567
+  fm_write_meta "$meta" \
+    "pr_head=$head" \
+    'window=firstmate:fm-task-a' \
+    "pr=$url" \
+    'control_relaunch_tx=123.20260910T120000Z.456'
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "known task metadata keys were order-dependent"
+  [ "$FM_PR_META_URL" = "$url" ] \
+    || fail "order-independent metadata parsing lost the PR identity"
+
+  fm_write_meta "$meta" \
+    'unexpected_before_pr=value' \
+    "pr=$url"
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "an unknown task metadata key before pr= was accepted"
+  fm_write_meta "$meta" \
+    "pr=$url" \
+    'unexpected_after_pr=value'
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "an unknown task metadata key after pr= was accepted"
+  pass "PR metadata identity is order-independent over a closed key set"
 }
 
 test_invalid_entrypoints_have_zero_side_effects() {
@@ -2133,7 +2162,11 @@ test_merged_poll_retires_once() {
   local dir state rc first second meta_before
   dir=$(make_case merged-retirement-once)
   state="$dir/home/state"
-  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    "worktree=$dir/wt" \
+    'pr=https://github.com/o/r/pull/1' \
+    'control_relaunch_tx=123.20260910T120000Z.456'
   meta_before=$(cat "$state/task-a.meta")
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
   add_stop_custom_check "$dir"
@@ -2162,6 +2195,34 @@ test_merged_poll_retires_once() {
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
     || fail "handled merged notification remained queued after acknowledgement"
   pass "validated merged polls notify once and retire before the next watcher cycle"
+}
+
+test_unknown_appended_metadata_key_refuses_poll() {
+  local dir state rc first
+  dir=$(make_case unknown-appended-metadata)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    "worktree=$dir/wt" \
+    'pr=https://github.com/o/r/pull/1' \
+    'unexpected_after_pr=value'
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher with unknown appended metadata failed: $(cat "$dir/watch.err")"
+  first=$(cat "$dir/watch.out")
+  case "$first" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "unknown appended metadata did not suppress the PR poll: $first" ;; esac
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    && fail "unknown appended metadata still authenticated the PR poll"
+  [ -f "$state/task-a.check.sh" ] && [ -f "$state/task-a.pr-poll" ] \
+    && [ -f "$state/task-a.pr-poll-registration" ] \
+    || fail "refused poll discarded evidence instead of remaining armed"
+  pass "unknown appended metadata is refused without consuming the armed poll"
 }
 
 # A poll's own retirement state is scoped to ONE registration, so it cannot by
@@ -3440,12 +3501,14 @@ SH
 }
 
 test_parser_matrix
+test_metadata_identity_is_order_independent_and_closed
 test_gitlab_merge_watch
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree
 test_gerrit_nm_ready_gate_requires_recovered_custody
 test_merged_poll_retires_once
+test_unknown_appended_metadata_key_refuses_poll
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
