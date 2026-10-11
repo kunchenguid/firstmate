@@ -391,6 +391,7 @@ Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegati
 ### Required tools and manual mode
 
 Compatible means the installed build passes the shared version and feature probe owned by [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh), including the atomic multi-ID move required by handoff delegation.
+[`fm_pf_pr_url_valid`](../bin/fm-public-followup-lib.sh) owns static review-link classification for snapshots, inactive returns and public follow-ups; acceptance of Forgejo links does not add Forgejo merge or watch support.
 Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and silent default-backend behavior.
 
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
