@@ -2059,6 +2059,7 @@ async function releaseLifecycleLock() {
   const { lockPath, ownerPath } = activeLifecycleLock;
   await unlink(lockPath);
   await unlink(path.join(ownerPath, "pid"));
+  await unlink(path.join(ownerPath, "owner-identity")).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
   await rmdir(ownerPath);
   activeLifecycleLock = null;
 }
