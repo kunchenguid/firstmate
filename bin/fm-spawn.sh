@@ -397,7 +397,12 @@
 #                  trust for the launch cwd only, never a trust.json rewrite)
 #     __PIEXCLUDE__ optional ` --exclude-tools '<comma-joined names>'` from
 #                  config/crew-exclude-tools on Pi/pi-signed ship and scout
-#                  launches (supplies its own leading space, empty otherwise)
+#                  launches, plus the built-in model-scoped exclusion a
+#                  qwen-local/ model always adds (the pi-web-access tools
+#                  web_search, source_check, fetch_content, get_search_content:
+#                  never called by local Qwen workers, ~3,200 tokens of schema
+#                  per turn on their small window); merged, deduplicated
+#                  (supplies its own leading space, empty otherwise)
 #     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
 #                  Pi replacement on the session the endpoint's runtime already
 #                  reports (relaunch_resume_args below owns it; it supplies its
@@ -2403,6 +2408,28 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   exit 1
 fi
 
+# config/secondmate-harness may carry optional model/effort tokens alongside the
+# harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
+# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
+# the harness itself came from the secondmate config fallback chain. Resolving
+# here on every spawn makes the pin durable across respawns. Precedence: explicit
+# --model/--effort flags still win over the file's tokens.
+if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
+  if [ "$MODEL_SET" -eq 0 ]; then
+    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+    [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
+  fi
+  if [ "$EFFORT_SET" -eq 0 ]; then
+    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+    if [ -n "$SM_EFFORT" ]; then
+      case "$SM_EFFORT" in
+      low | medium | high | xhigh | max | ultra) EFFORT=$SM_EFFORT ;;
+      *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2 ;;
+      esac
+    fi
+  fi
+fi
+
 # config/crew-exclude-tools (header above): refuse before worker provisioning
 # if this launch cannot honor the list. Secondmate agents are not covered.
 EXCLUDE_TOOLS=
@@ -2437,7 +2464,23 @@ pi | pi-signed)
   fi
   LAUNCH=${LAUNCH//__PIAPPROVE__/$PI_APPROVE}
   PI_EXCLUDE=
-  [ -z "$EXCLUDE_TOOLS" ] || PI_EXCLUDE=" --exclude-tools $(shell_quote "$EXCLUDE_TOOLS")"
+  # Model-scoped exclusion, merged with (never replacing) the home's
+  # config/crew-exclude-tools list: a Pi/pi-signed launch on the local Qwen
+  # server (the qwen-local/ provider) drops the pi-web-access tools' schemas
+  # (~3,200 tokens per turn the worker never uses). Every other model and
+  # every other harness keeps the tools; the primary session is unaffected.
+  PI_EXCLUDE_NAMES=$EXCLUDE_TOOLS
+  case "$MODEL" in
+  qwen-local/*)
+    for PI_TOOL in web_search source_check fetch_content get_search_content; do
+      case ",$PI_EXCLUDE_NAMES," in
+      *,"$PI_TOOL",*) ;;
+      *) PI_EXCLUDE_NAMES="${PI_EXCLUDE_NAMES:+$PI_EXCLUDE_NAMES,}$PI_TOOL" ;;
+      esac
+    done
+    ;;
+  esac
+  [ -z "$PI_EXCLUDE_NAMES" ] || PI_EXCLUDE=" --exclude-tools $(shell_quote "$PI_EXCLUDE_NAMES")"
   LAUNCH=${LAUNCH//__PIEXCLUDE__/$PI_EXCLUDE}
   LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
   ;;
@@ -2476,27 +2519,6 @@ agy)
   ;;
 esac
 
-# config/secondmate-harness may carry optional model/effort tokens alongside the
-# harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
-# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
-# the harness itself came from the secondmate config fallback chain. Resolving
-# here on every spawn makes the pin durable across respawns. Precedence: explicit
-# --model/--effort flags still win over the file's tokens.
-if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
-  if [ "$MODEL_SET" -eq 0 ]; then
-    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
-    [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
-  fi
-  if [ "$EFFORT_SET" -eq 0 ]; then
-    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
-    if [ -n "$SM_EFFORT" ]; then
-      case "$SM_EFFORT" in
-      low | medium | high | xhigh | max | ultra) EFFORT=$SM_EFFORT ;;
-      *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2 ;;
-      esac
-    fi
-  fi
-fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then

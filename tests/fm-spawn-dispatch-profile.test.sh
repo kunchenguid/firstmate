@@ -1321,6 +1321,94 @@ test_pi_exclude_tools_reach_ship_and_scout_launches() {
   pass "Pi and pi-signed ship and scout launches carry the configured tool exclusions"
 }
 
+# Model-scoped exclusion: a Pi/pi-signed launch on the local Qwen server drops
+# the pi-web-access tools' schemas (~3.2K tokens per turn the worker never
+# calls); every other model, every other harness, and the primary session keep
+# the tools, and the built-in list merges with config/crew-exclude-tools.
+WEB_TOOL_EXCLUSION='web_search,source_check,fetch_content,get_search_content'
+
+test_qwen_local_model_excludes_web_tools() {
+  local harness rec id out status launch
+  for harness in pi pi-signed; do
+    id="excl-qwen-web-$harness-z9b"
+    rec=$(make_spawn_case "excl-qwen-web-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --harness "$harness" --model "$QWEN_LOCAL_MODEL")
+    status=$?
+    expect_code 0 "$status" "qwen-local $harness ship spawn should succeed"$'\n'"$out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "--exclude-tools '$WEB_TOOL_EXCLUSION' " \
+      "the $harness qwen-local launch must carry the web-tool exclusion"
+  done
+  pass "local Qwen Pi launches exclude the unused pi-web-access tools"
+}
+
+test_qwen_local_model_exclusion_merges_with_config_list() {
+  local rec id out status launch
+  id=excl-qwen-web-merge-z9c
+  rec=$(make_spawn_case excl-qwen-web-merge pi "$id")
+  read_case_record "$rec"
+  write_exclude_file "$HOME_DIR" 'mcp__tracker__editIssue' 'web_search'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness pi --model "$QWEN_LOCAL_MODEL")
+  status=$?
+  expect_code 0 "$status" "qwen-local spawn with a config exclusion list should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "--exclude-tools 'mcp__tracker__editIssue,web_search,source_check,fetch_content,get_search_content' " \
+    "the merged list must keep config entries first and each name exactly once"
+  pass "the built-in qwen-local exclusion merges with config/crew-exclude-tools without duplicates"
+}
+
+test_web_tool_exclusion_is_model_and_harness_scoped() {
+  local rec id out status launch
+  id=excl-qwen-web-scoped-pi-z9d
+  rec=$(make_spawn_case excl-qwen-web-scoped-pi pi "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness pi --model openai-codex/gpt-5.6-sol)
+  status=$?
+  expect_code 0 "$status" "a pi spawn on another model should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--exclude-tools" \
+    "a pi launch on another model must keep the web tools"
+
+  id=excl-qwen-web-scoped-oc-z9d
+  rec=$(make_spawn_case excl-qwen-web-scoped-oc opencode "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model opencode-go/muse-spark-1.3-contributor)
+  status=$?
+  expect_code 0 "$status" "an opencode-go ship spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--exclude-tools" \
+    "an opencode-go launch must keep the web tools"
+  pass "the web-tool exclusion is scoped to qwen-local models on Pi runtimes"
+}
+
+test_qwen_local_secondmate_config_model_excludes_web_tools() {
+  local rec id sm out status launch
+  id=excl-qwen-web-secondmate-z9e
+  rec=$(make_spawn_case excl-qwen-web-secondmate pi "$id")
+  read_case_record "$rec"
+  printf '%s\n' "pi $QWEN_LOCAL_MODEL" > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a config-resolved qwen-local secondmate should succeed"$'\n'"$out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi "$QWEN_LOCAL_MODEL" default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model '$QWEN_LOCAL_MODEL' " \
+    "the config-resolved secondmate model must reach the launch"
+  assert_contains "$launch" "--exclude-tools '$WEB_TOOL_EXCLUSION' " \
+    "a config-resolved qwen-local secondmate must exclude the unused pi-web-access tools"
+  pass "a config-resolved qwen-local secondmate excludes the unused pi-web-access tools"
+}
+
 test_pi_exclude_tools_worker_registry_reports() {
   local harness kindflag scenario case_name rec id out status report
   command -v node >/dev/null 2>&1 || fail "node is required to drive Pi worker exclusion reporting"
@@ -2415,6 +2503,10 @@ test_pi_seeded_secondmate_preapproves_project_trust
 test_pi_worker_launch_omits_seeded_home_approve
 test_pi_approve_probe_omits_unsupported_flag
 test_pi_exclude_tools_reach_ship_and_scout_launches
+test_qwen_local_model_excludes_web_tools
+test_qwen_local_model_exclusion_merges_with_config_list
+test_qwen_local_secondmate_config_model_excludes_web_tools
+test_web_tool_exclusion_is_model_and_harness_scoped
 test_pi_exclude_tools_worker_registry_reports
 test_pi_exclude_tools_absent_and_empty_lists
 test_exclude_tools_non_pi_runtime_refuses_non_empty_list

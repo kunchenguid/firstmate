@@ -873,13 +873,17 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 
 The optional local, gitignored `config/crew-exclude-tools` hides named tools from this home's ship and scout workers, for example to keep an MCP server's write tools out of reach while its read tools stay available.
 The contract is runtime-neutral: a runtime must support hiding the listed tool names or refuse the launch, and a non-empty list is never silently ignored.
-With no file, or a file with no entries, every launch on every runtime is unchanged.
+With no file, or a file with no entries, this file leaves every launch on every runtime unchanged.
 
 Create the file with one tool name per line, such as `mcp__<server>__<tool>` for an MCP tool.
 Blank lines and lines beginning with `#` are allowed, and surrounding whitespace on a line is trimmed; a trailing comment on an entry line is not allowed.
 The file is read from this home's own configuration directory on every launch, so a change reaches the next worker or relaunch without a restart.
 It is not in the inherited configuration set, so no other home, including a secondmate home, receives it; create the file in each home that wants it.
 It does not apply to a secondmate's own agent, which neither reads nor refuses on it.
+
+Independently of this file, a `pi` or `pi-signed` launch whose resolved model uses the local Qwen server (`qwen-local/<id>`) always excludes the four `pi-web-access` tools (`web_search`, `source_check`, `fetch_content`, `get_search_content`): local Qwen workers never call them, and on their small context window the saved schema weight matters.
+That built-in list merges with this file's entries without duplicates, applies on launch and relaunch alike, and leaves every other model, every other runtime, and the primary session unchanged.
+[`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns its launch-flag mechanics.
 
 ### Runtime support
 
@@ -898,7 +902,7 @@ An unreadable or nonregular file, or a path inspection error, also refuses and n
 For a new worker, these checks run before its endpoint, local copy, or task record is created; Firstmate never launches with a partial list.
 Only exact tool names are accepted, not wildcard patterns.
 Firstmate checks syntax and runtime support before launch but never runs `pi mcp list` or otherwise connects to servers to validate names.
-When its first agent run starts, after Pi's startup tool-loading boundary, the worker extension compares the launch's exclusion list with its own loaded-tool registry and appends a timestamped warning note to `state/<task-id>.status` naming the configuration file and every unmatched entry for the supervisor.
+When its first agent run starts, after Pi's startup tool-loading boundary, the worker extension compares the resolved `config/crew-exclude-tools` list with its own loaded-tool registry and appends a timestamped warning note to `state/<task-id>.status` naming the configuration file and every unmatched entry for the supervisor.
 The check runs before worker actions so it cannot supersede a terminal status emitted during the turn.
 An unmatched entry is reported as **unverified**, not valid: Pi versions that omit excluded tools from the registry cannot distinguish a correct exclusion from a typo, and a server that has not connected cannot verify its tools either.
 Names present in the registry produce no report; unknown or unverified names do not refuse the launch.
