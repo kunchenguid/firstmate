@@ -9,13 +9,15 @@
 # When state/<id>.meta records pr= as a GitHub pull-request URL or a bare
 # number for an open PR, the compare side is ALWAYS a freshly fetched
 # refs/pull/<n>/head by default so review stays current after no-mistakes fix
-# rounds push to the PR. A recorded pr_head= is only a fallback when fetch fails
+# rounds push to the PR. Azure uses the live source SHA supplied by
+# bin/fm-azure-pr.py, fetching its object when needed.
+# A recorded pr_head= is only a fallback when live head resolution fails
 # (stale recorded SHAs must never win over a reachable remote PR head). If
 # neither PR head can be resolved, fall back to the local branch with a warning.
 # A GitLab merge request and a Gerrit change expose no comparable ref and record
-# no pr_head, so a task recording one always takes that warning path;
-# docs/architecture.md owns that fallback. Without pr=, compare the task's
-# immutable ship branch recorded in state/<id>.meta ("fm/<id>" for records
+# no pr_head, so a task recording one always takes that warning path.
+# Without pr=, compare the task's immutable ship branch recorded in
+# state/<id>.meta ("fm/<id>" for records
 # created before that field existed), or the worktree's checked-out branch when
 # that branch does not exist in the worktree. A recorded branch that is not a
 # valid git branch name is refused instead of taking that fallback, the same
@@ -123,6 +125,17 @@ fetch_pull_head() {
 
 resolve_pr_head() {
   local pr_url=$1 recorded_head=$2 n resolved
+  case "$pr_url" in
+    https://dev.azure.com/*|https://*.visualstudio.com/*)
+      if resolved=$(python3 "$SCRIPT_DIR/fm-azure-pr.py" head "$pr_url" 2>/dev/null); then
+        if git -C "$WT" cat-file -e "$resolved^{commit}" 2>/dev/null \
+          || git -C "$WT" fetch --quiet origin "$resolved" >/dev/null 2>&1; then
+          printf '%s' "$resolved"
+          return 0
+        fi
+      fi
+      ;;
+  esac
   n=$(pr_number_from_target "$pr_url") || true
   if [ -n "$n" ]; then
     if resolved=$(fetch_pull_head "$n"); then

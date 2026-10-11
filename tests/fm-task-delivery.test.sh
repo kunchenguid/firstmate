@@ -308,7 +308,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod contract
+  local home meta out sendroot payload mode id brief_dod delivered_dod branch contract
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -327,8 +327,15 @@ STUB
       || fail "$mode: scout brief generation should succeed"
     fill_brief_subsections "$home/data/$id/brief.md" \
       "Ship the delivery-contract change." "Preserve the selected delivery mode."
-    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
-      || fail "$mode: promotion should succeed"
+    branch="fm/$id"
+    if [ "$mode" != local-only ]; then
+      branch="users/example/$id"
+      out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off --branch-prefix users/example/ 2>&1) \
+        || fail "$mode: promotion should succeed"
+    else
+      out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
+        || fail "$mode: promotion should succeed"
+    fi
 
     payload="$TMP_ROOT/promote-dod/payload-$id"
     # Run the delivery command promotion printed, so the assertions below are made
@@ -349,7 +356,7 @@ STUB
       "$mode: promoted worker was not told to verify its repository root"
     assert_grep "If either does not resolve to the worktree you were launched in, stop and escalate to firstmate" "$payload" \
       "$mode: promoted worker was not told to stop for any wrong worktree"
-    assert_grep "git checkout -b fm/$id --" "$payload" \
+    assert_grep "git checkout -b $branch --" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
     assert_grep "## Captain's intent" "$payload" \
       "$mode: promoted worker did not receive the Captain's intent subsection"
@@ -372,7 +379,7 @@ STUB
     # payload ends at its Definition of done, as does an ordinary generated
     # brief, so identical suffixes prove both workers receive the same contract.
     rm "$home/data/$id/brief.md"
-    FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" --branch-prefix "${branch%/*}/" >/dev/null 2>&1 \
       || fail "$mode: ordinary ship brief generation should succeed"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
@@ -531,6 +538,32 @@ EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" controlproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "a single-word control name regressed (got '$out')"
   pass "fm-project-mode: the registry lookup matches a whole multi-word name, not just its first token"
+}
+
+test_project_branch_prefix_selection() {
+  local home id prefix out
+  home="$TMP_ROOT/branch-prefix/home"
+  mkdir -p "$home/state"
+  id='branch-prefix'
+  FM_HOME="$home" "$BRIEF" "$id" fixture --scout >/dev/null 2>&1 || fail "scout scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "Ship the fix." "Keep project branch naming."
+  printf 'kind=scout\nworktree=/tmp/unused\n' > "$home/state/$id.meta"
+  FM_HOME="$home" "$PROMOTE" "$id" --mode local-only --yolo off --branch-prefix users/example/ >/dev/null 2>&1 \
+    || fail "prefix promotion"
+  assert_grep "git checkout -b users/example/$id" "$home/data/$id/ship-instructions.md" "promotion ignored prefix"
+  assert_grep "ready in branch users/example/$id" "$home/data/$id/ship-instructions.md" "promotion DOD ignored prefix"
+  FM_HOME="$home" "$BRIEF" ship-prefix fixture --mode local-only --branch-prefix users/example/ >/dev/null 2>&1 \
+    || fail "prefix ship scaffold"
+  assert_grep 'git checkout -b users/example/ship-prefix' "$home/data/ship-prefix/brief.md" "scaffold ignored prefix"
+  assert_grep 'ready in branch users/example/ship-prefix' "$home/data/ship-prefix/brief.md" "scaffold DOD ignored prefix"
+  for prefix in '../bad/' 'users//name/' 'users/name~/' 'users/name:/' 'users/name?/' 'users/name.lock/'; do
+    if out=$(FM_HOME="$home" "$BRIEF" invalid-prefix fixture --mode no-mistakes --branch-prefix "$prefix" 2>&1); then
+      fail "invalid branch prefix was accepted: $prefix"
+    fi
+    assert_contains "$out" 'must form a valid git branch' "invalid prefix lacked diagnostic"
+    [ ! -f "$home/data/invalid-prefix/brief.md" ] || fail "invalid branch wrote brief"
+  done
+  pass "project-specific branch prefixes reach scaffold, promotion and DOD; unsafe prefixes refuse"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
@@ -1636,6 +1669,7 @@ test_promotion_persists_the_selected_ship_branch
 test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
 test_project_mode_matches_whole_multiword_names
+test_project_branch_prefix_selection
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally
 test_project_mode_refuses_only_a_malformed_forge_binding

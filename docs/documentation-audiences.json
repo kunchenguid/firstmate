@@ -373,6 +373,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/azure-devops.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/gitlab-merge-watch.md",
       "audience": "maintainer-verification"
     },

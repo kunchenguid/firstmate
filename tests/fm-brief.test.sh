@@ -340,10 +340,10 @@ test_pr_based_dod_requires_non_draft() {
       continue
     fi
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'confirm it is not a draft (`gh-axi pr view <number>` must print `draft: no`' "$brief" \
+    assert_grep 'On GitHub, `gh-axi pr view <number>` must print `draft: no`' "$brief" \
       "$mode: done must require reading the PR back from the forge as non-draft"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'mark it ready with `gh-axi pr ready <number>`' "$brief" \
+    assert_grep '`gh-axi pr ready <number>` marks it ready' "$brief" \
       "$mode: a draft must be marked ready before done"
     assert_grep "If you deliberately keep the PR a draft, append \`paused" "$brief" \
       "$mode: a deliberate draft must declare a wait instead of done"
@@ -1178,7 +1178,8 @@ test_home_brief_include_is_appended_last() {
 
 # --base-branch names the branch a task starts from and a ship's PR targets. It is
 # recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
-# refused where no pull request carries the work.
+# refused where no pull request carries the work. The generated worker brief is
+# the output contract: both providers must receive the same base and shell quoting.
 test_base_branch_is_rendered_and_bounded() {
   local home out rc brief base meta_base
   home="$TMP_ROOT/base-branch-home"
@@ -1192,8 +1193,8 @@ test_base_branch_is_rendered_and_bounded() {
   base=$(fm_brief_base_branches "$brief")
   [ "$base" = feature/hub ] || fail "the direct-PR brief recorded base '$base', not feature/hub"
   # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
-  assert_grep 'open a PR with `gh-axi` that is ready for review, not a draft, against the base branch `feature/hub` (`--base feature/hub`)' "$brief" \
-    "the direct-PR definition of done does not target the base branch"
+  assert_grep 'open a PR with the forge'"'"'s CLI (`gh-axi` for GitHub, `az repos pr` for Azure DevOps) that is ready for review, not a draft, against the base branch `feature/hub` (`--base feature/hub` on GitHub; `--target-branch feature/hub` on Azure DevOps), not the repository default.' "$brief" \
+    "the direct-PR definition of done does not target the base branch on both providers"
   # shellcheck disable=SC2016
   assert_grep 'Never push to the base branch `feature/hub` or the default branch' "$brief" \
     "the direct-PR safety rule does not protect the base branch"
@@ -1219,8 +1220,8 @@ test_base_branch_is_rendered_and_bounded() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-meta-b9 some-proj --mode direct-PR --base-branch "$meta_base" >/dev/null 2>&1 \
     || fail "direct-PR --base-branch with a shell metacharacter should scaffold"
   # shellcheck disable=SC2016
-  assert_grep '(`--base release/\$HOTFIX`)' "$home/data/brief-base-meta-b9/brief.md" \
-    "the direct-PR command did not shell-quote the base branch"
+  assert_grep '(`--base release/\$HOTFIX` on GitHub; `--target-branch release/\$HOTFIX` on Azure DevOps)' "$home/data/brief-base-meta-b9/brief.md" \
+    "the direct-PR commands did not shell-quote the base branch on both providers"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-scout-b3 some-proj --scout --base-branch feature/hub >/dev/null 2>&1 \
     || fail "scout --base-branch should scaffold"
