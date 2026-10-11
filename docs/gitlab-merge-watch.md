@@ -236,10 +236,22 @@ $ echo $?
 1
 ```
 
-A project that runs no pipeline at all therefore cannot merge through this path.
-That is the intended reading of the requirement rather than an oversight: a successful pipeline at the head is a condition, and "there is no pipeline" does not satisfy it.
+A project that runs no pipeline at all therefore cannot merge through this path, unless its registry entry carries `mr-pipeline=none`: a captain-confirmed fact that the project's merge requests never get a pipeline, set once per project (`bin/fm-project-mode.sh`'s header owns the token).
 
-Both refusals came after `pr=` was recorded and the merge poll was armed, as a failed live verification or `gh pr merge` does on the GitHub side, so a refusal still leaves the audit trail and the watch in place.
+Both refusals above came after `pr=` was recorded and the merge poll was armed, as a failed live verification or `gh pr merge` does on the GitHub side, so a refusal still leaves the audit trail and the watch in place.
+
+With the token registered and no live change to the fixture, the same merge request's refusal loses exactly its two pipeline lines, run behind the same `glab` wrapper so no live merge happens even though every remaining condition holds (glab 1.53.0, 2026-09-29):
+
+```
+$ FM_HOME=<throwaway home with fixture-project registered [mr-pipeline=none]> fm-pr-merge.sh e2 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
+armed: state/e2.check.sh
+verified: https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2 is open and mergeable; the project registers no merge-request pipeline (mr-pipeline=none) and GitLab reports it mergeable at head 66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8
+refused by evidence wrapper: merge subcommand disabled
+$ echo $?
+99
+```
+
+Without the token, without the task's own `project=` line resolving to that registry entry, or when that project's clone has an origin other than the merge request's own project, the refusal above is unchanged: the pipeline conditions are dropped only for the exact project the captain confirmed, never inferred from the merge request's own live state.
 
 A recorded `pr_head=` that no longer matches the live head is reported, and the live head is what gets verified.
 The stale value below was written into the task record by hand, because a GitLab task never records one on its own:

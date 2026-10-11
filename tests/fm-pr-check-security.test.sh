@@ -136,6 +136,8 @@ make_case() {
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
 SH
   chmod +x "$fake_root/bin/fm-guard.sh"
+  # The GitLab merge path reads the task's registered mr-pipeline posture.
+  ln -s "$ROOT/bin/fm-project-mode.sh" "$fake_root/bin/fm-project-mode.sh"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"

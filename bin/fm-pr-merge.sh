@@ -52,8 +52,8 @@
 # context name even for an app-bound requirement, and never waives an unreadable
 # required source or producer read. Both are
 # refused while the away-posture record exists, and neither
-# applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded. After gh returns success, GitHub's live state is read back and
+# applies on GitLab, where a merge is governed by the head pipeline or the
+# project's registered mr-pipeline=none posture instead. After gh returns success, GitHub's live state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
@@ -88,13 +88,21 @@
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
 # blocking_discussions_resolved is true, and the head pipeline succeeded at the
-# exact current head commit. Every failing condition is reported, not just the
-# first. The verified head is then passed to glab as --sha, so a push that lands
-# between that read and the merge fails the merge instead of landing commits
-# nothing verified. A recorded pr_head that disagrees with the live head is
-# reported rather than trusted, because a rebase moves the head and leaves the
-# recorded value stale. Reading that state needs glab and jq, and either one
-# absent stops the merge before any state is recorded.
+# exact current head commit. The pipeline condition is skipped only when the
+# task's project is registered mr-pipeline=none in data/projects.md (a
+# captain-confirmed fact that the project's merge requests never get a
+# pipeline at all), that project's clone has this merge request's own
+# project as its origin, and the merge request has no head pipeline whatsoever;
+# GitLab's own mergeable read still has to hold, and a pipeline that does
+# exist at the head is still required to have succeeded there, token or not
+# (bin/fm-project-mode.sh's header owns the token). Every failing condition is
+# reported, not just the first. The verified head is then passed to glab as
+# --sha, so a push that lands between that read and the merge fails the merge
+# instead of landing commits nothing verified. A recorded pr_head that
+# disagrees with the live head is reported rather than trusted, because a
+# rebase moves the head and leaves the recorded value stale. Reading that
+# state needs glab and jq, and either one absent stops the merge before any
+# state is recorded.
 #
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
@@ -231,11 +239,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
-  echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  echo "error: --allow-red does not apply to GitLab; a merge there is governed by the head pipeline or the project's registered mr-pipeline=none posture, never a per-check waiver" >&2
   exit 2
 fi
 if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
-  echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  echo "error: --allow-missing does not apply to GitLab; a merge there is governed by the head pipeline or the project's registered mr-pipeline=none posture, never a per-check waiver" >&2
   exit 2
 fi
 
@@ -447,16 +455,60 @@ if [ "$PROVIDER" = gitlab ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
+# The task's registered mr-pipeline posture (required|none), resolved once
+# from the project= path already in the task's metadata before the merge is
+# attempted. A task with no project= line, or a project the registry has no
+# token for, keeps the default "required" and today's behavior is unchanged;
+# the registry lookup is the captain's confirmed project fact, never a live
+# guess from the merge request itself. The registry names a local clone, not
+# a forge project, so a none posture applies only when that clone's origin is
+# the merge request's own host/path; any other origin, or none readable, keeps
+# "required", so one project's waiver never lands another project's request.
+FM_PR_GITLAB_MR_PIPELINE=required
+resolve_gitlab_mr_pipeline_posture() {
+  local project_path project_name origin
+  project_path=$(sed -n 's/^project=//p' "$META" | head -n 1)
+  [ -n "$project_path" ] || return 0
+  project_name=$(basename "$project_path")
+  if ! FM_PR_GITLAB_MR_PIPELINE=$("$FM_ROOT/bin/fm-project-mode.sh" --mr-pipeline "$project_name" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" --mr-pipeline "$project_name" >/dev/null || true
+    echo "error: task $ID cannot merge: the registry entry for $project_name does not resolve to a delivery posture (see the refusal above); correct data/projects.md and merge again" >&2
+    return 1
+  fi
+  [ "$FM_PR_GITLAB_MR_PIPELINE" = none ] || return 0
+  # https://host/path, ssh://[user@]host[:port]/path and [user@]host:path,
+  # each with an optional .git suffix, reduce to host/path.
+  origin=$(git -C "$project_path" remote get-url origin 2>/dev/null || true)
+  origin=${origin%.git}
+  case "$origin" in
+    *://*) origin=${origin#*://}; origin=${origin#*@}
+      origin="${origin%%[:/]*}/${origin#*/}" ;;
+    *:*) origin=${origin#*@}; origin="${origin%%:*}/${origin#*:}" ;;
+  esac
+  if [ "$origin" != "$PR_HOST/$PR_PATH" ]; then
+    echo "note: $project_name is registered mr-pipeline=none, but its origin is \"${origin:-unreadable}\", not this merge request's project $PR_HOST/$PR_PATH; the waiver does not apply and the head pipeline is required" >&2
+    FM_PR_GITLAB_MR_PIPELINE=required
+  fi
+}
+
 # Pre-merge conditions for a GitLab merge request, read from one live view of
 # the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
 # returns non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
+# Set true only when the merge is accepted with no head pipeline at all under
+# a registered mr-pipeline=none posture, so the merge call below can pass
+# --auto-merge=false the same way the away branch already does: GitLab's
+# auto-merge default falls through to an immediate merge only when a pipeline
+# policy allows it, and a project with no pipeline is exactly the case that
+# should not be left to that fallthrough unproven.
+FM_PR_GITLAB_MR_PIPELINE_NONE_USED=false
 gitlab_verify_mergeable() {
   local json fields line
   local total=0 named=0 refusals=''
   local state='' detail='' conflicts='' discussions=''
   local live_head='' pipeline_sha='' pipeline_status='' async_configured=''
+  FM_PR_GITLAB_MR_PIPELINE_NONE_USED=false
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -534,20 +586,35 @@ FIELDS
   [ "$discussions" = true ] \
     || refusals="$refusals  - blocking_discussions_resolved is \"${discussions:-unreadable}\", not true
 "
-  [ "$pipeline_status" = success ] \
-    || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
+  if [ "$FM_PR_GITLAB_MR_PIPELINE" = none ] && [ -z "$pipeline_status" ]; then
+    # The registered posture says this project's merge requests never get a
+    # pipeline, and this one has none: the two pipeline conditions cannot be
+    # satisfied by any commit, so they are dropped instead of refused. A
+    # pipeline that does exist (pipeline_status non-empty) still falls
+    # through to the ordinary checks below, held to the same requirement as
+    # every other project.
+    FM_PR_GITLAB_MR_PIPELINE_NONE_USED=true
+  else
+    [ "$pipeline_status" = success ] \
+      || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
 "
-  [ "$pipeline_sha" = "$live_head" ] \
-    || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+    [ "$pipeline_sha" = "$live_head" ] \
+      || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
 "
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
-    "$URL" "$live_head" >&2
+  if [ "$FM_PR_GITLAB_MR_PIPELINE_NONE_USED" = true ]; then
+    printf 'verified: %s is open and mergeable; the project registers no merge-request pipeline (mr-pipeline=none) and GitLab reports it mergeable at head %s\n' \
+      "$URL" "$live_head" >&2
+  else
+    printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
+      "$URL" "$live_head" >&2
+  fi
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
 }
@@ -1427,6 +1494,7 @@ case "$PROVIDER" in
     fi
     ;;
   gitlab)
+    resolve_gitlab_mr_pipeline_posture || exit 1
     gitlab_verify_mergeable || exit 1
     # --sha binds the merge to the head this run verified, so a push that lands
     # in between is refused by GitLab instead of merged unverified. --yes only
@@ -1440,7 +1508,7 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     merge_status=0
     gitlab_merge_args=()
-    if [ "$FM_PR_AWAY_POSTURE" = true ]; then
+    if [ "$FM_PR_AWAY_POSTURE" = true ] || [ "$FM_PR_GITLAB_MR_PIPELINE_NONE_USED" = true ]; then
       gitlab_merge_args=(--auto-merge=false)
     fi
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \

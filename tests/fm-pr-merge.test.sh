@@ -1748,6 +1748,8 @@ test_gitlab_url_resolves_and_merges() {
     || fail "gitlab-merges: unexpected merge invocation: '$merge_line'"
   assert_grep "successful pipeline at head $MR_HEAD" "$case_dir/stderr" \
     "gitlab-merges: the verified head was not reported"
+  assert_no_grep "registry" "$case_dir/stderr" \
+    "gitlab-merges: an unregistered project's registry warnings leaked into the merge output"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "gitlab-merges: a merge request reached the GitHub CLI"
   pass "fm-pr-merge merges a GitLab merge request through glab instead of refusing it"
 }
@@ -1908,6 +1910,153 @@ test_gitlab_reports_every_failing_condition() {
       "gitlab-refuse-all: '$expected' was not reported"
   done
   pass "fm-pr-merge reports every failing GitLab condition, not only the first"
+}
+
+# write_mr_pipeline_registry <case_dir> <token> [origin]: a throwaway
+# data/projects.md registering the token on "project", the basename make_case
+# always records as project= in the task's metadata, and that project's clone
+# with the given origin (by default the merge request's own project).
+write_mr_pipeline_registry() {
+  local case_dir=$1 token=$2 origin=${3:-git@$MR_HOST:$MR_PATH.git}
+  printf '%s\n' "- project [$token] - throwaway registry entry (added 2026-09-29)" \
+    > "$case_dir/home/data/projects.md"
+  git init -q "$case_dir/project"
+  git -C "$case_dir/project" remote add origin "$origin"
+}
+
+test_gitlab_mr_pipeline_none_merges_without_a_pipeline() {
+  local case_dir rc merge_line
+  case_dir=$(make_gitlab_case gitlab-mr-pipeline-none pipeline=null)
+  write_mr_pipeline_registry "$case_dir" mr-pipeline=none
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-mr-pipeline-none: a registered no-pipeline project with no head pipeline should merge"
+  assert_grep "the project registers no merge-request pipeline (mr-pipeline=none)" "$case_dir/stderr" \
+    "gitlab-mr-pipeline-none: the distinct verified line was not reported"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --auto-merge=false" ] \
+    || fail "gitlab-mr-pipeline-none: unexpected merge invocation: '$merge_line'"
+  pass "fm-pr-merge merges a GitLab merge request with no head pipeline when the project registers mr-pipeline=none"
+}
+
+test_gitlab_mr_pipeline_none_still_requires_success_when_present() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-mr-pipeline-none-failed pipeline_status=failed)
+  write_mr_pipeline_registry "$case_dir" mr-pipeline=none
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-pipeline-none-failed: a failed pipeline at the head should still refuse"
+  assert_grep 'the head pipeline status is "failed", not success' "$case_dir/stderr" \
+    "gitlab-mr-pipeline-none-failed: mr-pipeline=none should not waive a pipeline that actually failed"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-mr-pipeline-none-failed: a merge was attempted despite the failed pipeline"
+  pass "fm-pr-merge still requires a present GitLab pipeline to succeed even when mr-pipeline=none is registered"
+}
+
+test_gitlab_mr_pipeline_none_still_requires_head_match_when_present() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-mr-pipeline-none-stale "pipeline_sha=$MR_STALE_HEAD")
+  write_mr_pipeline_registry "$case_dir" mr-pipeline=none
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-pipeline-none-stale: a pipeline at a stale head should still refuse"
+  assert_grep "the head pipeline ran at \"$MR_STALE_HEAD\", not at the current head $MR_HEAD" "$case_dir/stderr" \
+    "gitlab-mr-pipeline-none-stale: mr-pipeline=none should not waive a pipeline run at a stale head"
+  pass "fm-pr-merge still binds a present GitLab pipeline to the live head even when mr-pipeline=none is registered"
+}
+
+test_gitlab_mr_pipeline_none_still_requires_other_conditions() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-mr-pipeline-none-not-mergeable pipeline=null detail=need_rebase)
+  write_mr_pipeline_registry "$case_dir" mr-pipeline=none
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-pipeline-none-not-mergeable: GitLab reporting the request not mergeable should still refuse"
+  assert_grep 'detailed_merge_status is "need_rebase", not mergeable' "$case_dir/stderr" \
+    "gitlab-mr-pipeline-none-not-mergeable: mr-pipeline=none only drops the pipeline conditions, not the others"
+  assert_no_grep 'the head pipeline status is' "$case_dir/stderr" \
+    "gitlab-mr-pipeline-none-not-mergeable: the dropped pipeline conditions should not appear in the refusal"
+  pass "fm-pr-merge keeps every non-pipeline GitLab condition even when mr-pipeline=none is registered"
+}
+
+test_gitlab_mr_pipeline_requires_registered_project_binding() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-mr-pipeline-no-project pipeline=null)
+  write_mr_pipeline_registry "$case_dir" mr-pipeline=none
+  sed -i '/^project=/d' "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-pipeline-no-project: a task with no project= line keeps the default pipeline requirement"
+  assert_grep 'the head pipeline status is "none", not success' "$case_dir/stderr" \
+    "gitlab-mr-pipeline-no-project: a registered token elsewhere must not apply without a project binding"
+  pass "fm-pr-merge requires a task's own project= binding before honoring a registered mr-pipeline token"
+}
+
+test_gitlab_mr_pipeline_none_requires_matching_origin() {
+  local case_dir rc
+  # Same basename, different group: the registered project is not this merge
+  # request's project, so its waiver must not apply here.
+  case_dir=$(make_gitlab_case gitlab-mr-pipeline-other-origin pipeline=null)
+  write_mr_pipeline_registry "$case_dir" mr-pipeline=none "https://$MR_HOST/group/other/project.git"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-pipeline-other-origin: another project's mr-pipeline=none should not waive this request's pipeline"
+  assert_grep "its origin is \"$MR_HOST/group/other/project\", not this merge request's project $MR_HOST/$MR_PATH" "$case_dir/stderr" \
+    "gitlab-mr-pipeline-other-origin: the mismatched project identities were not named"
+  assert_grep 'the head pipeline status is "none", not success' "$case_dir/stderr" \
+    "gitlab-mr-pipeline-other-origin: the ordinary pipeline requirement was not applied"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-mr-pipeline-other-origin: a merge was attempted under another project's waiver"
+  pass "fm-pr-merge applies mr-pipeline=none only when the project's origin is the merge request's own project"
+}
+
+test_gitlab_malformed_mr_pipeline_registry_refuses() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-mr-pipeline-malformed pipeline=null)
+  write_mr_pipeline_registry "$case_dir" mr-pipeline=bogus
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-pipeline-malformed: a malformed registry token should refuse the merge rather than guess"
+  assert_grep 'unknown mr-pipeline "bogus"' "$case_dir/stderr" \
+    "gitlab-mr-pipeline-malformed: the registry refusal was not surfaced"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-mr-pipeline-malformed: a merge was attempted despite the malformed registry entry"
+  pass "fm-pr-merge refuses a GitLab merge when the project's registered mr-pipeline token is malformed"
 }
 
 test_gitlab_stale_recorded_head_is_reported() {
@@ -2408,6 +2557,13 @@ test_gitlab_extra_args_forwarded
 test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently
 test_gitlab_reports_every_failing_condition
+test_gitlab_mr_pipeline_none_merges_without_a_pipeline
+test_gitlab_mr_pipeline_none_still_requires_success_when_present
+test_gitlab_mr_pipeline_none_still_requires_head_match_when_present
+test_gitlab_mr_pipeline_none_still_requires_other_conditions
+test_gitlab_mr_pipeline_requires_registered_project_binding
+test_gitlab_mr_pipeline_none_requires_matching_origin
+test_gitlab_malformed_mr_pipeline_registry_refuses
 test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
@@ -3212,6 +3368,21 @@ test_away_posture_refuses_asynchronous_merge_paths() {
   case "$merge_line" in
     *" --auto-merge=false") ;;
     *) fail "away-gitlab-sync: the final glab flag did not force an immediate merge: '$merge_line'" ;;
+  esac
+
+  # A registered mr-pipeline=none token is a captain-confirmed standing fact
+  # about the project, not a per-merge waiver, so it is honored under away
+  # authority exactly like an ordinary green pipeline is.
+  case_dir=$(make_gitlab_case away-gitlab-mr-pipeline-none pipeline=null)
+  write_mr_pipeline_registry "$case_dir" mr-pipeline=none
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "away-gitlab-mr-pipeline-none: a registered no-pipeline project should still merge while away"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  case "$merge_line" in
+    *" --auto-merge=false") ;;
+    *) fail "away-gitlab-mr-pipeline-none: the final glab flag did not force an immediate merge: '$merge_line'" ;;
   esac
   pass "away posture permits immediate merges but refuses every asynchronous path"
 }
