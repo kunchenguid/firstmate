@@ -208,8 +208,8 @@ oc_step_failed() {  # <location>
   printf '{"type":"session.step.failed","data":{},"location":{"directory":"%s"}}' "$1"
 }
 
-oc_execution_end() {  # <event-type> <sessionID> <location>
-  printf '{"type":"%s","data":{"sessionID":"%s"},"location":{"directory":"%s"}}' "$1" "$2" "$3"
+oc_execution_end() {  # <event-type> <sessionID>
+  printf '{"type":"%s","data":{"sessionID":"%s"}}' "$1" "$2"
 }
 
 test_opencode_plugin_semantic_lifecycle() {
@@ -261,7 +261,7 @@ test_opencode_plugin_semantic_lifecycle() {
     "$(oc_step_started ses_main "$WT_DIR")" \
     "$(oc_step_started ses_child "$WT_DIR")" \
     "$(oc_step_failed "$WT_DIR")" \
-    "$(oc_execution_end session.execution.failed ses_child "$WT_DIR")") || fail "failed-step drive failed: $out"
+    "$(oc_execution_end session.execution.failed ses_child)") || fail "failed-step drive failed: $out"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy opencode-plugin" ] || fail "one failed session must leave another active session busy, got '$out'"
 
@@ -269,7 +269,7 @@ test_opencode_plugin_semantic_lifecycle() {
     "$(oc_step_started ses_main "$WT_DIR")" \
     "$(oc_step_started ses_child "$WT_DIR")" \
     "$(oc_step_failed "$WT_DIR")" \
-    "$(oc_execution_end session.execution.failed ses_child "$WT_DIR")" \
+    "$(oc_execution_end session.execution.failed ses_child)" \
     "$(oc_turn_end ses_main "$WT_DIR")") || fail "failed-child recovery drive failed: $out"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "idle opencode-plugin" ] || fail "a failed child and completed parent must classify idle, got '$out'"

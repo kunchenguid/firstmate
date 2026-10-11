@@ -5157,6 +5157,12 @@ export default {
           execFile("touch", ["$TURNEND"], () => resolve());
         });
       }
+    }, {
+      acceptUnlocated: (event) => [
+        "session.execution.succeeded",
+        "session.execution.failed",
+        "session.execution.interrupted",
+      ].includes(event?.type) && activeSessions.has(event.data?.sessionID),
     });
   },
 };

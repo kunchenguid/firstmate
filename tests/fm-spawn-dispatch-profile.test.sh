@@ -900,6 +900,44 @@ test_opencode_merges_and_clears_its_model_pin() {
   pass "opencode merges, updates, and clears only its own model pin"
 }
 
+test_opencode_default_restores_displaced_models() {
+  local rec pin_id default_id out status cfg
+  pin_id=profile-opencode-restore-pin-z7l
+  default_id=profile-opencode-restore-default-z7m
+  rec=$(make_spawn_case profile-opencode-restore opencode "$pin_id" "$default_id")
+  read_case_record "$rec"
+  cfg="$WT_DIR/.opencode/opencode.json"
+  mkdir -p "$WT_DIR/.opencode"
+  printf '%s\n' '{"model":"project/top-model","permission":{"read":"ask"},"agent":{"build":{"model":"project/build-model","temperature":0.4}}}' > "$cfg"
+  printf '%s\n' '.opencode/opencode.json' >> "$PROJ_DIR/.git/info/exclude"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$pin_id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "model pin should displace the existing project models: $out"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    my $marker = $config->{"x-firstmate-model-pin"};
+    die "top-level model was not recorded" unless $marker->{previousModelPresent} && $marker->{previousModel} eq "project/top-model";
+    die "build model was not recorded" unless $marker->{previousBuildModelPresent} && $marker->{previousBuildModel} eq "project/build-model";
+  ' "$cfg" || fail "OpenCode did not record both displaced model values"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$default_id" "$PROJ_DIR" --model default)
+  status=$?
+  expect_code 0 "$status" "default model should restore displaced project models: $out"
+  perl -MJSON::PP -e '
+    my $config = decode_json(do { local $/; <> });
+    my $marker = $config->{"x-firstmate-model-pin"};
+    die "top-level model was not restored" unless $config->{model} eq "project/top-model";
+    die "build model was not restored" unless $config->{agent}{build}{model} eq "project/build-model";
+    die "effort variant changed" unless $config->{agent}{build}{variant} eq "high";
+    die "permission rule changed" unless $config->{permission}{"*"} eq "allow" && $config->{permission}{read} eq "ask";
+    die "top-level Firstmate model marker remains" if exists $marker->{managedModel};
+    die "build Firstmate model marker remains" if exists $marker->{managedBuildModel};
+  ' "$cfg" || fail "default model launch did not restore project models and preserve effort and permission"
+  pass "opencode default restores displaced project and user model values"
+}
+
 test_opencode_refuses_unparseable_worktree_config() {
   local rec id out status cfg before
   id=profile-opencode-invalid-z7k
@@ -2514,6 +2552,7 @@ test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_effort_variant
 test_opencode_pins_model_in_worktree_config
 test_opencode_merges_and_clears_its_model_pin
+test_opencode_default_restores_displaced_models
 test_opencode_refuses_unparseable_worktree_config
 test_opencode_refuses_malformed_model_marker_values
 test_opencode_refuses_a_tracked_project_config

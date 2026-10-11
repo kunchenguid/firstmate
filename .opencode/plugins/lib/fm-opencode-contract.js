@@ -88,9 +88,9 @@ export async function resolvePluginRoot(ctx) {
 // OpenCode 2's ctx.event.subscribe() is the connected server's entire public
 // event stream, not this instance's: one server serves every location, and a
 // plugin in one worktree observes sessions, tool calls and turns in all the
-// others. Each event carries the location it belongs to, so every handler here
-// filters on it. An event that publishes no location (session.execution.* does
-// not) belongs to no location and is ignored rather than attributed by guess.
+// others. Location-bearing events must match exactly. Events without a
+// location are ignored unless a subscriber explicitly accepts them using
+// independent state.
 export function isOwnEvent(ctx, event) {
   const own = ctx?.location?.directory;
   const directory = event?.location?.directory;
@@ -124,11 +124,12 @@ export function turnEndedSessionID(event) {
 // subscription. A handler that throws is contained here: one bad event must not
 // end a long-lived subscription, because a dead subscription is exactly the
 // blind supervision this directory exists to prevent.
-export function subscribeOwnEvents(ctx, handler) {
+export function subscribeOwnEvents(ctx, handler, { acceptUnlocated = () => false } = {}) {
   const controller = new AbortController();
   void (async () => {
     for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-      if (!isOwnEvent(ctx, event)) continue;
+      const unlocated = !event?.location?.directory && acceptUnlocated(event);
+      if (!isOwnEvent(ctx, event) && !unlocated) continue;
       try {
         await handler(event);
       } catch {
