@@ -45,7 +45,7 @@ EOF
 # command that staged its job. Stop it before the shared fixture cleanup runs,
 # and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
 pf_test_cleanup() {
-  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
+  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid attempt worker_state
   if [ -n "$PF_TEST_LOCK_HOLDER" ]; then
     kill "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
     wait "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
@@ -53,7 +53,21 @@ pf_test_cleanup() {
   fi
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null || true
+      # This worker is detached, so wait(1) cannot reap it. TERM begins a
+      # shutdown that still writes job state; deleting its fixture immediately
+      # races those writes and can make rm fail with "Directory not empty".
+      for ((attempt=0; attempt<100; attempt++)); do
+        worker_state=$(ps -p "$pid" -o stat= 2>/dev/null) || worker_state=
+        case "$worker_state" in ''|*Z*) break ;; esac
+        sleep 0.1
+      done
+      case "$worker_state" in
+        ''|*Z*) ;;
+        *) printf 'not ok - fixture remote worker %s did not stop before cleanup\n' "$pid" >&2; return 1 ;;
+      esac
+    fi
   fi
   fm_test_cleanup
 }
@@ -3096,6 +3110,30 @@ test_unsafe_registration_entry_fails_remote_collection() {
   pass "unsafe registration entries fail collection without dropping staged results"
 }
 
+test_gitlab_review_url_classification() {
+  local url expected result base
+  local -a valid invalid urls
+  # The shell predicate uses the shared namespace owner, with independent
+  # public-safe text limits still exercised by the existing event corpus.
+  . "$ROOT/bin/fm-public-followup-lib.sh"
+  base=https://gitlab.example.test/group/sub/project/-/merge_requests
+  valid=(https://gitlab.com/group/project/-/merge_requests/7 "$base/780" https://github.com/o/r/pull/7 https://forgejo.example.test/o/r/pulls/7)
+  invalid=("$base/0" "$base/0780" "$base/780junk" "$base/780/" "$base/780?x=1" "$base/780#x" " $base/780" "$base/780"$'\n' "$base/780"$'\001'
+    http://gitlab.com/o/r/-/merge_requests/7 https://Gitlab.com/o/r/-/merge_requests/7 https://user@gitlab.com/o/r/-/merge_requests/7 https://gitlab.com:443/o/r/-/merge_requests/7
+    https://gitlab.com/o%2Fr/r/-/merge_requests/7 https://gitlab.com/o/../r/-/merge_requests/7 https://gitlab.com/o//r/-/merge_requests/7 https://gitlab.com/o/-/r/-/merge_requests/7
+    https://gitlab.com/o/-repo/-/merge_requests/7 https://gitlab.com/o/r.git/-/merge_requests/7 https://github.com/o/r/-/merge_requests/7 https://github.com/o/r/pulls/7
+    https://forgejo.example.test/o/r/pull/7 https://gitlab.com/o/r/-/issues/7)
+  for expected in accept reject; do
+    if [ "$expected" = accept ]; then urls=("${valid[@]}"); else urls=("${invalid[@]}"); fi
+    for url in "${urls[@]}"; do
+      result=reject
+      fm_pf_pr_url_valid "$url" && result=accept
+      [ "$result" = "$expected" ] || fail "shell review URL $expected mismatch: $url"
+    done
+  done
+  pass 'canonical GitLab/GitHub/Forgejo review links classify without a completion preview dependency'
+}
+
 test_remote_route_loss_fails_brief_and_collection() {
   local home remote out command
   remote_fixture_prepare
@@ -3986,6 +4024,7 @@ test_remote_collection_transport_failure_is_loud
 test_remote_collection_refuses_unreadable_outbox
 test_invalid_registration_fails_remote_collection
 test_unsafe_registration_entry_fails_remote_collection
+test_gitlab_review_url_classification
 test_remote_route_loss_fails_brief_and_collection
 test_empty_remote_collection_is_healthy
 test_remote_brief_rejects_traversal_route_paths

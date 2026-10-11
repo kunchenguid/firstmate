@@ -555,6 +555,80 @@ EOF
   pass "snapshot includes durable scout reports after teardown"
 }
 
+test_canonical_review_links() {
+  local home fakebin out id url
+  home=$(make_home review-links)
+  fakebin=$(make_fakebin "$home")
+  printf '## Done\n' > "$home/data/backlog.md"
+  while IFS='|' read -r id url; do
+    printf -- '- [x] %s - review <%s> (kind: ship) (merged 2026-07-09)\n' "$id" "$url" >> "$home/data/backlog.md"
+  done <<'URLS'
+gl|https://gitlab.com/group/project/-/merge_requests/780
+nested|https://gitlab.example.test/group/sub/project/-/merge_requests/7
+gh|https://github.com/owner/repo/pull/7
+fj|https://forgejo.example.test/owner/repo/pulls/7
+issue|https://gitlab.com/group/project/-/issues/7
+bad|https://gitlab.com/group/project/-/merge_requests/0
+query|https://gitlab.com/group/project/-/merge_requests/7?x=1
+URLS
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) || fail 'review link snapshot failed'
+  printf '%s' "$out" | jq -e '
+    .backlog.records | map({key:.id,value:.pr_url}) | from_entries
+    | .gl == "https://gitlab.com/group/project/-/merge_requests/780"
+      and .nested == "https://gitlab.example.test/group/sub/project/-/merge_requests/7"
+      and .gh == "https://github.com/owner/repo/pull/7"
+      and .fj == "https://forgejo.example.test/owner/repo/pulls/7"
+      and .issue == null and .bad == null and .query == null
+  ' >/dev/null || fail 'snapshot classified malformed/doc links or lost exact review identity'
+  pass 'snapshot displays full canonical GitLab/GitHub/Forgejo review links and rejects non-review links'
+}
+
+test_status_review_delivery_provenance() {
+  local home fakebin out provider prefix scenario id kind recorded
+  home=$(make_home delivery-provenance)
+  fakebin=$(make_fakebin "$home")
+  while IFS='|' read -r provider prefix; do
+    for scenario in latest meta scout scout-meta incidental resumed malformed; do
+      id="$provider-$scenario"
+      kind=ship
+      recorded=
+      case "$scenario" in
+        scout|scout-meta) kind=scout ;;
+      esac
+      case "$scenario" in
+        meta|scout-meta) recorded="${prefix}9" ;;
+      esac
+      fm_write_meta "$home/state/$id.meta" \
+        "window=firstmate:fm-$id" "kind=$kind" "mode=$kind" \
+        "harness=codex" "project=alpha" "pr=$recorded"
+      printf 'done: PR %s7\ndone [at=2026-07-09T12:00:00Z]: PR %s8 checks green\n' \
+        "$prefix" "$prefix" > "$home/state/$id.status"
+      case "$scenario" in
+        incidental) printf 'done: mentioned %s9 in documentation\n' "$prefix" >> "$home/state/$id.status" ;;
+        resumed) printf 'working: preparing another change\n' >> "$home/state/$id.status" ;;
+        malformed) printf 'done: PR %s0\n' "$prefix" >> "$home/state/$id.status" ;;
+      esac
+    done
+  done <<'URLS'
+gl|https://gitlab.example.test/group/sub/project/-/merge_requests/
+gh|https://github.com/owner/repo/pull/
+fj|https://forgejo.example.test/owner/repo/pulls/
+URLS
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) || fail 'delivery provenance snapshot failed'
+  printf '%s' "$out" | jq -e '
+    [.tasks[] |
+      if (.id | endswith("-latest")) then
+        (.pr.url | endswith("8")) and .pr.source == "status_event"
+      elif (.id | endswith("-scout-meta")) then
+        .pr.url == null and .pr.source == "absent"
+      elif (.id | endswith("-meta")) then
+        (.pr.url | endswith("9")) and .pr.source == "meta"
+      else .pr.url == null and .pr.source == "absent" end
+    ] | length == 21 and all
+  ' >/dev/null || fail 'snapshot claimed historical/scout/incidental links or lost metadata precedence'
+  pass 'snapshot review delivery uses latest ready event, excludes scouts, and prefers metadata'
+}
+
 test_backlog_tasks_axi_forms_and_overrides() {
   local home data projects fakebin out view
   home=$(make_home overrides)
@@ -1167,6 +1241,8 @@ test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
+test_canonical_review_links
+test_status_review_delivery_provenance
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status

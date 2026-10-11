@@ -686,6 +686,130 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+# A canonical GitLab origin uses a fixture-only transport rewrite. The proof
+# must bind the raw configured origin identity, never the rewritten local path.
+make_gitlab_case() {
+  local case_dir head
+  case_dir=$(make_case "$1")
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" repair.txt landed
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" config remote.origin.url https://gitlab.example.test/group/sub/project.git
+  git -C "$case_dir/project" config "url.$case_dir/origin.git.insteadOf" https://gitlab.example.test/group/sub/project.git
+  printf '%s\n' 'pr=https://gitlab.example.test/group/sub/project/-/merge_requests/7' 'base_branch=deleted-source' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' "{\"iid\":7,\"web_url\":\"https://gitlab.example.test/group/sub/project/-/merge_requests/7\",\"state\":\"merged\",\"sha\":\"$head\",\"diff_refs\":{\"head_sha\":\"$head\"},\"target_branch\":\"release\",\"source_project_id\":22,\"target_project_id\":11}" > "$case_dir/mr.json"
+  printf '%s\n' '{"id":11,"path_with_namespace":"group/sub/project","web_url":"https://gitlab.example.test/group/sub/project"}' > "$case_dir/project.json"
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  'mr view 7 -R https://gitlab.example.test/group/sub/project -F json')
+    cat '$case_dir/mr.json' ;;
+  'api projects/group%2Fsub%2Fproject')
+    cat '$case_dir/project.json' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/glab"
+  printf '%s\n' "$case_dir"
+}
+
+# Build the rebased MR in a separate clone so its commit object is absent
+# from the task. The fixture glab supplies metadata; all graph operations,
+# source deletion and exact-head transport use real isolated Git repositories.
+make_gitlab_rebased_source() {
+  local case_dir=$1 original rebased
+  original=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git clone -q "$case_dir/origin.git" "$case_dir/source"
+  git -C "$case_dir/source" fetch -q "$case_dir/wt" HEAD:refs/heads/source-review
+  git -C "$case_dir/source" checkout -qb release main
+  printf 'target advance\n' > "$case_dir/source/unrelated.txt"
+  git -C "$case_dir/source" add unrelated.txt
+  git -C "$case_dir/source" commit -qm 'advance actual target'
+  git -C "$case_dir/source" checkout -q source-review
+  git -C "$case_dir/source" rebase release >/dev/null 2>&1 || fail 'could not rebase isolated MR'
+  rebased=$(git -C "$case_dir/source" rev-parse HEAD)
+  [ "$original" != "$rebased" ] || fail 'fixture did not change the source commit through rebase'
+  if git -C "$case_dir/wt" cat-file -e "$rebased^{commit}" 2>/dev/null; then
+    fail 'rebased MR head unexpectedly exists in task object store'
+  fi
+  git -C "$case_dir/source" push -q origin source-review
+  jq --arg head "$rebased" '.sha=$head | .diff_refs.head_sha=$head' \
+    "$case_dir/mr.json" > "$case_dir/new.json"
+  mv "$case_dir/new.json" "$case_dir/mr.json"
+}
+
+test_gitlab_deleted_source_target_landing() {
+  local case_dir out
+  case_dir=$(make_gitlab_case gitlab-deleted-source)
+  make_gitlab_rebased_source "$case_dir"
+  git -C "$case_dir/source" checkout -q release
+  git -C "$case_dir/source" merge --squash source-review >/dev/null
+  git -C "$case_dir/source" commit -qm 'squash MR on actual target'
+  git -C "$case_dir/source" push -q origin release
+  git -C "$case_dir/source" push -q origin :refs/heads/source-review
+  # No MR head ref exists and its rebased object is absent locally. Only
+  # the nondefault target contains the squash; the legacy source is gone.
+  git -C "$case_dir/origin.git" show-ref --verify --quiet refs/heads/source-review \
+    && fail 'source branch survived deletion'
+  git -C "$case_dir/origin.git" show-ref --verify --quiet refs/merge-requests/7/head \
+    && fail 'squash fixture accidentally permits direct MR head fetch'
+  out=$(run_teardown "$case_dir" 2>&1) || fail "GitLab target proof refused deleted source: $out"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail 'GitLab landed task record survived'
+  pass 'GitLab real squash uses verified nondefault target after rebased source and MR ref deletion'
+}
+
+test_gitlab_rebased_head_fetch_landing() {
+  local case_dir out
+  case_dir=$(make_gitlab_case gitlab-rebased-head)
+  make_gitlab_rebased_source "$case_dir"
+  git -C "$case_dir/source" checkout -q release
+  git -C "$case_dir/source" merge --ff-only source-review >/dev/null
+  git -C "$case_dir/source" push -q origin release source-review:refs/merge-requests/7/head
+  git -C "$case_dir/source" push -q origin :refs/heads/source-review
+  cat > "$case_dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> '$case_dir/git.calls'
+exec '$REAL_GIT_FOR_TEST' "\$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  out=$(run_teardown "$case_dir" 2>&1) || fail "GitLab rebased head fetch refused landed work: $out"
+  grep -Fq 'refs/merge-requests/7/head:refs/fm-teardown/task-x1/merge-request/7/head' \
+    "$case_dir/git.calls" || fail 'rebased proof did not fetch the task-private MR head'
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail 'rebased GitLab task record survived'
+  pass 'GitLab real rebase proves equivalent local patches through an exact origin-bound MR head fetch'
+}
+
+test_gitlab_landing_refusals_preserve_work() {
+  local case_dir variant out
+  for variant in exact extra dirty untracked identity head target project origin expired; do
+    case_dir=$(make_gitlab_case "gitlab-$variant")
+    cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf 'cleanup\\n' >> '$case_dir/cleanup'
+SH
+    case "$variant" in
+      extra) wt_commit_file "$case_dir" extra.txt unlanded ;;
+      dirty) printf 'dirty\n' >> "$case_dir/wt/repair.txt" ;;
+      untracked) printf 'untracked\n' > "$case_dir/wt/untracked.txt" ;;
+      identity) jq '.iid=8' "$case_dir/mr.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/mr.json" ;;
+      head) jq '.diff_refs.head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$case_dir/mr.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/mr.json" ;;
+      target) jq '.target_branch="../main"' "$case_dir/mr.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/mr.json" ;;
+      project) jq '.id=22' "$case_dir/project.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/project.json" ;;
+      origin) git -C "$case_dir/project" config remote.origin.url https://gitlab.example.test/other/project.git ;;
+      expired) jq '.sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" | .diff_refs.head_sha=.sha' "$case_dir/mr.json" > "$case_dir/new.json"; mv "$case_dir/new.json" "$case_dir/mr.json" ;;
+    esac
+    if out=$(run_teardown "$case_dir" 2>&1); then
+      [ "$variant" = exact ] || fail "GitLab $variant removed work: $out"
+      [ -f "$case_dir/cleanup" ] || fail 'exact merged GitLab head not cleaned'
+    else
+      [ "$variant" != exact ] || fail "exact merged GitLab head refused: $out"
+      [ -f "$case_dir/state/task-x1.meta" ] && [ -d "$case_dir/wt" ] && [ ! -e "$case_dir/cleanup" ] \
+        || fail "GitLab $variant refusal changed local work/record/endpoint"
+    fi
+  done
+  pass 'GitLab exact merged source head lands; extra, dirty, forged and unavailable proof preserves work'
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -5618,6 +5742,9 @@ test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
+test_gitlab_deleted_source_target_landing
+test_gitlab_rebased_head_fetch_landing
+test_gitlab_landing_refusals_preserve_work
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
