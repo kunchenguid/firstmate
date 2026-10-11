@@ -265,7 +265,11 @@ SH
 
 # make_liveness_tmux <dir>: a controllable tmux stub. FM_TEST_PANE_CMD may be
 # a foreground command, `missing` (readable inventory omits the window), or
-# `unreadable` (both pane and inventory reads fail).
+# `unreadable` (both pane and inventory reads fail). A successful `new-window`
+# makes the window reappear reporting FM_TEST_PANE_CMD_AFTER_SPAWN (default
+# `claude`), which models a real respawn bringing an agent up; set
+# FM_TEST_SPAWN_STAYS_DEAD=1 to keep it reporting the original command instead,
+# which models a launch command that returned success while no agent started.
 make_liveness_tmux() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -273,15 +277,21 @@ make_liveness_tmux() {
 #!/usr/bin/env bash
 set -u
 mode=${FM_TEST_PANE_CMD:-zsh}
+after=${FM_TEST_PANE_CMD_AFTER_SPAWN:-claude}
+spawned=0
+[ -e "${FM_TMUX_CALL_LOG:-/dev/null}.spawned" ] && spawned=1
+[ "${FM_TEST_SPAWN_STAYS_DEAD:-0}" = 1 ] && spawned=0
+effective=$mode
+[ "$spawned" = 1 ] && effective=$after
 case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
         *pane_current_command*)
-          case "$mode" in
+          case "$effective" in
             missing) printf '%s\n' node; exit 0 ;;
             unreadable) exit 1 ;;
-            *) printf '%s\n' "$mode"; exit 0 ;;
+            *) printf '%s\n' "$effective"; exit 0 ;;
           esac
           ;;
       esac
@@ -289,7 +299,7 @@ case "${1:-}" in
     exit 0
     ;;
   list-windows)
-    case "$mode" in
+    case "$effective" in
       missing) printf '%s\n' main; exit 0 ;;
       unreadable) exit 1 ;;
       *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0 ;;
@@ -299,7 +309,7 @@ case "${1:-}" in
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
     [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
     [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && [ "${1:-}" = new-window ] && exit 1
-    [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
+    [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed" && : > "${FM_TMUX_CALL_LOG}.spawned"
     exit 0
     ;;
   has-session) exit 0 ;;
@@ -530,6 +540,151 @@ test_sweep_reports_missing_endpoint_relaunch_failure() {
   pass "sweep: failed relaunch diagnostics distinguish a confidently missing endpoint"
 }
 
+test_sweep_reports_unconfirmed_respawn() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-unconfirmed)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # The launch command exits 0 (the window is re-created), but the pane keeps
+  # reporting a bare shell, so no agent is proven running at the endpoint.
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_TEST_SPAWN_STAYS_DEAD=1)
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn unconfirmed:" \
+    "a zero-status spawn with no live successor must be reported unconfirmed"
+  assert_not_contains "$out" "respawn failed" \
+    "an unconfirmed respawn is not the launch command's failure"
+  assert_not_contains "$out" "respawning" \
+    "an unconfirmed respawn must never be reported as a success"
+  assert_grep 'unconfirmed' "$w/home/state/.secondmate-relaunch-sm1" \
+    "the durable ledger must record the unconfirmed outcome"
+  assert_no_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
+    "no relaunched row may be written when no successor is proven"
+  pass "sweep: a respawn whose endpoint never reads alive is reported unconfirmed"
+}
+
+test_sweep_reports_endpoint_drift_without_relaunching() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-drift)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  # The record claims a window that belongs to no pane this task owns: the
+  # stale-address shape that would send the worker into a self-check loop.
+  {
+    printf 'window=firstmate:fm-other\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'home=%s\n' "$w/sm1"
+  } > "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_ENDPOINT_DRIFT: sm1:" \
+    "a stale endpoint identity must be reported as drift"
+  assert_contains "$out" "firstmate:fm-other" \
+    "the drift line must name the recorded address"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1:" \
+    "a drifting record must not be probed or reported as liveness"
+  [ ! -s "$log" ] || fail "a drifting record must never be killed or respawned: $(cat "$log")"
+  pass "sweep: a record whose endpoint identity is stale is reported as drift and never relaunched"
+}
+
+# Library level: the drift assertion must name an incoherent identity and stay
+# silent for a coherent one, for both backends that carry a bound identity.
+test_endpoint_drift_detects_inconsistent_records() {
+  local d out
+  d="$TMP_ROOT/drift"
+  mkdir -p "$d"
+  cat > "$d/tmux.meta" <<'EOF'
+window=firstmate:fm-old
+kind=secondmate
+harness=claude
+EOF
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  out=$(STATE="$d" bash -c '. "$0/bin/fm-secondmate-liveness-lib.sh"
+    fm_secondmate_endpoint_drift "$1" sm1 && echo clean || echo "drift:$FM_SM_LIVE_DRIFT"' "$ROOT" "$d/tmux.meta")
+  assert_contains "$out" "drift:" "a tmux record naming another task's window must be drift"
+  assert_contains "$out" "fm-old" "the drift must name the recorded address"
+
+  cat > "$d/herdr.meta" <<'EOF'
+window=default:w1:p1
+kind=secondmate
+harness=claude
+backend=herdr
+herdr_session=default
+herdr_workspace_id=w9
+herdr_tab_id=w9:t1
+herdr_pane_id=w1:p2
+EOF
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  out=$(STATE="$d" bash -c '. "$0/bin/fm-secondmate-liveness-lib.sh"
+    fm_secondmate_endpoint_drift "$1" sm1 && echo clean || echo "drift:$FM_SM_LIVE_DRIFT"' "$ROOT" "$d/herdr.meta")
+  assert_contains "$out" "drift:" "a herdr record whose window disagrees with its pane must be drift"
+  assert_contains "$out" "default:w1:p2" "the drift must name the herdr-derived address"
+
+  cat > "$d/ok.meta" <<'EOF'
+window=firstmate:fm-sm1
+kind=secondmate
+harness=claude
+EOF
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  out=$(STATE="$d" bash -c '. "$0/bin/fm-secondmate-liveness-lib.sh"
+    fm_secondmate_endpoint_drift "$1" sm1 && echo clean || echo "drift:$FM_SM_LIVE_DRIFT"' "$ROOT" "$d/ok.meta")
+  [ "$out" = clean ] || fail "a coherent endpoint identity must not be reported as drift: $out"
+
+  cat > "$d/remote.meta" <<'EOF'
+window=remote:rsm1
+kind=secondmate
+harness=claude
+remote_host=lab-host
+home=/remote/rsm1-home
+EOF
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  out=$(STATE="$d" bash -c '. "$0/bin/fm-secondmate-liveness-lib.sh"
+    fm_secondmate_endpoint_drift "$1" rsm1 && echo clean || echo "drift:$FM_SM_LIVE_DRIFT"' "$ROOT" "$d/remote.meta")
+  [ "$out" = clean ] || fail "a remote route's host-side window must not be judged as a local drift: $out"
+  pass "endpoint drift: a stale or inconsistent record identity is named once, a coherent or remote one stays silent"
+}
+
+# Library level: the relaunch function itself must return non-zero and expose
+# FM_SM_LIVE_STATUS=unconfirmed so both callers share one honest verdict, rather
+# than each re-deriving it. The spawn is stubbed to exit 0 while the endpoint
+# keeps reading a dead shell.
+test_relaunch_function_reports_unconfirmed_without_a_running_successor() {
+  local w tmuxfb out
+  w=$(new_world unconfirmed-lib)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  tmuxfb=$(make_liveness_tmux "$w")
+  mkdir -p "$w/fakeroot/bin"
+  cat > "$w/fakeroot/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$w/fakeroot/bin/fm-spawn.sh"
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  out=$(env PATH="$tmuxfb:$BASE_PATH" TMUX='' FM_BACKEND=tmux \
+    FM_TEST_PANE_CMD=zsh FM_TEST_SPAWN_STAYS_DEAD=1 FM_TMUX_CALL_LOG="$w/calls.log" \
+    FM_ROOT="$w/fakeroot" STATE="$w/home/state" \
+    bash -c '. "$0/bin/fm-secondmate-liveness-lib.sh"
+      fm_secondmate_liveness_probe "$1" sm1 poll
+      FM_SM_LIVE_KILL=0
+      rc=0
+      fm_secondmate_liveness_relaunch "$1" sm1 || rc=$?
+      printf "rc=%s status=%s state=%s reason=%s\n" "$rc" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_STATE" "$FM_SM_LIVE_REASON"
+    ' "$ROOT" "$w/home/state/sm1.meta" 2>&1)
+  assert_contains "$out" "rc=1" "a zero-status spawn with no live agent must return non-zero"
+  assert_contains "$out" "status=unconfirmed" "the shared outcome must be unconfirmed"
+  assert_contains "$out" "state=dead" "the endpoint's real state must be reported"
+  assert_contains "$out" "a running successor is not proven" "the reason must say why"
+  assert_grep 'unconfirmed' "$w/home/state/.secondmate-relaunch-sm1" \
+    "an unconfirmed row must be ledgered"
+  assert_no_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
+    "no relaunched row may be written"
+  pass "relaunch function: a zero-status spawn with no live agent is unconfirmed, not relaunched"
+}
+
 test_sweep_never_acts_on_unverified_harness_dead_reading() {
   local w fb tmuxfb log out
   w=$(new_world sweep-unverified-harness)
@@ -713,6 +868,10 @@ test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure
+test_sweep_reports_unconfirmed_respawn
+test_sweep_reports_endpoint_drift_without_relaunching
+test_endpoint_drift_detects_inconsistent_records
+test_relaunch_function_reports_unconfirmed_without_a_running_successor
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only

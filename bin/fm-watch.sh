@@ -1093,6 +1093,9 @@ secondmate_liveness_tick() {
         elif fm_secondmate_liveness_relaunch "$meta" "$id" "$SECONDMATE_LIVENESS_TIMEOUT"; then
           reason="check: secondmate $id auto-relaunched after $FM_SM_LIVE_CAUSE ($FM_SM_LIVE_WHERE)"
           notify_key="secondmate-relaunch-$id-$now"
+        elif [ "$FM_SM_LIVE_STATUS" = unconfirmed ]; then
+          reason="check: secondmate $id auto-relaunch unconfirmed - $FM_SM_LIVE_REASON"
+          notify_key="secondmate-relaunch-unconfirmed-$id-$now"
         elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then
           err=$FM_SM_LIVE_REASON
         else

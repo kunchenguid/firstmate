@@ -89,9 +89,43 @@ fm_sm_live_first_line() {
 # `rearmed` row when a live probe lifts a parked mate. The watcher bound counts
 # `attempt` rows inside its window and after the last `rearmed` row; the whole
 # file is the durable per-mate relaunch record the captain can count to see
-# frequency. Fails when the row cannot be appended.
-fm_secondmate_liveness_ledger_add() {  # <id> <attempt|relaunched|failed|rearmed>
+# frequency. `unconfirmed` is a distinct outcome from `failed`: the launch
+# command exited 0, but no running agent could be proven at the republished
+# endpoint, so the recovery is not reported as a success. Fails when the row
+# cannot be appended.
+fm_secondmate_liveness_ledger_add() {  # <id> <attempt|relaunched|failed|unconfirmed|rearmed>
   printf '%s\t%s\n' "$(date +%s)" "$2" >> "$STATE/.secondmate-relaunch-$1" 2>/dev/null
+}
+
+# fm_secondmate_liveness_endpoint_state <meta> <id> -> one agent-state word
+#
+# Read-only re-resolution of the endpoint the launch owner just republished,
+# using the same local backend classifier and remote state verb as the probe.
+# This is the confirmation half of the relaunch contract: a zero exit status
+# from the launch command is not proof a successor is running, so the relaunch
+# path asks the endpoint itself. Never errors out; an unreadable endpoint
+# reports `unreadable` so the caller can report an unconfirmed outcome rather
+# than a false success.
+fm_secondmate_liveness_endpoint_state() {  # <meta> <id>
+  local meta=$1 id=$2 remote_host out backend target
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  if [ -n "$remote_host" ]; then
+    if out=$("$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+      printf '%s' "$(printf '%s\n' "$out" | tail -1)"
+    else
+      printf 'unreadable'
+    fi
+    return 0
+  fi
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
+  [ -n "$target" ] || { printf 'missing'; return 0; }
+  if ! out=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null); then
+    out=unreadable
+  fi
+  [ -n "$out" ] || out=unreadable
+  printf '%s' "$out"
 }
 
 # Count of attempt rows no older than <window-secs> that follow the last
@@ -253,6 +287,49 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   return 0
 }
 
+# fm_secondmate_endpoint_drift <meta> <id>
+#
+# Boot-time identity assertion for a recorded secondmate endpoint. A record
+# whose endpoint block no longer names the pane it claims feeds a stale address
+# to the worker's own self-check, which then loops. This compares the record's
+# endpoint identity with the backend's own required identity for the task and
+# sets FM_SM_LIVE_DRIFT to one actionable description on mismatch; returns 0
+# when the identity is coherent (or when the record has no endpoint at all,
+# which secondmate-provisioning recovery owns). Read-only.
+fm_secondmate_endpoint_drift() {  # <meta> <id>
+  local meta=$1 id=$2 backend window session pane hs hw ht hp remote_host
+  FM_SM_LIVE_DRIFT=''
+  window=$(fm_meta_get "$meta" window)
+  [ -n "$window" ] || return 0
+  # A remote route names its own host-side endpoint and is probed through the
+  # remote control script, so its local window shape is not a firstmate endpoint
+  # identity to check here (the remote readiness path owns that).
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  [ -z "$remote_host" ] || return 0
+  backend=$(fm_backend_of_meta "$meta")
+  case "$backend" in
+    tmux)
+      session=${window%%:*}
+      pane=${window#*:}
+      if [ "$pane" = "$window" ] || [ -z "$session" ] || [ "$pane" != "fm-$id" ]; then
+        FM_SM_LIVE_DRIFT="record says '$window', but a tmux endpoint for task $id must be '<session>:fm-$id'"
+      fi
+      ;;
+    herdr)
+      hs=$(fm_meta_get "$meta" herdr_session)
+      hw=$(fm_meta_get "$meta" herdr_workspace_id)
+      ht=$(fm_meta_get "$meta" herdr_tab_id)
+      hp=$(fm_meta_get "$meta" herdr_pane_id)
+      if [ -z "$hs" ] || [ -z "$hw" ] || [ -z "$ht" ] || [ -z "$hp" ]; then
+        FM_SM_LIVE_DRIFT="record says '$window', but its herdr identity is incomplete (session='$hs' workspace='$hw' tab='$ht' pane='$hp')"
+      elif [ "$window" != "$hs:$hp" ]; then
+        FM_SM_LIVE_DRIFT="record says '$window', but its herdr fields name '$hs:$hp'"
+      fi
+      ;;
+  esac
+  [ -z "$FM_SM_LIVE_DRIFT" ]
+}
+
 # fm_secondmate_liveness_relaunch <meta> <id> [timeout-secs]
 #
 # Acts on a `relaunchable` probe verdict for <id>: kills a confirmed-dead local
@@ -260,10 +337,14 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 # per-mate ledger, then runs the guarded secondmate spawn. A positive timeout
 # wraps the spawn in fm_run_timed so a watcher poll stays bounded; 124/137 mean
 # the bound fired. Returns the spawn exit status; combined spawn output is in
-# FM_SM_LIVE_OUT and the status in FM_SM_LIVE_RC. When the ledger cannot be
-# read or the attempt row cannot be appended, nothing is killed or spawned: the verdict becomes
-# FM_SM_LIVE_STATUS=skipped with FM_SM_LIVE_REASON set and this returns 1.
-# Caller holds the liveness lock and owns reporting.
+# FM_SM_LIVE_OUT and the status in FM_SM_LIVE_RC. A zero spawn status is only
+# confirmed when the republished endpoint reads `alive`; otherwise the outcome
+# is `unconfirmed` (FM_SM_LIVE_STATUS=unconfirmed, FM_SM_LIVE_REASON set) and
+# this returns 1, so a still-dead lane is never reported as a success. When the
+# ledger cannot be read or the attempt row cannot be appended, nothing is killed
+# or spawned: the verdict becomes FM_SM_LIVE_STATUS=skipped with
+# FM_SM_LIVE_REASON set and this returns 1. Caller holds the liveness lock and
+# owns reporting.
 fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
   local meta=$1 id=$2 timeout=${3:-}
   FM_SM_LIVE_OUT='' FM_SM_LIVE_RC=0
@@ -296,10 +377,24 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
   fi
   FM_SM_LIVE_RC=$rc
-  if [ "$rc" -eq 0 ]; then
-    fm_secondmate_liveness_ledger_add "$id" relaunched || true
-  else
+  if [ "$rc" -ne 0 ]; then
     fm_secondmate_liveness_ledger_add "$id" failed || true
+    return "$rc"
   fi
-  return "$rc"
+  # A zero exit status is the launch command's result, not proof that an agent
+  # is running: the endpoint the launch owner republished is the only authority
+  # on that. Require a positive `alive` there before this can be called a
+  # relaunch, and otherwise record and report an honest `unconfirmed` outcome.
+  local confirm_state
+  confirm_state=$(fm_secondmate_liveness_endpoint_state "$meta" "$id")
+  if [ "$confirm_state" = alive ]; then
+    fm_secondmate_liveness_ledger_add "$id" relaunched || true
+    FM_SM_LIVE_STATE=alive
+    return 0
+  fi
+  fm_secondmate_liveness_ledger_add "$id" unconfirmed || true
+  FM_SM_LIVE_STATUS=unconfirmed
+  FM_SM_LIVE_STATE=$confirm_state
+  FM_SM_LIVE_REASON="launch command returned 0 but the republished endpoint reads '$confirm_state'; a running successor is not proven"
+  return 1
 }

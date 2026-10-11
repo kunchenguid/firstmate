@@ -4289,12 +4289,57 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+# An interrupted relaunch transaction (non-terminal phase) is the only copy of
+# the prior record; teardown must not destroy it, so the session-start
+# reconciler can still see it. A terminal transaction is ordinary runtime state
+# and is retired as before.
+test_teardown_keeps_an_open_relaunch_transaction_for_the_reconciler() {
+  local case_dir out
+  case_dir=$(make_case open-relaunch)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  printf 'v1\ntask=task-x1\nphase=launching\nrelaunch_tx=tx-open\n' \
+    > "$case_dir/state/task-x1.control-relaunch"
+  printf 'prior\n' > "$case_dir/state/task-x1.control-relaunch.meta-prior"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown should still complete with an open transaction: $out"
+  [ -e "$case_dir/state/task-x1.control-relaunch" ] \
+    || fail "an interrupted relaunch transaction must survive teardown"
+  [ -e "$case_dir/state/task-x1.control-relaunch.meta-prior" ] \
+    || fail "the saved-aside prior record must survive teardown"
+  assert_contains "$out" "keeping task-x1's interrupted relaunch transaction" \
+    "teardown must say it kept the transaction"
+  pass "teardown keeps an interrupted relaunch transaction for the session-start reconciler"
+}
+
+test_teardown_removes_a_terminal_relaunch_transaction() {
+  local case_dir out
+  case_dir=$(make_case closed-relaunch)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/8' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  printf 'v1\ntask=task-x1\nphase=complete\n' > "$case_dir/state/task-x1.control-relaunch"
+  printf 'prior\n' > "$case_dir/state/task-x1.control-relaunch.meta-prior"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown should complete: $out"
+  [ ! -e "$case_dir/state/task-x1.control-relaunch" ] \
+    || fail "a terminal relaunch transaction should be retired"
+  [ ! -e "$case_dir/state/task-x1.control-relaunch.meta-prior" ] \
+    || fail "a terminal transaction's prior copy should be retired"
+  assert_not_contains "$out" "keeping task-x1's interrupted relaunch transaction" \
+    "a terminal transaction must not be reported as kept"
+  pass "teardown retires a terminal relaunch transaction"
+}
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
+test_teardown_keeps_an_open_relaunch_transaction_for_the_reconciler
+test_teardown_removes_a_terminal_relaunch_transaction
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note

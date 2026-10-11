@@ -30,9 +30,11 @@ TMP_ROOT=$(fm_test_tmproot fm-compaction-check)
 MODELS_STUB="$TMP_ROOT/models.txt"
 cat > "$MODELS_STUB" <<'EOF'
 provider         model                                               context  max-out  thinking  images
-syslog-harness   syslog-auto                                         131.1K   8.2K     no        no
+syslog-harness   syslog-auto                                         131.1K   32.8K    no        no
+syslog-harness   tencent-plan/auto                                   131.1K   8.2K     no        no
 deepseek         deepseek-v4-flash                                   1M       384K     yes       no
 openrouter       deepseek-v4-flash                                   1M       128K     yes       no
+openrouter       mega-out                                            1M       943.7K   yes       no
 deepseek         deepseek-flash                                      1M       384K     yes       yes
 EOF
 
@@ -739,6 +741,83 @@ EOF
   pass "the real pi --list-models output resolves a window through this checker"
 }
 
+# --- defect: thinking level and output budget -------------------------------
+#
+# The effective reasoning level and the model's output ceiling must be explicit
+# and judged at boot. A level inherited silently, a level set from two
+# conflicting files, an output ceiling below the local-model floor, or a ceiling
+# the compaction reserve cannot hold are all actionable, and every line names
+# the effective level and the file that set it.
+
+test_output_ceiling_below_the_fleet_floor_is_unsafe_with_both_numbers() {
+  case_dir=$(make_home output-floor)
+  home="$case_dir/home"
+  rmdir "$home/.pi"
+  cat > "$case_dir/global.json" <<'EOF'
+{"defaultProvider":"syslog-harness","defaultModel":"tencent-plan/auto","compaction":{"reserveTokens":65536}}
+EOF
+  run_check "$home"
+  expect_code 1 "$STATUS" "an 8.2K output ceiling must be reported unsafe"
+  line=$(scope_line primary "$OUT")
+  assert_contains "$line" "COMPACTION: unsafe" "the scope must be marked unsafe"
+  assert_contains "$line" "reason=output-budget-below-ceiling" "the reason must name the output ceiling"
+  assert_contains "$line" "output=8.2K ceiling=32768" "the line must name both numbers"
+  pass "a model output ceiling below the fleet floor fails loudly with both numbers"
+}
+
+test_output_ceiling_above_the_reserve_is_unsafe_with_both_numbers() {
+  case_dir=$(make_home output-reserve)
+  home="$case_dir/home"
+  rmdir "$home/.pi"
+  cat > "$case_dir/global.json" <<'EOF'
+{"defaultProvider":"openrouter","defaultModel":"mega-out","compaction":{"reserveTokens":500000}}
+EOF
+  run_check "$home"
+  expect_code 1 "$STATUS" "an output ceiling above the reserve must be reported unsafe"
+  line=$(scope_line primary "$OUT")
+  assert_contains "$line" "reason=output-budget-exceeds-reserve" "the reason must name the reserve collision"
+  assert_contains "$line" "output=943700" "the line must name the output ceiling"
+  assert_contains "$line" "reserve=500000" "the line must name the reserve"
+  pass "an output ceiling the reserve cannot hold fails loudly with both numbers"
+}
+
+test_thinking_level_from_two_conflicting_sources_is_unsafe() {
+  case_dir=$(make_home thinking-conflict)
+  home="$case_dir/home"
+  cat > "$case_dir/global.json" <<'EOF'
+{"defaultProvider":"syslog-harness","defaultModel":"syslog-auto","defaultThinkingLevel":"high","compaction":{"reserveTokens":65536}}
+EOF
+  cat > "$home/.pi/settings.json" <<'EOF'
+{"defaultThinkingLevel":"medium","compaction":{"reserveTokens":65536}}
+EOF
+  run_check "$home"
+  expect_code 1 "$STATUS" "a level set from two conflicting files must be reported unsafe"
+  line=$(scope_line primary "$OUT")
+  assert_contains "$line" "reason=thinking-level-dual-source" "the reason must name the two-source conflict"
+  assert_contains "$line" "project=medium global=high" "the line must name both values"
+  assert_contains "$line" "thinking=medium thinkingSource=$home/.pi/settings.json" \
+    "the effective project level must be named with its source"
+  pass "a thinking level set from two conflicting sources is reported unsafe with both values"
+}
+
+test_single_explicit_thinking_level_is_ok_and_named() {
+  case_dir=$(make_home thinking-single)
+  home="$case_dir/home"
+  cat > "$case_dir/global.json" <<'EOF'
+{"defaultProvider":"syslog-harness","defaultModel":"syslog-auto","defaultThinkingLevel":"high","compaction":{"reserveTokens":65536}}
+EOF
+  rmdir "$home/.pi"
+  run_check "$home"
+  expect_code 0 "$STATUS" "a single adequate output budget and level must pass"
+  line=$(scope_line primary "$OUT")
+  assert_contains "$line" "COMPACTION: ok" "the reconciled scope must pass"
+  assert_contains "$line" "thinking=high thinkingSource=$case_dir/global.json" \
+    "the effective level and its single source must be named"
+  assert_not_contains "$line" "thinking-level-dual-source" "a single source is not a conflict"
+  pass "a single explicit thinking level with an adequate output budget is reported ok and named"
+}
+
+
 test_project_over_global_reserve_wins
 test_global_reserve_used_without_project_settings
 test_builtin_default_reserve_is_named
@@ -764,4 +843,8 @@ test_missing_pi_is_skipped_not_failed
 test_silent_jq_is_not_read_as_missing_settings
 test_bootstrap_reports_unsafe_scope
 test_bootstrap_is_silent_when_every_scope_is_safe
+test_output_ceiling_below_the_fleet_floor_is_unsafe_with_both_numbers
+test_output_ceiling_above_the_reserve_is_unsafe_with_both_numbers
+test_thinking_level_from_two_conflicting_sources_is_unsafe
+test_single_explicit_thinking_level_is_ok_and_named
 test_real_pi_model_list_resolves
