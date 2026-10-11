@@ -76,6 +76,7 @@ The pool status view may expose metadata for all slots, including identifiers, p
 | Scratch or temporary items inside a finished task's `data/<id>/` | Conditional cleanup | Verify the task is finished and each item is scratch or temporary with no references; preserve `report.md` and investigation evidence. | Propose only individually verified items. |
 | `state/.<id>.open-decisions-cursor` | Unconditionally cleanable | Deleting the cursor causes one full open-decision re-fold and loses no decision state. | May be proposed with the one-time recomputation cost disclosed; deletion still requires the captain's specific authorization. |
 | Firstmate-created temporary demonstration artifacts | Conditional cleanup | Verify Firstmate ownership, temporary demonstration purpose, and absence of references. | Propose only individually verified artifacts. |
+| Documented harness-owned session records, installed plugins, and configuration snapshots | Conditional cleanup | Use the matching adapter reference's active-session checks; verify the item is not needed by a live session, current harness configuration, or installed plugin, and that its purpose and references are understood. If any check cannot be established from the adapter reference and current metadata, classify it as unknown/prohibited and ask the captain. | Propose only individually verified items; never infer eligibility from age or size. |
 | `state/*.status` and `state/*.meta` | Conditional cleanup | Only task teardown may remove these as part of finishing a task under `bin/fm-teardown.sh`; never manually delete active-task records, because byte-offset presentation cursors refer to them. | Leave lifecycle cleanup to teardown. |
 | A complete `data/<id>/` directory | Conditional cleanup | Verify both that the task is finished and that its deliverables are archived elsewhere; otherwise do not remove the directory. | Propose only after recording the archive location. |
 | A dirty isolated-copy pool slot | Conditional cleanup | Do not prescribe a destruction command. Present the evidence and let the captain decide disposition; never disturb an in-use or leased slot or another worker's sibling slot. | Escalate that specific slot's disposition to the captain. |
@@ -97,11 +98,11 @@ The supported task-close lifecycle is owned by `bin/fm-teardown.sh`, and the ope
 1. Perform the read-only audit of the applicable roots and record each candidate's path, size, owner, latest-use evidence, and evidence source.
 2. Apply the three-state table; record each required check, and treat failed or uncertain conditions as prohibited.
 3. Give the captain a table with columns “path / size / owner / classification / deletion conditions / suggested action”; show only Firstmate-owned candidates and keep sibling-slot identifiers and paths within the private home.
-4. Wait for the captain's explicit authorization naming the object and action; without it, stop at audit and recommendations.
-5. After authorization, rescue or back up the relevant content and verify the copy byte for byte; if verification fails, stop without changing the source.
-6. Perform only the approved minimum amount and do not expand to adjacent objects or bulk cleanup.
-7. Verify before-and-after byte counts and that relevant services and processes remain alive; confirm the resulting state matches the authorization.
-8. Record the outcome, measured space change, untreated items, and available rollback method; do not claim freed capacity without evidence.
+4. Present the audit and recommendations to the captain; stop without changing anything, even when the captain authorizes a specific object and action.
+5. If the captain authorizes cleanup, provide the authorized executor with the minimum backup, verification, and action procedure; the captain or designated executor performs it, not this skill.
+6. Do not expand an authorization to adjacent objects or bulk cleanup.
+7. Ask the captain or executor to verify before-and-after byte counts and that relevant services and processes remain alive; do not claim the result yourself without their evidence.
+8. Record only the reported outcome, measured space change, untreated items, and available rollback method; distinguish unverified reports from observed evidence.
 
 ## Examples of what not to do
 
