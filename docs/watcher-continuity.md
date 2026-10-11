@@ -364,10 +364,10 @@ Branch acknowledgement retiring the check-row receipts of exactly its granted se
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
-When supervision is still needed and a cycle returns an actionable wake, a standalone arm confirms a live watcher successor before it exits and links the successor in the cycle log.
-If it cannot confirm one, it queues a `watcher-successor-drop` check and reports failure with the cycle's missing successor.
-Adapters that own restoration set `FM_WATCH_NO_AUTO_SUCCESSOR=1` so their close handlers remain the successor owner; those arms queue the same check when no healthy watcher is present at close, while the adapter performs its own restoration.
-The regression suite uses the same override to exercise the surfaced drop path and repair a dropped chain without creating a duplicate watcher.
+Adapters (OpenCode, Claude, Pi, omp) own their own successor launches by default; standalone arms exit cleanly upon delivering a wake without spawning an unrequested successor.
+When `FM_WATCH_AUTO_SUCCESSOR=1` is opted in and supervision is needed, an arm confirms a live watcher successor before it exits and links the successor in the cycle log.
+If an opted-in successor cannot be confirmed, it queues a `watcher-successor-drop` check and reports failure with the cycle's missing successor.
+A single-flight launch guard protects the arm so concurrent or consecutive wakes cannot multiply arm processes.
 An arm started without an actionable wake follows its existing close-resolution contract below.
 
 ### How an arm resolves a close
@@ -467,7 +467,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.
-- Successor confirmation and cycle-log linking after an actionable close, surfaced failure when the test override disables successor launch, and repair of a dropped chain without creating a duplicate watcher.
+- Opt-in successor confirmation and cycle-log linking after an actionable close, surfaced failure when an opted-in successor cannot be confirmed, repair of a dropped chain, and single-arm invariance across consecutive wakes.
 
 `tests/fm-watch-recovery-loop.test.sh` covers:
 

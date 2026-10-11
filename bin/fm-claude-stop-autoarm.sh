@@ -344,9 +344,9 @@ ARM_PID=
 CLOSED_ARM_PID=
 run_arm() {  # <output file, or empty for none>
   if [ -n "$1" ]; then
-    FM_GUARD_GRACE="$GRACE" FM_WATCH_NO_AUTO_SUCCESSOR=1 "$SCRIPT_DIR/fm-watch-arm.sh" >"$1" 2>&1 &
+    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$1" 2>&1 &
   else
-    FM_GUARD_GRACE="$GRACE" FM_WATCH_NO_AUTO_SUCCESSOR=1 "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
+    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
   fi
   ARM_PID=$!
   wait "$ARM_PID" || true
@@ -377,7 +377,7 @@ start_handling_successor() {  # <closed-arm-pid>
   fi
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  FM_WATCH_PREDECESSOR_ARM_PID=$1 FM_GUARD_GRACE="$GRACE" FM_WATCH_NO_AUTO_SUCCESSOR=1 \
+  FM_WATCH_PREDECESSOR_ARM_PID=$1 FM_GUARD_GRACE="$GRACE" \
     nohup "$SCRIPT_DIR/fm-watch-arm.sh" >"$out" 2>&1 </dev/null &
   pid=$!
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
