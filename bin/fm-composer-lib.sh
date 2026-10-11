@@ -570,16 +570,32 @@ FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT='^[[:space:]]*/.*[0-9]+(\.[0-9]+)?[KMG]?[
 # 2026-10-10 on the fm-model-scorecard worker, OpenCode 1.18.25 through Herdr:
 # `  ┃                     ~/.treehouse/firstmate-cff959/2/` above `  ┃  Build
 # · DeepSeek V4.1 Flash (Ollama) Ollama Cloud      firstmate:fm/fm-model-
-# scorecard`). The classifier used to read that fragment as typed text, so an
-# idle, EMPTY composer read `pending`: fm-send skipped the doorbell and
-# fm-control refused exit and relaunch on a healthy worker. The fragment is
-# furniture ONLY in this exact shape - wide left padding (a wrapped
-# right-aligned cell, never the two-space indent typed rows carry), a path
-# opening `~/` or `/`, no whitespace inside it, and the row DIRECTLY below a
-# model row - so typed text in that position keeps its shallow indent and
-# stays pending. Consulted on the post-bar row body before trimming, by the
-# left-bar classifier and the extractor alike.
+# scorecard`). On an even longer worktree path the SAME cell wraps over
+# CONSECUTIVE rows (captured live 2026-10-10 on the desklink lead's engine-fix
+# worker, OpenCode 1.18.25 through Herdr): `  ┃
+# ~/.treehouse/desklink-f2d1d8/4/`, then `  ┃
+# desklink:fm/dl-engine-restart-keeps-` (the continuation row carries no `~/`
+# or `/` lead), then `  ┃  Build · DeepSeek V4.1 Flash pair`. The classifier
+# used to read that fragment as typed text, so an idle, EMPTY composer read
+# `pending`: fm-send skipped the doorbell and fm-control refused exit and
+# relaunch on a healthy worker. The fragment is furniture ONLY in this exact
+# shape - wide left padding (a wrapped right-aligned cell, never the
+# two-space indent typed rows carry), an opening row whose path begins `~/` or
+# `/` with no whitespace, zero or more no-whitespace continuation rows below
+# it, all ending DIRECTLY above a model row - so typed text in that position
+# keeps its shallow indent and stays pending. The opening row matches
+# FM_COMPOSER_OPENCODE_RIGHT_CELL_WRAP_RE_DEFAULT and each continuation row
+# matches FM_COMPOSER_OPENCODE_WRAP_CONT_RE_DEFAULT below; the caller proves
+# the run against the model row through
+# _fm_composer_opencode_wrap_run_start. Consulted on the post-bar row body
+# before trimming, by the left-bar classifier and the extractor alike.
 FM_COMPOSER_OPENCODE_RIGHT_CELL_WRAP_RE_DEFAULT='^[[:space:]]{8,}(~/|/)[^[:space:]]+$'
+# A wrapped `<dir>:<branch>` cell's continuation row: the same wide
+# right-aligned padding, but no `~/` or `/` lead (the wrap broke mid-token), so
+# the opening row is the only row that carries the path lead and every row here
+# is one unbroken no-whitespace token. Typed text never matches - it keeps its
+# two-space indent - so this only ever extends the opening row's furniture run.
+FM_COMPOSER_OPENCODE_WRAP_CONT_RE_DEFAULT='^[[:space:]]{8,}[^[:space:]]+$'
 # Pi's footer stats row opens at column 0 with the session cost when every
 # token counter is zero (`$0.000 (sub) 5.4%/272k (auto)` on pi 0.85.1).
 # That leading `$` is a cost cell, not a dead-shell prompt, only when a digit
@@ -1385,6 +1401,54 @@ _fm_composer_row_is_opencode_right_cell_wrap() {  # <padded-body>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_RIGHT_CELL_WRAP_RE:-$FM_COMPOSER_OPENCODE_RIGHT_CELL_WRAP_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_opencode_wrap_continuation: 0 when <padded-body> - a
+# left-bar row's content after its `┃` is stripped, BEFORE trimming - is a
+# continuation row of a wrapped right-aligned `<dir>:<branch>` directory
+# fragment (FM_COMPOSER_OPENCODE_WRAP_CONT_RE_DEFAULT above): the same wide
+# right-aligned padding with no `~/` or `/` lead and no interior whitespace.
+# Furniture only as part of a run whose opening row is
+# _fm_composer_row_is_opencode_right_cell_wrap and which ends directly above a
+# model row.
+_fm_composer_row_is_opencode_wrap_continuation() {  # <padded-body>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_WRAP_CONT_RE:-$FM_COMPOSER_OPENCODE_WRAP_CONT_RE_DEFAULT}" sensitive
+}
+
+# _fm_composer_opencode_wrap_run_start: print the FIRST row of a wrapped
+# right-aligned `<dir>:<branch>` directory fragment that ends on the row
+# directly above <last> and lies within [<first>,<last>), else print nothing
+# and return 1. A one-row wrap is the PR 55 shape (that row is the opening
+# FM_COMPOSER_OPENCODE_RIGHT_CELL_WRAP itself); a taller wrap is a run of
+# no-whitespace continuation rows below a `~/`- or `/`-opening row. The caller
+# must confirm <last> is a model row first, because the fragment is furniture
+# only in that position. Every row keeps the wide right-aligned padding, so
+# typed text's shallow indent never matches and is never consumed.
+_fm_composer_opencode_wrap_run_start() {  # <screen> <styled> <first> <last>
+  local screen=$1 styled=$2 first=$3 last=$4 row raw body
+  row=$((last - 1))
+  [ "$row" -ge "$first" ] || return 1
+  raw=$(_fm_composer_screen_row "$row" "$screen")
+  body=$(_fm_composer_row_content "$raw" "$styled")
+  case "$body" in '┃'*) body=${body#┃} ;; esac
+  if _fm_composer_row_is_opencode_right_cell_wrap "$body"; then
+    printf '%s' "$row"
+    return 0
+  fi
+  _fm_composer_row_is_opencode_wrap_continuation "$body" || return 1
+  row=$((row - 1))
+  while [ "$row" -ge "$first" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    body=$(_fm_composer_row_content "$raw" "$styled")
+    case "$body" in '┃'*) body=${body#┃} ;; esac
+    if _fm_composer_row_is_opencode_right_cell_wrap "$body"; then
+      printf '%s' "$row"
+      return 0
+    fi
+    _fm_composer_row_is_opencode_wrap_continuation "$body" || return 1
+    row=$((row - 1))
+  done
+  return 1
+}
+
 # _fm_composer_row_is_opencode_busy: 0 when the trimmed row carries OpenCode's
 # in-turn hint (`esc interrupt`). A busy status row is NOT furniture, so the
 # below-floor block collector excludes any block that contains it - necessary
@@ -1500,18 +1564,19 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # can prove it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content padded pending_seen=0 footer_re leading_blank=1 placeholder_position=0
-  local last_body last_is_model=0
+  local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
+  local last_body wrap_first=-1
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   # The agent/model row's wrapped `<dir>:<branch>` directory fragment is
   # furniture only directly above a model row, so prove the run's LAST row is
-  # one before any row may claim that shape.
+  # one before any row may claim that shape, then resolve the whole wrapped
+  # run (one or more rows) that ends on the row directly above it.
   raw=$(_fm_composer_screen_row "$last" "$screen")
   last_body=$(_fm_composer_row_content "$raw" "$styled")
   case "$last_body" in '┃'*) last_body=${last_body#┃} ;; esac
   fm_composer_normalize_trim_var last_body
   if fm_composer_idle_matches "$last_body" "$footer_re" sensitive; then
-    last_is_model=1
+    wrap_first=$(_fm_composer_opencode_wrap_run_start "$screen" "$styled" "$first" "$last") || wrap_first=-1
   fi
   row=$first
   while [ "$row" -le "$last" ]; do
@@ -1520,7 +1585,6 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     case "$content" in
       '┃'*) content=${content#┃} ;;
     esac
-    padded=$content
     fm_composer_normalize_trim_var content
     if [ -z "$content" ]; then row=$((row + 1)); continue; fi
     if [ "$leading_blank" = 1 ] && [ "$row" -gt "$first" ]; then
@@ -1537,8 +1601,7 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
        && fm_composer_idle_matches "$content" "$footer_re" sensitive; then
       row=$((row + 1)); continue
     fi
-    if [ "$row" -eq $((last - 1)) ] && [ "$last_is_model" = 1 ] \
-       && _fm_composer_row_is_opencode_right_cell_wrap "$padded"; then
+    if [ "$wrap_first" -ge 0 ] && [ "$row" -ge "$wrap_first" ] && [ "$row" -lt "$last" ]; then
       row=$((row + 1)); continue
     fi
     pending_seen=1
@@ -1904,7 +1967,7 @@ _fm_composer_extract_refusal_geometry() {  # <plain-screen>
 fm_composer_extract_selected_content() {  # <caps> <screen> [diagnostics=0]
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0 diagnostics=${3:-0}
-  local padded='' last_body last_is_model=0
+  local last_body wrap_first=-1
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1928,13 +1991,13 @@ EOF
     case "$last_body" in '┃'*) last_body=${last_body#┃} ;; esac
     fm_composer_normalize_trim_var last_body
     if fm_composer_idle_matches "$last_body" "$footer_re" sensitive; then
-      last_is_model=1
+      wrap_first=$(_fm_composer_opencode_wrap_run_start "$screen" "$styled" \
+        "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST") || wrap_first=-1
     fi
   fi
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
-    padded=''
     placeholder_position=0
     if [ "$FM_COMPOSER_SELECTED_KIND" = pi ] \
        && _fm_composer_row_is_pi_notice "$raw" "$styled"; then
@@ -1950,7 +2013,6 @@ EOF
         ;;
       leftbar)
         case "$content" in '┃'*) content=${content#┃} ;; esac
-        padded=$content
         fm_composer_normalize_trim_var content
         if [ -z "$content" ]; then
           :
@@ -1993,9 +2055,9 @@ EOF
             && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
             && fm_composer_idle_matches "$content" "$footer_re" sensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
-            && [ "$last_is_model" = 1 ] \
-            && [ "$row" -eq $((FM_COMPOSER_SELECTED_LAST - 1)) ] \
-            && _fm_composer_row_is_opencode_right_cell_wrap "$padded"; }; then
+            && [ "$wrap_first" -ge 0 ] \
+            && [ "$row" -ge "$wrap_first" ] \
+            && [ "$row" -lt "$FM_COMPOSER_SELECTED_LAST" ]; }; then
       row=$((row + 1))
       continue
     fi

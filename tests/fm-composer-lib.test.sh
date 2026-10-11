@@ -1075,6 +1075,35 @@ test_matrix_opencode_leftbar_signals() {
   assert_screen "opencode typed draft above the wrapped dir fragment on plain backends" unknown "$CAPS_PLAIN" "$v11825_typed_wrap"
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$v11825_typed_wrap")
   [ "$out" = 'Reply with OK.' ] || fail "a draft above the wrapped fragment must survive extraction, got '$out'"
+  # Live 2026-10-10 (OpenCode 1.18.25 through Herdr, the desklink lead's
+  # engine-fix worker): on a still-longer worktree path the SAME right-aligned
+  # `<dir>:<branch>` cell wraps over TWO rows - its `~/...` directory fragment
+  # on one row, the `desklink:fm/...` continuation on the next (which carries
+  # NO `~/` or `/` lead), both behind wide right-aligned padding - and the
+  # model row directly below ends `pair`. The single-row PR 55 rule only
+  # claimed the row DIRECTLY above the model row, so the continuation read as
+  # pending and the idle, empty composer stranded: fm-send skipped the
+  # doorbell and fm-control refused exit and relaunch. The rule now resolves
+  # the whole wrapped run (opening `~/`/`/` row plus no-whitespace
+  # continuation rows) that ENDS on the row directly above the model row, in
+  # the classifier and the extractor alike. A run whose rows do NOT end in an
+  # opening path row is still typed text, so a bare continuation above the
+  # model row stays pending.
+  local v11825_wrap2 v11825_typed2 v11825_orphan2
+  v11825_wrap2=$'  ┃\n  ┃\n  ┃                                                                  ~/.treehouse/desklink-f2d1d8/4/\n  ┃                                                                  desklink:fm/dl-engine-restart-keeps-\n  ┃  Build · DeepSeek V4.1 Flash pair\n'"$floor"$'\n   /home/umer/.treehouse/desklink-f2d1d8/4/desklink             87.1K (33%) · $0.33  ctrl+p commands    • OpenCode 1.18.25'
+  assert_screen "opencode 1.18.25 two-row wrapped dir fragment above model row on herdr" empty "$CAPS_STYLED" "$v11825_wrap2"
+  assert_screen "opencode 1.18.25 two-row wrapped dir fragment above model row on zellij" empty "$CAPS_STYLED_NOID" "$v11825_wrap2"
+  assert_screen "opencode 1.18.25 two-row wrapped dir fragment above model row on cmux/orca" empty "$CAPS_PLAIN" "$v11825_wrap2"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$v11825_wrap2")
+  [ -z "$out" ] || fail "the two-row wrapped dir fragment must never extract as composer content, got '$out'"
+  v11825_typed2=$'  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃                                                                  ~/.treehouse/desklink-f2d1d8/4/\n  ┃                                                                  desklink:fm/dl-engine-restart-keeps-\n  ┃  Build · DeepSeek V4.1 Flash pair\n'"$floor"
+  assert_screen "opencode typed draft above the two-row wrapped fragment on herdr" pending "$CAPS_STYLED" "$v11825_typed2"
+  assert_screen "opencode typed draft above the two-row wrapped fragment on plain backends" unknown "$CAPS_PLAIN" "$v11825_typed2"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$v11825_typed2")
+  [ "$out" = 'Reply with OK.' ] || fail "a draft above the two-row wrapped fragment must survive extraction, got '$out'"
+  v11825_orphan2=$'  ┃\n  ┃  Reply with OK.\n  ┃                                                                  desklink:fm/dl-engine-restart-keeps-\n  ┃  Build · DeepSeek V4.1 Flash pair\n'"$floor"
+  assert_screen "opencode bare wrap continuation with no opening path row stays pending on herdr" pending "$CAPS_STYLED" "$v11825_orphan2"
+  assert_screen "opencode bare wrap continuation with no opening path row stays unknown on plain backends" unknown "$CAPS_PLAIN" "$v11825_orphan2"
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
 }
 
