@@ -5629,8 +5629,15 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
 fi
 
 # This is the commit point: all endpoint and harness delivery that can reject
-# the spawn has succeeded. Re-read and transition while holding the same
-# per-task lock as metadata publication, then and only then report success.
+# the spawn has succeeded, so this worker supersedes any deliberately stopped
+# incarnation of the task. Clear the parked-task marker only here: an earlier
+# launch failure leaves the stopped task parked rather than reviving the
+# stale/wedge ladder. Re-read and transition while holding the same per-task
+# lock as metadata publication, then and only then report success.
+fm_control_deliberate_stop_clear "$STATE_REAL" "$ID" || {
+  echo "error: task $ID's worker was launched, but its deliberate-stop marker could not be cleared" >&2
+  exit 1
+}
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"

@@ -390,6 +390,87 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_clears_the_deliberate_stop_marker() {
+  local dir out rc
+  dir=$(new_case deliberate-stop-clear rl1)
+  add_ship_task "$dir" rl1 claude
+  # A prior deliberate stop left this marker (bin/fm-control-lib.sh owns it);
+  # the relaunch must clear it so the replacement is supervised normally again.
+  printf '%s\n' "$(date +%s)" > "$dir/home/state/rl1.deliberate-stop"
+  out=$(run_control "$dir" rl1 relaunch --note "resume after a deliberate stop"); rc=$?
+  expect_code 0 "$rc" "the relaunch should succeed"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl1.deliberate-stop" ] \
+    || fail "a relaunch must clear the deliberate-stop marker so the replacement is supervised normally"
+  pass "fm-control relaunch: clears the durable deliberate-stop marker left by a prior stop"
+}
+
+test_relaunch_clears_the_deliberate_stop_marker_when_the_backlog_commit_fails() {
+  local dir out rc=0
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case deliberate-stop-clear-backlog rl77)
+  add_ship_task "$dir" rl77 claude
+  seed_backlog "$dir" rl77 queued
+  break_tasks_axi_start "$dir"
+  printf '%s\n' "$(date +%s)" > "$dir/home/state/rl77.deliberate-stop"
+
+  out=$(run_control "$dir" rl77 relaunch --note "resume after a deliberate stop") || rc=$?
+
+  # The replacement is delivered before the deferred backlog commit, so even
+  # though that commit fails and the relaunch reports failure, the running
+  # replacement must not stay classified as a deliberately parked task.
+  expect_code 1 "$rc" "a failed backlog commit should fail the relaunch"$'\n'"$out"
+  assert_grep "Firstmate operational input waiting" "$dir/fake/literal" \
+    "the replacement should have been delivered before the backlog commit failed"
+  [ ! -e "$dir/home/state/rl77.deliberate-stop" ] \
+    || fail "a delivered relaunch must clear the deliberate-stop marker even when the backlog commit fails"
+  pass "fm-control relaunch: a failed post-launch backlog commit still clears the deliberate-stop marker"
+}
+
+test_fresh_spawn_revive_clears_the_deliberate_stop_marker() {
+  local dir out rc
+  dir=$(new_case fresh-revive-clear rl9)
+  add_ship_task "$dir" rl9 claude
+  # The recorded endpoint is gone but the task record survives, the shape a
+  # same-identity reclaim revives in place. A fresh spawn republishes that
+  # record for a replacement worker and must clear the parked-task marker.
+  : > "$dir/fake/windows"
+  printf '%s\n' "$(date +%s)" > "$dir/home/state/rl9.deliberate-stop"
+  out=$(run_spawn "$dir" rl9 "$dir/proj" --mode no-mistakes --yolo off --harness claude); rc=$?
+  expect_code 0 "$rc" "a fresh spawn reviving an existing record should succeed"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl9.deliberate-stop" ] \
+    || fail "a fresh spawn that republishes an existing record must clear the deliberate-stop marker"
+  pass "fm-spawn fresh spawn: reviving an existing task record clears the deliberate-stop marker"
+}
+
+test_fresh_spawn_retry_after_rollback_clears_the_deliberate_stop_marker() {
+  local dir out rc=0
+  dir=$(new_case fresh-revive-rollback rl10)
+  add_ship_task "$dir" rl10 claude
+  : > "$dir/fake/windows"
+  printf '%s\n' "$(date +%s)" > "$dir/home/state/rl10.deliberate-stop"
+
+  # The revive publishes its record, then fails during launch delivery, so the
+  # rollback removes that provisional record while the marker survives. The
+  # documented retry then republishes a record for a brand-new incarnation.
+  out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
+    run_spawn "$dir" rl10 "$dir/proj" --mode no-mistakes --yolo off --harness claude) || rc=$?
+  expect_code 1 "$rc" "a launch transport failure should fail the fresh spawn"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl10.meta" ] \
+    || fail "a failed fresh spawn should roll back its provisional record"
+  # The endpoint the failed attempt created is gone too; the tmux stub does not
+  # model window destruction, so clear the inventory the way the backend would.
+  : > "$dir/fake/windows"
+
+  out=$(run_spawn "$dir" rl10 "$dir/proj" --mode no-mistakes --yolo off --harness claude); rc=$?
+  expect_code 0 "$rc" "the retry after a rolled-back revive should succeed"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl10.deliberate-stop" ] \
+    || fail "a retry after a rolled-back revive must clear the orphaned deliberate-stop marker"
+  pass "fm-spawn fresh spawn: a retry after a rolled-back revive clears the orphaned deliberate-stop marker"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -921,7 +1002,9 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
     || fail "the transaction should record the partial launch failure"
   [ "$(journal_field "$dir" rl29 rollback)" = prior-record-kept ] \
     || fail "unpublished rollback should retain the live durable record"
-  pass "fm-control relaunch: wiring cleanup failure refuses replacement arming"
+  [ -e "$dir/home/state/rl29.deliberate-stop" ] \
+    || fail "an aborted relaunch must retain the parked deliberate-stop marker"
+  pass "fm-control relaunch: wiring cleanup failure refuses replacement arming and retains the parked stop"
 }
 
 test_turnend_auth_paths_are_owned_by_the_control_adapter() {
@@ -2489,6 +2572,10 @@ SH
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_clears_the_deliberate_stop_marker
+test_relaunch_clears_the_deliberate_stop_marker_when_the_backlog_commit_fails
+test_fresh_spawn_revive_clears_the_deliberate_stop_marker
+test_fresh_spawn_retry_after_rollback_clears_the_deliberate_stop_marker
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
