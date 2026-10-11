@@ -31,18 +31,21 @@ done
 [ "${previous:-}" = --session ] || { echo "fake herdr: missing --session before any -- delimiter" >&2; exit 90; }
 session=$last
 default_socket=$(cat "$state/default-socket")
+default_state=$(jq -nc --arg socket "$default_socket" \
+  '{sessions:[{default:true,name:"default",running:true,socket_path:$socket,session_dir:"/home/test/.config/herdr"}]}')
+[ ! -f "$state/default-state.json" ] || default_state=$(cat "$state/default-state.json")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
 
 case "$1 ${2:-}" in
   "session list")
     if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
+      printf '%s\n' "$default_state"
     else
       running=false
       [ "$lab_state" = running ] && running=true
-      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+      printf '%s' "$default_state" | jq -c --arg name "$session" --argjson running "$running" \
+        '.sessions += [{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]'
     fi
     ;;
   "server --session")
@@ -164,6 +167,121 @@ test_provision_run_and_guarded_teardown() {
   sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
     || fail "delete was not immediately preceded by a fresh refuse-default session list"
   pass "fm-herdr-lab: provisioning, scoped calls, guarded teardown, and fleet tripwire are deterministic"
+}
+
+test_stopped_default_lifecycle_preserves_baseline() {
+  # Exercise the executable against an observed stopped default without starting it.
+  local name="fm-lab-fresh-host-$$" before after
+  before='{"sessions":[{"name":"default","default":true,"running":false,"socket_path":"/tmp/private/herdr.sock","session_dir":"/tmp/private/herdr"}]}'
+  printf '%s\n' "$before" > "$FAKE_STATE/default-state.json"
+  : > "$FAKE_LOG"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" provision "$name" || fail "stopped default refused provision"
+  jq -e '.running == false and .session_dir == "/tmp/private/herdr"' \
+    "$TRIPWIRES/$name.fleet-state.json" >/dev/null || fail "stopped default baseline was not recorded"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" run "$name" workspace list >/dev/null || fail "fresh lab command failed"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" stop "$name" || fail "fresh lab stop failed"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" provision "$name" || fail "fresh lab re-provision failed"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" teardown "$name" || fail "fresh lab teardown failed"
+  after=$(run_with_fake "$ROOT/bin/fm-herdr-lab.sh" run "$name" session list --json)
+  [ "$(printf '%s' "$before" | jq -c .)" = "$after" ] || fail "stopped default changed during lifecycle"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "fresh lab teardown retained its tripwire"
+  if grep -Ev -- "--session $name$" "$FAKE_LOG" >/dev/null; then
+    fail "fresh lab lifecycle reached a session other than its explicit named target"
+  fi
+  rm -f "$FAKE_STATE/default-state.json"
+  pass "fm-herdr-lab: a stopped default stays stopped across named lab lifecycle"
+}
+
+test_ambiguous_default_baselines_refuse_provision() {
+  # Reject unknown state, contradictory identity, and missing or invalid paths before startup.
+  local name="fm-lab-ambiguous-$$" filter status before
+  before='{"sessions":[{"name":"default","default":true,"running":false,"socket_path":"/tmp/private/herdr.sock","session_dir":"/tmp/private/herdr"}]}'
+  while IFS= read -r filter; do
+    printf '%s' "$before" | jq -c "$filter" > "$FAKE_STATE/default-state.json"
+    : > "$FAKE_LOG"
+    status=0
+    run_with_fake "$ROOT/bin/fm-herdr-lab.sh" provision "$name" >/dev/null 2>&1 || status=$?
+    expect_code 1 "$status" "ambiguous default must refuse provision: $filter"
+    assert_absent "$TRIPWIRES/$name.fleet-state.json" "refused baseline retained ownership: $filter"
+    if grep -q '^server ' "$FAKE_LOG"; then
+      fail "ambiguous baseline reached server startup: $filter"
+    fi
+  done <<'FILTERS'
+.sessions = []
+.sessions += .sessions
+.sessions += [{name:"default",default:false,running:false,socket_path:"/other.sock"}]
+.sessions[0].name = "other"
+.sessions[0].default = false
+.sessions[0].running = null
+del(.sessions[0].running)
+.sessions[0].running = "false"
+.sessions[0].running = 0
+del(.sessions[0].socket_path)
+.sessions[0].socket_path = ""
+.sessions[0].socket_path = "relative.sock"
+.sessions[0].session_dir = null
+.sessions[0].session_dir = "relative"
+FILTERS
+  printf '%s\n' '{not json}' > "$FAKE_STATE/default-state.json"
+  status=0
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" provision "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "malformed session list must refuse provision"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "malformed baseline retained ownership"
+  rm -f "$FAKE_STATE/default-state.json"
+  pass "fm-herdr-lab: ambiguous default identity, paths, and running state refuse startup"
+}
+
+test_default_transitions_retain_tripwire() {
+  # Both baseline states reject changed identity, paths, or running state on restart and cleanup.
+  local name running filter before status counter=0
+  for running in true false; do
+    before=$(jq -nc --argjson running "$running" \
+      '{sessions:[{name:"default",default:true,running:$running,socket_path:"/tmp/private/herdr.sock",session_dir:"/tmp/private/herdr"}]}')
+    while IFS= read -r filter; do
+      counter=$((counter + 1))
+      name="fm-lab-transition-$$-$counter"
+      printf '%s\n' "$before" > "$FAKE_STATE/default-state.json"
+      run_with_fake "$ROOT/bin/fm-herdr-lab.sh" provision "$name" || fail "transition fixture provision failed"
+      run_with_fake "$ROOT/bin/fm-herdr-lab.sh" stop "$name" || fail "transition fixture stop failed"
+      printf '%s' "$before" | jq -c "$filter" > "$FAKE_STATE/default-state.json"
+      : > "$FAKE_LOG"
+      status=0
+      run_with_fake "$ROOT/bin/fm-herdr-lab.sh" provision "$name" >/dev/null 2>&1 || status=$?
+      expect_code 1 "$status" "changed $running baseline must refuse restart: $filter"
+      if grep -q '^server ' "$FAKE_LOG"; then
+        fail "changed baseline reached server startup: $filter"
+      fi
+      status=0
+      run_with_fake "$ROOT/bin/fm-herdr-lab.sh" teardown "$name" >/dev/null 2>&1 || status=$?
+      expect_code 1 "$status" "changed $running baseline must fail cleanup: $filter"
+      assert_present "$TRIPWIRES/$name.fleet-state.json" "changed baseline lost its evidence"
+      printf '%s\n' "$before" > "$FAKE_STATE/default-state.json"
+      run_with_fake "$ROOT/bin/fm-herdr-lab.sh" teardown "$name" || fail "restored baseline cleanup failed"
+      assert_absent "$TRIPWIRES/$name.fleet-state.json" "verified cleanup retained evidence"
+    done <<'FILTERS'
+.sessions[0].running |= not
+.sessions[0].running = null
+.sessions[0].name = "other"
+.sessions[0].default = false
+.sessions[0].socket_path = "/changed/herdr.sock"
+.sessions[0].session_dir = "/changed/herdr"
+.sessions = []
+.sessions += .sessions
+FILTERS
+  done
+  rm -f "$FAKE_STATE/default-state.json"
+  pass "fm-herdr-lab: both default baseline states reject contradictory transitions"
+}
+
+test_socket_only_default_remains_supported() {
+  # Keep older Herdr session lists usable when they omit session_dir.
+  local name="fm-lab-socket-only-$$"
+  printf '%s\n' '{"sessions":[{"name":"default","default":true,"running":true,"socket_path":"/tmp/private/herdr.sock"}]}' \
+    > "$FAKE_STATE/default-state.json"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" provision "$name" || fail "socket-only default refused provision"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" teardown "$name" || fail "socket-only default teardown failed"
+  rm -f "$FAKE_STATE/default-state.json"
+  pass "fm-herdr-lab: socket-only running-default snapshots remain supported"
 }
 
 test_run_scopes_session_before_double_dash() {
@@ -536,6 +654,10 @@ test_viewer_launcher_refuses_unsafe_arguments() {
 
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
+test_stopped_default_lifecycle_preserves_baseline
+test_ambiguous_default_baselines_refuse_provision
+test_default_transitions_retain_tripwire
+test_socket_only_default_remains_supported
 test_run_scopes_session_before_double_dash
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
