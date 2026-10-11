@@ -28,6 +28,10 @@
 # Aggregation (no suite execution):
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
 #
+# Scoped stop (kills only that run and its descendants, never sibling suites):
+#   fm-test-run.sh --stop [run-id]   (no run-id: list live runs; one run: stop it)
+#   A stopped or interrupted run prints FM_TEST_ABORTED signal=<n> run=<id>.
+#
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run. Each
 #                   script record carries its family, expected gate-skip class,
@@ -225,6 +229,49 @@ usage() {
     /^#/ { sub(/^# ?/, ""); print; next }
     { exit }
   ' "$0" >&2
+}
+
+PID_DIR="${TMPDIR:-/tmp}/fm-test-run-pids"
+
+descendants_of() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do
+    descendants_of "$c"
+    printf '%s\n' "$c"
+  done
+}
+
+# Lists live runs (no argument) or stops exactly one run and its descendants.
+stop_runs() {
+  local want=${1:-} f id pid live=0 victims
+  for f in "$PID_DIR"/*.pid; do
+    [ -f "$f" ] || continue
+    id=$(basename "$f" .pid)
+    pid=$(cat "$f" 2>/dev/null)
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$f"
+      continue
+    fi
+    live=$((live + 1))
+    if [ -z "$want" ]; then
+      printf '%s pid=%s\n' "$id" "$pid"
+    elif [ "$id" = "$want" ]; then
+      # Bash defers a trap until its foreground child exits, so signal the
+      # runner first, then its descendants, which lets the trap run promptly.
+      victims=$(descendants_of "$pid")
+      kill -TERM "$pid" 2>/dev/null || true
+      # shellcheck disable=SC2086
+      [ -z "$victims" ] || kill -TERM $victims 2>/dev/null || true
+      printf 'fm-test-run: stopped %s\n' "$id"
+      return 0
+    fi
+  done
+  if [ -z "$want" ]; then
+    [ "$live" -gt 0 ] || printf 'fm-test-run: no live runs\n' >&2
+    return 0
+  fi
+  printf 'fm-test-run: no live run %s\n' "$want" >&2
+  return 1
 }
 
 die() {
@@ -2171,6 +2218,14 @@ while [ "$#" -gt 0 ]; do
       LIST_LANES=1
       shift
       ;;
+    --stop)
+      stop_runs "${2:-}"
+      exit $?
+      ;;
+    --stop=*)
+      stop_runs "${1#--stop=}"
+      exit $?
+      ;;
     --check-coverage)
       CHECK_COVERAGE=1
       shift
@@ -2502,11 +2557,29 @@ declare -a WORKER_SCRIPTS=()
 # shellcheck disable=SC2329
 cleanup_run() {
   rm -rf "$RUN_TMP"
+  rm -f "${PID_FILE:-}"
+}
+
+RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
+mkdir -p "$PID_DIR"
+PID_FILE="$PID_DIR/$RUN_ID.pid"
+printf '%s\n' "$$" >"$PID_FILE"
+
+# Invoked indirectly by the TERM/INT trap below.
+# shellcheck disable=SC2329
+abort_run() {
+  local sig=$1 p
+  trap - TERM INT
+  for p in $(descendants_of "$$"); do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  printf 'FM_TEST_ABORTED signal=%s run=%s\n' "$sig" "$RUN_ID"
+  exit $((128 + sig))
 }
 
 trap cleanup_run EXIT
-
-RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
+trap 'abort_run 15' TERM
+trap 'abort_run 2' INT
 TOTAL=0
 FAILED=0
 SKIPPED_GATE=0

@@ -1519,6 +1519,45 @@ test_concurrent_runs_are_ordered_longest_first() {
 # --max-wall-ms is checked after the run, so it cannot end a run that never
 # finishes. A hung script has to become a bounded failure, because an unbounded
 # suite is exactly what silently outruns its caller's invocation budget.
+test_stop_is_scoped_to_one_run() {
+  local tmp repo runner sleeper a_out b_out a_id b_pid w
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stop.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  sleeper=tests/fm-sleep-fixture.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  printf '#!/usr/bin/env bash\necho "ok - sleeping"\nsleep 600\n' >"$repo/$sleeper"
+  chmod +x "$runner" "$repo/$sleeper"
+  a_out="$tmp/a.out"
+  b_out="$tmp/b.out"
+  TMPDIR="$tmp" "$runner" "$sleeper" >"$a_out" 2>&1 &
+  TMPDIR="$tmp" "$runner" "$sleeper" >"$b_out" 2>&1 &
+  b_pid=$!
+  w=0
+  while [ "$(find "$tmp/fm-test-run-pids" -name '*.pid' 2>/dev/null | wc -l | tr -d ' ')" -lt 2 ] && [ "$w" -lt 100 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  a_id=$(TMPDIR="$tmp" "$runner" --stop | head -1 | awk '{print $1}')
+  [ -n "$a_id" ] || fail "--stop listed no live runs"
+  TMPDIR="$tmp" "$runner" --stop "$a_id" >/dev/null || fail "--stop <run> failed"
+  w=0
+  while ! grep -q FM_TEST_ABORTED "$a_out" "$b_out" 2>/dev/null && [ "$w" -lt 100 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  [ "$(grep -l FM_TEST_ABORTED "$a_out" "$b_out" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "exactly one run must abort: $(cat "$a_out" "$b_out")"
+  kill -0 "$b_pid" 2>/dev/null || fail "sibling run died"
+  TMPDIR="$tmp" "$runner" --stop "$(TMPDIR="$tmp" "$runner" --stop | head -1 | awk '{print $1}')" >/dev/null 2>&1 || true
+  wait
+  rm -rf "$tmp"
+  pass "--stop kills one run, emits FM_TEST_ABORTED, spares siblings"
+}
+
 test_per_script_timeout_bounds_a_hang() {
   local tmp repo runner hang rc began ended grandchild_pid grandchild waited
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-hang.XXXXXX")
@@ -1932,6 +1971,7 @@ test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
 test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
+test_stop_is_scoped_to_one_run
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice
