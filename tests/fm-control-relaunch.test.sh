@@ -2577,6 +2577,8 @@ launched_with_store() {  # <case-dir> <store> <what>
 
 add_claude_secondmate() {  # <case-dir> <id>
   local dir=$1 id=$2 home="$1/home"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
   fm_git_worktree "$dir/proj" "$dir/smhome" "sm-$id"
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf '%s\n' "$id" > "$dir/smhome/.fm-secondmate-home"
