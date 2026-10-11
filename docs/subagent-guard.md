@@ -229,7 +229,7 @@ The integration surface of each was inspected and each is structurally wireable 
 - Grok's tracked hooks (`.grok/hooks/fm-primary-pretool-check.json`, `.grok/hooks/fm-primary-cd-check.json`) use a `PreToolUse` matcher, currently `Bash`, and pipe stdin to a checker.
   The checker already reads Grok's `.toolName` field, so only the matcher token is missing.
   Grok does expose a delegation surface: `docs/supervision-protocols/grok.md` documents `get_command_or_subagent_output(<task_id>)`, which implies a corresponding dispatch tool.
-- OpenCode's tracked plugins gate on `input?.tool !== "bash"` inside `tool.execute.before`, and block by throwing.
+- OpenCode's tracked plugins gate on the shell tool (`bash` on the v1 hook API, `shell` on v2) inside `tool.execute.before` / `ctx.tool.hook("execute.before", ...)`, and block by throwing.
   Swapping that comparison for a call into this checker with `--tool` is the whole change.
 - Pi's tracked extension gates on `event.toolName !== "bash"` inside `pi.on("tool_call", ...)` and blocks by returning `{block: true}`.
   The same change applies. A parallel evaluation reports that Pi exposes no delegation tool at all, which would make it not applicable, but that was not verified here.

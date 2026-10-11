@@ -58,3 +58,36 @@ export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }
     },
   };
 };
+
+// OpenCode v2 default export. The v2 loader requires `{ id, setup(ctx) }`, v2
+// events arrive from `ctx.event.subscribe()`, and a follow-up turn is forced
+// with `ctx.session.prompt`. The v1 hook object above is reused through a
+// `client` shim so both APIs share one implementation.
+function clientFromCtx(ctx) {
+  return {
+    session: {
+      promptAsync: ({ path, body }) =>
+        ctx.session.prompt({ sessionID: path?.id, text: body?.parts?.[0]?.text ?? "" }),
+    },
+  };
+}
+
+export default {
+  id: "fm-primary-sessionstart-nudge",
+  async setup(ctx) {
+    const hooks = await FmPrimarySessionstartNudge({
+      client: clientFromCtx(ctx),
+      directory: ctx.location?.directory,
+    });
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        // v2 events carry their payload under `data`; the v1 hooks read `properties`.
+        try {
+          await hooks.event({ event: { type: event.type, properties: event.data } });
+        } catch {}
+      }
+    })().catch(() => {});
+    return () => controller.abort();
+  },
+};

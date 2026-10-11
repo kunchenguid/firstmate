@@ -197,6 +197,35 @@ await hooks.event({ event });
 await hooks.event({ event });
 if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.length}`);
 if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
+
+// v2 default export: ctx.event.subscribe + ctx.session.prompt
+const v2prompts = [];
+const ctx = {
+  location: { directory: process.env.WORKTREE },
+  session: {
+    prompt: async (arg) => {
+      v2prompts.push(arg);
+    },
+  },
+  event: {
+    subscribe: async function* () {
+      // v2.0.18 event envelope: payload under `data`, not `properties`.
+      yield {
+        id: "evt_1",
+        created: 0,
+        type: "session.created",
+        data: { sessionID: "session-nudge-v2", agent: "build" },
+      };
+    },
+  },
+};
+await mod.default.setup(ctx);
+for (let i = 0; i < 40 && v2prompts.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+if (v2prompts.length !== 1) throw new Error(`expected one v2 prompt, got ${v2prompts.length}`);
+if (v2prompts[0].sessionID !== "session-nudge-v2") throw new Error(`unexpected v2 session: ${v2prompts[0].sessionID}`);
+if (v2prompts[0].text !== process.env.EXPECTED) throw new Error(`unexpected v2 prompt: ${v2prompts[0].text}`);
 EOF
   ) || status=$?
   expect_code 0 "$status" "OpenCode exact nudge delivery"

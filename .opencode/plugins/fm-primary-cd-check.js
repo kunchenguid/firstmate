@@ -2,6 +2,10 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 
+// The OpenCode shell tool is `bash` on the v1 hook API and `shell` on the v2
+// hook API; the same command-guard owner handles both.
+const SHELL_TOOL_NAMES = new Set(["bash", "shell"]);
+
 // PreToolUse seatbelt for OpenCode: block a stray persistent top-level `cd` in
 // the primary firstmate checkout before the agent's bash tool relocates the
 // shell out of the home (see bin/fm-cd-pretool-check.sh and docs/cd-guard.md).
@@ -50,7 +54,7 @@ export const FmPrimaryCdCheck = async ({ directory, worktree }) => {
 
   return {
     "tool.execute.before": async (input, output) => {
-      if (!root || input?.tool !== "bash") return;
+      if (!root || !SHELL_TOOL_NAMES.has(input?.tool)) return;
       const command = output?.args?.command;
       if (!command || typeof command !== "string") return;
 
@@ -61,4 +65,17 @@ export const FmPrimaryCdCheck = async ({ directory, worktree }) => {
       throw new Error(reason);
     },
   };
+};
+
+// OpenCode v2 default export: the loader requires `{ id, setup(ctx) }` and the
+// v2 `ctx.tool.hook("execute.before", event)` event carrying `event.tool` and
+// `event.input`, so it is adapted onto the shared v1 hook object above.
+export default {
+  id: "fm-primary-cd-check",
+  async setup(ctx) {
+    const hooks = await FmPrimaryCdCheck({ directory: ctx.location?.directory });
+    await ctx.tool.hook("execute.before", (event) =>
+      hooks["tool.execute.before"]({ tool: event?.tool }, { args: event?.input ?? {} }),
+    );
+  },
 };
