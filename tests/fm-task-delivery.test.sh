@@ -1609,6 +1609,12 @@ EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix bareproj 2>/dev/null)
   [ "$out" = "" ] || fail "an empty branch= override must resolve to an empty prefix, not fm/ (got '$out')"
 
+  printf '%s\n' '- v10proj [direct-PR pr-draft-hold=do-not-auto-ready] - v10 fixture (added 2026-01-01)' >> "$home/data/projects.md"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --pr-draft-hold v10proj 2>/dev/null)
+  [ "$out" = "do-not-auto-ready" ] || fail "pr-draft-hold registry token was not resolved (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" v10proj 2>/dev/null)
+  [ "$out" = "direct-PR off" ] || fail "pr-draft-hold token must not leak into mode/yolo output (got '$out')"
+
   out=$(FM_HOME="$home" "$PROJECT_MODE" typomodeproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode's registered branch leaked into the mode/yolo output (got '$out')"
   err=$(FM_HOME="$home" "$PROJECT_MODE" typomodeproj 2>&1 >/dev/null)

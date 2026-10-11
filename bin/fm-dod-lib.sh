@@ -6,7 +6,7 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>] [<pr-draft-hold-label>]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
 # contract.
@@ -44,7 +44,8 @@
 # task's done. Teardown's landed-work test remains the complete discard gate.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
-# appends " forge=gerrit shape=squash" to that line. The "Ship branch: <branch>"
+# appends " forge=gerrit shape=squash" to that line, and a pr-draft-hold delivery
+# appends " pr-draft-hold=<label>". The "Ship branch: <branch>"
 # line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
 # forge is none|gerrit and defaults to none; bin/fm-project-mode.sh's header owns
@@ -64,9 +65,11 @@
 # watch is armed, because the merge poll watches one change. No contract here
 # lets a worker submit, vote on, or abandon a change.
 # The two PR-based blocks require a non-draft pull request before the done
-# report, read back from the forge; a lane that deliberately holds a draft
-# declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
-# monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
+# report, read back from the forge, unless the delivery contract carries
+# pr-draft-hold=<label>: then the worker opens a draft, applies that label,
+# and reports done while the pull request stays a draft. bin/fm-pr-check.sh
+# refuses to arm merge monitoring on a draft through the same reading
+# bin/fm-pr-merge.sh uses; a deliberate draft hold is not a paused wait.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -159,6 +162,41 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
 # metadata, and every later consumer reads that metadata field. It is
 # refused on local-only, whose landing fast-forwards local main, and on a Gerrit
 # forge, whose publish path targets the change's own branch.
+# Optional pr-draft-hold=<label> on a GitHub pull-request delivery keeps the PR a
+# draft, applies <label>, and accepts a done report while it stays a draft.
+# It composes with no-mistakes and direct-PR and is refused on local-only and
+# on forge=gerrit, which has no pull requests.
+fm_pr_draft_hold_valid_for_mode() {  # <label> <mode> <forge> <caller>
+  local label=$1 mode=$2 forge=$3 caller=$4
+  [ -n "$label" ] || return 0
+  case "$label" in
+    *' '*)
+      echo "error: $caller: pr-draft-hold label must not contain a space (got '$label')" >&2
+      return 1 ;;
+  esac
+  if [ "$forge" != none ]; then
+    echo "error: $caller: pr-draft-hold is refused on forge=$forge; it applies only to GitHub pull requests" >&2
+    return 1
+  fi
+  case "$mode" in
+    no-mistakes|direct-PR) return 0 ;;
+    *)
+      echo "error: $caller: pr-draft-hold applies only to no-mistakes or direct-PR (got mode=$mode)" >&2
+      return 1 ;;
+  esac
+}
+
+fm_dod_delivery_contract_line() {  # <mode> <forge> <pr-draft-hold-label>
+  local mode=$1 forge=$2 hold=$3 line=
+  case "$mode:$forge" in
+    direct-PR:gerrit) line='Delivery contract: mode=direct-PR forge=gerrit shape=squash' ;;
+    no-mistakes:gerrit) line='Delivery contract: mode=no-mistakes forge=gerrit shape=squash' ;;
+    *) line="Delivery contract: mode=$mode" ;;
+  esac
+  [ -z "$hold" ] || line="$line pr-draft-hold=$hold"
+  printf '%s\n' "$line"
+}
+
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   local base=$1 mode=$2 forge=$3 caller=$4
   [ -n "$base" ] || return 0
@@ -400,11 +438,14 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<pr-draft-hold>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} pr_draft_hold=${6:-}
+  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q hold_q contract=
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
+  fm_pr_draft_hold_valid_for_mode "$pr_draft_hold" "$mode" "$forge" fm_dod_block || return 1
+  contract=$(fm_dod_delivery_contract_line "$mode" "$forge" "$pr_draft_hold")
+  [ -z "$pr_draft_hold" ] || printf -v hold_q '%q' "$pr_draft_hold"
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"
     pr_base=", against the base branch \`$base\` (\`--base $base_q\`), not the repository default"
@@ -415,7 +456,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
     direct-PR:gerrit)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=direct-PR forge=gerrit shape=squash
+$contract
 Ship branch: $branch
 This task ships **direct-PR** to a Gerrit review server: you publish the change yourself, without the no-mistakes pipeline.
 Gerrit has no pull requests, so there is nothing to open; publishing creates the change.
@@ -430,7 +471,7 @@ EOF
     no-mistakes:gerrit)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=no-mistakes forge=gerrit shape=squash
+$contract
 Ship branch: $branch
 This project's review server is Gerrit: it has no pull requests and no forge CI the pipeline can watch, so **no-mistakes runs here as a review pass that ends at a ready branch**, and you then publish that branch as one change.
 Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
@@ -460,9 +501,25 @@ EOF
       fm_gerrit_publish_block
       ;;
     direct-PR:*)
-      cat <<EOF
+      if [ -n "$pr_draft_hold" ]; then
+        cat <<EOF
 # Definition of done
-Delivery contract: mode=direct-PR
+$contract
+Ship branch: $branch
+This task ships **direct-PR** with **draft hold**: you raise a draft pull request yourself, without the no-mistakes pipeline, and leave it a draft until firstmate or the captain marks it ready after review.
+The task is complete only when committed on your branch.
+When it is implemented and committed, push your branch and open a **draft** pull request with \`gh-axi\`$pr_base.
+Apply the hold label \`$pr_draft_hold\` with \`gh-axi pr edit <number> --add-label $hold_q\` (where <number> is the PR number from your PR URL).
+Before you report done, read the PR back from the forge and confirm it is still a draft (\`gh-axi pr view <number>\` must print \`draft: yes\`) and lists the hold label; do **not** mark it ready with \`gh-axi pr ready <number>\`.
+On keenvc/v10, the \`do-not-auto-ready\` label matches the repository workflow that otherwise undrafts green pull requests and lets the merge queue merge before a different-model review.
+Then append \`done [at=<epoch>]: PR {url} draft hold\` to the status file and stop.
+That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR after it is marked ready; firstmate relays the outcome.
+EOF
+      else
+        cat <<EOF
+# Definition of done
+$contract
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
@@ -474,11 +531,12 @@ That \`done:\` is accepted only when this copy's HEAD - your latest commit - is 
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
+      fi
       ;;
     local-only:*)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=local-only
+$contract
 Ship branch: $branch
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
@@ -491,7 +549,7 @@ EOF
     no-mistakes:*)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=no-mistakes
+$contract
 Ship branch: $branch
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
@@ -500,7 +558,16 @@ That first \`done:\` is the handoff that starts the pipeline, which owns the pus
 ${nm_base}
 EOF
       fm_nm_driving_block "$forge"
-      cat <<EOF
+      if [ -n "$pr_draft_hold" ]; then
+        cat <<EOF
+
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is a draft (\`gh-axi pr view <number>\` must print \`draft: yes\`, where <number> is the PR number from your PR URL), lists the hold label \`$pr_draft_hold\`, and was opened or left as a draft; apply the label with \`gh-axi pr edit <number> --add-label $hold_q\` when it is missing, and do **not** mark it ready with \`gh-axi pr ready <number>\`.
+On keenvc/v10, the \`do-not-auto-ready\` label matches the repository workflow that otherwise undrafts green pull requests and lets the merge queue merge before a different-model review.
+Then append \`done [at=<epoch>]: PR {url} checks green draft hold\` and stop. You are finished.
+That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
+EOF
+      else
+        cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
@@ -508,6 +575,7 @@ Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finis
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 EOF
+      fi
       ;;
     *)
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2

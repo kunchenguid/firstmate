@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--pr-draft-hold <label>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -75,6 +75,13 @@
 # header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`
 # changes for the worker. A forge on --mode local-only is refused, because that
 # mode publishes nothing.
+# --pr-draft-hold <label> keeps the task's GitHub pull request a draft, applies
+# <label>, and lets the worker report done while it stays a draft. Firstmate
+# resolves it per task at intake from the captain's instruction and the project's
+# optional `pr-draft-hold=<label>` registry token (bin/fm-project-mode.sh); this
+# script never reads the registry. Refused on local-only, on forge=gerrit, and
+# on scout/secondmate scaffolds. On keenvc/v10, `do-not-auto-ready` is the
+# label that opts out of the auto-ready workflow before a different-model review.
 # --shape names how a forge=gerrit task is published, and only `squash` - one
 # change - is accepted: `stack` is refused until a stack can be watched by its
 # membership pinned when its watch is armed, because the merge watch follows one
@@ -82,7 +89,8 @@
 # It defaults to squash on gerrit and is refused without it.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
-# on that forge. bin/fm-spawn.sh reads that line and refuses to launch a ship task
+# on that forge and by " pr-draft-hold=<label>" when --pr-draft-hold was passed.
+# bin/fm-spawn.sh reads that line and refuses to launch a ship task
 # whose explicit --mode or registered forge disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -201,6 +209,8 @@ FORGE=none
 FORGE_SET=0
 SHAPE=
 SHAPE_SET=0
+PR_DRAFT_HOLD=
+PR_DRAFT_HOLD_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -214,6 +224,7 @@ for a in "$@"; do
       base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
+      pr-draft-hold) PR_DRAFT_HOLD=$a; PR_DRAFT_HOLD_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -234,6 +245,8 @@ for a in "$@"; do
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     --shape) want_value=shape ;;
     --shape=*) SHAPE=${a#--shape=}; SHAPE_SET=1 ;;
+    --pr-draft-hold) want_value="pr-draft-hold" ;;
+    --pr-draft-hold=*) PR_DRAFT_HOLD=${a#--pr-draft-hold=}; PR_DRAFT_HOLD_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -289,9 +302,16 @@ if [ "$KIND" = ship ]; then
     echo "error: --shape applies only with --forge gerrit, where the worker publishes the change itself" >&2
     exit 1
   fi
-elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
-  echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ] || [ "$PR_DRAFT_HOLD_SET" -eq 1 ]; then
+  echo "error: --forge, --shape, and --pr-draft-hold apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+if [ "$PR_DRAFT_HOLD_SET" -eq 1 ]; then
+  [ -n "$PR_DRAFT_HOLD" ] || {
+    echo "error: --pr-draft-hold requires a non-empty label" >&2
+    exit 1
+  }
+  fm_pr_draft_hold_valid_for_mode "$PR_DRAFT_HOLD" "$MODE" "$FORGE" "fm-brief.sh --pr-draft-hold" || exit 1
 fi
 if [ "$BASE_BRANCH_SET" -eq 1 ]; then
   if [ "$KIND" = secondmate ] || [ -z "$BASE_BRANCH" ]; then
@@ -668,7 +688,7 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$PR_DRAFT_HOLD") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -724,7 +744,11 @@ $DOD
 EOF
 append_brief_include
 if [ "$FORGE" = none ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+  if [ -n "$PR_DRAFT_HOLD" ]; then
+    echo "scaffolded: $BRIEF (ship, mode=$MODE pr-draft-hold=$PR_DRAFT_HOLD; replace {TASK} and {FIRSTMATE_SPEC})"
+  else
+    echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+  fi
 else
   echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {FIRSTMATE_SPEC})"
 fi

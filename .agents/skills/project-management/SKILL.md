@@ -61,6 +61,10 @@ A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only`, a
 `yolo` is inactive on a `forge=gerrit` project, so never propose `+yolo` alongside it.
 `bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-dod-lib.sh` owns what it changes for a worker.
 
+The optional `pr-draft-hold=<label>` token records a standing default for draft-and-hold GitHub delivery on `no-mistakes` or `direct-PR` projects without a Gerrit forge.
+Firstmate still passes `--pr-draft-hold <label>` explicitly when scaffolding the brief at intake; the registry token is context, not an automatic brief input.
+On keenvc/v10, register `pr-draft-hold=do-not-auto-ready` so workers apply the label that opts pull requests out of the auto-ready workflow and merge-queue merge before a different-model review.
+
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.

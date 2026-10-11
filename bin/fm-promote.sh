@@ -38,7 +38,7 @@
 # its value against the registry; bin/fm-project-mode.sh's header owns the
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
 # the refusal of a forge on local-only.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--pr-draft-hold <label>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,6 +67,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 MODE=
 YOLO=
 BRANCH_PREFIX=fm/
+PR_DRAFT_HOLD=
+PR_DRAFT_HOLD_SET=0
 MODE_SET=0
 YOLO_SET=0
 FORGE=none
@@ -81,6 +83,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       branch-prefix) BRANCH_PREFIX=$a ;;
+      pr-draft-hold) PR_DRAFT_HOLD=$a; PR_DRAFT_HOLD_SET=1 ;;
     esac
     want_value=
     continue
@@ -92,6 +95,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --branch-prefix) want_value="branch-prefix" ;;
     --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=} ;;
+    --pr-draft-hold) want_value="pr-draft-hold" ;;
+    --pr-draft-hold=*) PR_DRAFT_HOLD=${a#--pr-draft-hold=}; PR_DRAFT_HOLD_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -197,7 +202,17 @@ if [ -n "$PROMOTE_PROJECT" ]; then
   fi
   FORGE=${PROMOTE_STANDING_FORGE:-none}
   refuse_impossible_forge_posture || exit 1
+  if [ "$PR_DRAFT_HOLD_SET" -eq 0 ]; then
+    PR_DRAFT_HOLD=$("$FM_ROOT/bin/fm-project-mode.sh" --pr-draft-hold "$PROMOTE_PROJECT_NAME" 2>/dev/null) || PR_DRAFT_HOLD=
+  fi
 fi
+if [ "$PR_DRAFT_HOLD_SET" -eq 1 ]; then
+  [ -n "$PR_DRAFT_HOLD" ] || {
+    echo "error: --pr-draft-hold requires a non-empty label" >&2
+    exit 1
+  }
+fi
+fm_pr_draft_hold_valid_for_mode "$PR_DRAFT_HOLD" "$MODE" "$FORGE" "fm-promote.sh --pr-draft-hold" || exit 1
 BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | head -n 1)
 fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-promote.sh $ID" || exit 1
 PROMOTE_BASE_WORDS='default-branch base'
@@ -271,7 +286,7 @@ EOF
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH"
+  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$PR_DRAFT_HOLD"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }

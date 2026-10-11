@@ -271,6 +271,27 @@ test_ship_mode_is_explicit_not_registry() {
   pass "fm-brief.sh: the explicit ship mode wins over the registered posture"
 }
 
+test_ship_pr_draft_hold_scaffolds_contract() {
+  local home brief out status
+  home="$TMP_ROOT/pr-draft-hold-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-draft-hold-a7 some-proj \
+    --mode direct-PR --pr-draft-hold do-not-auto-ready >/dev/null 2>&1 \
+    || fail "direct-PR brief with pr-draft-hold should scaffold"
+  brief="$home/data/brief-draft-hold-a7/brief.md"
+  grep -qx 'Delivery contract: mode=direct-PR pr-draft-hold=do-not-auto-ready' "$brief" \
+    || fail "brief did not record pr-draft-hold on the delivery contract line"
+  assert_grep 'draft hold' "$brief" "brief did not render draft-hold definition of done"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-draft-hold-b7 some-proj \
+    --mode local-only --pr-draft-hold do-not-auto-ready 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only with pr-draft-hold should refuse"
+  assert_contains "$out" 'pr-draft-hold applies only to no-mistakes or direct-PR' \
+    "local-only pr-draft-hold refusal was unclear"
+  pass "fm-brief.sh: --pr-draft-hold scaffolds draft-hold delivery and refuses local-only"
+}
+
 # yolo is firstmate's merge authority and never reaches the worker, and a scout
 # or charter carries no delivery contract. Each must refuse rather than accept and
 # discard the flag, which would look recorded but change nothing.
@@ -1471,6 +1492,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
+test_ship_pr_draft_hold_scaffolds_contract
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording

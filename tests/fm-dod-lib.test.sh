@@ -367,6 +367,22 @@ EOF
   pass "fenced and indented Captain lines are not authorized intent"
 }
 
+test_pr_draft_hold_direct_pr_contract() {
+  local out="$TMP_ROOT/pr-draft-hold-direct.md"
+  fm_dod_block direct-PR dod-hold-task fm/dod-hold-task none '' do-not-auto-ready > "$out"
+  assert_grep 'Delivery contract: mode=direct-PR pr-draft-hold=do-not-auto-ready' "$out" \
+    "direct-PR draft-hold did not record the machine-readable contract"
+  assert_grep 'open a **draft** pull request' "$out" \
+    "direct-PR draft-hold did not require a draft PR"
+  assert_grep 'draft: yes' "$out" \
+    "direct-PR draft-hold did not require confirming draft state"
+  assert_grep 'do **not** mark it ready' "$out" \
+    "direct-PR draft-hold must forbid marking the PR ready"
+  assert_grep 'do-not-auto-ready' "$out" \
+    "direct-PR draft-hold did not document the v10 label alignment"
+  pass "direct-PR pr-draft-hold definition of done keeps the PR a draft"
+}
+
 # The draft check the DoD hands a worker must be the gh-axi path that rule 3 of
 # every ship brief requires for GitHub operations, never raw gh (issue 5325).
 test_pr_based_dod_draft_check_uses_gh_axi() {
@@ -442,6 +458,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_pr_draft_hold_direct_pr_contract
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the

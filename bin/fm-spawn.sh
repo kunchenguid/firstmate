@@ -38,6 +38,12 @@
 #   prints a one-line deviation notice and continues, because the registered
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
+#   A project may also register pr-draft-hold=<label> in data/projects.md; a ship
+#   spawn reads it through bin/fm-project-mode.sh --pr-draft-hold and, when the
+#   brief's recorded "Delivery contract:" pr-draft-hold disagrees with it, prints
+#   a one-line deviation notice and continues, because the registered token is the
+#   captain's standing preference and the brief is what the worker received
+#   (bin/fm-brief.sh --pr-draft-hold owns the flag).
 #   --base-branch is the optional branch selected at intake for a ship or scout
 #   to start from and target instead of origin's default branch. A fresh launch
 #   resets its pooled copy to origin/<branch>, refusing when the project has no
@@ -3287,6 +3293,7 @@ if [ "$KIND" = ship ]; then
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
+  BRIEF_PR_DRAFT_HOLD=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]pr-draft-hold=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$BRIEF" | head -n 1)
   if [ -n "$BRIEF_BRANCH" ]; then
     [ "$BRIEF_BRANCH" = "$BRANCH" ] || {
@@ -3350,6 +3357,10 @@ if [ "$KIND" = ship ]; then
   STANDING_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$PROJ_NAME" 2>/dev/null) || STANDING_BRANCH=
   if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
     echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+  STANDING_PR_DRAFT_HOLD=$("$FM_ROOT/bin/fm-project-mode.sh" --pr-draft-hold "$PROJ_NAME" 2>/dev/null) || STANDING_PR_DRAFT_HOLD=
+  if [ -n "$STANDING_PR_DRAFT_HOLD" ] && [ "$BRIEF_PR_DRAFT_HOLD" != "$STANDING_PR_DRAFT_HOLD" ]; then
+    echo "notice: $ID brief records pr-draft-hold=${BRIEF_PR_DRAFT_HOLD:-(none)} while $PROJ_NAME registers pr-draft-hold=$STANDING_PR_DRAFT_HOLD - proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
 fi
 
