@@ -443,7 +443,6 @@ test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
 test_promotion_keeps_the_recorded_base_branch
-
 # The launch role is the generated text a worker receives. It must keep the
 # skill name, so a session that registers the skill loads it by name, and must
 # name the skill file as the fallback for a session where the name does not
@@ -464,5 +463,4 @@ test_worker_role_names_skill_and_fallback_file() {
 }
 
 test_worker_role_names_skill_and_fallback_file
-
 echo "all fm-dod-lib tests passed"

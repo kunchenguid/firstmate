@@ -4,6 +4,11 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   --codex-appserver selects the machine-supervised transport for one fresh
+#   --harness codex ship/scout. Linux, Codex 0.156.1 and python3 are required.
+#   It retains the selected terminal endpoint/worktree provider, grants only
+#   the isolated worker workspace, and reports through client-owned tools.
+#   Interactive Codex, secondmates, batch launch, and relaunch are unchanged.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -689,6 +694,7 @@ fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+CODEX_APPSERVER=0
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -769,6 +775,7 @@ for a in "$@"; do
     continue
   fi
   case "$a" in
+  --codex-appserver) CODEX_APPSERVER=1 ;;
   --scout)
     KIND=scout
     KIND_SET=1
@@ -827,6 +834,16 @@ for a in "$@"; do
   *) POS+=("$a") ;;
   esac
 done
+if [ "$CODEX_APPSERVER" = 1 ]; then
+  if [ "$HARNESS_ARG" != codex ] || [ "${#POS[@]}" -ne 2 ] || [ "$KIND" = secondmate ] || [ "$RELAUNCH" = 1 ]; then
+    echo "error: --codex-appserver requires one fresh ship/scout and explicit --harness codex" >&2
+    exit 1
+  fi
+  if [ "$(uname)" != Linux ] || [ "$(codex --version)" != 'codex-cli 0.156.1' ] || ! command -v python3 >/dev/null; then
+    echo "error: app-server transport is verified only on Linux with Codex 0.156.1 and python3" >&2
+    exit 1
+  fi
+fi
 [ -z "$want_value" ] || {
   echo "error: --$want_value requires a value" >&2
   exit 1
@@ -1247,6 +1264,10 @@ spawn_remote_secondmate() {
   return 0
 }
 
+if [ "$CODEX_APPSERVER" = 1 ] && { [ "$KIND" = secondmate ] || [ "$RELAUNCH" = 1 ]; }; then
+  echo "error: --codex-appserver supports fresh ship/scout launches only" >&2
+  exit 1
+fi
 BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
@@ -1742,6 +1763,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     BACKEND=$BACKEND_ARG
   else
     BACKEND=$(fm_backend_name)
+  fi
+  if [ "$CODEX_APPSERVER" = 1 ] && [ "$BACKEND" != tmux ]; then
+    echo "error: app-server transport is currently verified only with backend=tmux" >&2
+    exit 1
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
@@ -3214,9 +3239,22 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   {
-    fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
+    if [ "$CODEX_APPSERVER" = 1 ]; then
+      printf '%s\n' 'FIRSTMATE_OP: v1 launch-brief' 'You are a FirstMate worker, not a supervisor. Report only through firstmate_report. Never address the user directly. Steering arrives in this active turn, not through a filesystem inbox. Canonical fleet state is read-only to you.'
+      printf "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`%s/.agents/skills/firstmate-coding-guidelines/SKILL.md\` instead.\n" "$FM_ROOT"
+    else
+      fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT"
+    fi &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
+      if [ "$CODEX_APPSERVER" = 1 ]; then
+        printf '\n%s\n' '# App-server transport contract (supersedes brief reporting and inbox instructions)' 'Use firstmate_report progress for status and needs-decision for a decision; its callback waits for the supervisor answer in this turn. Never append status, poll an inbox, or write fleet data. Submit result only when delivery evidence is complete; terminal success is recorded by the supervisor.'
+        if [ "$KIND" = scout ]; then
+          printf '%s\n' 'Submit the complete standalone Markdown report in the result report field (maximum 262144 UTF-8 bytes), with a short conclusion in message. Do not write report.md yourself; the supervisor atomically publishes it at the canonical task report path, where it survives teardown.'
+        else
+          printf '%s\n' 'Your task branch is already provisioned in task-private Git metadata; do not recreate it. Make local commits only. The supervisor verifies and imports your exact task HEAD after successful handoff, then existing delivery handles publication. Keep scratch evidence inside the task workspace.'
+        fi
+      fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
@@ -4620,7 +4658,9 @@ if [ "$KIND" != secondmate ]; then
   BUSY_GEN=
   case "$HARNESS" in
   codex*)
-    if fm_busy_codex_semantic_source; then
+    if [ "$CODEX_APPSERVER" = 1 ]; then
+      BUSY_GEN=$(bash "$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || exit 1
+    elif fm_busy_codex_semantic_source; then
       echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
       exit 1
     fi
@@ -5102,6 +5142,7 @@ preserve_relaunch_meta() {
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
+  [ "$CODEX_APPSERVER" != 1 ] || echo "codex_transport=appserver"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -5227,6 +5268,10 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+if [ "$CODEX_APPSERVER" = 1 ]; then
+  [ "$HARNESS" = codex ] || { echo "error: --codex-appserver requires codex" >&2; exit 1; }
+  LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE_REAL") FM_DATA_OVERRIDE=$(shell_quote "$DATA") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") python3 $(shell_quote "$SCRIPT_DIR/fm-codex-appserver.py") run $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN") $(shell_quote "$DATA") $(shell_quote "$BRIEF") $(shell_quote "$WT") $(shell_quote "$MODEL") $(shell_quote "$EFFORT")"
+fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")

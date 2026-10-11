@@ -738,6 +738,10 @@ fm_send_feed_resolved_holds() { # <answer-text>
   done
   if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
+    if [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" codex_transport)" = appserver ]; then
+      echo "error: this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. The app-server answer remains pending; retry the same keyed answer after fixing closure." >&2
+      return 1
+    fi
     echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
   fi
@@ -754,6 +758,28 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # target_ready path before sending, while zellij verifies pane labels in its
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
+
+# The app-server client owns active-turn steering and pending tool responses.
+# Keep ordinary keyed validation/closure above; never route these into a TUI.
+if [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" codex_transport)" = appserver ]; then
+  [ "${1:-}" != --key ] || { echo "error: use fm-control for app-server lifecycle" >&2; exit 1; }
+  app_text=$*
+  [ -n "${app_text//[[:space:]]/}" ] || { echo "error: empty app-server message" >&2; exit 1; }
+  app_id=$(fm_send_id_from_meta "$TARGET_META")
+  app_gen=$(fm_meta_get "$TARGET_META" busy_gen)
+  app_op=steer
+  app_key=
+  if [ -n "$RESOLVE_KEYS" ]; then
+    app_op=answer
+    app_key=$RESOLVE_KEYS
+    case "$app_key" in *' '*) echo "error: one app-server decision answer per send" >&2; exit 1 ;; esac
+  fi
+  printf '%s' "$app_text" | python3 "$SCRIPT_DIR/fm-codex-appserver.py" control \
+    "$STATE" "$app_id" "$app_gen" "$app_op" "$app_key" || exit 1
+  fm_send_close_resolved_keys "$app_text" || exit 1
+  fm_send_feed_resolved_holds "$app_text" || exit 1
+  exit 0
+fi
 
 if [ "${1:-}" = "--key" ]; then
   [ -z "$FIRE_AND_FORGET_ID" ] ||
