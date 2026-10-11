@@ -7,6 +7,176 @@ set -u
 
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-checkpoint)
+SESSION_TEST_PIDS=()
+cleanup_session_tests() {
+  fm_test_cleanup
+  local pid
+  for pid in "${SESSION_TEST_PIDS[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup_session_tests EXIT
+
+session_process_alive() {
+  local stat
+  stat=$(ps -o stat= -p "$1" 2>/dev/null) || return 1
+  case "$stat" in ''|*Z*) return 1 ;; esac
+}
+
+wait_session_watcher() { # <home> <live|gone>
+  local home=$1 expected=$2 i=0 pid
+  while [ "$i" -lt 200 ]; do
+    pid=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
+    if [ "$expected" = live ]; then
+      if [ -n "$pid" ] && [ -e "$home/state/.last-watcher-beat" ] && session_process_alive "$pid"; then
+        return 0
+      fi
+    elif ! session_process_alive "$SESSION_WATCH_PID"; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "session watcher did not become $expected: $(cat "$home/arm.out" "$home/arm.err")"
+}
+
+start_session_owner() {
+  sleep 120 &
+  SESSION_OWNER_PID=$!
+  SESSION_TEST_PIDS+=("$SESSION_OWNER_PID")
+}
+
+start_session_watcher() { # <home> [check-interval]
+  local home=$1 interval=${2:-999999}
+  printf '%s\n' "$SESSION_OWNER_PID" > "$home/state/.lock"
+  fm_test_track_watcher_state "$home/state"
+  FM_HOME="$home" FM_POLL=30 FM_CHECK_INTERVAL="$interval" FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-arm.sh" >"$home/arm.out" 2>"$home/arm.err" &
+  SESSION_ARM_PID=$!
+  SESSION_TEST_PIDS+=("$SESSION_ARM_PID")
+  wait_session_watcher "$home" live
+  SESSION_WATCH_PID=$(cat "$home/state/.watch.lock/pid")
+}
+
+# The real arm remains alive after its session owner exits, reproducing a
+# detached background task. No pane or harness process-name fixture is involved.
+test_session_exit_stops_only_its_watcher() {
+  local home other owner watcher other_watcher other_owner
+  home=$(make_home owner-exit)
+  other=$(make_home other-owner)
+  start_session_owner
+  owner=$SESSION_OWNER_PID
+  start_session_watcher "$home"
+  watcher=$SESSION_WATCH_PID
+  start_session_owner
+  other_owner=$SESSION_OWNER_PID
+  start_session_watcher "$other"
+  other_watcher=$SESSION_WATCH_PID
+  kill -TERM "$owner"
+  wait "$owner" || true
+  SESSION_WATCH_PID=$watcher
+  wait_session_watcher "$home" gone
+  session_process_alive "$other_watcher" || fail "owner exit stopped another home's watcher"
+  session_process_alive "$other_owner" || fail "owner exit stopped another home's session"
+  assert_absent "$home/state/.watch.lock/pid" "owner exit retained the watcher singleton"
+  assert_contains "$(cat "$home/arm.err")" 'session owner exited' "owner exit was not diagnosed"
+  FM_HOME="$other" "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null
+  pass "session exit promptly stops its real watcher and preserves another home"
+}
+
+test_replacement_owner_preserves_supervision_until_it_exits() {
+  local home old_owner replacement watcher old_arm
+  home=$(make_home replacement-owner)
+  start_session_owner
+  old_owner=$SESSION_OWNER_PID
+  start_session_watcher "$home"
+  watcher=$SESSION_WATCH_PID
+  old_arm=$SESSION_ARM_PID
+  start_session_owner
+  replacement=$SESSION_OWNER_PID
+  # Publish through the same claim lock used by fm-lock.sh; a late old exit
+  # must see the replacement before deciding whether to stop this watcher.
+  FM_HOME="$home" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$STATE/.lock.acquire"
+    printf "%s\n" "$2" > "$STATE/.lock"
+    fm_lock_release "$STATE/.lock.acquire"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$replacement" || fail "replacement publication failed"
+  kill -TERM "$old_owner"
+  wait "$old_owner" || true
+  sleep 2
+  session_process_alive "$watcher" || fail "old owner exit killed a live replacement's watcher"
+  kill -KILL "$old_arm"
+  wait "$old_arm" 2>/dev/null || true
+  # Both postures and active work retain supervision while that owner lives.
+  printf 'working: active work\n' > "$home/state/task.status"
+  : > "$home/state/.afk"
+  sleep 2
+  session_process_alive "$watcher" || fail "away posture lost a live owner's watcher"
+  printf 'quiet\n' > "$home/state/.afk"
+  sleep 2
+  session_process_alive "$watcher" || fail "quiet posture lost a live owner's watcher"
+  kill -TERM "$replacement"
+  wait "$replacement" || true
+  SESSION_WATCH_PID=$watcher
+  wait_session_watcher "$home" gone
+  pass "replacement ownership preserves supervision through old exit and stops at new exit"
+}
+
+test_launcher_exit_stops_watcher_with_a_live_shared_owner() {
+  local home owner arm watcher
+  home=$(make_home launcher-exit)
+  start_session_owner
+  owner=$SESSION_OWNER_PID
+  start_session_watcher "$home"
+  arm=$SESSION_ARM_PID
+  watcher=$SESSION_WATCH_PID
+  # A chat closing while BOTH kernel processes stay alive has no observable
+  # exit here. Keep the watcher alive instead of inventing per-chat liveness.
+  sleep 2
+  session_process_alive "$owner" || fail "shared owner was not live in the unsupported-chat-exit case"
+  session_process_alive "$arm" || fail "launcher was not live in the unsupported-chat-exit case"
+  session_process_alive "$watcher" || fail "live processes were mistaken for an observed session exit"
+  # Model a shared server staying alive after the session-scoped tool process
+  # disappears. SIGKILL prevents the arm's ordinary cleanup from masking it.
+  kill -KILL "$arm"
+  wait "$arm" 2>/dev/null || true
+  SESSION_WATCH_PID=$watcher
+  wait_session_watcher "$home" gone
+  session_process_alive "$owner" || fail "launcher exit killed the shared owner process"
+  assert_contains "$(cat "$home/arm.err")" 'session launcher exited' "launcher exit was not diagnosed"
+  pass "launcher exit stops its watcher even while a shared owner process remains alive"
+}
+
+test_owner_exit_stops_a_blocked_check() {
+  local home owner watcher check_pid i=0
+  home=$(make_home blocked-owner-exit)
+  cat > "$home/state/blocked.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/check.pid"
+exec sleep 120
+SH
+  chmod 0700 "$home/state/blocked.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" blocked >/dev/null || fail "check registration failed"
+  start_session_owner
+  owner=$SESSION_OWNER_PID
+  start_session_watcher "$home" 1
+  watcher=$SESSION_WATCH_PID
+  while [ "$i" -lt 200 ] && [ ! -s "$home/check.pid" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$home/check.pid" ] || fail "the real watcher never entered the blocked check"
+  check_pid=$(cat "$home/check.pid")
+  session_process_alive "$check_pid" || fail "the check was not blocked at owner exit"
+  kill -TERM "$owner"
+  wait "$owner" || true
+  SESSION_WATCH_PID=$watcher
+  wait_session_watcher "$home" gone
+  session_process_alive "$check_pid" && fail "owner exit left the blocked check running"
+  pass "owner exit stops a real watcher blocked in a registered check and reaps that check"
+}
 
 make_home() {
   local name=$1 home
@@ -16,7 +186,7 @@ make_home() {
 }
 
 test_quiet_checkpoint_exits_124_cleanly() {
-  local home out err status
+  local home out err status watcher_pid
   home=$(make_home quiet)
   out="$home/out.txt"
   err="$home/err.txt"
@@ -24,7 +194,10 @@ test_quiet_checkpoint_exits_124_cleanly() {
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
   expect_code 124 "$status" "quiet checkpoint exit"
   assert_contains "$(cat "$out")" "checkpoint: no actionable wake within 1s" "quiet checkpoint line missing"
-  assert_absent "$home/state/.watch.lock/pid" "watch lock pid survived quiet checkpoint timeout"
+  watcher_pid=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$watcher_pid" ] && session_process_alive "$watcher_pid"; then
+    fail "quiet checkpoint left a watcher running"
+  fi
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 
@@ -197,6 +370,10 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
 }
 
 test_quiet_checkpoint_exits_124_cleanly
+test_session_exit_stops_only_its_watcher
+test_replacement_owner_preserves_supervision_until_it_exits
+test_launcher_exit_stops_watcher_with_a_live_shared_owner
+test_owner_exit_stops_a_blocked_check
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
