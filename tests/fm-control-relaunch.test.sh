@@ -2480,6 +2480,17 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_relaunch_onto_grok_carries_no_ask_user() {
+  local dir out rc
+  dir=$(new_case grok-relaunch rl-grok)
+  add_ship_task "$dir" rl-grok claude
+  printf 'grok' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl-grok relaunch --harness grok --note "switch to grok"); rc=$?
+  expect_code 0 "$rc" "relaunch onto grok should succeed"$'\n'"$out"
+  assert_grep "grok --always-approve --no-ask-user" "$dir/fake/literal" "relaunch onto grok must carry --no-ask-user"
+  pass "relaunch onto grok carries --no-ask-user"
+}
+
 test_exit_and_relaunch_remove_the_dialog_file() {
   local dir out rc
   dir=$(new_case dialog-file-exit rl70)
@@ -2606,3 +2617,4 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_onto_grok_carries_no_ask_user

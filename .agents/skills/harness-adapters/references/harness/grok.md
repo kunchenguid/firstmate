@@ -1,8 +1,8 @@
 # Grok Build
 
 The xAI `grok` TUI is Claude-Code-compatible.
-Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, exit on 2026-07-19 with 0.2.103, and folder trust, the training opt-in, and unsent composer delivery on 2026-09-24 with 1.0.41.
-Launch shape: `grok --always-approve "$(cat <brief>)"`.
+Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, exit on 2026-07-19 with 0.2.103, folder trust, the training opt-in, and unsent composer delivery on 2026-09-24 with 1.0.41, and ask-tool disable (`--no-ask-user`) on 2026-10-10 with 1.0.50.
+Launch shape: `grok --always-approve --no-ask-user "$(cat <brief>)"`.
 
 ## Operating facts
 

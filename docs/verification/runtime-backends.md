@@ -2552,3 +2552,23 @@ Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which
 This live proof covers the watcher and queue boundary; it does not establish live daemon-consumer delivery.
 `bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.
 Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
+
+## Grok ask-user question tool disable
+
+Verified on 2026-10-10 with grok 1.0.50 (c58f321264ba) [stable] on macOS arm64.
+`grok --help` lists `--disallowed-tools <TOOLS>` but does not list `--no-ask-user`.
+The installed binary's strings contain `NO_ASK_USER` with help text `Disable structured question prompts from the agent`.
+It is parsed as a TUI flag and is the control Firstmate needs.
+The headless flag `--disallowed-tools` is documented as ignored-with-a-warning in the interactive TUI.
+The documented fallback is `features.ask_user_question=false` in `config.toml` or `GROK_ASK_USER_QUESTION=0`.
+In an isolated scratch git repository, a Grok TUI session launched as `grok --always-approve` and prompted to use `ask_user_question` opened the question card and reported `agent_status: blocked`.
+The same prompt launched as `grok --always-approve --no-ask-user` finished the turn with no question card and returned to idle, with no startup warning.
+Headless verification in the same scratch showed `--disallowed-tools ask_user_question` removing the tool.
+The launch template in `bin/fm-spawn.sh` now carries `--no-ask-user` for every Grok ship, scout, secondmate, and relaunch.
+`tests/fm-spawn-dispatch-profile.test.sh` and `tests/fm-control-relaunch.test.sh` cover that shape.
+
+```sh
+strings "$(command -v grok)" | grep -i no-ask-user
+grok --help | grep -c "no-ask-user"  # 0 on 1.0.50, parsed despite hidden
+bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh tests/fm-control-relaunch.test.sh
+```
