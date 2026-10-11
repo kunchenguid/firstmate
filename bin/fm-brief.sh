@@ -98,8 +98,12 @@
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known wait expected to clear on its own, including
-# the worker's own background work, pipeline or long command; blocked when
-# firstmate must act. The first-sight alert remains; repeats use the long cadence.
+# the worker's own background work, a still-running pipeline step, or a long
+# command; blocked when firstmate must act. A pipeline parked at a review gate
+# awaiting a decision is never a pause - it is escalated as `needs-decision`
+# naming the gate key and its finding ids - because a declared pause would park
+# the run unanswered on the long recheck cadence. The first-sight alert remains;
+# repeats use the long cadence.
 # Emission-time syntax and legacy unknown-time handling are owned by
 # bin/fm-classify-lib.sh; each scaffold renders the stamp as a literal <epoch>
 # placeholder the worker replaces with a numeric Unix time as it appends, so a
@@ -154,6 +158,7 @@ PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
    Before ending your turn with your own background shell or monitor still running, or before waiting on your own pipeline run or a long foreground command, append \`$PAUSED_VERB [at=<epoch>]: {job and completion condition}\` to the status file.
+   A pipeline step that is genuinely still running may be reported as \`$PAUSED_VERB\` under this rule. A pipeline parked at a review gate awaiting a decision is never \`$PAUSED_VERB\`: inspect the gate your drive call returned, then append \`needs-decision [at=<epoch>]: {gate and options}\` (on a no-mistakes ship task, rule 6's ask-user format with \`[key=nm-<run>-<step>]\`, naming every finding id from that gate) and stop.
    Name what you are waiting for and what will let you resume; do not repeat the declaration on every poll.
    Do not declare active implementation or reasoning as a wait.
    Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.

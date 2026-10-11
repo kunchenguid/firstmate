@@ -951,6 +951,55 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds declare a validation-round pause once, then hold it"
 }
 
+# The shared pause rule must distinguish a pipeline step that is genuinely still
+# running (a legitimate declared pause) from a pipeline parked at a review gate
+# awaiting a decision (never a pause: escalate as needs-decision naming the gate
+# key and finding ids). This is the regression for three same-day runs that sat
+# ~90 minutes parked at a gate on a plain pause.
+test_ship_and_scout_raise_parked_gates_as_decisions() {
+  local home kind id brief
+  home="$TMP_ROOT/parked-gate-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-parked-gate-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "A pipeline step that is genuinely still running may be reported as" "$brief" \
+      "$kind brief lost the running-step-may-pause distinction"
+    assert_grep "A pipeline parked at a review gate awaiting a decision is never" "$brief" \
+      "$kind brief lost the parked-gate-is-never-a-pause rule"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the needs-decision template must stay literal
+    assert_grep 'append `needs-decision [at=<epoch>]: {gate and options}`' "$brief" \
+      "$kind brief does not require a needs-decision escalation for a parked gate"
+    assert_grep "naming every finding id from that gate" "$brief" \
+      "$kind brief does not require naming the parked gate's finding ids"
+    # The distinction extends the existing pause guidance rather than replacing it.
+    assert_grep "including your own validation round" "$brief" \
+      "$kind brief lost the existing validation-round pause guidance"
+    assert_grep "before waiting on your own pipeline run or a long foreground command" "$brief" \
+      "$kind brief lost the existing pipeline-run pause guidance"
+    assert_grep "do not repeat the declaration on every poll" "$brief" \
+      "$kind brief lost the no-repeat-declaration guidance"
+  done
+
+  # The shared block renders in both briefs; the parenthetical self-limits the
+  # ship-only key shape to no-mistakes ship tasks, so the scout brief carries it
+  # only under that explicit condition rather than as standalone vocabulary.
+  assert_grep "key=nm-<run>-<step>" "$home/data/brief-parked-gate-ship/brief.md" \
+    "ship brief's parked-gate rule must point at rule 6's ask-user key shape"
+  assert_grep "on a no-mistakes ship task, rule 6's ask-user format" \
+    "$home/data/brief-parked-gate-scout/brief.md" \
+    "scout brief's parked-gate rule must self-limit the ship-only escalation to ship tasks"
+
+  pass "fm-brief.sh: ship and scout scaffolds raise parked review gates as decisions"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -1491,6 +1540,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_ship_and_scout_raise_parked_gates_as_decisions
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
