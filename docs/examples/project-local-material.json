@@ -1,0 +1,23 @@
+{
+  "web-app": {
+    "source": "/home/you/repos/web-app-worktrees/main",
+    "environments": {
+      "default": ".env.staging",
+      "production": ".env",
+      "production_note": "the video and social integrations exist only in the production project"
+    },
+    "entries": [
+      { "path": ".env", "mode": "link" },
+      { "path": ".env.staging", "mode": "link" },
+      { "path": ".mcp.json", "mode": "link" },
+      { "path": "e2e/.auth", "mode": "copy" }
+    ]
+  },
+  "marketing-site": {
+    "source": "/home/you/repos/marketing-site",
+    "entries": [
+      { "path": ".env", "mode": "link" },
+      { "path": ".mcp.json", "mode": "link" }
+    ]
+  }
+}
