@@ -32,7 +32,8 @@ Observed result: the project hook ran, but its stdout did not reach model contex
 This is the current Grok fail-open limit.
 
 OpenCode was checked in both headless and interactive modes.
-`client.session.promptAsync` accepted the nudge in both cases; the persistent TUI completed the generated turn, while `opencode run` exited before another turn.
+`ctx.session.prompt` accepted the nudge in both cases; the persistent TUI completed the generated turn, while `opencode run` exited before another turn.
+A live 2.0.26 headless session stored the delivered nudge exactly once as a user message after the plugin port (2026-10-10), and the plugin never delivered it to a session created at another location.
 This is the current headless fail-open limit.
 
 Pi command shape:
@@ -222,14 +223,14 @@ These guarantees are process semantics, not vendor-emitted signals, so no live-h
 
 ## Semantic busy state
 
-The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
+The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them, and the OpenCode row was re-verified on 2026-10-10 for the V2 plugin port (the generated plugin driven by a real `opencode run` 2.0.26 session in place of the harness worker).
 Each pass polled `state/<id>.busy-state` while a real turn ran.
 
 | Harness | Version verified | Semantic source | Observed result |
 | --- | --- | --- | --- |
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
 | omp | 18.1.11 | Extension `agent_start` / `agent_end` without `willContinue` | Live Herdr scout on `openai-codex/gpt-6-astra` (2026-09-05): the spawn seed `busy source=fm-spawn`, then `busy source=omp-ext event=agent-start`, then `idle source=omp-ext event=agent-end` at the natural end of the brief; a steer through `fm-send` reopened `busy … agent-start`, and a control-plane interrupt closed it with `idle … agent-end` (omp fires `agent_end` on an interrupted turn). `ctx.isIdle()` is deliberately not consulted because it reads false at a natural TUI `agent_end`. |
-| OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
+| OpenCode | 2.0.26 | Plugin execution lifecycle (`session.execution.started` active; `session.execution.succeeded`/`failed`/`interrupted` inactive) | A real `opencode run` session with the fm-spawn-generated plugin wrote `busy source=opencode-plugin event=session-execution-started`, then `idle source=opencode-plugin event=session-execution-succeeded`, and touched the turn-end marker; interleaved events from a session at another location were scoped out. The 1.17.18 `session.status` row this replaces was retired with the V2 port. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
@@ -263,7 +264,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | --- | --- | --- | --- |
 | Claude | 2.1.278 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session received the full session-start digest through the tracked `SessionStart` hook, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
-| OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
+| OpenCode | 2.0.26 | Passive execution-terminal callback | Throwing could not block, while `ctx.session.prompt` scheduled one TUI follow-up when the guard returned 2; a live `opencode run` session received exactly one typed `TURN WOULD END BLIND` follow-up (2026-10-10). Headless remained fail-open, and the 1.17.6 `session.idle` row this replaces was retired with the V2 port. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | omp | 18.1.11 | Blocking `session_stop` hook returning `{ continue: true, additionalContext }` | In the isolated rpc lab (2026-09-05), the successor watcher was frozen with `SIGSTOP` until its beacon passed the lab `FM_GUARD_GRACE` of 20s while its arm child stayed attached (a killed watcher closes its arm child and the extension re-arms before the guard can fire); the next turn end raised the guard, the guard spy recorded `rc=2` followed by a stop carrying `stop_hook_active: true`, omp compelled a continuation carrying the `turn-end-guard` operational text, the `fm_watch_arm_omp` invocation count then rose to at least two, and a live watcher held the home lock after the thaw; the flagged stop was allowed, so exactly one continuation ran. `session_stop` never fired for an interrupted turn. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |

@@ -1662,11 +1662,15 @@ if (existsSync(`${state}/.afk`)) {
   expected = verdict;
 }
 
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const mod = await import(pathToFileURL(process.env.HOST).href);
+const host = await mod.loadV2Plugin(process.env.PLUGIN, { directory: process.env.WORKTREE });
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
-const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+const coordinator = globalThis.__firstmateOpenCodeWatchArm.get(process.env.WORKTREE);
+if (!coordinator) {
+  console.error("the plugin did not register a watch-arm coordinator for its location");
+  process.exit(1);
+}
+const status = await coordinator.ensureArmed("session-test", host.ctx);
 if (expected === "no-arm") {
   if (status !== "not-needed") {
     console.error(`expected a not-needed decline, got ${status}`);
@@ -1705,6 +1709,7 @@ EOF
     esac
     out=$(FM_ROOT_OVERRIDE="$dir/repo" WORKTREE="$dir/repo" FM_HOME="$dir/home" \
       FM_ARM_LOG="$dir/arm.log" NODE_NO_WARNINGS=1 \
+      HOST="$ROOT/tests/assets/opencode-v2-host.mjs" \
       PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" node "$driver" 2>&1)
     status=$?
     expect_code 0 "$status" "OpenCode arm plugin must decide with the shared predicate ($case_name): $out"

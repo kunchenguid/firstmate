@@ -1,6 +1,19 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { createSessionScope } from "./lib/fm-session-scope.js";
+
+// OpenCode 2 plugin (default export with id + setup; the V1 named-function
+// shape no longer loads). session.created still exists on the V2 wire with
+// its session id under event.data, and ctx.session.prompt is the V2 form of
+// the V1 client.session.promptAsync delivery (both verified live on 2.0.26).
+// The V2 event stream is server-wide, so the scope check keeps the nudge on
+// this location's own sessions (lib/fm-session-scope.js owns that rule).
+//
+// The subscription starts before any slow work: on a shared server the
+// session can be created while setup's git probe still runs, and a
+// subscription registered after that would miss the one session.created this
+// plugin exists for. The root therefore resolves lazily inside the handler.
 
 const handledSessions = new Set();
 
@@ -32,29 +45,35 @@ async function resolveRoot(anchor) {
   return resolvePath(anchor);
 }
 
-export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
+export default {
+  id: "fm-primary-sessionstart-nudge",
+  async setup(ctx) {
+    const scope = createSessionScope(ctx);
+    let rootPromise = null;
+    const root = () => (rootPromise ??= resolveRoot(ctx.location.directory));
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        try {
+          if (event.type !== "session.created") continue;
+          const sessionID = event.data?.sessionID;
+          if (!sessionID || handledSessions.has(sessionID)) continue;
+          if (!(await scope.belongs(event))) continue;
+          handledSessions.add(sessionID);
 
-  return {
-    event: async ({ event }) => {
-      if (event.type !== "session.created") return;
-      const sessionID = event.properties?.info?.id ?? event.properties?.sessionID;
-      if (!sessionID || handledSessions.has(sessionID) || !root) return;
-      handledSessions.add(sessionID);
+          const rootDir = await root();
+          if (!rootDir) continue;
+          const result = await runProcess(`${rootDir}/bin/fm-sessionstart-nudge.sh`, []);
+          const nudge = result.code === 0 ? result.stdout.trim() : "";
+          if (!nudge) continue;
 
-      const result = await runProcess(`${root}/bin/fm-sessionstart-nudge.sh`, []);
-      const nudge = result.code === 0 ? result.stdout.trim() : "";
-      if (!nudge) return;
-
-      try {
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text: nudge }],
-          },
-        });
-      } catch {
+          await ctx.session.prompt({ sessionID, text: nudge });
+        } catch {
+          // One event must never end the subscription: the nudge must keep
+          // working for later sessions.
+        }
       }
-    },
-  };
+    })();
+    return () => controller.abort();
+  },
 };

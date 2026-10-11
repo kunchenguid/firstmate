@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { createSessionScope } from "./lib/fm-session-scope.js";
 
 // Supervision host: a home opted in with config/supervision-host
 // (docs/configuration.md "Supervision host" owns the gate, which
@@ -23,6 +24,15 @@ const ARM_READY_TIMEOUT_MS = positiveInteger("FM_OPENCODE_ARM_READY_TIMEOUT_MS",
 const HOST_READY_TIMEOUT_MS = Math.max(ARM_READY_TIMEOUT_MS, 30000);
 const WAKE_LINE = /^(signal:|stale:|check:|heartbeat($|:))/;
 const HOST_LINE = /^supervision-host:/;
+// The V2 turn-end set: OpenCode 2 never emits the V1 session.idle event
+// (verified live on 2.0.26), so each way an execution can stop triggers the
+// same idle handling the V1 event carried. A shutdown interrupt is the app
+// closing, not a turn end, and is skipped.
+const TURN_END_TYPES = new Set([
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+]);
 const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const REARM_RETRY_BASE_MS = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const REARM_RETRY_MAX_MS = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
@@ -266,12 +276,7 @@ function observeArmOutput(hostMode, stdout, stderr, settleReadiness) {
 
 async function sendPrompt(paths, client, sessionID, text) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
-  await client.session.promptAsync({
-    path: { id: sessionID },
-    body: {
-      parts: [{ type: "text", text: encoded }],
-    },
-  });
+  await client.session.prompt({ sessionID, text: encoded });
 }
 
 function confirmHandlingDelivery(paths, recovery) {
@@ -561,19 +566,51 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
   return armAttempt(await waitForArmReady(armChild), armChild, includeArmChild);
 }
 
-export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
-  const paths = effectivePaths(root);
-  globalThis[COORDINATOR_KEY] = {
-    ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),
-  };
+// One coordinator per location on a shared Map: OpenCode 2 runs every
+// location's plugin instances in one process with one globalThis (verified
+// live on 2.0.26), so a single global slot would let one location's guard
+// reach another location's arm. The turnend-guard looks its location up
+// here.
+function coordinatorRegistry() {
+  const registry = globalThis[COORDINATOR_KEY];
+  if (registry instanceof Map) return registry;
+  const created = new Map();
+  globalThis[COORDINATOR_KEY] = created;
+  return created;
+}
 
-  return {
-    event: async ({ event }) => {
-      if (event.type !== "session.idle") return;
-      const sessionID = event.properties?.sessionID;
-      if (!sessionID) return;
-      void ensureArm(paths, sessionID, client);
-    },
-  };
+export default {
+  id: "fm-primary-watch-arm",
+  async setup(ctx) {
+    const root = await resolveRoot(ctx.location.directory);
+    const paths = effectivePaths(root);
+    const scope = createSessionScope(ctx);
+    const registry = coordinatorRegistry();
+    const coordinator = {
+      ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? ctx),
+    };
+    registry.set(ctx.location.directory, coordinator);
+
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        try {
+          if (!TURN_END_TYPES.has(event.type)) continue;
+          if (event.type === "session.execution.interrupted" && event.data?.reason === "shutdown") continue;
+          if (!(await scope.belongs(event))) continue;
+          const sessionID = event.data?.sessionID;
+          if (!sessionID) continue;
+          void ensureArm(paths, sessionID, ctx);
+        } catch {
+          // One event must never end the subscription: continuity depends on
+          // this loop staying alive.
+        }
+      }
+    })();
+
+    return () => {
+      controller.abort();
+      if (registry.get(ctx.location.directory) === coordinator) registry.delete(ctx.location.directory);
+    };
+  },
 };

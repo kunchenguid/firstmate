@@ -4721,14 +4721,23 @@ EOF
     cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state comes from OpenCode's session.status events: busy and retry
-// are active, idle is inactive. Scoping latches the first session that
-// reports activity (the worker's main session - a subagent child session can
-// only start while the main session is already busy) and ignores other
-// sessions' status until the latched session settles, so a child's idle can
-// never clear the worker's busy state. The session.idle touch stays the
-// watcher's wake NOTIFICATION, never current-state truth.
+// OpenCode 2 (default export with id + setup; the V1 named-function shape no
+// longer loads) replaced the V1 session.status event with execution
+// lifecycle events (verified live on 2.0.26): execution started and retry
+// scheduled are active; succeeded, failed, and interrupted are inactive.
+// The V2 event stream is server-wide, so this plugin scopes each event to
+// the worker's own location before it writes anything; the rule is owned by
+// the firstmate home's .opencode/plugins/lib/fm-session-scope.js and this
+// generated copy stays self-contained because a worker worktree carries no
+// lib directory. Scoping latches the first session that reports activity
+// (the worker's main session - a subagent child session can only start while
+// the main session is already busy) and ignores other sessions' status until
+// the latched session settles, so a child's terminal event can never clear
+// the worker's busy state. The turn-end touch stays the watcher's wake
+// NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4736,35 +4745,69 @@ const busyEvent = (state, event) =>
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
   });
-export const FmBusyState = async () => {
-  let activeSession = null;
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.status") {
-        const sessionID = event.properties.sessionID;
-        const statusType = event.properties.status && event.properties.status.type;
-        if (statusType === "busy" || statusType === "retry") {
-          if (activeSession === null) activeSession = sessionID;
-          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
-          return;
+const resolvePath = (anchor) => {
+  try {
+    return realpathSync(anchor);
+  } catch {
+    return resolve(anchor);
+  }
+};
+export default {
+  id: "fm-busy-state",
+  async setup(ctx) {
+    const locationDirectory = resolvePath(ctx.location.directory);
+    const verdicts = new Map();
+    const belongs = async (event) => {
+      const sessionID = event.data?.sessionID;
+      if (typeof sessionID !== "string" || !sessionID) return false;
+      const known = verdicts.get(sessionID);
+      if (known !== undefined) return known;
+      let directory;
+      if (event.type === "session.created") directory = event.data?.location?.directory;
+      if (typeof directory !== "string" || !directory) {
+        try {
+          directory = (await ctx.session.get({ sessionID }))?.location?.directory;
+        } catch {
+          directory = undefined;
         }
-        if (statusType === "idle" && sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-status-idle");
-        }
-        return;
       }
-      if (event.type === "session.idle") {
-        if (event.properties.sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-idle");
+      const verdict = typeof directory === "string" && resolvePath(directory) === locationDirectory;
+      verdicts.set(sessionID, verdict);
+      return verdict;
+    };
+    let activeSession = null;
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        try {
+          if (event.type === "session.execution.started" || event.type === "session.retry.scheduled") {
+            if (!(await belongs(event))) continue;
+            const sessionID = event.data?.sessionID;
+            if (activeSession === null) activeSession = sessionID;
+            if (sessionID === activeSession) {
+              const active = event.type === "session.retry.scheduled" ? "session-retry-scheduled" : "session-execution-started";
+              await busyEvent("busy", active);
+            }
+            continue;
+          }
+          if (event.type === "session.execution.succeeded" || event.type === "session.execution.failed" || event.type === "session.execution.interrupted") {
+            if (!(await belongs(event))) continue;
+            const sessionID = event.data?.sessionID;
+            if (sessionID === activeSession) {
+              activeSession = null;
+              await busyEvent("idle", "session-execution-" + event.type.slice("session.execution.".length));
+            }
+            await new Promise((resolve) => {
+              execFile("touch", ["$TURNEND"], () => resolve());
+            });
+          }
+        } catch {
+          // One event must never end the subscription.
         }
-        await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
-        });
       }
-    },
-  };
+    })();
+    return () => controller.abort();
+  },
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'
