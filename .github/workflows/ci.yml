@@ -29,7 +29,7 @@ concurrency:
 jobs:
   lint:
     name: Lint ${{ matrix.partition }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kunchenguid/firstmate' && 'ubuntu-latest' || fromJSON('["self-hosted", "hezki-pc"]') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     strategy:
@@ -78,7 +78,7 @@ jobs:
   # and that the portable serial CI shards partition that serial lane exactly.
   test-coverage:
     name: Test coverage guard
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kunchenguid/firstmate' && 'ubuntu-latest' || fromJSON('["self-hosted", "hezki-pc"]') }}
     # Fast tier: the coverage guard is a seconds-long local computation.
     timeout-minutes: 5
     steps:
@@ -90,7 +90,7 @@ jobs:
   # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kunchenguid/firstmate' && 'ubuntu-latest' || fromJSON('["self-hosted", "hezki-pc"]') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -134,7 +134,7 @@ jobs:
 
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kunchenguid/firstmate' && 'ubuntu-latest' || fromJSON('["self-hosted", "hezki-pc"]') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -178,7 +178,7 @@ jobs:
   # whose "ofN" disagrees with it (docs/fm-test-portable-shards.md).
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kunchenguid/firstmate' && 'ubuntu-latest' || fromJSON('["self-hosted", "hezki-pc"]') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     strategy:
@@ -250,7 +250,7 @@ jobs:
   # the failure evidence and move the job to macOS rather than skip assertions.
   tests-herdr:
     name: Behavior tests (Herdr)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kunchenguid/firstmate' && 'ubuntu-latest' || fromJSON('["self-hosted", "hezki-pc"]') }}
     # Heavy tier (see the timeout policy above): the last-resort job backstop.
     # The family-run step below owns the hang tripwire, so a wedged suite fails
     # there with the always() cleanup and timing upload still running.
@@ -371,7 +371,7 @@ jobs:
   # Aggregate per-lane timing into one summary artifact for critical-path review.
   tests-timing-aggregate:
     name: Behavior timing aggregate
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kunchenguid/firstmate' && 'ubuntu-latest' || fromJSON('["self-hosted", "hezki-pc"]') }}
     # Fast tier: aggregation is seconds of work over lane artifacts.
     timeout-minutes: 5
     needs:
@@ -412,6 +412,8 @@ jobs:
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
+    # The fork's self-hosted Linux runners cannot run macOS jobs.
+    if: github.repository == 'kunchenguid/firstmate'
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -505,7 +507,7 @@ jobs:
 
   invariants:
     name: Repo invariants
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kunchenguid/firstmate' && 'ubuntu-latest' || fromJSON('["self-hosted", "hezki-pc"]') }}
     # Fast tier: the invariant checks are seconds-long file comparisons.
     timeout-minutes: 5
     steps:
