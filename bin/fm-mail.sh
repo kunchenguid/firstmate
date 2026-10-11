@@ -29,6 +29,12 @@
 #                        `at`/cron, or via the standing check armed by
 #                        bin/fm-mail-check.sh (docs/configuration.md
 #                        "Mail plane").
+#                        With FM_MAIL_SOURCE_ALLOW set, only mail whose
+#                        parsed From address matches it wakes. Other mail is
+#                        recorded in the cursor without a wake, never marked
+#                        read, and logged only as a count; a uid whose header
+#                        cannot be fetched is held unwoken (sender
+#                        unverifiable) and retried next poll.
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
@@ -50,6 +56,13 @@
 #   FM_SMTP_HOST=<smtp host>
 #   FM_SMTP_PORT=<smtp port>     (default 465, implicit TLS)
 #   FM_MAIL_TIMEOUT=<seconds>    (default 20; IMAP/SMTP socket timeout)
+#   FM_MAIL_SOURCE_ALLOW=<list>  (optional sender allow list, e.g.
+#                                @example.com,user@example.org: "@domain"
+#                                matches that exact domain, anything else one
+#                                exact address, case-insensitive; unset or
+#                                blank surfaces every sender, and a malformed
+#                                entry fails read/poll naming it. read also
+#                                withholds non-matching mail.)
 # FM_HOME falls back to the repo root when unset. This script carries no secret
 # and no default endpoint that could resolve against a wrong home; FM_MAIL_USER,
 # FM_MAIL_PASS, FM_IMAP_HOST, and FM_SMTP_HOST are always required, and
@@ -479,13 +492,17 @@ mail_heal() {
 mail_poll() {
   # List unseen mail (uid,date,from,subj,status) plus the mailbox generation
   # guard, then wake each NEW uid and each recovered retry uid. status is
-  # ok, retry, or degraded; an empty status is treated as ok so a legacy
-  # four-field row still wakes. Never marks anything read. Overlapping polls
+  # ok, retry, degraded, filtered, or held; an empty status is treated as ok
+  # so a legacy four-field row still wakes. filtered (sender outside
+  # FM_MAIL_SOURCE_ALLOW) is recorded in the cursor and dropped from the retry
+  # set without a wake; held (sender unverifiable) is left for the next poll.
+  # Never marks anything read. Overlapping polls
   # are serialized on the mail-seen lock; each poll first heals a run
   # interrupted between its phases (mail_heal), so an overlapping poll or an
   # interrupted run can never lose a mail. wake_for owns the remaining
   # kill-window duplicate residual.
   local list generation first_line uid fr subj status woke=0 need_wake line wake_rc=0
+  local filtered=0 held=0
   if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
@@ -542,6 +559,24 @@ mail_poll() {
     [ -z "$status" ] && status=ok
     need_wake=0
     case "$status" in
+      filtered)
+        # A sender outside the allow list never wakes. Record the uid so it
+        # does not re-fetch, and drop any retry entry so it does not resurface
+        # as recovered metadata. A failed write only means the next poll
+        # filters it again, so it never stops the poll.
+        if ! mail_seen "$uid" && ! printf '%s\n' "$uid" >> "$CURSOR"; then
+          echo "fm-mail: could not record a withheld uid; filtered again next poll" >&2
+        fi
+        if ! mail_retry_remove "$uid"; then
+          echo "fm-mail: could not clear retry for a withheld uid; filtered again next poll" >&2
+        fi
+        filtered=$((filtered + 1))
+        continue
+        ;;
+      held)
+        held=$((held + 1))
+        continue
+        ;;
       retry)
         # Already cursor-recorded from the degraded wake. Surface recovered
         # metadata once; if a recovery/ok publish is already journaled, retry
@@ -610,6 +645,13 @@ mail_poll() {
     fi
   done <<< "$list"
   fm_lock_release "$STATE_DIR/.mail-seen.lock"
+  # Counts only: a withheld sender's address and subject are never logged.
+  if [ "$filtered" -gt 0 ]; then
+    echo "fm-mail: withheld $filtered message(s) from senders outside FM_MAIL_SOURCE_ALLOW (not woken, left unread)"
+  fi
+  if [ "$held" -gt 0 ]; then
+    echo "fm-mail: held $held message(s) whose sender could not be verified (header unfetchable); retried next poll"
+  fi
   if [ "$woke" -eq 0 ]; then
     echo "fm-mail: no new mail"
   fi
@@ -636,6 +678,7 @@ case "${1:-}" in
   status)
     echo "mail account: $FM_MAIL_USER"
     echo "imap: $IMAP_HOST:$IMAP_PORT smtp: $SMTP_HOST:$SMTP_PORT"
+    run_py allow || true
     run_py seen "$CURSOR" || true
     ;;
   poll)

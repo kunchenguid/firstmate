@@ -1527,9 +1527,28 @@ FM_SMTP_HOST=   # SMTP server hostname
 `FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
 The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
 
+**Sender allow list**
+
+`FM_MAIL_SOURCE_ALLOW` is an optional comma-separated sender allow list, read from the same `.env` or environment:
+
+```sh
+FM_MAIL_SOURCE_ALLOW=@example.com,user@example.org
+```
+
+An entry starting with `@` matches that exact sender domain, so `@example.com` matches neither `sub.example.com` nor `example.com.evil.test`; any other entry matches one exact address.
+Matching is case-insensitive, tolerates whitespace around entries, and uses the single address parsed from the `From` header, never its display text; a message with no, several, or unparseable `From` addresses never matches.
+Unset or blank means every sender surfaces, as before.
+A malformed entry, such as a bare `example.com`, a wildcard, or embedded whitespace, makes `read` and `poll` fail naming it, rather than silently widening or emptying the filter.
+
+When the list is set, only matching mail wakes.
+`poll` records non-matching mail in its cursor so it never re-wakes, leaves it unread, and logs only a count, never the sender or subject; changing the list later does not resurface mail already withheld.
+A message whose header cannot be fetched has no verifiable sender, so it is held without a wake and retried on later polls instead of surfacing degraded.
+`read` likewise lists only matching mail plus a withheld count, and `status` prints the parsed list.
+The list matches the claimed `From` address only; it does not authenticate the sender against spoofing.
+
 **Unfetchable headers**
 
-A message whose header cannot be fetched is surfaced with a degraded summary instead of being skipped, so it is never missed and cannot block later mail.
+Without a sender allow list, a message whose header cannot be fetched is surfaced with a degraded summary instead of being skipped, so it is never missed and cannot block later mail.
 A later poll retries that fetch and, on success, surfaces the real sender and subject; a persistently unfetchable message stays degraded without repeating that wake.
 
 **Arm unattended polling**
@@ -2422,6 +2441,7 @@ FM_IMAP_HOST=      # mail-plane IMAP server hostname
 FM_IMAP_PORT=993   # mail-plane IMAP server port
 FM_SMTP_HOST=      # mail-plane SMTP server hostname
 FM_SMTP_PORT=465   # mail-plane SMTP server port
+FM_MAIL_SOURCE_ALLOW=   # optional mail-plane sender allow list; unset surfaces every sender
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
