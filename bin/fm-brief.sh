@@ -113,6 +113,12 @@
 # additions of missing knowledge. A correction edits only the wrong text and
 # never runs fm-ensure-agents-md.sh, whose inserted sections and created
 # pointer file are themselves additions.
+# Ship briefs also carry a compact coding-rules section, the ponytail rules
+# (https://github.com/DietrichGebert/ponytail AGENTS.md), so every implementer
+# receives them: write the smallest complete change, reuse before invention, and
+# never cut validation, error handling, security, or accessibility. It states no
+# delivery or safety rule of its own; scout briefs and secondmate charters, whose
+# deliverables are a report and a charter rather than a code change, omit it.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -586,6 +592,35 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# The compact coding rules every implementer brief carries, taken from the
+# ponytail ruleset (https://github.com/DietrichGebert/ponytail AGENTS.md) and
+# rendered in this brief's own voice. Ship briefs emit it; a scout's deliverable
+# is a report and a charter is not a delivery contract, so neither takes it.
+# It states no delivery or safety rule of its own and defers to the sections
+# above it.
+IFS= read -r -d '' PONYTAIL_SECTION <<'EOF' || true
+# Smallest complete change
+Ponytail rules: the best code is the code you never wrote, so write the smallest complete change that fully works rather than the most flexible one.
+Read the task and the code it touches before you write anything: list every place the change must reach - callers, tests, fixtures, config, exports - and check what it could break for users, because that is the scope and anything extra is not.
+Then take the first option that fully works:
+1. Does it need to exist at all? Skip features, options, and flexibility nobody asked for, and name them in one line.
+2. Is it already in this codebase, as a helper, component, service, or pattern? Use it the way the surrounding code does.
+3. Does the standard library or a platform feature do it? Use it, and prefer a house component over a native widget.
+4. Is there an installed dependency? Use it, and never add a dependency for a few lines.
+5. Can it be one line a reader gets at a glance? One line.
+6. Otherwise: the minimum code that works.
+Be lazy about the solution, never about the change: finish every part the task needs, including the callers, tests, and fixtures your change breaks.
+Add no abstraction, wrapper, option, config, boilerplate, or "for later" code nobody asked for, and keep the layers, interfaces, and conventions the codebase already has; deletion beats addition.
+The shortest working diff wins once you know everything it must touch, and a one-liner that needs decoding is not short; comment only the why the code cannot show, in one line.
+Fixing a bug, grep every caller of the function you touch first and fix the root cause once in the shared code.
+Code you move or merge keeps its error handling and validation, and between options of equal size take the one that is correct on the edge cases.
+New non-trivial logic - a branch, a loop, a parser, money or security, or a whole new script or app - leaves one small test; trivial changes need none.
+A shortcut with a known limit gets a one-line comment in the form `shortcut: <the limit>, <when to upgrade>`.
+Never cut: validation at trust boundaries, error handling that prevents data loss, security, accessibility, or anything the task asked for.
+Name what you skipped or did not check, and any risk the reviewer should know, in your pull request body or your final report.
+EOF
+PONYTAIL_SECTION=${PONYTAIL_SECTION%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -719,6 +754,8 @@ $WAIT_BLOCK$INBOX_SECTION
 # Project memory
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
 A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
+
+$PONYTAIL_SECTION
 
 $DOD
 EOF

@@ -511,6 +511,52 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording bounds edits to corrections of wrong information"
 }
 
+# Every implementer brief must carry the compact coding rules (the ponytail
+# rules, https://github.com/DietrichGebert/ponytail AGENTS.md) as a generated
+# section. A scout delivers a report and a charter is not a code change, so
+# neither of those scaffolds carries it.
+test_ship_brief_carries_ponytail_rules() {
+  local home id scout brief scout_brief
+  home="$TMP_ROOT/ponytail-home"
+  mkdir -p "$home/data"
+  id="brief-ponytail-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "# Smallest complete change" "$brief" \
+    "implementer brief lost the smallest-complete-change section"
+  assert_grep "Ponytail rules" "$brief" \
+    "implementer brief lost the ponytail rule attribution"
+  assert_grep "Does it need to exist at all?" "$brief" \
+    "implementer brief lost the first skip-what-nobody-asked-for rung"
+  assert_grep "Is it already in this codebase" "$brief" \
+    "implementer brief lost the reuse-what-exists rung"
+  assert_grep "never add a dependency for a few lines" "$brief" \
+    "implementer brief lost the installed-dependency rung"
+  assert_grep "Be lazy about the solution, never about the change" "$brief" \
+    "implementer brief lost the complete-the-change bound"
+  assert_grep "fix the root cause once in the shared code" "$brief" \
+    "implementer brief lost the root-cause bug-fix rule"
+  assert_grep "leaves one small test" "$brief" \
+    "implementer brief lost the one-small-test rule"
+  assert_grep 'form `shortcut: <the limit>, <when to upgrade>`' "$brief" \
+    "implementer brief lost the shortcut-comment form"
+  assert_no_grep '\`shortcut' "$brief" \
+    "implementer brief leaked a heredoc backslash into the shortcut-comment form"
+  assert_grep "Never cut: validation at trust boundaries" "$brief" \
+    "implementer brief lost the never-cut list"
+  assert_grep "Name what you skipped or did not check" "$brief" \
+    "implementer brief lost the skipped-and-risk disclosure line"
+
+  scout="brief-ponytail-scout-c3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$scout" some-proj --scout >/dev/null 2>&1
+  scout_brief="$home/data/$scout/brief.md"
+  assert_present "$scout_brief" "scout brief was not scaffolded"
+  assert_no_grep "Ponytail rules" "$scout_brief" \
+    "a report-only scout brief must not carry the implementer coding rules"
+  pass "fm-brief.sh: implementer briefs carry the ponytail coding rules and scout briefs do not"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -1478,6 +1524,7 @@ test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_ship_brief_carries_ponytail_rules
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
