@@ -3035,6 +3035,96 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   pass "dispatching a persistent secondmate needs no backlog item"
 }
 
+test_cmux_close_refusal_survives_replay() {
+  local case_dir home id mode out rc before marker expected_state force_flags=()
+  local workspace=aaaaaaaa-0000-0000-0000-000000000000
+  local surface=bbbbbbbb-1111-1111-1111-111111111111
+  for mode in close retain; do
+    id="atomic-cmux-replay-$mode"
+    case_dir=$(make_home "cmux-replay-$mode")
+    home=$(home_of "$case_dir")
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+    force_flags=()
+    expected_state='done'
+    if [ "$mode" = retain ]; then
+      tasks-axi hold "$id" --kind captain --reason 'decision still needed' \
+        --file "$(backlog_of "$case_dir")" >/dev/null || fail "could not hold cmux task"
+      force_flags=(--force)
+      expected_state=queued
+    fi
+    fm_write_meta "$home/state/$id.meta" \
+      "backend=cmux" "window=$workspace:$surface" "endpoint_task_id=$id" \
+      "cmux_workspace_id=$workspace" "cmux_surface_id=$surface" \
+      "worktree=$case_dir/wt" "project=$case_dir/project" \
+      "kind=ship" "mode=local-only" "harness=pi" "spawn_gen=cmux-$mode"
+    cp "$home/state/$id.meta" "$case_dir/original.meta"
+    before=$(tasks-axi show "$id" --file "$(backlog_of "$case_dir")")
+    marker="$home/state/$id.backlog-close"
+    cat > "$case_dir/fakebin/cmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+fixture=$(cd "$(dirname "$0")/.." && pwd)
+printf '%s\n' "$*" >> "$fixture/cmux.log"
+case "${1:-}" in
+  version) printf '%s\n' 'cmux 0.64.17 (97) [fake]' ;;
+  ping) printf '%s\n' PONG ;;
+  workspace)
+    case " $* " in
+      *' --window '*) printf '%s\n' '{"workspaces":[{"id":"aaaaaaaa-0000-0000-0000-000000000000"},{"id":"ffffffff-0000-0000-0000-000000000000"}]}' ;;
+      *) printf '%s\n' '{"workspaces":[]}' ;;
+    esac
+    ;;
+  list-windows) printf '%s\n' '[{"id":"eeeeeeee-0000-0000-0000-000000000000"}]' ;;
+  list-panes)
+    if [ -f "$fixture/closed" ]; then
+      printf '%s\n' 'Error: not_found: Workspace not found' >&2
+      exit 1
+    fi
+    printf '%s\n' '{"panes":[{"surface_ids":["bbbbbbbb-1111-1111-1111-111111111111"]}]}'
+    ;;
+  close-workspace) [ ! -f "$fixture/allow-close" ] || : > "$fixture/closed" ;;
+  *) exit 1 ;;
+esac
+SH
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+fixture=$(cd "$(dirname "$0")/.." && pwd)
+printf '%s\n' "$*" >> "$fixture/treehouse.log"
+SH
+    chmod +x "$case_dir/fakebin/cmux" "$case_dir/fakebin/treehouse"
+
+    rc=0
+    out=$(run_teardown "$case_dir" "$id" "${force_flags[@]+"${force_flags[@]}"}") || rc=$?
+    [ "$rc" -ne 0 ] || fail "cmux $mode cleanup accepted an unconfirmed close: $out"
+    assert_grep 'close-workspace --workspace' "$case_dir/cmux.log" "cmux close was not attempted: $out"
+    assert_present "$marker" "cmux refusal lost the prepared transition"
+    assert_absent "$case_dir/closed" "cmux fixture unexpectedly closed the endpoint"
+    assert_absent "$case_dir/treehouse.log" "cmux refusal returned the project copy"
+
+    out=$(run_bootstrap "$case_dir") || fail "bootstrap failed: $out"
+    assert_present "$home/state/$id.meta" "cmux $mode replay lost the live endpoint record"
+    cmp -s "$case_dir/original.meta" "$home/state/$id.meta" \
+      || fail "cmux $mode replay changed the live endpoint record"
+    assert_present "$marker" "cmux $mode replay consumed the pending transition"
+    [ "$(tasks-axi show "$id" --file "$(backlog_of "$case_dir")")" = "$before" ] \
+      || fail "cmux $mode replay changed the backlog before confirmed cleanup"
+    assert_present "$case_dir/wt/.git" "cmux $mode replay lost the isolated copy"
+
+    # The retained record permits an ordinary cleanup retry to confirm closure.
+    : > "$case_dir/allow-close"
+    out=$(run_teardown "$case_dir" "$id" "${force_flags[@]+"${force_flags[@]}"}") \
+      || fail "cmux $mode cleanup retry failed: $out"
+    assert_present "$case_dir/closed" "cmux retry did not close the exact endpoint"
+    assert_absent "$home/state/$id.meta" "cmux retry retained the retired task record"
+    assert_absent "$marker" "cmux retry retained the applied backlog transition"
+    [ "$(row_state "$case_dir" "$id")" = "$expected_state" ] \
+      || fail "cmux $mode retry did not finish its backlog transition: $out"
+  done
+  pass "cmux close and retain refusals preserve endpoint records across restart until cleanup confirms closure"
+}
+
+test_cmux_close_refusal_survives_replay
 test_backend_resolution_preserves_config_errors
 test_backend_resolution_preserves_precedence_and_defaults
 test_backlog_callers_refuse_unreadable_backend_config

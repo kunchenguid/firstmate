@@ -73,10 +73,7 @@
 #      `self.id = UUID()`, with no restored-id parameter, unlike surfaces'
 #      `restoredSurfaceId ?? UUID()` path scoped to same-run object reuse).
 #      No live app restart of the captain's own content was performed to
-#      confirm this; see docs/cmux-backend.md for the reasoning. Recovery
-#      therefore uses scoped-title matching from the caller-facing fm-<id>
-#      label, never a stored uuid, mirroring herdr's/zellij's own recovery
-#      posture.
+#      confirm this; see docs/cmux-backend.md for the reasoning.
 #   6. NO title uniqueness enforcement for workspaces OR surfaces/tabs -
 #      verified live (two workspaces, and two surfaces in one workspace, all
 #      created successfully sharing one title). The duplicate check below is
@@ -341,31 +338,36 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
-# fm_backend_cmux_create_task: create the task's workspace (one surface),
-# refusing an existing live <label> (finding #6: cmux enforces no uniqueness
-# itself). Resolves the fresh workspace's default surface via one list-panes
-# call (finding: a freshly created workspace already has exactly one surface,
-# so no separate new-surface call is needed). --focus false is passed for
-# defense in depth though verified to already be the default (finding:
-# workspace/surface/pane create all default focus to false) - no
-# focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
-# <surface_id>" on success.
+# fm_backend_cmux_create_task: create the task's workspace and take its exact
+# workspace and surface UUIDs from the authoritative create response.
+# The older create-then-title-lookup sequence raced cmux's workspace-list
+# projection and was also scoped to the caller's current window, so a real
+# creation could be mistaken for failure while leaving only an idle shell.
+# The canonical `workspace create` command has returned both UUIDs as JSON
+# since the verified 0.64.17 floor.
+# cmux enforces no title uniqueness itself, so the pre-create duplicate check
+# remains deliberate.
+# --focus false is defense in depth though verified to be the default.
+# Echoes "<workspace_id> <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title dup out wsid sfid uuid_re
+  uuid_re='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
   title=$(fm_backend_cmux_scoped_title "$label")
   dup=$(fm_backend_cmux_workspace_id_for_label "$title")
   if [ -n "$dup" ]; then
     echo "error: cmux workspace '$title' already exists" >&2
     return 1
   fi
-  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids 2>&1) || {
-    echo "error: cmux new-workspace failed for '$title': $out" >&2
+  out=$(fm_backend_cmux_cli workspace create --name "$title" --cwd "$cwd" --focus false --json --id-format uuids 2>&1) || {
+    echo "error: cmux workspace create failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
-  sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-  [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
+  wsid=$(printf '%s' "$out" | jq -r --arg re "$uuid_re" '(.workspace_id // empty) | select(type == "string" and test($re))' 2>/dev/null)
+  sfid=$(printf '%s' "$out" | jq -r --arg re "$uuid_re" '(.surface_id // empty) | select(type == "string" and test($re))' 2>/dev/null)
+  if [ -z "$wsid" ] || [ -z "$sfid" ]; then
+    echo "error: cmux workspace create returned no complete workspace/surface identity for '$title'; refusing to infer one from an eventually consistent title listing" >&2
+    return 1
+  fi
   printf '%s %s' "$wsid" "$sfid"
 }
 
@@ -405,28 +407,20 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
 
 # fm_backend_cmux_target_ready: parse the target and verify it is live via
 # fm_backend_cmux_surface_exists (never read-screen - see that function's
-# header for the fresh-surface pitfall this avoids). When the caller knows
-# the owning firstmate task label, refresh stale workspace/surface ids by label.
+# header for the fresh-surface pitfall this avoids).
+# When the caller knows the owning firstmate task label, a visible conflicting
+# title is refused.
+# An absent title is not contradictory evidence because workspace listing is
+# current-window scoped and can lag a successful create response, so the exact
+# UUID pair remains authoritative when its surface exists structurally.
 fm_backend_cmux_target_ready() {  # <target> [expected-label]
-  local expected_label=${2:-} expected_title title wsid sfid
+  local expected_label=${2:-} expected_title listing title
   fm_backend_cmux_parse_target "$1" || return 1
   if [ -n "$expected_label" ]; then
     expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
-    title=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
-    if [ "$title" = "$expected_title" ]; then
-      fm_backend_cmux_surface_exists "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE" && return 0
-      wsid=$FM_BACKEND_CMUX_WORKSPACE
-    elif [ -n "$title" ]; then
-      return 1
-    else
-      wsid=$(fm_backend_cmux_workspace_id_for_label "$expected_title")
-      [ -n "$wsid" ] || return 1
-    fi
-    sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-    [ -n "$sfid" ] || return 1
-    FM_BACKEND_CMUX_WORKSPACE=$wsid
-    FM_BACKEND_CMUX_SURFACE=$sfid
-    return 0
+    listing=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || listing=
+    title=$(printf '%s' "$listing" | jq -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
+    [ -z "$title" ] || [ "$title" = "$expected_title" ] || return 1
   fi
   fm_backend_cmux_surface_exists "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE"
 }
@@ -585,10 +579,12 @@ fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # The count comes from the same scoped workspace list that confirms membership.
 fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count>"
   local wsid=$1 wins wid wss count
-  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 0
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$wins" | jq -e 'type == "array" and all(.[]; (.id | type) == "string" and (.id | length) > 0)' >/dev/null 2>&1 || return 1
   while IFS= read -r wid; do
     [ -n "$wid" ] || continue
-    wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) || continue
+    wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) || return 1
+    printf '%s' "$wss" | jq -e '(.workspaces | type) == "array" and all(.workspaces[]; (.id | type) == "string" and (.id | length) > 0)' >/dev/null 2>&1 || return 1
     count=$(printf '%s' "$wss" | jq -er --arg id "$wsid" '
       (.workspaces // []) as $workspaces
       | select(any($workspaces[]?; .id == $id))
@@ -597,10 +593,19 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
     printf '%s %s' "$wid" "$count"
     return 0
   done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
+  return 0
 }
 
-# fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
-# every other backend's `kill` `|| true` contract). A cmux task owns one
+fm_backend_cmux_workspace_confirmed_gone() {  # <workspace_id>
+  local result
+  result=$(fm_backend_cmux_cli list-panes --workspace "$1" --json --id-format uuids 2>&1) && return 1
+  case "$result" in
+    *'not_found: Workspace not found'*|*'not_found: workspace not found'*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_backend_cmux_kill: remove the task's whole workspace. A cmux task owns one
 # workspace, so teardown reclaims that workspace and all of its surfaces.
 #
 # The selected-workspace teardown bug (docs/cmux-backend.md "Closing the last
@@ -616,20 +621,29 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
 # leaving that window a fresh default workspace (never an fm-<home>- title, so
 # recovery/list_live ignore it) - cmux's own "closed the last tab" outcome.
 fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
-  local expected_label=${3:-} wsid wininfo win count
-  if [ -n "$expected_label" ]; then
-    fm_backend_cmux_target_ready "$1" "$expected_label" || return 0
-  else
-    fm_backend_cmux_parse_target "$1" || return 0
-  fi
+  local expected_label=${3:-} wsid wininfo win count attempt
+  fm_backend_cmux_parse_target "$1" || return 1
   wsid=$FM_BACKEND_CMUX_WORKSPACE
-  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid")
+  fm_backend_cmux_target_ready "$1" "$expected_label" || {
+    fm_backend_cmux_workspace_confirmed_gone "$wsid"
+    return $?
+  }
+  wsid=$FM_BACKEND_CMUX_WORKSPACE
+  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid") || return 1
   win=${wininfo%% *}
   count=${wininfo##* }
-  if [ -n "$win" ] && [ "$count" = 1 ]; then
-    fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
-  fi
-  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
+  [ -n "$win" ] || return 1
+  case "$count" in
+    1) fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || return 1 ;;
+    *[!0-9]*|'') return 1 ;;
+  esac
+  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || return 1
+  # The app acknowledges close before its workspace removal finishes.
+  for attempt in {1..10}; do
+    fm_backend_cmux_workspace_confirmed_gone "$wsid" && return 0
+    [ "$attempt" -eq 10 ] || sleep 0.1
+  done
+  return 1
 }
 
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace

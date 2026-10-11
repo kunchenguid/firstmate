@@ -18,34 +18,32 @@
 # the captain's own live work.
 set -u
 
-# cmux_refuse_if_unsafe: 0 (SAFE to proceed) only if <workspace_id> is
-# non-empty, <want_label> carries the fm-test- prefix, and the workspace is
+# cmux_refuse_if_unsafe: 0 (SAFE to proceed) only if <target> is
+# structurally live, <want_label> carries the fm-test- prefix, and the workspace is
 # CURRENTLY LISTED with the scoped title for <want_label>. 1 (REFUSE) on
 # anything else. Requires bin/backends/cmux.sh already sourced.
-cmux_refuse_if_unsafe() {  # <workspace_id> <want_label>
-  local wsid=$1 want_label=$2 want_title title
-  [ -n "$wsid" ] || { echo "cmux safety guard: refusing - empty workspace id" >&2; return 1; }
+cmux_refuse_if_unsafe() {  # <target> <want_label>
+  local want_label=$2 want_title title
+  fm_backend_cmux_parse_target "$1" || return 1
   case "$want_label" in
     fm-test-*) : ;;
     *) echo "cmux safety guard: refusing - label '$want_label' does not carry the fm-test- prefix" >&2; return 1 ;;
   esac
   want_title=$(fm_backend_cmux_scoped_title "$want_label")
-  title=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r --arg id "$wsid" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
+  title=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
   if [ "$title" != "$want_title" ]; then
-    echo "cmux safety guard: refusing - workspace $wsid title '${title:-<not found>}' does not match expected '$want_title'" >&2
+    echo "cmux safety guard: refusing - workspace $FM_BACKEND_CMUX_WORKSPACE title '${title:-<not found>}' does not match expected '$want_title'" >&2
     return 1
   fi
+  fm_backend_cmux_surface_exists "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE" || return 1
   return 0
 }
 
 # cmux_safe_close_workspace: the ONLY sanctioned way for a test to tear down
 # a workspace it created. Guards first (cmux_refuse_if_unsafe), then closes
-# the whole workspace (never a bulk/enumerate-based close). Best-effort past
-# the guard (a workspace already gone must not fail the caller's cleanup
-# trap) - but the guard itself is NOT best-effort: a refusal here means
-# cleanup leaves the isolated, throwaway workspace for that fm-test- label open
-# rather than risk the wrong target.
-cmux_safe_close_workspace() {  # <workspace_id> <want_label>
+# the whole workspace (never a bulk/enumerate-based close). A refusal leaves
+# the isolated, throwaway workspace for that fm-test- label open.
+cmux_safe_close_workspace() {  # <target> <want_label>
   cmux_refuse_if_unsafe "$1" "$2" || return 1
-  fm_backend_cmux_cli close-workspace --workspace "$1" >/dev/null 2>&1 || true
+  fm_backend_cmux_kill "$1" "" "$2"
 }
