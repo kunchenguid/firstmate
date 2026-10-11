@@ -155,6 +155,30 @@ make_primary_root() {
   (cd "$dir" && pwd -P)
 }
 
+# make_linked_root <name>: a genuine linked `git worktree` (git-dir !=
+# git-common-dir) shaped like a primary checkout (AGENTS.md, bin/ with a stub
+# arm) plus its state/config dirs, echoing the resolved root. This is the shape
+# a treehouse lease hands a second-mate home or a crewmate/scout worktree.
+make_linked_root() {
+  local dir="$TMP_ROOT/$1" base="$TMP_ROOT/$1-base" stub
+  fm_git_worktree "$base" "$dir" "fm/watcher-$1"
+  mkdir -p "$dir/state" "$dir/config" "$dir/bin"
+  : > "$dir/AGENTS.md"
+  stub="$dir/bin/fm-watch-arm.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$stub"
+  chmod +x "$stub"
+  (cd "$dir" && pwd -P)
+}
+
+# assert_linked_worktree <label> <root>: the fixture must really have git-dir
+# distinct from git-common-dir, or the case cannot exercise the linked-worktree
+# branch and could pass vacuously on a plain checkout.
+assert_linked_worktree() {
+  local label=$1 root=$2
+  [ "$(git -C "$root" rev-parse --git-dir)" != "$(git -C "$root" rev-parse --git-common-dir)" ] \
+    || fail "$label: fixture is not a linked worktree (git-dir == git-common-dir)"
+}
+
 # drive_plugin_arm <root> <state> <config>: write the lock that names this Node
 # process, load the plugin factory, and print the ensureArm status it returns.
 drive_plugin_arm() {
@@ -204,6 +228,38 @@ test_plugin_not_needed_for_empty_home() {
   pass "plugin: an empty home reports not-needed"
 }
 
+# A treehouse-leased OpenCode SECOND MATE home is a genuine linked worktree
+# carrying .fm-secondmate-home. It must arm its OWN watcher despite git-dir !=
+# git-common-dir; the marker is what distinguishes it from a crewmate/scout
+# worktree. The stub arm sits at the home's own bin/, which is what the turn-end
+# guard requires.
+test_plugin_arms_for_secondmate_linked_home() {
+  local root status
+  root=$(make_linked_root plugin-sm-home)
+  printf 'sm-test-1\n' > "$root/.fm-secondmate-home"
+  : > "$root/state/task1.meta"
+  assert_linked_worktree "secondmate home" "$root"
+  status=$(drive_plugin_arm "$root" "$root/state" "$root/config")
+  [ "$status" != "not-primary" ] \
+    || fail "plugin rejected a treehouse-leased secondmate home (status '$status')"
+  [ "$status" != "not-needed" ] \
+    || fail "plugin reported 'not-needed' for a secondmate home with an in-flight task"
+  pass "plugin: a treehouse-leased secondmate home (linked worktree with marker) arms"
+}
+
+# A plain linked worktree with no .fm-secondmate-home is a crewmate/scout
+# worktree and must stay silent: isPrimaryRoot rejects it before any arm.
+test_plugin_silent_in_linked_worktree() {
+  local root status
+  root=$(make_linked_root plugin-crew-wt)
+  : > "$root/state/task1.meta"
+  assert_linked_worktree "crewmate worktree" "$root"
+  status=$(drive_plugin_arm "$root" "$root/state" "$root/config")
+  [ "$status" = "not-primary" ] \
+    || fail "plugin did not reject a plain linked worktree (status '$status')"
+  pass "plugin: a plain linked crewmate/scout worktree does not arm"
+}
+
 test_registered_check_arms
 test_registered_source_arms
 test_untrusted_check_does_not_arm
@@ -215,3 +271,5 @@ test_empty_home_does_not_arm
 test_plugin_arms_for_registered_check
 test_plugin_arms_for_registered_source
 test_plugin_not_needed_for_empty_home
+test_plugin_arms_for_secondmate_linked_home
+test_plugin_silent_in_linked_worktree

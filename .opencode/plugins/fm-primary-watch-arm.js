@@ -115,7 +115,12 @@ function effectivePaths(root) {
 async function isPrimaryRoot(root, home) {
   if (!root) return false;
   if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  if (existsSync(`${root}/.fm-secondmate-home`)) return false;
+  // A second-mate home owns .fm-secondmate-home and is itself a primary root.
+  // A treehouse-leased OpenCode second mate is exactly a linked worktree
+  // (git-dir != git-common-dir) carrying that marker, so it must arm its OWN
+  // correctly-pathed watcher; the linked-worktree test below would otherwise
+  // reject it. A crewmate/scout worktree carries no marker and stays silent.
+  if (existsSync(`${root}/.fm-secondmate-home`)) return true;
   if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
   const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
   const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
