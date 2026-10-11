@@ -970,6 +970,7 @@ Each relaunch installs a fresh worker extension with the home's current list, so
 ## Worker account pin (config/claude-account, config/pi-account)
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
+A home with several Claude seats can instead declare a Claude account pool, so firstmate can move Claude work to another seat when one runs low.
 The pin is opt-in: with neither file, every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
 
 Both files are local and gitignored.
@@ -982,9 +983,10 @@ Both files are local and gitignored.
 ### File format and provider selection
 
 `config/claude-account` holds one line: `ordinary`, or the absolute path of an existing Claude config directory.
+It may instead hold a pool: several such lines, all distinct, whose first line is the home's default account.
 `config/pi-account` holds that same root on line 1 and, on line 2, the providers this home may spend, separated by spaces, for example `openai-codex anthropic`.
 
-A final newline is optional; any other line, a relative path, or a control character such as a CR refuses.
+A final newline is optional; a blank or repeated line, any other line, a relative path, or a control character such as a CR refuses.
 For Claude, `ordinary` unsets `CLAUDE_CONFIG_DIR` rather than pointing it at `~/.claude`, because Claude reads `$CLAUDE_CONFIG_DIR/.claude.json` and keys its macOS Keychain entry to any directory that is set ([authentication, "Credential management"](https://code.claude.com/docs/en/authentication#credential-management)).
 
 A Pi root can hold several provider logins at once, so the root alone does not say which account a launch spends.
@@ -998,6 +1000,21 @@ When a file is present, every launch of that runner from this home uses it: ship
 A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFIG_DIR` or a credential that a pinned launch unsets, such as `ANTHROPIC_API_KEY`.
 The assignment would override the pin.
 The refusal names the variable; remove that assignment from the raw command, or change or remove `config/claude-account`.
+
+### Claude account pool
+
+A launch without `--account` uses the pool's first line, exactly as a single-line pin does.
+`fm-spawn.sh --account <entry>` launches a Claude worker on another line instead; the entry must equal one declared line exactly, and the flag refuses for any other runner, in a home without `config/claude-account`, and for a remote secondmate, whose own home owns its pin.
+Every declared root must be a readable, searchable directory, but only the account a launch selects is asked whether it is signed in.
+
+A relaunch keeps the account recorded on its task while the file still declares it.
+When the file no longer declares that account, the relaunch refuses before the running worker stops and names the account; restore the line, or relaunch with `--account <entry>` to move the task deliberately.
+A home whose file is gone relaunches unpinned, as before.
+The Pi pin keeps one root, and its relaunch re-reads the current file.
+
+Firstmate chooses among declared accounts with [`bin/fm-claude-account.sh`](../bin/fm-claude-account.sh) `pick`, which reads `quota-axi` once and prints the evidence for every declared account before naming one; its header owns the lane matching, ranking, and exit codes.
+That needs a `quota-axi` that reports separate Claude account lanes with their `--full` account locators; an older build leaves every account unmeasured, and the pick then names the first line and says so.
+Only the captain edits the pool; firstmate chooses within it.
 
 Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the pinned account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.

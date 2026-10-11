@@ -4,7 +4,8 @@ description: >-
   Agent-only decision procedure for resolving a matched crew-dispatch profile
   array from quota-axi's default TOON, ranking by spendPriority after three
   orthogonal gates.
-  Load when a dispatch rule or default resolves to more than one profile candidate.
+  Load when a dispatch rule or default resolves to more than one profile candidate,
+  and before any Claude spawn in a home whose config/claude-account declares more than one account.
 user-invocable: false
 metadata:
   internal: true
@@ -35,6 +36,15 @@ It does not replace the reasoning-class, runway-feasibility, or authentication g
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
 The opt-in [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) has its own documented gates.
 It never removes this skill's authority, and its `ambiguous`, `escalate`, and `error` outcomes return here.
+
+## Claude account pool
+
+A home whose `config/claude-account` declares more than one line is a Claude account pool ([`docs/configuration.md`](../../../docs/configuration.md#claude-account-pool)).
+After the harness and model decision lands on `claude` for any ship, scout, or local secondmate spawn in such a home, run `bin/fm-claude-account.sh pick --model <model>` once and pass its final `account:` line to `bin/fm-spawn.sh --account`.
+A relaunch stays on the task's recorded account; when that account is exhausted, a fresh pick's `account:` passed to `bin/fm-control.sh relaunch --account` is the deliberate switch.
+Report its `lane:` and `basis:` lines with the other candidate accounting, including an unmeasured default it discloses.
+Its exhausted exit means no declared account can take the work: stop and report it rather than spawning, and never edit the file to make room.
+The helper's header owns lane matching, ranking, and exit codes.
 
 ## Read the default TOON
 
