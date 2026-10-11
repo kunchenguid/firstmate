@@ -44,8 +44,19 @@ for root in "$FM_HOME/state" "$FM_HOME/data"; do
   ' sh {} +
 done
 
-# 2. Harness-owned roots: derive applicable locations and active-session checks from the supported harness adapters.
-# Do not guess, enumerate, or recursively inventory host-specific harness directories.
+# 2. Harness-owned data and caches: use only roots documented by the matching adapter references.
+# Determine applicable harnesses from the current harness, explicit existing configuration,
+# and installed executables documented by adapters. Inspect config/crew-harness and
+# config/secondmate-harness when present; resolve the current harness with the repository's
+# bin/fm-harness.sh. Read the adapter references to identify supported executable checks, then
+# check those executables read-only. For each installed/configured harness, read only its
+# references/harness/<name>.md and use its documented home/volatile-directory paths and
+# active-session checks. pi-signed uses the pi reference. Do not infer vendor defaults or
+# treat an adapter's mere presence as proof that its harness is installed.
+# Inventory only documented roots, using metadata (path, size, owner, timestamps) without
+# opening file contents. Include documented session records, installed plugins, and config
+# snapshots. If a harness-owned directory is encountered without a matching adapter reference
+# that documents its ownership/location, report it as unknown; do not guess or omit it.
 
 # 3. Isolated-copy pool: request the supported aggregate metadata view only.
 if command -v treehouse >/dev/null 2>&1; then treehouse status; fi
@@ -53,7 +64,7 @@ if command -v treehouse >/dev/null 2>&1; then treehouse status; fi
 
 The platform-specific `stat` forms are attempted as alternatives; if neither works, the portable byte count is retained and unavailable metadata is explicitly reported.
 
-The pool status view may expose metadata for all slots, including identifiers, paths, sizes, state, holder processes or owners, and timestamps; do not recursively inventory slot contents. Use task records and service inventories to establish ownership and references, never infer eligibility from age or a directory name alone. Metadata alone is insufficient to propose cleanup of another worker's slot; refer its disposition to the captain without exporting its path outside the private home.
+The pool status view may expose metadata for all slots, including identifiers, paths, sizes, state, holder processes or owners, and timestamps; do not recursively inventory slot contents. Use task records and service inventories to establish ownership and references, never infer eligibility from age or a directory name alone. Metadata alone is insufficient to propose cleanup of another worker's slot; refer its disposition to the captain without exporting its path outside the private home. The metadata-only harness audit includes documented harness-owned session records, installed plugins, and configuration snapshots; sibling-slot contents remain forbidden to read, copy, write, delete, move, or rename, and sibling paths/content must not be exported outside private home.
 
 ## Three-state classification
 
