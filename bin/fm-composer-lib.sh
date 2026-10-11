@@ -1004,6 +1004,11 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_PAIR_VALID=0
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
+  # 1 when the recorded pair OPENED on a plain separator (pi's idle
+  # presentation) rather than on a titled rule or wave art (the working
+  # presentations); _fm_composer_pi_verdict reads it to settle a `working`
+  # identity over the idle shape.
+  FM_COMPOSER_SCAN_PI_OPEN_PLAIN=0
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   # The glyph PROOF of each envelope: the first row strictly inside it whose
   # content leads with an agent prompt glyph once its side borders are
@@ -1017,6 +1022,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH=
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max pi_sep pi_titled
+  local pi_open_plain=0
   local probe row_glyph row_glyph_row
   local box_glyph_row=-1 box_glyph='' pi_glyph_row=-1 pi_glyph=''
   pi_max=$FM_COMPOSER_PI_MAX_LINES
@@ -1082,6 +1088,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
         FM_COMPOSER_SCAN_PI_OPEN=$pi_open
         FM_COMPOSER_SCAN_PI_CLOSE=$row
+        FM_COMPOSER_SCAN_PI_OPEN_PLAIN=$pi_open_plain
         if [ "$pi_lines" -le "$pi_max" ]; then
           FM_COMPOSER_SCAN_PI_PAIR_VALID=1
         else
@@ -1091,6 +1098,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         FM_COMPOSER_SCAN_PI_GLYPH=$pi_glyph
       fi
       pi_open=$row
+      pi_open_plain=$pi_sep
       pi_lines=0
       pi_glyph_row=-1
       pi_glyph=''
@@ -2441,11 +2449,28 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done pi proves an empty composer. A blocked
+# live pi state, while an idle/done pi proves an empty composer. A blocked
 # pi is parked on an interactive prompt waiting for a human keystroke: its menu
 # is drawn above the separator pair, so the composer region looks free while the
 # keys would answer the prompt instead of composing (issue #2797). Structure
 # cannot disprove that, so a blocked pi defers rather than claiming empty.
+#
+# A `working` identity is the one status structure CAN contradict. Pi's live
+# turn replaces the idle pair's plain top rule for the whole turn - with the
+# titled `── ⠧ Working ─` frame (_fm_composer_pi_titled_rule_row) or with the
+# Calm presentation's boat art, which opens the pair on wave rows
+# (_fm_composer_pi_wave_art_row) - so a pair that opens on a plain separator is
+# the idle presentation itself. A `working` registration over that shape is
+# provably stale, not a live turn: herdr keeps a pane's last report when the
+# turn-end report never lands (the aborted-operation freeze, measured live on
+# the Ownvoice lead pane 2026-10-11: `agent get` still reported working hours
+# after the operation aborted while the pane sat at a visibly empty composer,
+# every read returned `unknown`, fm-control refused every relaunch with
+# `not proven empty`, and the doorbell stayed undelivered for about an hour).
+# The stale registration therefore reads `empty` over the idle pair; typed text
+# still reads `pending` first, and a working-consistent structure (titled
+# frame, wave art) still defers. Blocked defers on every structure because its
+# menu sits above the pair, so even the plain idle shape cannot disprove it.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -2473,6 +2498,13 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   case "$agent_status" in
     idle|done) printf 'empty' ;;
+    working)
+      if [ "$FM_COMPOSER_SCAN_PI_OPEN_PLAIN" = 1 ]; then
+        printf 'empty'
+      else
+        printf 'unknown'
+      fi
+      ;;
     *) printf 'unknown' ;;
   esac
 }

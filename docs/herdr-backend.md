@@ -632,13 +632,14 @@ It hands the visible pane's ANSI viewport plus Herdr's capability facts to the f
 - Bordered boxes.
 - Bare agent-glyph rows, including muse's `⟩`, which the adapter's retired local pattern silently omitted.
 - opencode's left bar.
-- The Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
+- The Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and the shape does not contradict the reported state (idle or done on any opening; a stale `working` registration over the plain-rule idle pair - the shape pi's live turn never draws - reads empty).
 
 ### Pi composer states
 
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's.
 That state defers instead of proving emptiness.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
+A `working` registration defers only while the shape agrees with it - the titled turn frame or the Calm boat art opening the pair - because over the plain-rule idle pair it is provably the stale registration herdr leaves when a turn-end report never lands.
+A pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
 ### Placeholder and ghost text

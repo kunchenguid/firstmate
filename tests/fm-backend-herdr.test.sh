@@ -4381,9 +4381,32 @@ test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown() {
   pass "fm_backend_herdr_composer_state: an incomplete lower Pi separator cannot inherit a stale empty row"
 }
 
+# A `working` registration over a plain-separator pair is the STALE
+# registration, not a live turn: pi's live turn replaces the idle pair's plain
+# top rule with the titled `── ⠧ Working ─` frame or draws the Calm boat in the
+# rule slot, so the plain opening proves the idle presentation. Measured live on
+# the Ownvoice lead pane (2026-10-11): herdr's registration froze at working
+# for hours after pi aborted its operation, the visibly empty composer read
+# `unknown`, and fm-control refused every relaunch with `not proven empty`.
+# The adapter must read that shape `empty` through the real capture + identity
+# path; a genuinely working pi keeps deferring through its own working shapes,
+# pinned in tests/fm-composer-lib.test.sh.
+test_composer_state_pi_stale_working_over_idle_pair_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-stale-working"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '─────────────────────────────────────────────────────\n\n─────────────────────────────────────────────────────\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = empty ] \
+    || fail "a stale working registration over the plain idle pair should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: a stale working registration over the idle pair reads empty"
+}
+
 test_composer_state_pi_separator_requires_safe_native_identity() {
   local dir log resp fb out status case_id idx=0
-  for case_id in working non-pi unreadable over-tall; do
+  for case_id in non-pi unreadable over-tall; do
     dir="$TMP_ROOT/composer-pi-separated-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
     if [ "$case_id" = over-tall ]; then
       {
@@ -4395,7 +4418,6 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
       printf '─────────────────────────────────────────────────────\n\n─────────────────────────────────────────────────────\n' > "$resp/1.out"
     fi
     case "$case_id" in
-      working) printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/2.out" ;;
       non-pi) printf '{"result":{"agent":{"agent":"shell","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
       unreadable) printf '1\n' > "$resp/2.exit" ;;
       over-tall) printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
@@ -4405,7 +4427,7 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
     [ "$out" = unknown ] || fail "unsafe Pi separator case '$case_id' must remain unknown, got '$out'"
   done
-  pass "fm_backend_herdr_composer_state: Pi separators never authorize working, non-Pi, unreadable, or over-tall targets"
+  pass "fm_backend_herdr_composer_state: Pi separators never authorize non-Pi, unreadable, or over-tall targets"
 }
 
 # --- composer_state: unbordered (bare) composer rows -------------------------
@@ -6435,6 +6457,7 @@ test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_dollar_status_footer_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
+test_composer_state_pi_stale_working_over_idle_pair_is_empty
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
