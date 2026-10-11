@@ -16,6 +16,11 @@
 # cards, scrolled with up/down (j/k), focus moved with left/right (h/l), and
 # its header shows the position ("cards 1-4 of 14").  Below four columns of
 # width only the focused column is shown.
+# The live loop remembers each card's column from the previous snapshot: a card
+# that turns up in a different column is drawn in a highlight colour with one
+# extra "moved from <COLUMN>" line for FM_DASHBOARD_MOVE_SECONDS (default 30)
+# of wall-clock time.  New cards, cards that leave, and the first frame are
+# never marked.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,6 +67,9 @@ case "$SCROLL" in ''|*[!0-9]*) echo "fm-dashboard: --scroll must be a non-negati
 
 command -v jq >/dev/null 2>&1 || { echo "fm-dashboard: jq not found" >&2; exit 1; }
 
+MOVE_TTL=${FM_DASHBOARD_MOVE_SECONDS:-30}
+case "$MOVE_TTL" in ''|*[!0-9]*) MOVE_TTL=30 ;; esac
+
 COLOR=false
 [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && COLOR=true
 
@@ -85,9 +93,12 @@ RENDER='
 
   def card($c; $w; $bs):
     ($w - 2) as $iw
-    | [seg("╭─ "; $bs) + seg($c.id | dash | trunc($w - 5); "1;37") + seg(" " + ("─" | rep($w - 4 - ($c.id | dash | trunc($w - 5) | length))); $bs)]
+    | ($c.moved != null) as $mv
+    | (if $mv then "1;33" else $bs end) as $bs
+    | [seg("╭─ "; $bs) + seg($c.id | dash | trunc($w - 5); (if $mv then "1;33" else "1;37" end)) + seg(" " + ("─" | rep($w - 4 - ($c.id | dash | trunc($w - 5) | length))); $bs)]
       + [$c.title | dash | chunks($iw)[:2][] | seg("│ "; $bs) + seg(.; "")]
       + [seg("│ "; $bs) + seg("\($c.project | dash) · \($c.kind | dash) · \($c.mode | dash)" | trunc($iw); "2")]
+      + (if $mv then [seg("│ "; $bs) + seg("moved from " + $c.moved | trunc($iw); "1;33")] else [] end)
       + (if $c.state then [seg("│ "; $bs) + seg("⚑ " + $c.state + (if ($c.detail // "") != "" then " - " + $c.detail else "" end) | trunc($iw); $c.state | state_style)] else [] end)
       + (if $c.note then [seg("│ "; $bs) + seg($c.note | trunc($iw); "1;35")] else [] end)
       + (if $c.pr then [$c.pr | chunks($iw)[] | seg("│ "; $bs) + seg(.; "4;34")] else [] end)
@@ -170,6 +181,15 @@ RENDER='
       {name: "DONE", motto: "made port", style: "33",
        cards: ([$records[] | select(.state == "done")] | .[:$done_max] | map(record_card(.; null)))}
     ] as $cols
+  # Column per card id now, and the cards moved since $prev (null on the first
+  # frame) that are still within $ttl seconds and still where they moved to.
+  | ([$cols[] | .name as $n | .cards[] | select(.id != "note") | {key: .id, value: $n}] | from_entries) as $cur
+  | ($moves | with_entries(select(.value.at + $ttl > $now and $cur[.key] == .value.to))) as $alive
+  | (if $prev == null then {}
+     else $cur | with_entries(select($prev[.key] != null and $prev[.key] != .value)
+       | {key, value: {from: $prev[.key], to: .value, at: $now}}) end) as $fresh
+  | ($alive + $fresh) as $mvs
+  | ($cols | map(.cards |= map(. + {moved: ($mvs[.id].from // null)}))) as $cols
   | (.fm_home // "firstmate" | split("/") | map(select(. != "")) | last // "firstmate") as $fleet
   | ($cols | to_entries | map(
       [([($offsets[.key] // 0), 0] | max), ([(.value.cards | length) - 1, 0] | max)] | min)) as $offs
@@ -197,7 +217,7 @@ RENDER='
      end)
     ]) as $lines
   | (if $clip then $lines[:$rows] else $lines end) as $shown
-  | if $live then ($offs | map(tostring) | join(" ")), $shown[] else $shown[] end
+  | if $live then ($offs | map(tostring) | join(" ")), ($cur | tojson), ($mvs | tojson), $shown[] else $shown[] end
 '
 
 snapshot() {
@@ -225,15 +245,18 @@ term_dim() {
 term_height() { term_dim h; }
 term_width() { term_dim w; }
 
-# render <width> <rows> <focus> <offsets-json> <live>: draw a snapshot; with
-# <live> true the first line printed is the clamped scroll offsets.
+# render <width> <rows> <focus> <offsets-json> <live> [<prev-json> <moves-json>]:
+# draw a snapshot; with <live> true the first three lines printed are the
+# clamped scroll offsets, the card-to-column map, and the active moves.
 render() {
-  local width=$2
+  local width=$2 prev=${7:-null} moves=${8:-}
+  [ -n "$moves" ] || moves='{}'
   case "$width" in ''|*[!0-9]*) width=80 ;; esac
   printf '%s\n' "$1" | jq -r --argjson color "$COLOR" --argjson width "$width" \
     --argjson once "$([ "$ONCE" = 1 ] && echo true || echo false)" \
     --argjson interval "$INTERVAL" --argjson done_max "$DONE_MAX" \
-    --argjson rows "$3" --argjson focus "$4" --argjson offsets "$5" --argjson live "$6" "$RENDER"
+    --argjson rows "$3" --argjson focus "$4" --argjson offsets "$5" --argjson live "$6" \
+    --argjson prev "$prev" --argjson moves "$moves" --argjson now "$SECONDS" --argjson ttl "$MOVE_TTL" "$RENDER"
 }
 
 frame() {  # <width>
@@ -311,7 +334,7 @@ read_key() {
   fi
 }
 
-focus=0 offs="0 0 0 0" json='' deadline=0 key=
+focus=0 offs="0 0 0 0" json='' deadline=0 key='' prev_map=null moves='{}'
 while :; do
   if [ -n "$fetch_pid" ] && ! kill -0 "$fetch_pid" 2>/dev/null; then
     wait "$fetch_pid" 2>/dev/null
@@ -333,10 +356,14 @@ while :; do
     else
       # shellcheck disable=SC2086  # $offs is four space-separated integers
       set -- $offs
-      out=$(render "$json" "$(term_width)" "$rows" "$focus" "[$1,$2,$3,$4]" true 2>&1)
+      out=$(render "$json" "$(term_width)" "$rows" "$focus" "[$1,$2,$3,$4]" true "$prev_map" "$moves" 2>&1)
       case "${out%%$'\n'*}" in
         *[!0-9\ ]*|'') ;;
-        *) offs=${out%%$'\n'*}; out=${out#*$'\n'} ;;
+        *)
+          offs=${out%%$'\n'*}; out=${out#*$'\n'}
+          prev_map=${out%%$'\n'*}; out=${out#*$'\n'}
+          moves=${out%%$'\n'*}; out=${out#*$'\n'}
+          ;;
       esac
     fi
     draw "$out"

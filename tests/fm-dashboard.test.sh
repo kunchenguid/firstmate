@@ -237,10 +237,61 @@ PY
   pass "live board re-lays out at the new size when the terminal is resized"
 }
 
+# Snapshot 1 is the fixture; later ones move ship-task into a ready PR (IN
+# FLIGHT -> WAITING ON CAPTAIN) and add a brand-new queued card.
+test_live_board_marks_moved_cards_until_they_expire() {
+  command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; return 0; }
+  local bin=$TMP_ROOT/movebin out
+  mkdir -p "$bin"
+  cp "$DASH" "$bin/fm-dashboard.sh"
+  jq '.tasks |= map(if .id == "ship-task"
+        then .current_state.state = "done" | .pr.url = "https://github.com/o/r/pull/5" else . end)
+      | .backlog.records += [{"state":"queued","structured":true,"id":"fresh-task","title":"Fresh","repo":"beta","kind":"ship","captain_actionable":false}]' \
+    "$FIXTURE" > "$bin/moved.json"
+  cat > "$bin/fm-fleet-snapshot.sh" <<EOF2
+#!/usr/bin/env bash
+n=\$(cat "$bin/n" 2>/dev/null || echo 0); echo \$((n + 1)) > "$bin/n"
+if [ "\$n" -eq 0 ]; then cat "$FIXTURE"; else cat "$bin/moved.json"; fi
+EOF2
+  chmod +x "$bin/fm-fleet-snapshot.sh"
+  out=$(python3 -I - "$bin/fm-dashboard.sh" <<'PY'
+import os, pty, select, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ.update(NO_COLOR="1", COLUMNS="160", LINES="40", TERM="xterm",
+                      FM_DASHBOARD_MOVE_SECONDS="2")
+    os.execv("/usr/bin/env", ["env", "bash", sys.argv[1], "--interval", "1"])
+out, end = b"", time.time() + 7
+while time.time() < end:
+    if select.select([fd], [], [], 0.05)[0]:
+        try: out += os.read(fd, 65536)
+        except OSError: break
+os.write(fd, b"q")
+time.sleep(0.3)
+os.waitpid(pid, 0)
+frames = [f for f in out.decode("utf-8", "replace").split("\x1b[H") if "FIRSTMATE" in f]
+print("FRAMES=" + str(len(frames)))
+marked = [i for i, f in enumerate(frames) if "moved from" in f]
+print("FIRST_MARKED=" + str(0 in marked))
+print("SOME_MARKED=" + str(bool(marked)))
+print("LAST_MARKED=" + str(len(frames) - 1 in marked))
+print("TAGS=" + "|".join(sorted({l.strip("│ ").strip() for f in frames for l in f.splitlines() if "moved from" in l} )))
+print("FRESH_SEEN=" + str(any("fresh-task" in f for f in frames)))
+PY
+) || fail "move-marker run failed"
+  assert_contains "$out" "FIRST_MARKED=False" "first frame marks nothing"
+  assert_contains "$out" "SOME_MARKED=True" "a card that changed column is marked"
+  assert_contains "$out" "LAST_MARKED=False" "the marker expires"
+  assert_contains "$out" "FRESH_SEEN=True" "new card appears on the board"
+  assert_contains "$out" "TAGS=moved from IN FLIGHT" "only the moved card is tagged, with its old column"
+  pass "live board marks cards that changed column and drops the marker after the timeout"
+}
+
 test_wide_board_lays_columns_side_by_side
 test_live_keys_never_echo_during_refresh
 test_live_key_burst_applies_every_step
 test_live_board_relayouts_on_resize
+test_live_board_marks_moved_cards_until_they_expire
 test_rows_clip_to_viewport_with_position_marker
 test_narrow_board_stacks_and_places_cards
 test_finished_task_with_pr_waits_despite_stale_run_state
