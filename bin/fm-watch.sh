@@ -2336,6 +2336,36 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# Input demand has no separate watcher. Check the body-free durable doorbell
+# between scan units and in otherwise blind sleeps. Backend event waits retain
+# their existing bounded budget and ordinary polling remains the backstop.
+INPUT_OBSERVED=$(cat "$STATE/.captain-input-notify" 2>/dev/null || true)
+input_checkpoint() {
+  local current seq id rest
+  [ -f "$STATE/.captain-input" ] || return 0
+  current=$(cat "$STATE/.captain-input-notify" 2>/dev/null || true)
+  [ "$current" != "$INPUT_OBSERVED" ] || return 0
+  INPUT_OBSERVED=$current
+  IFS=$'\t' read -r seq id rest <<< "$current"
+  case "$seq" in ''|*[!0-9]*) return 0 ;; esac
+  case "$id" in ''|*..*|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  [ -z "$rest" ] || return 0
+  [ -f "$STATE/inbox/$id.note" ] || return 0
+  # The append already made the ordinary recovery episode pending. Do not
+  # append another row or mark the note handled merely for ringing the bell.
+  wake "check: captain-input $seq $id"
+}
+
+input_wait() { # <seconds>
+  if [ -f "$STATE/.captain-input" ]; then
+    python3 "$SCRIPT_DIR/fm-input-wait.py" "$STATE/.captain-input-notify" "$INPUT_OBSERVED" "$1" \
+      || sleep "$1"
+    input_checkpoint
+  else
+    sleep "$1"
+  fi
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -2370,7 +2400,7 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    input_wait "$POLL"
     return
   fi
 
@@ -2386,7 +2416,7 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    input_wait "$POLL"
     return
   fi
 
@@ -2403,7 +2433,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      sleep "$POLL"
+      input_wait "$POLL"
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already
@@ -2715,6 +2745,8 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  input_checkpoint
+
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true
@@ -2735,6 +2767,7 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+  input_checkpoint
 
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
@@ -2746,6 +2779,8 @@ while :; do
     exit 1
   }
 
+  input_checkpoint
+
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
   # the parent without consuming or rewriting the receiving home's record.
@@ -2754,6 +2789,8 @@ while :; do
     exit 1
   }
 
+  input_checkpoint
+
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source
@@ -2761,6 +2798,7 @@ while :; do
   if [ -d "$STATE/procevent" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
+  input_checkpoint
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
@@ -2782,6 +2820,8 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  input_checkpoint
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -2793,6 +2833,7 @@ while :; do
     rejected_checks=
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do
+      input_checkpoint
       [ -e "$c" ] || continue
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
@@ -2924,7 +2965,7 @@ EOF
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    input_wait "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
@@ -3306,5 +3347,6 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
+  input_checkpoint
   event_wait_or_sleep
 done

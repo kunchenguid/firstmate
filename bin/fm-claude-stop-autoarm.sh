@@ -531,6 +531,9 @@ if [ "$ACTIONABLE" -eq 1 ]; then
       printf 'This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.\n'
     fi
     [ -z "$SUCCESSOR_FAILURE" ] || printf '%s\n' "$SUCCESSOR_FAILURE"
+    if [ -f "$STATE/.captain-input" ]; then
+      printf 'For inbox rows, read and handle the saved note through bin/fm-inbox.sh; acknowledge the note before its wake. bin/fm-inbox.sh input-receipts exposes the shared receipt without consuming input.\n' >&2
+    fi
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
