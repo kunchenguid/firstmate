@@ -18,6 +18,7 @@
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
+#     pr_url is the first link accepted by fm_pf_pr_url_valid, else null.
 #     Structured rows preserve captain-hold metadata such as hold_kind,
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
@@ -55,6 +56,10 @@
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
 #     supervision rather than this snapshot path.
+#     pr.url prefers recorded pr=, else a canonical URL from the latest exact
+#     `done: PR <url> [checks green]` event (with an optional emission stamp).
+#     pr.source is meta, status_event, or absent; scouts never claim a PR URL.
+#     fm_pf_pr_url_valid owns status-link classification, not landing proof.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state. age_seconds is null when the emission time is unknown;
 #     fm-classify-lib.sh owns the optional emission-time field, and only the
