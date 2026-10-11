@@ -254,13 +254,16 @@ fm_busy_source_trusted() {  # <harness> <source>
 
 # fm_busy_record_read: parse and validate state/<id>.busy-state against the
 # armed gen. Prints "<state> <source> <event> <seq>" for a valid record.
+# Optional mode "snapshot" appends "<ts> <gen>" so sequence-sensitive
+# consumers can bind a decision to one exact validated lifecycle snapshot
+# without reparsing the record independently.
 # Non-zero returns name the reason on stdout instead:
 #   missing      no record file (or no armed gen and no record)
 #   malformed    unparseable line, bad tokens, or a missing armed gen for an
 #                existing record
 #   gen-mismatch a record from a stale incarnation
-fm_busy_record_read() {  # <state-dir> <id>
-  local state=$1 id=$2 rec gen line extra ver f
+fm_busy_record_read() {  # <state-dir> <id> [snapshot]
+  local state=$1 id=$2 mode=${3:-} rec gen line extra ver f
   local r_gen='' r_seq='' r_state='' r_source='' r_event='' r_ts=''
   rec=$(fm_busy_record_path "$state" "$id")
   if [ ! -f "$rec" ]; then
@@ -305,6 +308,9 @@ fm_busy_record_read() {  # <state-dir> <id>
     return 1
   fi
   printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+  if [ "$mode" = snapshot ]; then
+    printf ' %s %s' "$r_ts" "$r_gen"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1212,4 +1218,51 @@ fm_busy_is_busy() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local verdict
   verdict=$(fm_busy_classify "$@")
   [ "${verdict%% *}" = busy ]
+}
+
+# fm_busy_declared_pause_valid: a paused declaration is authoritative unless a
+# trusted busy lifecycle is current, in which case it must name that exact
+# generation and sequence. Requires fm-classify-lib.sh for status helpers.
+fm_busy_declared_pause_valid() {  # <state-dir> <id> [require-bound]
+  local state=$1 id=$2 mode=${3:-} meta statusf harness before after status_sig_before status_sig_after last
+  local pause_gen pause_seq busy_state busy_source busy_event busy_seq busy_ts busy_gen
+  meta="$state/$id.meta"
+  statusf="$state/$id.status"
+  [ -f "$statusf" ] || return 1
+  last=$(status_declared_wait_line "$statusf")
+  status_is_paused "$last" || return 1
+  if [ ! -f "$meta" ]; then
+    [ "$mode" != require-bound ]
+    return
+  fi
+  harness=$(grep '^harness=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -z "$harness" ]; then
+    [ "$mode" != require-bound ]
+    return
+  fi
+  if [ ! -e "$state/$id.busy-state" ]; then
+    [ "$mode" != require-bound ]
+    return
+  fi
+  before=$(fm_busy_record_read "$state" "$id" snapshot) || return 1
+  read -r busy_state busy_source busy_event busy_seq busy_ts busy_gen <<EOF
+$before
+EOF
+  if [ "$busy_state" != busy ] || ! fm_busy_source_trusted "$harness" "$busy_source"; then
+    [ "$mode" != require-bound ]
+    return
+  fi
+  fm_busy_token_valid "$busy_event" || return 1
+  fm_busy_token_valid "$busy_gen" || return 1
+  case "$busy_seq" in ''|*[!0-9]*) return 1 ;; esac
+  case "$busy_ts" in ''|*[!0-9]*) return 1 ;; esac
+  status_sig_before=$(status_observed_signature "$statusf") || return 1
+  pause_gen=$(printf '%s\n' "${last%%:*}" | sed -n 's/.*\[busy-gen=\([^]]*\)\].*/\1/p')
+  pause_seq=$(printf '%s\n' "${last%%:*}" | sed -n 's/.*\[busy-seq=\([^]]*\)\].*/\1/p')
+  [ "$pause_gen" = "$busy_gen" ] || return 1
+  [ "$pause_seq" = "$busy_seq" ] || return 1
+  status_sig_after=$(status_observed_signature "$statusf") || return 1
+  [ "$status_sig_before" = "$status_sig_after" ] || return 1
+  after=$(fm_busy_record_read "$state" "$id" snapshot) || return 1
+  [ "$before" = "$after" ]
 }

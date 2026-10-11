@@ -24,6 +24,7 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+STATUS_APPEND="$ROOT/bin/fm-status-append.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
@@ -113,6 +114,32 @@ wait_numeric_file() {
       ''|*[!0-9]*) ;;
       *) return 0 ;;
     esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Wait up to <limit> 0.1s ticks for <file> to exist. The watcher's first poll
+# can take longer than a fixed wait_live window (it runs the bootstrap scans and
+# a full fleet pass before the pane branch), so an absorb assertion must wait for
+# the marker it expects rather than racing a fixed tick budget.
+wait_file_exists() {  # <file> [limit]
+  local file=$1 limit=${2:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Wait up to <limit> 0.1s ticks for <file> to be removed, for the same reason:
+# a retirement assertion must observe the watcher's poll, not a fixed budget.
+wait_file_gone() {  # <file> [limit]
+  local file=$1 limit=${2:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] || return 0
     sleep 0.1
     i=$((i + 1))
   done
@@ -4774,6 +4801,69 @@ test_cleanup_marker_lock_bound_is_decimal_with_zero_default() {
 # demand-deep-inspection marker - never an
 # automatic interrupt or restart.
 
+test_current_busy_generation_pause_uses_long_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid busy_ts
+  dir=$(make_case busy-current-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-current-pause"
+  printf 'Working... current paused generation\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/current-pause.meta"
+  record_pi_busy "$state" current-pause
+  busy_ts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state/current-pause.busy-state")
+  "$STATUS_APPEND" "$state" current-pause 'paused: foreground keeper deliberately parked for review'
+  set_mtime "$busy_ts" "$state/current-pause.status"
+  sig=$(seen_sig "$state/current-pause.status"); printf '%s' "$sig" > "$state/.seen-current-pause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working... current paused generation")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  set_mtime $(( $(date +%s) - 500 )) "$state/current-pause.turn-ended"
+  prime_turnend_seen "$state/current-pause.turn-ended"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_file_exists "$state/.paused-$key" 150 \
+    || { reap "$pid"; fail "a current-generation pause missed long-cadence tracking: $(cat "$out")"; }
+  kill -0 "$pid" 2>/dev/null \
+    || { reap "$pid"; fail "a current-generation pause used wedge cadence: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "a current-generation pause printed a wake"; }
+  reap "$pid"
+  pass "a pause bound to the current busy generation uses long-cadence tracking"
+}
+
+test_old_or_unordered_pause_does_not_mask_newer_busy_generation() {
+  local ordering dir state fakebin out capture_file window key pane_hash sig pid busy_ts pause_ts
+  for ordering in older same-second; do
+    dir=$(make_case "busy-stale-pause-$ordering"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-stale-pause-$ordering"
+    printf 'Working... genuinely active generation\n' > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stale-pause.meta"
+    printf 'paused: declaration from an older generation\n' > "$state/stale-pause.status"
+    record_pi_busy "$state" stale-pause
+    busy_ts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state/stale-pause.busy-state")
+    if [ "$ordering" = older ]; then pause_ts=$((busy_ts - 1)); else pause_ts=$busy_ts; fi
+    set_mtime "$pause_ts" "$state/stale-pause.status"
+    sig=$(seen_sig "$state/stale-pause.status"); printf '%s' "$sig" > "$state/.seen-stale-pause_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "Working... genuinely active generation")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    set_mtime $(( $(date +%s) - 500 )) "$state/stale-pause.turn-ended"
+    prime_turnend_seen "$state/stale-pause.turn-ended"
+    printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "a $ordering pause masked a busy-generation wedge"
+    grep -F "possible wedge" "$out" >/dev/null || fail "a $ordering pause removed wedge diagnostics"
+  done
+  pass "old or unordered pauses cannot mask a newer busy generation"
+}
+
 test_busy_pane_below_turn_age_bound_is_absorbed() {
   local dir state fakebin out capture_file window key sig pid
   dir=$(make_case busy-below-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5024,7 +5114,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   printf 'Working... (7200.4s) lavish-axi poll' > "$capture_file"
   printf 'window=%s\nkind=scout\nharness=pi\n' "$window" > "$state/review-scout.meta"
   record_pi_busy "$state" review-scout
-  printf 'paused: hosting the Lavish review, awaiting captain feedback\n' > "$statusf"
+  "$STATUS_APPEND" "$state" review-scout \
+    'paused: hosting the Lavish review, awaiting captain feedback'
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   # No completed turn for hours (the single blocking poll call): age the spawn
@@ -5042,7 +5133,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a declared pause on a busy review pane was escalated: $(cat "$out")"; }
+  wait_file_exists "$state/.paused-$key" 150 \
+    || { reap "$pid"; fail "a declared pause on a busy review pane was escalated: $(cat "$out")"; }
   reap "$pid"
   [ ! -s "$out" ] || fail "a declared pause on a busy review pane printed a wake reason: $(cat "$out")"
   [ -e "$state/.paused-$key" ] || fail "the busy-turn bound did not apply the declared-pause cadence"
@@ -5088,7 +5180,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a lifted pause escalated before the wedge threshold: $(cat "$out")"; }
+  wait_file_exists "$state/.stale-since-$key" 150 \
+    || { reap "$pid"; fail "a lifted pause escalated before the wedge threshold: $(cat "$out")"; }
   reap "$pid"
   [ -s "$state/.stale-since-$key" ] || fail "a lifted pause did not restore the busy-turn wedge timer"
   [ ! -e "$state/.paused-$key" ] || fail "a lifted pause left stale declared-pause bookkeeping behind"
@@ -6280,6 +6373,44 @@ test_afk_present_reverts_watcher_to_one_shot() {
   pass "with .afk present the watcher reverts to one-shot so the daemon owns triage (no double-triage)"
 }
 
+test_afk_current_busy_generation_pause_leaves_long_cadence_to_daemon() {
+  local dir state fakebin out capture_file window key pane_hash sig pid busy_ts
+  dir=$(make_case afk-busy-current-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-afk-busy-current-pause"
+  printf 'Working... current paused generation\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/afk-current-pause.meta"
+  record_pi_busy "$state" afk-current-pause
+  busy_ts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state/afk-current-pause.busy-state")
+  [ -n "$busy_ts" ] || fail "could not read the away-mode busy event timestamp"
+  "$STATUS_APPEND" "$state" afk-current-pause 'paused: foreground keeper deliberately parked for an external review'
+  set_mtime "$busy_ts" "$state/afk-current-pause.status"
+  sig=$(seen_sig "$state/afk-current-pause.status"); printf '%s' "$sig" > "$state/.seen-afk-current-pause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working... current paused generation")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  set_mtime $(( $(date +%s) - 500 )) "$state/afk-current-pause.turn-ended"
+  prime_turnend_seen "$state/afk-current-pause.turn-ended"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '10\n' > "$state/.wedge-escalations-$key"
+  date +%s > "$state/.afk"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_file_gone "$state/.wedge-escalations-$key" 150 \
+    || { reap "$pid"; fail "an away-mode current-generation pause retained its escalation counter: $(cat "$out")"; }
+  kill -0 "$pid" 2>/dev/null \
+    || { reap "$pid"; fail "an away-mode current-generation pause emitted a watcher wedge: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "an away-mode current-generation pause printed a wake"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "an away-mode current-generation pause queued an enriched wedge"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "an away-mode current-generation pause retained its wedge timer"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "the away-mode watcher took ownership of daemon pause tracking"; }
+  reap "$pid"
+  pass "away mode retires a current-generation pause's short timer and leaves long-cadence ownership to the daemon"
+}
+
 # A paused pane can first appear as a changed hash. In AFK mode that initial path
 # must still hand off the plain window identity to the daemon, rather than running
 # the normal-mode pause re-surface and decorating the stale identity.
@@ -6686,6 +6817,8 @@ test_identical_dead_display_of_a_successor_still_reports
 test_term_stops_a_watcher_blocked_inside_a_poll
 test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held
 test_cleanup_marker_lock_bound_is_decimal_with_zero_default
+test_current_busy_generation_pause_uses_long_cadence
+test_old_or_unordered_pause_does_not_mask_newer_busy_generation
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
@@ -6694,8 +6827,6 @@ test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
-test_afk_busy_declared_pause_hands_off_plain_stale
-test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
@@ -6742,6 +6873,7 @@ test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
+test_afk_current_busy_generation_pause_leaves_long_cadence_to_daemon
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_captain_held_never_rechecked_while_away_record_exists
 test_live_captain_held_first_sight_silenced_by_away_record

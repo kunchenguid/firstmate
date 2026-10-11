@@ -40,7 +40,7 @@ test_arm_seeds_busy_spawn() {
 }
 
 test_apply_advances_seq_and_source() {
-  local state gen out seq
+  local state gen out record r_state r_source r_event seq r_ts r_gen
   state=$(new_state_dir apply-seq)
   gen=$("$EV" arm "$state" t1)
   "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop \
@@ -51,9 +51,42 @@ test_apply_advances_seq_and_source() {
     || fail "apply busy failed"
   out=$(fm_busy_classify tmux w1 claude t1 "$state")
   [ "$out" = "busy claude-hook" ] || fail "expected 'busy claude-hook', got '$out'"
-  seq=$(fm_busy_record_read "$state" t1 | awk '{print $4}')
-  [ "$seq" = 3 ] || fail "expected seq 3 after seed + two applies, got '$seq'"
-  pass "apply advances seq under the armed gen and attributes the writing source"
+  record=$(fm_busy_record_read "$state" t1 snapshot)
+  read -r r_state r_source r_event seq r_ts r_gen <<EOF
+$record
+EOF
+  [ "$r_state:$r_source:$r_event:$seq" = "busy:claude-hook:user-prompt-submit:3" ] \
+    || fail "validated record snapshot lost lifecycle fields: '$record'"
+  case "$r_ts" in ''|*[!0-9]*) fail "validated record snapshot lost its event timestamp: '$record'" ;; esac
+  [ "$r_gen" = "$gen" ] || fail "validated record snapshot lost its current generation: '$record'"
+  [ "$(fm_busy_record_read "$state" t1 | awk '{print NF}')" = 4 ] \
+    || fail "default record read lost its four-field compatibility shape"
+  pass "apply advances seq and exposes one exact generation-bound lifecycle snapshot"
+}
+
+test_status_append_binds_only_busy_pauses() {
+  local state gen line
+  state=$(new_state_dir status-append)
+  gen=$("$EV" arm "$state" t1)
+
+  "$ROOT/bin/fm-status-append.sh" "$state" t1 'paused: waiting for review'
+  line=$(tail -1 "$state/t1.status")
+  case "$line" in
+    "paused [busy-gen=$gen] [busy-seq=1]: waiting for review") ;;
+    *) fail "busy pause was not bound to its validated lifecycle snapshot: '$line'" ;;
+  esac
+
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
+  "$ROOT/bin/fm-status-append.sh" "$state" t1 'paused: waiting after the turn ended'
+  line=$(tail -1 "$state/t1.status")
+  [ "$line" = 'paused: waiting after the turn ended' ] \
+    || fail "an idle pause was incorrectly bound to a busy lifecycle: '$line'"
+
+  "$ROOT/bin/fm-status-append.sh" "$state" t1 'progress: ordinary status'
+  line=$(tail -1 "$state/t1.status")
+  [ "$line" = 'progress: ordinary status' ] \
+    || fail "a non-pause status was modified: '$line'"
+  pass "status append binds only pauses from an unchanged busy lifecycle snapshot"
 }
 
 test_apply_current_gen_reset() {
@@ -521,15 +554,20 @@ test_herdr_native_busy_only() {
   FAKE_NATIVE=idle
   out=$(fm_busy_classify herdr s:p claude t1 "$state")
   [ "$out" = "unknown missing" ] || fail "native idle must NOT classify idle, got '$out'"
-  # A valid record outranks the native verdict.
+  # A valid record outranks the native verdict in both directions. Native idle
+  # also covers Herdr's normalized done status, which can blip between tools and
+  # therefore cannot close an adapter-owned busy turn.
   local gen
   gen=$("$EV" arm "$state" t1)
+  FAKE_NATIVE=idle
+  out=$(fm_busy_classify herdr s:p claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "native idle must not close a valid busy record, got '$out'"
   "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
   FAKE_NATIVE=busy
   out=$(fm_busy_classify herdr s:p claude t1 "$state")
   [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank herdr's native verdict, got '$out'"
   unset -f fm_backend_busy_state
-  pass "herdr's native verdict is trusted for busy only, and records outrank it"
+  pass "herdr native state cannot close or reopen a valid adapter lifecycle record"
 }
 
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
@@ -597,6 +635,7 @@ test_progress_is_generation_bound_and_not_semantic_state
 
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
+test_status_append_binds_only_busy_pauses
 test_apply_current_gen_reset
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen

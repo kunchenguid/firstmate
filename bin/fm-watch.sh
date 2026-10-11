@@ -63,12 +63,11 @@
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence; under daemon-backed afk an
-#                          external wait is instead handed to the daemon as this
-#                          plain reason once per declaration, while captain-held
-#                          work stays silent until return
-#                          (busy_turn_bound_check owns that split);
+#                          wait bound to that exact busy generation and sequence,
+#                          or a verified captain-held transfer, uses the long
+#                          pause recheck cadence; under daemon-backed afk a bound
+#                          external wait is absorbed before a wake, while
+#                          captain-held work stays silent until return;
 #                          every other pane goes through the same wedge timer,
 #                          the dead-record probe above included, and surfaces
 #                          with the identical "stale: ..." reason, escalation
@@ -337,7 +336,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
 # automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, which takes the long pause cadence instead. Set generously above
+# itself, when its declaration is bound to the exact current validated busy
+# generation and sequence; unbound or stale pauses do not defer.
+# Set generously above
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
@@ -1299,17 +1300,17 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # so it is taken only behind a first fold read that finds some open
 # `needs-decision` at all, and only in the at-threshold branch - at most once per
 # window per STALE_ESCALATE_SECS, never on an ordinary poll.
-wedge_wait_evidence() {  # <task> -> one wait_record on stdout
-  local task=$1 last until statusf run
+wedge_wait_evidence() {  # <task> [skip-declared] -> one wait_record on stdout
+  local task=$1 mode=${2:-} last until statusf run
   [ -n "$task" ] || return 1
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
-  if status_is_captain_held "$last"; then
+  if [ "$mode" != skip-declared ] && status_is_captain_held "$last"; then
     wait_record 'captain-held' 'awaiting the captain - verified hold transfer' \
       captain 'answer the held decision or release the hold' "$statusf"
     return 0
   fi
-  if status_is_paused "$last"; then
+  if [ "$mode" != skip-declared ] && status_is_paused "$last"; then
     if until=$(status_paused_until "$last"); then
       [ "$(date +%s)" -lt "$until" ] || return 1
     fi
@@ -1519,8 +1520,8 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [wait-mode]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 wait_mode=${7:-} since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1534,7 +1535,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fm_epoch_seconds_to age
       age=$(( age - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        if evidence=$(wedge_wait_evidence "$task") &&
+        if evidence=$(wedge_wait_evidence "$task" "$wait_mode") &&
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
         fi
@@ -1565,6 +1566,21 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # or tool activity, never a timer or a busy footer. It does not emit a wake or
 # change semantic busy state. Before either marker exists, age the spawn record.
 # The caller checks busy state and routes a crossed bound through inspection.
+current_busy_generation_is_paused() {  # <task>
+  fm_busy_declared_pause_valid "$STATE" "$1" || return 1
+  fm_busy_record_read "$STATE" "$1" snapshot 2>/dev/null | grep -q '^busy '
+}
+
+handle_current_busy_pause() {  # <window> <task> <hash> <since-file> <escalation-file>
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
+  if afk_present; then
+    rm -f "$since_file" "$escalation_file"
+    triage_log "absorbed busy current-generation pause for daemon-owned long cadence: $win"
+  else
+    handle_paused_stale "$win" "$task" "$h"
+  fi
+}
+
 busy_turn_over_age() {  # <task>
   local task=$1 f progress
   f="$STATE/$task.turn-ended"
@@ -1641,12 +1657,13 @@ handle_paused_stale() {  # <window> <task> <hash>
 # 0 when the declared-pause cadence took the pane, 1 when the wedge timer did.
 #
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
-# foreground call can hide behind a busy signature. A `paused:` declaration or
-# verified captain-held transfer instead identifies that live foreground call as
-# the expected external wait. The caller has already confirmed liveness through
-# the busy verdict, so this exception does not suppress undeclared wedges or
-# alter the separate non-busy classification. handle_paused_stale keeps the
-# exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
+# foreground call can hide behind a busy signature. A `paused:` declaration
+# bound to the exact current validated busy generation and sequence, or a
+# verified captain-held transfer, instead identifies that live foreground call
+# as the expected external wait. The caller has already confirmed liveness
+# through the busy verdict, and the exact binding keeps an old or unbound pause
+# from suppressing a genuine wedge. handle_paused_stale keeps the exception
+# bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
 # A pane that declared nothing falls through to the shared wedge timer, which,
 # in a home that armed config/wedge-defer-parked-gate, applies the same rule to
 # the one wait a busy pane cannot declare: a validation gate of its own awaiting
@@ -1654,21 +1671,19 @@ handle_paused_stale() {  # <window> <task> <hash>
 # than the ladder, because who owes that answer does not depend on what the pane
 # is rendering, and the recheck names that supervisor and the action that clears
 # it. An unconfigured home keeps the unchanged ladder there.
-# Away mode remains daemon-owned and receives the undecorated wake identity for
-# its own classification, which is why the declaration is read before the afk
-# branch rather than after it.
+# Away mode remains daemon-owned. Current-generation busy pauses are normally
+# absorbed by handle_current_busy_pause before this fallback is reached; a
+# captain-held transfer still hands the daemon the undecorated wake identity.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared
   statusf="$STATE/$task.status"
-  if status_is_paused_or_captain_held "$(status_declared_wait_line "$statusf")"; then
+  declared=$(status_declared_wait_line "$statusf")
+  if status_is_captain_held "$declared" || current_busy_generation_is_paused "$task"; then
     if afk_present; then
-      # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
-      # and lets the daemon classify the declaration itself - the undecorated
-      # identity the rest of this function's contract promises. Running the wedge
-      # timer here instead would decorate the wake as a possible wedge, and that
-      # decoration overrides the daemon's own pause verdict for the pane: the
-      # ladder then climbs on every re-arm, escalating a crew that declared the
-      # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
+      # Away mode is daemon-owned, so the remaining captain-held path hands off
+      # the PLAIN wake identity and lets the daemon classify the declaration
+      # itself. A bound busy pause normally took handle_current_busy_pause before
+      # this function.
       # The one-shot is keyed on the DECLARATION (the status log's signature),
       # never on the pane hash: a busy pane's harness footer ticks on every
       # capture, so a hash-keyed one-shot would re-fire on every poll and the
@@ -1700,7 +1715,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" "$h"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" "$h" skip-declared
   return 1
 }
 
@@ -3084,6 +3099,13 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # A pause from inside this exact validated busy generation is an explicit
+    # long external wait, not evidence that the foreground tool wedged. Handle
+    # it before either hash branch so stable and changing busy panes agree.
+    if [ "$busy_now" -eq 0 ] && current_busy_generation_is_paused "$task"; then
+      handle_current_busy_pause "$w" "$task" "$h" "$ssf" "$ewf"
+      continue
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
