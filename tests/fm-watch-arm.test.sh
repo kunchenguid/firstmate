@@ -1756,7 +1756,7 @@ test_watch_arm_successor_drop_path_escalates_when_supervision_needed() {
 }
 
 test_watch_arm_auto_spawns_successor_maintaining_supervision_chain() {
-  local dir state fakebin armout first_watcher successor_watcher i
+  local dir state fakebin armout successor_watcher i
   dir=$(make_case auto-spawn-successor)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1773,8 +1773,6 @@ test_watch_arm_auto_spawns_successor_maintaining_supervision_chain() {
 
   wait_for_file_text "$armout" 'watcher: started pid=' \
     || fail "initial arm did not start: $(cat "$armout")"
-  first_watcher=$(cat "$state/.watch.lock/pid")
-
   # Trigger wake to complete first cycle
   printf 'done: step 1\n' > "$state/task1.status"
 
