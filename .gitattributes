@@ -1,2 +1,5 @@
 # Bash parses shell scripts with LF line endings on every supported platform.
 *.sh text eol=lf
+
+# Union merges have corrupted the bin/ flag parsers more than once; force a real three-way merge.
+bin/*.sh merge=text

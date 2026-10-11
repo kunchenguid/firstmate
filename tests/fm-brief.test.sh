@@ -1109,6 +1109,38 @@ test_home_brief_include_is_appended_last() {
 # (a) An unregistered/default project - no --branch-prefix passed at all - must
 # keep every generated ship mode's branch on the legacy "fm/<task-id>" name, byte
 # for byte, so every existing firstmate installation is unaffected.
+# Union merges have repeatedly reordered or duplicated this parser's case arms,
+# leaving a named flag unreachable ("unknown option: --mode") or its value
+# handler stranded. Drive every value flag through both spellings and assert
+# the value reaches the scaffold, so any such corruption fails on behavior.
+test_value_flags_parse_in_both_spellings() {
+  local home out rc form
+  home="$TMP_ROOT/value-flags-home"
+  mkdir -p "$home/data"
+  for form in space equals; do
+    if [ "$form" = space ]; then
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "valflags-$form" some-proj \
+        --mode direct-PR --branch-prefix 'pfx/' --forge gerrit --shape squash 2>&1); rc=$?
+    else
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "valflags-$form" some-proj \
+        --mode=direct-PR --branch-prefix=pfx/ --forge=gerrit --shape=squash 2>&1); rc=$?
+    fi
+    expect_code 0 "$rc" "value flags ($form form) must parse (got: $out)"
+    assert_contains "$out" "mode=direct-PR forge=gerrit shape=squash" "value flags ($form form) did not reach the scaffold"
+    assert_grep "pfx/valflags-$form" "$home/data/valflags-$form/brief.md" \
+      "--branch-prefix ($form form) did not reach the brief"
+  done
+  for form in mode branch-prefix forge shape; do
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" valflags-missing some-proj "--$form" 2>&1); rc=$?
+    expect_code 1 "$rc" "--$form with no value must be refused"
+    assert_contains "$out" "--$form requires a value" "--$form with no value gave the wrong refusal"
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" valflags-missing some-proj "--$form" --scout 2>&1); rc=$?
+    expect_code 1 "$rc" "--$form followed by a flag must be refused"
+    assert_contains "$out" "--$form requires a value" "--$form followed by a flag gave the wrong refusal"
+  done
+  pass "fm-brief.sh: every value flag parses in both spellings and refuses a missing value"
+}
+
 test_ship_branch_prefix_defaults_to_legacy_fm() {
   local home id mode brief
   home="$TMP_ROOT/branch-prefix-default-home"
@@ -1352,6 +1384,7 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
 test_home_brief_include_is_appended_last
+test_value_flags_parse_in_both_spellings
 test_ship_branch_prefix_defaults_to_legacy_fm
 test_ship_branch_prefix_override_is_consistent_across_modes
 test_ship_branch_prefix_empty_override_yields_bare_task_id
