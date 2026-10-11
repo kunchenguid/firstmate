@@ -1502,8 +1502,8 @@ The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP me
 
 **Polling and delivery guarantees**
 
-Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
-Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
+Its `poll` command surfaces each eligible new message as a durable `check: mail <uid>` wake, subject to the sender allow list below, which is also what the standing received-mail check runs each watcher cycle.
+Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so eligible inbound mail is never silently missed.
 
 A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.
 
@@ -1525,7 +1525,7 @@ FM_SMTP_HOST=   # SMTP server hostname
 ```
 
 `FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
-The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
+The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus cursor-recorded retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without dropping eligible mail.
 
 **Sender allow list**
 
@@ -1542,8 +1542,9 @@ A malformed entry, such as a bare `example.com`, a wildcard, or embedded whitesp
 
 When the list is set, only matching mail wakes.
 `poll` records non-matching mail in its cursor so it never re-wakes, leaves it unread, and logs only a count, never the sender or subject; changing the list later does not resurface mail already withheld.
-A message whose header cannot be fetched has no verifiable sender, so it is held without a wake and retried on later polls instead of surfacing degraded.
-`read` likewise lists only matching mail plus a withheld count.
+A message whose header cannot be fetched has no verifiable sender, so it is held without a wake and recorded in the cursor and rotating retry set, allowing later mail to progress instead of surfacing degraded.
+On a later successful fetch, it wakes only if its sender matches; otherwise it is withheld and removed from the retry set.
+`read` likewise shows matching mail plus a withheld count; an unfetchable message is shown only as a UID with unavailable-content placeholders.
 The list matches the claimed `From` address only; it does not authenticate the sender against spoofing.
 
 **Unfetchable headers**
@@ -2441,7 +2442,7 @@ FM_IMAP_HOST=      # mail-plane IMAP server hostname
 FM_IMAP_PORT=993   # mail-plane IMAP server port
 FM_SMTP_HOST=      # mail-plane SMTP server hostname
 FM_SMTP_PORT=465   # mail-plane SMTP server port
-FM_MAIL_SOURCE_ALLOW=   # optional mail-plane sender allow list; unset surfaces every sender
+FM_MAIL_SOURCE_ALLOW=   # optional sender allow list; see "Mail plane" above
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env

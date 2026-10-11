@@ -19,8 +19,9 @@
 #                        marked read (BODY.PEEK), and every surfaced message
 #                        is keyed by its immutable IMAP UID so expunge
 #                        renumbering never re-wakes or loses mail. A uid whose
-#                        header could not be fetched is woken once degraded
-#                        and later re-woken once with recovered metadata. The
+#                        header could not be fetched, without a sender allow
+#                        list, is woken once degraded and later re-woken once
+#                        with recovered metadata. The
 #                        cursor also records the mailbox generation
 #                        (UIDVALIDITY) so a recreated mailbox cannot reuse a
 #                        numeric uid and suppress a new wake, and overlapping
@@ -29,20 +30,17 @@
 #                        `at`/cron, or via the standing check armed by
 #                        bin/fm-mail-check.sh (docs/configuration.md
 #                        "Mail plane").
-#                        With FM_MAIL_SOURCE_ALLOW set, only mail whose
-#                        parsed From address matches it wakes. Other mail is
-#                        recorded in the cursor without a wake, never marked
-#                        read, and logged only as a count; a uid whose header
-#                        cannot be fetched is held unwoken (sender
-#                        unverifiable) and retried next poll.
+#                        Sender filtering and held-mail recovery are defined
+#                        in docs/configuration.md "Mail plane".
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
 # Volume: poll surfaces at most FM_MAIL_POLL_MAX_WAKES messages per run
 # (default 20, valid 1..200); a larger flood is left unseen so the next poll
 # surfaces the next batch, keeping the durable wake queue bounded no matter how
-# much inbound mail arrives. A header fetch that fails is still surfaced once
-# (degraded placeholders) and retried on later polls until the real metadata
+# much inbound mail arrives. Without a sender allow list, a header fetch that
+# fails is still surfaced once (degraded placeholders) and retried on later
+# polls until the real metadata
 # lands; a persistently unfetchable uid is never skipped and never re-wakes.
 #
 # Deployment - credentials and endpoints are read from the environment,
@@ -56,13 +54,7 @@
 #   FM_SMTP_HOST=<smtp host>
 #   FM_SMTP_PORT=<smtp port>     (default 465, implicit TLS)
 #   FM_MAIL_TIMEOUT=<seconds>    (default 20; IMAP/SMTP socket timeout)
-#   FM_MAIL_SOURCE_ALLOW=<list>  (optional sender allow list, e.g.
-#                                @example.com,user@example.org: "@domain"
-#                                matches that exact domain, anything else one
-#                                exact address, case-insensitive; unset or
-#                                blank surfaces every sender, and a malformed
-#                                entry fails read/poll naming it. read also
-#                                withholds non-matching mail.)
+#   FM_MAIL_SOURCE_ALLOW=<list>  (optional; docs/configuration.md "Mail plane")
 # FM_HOME falls back to the repo root when unset. This script carries no secret
 # and no default endpoint that could resolve against a wrong home; FM_MAIL_USER,
 # FM_MAIL_PASS, FM_IMAP_HOST, and FM_SMTP_HOST are always required, and
@@ -201,12 +193,12 @@ EOF
 }
 
 mail_seen() {
-  # $1 = uid; returns 0 when the cursor already records the uid as surfaced.
+  # $1 = uid; returns 0 when the cursor already records the uid as processed.
   grep -Fqx "$1" "$CURSOR"
 }
 
 mail_retry_add() {
-  # $1 = uid; record that a degraded surfacing should be retried.
+  # $1 = uid; retain fetch failures, including unwoken held mail, for retry.
   local id=$1
   [ -n "$id" ] || return 1
   if [ -f "$RETRY" ] && grep -Fqx "$id" "$RETRY"; then
@@ -588,7 +580,7 @@ mail_poll() {
         continue
         ;;
       retry)
-        # Already cursor-recorded from the degraded wake. Surface recovered
+        # Already cursor-recorded from degraded or held mail. Surface recovered
         # metadata once; if a recovery/ok publish is already journaled, retry
         # the retry-set clear without appending another wake.
         if mail_retry_published "$generation" "$uid"; then

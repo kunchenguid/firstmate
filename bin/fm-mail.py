@@ -12,9 +12,8 @@
 #
 # All configuration arrives through the environment, never through arguments,
 # so credentials never appear in argv or logs. read/poll use BODY.PEEK so mail
-# is never marked seen before firstmate answers it. When FM_MAIL_SOURCE_ALLOW
-# is set, read and poll_list show only mail whose parsed From address matches
-# it (docs/configuration.md "Mail plane").
+# is never marked seen before firstmate answers it. Sender filtering is
+# defined in docs/configuration.md "Mail plane".
 import imaplib
 import os
 import re
@@ -373,7 +372,7 @@ def cmd_poll_list():
             uid = x.decode() if isinstance(x, bytes) else str(x)
             unseen.append(uid)
         if uidv and uidv == stored_gen:
-            # Same mailbox generation: skip uids this home already surfaced so
+            # Same mailbox generation: skip uids this home already processed so
             # the fetch budget goes to genuinely new mail. Retry-set uids are
             # only meaningful for this generation.
             new_uids = [u for u in unseen if u not in seen]
@@ -390,11 +389,11 @@ def cmd_poll_list():
         # persist block below owns when that position advances.
         window = max(cap * 4, cap + 10)
         new_candidates = new_uids[:window]
-        # Only a retry uid that is already surfaced (in the cursor) is a pure
+        # Only a retry uid that is already processed (in the cursor) is a pure
         # retry re-fetch. A retry-set uid that is not yet in the cursor is a
-        # degraded wake that failed to record - it stays a new candidate so
-        # the next poll surfaces it again as degraded instead of silently
-        # dropping it. The window itself (regardless of seen membership) is
+        # fetch failure that failed to record - it stays a new candidate so
+        # the next poll handles it again instead of silently dropping it.
+        # The window itself (regardless of seen membership) is
         # kept so a scan window of only unseen uids can still advance the
         # durable cursor past itself, never stalling the march over the whole
         # retry set.
@@ -445,8 +444,9 @@ def cmd_poll_list():
                 continue
             # A raised or empty FETCH is treated as a failure for THIS uid only,
             # so one bad message can never abort the bounded scan: a new uid is
-            # surfaced degraded, a retry uid is left for a later scan step, and
-            # the scan advances.
+            # held when filtering requires sender verification, otherwise
+            # surfaced degraded; a retry uid is left for a later scan step,
+            # and the scan advances.
             try:
                 typ, msg = m.uid('fetch', u.encode(), '(BODY.PEEK[HEADER])')
                 if typ != 'OK' or not msg or not msg[0]:
