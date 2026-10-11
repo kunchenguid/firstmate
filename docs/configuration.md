@@ -974,7 +974,8 @@ Each relaunch installs a fresh worker extension with the home's current list, so
 ## Worker account pin (config/claude-account, config/pi-account)
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
-The pin is opt-in: with neither file, every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
+The pin is opt-in: with neither file, a Claude task's first launch receives firstmate's own `CLAUDE_CONFIG_DIR` store, and its relaunches and secondmate respawns reuse the store recorded as `claude_config_dir=` unless `FM_CLAUDE_CONFIG_DIR` overrides it ([`bin/fm-claude-store-lib.sh`](../bin/fm-claude-store-lib.sh) owns that precedence).
+A pinned Claude task records its pinned store too, so removing `config/claude-account` does not move existing tasks: they keep that store, and keep unsetting the credentials below, until `FM_CLAUDE_CONFIG_DIR` names another.
 
 Both files are local and gitignored.
 
