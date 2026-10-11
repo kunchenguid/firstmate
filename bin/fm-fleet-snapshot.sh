@@ -273,6 +273,9 @@ Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
+An in-flight ship whose completed validation reports its matching PR open is
+not a terminal contradiction while a structured external hold remains; closed,
+merged, unreadable, unmatched, or URL-only PR evidence receives no exemption.
 Parent activity evidence uses FM_SNAPSHOT_PARENT_ACTIVITY_LINES,
 FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, FM_SNAPSHOT_PARENT_ACTIVITIES, and
 FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT, with truncation disclosed in the result.
@@ -322,8 +325,8 @@ last_nonempty_line() {  # <file>
 # A local crew-state read is bounded so one slow child cannot extend this
 # snapshot without limit. Remote secondmate endpoint liveness is never read here.
 # A local read that hits the bound folds to state unknown.
-crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
-  local id=$1 captured_meta=${2:-} captured_status=${3:-} raw rest state source detail sep
+crew_state_json() {  # <id> [<captured-meta>] [<captured-status>] [<expected-pr>]
+  local id=$1 captured_meta=${2:-} captured_status=${3:-} expected_pr=${4:-} raw rest state source detail sep
   raw=$(
     fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" \
       env FM_ROOT_OVERRIDE="$FM_ROOT" \
@@ -331,6 +334,7 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
       FM_STATE_OVERRIDE="$STATE" \
       FM_CREW_STATE_META_OVERRIDE="$captured_meta" \
       FM_CREW_STATE_STATUS_OVERRIDE="$captured_status" \
+      FM_CREW_STATE_EXPECTED_PR="$expected_pr" \
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
@@ -354,6 +358,15 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
   esac
   jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
+}
+
+external_hold_pr_for_task() {  # <id>
+  printf '%s' "$BACKLOG_JSON" | jq -r --arg id "$1" '
+    first(.records[]?
+      | select(.id == $id and .state == "in_flight" and .structured
+          and .current_role == "held" and .hold_kind == "external"
+          and (.pr_url | type) == "string")
+      | .pr_url) // empty'
 }
 
 status_event_json() {  # <observed-status-log> [<contract-path>]
@@ -653,7 +666,7 @@ prefetch_task_observations() {  # <meta> <id>
       > "$current_file" || current_rc=1
     agent_alive=unknown
   elif [ "$generation_current" = 1 ]; then
-    crew_state_json "$id" "$meta" "$status_capture" > "$current_file" &
+    crew_state_json "$id" "$meta" "$status_capture" "$(external_hold_pr_for_task "$id")" > "$current_file" &
     current_pid=$!
     kind=$(meta_value "$meta" kind)
     backend=$(fm_backend_of_meta "$meta")
@@ -1027,10 +1040,20 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.kind != "secondmate")
          | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
          | {id,state:.current_state.state} ]) as $unowned_children
-    | ([ $owned_in_flight[] as $work
+    | def open_pr_external_wait($work; $task):
+        $work.current_role == "held"
+        and $work.hold_kind == "external"
+        and ($work.pr_url | type) == "string"
+        and $task.kind == "ship"
+        and $task.current_state.state == "done"
+        and $task.current_state.source == "run-step"
+        and $task.pr.url == $work.pr_url
+        and (($task.current_state.detail // "") | test("^run passed: PR open(?: ·|$)"));
+    ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.kind != "secondmate")
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
+         | select(open_pr_external_wait($work; .) | not)
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
