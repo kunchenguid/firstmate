@@ -856,14 +856,59 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # closes over a bare agent-glyph row classifies through that same bare row,
 # while any other pair still needs a pi identity to prove anything, so this
 # can only ever move a verdict toward refusing, never toward a false `empty`.
+#
+# A rule CORRUPTED by a pi stderr notice still counts: the notice overwrites
+# the rule's leading columns and leaves its text followed by the remaining
+# dashes (`⚠️ Live session indexing failed: database is locked──────`, captured
+# live on the Ownvoice lead pane). That row is the composer's own bottom rule,
+# not typed input, so dropping it loses the separated pair and an idle, empty
+# composer reads `unknown`. The notice family is the exact one
+# _fm_composer_row_is_pi_notice owns, and the trailing 8-column run plus the
+# requirement that at least one dash be present keep a real draft (which has no
+# notice-family prefix) out.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
-  local row=$1
+  local row=$1 rest
   [ -n "$row" ] || return 1
-  [ -z "${row//─/}" ] || return 1
-  case "$row" in
-    *────────*) return 0 ;;
-  esac
+  if [ -z "${row//─/}" ]; then
+    case "$row" in
+      *────────*) return 0 ;;
+    esac
+    return 1
+  fi
+  rest=${row//─/}
+  if [ "$rest" != "$row" ] \
+     && fm_composer_idle_matches "$rest" "${FM_COMPOSER_PI_NOTICE_RE:-$FM_COMPOSER_PI_NOTICE_RE_DEFAULT}" sensitive; then
+    case "$row" in
+      *────────*) return 0 ;;
+    esac
+  fi
   return 1
+}
+
+# _fm_composer_pi_wave_art_row: 0 when <trimmed-row> is one row of the animated
+# boat Pi's Calm working presentation draws in the composer's rule slot (the
+# ponytail/pi wave extension on the fleet panes): low block bars (▁▂▃▄), the
+# swell strokes (╲ ╱), the sail cells (◿ ◣), and the mast (│). These rows are
+# animation furniture, not typed input, and they stand where the composer's top
+# rule would be, so the separated pair must open on them or an idle, empty
+# composer reads `unknown`.
+#
+# The two-part test keeps a draft out: the row must carry at least one
+# distinctive wave MARK (a bar, a swell stroke, or a sail cell - never the bare
+# mast `│`, which is also an ordinary box side border) and its non-whitespace
+# content must be drawn ONLY from the wave set. Typed text is ASCII, so it
+# fails the mark test outright; a box content row (`│ foo │`) fails the
+# only-wave-set test. Both patterns are grep ALTERNATIONS of literal glyphs,
+# never a bracket range between multibyte endpoints, for the reason
+# FM_OMP_SPINNER_FRAMES_RE records.
+FM_COMPOSER_PI_WAVE_MARK_RE_DEFAULT='(▁|▂|▃|▄|╲|╱|◿|◣)'
+FM_COMPOSER_PI_WAVE_RE_DEFAULT='^[[:space:]]*(▁|▂|▃|▄|╲|╱|◿|◣|│)*[[:space:]]*$'
+_fm_composer_pi_wave_art_row() {  # <trimmed-row>
+  local row=$1
+  fm_composer_normalize_trim_var row
+  [ -n "$row" ] || return 1
+  fm_composer_idle_matches "$row" "${FM_COMPOSER_PI_WAVE_MARK_RE:-$FM_COMPOSER_PI_WAVE_MARK_RE_DEFAULT}" sensitive || return 1
+  fm_composer_idle_matches "$row" "${FM_COMPOSER_PI_WAVE_RE:-$FM_COMPOSER_PI_WAVE_RE_DEFAULT}" sensitive
 }
 
 # _fm_composer_pi_titled_rule_row: 0 when a trimmed row is Pi's LIVE turn frame
@@ -1017,10 +1062,16 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
     # closes the preceding candidate and immediately opens the next, so an
     # earlier transcript rule can never outrank the live bottom composer pair.
+    # A Calm wave-art row stands where the composer's top rule would be, so it
+    # opens the candidate like a titled top rule does (and, like it, does not
+    # move the staleness boundary, which stays with the closing rule below).
     pi_sep=0
     pi_titled=0
     if _fm_composer_pi_separator_row "$trimmed"; then pi_sep=1; fi
     if [ "$pi_sep" = 0 ] && _fm_composer_pi_titled_rule_row "$trimmed"; then
+      pi_titled=1
+    fi
+    if [ "$pi_sep" = 0 ] && [ "$pi_titled" = 0 ] && _fm_composer_pi_wave_art_row "$trimmed"; then
       pi_titled=1
     fi
     if [ "$pi_sep" = 1 ] || [ "$pi_titled" = 1 ]; then

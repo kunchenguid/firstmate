@@ -884,6 +884,67 @@ test_matrix_pi_stderr_notice_rows() {
   pass "matrix: pi stderr notice rows are furniture, real drafts beside them stay pending"
 }
 
+test_matrix_pi_wave_art_and_notice_embedded_rule() {
+  # Real bytes: the Ownvoice (writeboost) lead pane, captured verbatim to
+  # data/fm-composer-pi-wave/pane-capture.txt in the supervising home. Pi's
+  # Calm working presentation draws its animated boat (the ponytail/pi wave
+  # extension) in the composer's rule slot - rows of low block bars (▁▂▃▄),
+  # swell strokes (╲ ╱), and sail cells (◿◣) - and a pi stderr notice overwrote
+  # the leading columns of the composer's BOTTOM rule, leaving the notice text
+  # followed by the rule's remaining dashes. Read as ordinary rows neither is a
+  # separator, so no pi pair was found and the idle lead read `unknown`:
+  # fm-control refused every relaunch ("composer state 'unknown', not proven
+  # empty"). The wave rows open the candidate like a titled top rule and the
+  # notice-corrupted rule closes it, so an idle/done pi reads empty.
+  local capture typed pi_idle pi_working none out
+  pi_idle=$(printf 'pi\tidle')
+  pi_working=$(printf 'pi\tworking')
+  none=$(printf 'zsh\t')
+  capture=$'                                            ◿│◣\n'
+  capture+=$'▁▁▂▂▃▃▄▄▄▄▄▃▃▂▂▁▁▁▁▁▂▂▃▃▃▄▄▄▄▄▄▃▃▃▂▂▂▁▁▁▁▁▁╲▁▁▁╱▁▁▁▁▁▂▂▃▃▃▄▄▄▄▄▃▃▂▂▂▁▁▁▁▁▁▂▂▂▃▃▃▄\n'
+  capture+=$'                                           ◿│◣\n'
+  capture+=$'\n'
+  capture+=$' Captain, shipshape.\n'
+  capture+=$'\n'
+  capture+=$'                              ◿│◣\n'
+  capture+=$'                          ◿│◣\n'
+  capture+=$'▁▁▂▂▃▃▃▄▄▄▄▄▄▃▃▃▂▂▂▁▁▁▁▁▁╲▁▁▁╱▁▁▁▁▁▂▂▃▃▃▄▄▄▄▄▃▃▂▂▂▁▁▁▁▁▁▂▂▂▃▃▃▄▄▄▄▄▄▃▃▃▂▂▂▁▁▁▁▁▁▂\n'
+  capture+=$'▁▁▂▂▃▃▄▄▄▄▄▄▃▃▃▃▂▂▂▁▁▁▁▁▁╲▁▁▁╱▁▁▁▁▁▂▂▃▃▄▄▄▄▄▄▃▃▂▂▁▁▁▁▁▁▂▂▂▃▃▃▃▄▄▄▄▄▄▃▃▃▂▂▂▁▁▁▁▁▁▂\n'
+  capture+=$'⚠️ Live session indexing failed: database is locked──────────────────────────────\n'
+  capture+=$'~/.treehouse/firstmate-8bf1b0/4/firstmate (detached)\n'
+  capture+=$'↑2.0M ↓185k R58M CH99.9% $11.537 (sub) 59.3%/272k (auto)       gpt-6.1-sol • high\n'
+  capture+=$'↑2.0M ↓185k R58M CH99.8% $11.554 (sub) 59.3%/272k (auto)       gpt-6.1-sol • high\n'
+  # 1. The incident: idle/done pi on herdr (styled + identity) reads empty.
+  assert_screen "idle pi lead under wave art + notice rule on herdr" empty \
+    "$CAPS_STYLED" "$capture" '' "$pi_idle"
+  # The separated shape still needs identity: without it (zellij) or on a plain
+  # capture (cmux/orca) the pane refuses rather than claims a false empty.
+  assert_screen "wave art + notice rule without identity capability" unknown \
+    "$CAPS_STYLED_NOID" "$capture"
+  assert_screen "wave art + notice rule on a plain capture" unknown \
+    "$CAPS_PLAIN" "$capture"
+  # A working pi defers - the boat is drawn only while a turn runs.
+  assert_screen "working pi under wave art still defers" unknown \
+    "$CAPS_STYLED" "$capture" '' "$pi_working"
+  assert_screen "non-pi identity cannot prove the wave-art composer" unknown \
+    "$CAPS_STYLED" "$capture" '' "$none"
+  # 2. Negative control: a real draft between the last wave row and the
+  #    notice-corrupted rule keeps its verdict and survives extraction. The
+  #    notice row is unique, so this inserts the draft directly above it.
+  typed=${capture//$'\n⚠️'/$'\nfix the flaky test\n⚠️'}
+  [ "$typed" != "$capture" ] || fail "fixture edit: the draft row was not inserted"
+  assert_screen "typed pi lead under wave art + notice rule" pending \
+    "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed")
+  [ "$out" = 'fix the flaky test' ] \
+    || fail "the draft beside the notice-corrupted rule must survive extraction, got '$out'"
+  # The idle wave-art composer extracts nothing: the notice text and the wave
+  # rows are furniture, never composer content.
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$capture")
+  [ -z "$out" ] || fail "the idle wave-art composer must extract nothing, got '$out'"
+  pass "matrix: pi Calm wave-art rows and a notice-corrupted rule are furniture; a draft between them stays pending"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -1439,6 +1500,7 @@ test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_pi_lead_turn_frame_and_extension_rows
 test_matrix_pi_lead_beneath_extension_error_is_empty
 test_matrix_pi_stderr_notice_rows
+test_matrix_pi_wave_art_and_notice_embedded_rule
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
