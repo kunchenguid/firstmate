@@ -440,6 +440,27 @@ test_actionable_close_rewakes_with_reason() {
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
 }
 
+# A turn that ends on an API error (for example a DNS failure) fires Claude's
+# StopFailure hook and never Stop (measured on Claude Code 2.1.296,
+# docs/verification/supervision.md). The tracked settings must register the same
+# asyncRewake auto-arm there, and the hook must arm and rewake from that payload
+# exactly as from Stop, so one unreachable moment cannot leave the home unwatched.
+test_api_error_turn_end_rearms_through_stopfailure() {
+  local dir out status
+  jq -e '[.hooks.StopFailure[]?.hooks[]? | select((.command | contains("bin/fm-claude-stop-autoarm.sh")) and .asyncRewake == true)] | length == 1' \
+    "$ROOT/.claude/settings.json" >/dev/null \
+    || fail "tracked .claude/settings.json must register the auto-arm as one asyncRewake StopFailure hook"
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" '{"session_id":"sess-autoarm","hook_event_name":"StopFailure","error":"server_error","last_assistant_message":"API Error: Can'"'"'t reach the API server - check your internet or DNS (ENOTFOUND)"}' 2>/dev/null); status=$?
+  expect_code 2 "$status" "an actionable close after a StopFailure turn end must exit 2 so Claude rewakes"
+  assert_contains "$out" "stale: fixture-win actionable" "StopFailure rewake must carry the arm's reason line"
+  [ -e "$dir/state/arm-ran" ] || fail "StopFailure hook never foregrounded the arm wrapper"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "StopFailure epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: an API-error turn end re-arms and rewakes through StopFailure"
+}
+
 # pi-code (Pi's Claude-hook compatibility extension) delivers a Claude-shaped
 # Stop payload but awaits the hook with no asyncRewake support, so the hook
 # must stand down or it wedges Pi's turn for the declared timeout (issue
@@ -1765,6 +1786,7 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_api_error_turn_end_rearms_through_stopfailure
 test_actionable_close_with_live_successor_rewakes_once
 test_attached_cycle_end_starts_handling_successor
 test_unconfirmed_handling_successor_still_rewakes

@@ -506,6 +506,25 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 | Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
 | Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
 
+### Claude ends an API-error turn with StopFailure, never Stop, 2026-10-10
+
+This supports registering `bin/fm-claude-stop-autoarm.sh` on `StopFailure` as well as `Stop` in `.claude/settings.json`.
+It was measured on Claude Code 2.1.296 on macOS arm64, in a scratch directory with no Firstmate hooks loaded, with `ANTHROPIC_BASE_URL=http://fm-dns-test.invalid` so every API call failed name resolution.
+
+A headless `claude -p "hi" --settings <probe>/settings.json` run with logging hooks on `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` printed `API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)` after about three minutes of retries.
+Its hook log recorded `UserPromptSubmit`, then `StopFailure` with `"error":"server_error"` and that message as `last_assistant_message`, then `SessionEnd`; `Stop` never fired.
+
+An interactive session on a tmux socket registered one `StopFailure` hook with `asyncRewake: true` that slept 5 seconds, printed a reply request to stderr, and exited 2, standing down after three firings.
+
+| Firing | Hook log time | Pane afterwards |
+| --- | --- | --- |
+| 1 | 19:11:33 | `Stop hook feedback`, then a new API attempt |
+| 2 | 19:14:38 | `Stop hook feedback`, then a new API attempt |
+| 3 | 19:17:40 | the hook stood down; the session stayed idle |
+
+So an exit 2 from a `StopFailure` hook rewakes the session, and each failed retry fires `StopFailure` again at the provider's own retry cadence rather than in a tight loop.
+`tests/fm-claude-stop-autoarm.test.sh` pins the tracked registration and the hook's rewake from this payload.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.
