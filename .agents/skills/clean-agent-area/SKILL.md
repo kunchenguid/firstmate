@@ -1,7 +1,7 @@
 ---
 name: clean-agent-area
 description: >-
-  Use when the captain asks to clean the agent area, free space, or investigate low disk space.
+  Use only when the captain explicitly asks to clean or free space in the agent area, or investigate low disk space there.
 user-invocable: true
 metadata:
   internal: true
@@ -20,7 +20,7 @@ metadata:
 
 ## 触发条件
 
-- 船长要求清理、腾空间、处理磁盘快满，或清 agent 区域时加载本 skill。
+- 仅当船长明确要求清理 agent 区域、腾出 agent 区域空间，或调查该区域的磁盘空间问题时加载本 skill。
 
 ## 只读审计
 
