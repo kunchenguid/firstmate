@@ -1599,6 +1599,7 @@ make_arm_decision_fixture() {  # <name>
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q -b main "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash

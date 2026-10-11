@@ -106,15 +106,19 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
-async function isPrimaryRoot(root) {
+// bin/fm-primary-scope-lib.sh's fm_primary_root_matches is the single owner of
+// the primary-home predicate (the turn-end guard and session-start nudge decide
+// with the same one), so this plugin can never disagree with them again. It
+// force-includes a linked treehouse-leased secondmate home carrying a valid
+// .fm-secondmate-home marker, which a bare git-dir==common-dir test rejects.
+function isPrimaryRoot(root) {
   if (!root) return false;
-  if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  // A second mate owns supervision in its home too. The common-dir and
-  // ancestor-lock proofs below still exclude isolated task workers.
-  const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
-  const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
-  if (gitDir.code !== 0 || commonDir.code !== 0) return false;
-  return gitDir.stdout.trim() === commonDir.stdout.trim();
+  const result = spawnSync(
+    "bash",
+    ["-c", '. "$1/bin/fm-primary-scope-lib.sh" && fm_primary_root_matches "$1"', "fm-primary-watch-arm", root],
+    { stdio: "ignore" },
+  );
+  return result.status === 0;
 }
 
 // bin/fm-supervision-lib.sh's fm_supervision_needed is the single owner of the
@@ -529,7 +533,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
 
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
-  if (!(await isPrimaryRoot(paths.root))) return { status: "not-primary", armChild: null };
+  if (!isPrimaryRoot(paths.root)) return { status: "not-primary", armChild: null };
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };

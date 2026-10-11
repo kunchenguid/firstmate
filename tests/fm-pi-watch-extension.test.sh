@@ -4246,6 +4246,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4297,6 +4298,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -4346,6 +4348,7 @@ test_opencode_primary_watch_plugin_requires_session_lock() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4409,6 +4412,7 @@ test_opencode_watch_arm_coordinator_respects_primary_scope() {
   fm_git_worktree "$base" "$repo" fm/opencode-coordinator
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -4446,6 +4450,58 @@ EOF
   pass "OpenCode watcher coordinator respects primary scope"
 }
 
+test_opencode_watch_arm_coordinator_accepts_secondmate_marker() {
+  local plugin base repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  base="$TMP_ROOT/opencode-secondmate-base"
+  repo="$TMP_ROOT/opencode-secondmate-wt"
+  home="$TMP_ROOT/opencode-secondmate-home"
+  log="$TMP_ROOT/opencode-secondmate.log"
+  fm_git_worktree "$base" "$repo" fm/opencode-secondmate
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  printf 'lead\n' > "$repo/.fm-secondmate-home"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (status === "not-primary") {
+  console.error("linked secondmate-marker home was refused as not-primary");
+  process.exit(1);
+}
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error(`watch arm did not run for a secondmate-marker home (${status})`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watch coordinator must treat a linked secondmate-marker home as primary"
+  [ -z "$out" ] || fail "OpenCode secondmate-marker test printed output: $out"
+  pass "OpenCode watcher coordinator honors the secondmate-home marker"
+}
+
 test_opencode_primary_watch_plugin_rearms_after_wake() {
   local plugin repo home log stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -4456,6 +4512,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4553,6 +4610,7 @@ test_opencode_primary_watch_plugin_runs_the_supervision_host() {  # [away|quiet]
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   if [ "$kind" = quiet ]; then
@@ -4645,6 +4703,7 @@ test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4726,6 +4785,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4798,6 +4858,7 @@ test_opencode_unretired_successor_falls_back_without_retry() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4876,6 +4937,7 @@ test_opencode_late_unretired_close_resumes_supervision() {
     mkdir -p "$repo/bin" "$home/state" "$home/config"
     git init -q "$repo"
     : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
     : > "$home/state/task.meta"
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -4972,6 +5034,7 @@ test_opencode_empty_close_retries_instead_of_disappearing() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -5032,6 +5095,7 @@ test_opencode_established_empty_close_honors_retry_limit() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -5087,6 +5151,7 @@ test_opencode_actionable_close_rechecks_session_lock() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -5154,6 +5219,7 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -5228,6 +5294,7 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -5344,6 +5411,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
+test_opencode_watch_arm_coordinator_accepts_secondmate_marker
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_primary_watch_plugin_runs_the_supervision_host
 test_opencode_primary_watch_plugin_runs_the_supervision_host quiet
