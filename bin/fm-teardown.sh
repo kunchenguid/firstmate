@@ -5,20 +5,12 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
-# When this home opts in through config/teardown-simulator-cleanup=on and
-# xcrun and jq are available, teardown attempts to shut down and delete
-# every Simulator named exactly fm-<task-id> on this host; no creation or
-# ownership record is consulted. An absent file, or any value other than on
-# after whitespace is stripped and case is ignored, performs no Simulator
-# cleanup at all.
-# Ordinary teardown does this after endpoint and per-task temp cleanup;
+# docs/configuration.md "Task Simulator cleanup" owns the opt-in, device
+# selection, pool exemption, and best-effort failure contracts.
+# Ordinary teardown runs Simulator cleanup after endpoint and per-task temp cleanup;
 # forced secondmate cleanup also applies it recursively to each descendant
-# before removing that descendant's task record.
-# Task IDs matching pool-<digits> are exempt to preserve persistent Simulators;
-# other pool-prefixed IDs are ordinary tasks. Unrelated device names are untouched.
-# Shutdown failure does not prevent deletion, and deletion failure only warns;
-# an absent device or unavailable tools do not block task-record cleanup.
-# tests/fm-teardown.test.sh covers these cleanup and failure contracts.
+# before removing that descendant's task record, using the invoking home's
+# configuration rather than each descendant home's switch.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -3774,7 +3766,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-# The header owns the name-based Simulator cleanup contract.
+# The header owns Simulator cleanup ordering.
 cleanup_task_simulators "$ID"
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.

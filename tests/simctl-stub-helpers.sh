@@ -2,7 +2,7 @@
 # tests/simctl-stub-helpers.sh - the shared fake `xcrun` fixture writer that
 # keeps the host's real Simulator set out of teardown-driven runs.
 #
-# bin/fm-teardown.sh's header owns the name-based Simulator cleanup contract.
+# docs/configuration.md "Task Simulator cleanup" owns device selection and opt-in.
 # Any fixture that drives the real script must shadow `xcrun` with this stub instead of letting
 # the host answer for it. tests/lib.sh installs the stub into every fm_fakebin
 # dir and onto the shared test PATH for suites that source it,

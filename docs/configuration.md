@@ -423,13 +423,13 @@ Regression coverage lives in `tests/fm-spawn-preflight.test.sh` and `tests/fm-co
 
 ## Task Simulator cleanup (config/teardown-simulator-cleanup)
 
-The optional local, gitignored `config/teardown-simulator-cleanup` value switch opts this home into removing task-owned Simulators during `fm-teardown.sh` cleanup.
+The optional local, gitignored `$FM_HOME/config/teardown-simulator-cleanup` value switch opts this home into Simulator removal during `fm-teardown.sh` cleanup.
 `FM_CONFIG_OVERRIDE` selects a different configuration directory when set.
 The file's content is whitespace-stripped and case-folded: only the value `on` enables cleanup, while an absent file or any other value performs no Simulator cleanup at all and teardown behaves exactly as before the capability existed.
-When enabled, teardown shuts down and deletes every Simulator named exactly `fm-<task-id>` on the host after endpoint and per-task temp cleanup, and a forced secondmate teardown applies the same cleanup recursively to each descendant task.
+When enabled, teardown attempts to shut down and delete every Simulator named exactly `fm-<task-id>` on the host; no creation or ownership record is consulted.
 Task IDs matching `pool-<digits>` are exempt so persistent pool Simulators survive, and unrelated device names are never touched.
-Cleanup is best-effort: an absent device, missing `xcrun` or `jq`, and shutdown or delete failures never block task-record cleanup.
-`bin/fm-teardown.sh`'s header owns the name-based cleanup contract; regression coverage lives in `tests/fm-teardown.test.sh` and `tests/fm-gotmp.test.sh`.
+Cleanup requires both `xcrun` and `jq` and is best-effort: an absent device or unavailable tools do not block task-record cleanup, shutdown failure does not prevent deletion, and deletion failure only warns.
+[`bin/fm-teardown.sh`'s header](../bin/fm-teardown.sh) owns cleanup ordering and forced secondmate descendant handling; regression coverage lives in `tests/fm-teardown.test.sh` and `tests/fm-gotmp.test.sh`.
 The switch is a home-local preference and is not inherited by secondmate homes.
 
 ## Runtime backend (config/backend / FM_BACKEND)
