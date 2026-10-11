@@ -676,6 +676,44 @@ EOF
   pass "a data -> storage/data symlink resolves the archive from storage, where tasks-axi reads .tasks.toml"
 }
 
+test_missing_perl_stops_with_a_clear_archive_error() {
+  local home fakebin noperl tool path out err rc
+  home=$(make_home no-perl)
+  printf '[markdown]\narchive = "records/done.md"\n' > "$home/.tasks.toml"
+  mkdir -p "$home/records"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] archived-hold - Depends on an archived blocker blocked-by: archived-blocker (repo: alpha) (kind: captain) (hold: waiting on blocker) (hold-kind: captain)
+
+## Done
+EOF
+  printf '\n## Archived 2026-07-15\n- [x] archived-blocker - Archived blocker (repo: alpha) (kind: ship) (done 2026-07-01)\n' > "$home/records/done.md"
+  fakebin=$(make_fakebin "$home")
+  # A PATH of symlinks to the tools the snapshot needs up to the archive lookup, minus perl.
+  noperl=$TMP_ROOT/no-perl-bin
+  mkdir -p "$noperl"
+  for tool in bash env dirname basename cat awk sed grep jq date mktemp rm mkdir; do
+    path=$(command -v "$tool") && ln -sf "$path" "$noperl/$tool"
+  done
+  rc=0
+  out=$(PATH="$fakebin:$noperl" HOME="$home" FM_HOME="$home" "$SNAPSHOT" --json 2>"$home/err") || rc=$?
+  err=$(cat "$home/err")
+  [ "$rc" -eq 1 ] || fail "a snapshot without perl must exit 1, got $rc: $err"
+  [ -z "$out" ] || fail "a snapshot without perl must print no JSON: $out"
+  [ "$err" = "fm-fleet-snapshot: perl not found (needed to resolve the Done archive)" ] \
+    || fail "a snapshot without perl must report the missing perl, got: $err"
+  # The neighbouring branches stay as they are: --help needs no perl, and the same home resolves the archived blocker once perl is present.
+  PATH="$fakebin:$noperl" "$SNAPSHOT" --help >/dev/null 2>&1 || fail "--help must not need perl"
+  out=$(PATH="$fakebin:$PATH" HOME="$home" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.backlog.records[] | select(.id == "archived-hold"))
+    | .unresolved_blocker_ids == [] and .hold_bucket == "live"
+  ' >/dev/null || fail "with perl present the archived blocker must resolve: $out"
+  pass "a snapshot without perl stops with a clear archive error while --help and the normal run are unchanged"
+}
+
 test_event_hints_follow_reconciled_current_state() {
   local home fakebin out hint_gen
   home=$(make_home event-hints)
@@ -1370,6 +1408,7 @@ test_configured_done_archive_path_resolves_blockers
 test_quoted_archive_path_keeps_hash
 test_global_config_archive_path_resolves_blockers
 test_symlinked_data_dir_resolves_archive_from_target_root
+test_missing_perl_stops_with_a_clear_archive_error
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint

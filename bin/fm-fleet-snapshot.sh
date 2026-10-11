@@ -170,6 +170,9 @@ toml_markdown_archive() {  # <toml-path>
 }
 done_archive_path() {
   local root archive
+  # fm_backlog_root resolves the data directory with perl; without it the archive
+  # would silently read as empty and archived blockers would stay blocked.
+  command -v perl >/dev/null 2>&1 || { echo "fm-fleet-snapshot: perl not found (needed to resolve the Done archive)" >&2; return 1; }
   root=$(fm_backlog_root "$DATA") || return 0
   archive=$(toml_markdown_archive "$root/.tasks.toml")
   [ -n "$archive" ] || [ -z "${HOME:-}" ] || archive=$(toml_markdown_archive "$HOME/.tasks-axi/config.toml")
@@ -280,7 +283,6 @@ esac
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"  # fm_backlog_root: the root tasks-axi resolves .tasks.toml from
-DONE_ARCHIVE=$(done_archive_path)
 
 usage() {
   cat <<'EOF'
@@ -348,6 +350,7 @@ case "${1:---json}" in
 esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
+DONE_ARCHIVE=$(done_archive_path) || exit 1
 
 bool_json() {
   if [ "$1" = 1 ]; then printf 'true'; else printf 'false'; fi
