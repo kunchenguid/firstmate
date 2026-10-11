@@ -2917,6 +2917,21 @@ case "$ARG3" in
       ;;
     esac
   done
+  # A named adapter template embeds the launch-brief arg itself; a raw command
+  # has no such placeholder and would start the agent at an empty prompt.
+  # Append it after the caller's own argv. Kimi rejects a positional prompt and
+  # gets its brief pointer after its readiness gate, and a command that already
+  # names __BRIEF__ is left alone.
+  case "$HARNESS" in
+  kimi*) : ;;
+  *)
+    # shellcheck disable=SC2016 # literal text, expanded by the launched shell
+    case "$LAUNCH" in
+    *__BRIEF__*) : ;;
+    *) LAUNCH=$LAUNCH' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    esac
+    ;;
+  esac
   ;;
 '')
   # No explicit harness: resolve from config. A secondmate AGENT launches on the
