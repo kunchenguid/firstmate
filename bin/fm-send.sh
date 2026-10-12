@@ -1128,7 +1128,8 @@ else
   # budget (~8s at the default cadence, twice the worst measured render); an
   # explicit FM_SEND_RETRIES still wins, and every other harness keeps the
   # shared 3-retry default untouched.
-  case "$TARGET_HARNESS" in
+  family=$(fm_control_harness_family "$TARGET_HARNESS") || family=$TARGET_HARNESS
+  case "$family" in
     agy) retries=${FM_SEND_RETRIES:-20} ;;
     *) retries=${FM_SEND_RETRIES:-3} ;;
   esac
