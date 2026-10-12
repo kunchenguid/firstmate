@@ -12,6 +12,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Skill | `/<skill>`, for example `/no-mistakes`. |
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
+| Advisor | `--advisor <model>`, absent from `claude --help`, sets the advisor for that session only and leaves the saved `advisorModel` untouched; on 2.1.294 an advisor that can never advise exits 1 at launch, while one ranked below the main model only warns and runs without it. Firstmate passes it only from a profile `advisor` or `--advisor` ([`Claude Code advisor`](../../../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson)). |
 | Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269. See [`Claude permission mode`](../../../../../docs/configuration.md#claude-permission-mode-configclaude-permission-mode) for the launch grant and configuration. |
 
 ## Workspace trust
