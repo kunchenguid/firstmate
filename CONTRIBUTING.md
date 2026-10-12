@@ -140,6 +140,8 @@ Source those instead of copying a fake toolchain into a new suite.
 A fixture may shorten a production timeout to keep a failure path prompt, but never below what the real work inside that window costs on a loaded machine: a fork, an exec, a lock acquisition, a beacon publication, or a first-poll check.
 Where a case's assertion is not about the timeout itself, give that window headroom over the measured loaded cost, and bound the test's own waiting with iteration-counted poll loops, which stretch under load where a wall-clock budget does not.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
+A test or lab that runs a real `claude` must move `HOME` and `XDG_DATA_HOME` to scratch together, never one without the other, because Claude Code's installer can put a version under the scratch data directory and repoint the real `~/.local/bin/claude` at it.
+treehouse ignores `XDG_CONFIG_HOME`, so a scratch home's worktree pool lands in the real `~/.treehouse` unless the fixture project's `treehouse.toml` sets `root=` or the test isolates `HOME`.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 
 ## Questions

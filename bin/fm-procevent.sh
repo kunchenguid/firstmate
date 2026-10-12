@@ -194,7 +194,11 @@
 # depend on an agent remembering. So after capture, a bound source
 # has its result passed to
 # `bin/fm-procevent-<adapter>.sh answers <result-file>`, and whatever that prints
-# is piped straight into that one intake. The adapter reports only what the
+# is piped straight into that one intake. An adapter's optional
+# `ack <result-file>` runs only after that intake exits 0 or 3 (3: every skip was
+# permanent), so an answer the intake did not settle stays undelivered; an adapter
+# without `ack` is unaffected.
+# The adapter reports only what the
 # captain chose; the intake owns every rule about what happens next. This runner
 # names no adapter, parses no result, and knows no decision rule, so a future
 # built-in source needs nothing here beyond an `answers` command and a binding.
@@ -457,15 +461,19 @@ adapter_autohandle() {  # <adapter> <source-id> <result-file>
 # leave the capture untouched and still announced, because this never
 # acknowledges anything (see the keyed-answer note in the header).
 feed_keyed_answers() {  # <adapter> <source-id> <result-file>
-  local adapter=$1 id=$2 result=$3 script origin seq
+  local adapter=$1 id=$2 result=$3 script origin seq fed rc=0
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
   [ -n "$origin" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
-  "$script" answers "$result" 2>/dev/null \
+  fed=$("$script" answers "$result" 2>/dev/null) || return 1
+  printf '%s\n' "$fed" \
     | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
-        --source "the captured result $id sequence $seq" >/dev/null 2>&1
+        --source "the captured result $id sequence $seq" >/dev/null || rc=$?
+  case "$rc" in 0 | 3) : ;; *) return 1 ;; esac
+  "$script" ack "$result" >/dev/null 2>&1
+  return 0
 }
 
 feed_reconcile_requests() {  # <adapter> <source-id> <result-file>

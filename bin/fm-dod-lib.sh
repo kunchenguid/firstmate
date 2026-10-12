@@ -114,6 +114,8 @@
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-timeout-lib.sh"
 
 # Completion receipts are task-owned state/<id>.run-receipt.json records.
 # schema=1 binds task, mode, spawn_gen and exact candidate head to PASS or FAIL,
@@ -153,6 +155,33 @@ fm_dod_receipt_accept() {  # <state> <id> <meta> <candidate-head>
     return 0
   fi
   echo "completion receipt refused for $id: FAIL, mismatched candidate/incarnation, malformed or absent evidence"
+  return 1
+}
+
+# The optional home merge gate (docs/configuration.md "Merge gate"). When
+# <config>/merge-gate exists and is executable, both landing entrypoints run
+# `merge-gate <task-id> <worktree> <head> <pr-url|->` with FM_HOME set, after
+# their own live checks and before the merge command; a nonzero exit refuses
+# the merge with the gate's output. An absent file changes nothing; a file that
+# exists but is not executable refuses the merge, naming it. The gate runs under
+# FM_MERGE_GATE_TIMEOUT seconds (default 600) because it runs inside the task's
+# control lock; a gate that outlives the bound is killed and refuses the merge.
+fm_dod_merge_gate() {  # <config-dir> <home> <id> <meta> <candidate-head> <pr-url|->
+  local gate=$1/merge-gate worktree out seconds=${FM_MERGE_GATE_TIMEOUT:-600} rc=0
+  [ -e "$gate" ] || [ -L "$gate" ] || return 0
+  [ -x "$gate" ] || { echo "merge refused: $gate is not executable"; return 1; }
+  case $seconds in ''|0*|*[!0-9]*)
+    echo "merge refused: FM_MERGE_GATE_TIMEOUT must be a positive number of seconds"; return 1 ;;
+  esac
+  worktree=$(fm_dod_meta_value "$4" worktree)
+  out=$(fm_run_timed "$seconds" env FM_HOME="$2" "$gate" "$3" "${worktree:--}" "$5" "$6" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  [ -z "$out" ] || printf '%s\n' "$out"
+  if fm_timed_out "$rc"; then
+    echo "merge refused: merge gate timed out after ${seconds}s or exited $rc"
+    return 1
+  fi
+  echo "merge refused by config/merge-gate (exit $rc)"
   return 1
 }
 

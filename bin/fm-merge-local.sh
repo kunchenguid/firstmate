@@ -17,6 +17,8 @@
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
 # Completion evidence is checked by bin/fm-dod-lib.sh at the immutable head
 # passed to git, so a concurrent branch move cannot replace validated content.
+# The optional config/merge-gate (fm_dod_merge_gate) then runs against that same
+# head with `-` as its PR argument; a nonzero exit refuses the merge.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -141,6 +143,7 @@ case "$hold_status" in
 esac
 candidate=$(git -C "$PROJ" rev-parse --verify "refs/heads/$BRANCH^{commit}")
 fm_dod_receipt_accept "$STATE" "$ID" "$META" "$candidate" >&2 || exit 1
+fm_dod_merge_gate "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" "$ID" "$META" "$candidate" - >&2 || exit 1
 merge_status=0
 git -C "$PROJ" merge --ff-only "$candidate" >/dev/null || merge_status=$?
 fm_lock_release "$MERGE_CONTROL_LOCK" || true

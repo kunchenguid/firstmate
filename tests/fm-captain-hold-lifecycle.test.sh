@@ -1746,6 +1746,63 @@ SH
   pass "a bound channel's captured answers close their captain-held tasks at answer time"
 }
 
+# A keyed answer is settled for good only when the intake's exit says so: a batch
+# whose every skip is permanent exits 3, while a transient skip - including a
+# migrated-hold scan that cannot read its beads graph - exits without 3 so the
+# runner keeps the answer for the next round.
+test_keyed_answer_exit_status_separates_settled_from_retried() {
+  local home beads out rc
+  home=$(make_home keyed-exit-status)
+  tasks_in "$home" add sample-closed "Closed call" --repo sample >/dev/null \
+    || fail "could not create the closed task"
+  tasks_in "$home" "done" sample-closed >/dev/null || fail "could not close the task"
+  tasks_in "$home" add sample-free "Free work" --repo sample >/dev/null \
+    || fail "could not create the unheld task"
+
+  set +e
+  out=$(printf 'sample-closed\tUse it\tLabel\n' | run_captain "$home" answers --source "keyed exit fixture" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "an already-closed answer did not exit 3 (rc $rc): $out"
+
+  set +e
+  out=$(printf 'sample-free\tUse it\tLabel\n' | run_captain "$home" answers --source "keyed exit fixture" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a not-held answer did not exit 3 (rc $rc): $out"
+
+  set +e
+  out=$(printf 'sample-absent\tUse it\tLabel\n' | run_captain "$home" answers --source "keyed exit fixture" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "an absent answer did not exit 1 (rc $rc): $out"
+
+  beads=$(make_home keyed-exit-scan)
+  cat > "$beads/.tasks.toml" <<'EOF'
+backend = "beads"
+
+[beads]
+path = "graph/.beads"
+binary = "fm-no-such-bd"
+prefix = "fm"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+EOF
+  set +e
+  out=$(printf 'sample-absent\tUse it\tLabel\n' | run_captain "$beads" answers --source "keyed exit fixture" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "an unreadable beads scan did not stay transient (rc $rc): $out"
+  case "$out" in
+    *"migrated-hold scan refused"*) : ;;
+    *) fail "the unreadable beads scan was not the reported refusal: $out" ;;
+  esac
+  pass "a keyed answer exits 3 only when every skip is settled, and a transient skip keeps it retryable"
+}
+
 # Answer-time closure is opt-in per source. A channel with no binding must behave
 # exactly as it always did: capture, announce, close nothing.
 # A reconcile is "go re-check reality", never the captain's answer. The value is
@@ -4653,6 +4710,7 @@ test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
+test_keyed_answer_exit_status_separates_settled_from_retried
 test_normal_answers_retire_pending_reconcile_requests
 test_reconcile_closes_with_evidence_or_keeps_the_call_open
 test_reconcile_outcomes_retry_partial_failures_once

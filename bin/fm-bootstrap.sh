@@ -7,7 +7,9 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
-#                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "MISSING_MANUAL: <tool> (instructions: <url>)",
+#                 "NEEDS_GH_AUTH" (skipped when every registered project is
+#                 local-only with a clone and no clone is unregistered),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "SENTINEL: fm-sentinel is not running ... (install: <command>)",
@@ -300,6 +302,28 @@ fleet_sync_origin_backed_project_count() {
     count=$((count + 1))
   done
   echo "$count"
+}
+
+# 0 when at least one project is registered and every registered project is
+# local-only with a clone present, and no clone is unregistered, so no project
+# needs GitHub and the sign-in probe has nothing to protect. A registered project
+# with no clone keeps the probe. bin/fm-project-mode.sh owns the posture lookup;
+# an unregistered clone resolves to no-mistakes and keeps the probe.
+every_project_local_only() {
+  local proj name mode seen=0
+  [ -f "$DATA/projects.md" ] || return 1
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    mode=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "${proj##*/}" 2>/dev/null) || return 1
+    [ "${mode%% *}" = local-only ] || return 1
+  done
+  while IFS= read -r name; do
+    [ -d "$PROJECTS/$name" ] || return 1
+    mode=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$name" 2>/dev/null) || return 1
+    [ "${mode%% *}" = local-only ] || return 1
+    seen=1
+  done < <(sed -nE 's/^- (.+)$/\1/p' "$DATA/projects.md" | sed -E 's/ (\[| - ).*//')
+  [ "$seen" = 1 ]
 }
 
 fleet_sync_bootstrap_timeout() {
@@ -1575,7 +1599,7 @@ detect_home_summary_publication() {
 local_phase && detect_local_tools
 if network_phase; then
   __fm_timing_stamp=$(fm_timing_now_ms)
-  gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+  every_project_local_only || gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config

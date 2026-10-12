@@ -232,7 +232,7 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 `bin/fm-procevent.sh` is the captured-result channel:
 
 - After capture, the runner passes a bound built-in source's result to `bin/fm-procevent-<adapter>.sh answers <result-file>`.
-- The runner pipes whatever that prints into the intake.
+- The runner pipes whatever that prints into the intake, and acknowledges the result only when the intake exits 0 or 3 (`bin/fm-procevent.sh` owns that rule).
 - Any built-in adapter with an `answers` command therefore works.
 - The runner names no adapter, parses no result, and carries no decision rule.
 

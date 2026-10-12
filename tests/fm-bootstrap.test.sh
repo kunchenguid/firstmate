@@ -1020,6 +1020,45 @@ SH
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
 }
 
+# GitHub auth only matters to a home that ships through GitHub: when every
+# registered project is local-only the probe stays quiet, and one registered
+# project that ships by PR brings it back, even with no clone for it yet.
+test_gh_auth_probe_skips_all_local_only_homes() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/gh-auth-local-only"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data" "$case_dir/home/projects/notes"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf -- '- notes [local-only] - Umer notes (added 2026-10-12)\n' > "$case_dir/home/data/projects.md"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/gh"
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "NEEDS_GH_AUTH" "an all-local-only home was told to log in to GitHub"
+  printf -- '- site [direct-PR] - Umer site (added 2026-10-12)\n' >> "$case_dir/home/data/projects.md"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "NEEDS_GH_AUTH" "a home with a PR project and no clone lost its GitHub auth check"
+  pass "bootstrap: the GitHub auth probe is skipped only when every registered project is local-only"
+}
+
+# A registered name may contain spaces: "my notes" with no clone must keep the
+# probe on even when a different registered project named "my" is local-only.
+test_gh_auth_probe_reads_full_registered_names() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/gh-auth-spaced-name"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data" "$case_dir/home/projects/my"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf -- '- my notes [direct-PR] - Umer notes (added 2026-10-12)\n- my [local-only] - Umer scratch (added 2026-10-12)\n' > "$case_dir/home/data/projects.md"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/gh"
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "NEEDS_GH_AUTH" "a registered PR project named with a space was read as a local-only prefix"
+  pass "bootstrap: the GitHub auth probe reads each registered project's full name"
+}
+
 test_network_sweeps_recheck_lock_ownership() {
   local case_dir fakebin fake_root marker out
   case_dir="$TMP_ROOT/network-lock-handoff"
@@ -1349,6 +1388,8 @@ test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
+test_gh_auth_probe_skips_all_local_only_homes
+test_gh_auth_probe_reads_full_registered_names
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once

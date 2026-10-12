@@ -1077,6 +1077,17 @@ When the file exists and is executable, `bin/fm-spawn.sh` runs `config/spawn-gat
 Secondmate spawns and relaunches never run it, and an absent file leaves spawn behavior unchanged.
 The gate's own content is home-local policy (for example a per-home lane limit); [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the invocation mechanics.
 
+## Merge gate (config/merge-gate)
+
+The optional local, gitignored `config/merge-gate` is an executable that hard-blocks a task merge, for example until a proof tool such as done-done passes for the exact head being merged.
+When the file exists and is executable, `bin/fm-merge-local.sh` runs `config/merge-gate <task-id> <worktree> <head> -` right before its fast-forward, and `bin/fm-pr-merge.sh` runs `config/merge-gate <task-id> <worktree> <head> <pr-url>` right before the forge merge, both with `FM_HOME` set.
+`<worktree>` is the task's recorded worktree, or `-` when none is recorded, and `<head>` is the exact commit the merge will land.
+`-` means no worktree: a gate must treat it as a plain argument and must not `cd` into it (`cd -` changes to the previous directory, or fails with `OLDPWD not set`).
+The gate runs under `FM_MERGE_GATE_TIMEOUT` seconds (default `600`), because it runs while the task's control lock is held; a gate that outlives the bound is killed and refuses the merge with `merge gate timed out after Ns or exited <rc>` (a gate that exits 124 or 137 on its own gets the same wording), so the lock is always released.
+A nonzero exit refuses the merge and prints the gate's output; an absent file leaves merge behavior unchanged, and a file that exists, including a dangling symlink, but is not executable refuses the merge and names the file.
+On the pull-request path the gate runs after the live merge checks and before the completion-receipt check; on the local-only path it runs after the completion-receipt check, right before the fast-forward. The gate can only add a refusal, never waive one.
+The gate's content is home-local policy; [`fm_dod_merge_gate`](../bin/fm-dod-lib.sh) owns the invocation mechanics, and the README's "Proof and decision tools" section installs done-done-axi's shipped gate script.
+
 ## Home brief include (config/brief-include.md)
 
 The optional gitignored `config/brief-include-shared.md` and home-local `config/brief-include.md` add standing worker instructions to every ship and scout brief.
@@ -1443,7 +1454,7 @@ Required tools come in two parts: a universal toolchain every home needs regardl
 Every home requires:
 
 - node and git.
-- gh, with GitHub authentication through `gh auth login`.
+- gh; GitHub authentication through `gh auth login` is needed for a home with a GitHub-hosted project, since the session-start auth probe is skipped while every registered project is local-only.
 - no-mistakes v1.46.0 or newer.
 - Compatible gh-axi.
 - chrome-devtools-axi.
@@ -2140,6 +2151,19 @@ A repo update that fast-forwards an in-repo action's bytes in place would otherw
 Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, and a durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice.
 The adapter automates only the exact deterministic subset: anything needing judgment, and anything destructive, irreversible, or security-sensitive, keeps the ordinary check-fires-then-firstmate-decides flow, and the adapter's header and `--help` own its commands, flags, and outcome document.
 
+**Sign-off board answers and hold cards**
+
+The `signoff` adapter (`bin/fm-procevent-signoff.sh`) connects captain holds to a [sign-off](https://github.com/umeranjum17/sign-off) decision board, and it does nothing until a home runs its `arm` command.
+Armed, it binds itself to the keyed-answer intake above and registers one source whose child waits in `sign-off-axi wait` without waking firstmate.
+Arming is per home: a secondmate home arms itself, and a hold recorded in a home that is not armed raises no card.
+An answer saved on the board for a task this home still holds for the captain is captured, woken as an ordinary `check` wake, and fed to `bin/fm-captain-hold.sh answers`, so the person never copies the answer across by hand.
+While armed, `bin/fm-captain-hold.sh hold` also raises a board card for that hold, with the task title as its title and the hold reason as its subject; a card that cannot be raised prints a warning and never fails the hold, and a dated deferral gets no card.
+Each hold occurrence gets its own card, so a task held again after an answered card gets a new live one.
+The adapter needs `sign-off-axi` on PATH: `arm` refuses without it, and the card attempt prints an install hint.
+Board keys carry a digest of this home's `FM_HOME` and the hold's stamp, so the machine's one shared board never delivers another home's answer or an earlier card's answer to this one.
+An answer is marked delivered only when the keyed-answer intake exits 0 or 3, so a transient skip or failure leaves it to be offered again on the next round; the adapter's header owns which skips are permanent.
+The adapter's header owns its commands, the deliverable-answer rule, and its limits, including that sign-off cannot withdraw a card for a hold answered through another channel; `retire` turns it off again.
+
 **Capture and publish results**
 
 This section is the single owner of the runner's operating contract.
@@ -2234,7 +2258,7 @@ Some built-in sources carry the captain's answer to a captain-held task, and wha
 **Reconcile selections and handling boundaries**
 
 - The reserved Reconcile selection uses the parallel optional `reconciles` adapter command and binding-verified `reconcile-requests` intake rather than entering keyed answers; [`captain-hold-lifecycle.md`](captain-hold-lifecycle.md#reconcile-re-check-reality-never-a-blind-close) owns those semantics.
-- Feeding is independent of handling: it never acknowledges a result and never suppresses a wake, because recording the answer or request is transcription while acting on it is firstmate's judgement.
+- Feeding is independent of handling: it never suppresses a wake, and the runner acknowledges a keyed-answer result only after the intake exits 0 or 3 (`bin/fm-procevent.sh`'s header owns that rule), because recording the answer or request is transcription while acting on it is firstmate's judgement.
 - An unbound built-in source, a built-in adapter without the corresponding command, and a failure on either side all leave the capture untouched and still announced.
 - External binding responses never enter either authority-bearing intake.
 

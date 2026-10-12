@@ -56,6 +56,10 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+# When this home has armed bin/fm-procevent-signoff.sh, an undated `hold` also
+# raises a sign-off board card keyed by this home's tag, the task id and the hold
+# stamp; that adapter owns the card,
+# and a card it cannot raise is a warning, never a failed hold.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -87,8 +91,11 @@
 # not held for the captain, or a task already closed is reported as `skipped:`
 # and feeds nothing. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
-# a mode mismatch is skipped. The command exits nonzero when any key was
-# skipped. `--source` is provenance text recorded in the
+# a mode mismatch is skipped. The command exits 3 when every skip was permanent
+# (the reserved reconcile value, already closed, not held for the captain, unknown
+# close mode, or migrated hold ambiguous) and 1 for any other skip; the reserved
+# reconcile value is refused for good, reported once on
+# stderr, and counts as a permanent skip. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
 # branch and no knowledge of chat, review decks, or any transport.
 # Legacy input: an optional positional origin (or a stored concrete-origin
@@ -695,7 +702,7 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
       *)
         printf 'fm-captain-hold: the migrated hold of %s is ambiguous: %s rows carry its marker line (identities tried: %s)\n' \
           "$entry" "$count" "$(printf '%s' "$CAPTAIN_MIGRATION_IDENTITIES" | tr ' ' ',')" >&2
-        return 2
+        return 3
         ;;
     esac
   fi
@@ -753,7 +760,7 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
   migrated=$(resolve_migrated_entry "$origin" "$entry") || rc=$?
   case "$rc" in
     0) printf '%s' "$migrated"; return 0 ;;
-    2) return 2 ;;
+    2 | 3) return "$rc" ;;
     124) return 124 ;;
   esac
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
@@ -902,7 +909,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0 card_close=release
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -952,6 +959,7 @@ command_hold() {
     fi
   else
     [ -n "$title" ] || fail "--title is required to create task $id"
+    card_close='done'
     validate_one_line title "$title"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -1008,6 +1016,14 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  # Optional sign-off card: a no-op unless bin/fm-procevent-signoff.sh is armed
+  # here. A created question closes on answer, held work is released; a dated
+  # deferral gets no live card, and a card failure never fails the hold.
+  if [ -z "$until" ]; then
+    release_task_control_lock
+    "$SCRIPT_DIR/fm-procevent-signoff.sh" raise "$id" "$(show_field_value "$show" title)" "$reason" "$card_close" \
+      || printf 'warning: task %s is held, but no sign-off card was raised for it\n' "$id" >&2
+  fi
   printf '%s\n' "$id"
 }
 
@@ -1315,7 +1331,7 @@ sanitize_reconcile_provenance() {
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 permanent=0 reason release_flag tab=$'\t'
   local resolve_rc
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1353,8 +1369,8 @@ command_answers() {
     [ -n "$answer" ] || continue
     label=$(sanitize_field "${label:-}")
     if [ "$answer" = "$RECONCILE_VALUE" ]; then
-      printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key"
-      skipped=$((skipped + 1))
+      printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key" >&2
+      skipped=$((skipped + 1)); permanent=$((permanent + 1))
       continue
     fi
     release_flag=''
@@ -1363,17 +1379,18 @@ command_answers() {
       release) release_flag=--release ;;
       *)
         printf 'skipped: %s (unknown close mode %s)\n' "$key" "$(sanitize_field "$mode")"
-        skipped=$((skipped + 1))
+        skipped=$((skipped + 1)); permanent=$((permanent + 1))
         continue
         ;;
     esac
     resolve_rc=0
     id=$(resolve_entry "$origin" "$key" 2>"$err") || resolve_rc=$?
     id=${id%% *}
-    if [ "$resolve_rc" = 2 ]; then
+    if [ "$resolve_rc" = 2 ] || [ "$resolve_rc" = 3 ]; then
       reason=$(tr -d '\n' < "$err")
       printf 'skipped: %s (migrated-hold scan refused%s)\n' "$key" "${reason:+: $reason}"
       skipped=$((skipped + 1))
+      if [ "$resolve_rc" = 3 ]; then permanent=$((permanent + 1)); fi
       continue
     fi
     if [ "$resolve_rc" -ne 0 ]; then
@@ -1430,12 +1447,12 @@ command_answers() {
     fi
     if [ "$state" = "done" ]; then
       printf 'skipped: %s (already closed)\n' "$id"
-      skipped=$((skipped + 1))
+      skipped=$((skipped + 1)); permanent=$((permanent + 1))
       continue
     fi
     if [ "$hold_kind" != captain ]; then
       printf 'skipped: %s (not held for the captain)\n' "$id"
-      skipped=$((skipped + 1))
+      skipped=$((skipped + 1)); permanent=$((permanent + 1))
       continue
     fi
     # shellcheck disable=SC2086  # release_flag is empty or a single literal flag.
@@ -1453,7 +1470,9 @@ command_answers() {
   done
   rm -f -- "$tmp" "$err"
   printf 'answers: closed=%s skipped=%s\n' "$closed" "$skipped"
-  [ "$skipped" -eq 0 ]
+  [ "$skipped" -eq 0 ] && return 0
+  [ "$skipped" -eq "$permanent" ] && return 3
+  return 1
 }
 
 # --- reconcile: verify latest state, then close with evidence or annotate ----
