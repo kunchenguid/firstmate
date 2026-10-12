@@ -2284,10 +2284,13 @@ signal_files_actionable() {  # <status-file> ...
 # changed task ids so quiet homes pay no lifecycle cost.
 auto_exit_terminal_workers() {  # <status-file> ...
   local f task
-  [ -f "$CONFIG/auto-exit-temporary-workers" ] && [ ! -L "$CONFIG/auto-exit-temporary-workers" ] \
-    || [ -f "$CONFIG/auto-exit-blocked-workers" ] && [ ! -L "$CONFIG/auto-exit-blocked-workers" ] \
-    || [ -f "$CONFIG/auto-exit-parked-workers" ] && [ ! -L "$CONFIG/auto-exit-parked-workers" ] \
-    || return 0
+  local flag enabled=0
+  for flag in temporary blocked parked; do
+    if [ -f "$CONFIG/auto-exit-$flag-workers" ] && [ ! -L "$CONFIG/auto-exit-$flag-workers" ]; then
+      enabled=1
+    fi
+  done
+  [ "$enabled" -eq 1 ] || return 0
   for f in "$@"; do
     case "$f" in *.status) ;; *) continue ;; esac
     task=$(basename "$f" .status)
