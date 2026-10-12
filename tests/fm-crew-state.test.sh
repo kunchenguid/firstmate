@@ -5645,6 +5645,11 @@ test_committed_handoff_window() {
   printf 'done [at=1]: previous head completed\n' > "$d/state/task.status"
   out=$(run_crew_state "$d" task)
   assert_contains "$out" 'state: committed-not-shipped' 'handoff predating current commit never masks it'
+  printf 'done: ready for pipeline\n' > "$d/state/task.status"
+  out=$(run_crew_state "$d" task)
+  assert_contains "$out" 'state: committed-not-shipped' 'untimed handoff receives no grace'
+  out=$(committed_tick "$d")
+  assert_contains "$out" 'check: committed-not-shipped: task head=' 'untimed handoff surfaces detector wake'
   printf 'paused [at=%s]: waiting for external condition\n' "$now" > "$d/state/task.status"
   out=$(run_crew_state "$d" task)
   assert_contains "$out" 'state: paused' 'declared external wait remains authoritative'

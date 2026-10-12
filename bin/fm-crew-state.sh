@@ -1339,8 +1339,7 @@ fi
 # delivery work left. Exact idle is required; unknown is never idle proof.
 # Decisions, blockers, and declared waits retain their existing state.
 # A current done: handoff suppresses this state for 240s by default, provided
-# its event stamp is at or after HEAD's commit time. Untimed legacy handoffs
-# retain done conservatively. A previous head's done cannot hide new work.
+# its event stamp is at or after HEAD's commit time.
 if [ "$KIND" = ship ] && [ "$(meta_value mode)" = no-mistakes ] \
   && [ -n "$CREW_BRANCH" ]; then
   handoff_current=0
@@ -1353,8 +1352,6 @@ if [ "$KIND" = ship ] && [ "$(meta_value mode)" = no-mistakes ] \
       if [ "$handoff_at" -ge "$head_at" ] && [ "$((now - handoff_at))" -lt "$handoff_grace" ]; then
         handoff_current=1
       fi
-    else
-      handoff_current=1
     fi
   fi
   case "$LOG_VERB" in
