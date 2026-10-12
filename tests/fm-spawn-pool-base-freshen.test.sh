@@ -689,6 +689,23 @@ lay_out_as_pool_slot() {
   SLOT_CLAIM="$slot_root/1/.fm-slot-owner"
 }
 
+# Fail exactly one thing: publishing the task record to this path. It is the
+# one spawn failure that lands after the strip install and before anything is
+# published, which is the abort that removes state/<id>.git-hooks while the
+# pooled slot it was bound to survives.
+break_meta_publication() {  # <fakebin-dir> <meta-path>
+  local fakebin=$1 meta=$2 real
+  real=$(command -v mv)
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" != "$meta" ] || exit 1
+done
+exec "$real" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+}
+
 # The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
 # a launched task's claim names it, a slot that cannot be claimed refuses before
 # anything is published, and an abort while the allocation lock is still held
@@ -874,8 +891,37 @@ test_scout_base_branch_refused_on_gerrit_forge() {
   pass "a based scout on a forge=gerrit project is refused at spawn"
 }
 
+# The strip install is the one spawn step that leaves durable state on a slot
+# the abort no longer owns: a worktree-scoped core.hooksPath. A spawn that
+# fails after installing and before publishing removes its strip dir, and a
+# pooled slot left pointing at that deleted directory silently runs no hooks
+# at all - neither the project's own nor the strip - until a later spawn
+# rebinds it.
+test_pool_slot_abort_leaves_no_stale_hooks_binding() {
+  local rec id out status bound
+  id='pool-slot-abort-hooks-r1'
+  rec=$(make_case slot-abort-hooks "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  break_meta_publication "$FAKEBIN_DIR" "$HOME_DIR/state/$id.meta"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a broken task-record publication"$'\n'"$out"
+  assert_contains "$out" "could not be published" \
+    "the abort did not come from the task-record publication failure"
+  [ ! -e "$HOME_DIR/state/$id.git-hooks" ] \
+    || fail "the aborted spawn left its strip directory behind: $out"
+  bound=$(git -C "$POOL_DIR" config --worktree --get core.hooksPath 2>/dev/null) || bound=
+  assert_equals "" "$bound" \
+    "the pooled slot still binds core.hooksPath at the deleted strip directory"
+  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
+    || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM" 2>/dev/null)"
+  pass "an aborted spawn leaves the pooled slot with no stale hooks binding"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_pool_slot_abort_leaves_no_stale_hooks_binding
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_named_base_branch_starts_from_that_branch

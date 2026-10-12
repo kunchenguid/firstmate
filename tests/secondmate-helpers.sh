@@ -192,6 +192,7 @@ make_firstmate_git_root() {
 exit 0
 SH
   chmod +x "$home/bin/fm-guard.sh"
+  ln -s "$ROOT/bin/fm-git-strip-ai-trailers.sh" "$home/bin/fm-git-strip-ai-trailers.sh"
   git -C "$home" init -q
   git -C "$home" add AGENTS.md bin/fm-guard.sh
   git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial

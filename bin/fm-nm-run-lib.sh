@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Shared no-mistakes axi run attribution primitives.
 #
+# fm_nm_run_bounded below is also the one delivery point for the AI-trailer
+# strip's no-mistakes mirror commit-msg (fm_nm_ensure_mirror_commit_msg): every
+# run-related `no-mistakes` call Firstmate makes passes through it, so the
+# strip is in place before the daemon's next fix-round commit in that
+# repository's run worktrees. The provisioning-time `no-mistakes init` and
+# `no-mistakes doctor` calls are the only ones outside this wrapper, and
+# neither runs a pipeline.
+#
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting), fm-teardown.sh
 # (pre-teardown run abort, see its "Fix 1" header comment), and fm-dod-lib.sh
@@ -38,7 +46,91 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
 fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
   local dir=$1 timeout_secs=$2
   shift 2
+  fm_nm_ensure_mirror_commit_msg "$dir" "$timeout_secs"
   fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+}
+
+# The repos.id state.sqlite records for registered repository paths, tried in
+# order - the worktree's own top-level path first, then the main root no-mistakes
+# falls back to - the id the no-mistakes mirror directory is named by. One
+# read-only python3 read, run under fm_nm_bounded with the caller's per-read
+# budget the way this file wraps its other state.sqlite reader, so a contended
+# database can never outlast that budget. Fails with no output when no path is
+# registered, an id is not a directory name, the read times out, or the
+# database cannot be read, each of which means "there is no mirror to deliver
+# to here".
+fm_nm_registered_repo_id() {  # <nm-home> <primary-path> <fallback-path> <timeout-secs>
+  fm_nm_bounded "$1" "$4" python3 - "$1" "$2" "$3" 2>/dev/null <<'PY' || return 1
+import re
+import sqlite3
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+keys = []
+for key in sys.argv[2:]:
+    if key and key not in keys:
+        keys.append(key)
+try:
+    with sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=30) as db:
+        for key in keys:
+            rows = db.execute("SELECT id FROM repos WHERE working_path = ?", (key,)).fetchall()
+            if len(rows) == 1 and isinstance(rows[0][0], str) and re.fullmatch(r"[A-Za-z0-9_-]+", rows[0][0]):
+                print(rows[0][0])
+                raise SystemExit(0)
+except (OSError, sqlite3.Error):
+    raise SystemExit(1)
+raise SystemExit(1)
+PY
+}
+
+# ONE owner for delivering the AI commit-trailer strip to the no-mistakes
+# mirror hooks directory, the one every run worktree's worktree-scoped
+# core.hooksPath resolves. The daemon commits its fix rounds in those run
+# worktrees, never in the task copy, so a fail-open commit-msg there is the
+# layer that reaches a pipeline commit; the pane's GIT_CONFIG_* reaches only
+# the launch's descendants and the task-worktree binding only the task copy.
+#
+# The mirror is derived from the repository the run is for, by the same
+# keying no-mistakes itself uses to decide which repo a run belongs to: the
+# worktree's own top-level path looked up in state.sqlite's repos table first,
+# then the main root it falls back to (its findRepo). Those two keys differ
+# exactly for a linked worktree that carries its own repos row, and runs
+# persist the repo_id that lookup chose, so answering with the main clone
+# alone would deliver the strip to a mirror no run of this worktree commits
+# in. Both keys are symlink-resolved the way no-mistakes resolves them.
+# Unregistered repository, unreadable database, missing mirror, or missing
+# python3 all read as "nothing to deliver" and are skipped silently, because
+# this runs on the read-only status path and must never fail or perturb the
+# caller's query; a mirror hook that cannot be installed safely surfaces its
+# own reason on stderr instead of overwriting a real hook.
+# Memoized per worktree for this process and never retried.
+fm_nm_ensure_mirror_commit_msg() {  # <worktree> [timeout-secs]
+  local wt=$1 timeout_secs=${2:-10} nm_home top_root main_root common mirror_id hooks_dir
+  [ -n "$wt" ] || return 0
+  nm_home=${NM_HOME:-"$HOME/.no-mistakes"}
+  case "$nm_home" in
+  /*) ;;
+  *) nm_home="$wt/$nm_home" ;;
+  esac
+  [ -d "$nm_home/repos" ] || return 0
+  [ "${FM_NM_MIRROR_HOOK_WT:-}" = "$wt" ] && return 0
+  FM_NM_MIRROR_HOOK_WT=$wt
+  top_root=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || return 0
+  top_root=$(CDPATH='' cd -- "$top_root" 2>/dev/null && pwd -P) || return 0
+  main_root=
+  if common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+    case "$common" in
+    */.git)
+      main_root=$(CDPATH='' cd -- "${common%/.git}" 2>/dev/null && pwd -P) || main_root=
+      ;;
+    esac
+  fi
+  mirror_id=$(fm_nm_registered_repo_id "$nm_home" "$top_root" "$main_root" "$timeout_secs") || return 0
+  hooks_dir="$nm_home/repos/$mirror_id.git/hooks"
+  [ -d "$hooks_dir" ] || return 0
+  "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-git-strip-ai-trailers.sh" install-mirror "$hooks_dir" || true
+  return 0
 }
 
 fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
