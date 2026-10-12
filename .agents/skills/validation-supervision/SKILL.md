@@ -13,6 +13,8 @@ The task worker that starts a no-mistakes run drives the pipeline and owns every
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 `bin/fm-dod-lib.sh` owns the worker-side `--intent` contract.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
+The findings of one review pass form one bounded batch that is fixed once.
+A later pass's new finding, and any policy-choice finding, does not start another fix round; `ask-user-authority` owns that decision.
 
 Only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
 That worker cancels the active run through no-mistakes axi's supported abort command and confirms through axi status that the run has stopped before changing any code.

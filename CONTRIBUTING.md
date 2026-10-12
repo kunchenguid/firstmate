@@ -82,7 +82,9 @@ Coordinate any workflow rollback with its required-check names so a retired chec
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - follow this repository's standing posture: any change to a behavioural surface ships through the `no-mistakes` pipeline on a feature branch and requires an explicit merge approval, and a behavioural surface is any `bin` contract, dispatch and supervision logic, or instruction surface a running session loads, including `AGENTS.md`, `CLAUDE.md`, skills, and contract documents other code points at ([`docs/documentation-audiences.md`](docs/documentation-audiences.md) owns which prose a session loads).
+The `direct-PR` fast path is only for changes confined to pure test tooling and internal test fixtures; mixed or uncertain changes take `no-mistakes`.
+`no-mistakes-prod-only` does not apply to this repository.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
@@ -110,7 +112,7 @@ bin/fm-test-run.sh --proven-isolated --jobs 4   # explicit local parallel of the
 bin/fm-test-run.sh --lane portable-serial   # portable serial remainder (watcher/AFK/tmux/stateful)
 bin/fm-test-run.sh --list-lanes   # discover exact lane names, including the current CI serial shards
 bin/fm-test-run.sh --check-coverage   # prove portable shards + serial + serial shards + Herdr equal the full inventory
-bin/fm-test-run.sh --all   # deliberate complete regression (optional local full walk; not no-mistakes Test)
+bin/fm-test-run.sh --all   # exactly one full walk before declaring a change complete; not no-mistakes Test
 bin/fm-test-isolation-proof.sh --list   # proven portable parallel candidate set
 bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json   # re-run the portable candidate proof
 bin/fm-test-isolation-proof.sh --pool watcher-wake-lock --jobs 4   # re-run an admitted family proof
@@ -127,6 +129,8 @@ Its header and `--help` own the flags, family labels, lanes, and changed-file ma
 `bin/fm-test-isolation-proof.sh` remains the single owner of the portable candidate proof and reusable family proof harness; see `docs/fm-test-isolation-proof.md`.
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
+Verification runs targeted subjects through `bin/fm-test-run.sh` while the work is under way, exactly one `--all` pass before declaring the change complete, and after a red `--all` only a targeted recovery pass (the affected files plus the tests sharing changed fixtures) instead of a second full walk.
+`bin/fm-test-run.sh`'s header and `--help` own how those targets are selected.
 CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 Pushing a new head to a pull request cancels that pull request's still-running CI so only the current head is validated; pushes to `main` are never cancelled, and the workflow owns that contract and its rationale.
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.

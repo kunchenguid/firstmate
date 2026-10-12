@@ -151,4 +151,4 @@ Every CI run starts with the `detect-changes` gate, which diffs the change again
 | Non-shell code | everything above plus the full behavior matrix and Herdr lane | ~23 minutes (slowest serial shard sets the wall) | macOS box only: stock-Bash regressions can only come from shell-visible changes. |
 | Shell-visible code | the full matrix | ~23 minutes | Nothing: this is the one full-rigor path every code change keeps. |
 
-The security-sensitive gates never skip: both lint partitions, the gate-refuse and owner-routing coverage inside the behavior lanes, and the no-mistakes compliance check run on every change that can reach them. Pipeline-side, no-mistakes Test rounds iterate with `bin/fm-test-run.sh --changed` and leave the full matrix to CI instead of paying for both on every round.
+The security-sensitive gates never skip: both lint partitions, the gate-refuse and owner-routing coverage inside the behavior lanes, and the no-mistakes compliance check run on every change that can reach them. Pipeline-side, no-mistakes Test rounds iterate with `bin/fm-test-run.sh --changed` instead of re-running the whole matrix every round.
