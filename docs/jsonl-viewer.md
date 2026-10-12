@@ -71,7 +71,8 @@ While that generation remains current, subsequent dashboard polls return only fr
 A background refresh atomically replaces the complete snapshot only after it succeeds; failures remain visible without replacing the last successful task data, while a process with no successful snapshot still reports the read as unavailable.
 All reader-facing timestamps are rendered in the fixed Asia/Shanghai time zone and labelled UTC+8; stored timestamps remain unchanged.
 Standalone task reports are labelled by task and refresh automatically while follow mode is enabled.
-Rendered reports and task briefs support headings, paragraphs, lists, blockquotes, tables, fenced code, and safe web or email links, with the complete plain source available below them.
+Rendered reports and task briefs support headings, paragraphs, lists, blockquotes, tables, fenced code, Mermaid diagrams, and safe web or email links, with the complete plain source available below them.
+Mermaid flowcharts use the repository-bundled Mermaid 11.17.2 renderer in strict mode, do not fetch diagram resources, and show a local source fallback when a diagram is invalid or requests custom styling or interaction.
 
 The task API adds `state`, `progress`, `executionHarness`, `executionModel` and `executionState` to its existing rows.
 Terminal rows return null progress and execution fields, and no terminal runtime owner is consulted.

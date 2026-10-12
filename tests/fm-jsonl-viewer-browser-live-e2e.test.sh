@@ -164,6 +164,102 @@ Code keeps `**literal markers**` unchanged.
 const literal = "<img id=code-unsafe src=x>";
 ```
 
+```mermaid
+flowchart LR
+  am[Advanced MC] -->|manages 1:N| mc[Merchant account]
+  mc -->|owns 1:N| ds[Data source]
+  ds -->|supplies| inputs[Primary / supplemental inputs]
+  inputs -->|processed into| product[Product]
+  product -->|member of N:M| scopes[Ad product scopes]
+  mc -->|linked N:M| ads[Ads account]
+  ads -->|owns 1:N| campaign[Campaign]
+  campaign -->|Standard Shopping / Demand Gen| group[Ad group]
+  group -->|has| tree[Listing group tree + Ads]
+  campaign -->|PMax| asset[Asset group]
+  asset -->|has| filters[Listing group filters + Creative assets]
+  tree -->|define| scopes
+  filters -->|define| scopes
+  scopes -->|constrain candidates for| serving[Serving]
+```
+
+```mermaid
+flowchart LR
+  business[Business] -->|owns / manages| catalog[Catalog]
+  business -->|owns / manages| adacct[Ad account]
+  catalog -->|contains 1:N| items[Product items]
+  pgroup[Product group] -->|groups 1:N| variants[Variant product items]
+  catalog -->|has 1:N| sets[Product sets]
+  sets -->|selects N:M| items
+  catalog -->|receives| feed[Feed / item API inputs]
+  catalog -->|linked to| eventsrc[External event sources]
+  adacct -->|owns 1:N| campaign[Campaign]
+  campaign -->|owns 1:N| adset[Ad set]
+  adset -->|owns 1:N| ad[Ad]
+  ad -->|references| creative[Creative]
+  adset -->|catalog configuration| sets
+  creative -->|catalog configuration| sets
+  eventsig[Event signals] -->|used in| serving[Serving]
+  sets -->|used in| serving
+  creative -->|used in| serving
+```
+
+```mermaid
+flowchart LR
+  sku[Selected SKU] -->|submit| submitted[Submitted]
+  submitted -->|process| processed[Processed item]
+  processed -->|review / market rules| eligible[Eligible]
+  submitted -->|input failure| fixdata[Fix data]
+  fixdata -->|retry latest state| submitted
+  processed -->|review issue| fixissue[Fix issue]
+  fixissue -->|recheck| processed
+  eligible -->|not included| scope[Check scope]
+  scope -->|recheck| inclusion[Ad inclusion]
+  eligible -->|with| inclusion
+  inclusion -->|with delivery opportunity| exposure[Product exposure]
+  exposure -->|click / interaction| outcome[Attributed outcome]
+  outcome -->|verify against| sold[Sold item / refund evidence]
+```
+
+```mermaid
+flowchart LR
+  truth[Toko product truth] -->|catalog input| catalogs[Google / Meta catalogs]
+  actions[Toko user actions] -->|events + item IDs| eventsrc[Media event sources]
+  catalogs -->|processing / eligibility diagnostics| toko[Toko]
+  serving[Media serving] -->|product performance + ad metadata| toko
+  attribution[Media attribution] -->|ad outcome / supported item reports| toko
+  orders[Toko orders] -->|sold SKU + customer cohort + refunds| analysis[Analysis]
+  toko -->|diagnostics + performance| analysis
+  catalogs -->|same keys and windows| analysis
+  orders -->|same keys and windows| analysis
+  analysis -->|recommend| actions2[Selection / feed quality / ad scope / budget]
+```
+
+```mermaid
+flowchart TD
+  subgraph group[Readable group]
+    styled["Use style='compact'"]
+  end
+```
+
+```mermaid
+flowchart LR
+  broken[Malformed diagram -->
+```
+
+```mermaid
+flowchart LR
+  unsafe[Unsafe interaction] --> safe[Safe text]
+  click unsafe "https://example.invalid/diagram"
+```
+
+```mermaid
+flowchart LR; configured[Configured] --> graph[Graph]; %%{init: {"htmlLabels": true}}%%
+```
+
+```mermaid
+flowchart LR; hidden:::mermaid-render-frame --> visible[Visible]
+```
+
 <script id="report-script">globalThis.reportExecuted = true</script>
 <img id="report-event" src=x onerror="globalThis.eventExecuted = true">
 [unsafe link](javascript:globalThis.linkExecuted=true)
@@ -352,6 +448,14 @@ await page.route("**/api/task-document?*", async route => {
 });
 let remoteAssetRequests = 0;
 let rejectedSessionRequests = 0;
+let cspViolations = 0;
+let cspViolationMessages = [];
+page.on("console", message => {
+  if (message.type() === "error" && message.text().includes("Content Security Policy")) {
+    cspViolations += 1;
+    if (cspViolationMessages.length < 3) cspViolationMessages.push(`${JSON.stringify(message.location())}: ${message.text()}`);
+  }
+});
 page.on("request", request => {
   if (request.url().startsWith("https://example.invalid/")) remoteAssetRequests += 1;
   if (request.url().includes("/api/sessions") && request.headers().authorization === "Bearer invalid-saved-token") rejectedSessionRequests += 1;
@@ -359,6 +463,7 @@ page.on("request", request => {
 let failed;
 let storagePage;
 let directPage;
+let recoveryPage;
 try {
   await page.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
   await page.evaluate(() => window.localStorage.clear());
@@ -722,6 +827,8 @@ try {
   if (generationOrder[0] !== "replacement generation record 201" || generationOrder[199] !== "replacement generation record 2" || !generationOrder[200]?.startsWith("boundary:The journal was rotated.") || !generationOrder.slice(201).some(value => value.includes("oldest ordered record"))) throw new Error(`dense rotation boundary did not separate the newest replacement tail from the prior generation: ${generationOrder.join("|")}`);
   if (!await retainedDetails.evaluate(element => element.open)) throw new Error("journal rotation collapsed retained record details");
   if (!await page.locator("#journal-filters").isVisible() || !await page.locator("#journal-actions").isVisible() || !await page.locator("#events").isVisible()) throw new Error("journal controls were hidden in journal mode");
+  cspViolations = 0;
+  cspViolationMessages = [];
   await page.locator("#source").selectOption("report");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_REPORT_ID }).click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
@@ -732,6 +839,56 @@ try {
   if ((await page.locator("#report-rendered").textContent()).includes("**strong prose**") || (await page.locator("#report-rendered table").textContent()).includes("**A**")) throw new Error("Markdown strong delimiters remained literal in rendered content");
   if (!await page.locator(".markdown-body code").filter({ hasText: "**literal markers**" }).count()) throw new Error("Markdown code literal containing strong markers was not preserved");
   if (!await page.locator(".markdown-body pre code").filter({ hasText: "const literal" }).count()) throw new Error("fenced code was not rendered");
+  await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').first().waitFor({ state: "visible", timeout: 10000 });
+  await page.waitForFunction(() => document.querySelectorAll('.mermaid-diagram[data-mermaid-state="rendered"] svg').length === 5, null, { timeout: 10000 });
+  if (await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').count() !== 5) throw new Error("the four report flowcharts and style-label regression flowchart were not rendered as SVG graphics");
+  if (await page.locator('.mermaid-diagram[data-mermaid-state="error"]').count() !== 4) throw new Error("malformed, interactive, configured, or styled Mermaid did not use the localized source fallback");
+  if (await page.locator('.mermaid-diagram[data-mermaid-state="error"] pre code').count() !== 4) throw new Error("Mermaid fallback did not preserve local source text");
+  const renderedDiagramText = (await page.locator('.mermaid-diagram[data-mermaid-state="rendered"]').allTextContents()).join("|");
+  for (const label of ["Advanced MC", "Business", "Selected SKU", "Toko product truth", "Selection", "feed quality", "budget", "Use style='compact'", "Readable group"]) {
+    if (!renderedDiagramText.includes(label)) throw new Error(`rendered Mermaid omitted label ${label}`);
+  }
+  const clusterColors = await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] .cluster').last().evaluate(cluster => ({
+    background: getComputedStyle(cluster.querySelector("rect")).fill,
+    label: getComputedStyle(cluster.parentElement.querySelector(".cluster-label text")).fill,
+  }));
+  if (clusterColors.background === clusterColors.label) throw new Error(`Mermaid subgraph title has no contrast: ${JSON.stringify(clusterColors)}`);
+  const diagramBounds = await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').evaluateAll(nodes => nodes.slice(0, 4).map(node => ({
+    clientWidth: node.clientWidth,
+    clientHeight: node.clientHeight,
+    scrollWidth: node.parentElement.scrollWidth,
+    containerWidth: node.parentElement.clientWidth,
+  })));
+  if (diagramBounds.some(bounds => bounds.clientWidth < 650 || bounds.clientHeight < 80 || bounds.scrollWidth < bounds.containerWidth)) throw new Error(`Mermaid diagrams were clipped or unreadably sized: ${JSON.stringify(diagramBounds)}`);
+  const clipping = await page.evaluate(() => {
+    const clippedLabelsFor = (svg, diagramIndex) => {
+      const viewport = svg.getBoundingClientRect();
+      return [...svg.querySelectorAll("text")].flatMap(text => {
+        const bounds = text.getBoundingClientRect();
+        const clipped = bounds.left < viewport.left - 1 || bounds.top < viewport.top - 1 || bounds.right > viewport.right + 1 || bounds.bottom > viewport.bottom + 1;
+        return clipped ? [{ diagramIndex, label: text.textContent, bounds: { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom }, viewport: { left: viewport.left, top: viewport.top, right: viewport.right, bottom: viewport.bottom } }] : [];
+      });
+    };
+    const actual = [...document.querySelectorAll('.mermaid-diagram[data-mermaid-state="rendered"] svg')].flatMap(clippedLabelsFor);
+    const namespace = "http://www.w3.org/2000/svg";
+    const probe = document.createElementNS(namespace, "svg");
+    probe.setAttribute("viewBox", "0 0 100 50");
+    probe.style.cssText = "position:fixed;left:0;top:0;width:200px;height:100px";
+    const label = document.createElementNS(namespace, "text");
+    label.setAttribute("x", "98");
+    label.setAttribute("y", "25");
+    label.setAttribute("font-size", "20");
+    label.textContent = "deliberately clipped";
+    probe.append(label);
+    document.body.append(probe);
+    const detectsScaledClipping = clippedLabelsFor(probe, "probe").length > 0;
+    probe.remove();
+    return { actual, detectsScaledClipping };
+  });
+  if (!clipping.detectsScaledClipping) throw new Error("Mermaid clipping assertion did not detect a deliberately clipped scaled label");
+  if (clipping.actual.length) throw new Error(`Mermaid labels exceeded their SVG viewports: ${JSON.stringify(clipping.actual)}`);
+  if (await page.locator('.mermaid-diagram style, .mermaid-diagram [style], .mermaid-diagram script, .mermaid-diagram foreignObject, .mermaid-diagram iframe, .mermaid-diagram object, .mermaid-diagram embed, .mermaid-diagram image, .mermaid-diagram a').count()) throw new Error("Mermaid introduced inline styling, executable, interactive, or remote-resource nodes");
+  if (cspViolations) throw new Error(`Mermaid rendering caused ${cspViolations} Content Security Policy violations: ${JSON.stringify(cspViolationMessages)}`);
   if (!await page.locator(".markdown-body blockquote").filter({ hasText: "quoted evidence" }).count()) throw new Error("blockquote was not rendered");
   if (await page.locator(".markdown-body li").count() !== 2) throw new Error("Markdown list was not rendered");
   if (await page.locator("#report-script").count()) throw new Error("raw report HTML became active DOM");
@@ -745,6 +902,9 @@ try {
   fs.appendFileSync(report, "\n## Refreshed section\n\nreport refresh marker\n");
   await page.getByRole("heading", { name: "Refreshed section" }).waitFor({ state: "visible", timeout: 3000 });
   if (await page.locator("#report .document-toc a").count() !== 7) throw new Error("report refresh did not rebuild the directory from the changed document");
+  await page.locator('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').first().waitFor({ state: "visible", timeout: 10000 });
+  await page.waitForFunction(() => document.querySelectorAll('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').length === 5, null, { timeout: 10000 });
+  if (await page.locator('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').count() !== 5) throw new Error("report refresh did not re-render all valid Mermaid diagrams");
   let releaseArtifactReport = () => {};
   let markArtifactReportStarted;
   const artifactReportStarted = new Promise(resolve => { markArtifactReportStarted = resolve; });
@@ -791,6 +951,27 @@ try {
   const changedTaskTotal = await page.locator('#sessions .task-card').count();
   if (changedTaskTotal !== preChangedTaskTotal + 1) throw new Error(`changed refresh did not render the changed task inventory: ${preChangedTaskTotal} -> ${changedTaskTotal}`);
 
+  recoveryPage = await browser.contexts()[0].newPage();
+  let rendererRequests = 0;
+  await recoveryPage.route("**/mermaid-renderer.html", async route => {
+    rendererRequests += 1;
+    if (rendererRequests === 1) await new Promise(resolve => setTimeout(resolve, 10500));
+    await route.continue().catch(() => {});
+  });
+  await recoveryPage.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await recoveryPage.evaluate(() => window.localStorage.clear());
+  await recoveryPage.reload({ waitUntil: "domcontentloaded", timeout: 3000 });
+  await recoveryPage.locator("#token").fill(process.env.VIEWER_TOKEN);
+  await recoveryPage.locator("#remember-token").check();
+  await recoveryPage.locator("#connect").click();
+  await recoveryPage.locator("#app-shell").waitFor({ state: "visible", timeout: 5000 });
+  await recoveryPage.goto(`${process.env.VIEWER_URL}/report/${process.env.VIEWER_REPORT_ID}`, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await recoveryPage.waitForFunction(() => document.querySelectorAll('#report-rendered .mermaid-diagram[data-mermaid-state="error"]').length === 9, null, { timeout: 13000 });
+  fs.appendFileSync(`${process.env.VIEWER_HOME}/data/${process.env.VIEWER_REPORT_ID}/report.md`, "\nRenderer retry marker.\n");
+  await recoveryPage.waitForFunction(() => document.querySelectorAll('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').length === 5, null, { timeout: 10000 });
+  if (rendererRequests < 2) throw new Error(`Mermaid renderer startup was not retried after timeout: ${rendererRequests} request(s)`);
+  await recoveryPage.close();
+
   storagePage = await browser.contexts()[0].newPage();
   await storagePage.addInitScript(() => {
     Object.defineProperty(window, "localStorage", { configurable: true, get() { throw new DOMException("denied", "SecurityError"); } });
@@ -809,6 +990,7 @@ try {
   releaseDelayedReport();
   if (storagePage && !storagePage.isClosed()) await storagePage.close();
   if (directPage && !directPage.isClosed()) await directPage.close();
+  if (recoveryPage && !recoveryPage.isClosed()) await recoveryPage.close();
   await page.close();
 }
 if (failed) throw failed;

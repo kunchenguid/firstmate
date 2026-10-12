@@ -242,9 +242,9 @@ TIMEOUT_SERVER_PID=
 CANDIDATE_CODE_ROOT="$TMP_ROOT/candidate-code"
 CANDIDATE_HOME="$TMP_ROOT/candidate-home"
 CANDIDATE_LOG="$TMP_ROOT/candidate-server.log"
-mkdir -p "$CANDIDATE_CODE_ROOT/bin" "$CANDIDATE_CODE_ROOT/web" "$CANDIDATE_HOME/data" "$CANDIDATE_HOME/state"
+mkdir -p "$CANDIDATE_CODE_ROOT/bin" "$CANDIDATE_CODE_ROOT/web/jsonl-viewer" "$CANDIDATE_HOME/data" "$CANDIDATE_HOME/state"
 cp "$ROOT/bin/fm-jsonl-viewer.mjs" "$CANDIDATE_CODE_ROOT/bin/fm-jsonl-viewer.mjs"
-cp "$ROOT/web/jsonl-viewer/"* "$CANDIDATE_CODE_ROOT/web/"
+cp -R "$ROOT/web/jsonl-viewer/." "$CANDIDATE_CODE_ROOT/web/jsonl-viewer/"
 cat > "$CANDIDATE_CODE_ROOT/bin/fm-fleet-snapshot.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -266,6 +266,10 @@ for _ in $(seq 1 100); do
 done
 [ -n "${CANDIDATE_PORT:-}" ] || fail "candidate viewer did not report its bound port"
 CANDIDATE_BASE="http://127.0.0.1:$CANDIDATE_PORT"
+content_type=$(curl -sS -D - -o "$TMP_ROOT/candidate-mermaid.js" "$CANDIDATE_BASE/vendor/mermaid.min.js" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')
+[ "$content_type" = "text/javascript; charset=utf-8" ] || fail "clean-copy Mermaid bundle returned unexpected content type $content_type"
+grep -q '__esbuild_esm_mermaid_nm' "$TMP_ROOT/candidate-mermaid.js" || fail "clean-copy viewer did not serve its bundled Mermaid runtime"
+kill -0 "$CANDIDATE_SERVER_PID" 2>/dev/null || fail "clean-copy viewer exited while serving its bundled Mermaid runtime"
 curl -sS -H "Authorization: Bearer $TOKEN" "$CANDIDATE_BASE/api/tasks" > "$TMP_ROOT/candidate-tasks.json"
 jq -e '
   (.tasks | any(.id=="archive-working" and .status=="Archived" and .warning==null and .progress==null))
@@ -432,6 +436,14 @@ curl -sS "$BASE/" > "$TMP_ROOT/index.html"
 if grep -q 'onerror=alert' "$TMP_ROOT/index.html"; then fail "private log-derived markup reached the static HTML response"; fi
 content_type=$(curl -sS -D - -o /dev/null "$BASE/app.js" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')
 case "$content_type" in text/javascript*) ;; *) fail "browser script has unsafe content type $content_type" ;; esac
+content_type=$(curl -sS -D - -o /dev/null "$BASE/vendor/mermaid.min.js" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')
+case "$content_type" in text/javascript*) ;; *) fail "local Mermaid renderer has unsafe content type $content_type" ;; esac
+csp=$(curl -sS -D - -o /dev/null "$BASE/" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-security-policy" {print $2}')
+case "$csp" in *"script-src 'self'"*"style-src 'self'"*) ;; *) fail "viewer CSP lost its self-only script or style boundary: $csp" ;; esac
+case "$csp" in *unsafe-inline*|*unsafe-eval*) fail "Mermaid support relaxed the viewer CSP: $csp" ;; esac
+renderer_csp=$(curl -sS -D - -o /dev/null "$BASE/mermaid-renderer.html" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-security-policy" {print $2}')
+case "$renderer_csp" in *"script-src 'self'"*"style-src 'unsafe-inline'"*"connect-src 'none'"*"img-src 'none'"*) ;; *) fail "isolated Mermaid renderer CSP lost its bounded script, style, or network policy: $renderer_csp" ;; esac
+case "$renderer_csp" in *unsafe-eval*) fail "isolated Mermaid renderer enabled eval: $renderer_csp" ;; esac
 
 # Current owner failures cannot be hidden by the task overview's display cache.
 cp "$HOME_FIXTURE/data/task-one/task.json" "$TMP_ROOT/task-one.saved"

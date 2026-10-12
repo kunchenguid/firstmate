@@ -129,7 +129,7 @@ function json(res, status, body) {
   res.end(encoded);
 }
 
-function text(res, status, body, contentType) {
+function text(res, status, body, contentType, contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'") {
   const encoded = Buffer.from(body);
   res.writeHead(status, {
     "Content-Type": contentType,
@@ -137,7 +137,7 @@ function text(res, status, body, contentType) {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+    "Content-Security-Policy": contentSecurityPolicy,
   });
   res.end(encoded);
 }
@@ -742,7 +742,10 @@ function serve() {
   const assets = {
     "/": ["index.html", "text/html; charset=utf-8"],
     "/app.js": ["app.js", "text/javascript; charset=utf-8"],
+    "/mermaid-renderer.html": ["mermaid-renderer.html", "text/html; charset=utf-8", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'"],
+    "/mermaid-renderer.js": ["mermaid-renderer.js", "text/javascript; charset=utf-8"],
     "/style.css": ["style.css", "text/css; charset=utf-8"],
+    "/vendor/mermaid.min.js": ["vendor/mermaid.min.js", "text/javascript; charset=utf-8"],
   };
 
   const server = http.createServer((req, res) => {
@@ -754,8 +757,8 @@ function serve() {
       return text(res, 200, readFileSync(join(assetRoot, "index.html"), "utf8"), "text/html; charset=utf-8");
     }
     if (Object.hasOwn(assets, url.pathname)) {
-      const [name, contentType] = assets[url.pathname];
-      return text(res, 200, readFileSync(join(assetRoot, name), "utf8"), contentType);
+      const [name, contentType, contentSecurityPolicy] = assets[url.pathname];
+      return text(res, 200, readFileSync(join(assetRoot, name), "utf8"), contentType, contentSecurityPolicy);
     }
     if (!authorized(req, token)) {
       res.setHeader("WWW-Authenticate", 'Bearer realm="Firstmate JSONL viewer"');
