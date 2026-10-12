@@ -5,8 +5,6 @@
 
 SCRIPT_DIR_AGY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT_AGY="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR_AGY/.." && pwd)}"
-FM_HOME_AGY="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT_AGY}}"
-CONFIG_AGY="${FM_CONFIG_OVERRIDE:-$FM_HOME_AGY/config}"
 
 # Resolves the antigravity / agy binary path
 fm_antigravity_resolve_binary() {
@@ -50,50 +48,8 @@ fm_antigravity_is_active() {
   local config_harness=""
   if [ -f "$config_dir/harness" ]; then
     config_harness=$(tr -d '[:space:]' < "$config_dir/harness" 2>/dev/null || true)
-  elif [ -f "$config_dir/primary-harness" ]; then
-    config_harness=$(tr -d '[:space:]' < "$config_dir/primary-harness" 2>/dev/null || true)
   fi
   if [ "$config_harness" = "antigravity" ] || [ "$config_harness" = "agy" ]; then
-    return 0
-  fi
-  return 1
-}
-
-# Finds an active Antigravity session PID
-fm_antigravity_session_pid() {
-  local config_dir="${FM_CONFIG_OVERRIDE:-${FM_HOME:-$FM_ROOT_AGY}/config}"
-  local config_harness=""
-  if [ -f "$config_dir/harness" ]; then
-    config_harness=$(tr -d '[:space:]' < "$config_dir/harness" 2>/dev/null || true)
-  elif [ -f "$config_dir/primary-harness" ]; then
-    config_harness=$(tr -d '[:space:]' < "$config_dir/primary-harness" 2>/dev/null || true)
-  fi
-
-  # Only resolve if explicitly configured or indicated by env
-  if [ "${ANTIGRAVITY_AGENT:-0}" != "1" ] && [ "${AGY_AGENT:-0}" != "1" ] && [ "$config_harness" != "antigravity" ] && [ "$config_harness" != "agy" ]; then
-    return 1
-  fi
-
-  if [ -n "${ANTIGRAVITY_PID:-}" ] && kill -0 "$ANTIGRAVITY_PID" 2>/dev/null; then
-    printf '%s\n' "$ANTIGRAVITY_PID"
-    return 0
-  fi
-  if [ -n "${AGY_PID:-}" ] && kill -0 "$AGY_PID" 2>/dev/null; then
-    printf '%s\n' "$AGY_PID"
-    return 0
-  fi
-
-  # Tests setting mock process tables must not see ambient external processes
-  [ -n "${TMP_ROOT:-}" ] && return 1
-  [ -n "${FM_TEST_PID1_COMM:-}" ] && return 1
-  [ -n "${FM_TEST_PATH_SHAPE:-}" ] && return 1
-  [ -n "${FM_TEST_CLAUDE_SHAPE:-}" ] && return 1
-  [ -n "${FM_TEST_SEAM:-}" ] && return 1
-
-  local pid
-  pid=$(pgrep -n -f 'agy(\.exe)?' 2>/dev/null || true)
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    printf '%s\n' "$pid"
     return 0
   fi
   return 1

@@ -842,13 +842,14 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn() {
 }
 
 test_agy_missing_binary_refuses_before_pane_creation() {
-  local id rec out rc
+  local id rec out rc base_sans
   id="agy-missing-z5-$$"
   rec=$(make_agy_spawn_case missing "$id")
   read_agy_spawn_record "$rec"
   rm "$FAKEBIN_DIR/agy"
   rc=0
-  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  base_sans=$(fm_test_base_path_sans "$BASE_PATH" agy)
+  out=$(BASE_PATH="$base_sans" run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "a missing agy executable should refuse the spawn"
   assert_contains "$out" "agy executable not found on PATH" "missing agy diagnostic lacked its concrete reason"
   [ -s "$CASE_DIR/launch.log" ] && fail "a missing agy executable created a launch command" || true
@@ -960,6 +961,29 @@ test_harness_marker_detects_antigravity_agent_env() {
   pass "fm-harness.sh: harness_marker detects ANTIGRAVITY_AGENT and AGY_AGENT markers"
 }
 
+test_fm_harness_process_matches_anchors_agy() {
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_harness_process_matches agy "" || fail "fm_harness_process_matches should match 'agy'"
+  fm_harness_process_matches antigravity "" || fail "fm_harness_process_matches should match 'antigravity'"
+  fm_harness_process_matches agy.exe "" || fail "fm_harness_process_matches should match 'agy.exe'"
+  fm_harness_process_matches antigravity.exe "" || fail "fm_harness_process_matches should match 'antigravity.exe'"
+  fm_harness_process_matches /usr/local/bin/agy "agy" || fail "fm_harness_process_matches should match '/usr/local/bin/agy'"
+  if fm_harness_process_matches magy ""; then
+    fail "fm_harness_process_matches must not match 'magy'"
+  fi
+  if fm_harness_process_matches agysync ""; then
+    fail "fm_harness_process_matches must not match 'agysync'"
+  fi
+  if fm_harness_process_matches bagy ""; then
+    fail "fm_harness_process_matches must not match 'bagy'"
+  fi
+  if fm_harness_process_matches python "python /path/to/magy.py"; then
+    fail "fm_harness_process_matches must not match 'magy' in python args"
+  fi
+  pass "fm-session-lock-lib: fm_harness_process_matches anchors agy and rejects decoys"
+}
+
 test_agy_ancestry_detects_the_native_command_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
@@ -994,3 +1018,4 @@ test_fm_antigravity_resolve_binary
 test_fm_antigravity_process_matches
 test_fm_antigravity_is_active
 test_harness_marker_detects_antigravity_agent_env
+test_fm_harness_process_matches_anchors_agy

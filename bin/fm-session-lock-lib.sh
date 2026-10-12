@@ -29,7 +29,7 @@ unset _FM_SESSION_LOCK_LIB_DIR
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
 # omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|antigravity|agy|^pi$|^pi-signed$|^omp$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^antigravity$|^antigravity\.exe$|^agy$|^agy\.exe$|^pi$|^pi-signed$|^omp$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
@@ -140,14 +140,6 @@ fm_harness_ancestry_pids() {
     case "$pid" in '' | *[!0-9]*) break ;; esac
     [ "$pid" -ge 1 ] || break
   done
-  if [ "$printed" -eq 0 ]; then
-    local agy_session_pid
-    agy_session_pid=$(fm_antigravity_session_pid 2>/dev/null || true)
-    if [ -n "$agy_session_pid" ]; then
-      printf '%s\n' "$agy_session_pid"
-      printed=1
-    fi
-  fi
   [ "$printed" -eq 1 ]
 }
 
