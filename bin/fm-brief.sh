@@ -115,6 +115,15 @@
 # additions of missing knowledge. A correction edits only the wrong text and
 # never runs fm-ensure-agents-md.sh, whose inserted sections and created
 # pointer file are themselves additions.
+# Ship briefs also carry a self-review section: before reporting the change
+# ready, the implementer reviews its own diff over ponytail-review's six axes
+# (bugs, security, real load, risky code with no test, slow paths, what to cut),
+# each finding stating what the code does, what goes wrong, the fix, and the cost
+# of skipping it, and naming what it did not check. Scout briefs instead shape
+# the report by deliverable: a code review gives every finding those same four
+# parts over the six axes, while an investigation or whole-repo audit ranks
+# findings most important first and ends with one "fix this first" verdict.
+# Both name the vendored ponytail skills under .agents/skills/.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -595,6 +604,18 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# The implementer self-review every ship brief carries, so a worker reviews its
+# own diff (ponytail-review's six axes, https://github.com/DietrichGebert/ponytail)
+# before the independent review sees it. Ship briefs emit it; a scout delivers a
+# report rather than a pull request, so its scaffold does not take it.
+IFS= read -r -d '' SELF_REVIEW_SECTION <<'EOF' || true
+# Self-review before the report
+Before you report the change ready, run ponytail-review's six axes over your own diff and fix what you find, so the independent review has less to catch.
+Take the six axes in order: bugs, security, real load, risky code with no test, slow paths, and what to cut.
+For each finding say what the code does, what goes wrong, the fix, and the cost of skipping it, and name what you did not check and any risk the reviewer should know.
+EOF
+SELF_REVIEW_SECTION=${SELF_REVIEW_SECTION%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -648,6 +669,9 @@ $WAIT_BLOCK$INBOX_SECTION
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Shape the findings by the deliverable.
+A code review gives every finding all four parts - what the code does, what goes wrong, how to fix it, and the cost of skipping it - over ponytail-review's six axes: bugs, security, real load, risky code with no test, slow paths, and what to cut.
+An investigation or a whole-repo audit ranks its findings most important first, ending with one "fix this first" verdict rather than a flat list, as ponytail-audit does.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.
@@ -728,6 +752,8 @@ $WAIT_BLOCK$INBOX_SECTION
 # Project memory
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
 A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
+
+$SELF_REVIEW_SECTION
 
 $DOD
 EOF

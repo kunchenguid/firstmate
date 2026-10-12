@@ -588,6 +588,47 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording bounds edits to corrections of wrong information"
 }
 
+# The implementer self-review (ponytail-review's six axes,
+# https://github.com/DietrichGebert/ponytail) rides every ship brief, and a
+# scout brief shapes its report by deliverable: a code review gives
+# ponytail-review's four-part findings over the six axes, while an investigation
+# or whole-repo audit ranks most-important-first with one "fix this first"
+# verdict. A scout delivers a report rather than a pull request, so it takes no
+# self-review section.
+test_ship_self_review_and_scout_deliverable_shapes() {
+  local home id brief scout_brief
+  home="$TMP_ROOT/ponytail-shapes-home"
+  mkdir -p "$home/data"
+
+  id="brief-selfreview-s1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "# Self-review before the report" "$brief" \
+    "ship brief lost the self-review section"
+  assert_grep "run ponytail-review's six axes over your own diff" "$brief" \
+    "ship brief lost the six-axes self-review instruction"
+  assert_grep "bugs, security, real load, risky code with no test, slow paths, and what to cut" "$brief" \
+    "ship brief lost the six axes"
+  assert_grep "the cost of skipping it" "$brief" \
+    "ship brief lost the four-part finding shape"
+
+  id="brief-review-shape-s2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  scout_brief="$home/data/$id/brief.md"
+  assert_present "$scout_brief" "scout brief was not scaffolded"
+  assert_grep "Shape the findings by the deliverable" "$scout_brief" \
+    "scout brief lost the deliverable-shape lead"
+  assert_grep "A code review gives every finding all four parts" "$scout_brief" \
+    "scout brief lost the review finding shape"
+  assert_grep 'ending with one "fix this first" verdict' "$scout_brief" \
+    "scout brief lost the audit ranking verdict"
+  assert_no_grep "# Self-review before the report" "$scout_brief" \
+    "a report-only scout brief must not carry the implementer self-review"
+
+  pass "fm-brief.sh: ship briefs carry the self-review and scout briefs shape findings by deliverable"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -1556,6 +1597,7 @@ test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_ship_self_review_and_scout_deliverable_shapes
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
