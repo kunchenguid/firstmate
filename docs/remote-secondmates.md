@@ -447,7 +447,8 @@ So recovery passes the same readiness gate rather than a weaker one.
 The watcher's liveness tick applies the identical rule during ordinary supervision through the shared `bin/fm-secondmate-liveness-lib.sh`:
 
 - The remote endpoint is probed read-only once per cadence.
-- Only a positive `dead` or `missing` reply relaunches through that command.
+- A positive `dead` or `missing` reply relaunches through that command.
+  So does a `wedged` verdict from the host-local `wedge-state` verb, after the host-local `wedge-recover` verb captures evidence and kills only the frozen agent ([configuration.md](configuration.md#wedged-secondmate-recovery-configsecondmate-wedge-window)).
 - An unreachable transport or inconclusive state is left untouched rather than replaced locally.
 
 ### Inventory reconcile for markerless routes

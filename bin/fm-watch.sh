@@ -1104,6 +1104,12 @@ secondmate_liveness_tick() {
         fi
         ;;
       alive)
+        # A wedge verdict this tick could not read is the one way wedge
+        # recovery degrades silently - an unreadable counter never produces a
+        # wedged verdict, so a vendor shape change simply stops protecting the
+        # mate. Record it rather than letting it pass as an ordinary live probe.
+        [ "${FM_SM_LIVE_WEDGE:-}" != unreadable ] \
+          || triage_log "secondmate $id liveness: progress counters unreadable; wedge detection is inactive for this mate"
         if [ -e "$bound_marker" ] || [ -L "$bound_marker" ]; then
           if ! fm_secondmate_liveness_ledger_add "$id" rearmed; then
             err="relaunch ledger is unwritable; auto-relaunch stays paused"

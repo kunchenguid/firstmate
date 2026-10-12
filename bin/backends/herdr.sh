@@ -2143,7 +2143,7 @@ fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
 # the settle retry.
 fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   local session=$1 pane_id=$2 info shell_pid count i pid name argv0 args verdict
-  local others=0 ps_bin rows
+  local others=0 rows
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
   printf '%s' "$info" | jq -e --arg pane "$pane_id" '
@@ -2183,41 +2183,16 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   # descendant of the pane shell outside the foreground group; only its
   # absence, read from the real process table, is proof of an agent-free pane.
   [ "$others" -eq 0 ] || { printf 'other'; return 0; }
-  ps_bin=${FM_HERDR_PS_BIN:-ps}
-  command -v "$ps_bin" >/dev/null 2>&1 || { printf 'unreadable'; return 0; }
-  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || { printf 'unreadable'; return 0; }
-  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '$1 == shell { found = 1 } END { exit(found ? 0 : 1) }' \
-    || { printf 'unreadable'; return 0; }
+  rows=$(fm_agent_process_table) || { printf 'unreadable'; return 0; }
+  fm_agent_process_table_has_pid "$rows" "$shell_pid" || { printf 'unreadable'; return 0; }
   while IFS=$'\t' read -r pid name; do
     [ -n "$pid" ] || continue
-    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || continue
-    args=${args#"${args%%[![:space:]]*}"}
-    argv0=${args%%[[:space:]]*}
-    if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
+    if [ "$(fm_agent_process_pid_classify "$pid" "$name" 2>/dev/null)" = agent ]; then
       printf 'agent'
       return 0
     fi
   done <<EOF
-$(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
-  {
-    pid[NR] = $1; ppid[NR] = $2
-    line = $0
-    sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
-    comm[NR] = line
-  }
-  END {
-    want[shell] = 1
-    changed = 1
-    while (changed) {
-      changed = 0
-      for (n = 1; n <= NR; n++) {
-        if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
-      }
-    }
-    for (n = 1; n <= NR; n++) {
-      if ((pid[n] in want) && pid[n] != shell) printf "%s\t%s\n", pid[n], comm[n]
-    }
-  }')
+$(fm_agent_process_descendant_rows "$rows" "$shell_pid")
 EOF
   printf 'shell'
 }

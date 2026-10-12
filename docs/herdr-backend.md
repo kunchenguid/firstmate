@@ -727,6 +727,7 @@ The process-level proof only decides whether that registration is backed by a ru
 [`verification/runtime-backends.md`](verification/runtime-backends.md#agent-lifecycle-control) owns the versioned evidence.
 
 The session-start sweep and the watcher's dedicated secondmate liveness tick use this probe.
+An `alive` secondmate can still be relaunched by the watcher tick when it is judged `wedged`, as [configuration.md](configuration.md#wedged-secondmate-recovery-configsecondmate-wedge-window) describes.
 Idle secondmates remain exempt from stale-pane escalation.
 [Secondmate endpoint recovery](architecture.md) owns the shared supervision mechanism.
 
