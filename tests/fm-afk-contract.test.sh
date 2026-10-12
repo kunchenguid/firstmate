@@ -625,16 +625,37 @@ test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away() {
 # The spend cap entry records without --spend is the parallelism already
 # standing in this home, counted exactly the way the later refusal counts it, so
 # away mode never narrows work that is already under way. The earlier default
-# stays a floor, and a secondmate is a persistent home rather than spend.
+# stays a floor, and a secondmate is a persistent home rather than spend. Only
+# a worker bin/fm-crew-state.sh reads as working counts, so the test runs the
+# contract beside a stub reader keyed on the task id's suffix.
 test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
-  local home out i
+  local home out i f stub="$TMP_ROOT/live-stub"
+  local CONTRACT="$stub/bin/fm-afk-contract.sh"
+  mkdir -p "$stub/bin"
+  for f in "$ROOT/bin"/*; do
+    [ "${f##*/}" = fm-crew-state.sh ] || ln -s "$f" "$stub/bin/${f##*/}"
+  done
+  cat > "$stub/bin/fm-crew-state.sh" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+*-working) echo "state: working · source: pane · busy" ;;
+*-done) echo "state: done · source: status-log · done" ;;
+*-paused) echo "state: paused · source: status-log · waiting" ;;
+*) echo "state: unknown · source: none · endpoint gone" ;;
+esac
+STUB
+  chmod +x "$stub/bin/fm-crew-state.sh"
   home=$(make_home spend-live-above)
   for i in 1 2 3 4 5 6; do
-    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
+    fm_write_meta "$home/state/task-$i-working.meta" "window=fm-task-$i" "kind=ship"
   done
-  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
+  fm_write_meta "$home/state/old-done.meta" "window=fm-old" "kind=ship"
+  fm_write_meta "$home/state/old-done-done.meta" "window=fm-old2" "kind=ship"
+  fm_write_meta "$home/state/old-paused.meta" "window=fm-old3" "kind=ship"
+  fm_write_meta "$home/state/old-paused-paused.meta" "window=fm-old4" "kind=ship"
+  fm_write_meta "$home/state/mate-working.meta" "window=remote:mate-1" "kind=secondmate"
   [ "$(contract "$home" live-workers)" = 6 ] \
-    || fail "live-workers counted the secondmate or miscounted: $(contract "$home" live-workers)"
+    || fail "live-workers counted the secondmate, a finished or paused record, or miscounted: $(contract "$home" live-workers)"
   out=$(contract "$home" enter --words 'keep the lane busy' 2>&1) || fail "entry failed: $out"
   [ "$(contract "$home" field spend_max_concurrent_workers)" = 6 ] \
     || fail "entry did not take the live count as the cap: $(contract "$home" field spend_max_concurrent_workers)"
@@ -642,7 +663,7 @@ test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
   assert_contains "$out" '  spend cap: 6 concurrent workers' 'the read-back carries the live count'
 
   home=$(make_home spend-live-below)
-  fm_write_meta "$home/state/task-1.meta" "window=fm-task-1" "kind=ship"
+  fm_write_meta "$home/state/task-1-working.meta" "window=fm-task-1" "kind=ship"
   fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
   out=$(contract "$home" enter --words 'quiet lane' 2>&1) || fail "entry failed: $out"
   [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] \
@@ -656,7 +677,7 @@ test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
 
   home=$(make_home spend-live-explicit)
   for i in 1 2 3 4 5 6; do
-    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
+    fm_write_meta "$home/state/task-$i-working.meta" "window=fm-task-$i" "kind=ship"
   done
   contract "$home" enter --words 'hold it down' --spend 2 >/dev/null 2>&1 || fail "explicit entry failed"
   [ "$(contract "$home" field spend_max_concurrent_workers)" = 2 ] \
