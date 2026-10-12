@@ -1164,6 +1164,7 @@ test_ship_review_evidence_contract() {
     assert_grep "exact executable proof commands" "$brief" \
       "$mode: missing CLI-only proof rule"
     destination='the PR body'
+    # shellcheck disable=SC2016 # Literal review-evidence template text must remain unexpanded.
     [ "$mode" = local-only ] && destination='a `note [at=<epoch>]: review evidence: {details}` line in the status file before `done:`'
     contents=$(cat "$brief")
     assert_contains "$contents" "reachable preview of the final head in $destination" \
@@ -1207,6 +1208,7 @@ test_ship_review_evidence_contract() {
     assert_grep "exact executable proof commands" "$brief" \
       "no-mistakes forge=$forge: missing CLI-only proof rule"
     destination='the PR body'
+    # shellcheck disable=SC2016 # Literal review-evidence template text must remain unexpanded.
     [ "$forge" = gerrit ] && destination='a `note [at=<epoch>]: review evidence: {details}` line in the status file before the published-for-review `done:` report'
     contents=$(cat "$brief")
     assert_contains "$contents" "reachable preview of the final head in $destination" \
@@ -1237,6 +1239,7 @@ test_ship_review_evidence_contract() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --forge gerrit >/dev/null 2>&1 \
     || fail "fm-brief.sh direct-PR forge=gerrit scaffold exited non-zero"
   brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # Literal review-evidence template text must remain unexpanded.
   destination='a `note [at=<epoch>]: review evidence: {details}` line in the status file before the published-for-review `done:` report'
   contents=$(cat "$brief")
   assert_contains "$contents" "reachable preview of the final head in $destination" \

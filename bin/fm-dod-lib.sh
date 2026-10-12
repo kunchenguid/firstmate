@@ -441,6 +441,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
     fi
     contract_consent=" upstream-consent=$consent"
   fi
+  # shellcheck disable=SC2016 # Literal review-evidence template text must remain unexpanded.
   case "$mode:$forge" in
     *:gerrit) review_destination='a `note [at=<epoch>]: review evidence: {details}` line in the status file before the published-for-review `done:` report' ;;
     local-only:*) review_destination='a `note [at=<epoch>]: review evidence: {details}` line in the status file before `done:`' ;;
