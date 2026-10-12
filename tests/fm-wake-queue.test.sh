@@ -3244,6 +3244,7 @@ make_secondmate_liveness_case() {
   # A secondmate home is a git checkout: the AI-trailer strip hook refuses a
   # launch whose worktree is not git.
   git init -q -b main "$home"
+  fm_register_secondmate "$dir/data/secondmates.md" sm1 "$home"
   printf 'sm1\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
@@ -3408,6 +3409,7 @@ test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking() {
   home="$TMP_ROOT/liveness-several-mate2"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
   git init -q -b main "$home"
+  fm_register_secondmate "$dir/data/secondmates.md" sm2 "$home"
   printf 'sm2\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
@@ -3609,6 +3611,7 @@ test_secondmate_liveness_tick_error_keeps_scanning_and_wakes() {
   home="$TMP_ROOT/liveness-mid-error-mate2"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
   git init -q -b main "$home"
+  fm_register_secondmate "$dir/data/secondmates.md" sm2 "$home"
   printf 'sm2\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"

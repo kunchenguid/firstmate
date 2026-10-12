@@ -433,6 +433,26 @@ fm_test_run_spawn() {
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
+  # A --secondmate spawn refuses unless the launching home's own registry binds
+  # the id to the secondmate home, so bind the first positional (the id) to the
+  # second positional when that is a directory, else to the pane path. A suite
+  # that already registered the id keeps its own line.
+  local arg sm_id= sm_home= is_secondmate=0 positional=0
+  for arg in "$@"; do
+    case "$arg" in
+    --secondmate) is_secondmate=1 ;;
+    -*) ;;
+    *)
+      positional=$((positional + 1))
+      [ "$positional" -ne 1 ] || sm_id=$arg
+      if [ "$positional" -eq 2 ] && [ -d "$arg" ]; then sm_home=$arg; fi
+      ;;
+    esac
+  done
+  if [ "$is_secondmate" -eq 1 ] && [ -n "$sm_id" ] && [ -d "${sm_home:=$pane}" ] \
+    && ! grep -q -- "^- $sm_id " "$home/data/secondmates.md" 2>/dev/null; then
+    fm_register_secondmate "$home/data/secondmates.md" "$sm_id" "$sm_home"
+  fi
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \

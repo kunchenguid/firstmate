@@ -969,3 +969,13 @@ fm_test_base_path_sans() {
   done
   printf '%s\n' "$dir"
 }
+
+# fm_register_secondmate <registry> <id> <home>: bind <id> to <home> in a
+# secondmate registry the way bin/fm-home-seed.sh does before a real launch.
+# A --secondmate spawn refuses unless its own home's registry carries this line.
+fm_register_secondmate() {
+  local registry=$1 id=$2 home=$3
+  mkdir -p "$(dirname "$registry")"
+  printf -- '- %s - test fixture (home: %s; scope: test fixture; projects: ; added 2026-08-05)\n' \
+    "$id" "$(cd "$home" && pwd -P)" >> "$registry"
+}

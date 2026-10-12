@@ -377,6 +377,12 @@ add_sm_home() {
     printf 'harness=%s\n' "$harness"
     printf 'home=%s\n' "$home"
   } > "$w/home/state/$id.meta"
+  # The sweep relaunches through a --secondmate spawn, which refuses unless this
+  # home's own registry binds the id to that home - the same binding
+  # bin/fm-home-seed.sh writes before the first launch. Discovery here is
+  # meta-driven, so the registry is easy to omit in a fixture and impossible to
+  # omit in a home that actually supervises a secondmate.
+  fm_register_secondmate "$w/home/data/secondmates.md" "$id" "$home"
 }
 
 run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> stdout

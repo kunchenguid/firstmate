@@ -112,6 +112,10 @@ make_seeded_secondmate_home() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
+  # A --secondmate spawn refuses unless the launching home's own registry binds
+  # the id to this home, exactly as fm-home-seed.sh writes it before a real
+  # launch; the current case's home is HOME_DIR from read_case_record.
+  fm_register_secondmate "$HOME_DIR/data/secondmates.md" "$id" "$home"
   printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
   git -C "$home" init -q -b main
 }

@@ -979,6 +979,7 @@ SH
     mkdir -p "$dir/wt/state" "$dir/wt/data" "$dir/wt/bin" \
       "$dir/home/config/secondmate-accounts/$id" "$dir/primary" "$dir/mate" "$dir/new-mate"
     printf '%s\n' "$id" > "$dir/wt/.fm-secondmate-home"
+    fm_register_secondmate "$dir/home/data/secondmates.md" "$id" "$dir/wt"
     printf '# agents\n' > "$dir/wt/AGENTS.md"
     printf '# charter\n' > "$dir/wt/data/charter.md"
     printf '%s openai-codex/gpt-5.5\n' "$harness" > "$dir/home/config/secondmate-harness"
@@ -1168,6 +1169,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" sm3 "$dir/smhome"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
     echo "window=fmses:fm-sm3"
@@ -1211,6 +1213,7 @@ test_secondmate_relaunch_with_a_legacy_pin_file_uses_the_first_line() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sml2\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" sml2 "$dir/smhome"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
     echo "window=fmses:fm-sml2"
@@ -1249,6 +1252,7 @@ test_secondmate_claude_relaunch_keeps_local_settings() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-local-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin" "$dir/smhome/.claude"
   printf 'sml\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" sml "$dir/smhome"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   prior='{"permissions":{"allow":["Bash(echo hi)"]}}'
   printf '%s\n' "$prior" > "$dir/smhome/.claude/settings.local.json"
@@ -1295,6 +1299,7 @@ test_secondmate_relaunch_lands_on_the_per_mate_pin() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'smp1\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" smp1 "$dir/smhome"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
     echo "window=fmses:fm-smp1"
@@ -1335,6 +1340,7 @@ test_secondmate_relaunch_uses_the_default_for_an_unpinned_mate() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'smp2\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" smp2 "$dir/smhome"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
     echo "window=fmses:fm-smp2"
@@ -1376,6 +1382,7 @@ test_secondmate_relaunch_refuses_an_unreadable_configured_pin_before_stop() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'smp3\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" smp3 "$dir/smhome"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
     echo "window=fmses:fm-smp3"
@@ -1414,6 +1421,7 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm6\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" sm6 "$dir/smhome"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
     echo "window=fmses:fm-sm6"
@@ -1455,6 +1463,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm7\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" sm7 "$dir/smhome"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
     echo "window=fmses:fm-sm7"
@@ -1493,6 +1502,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm4\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" sm4 "$dir/smhome"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
     echo "window=fmses:fm-sm4"
@@ -1947,6 +1957,7 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm1\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" sm1 "$dir/smhome"
   printf '# charter\n' > "$dir/smhome/data/charter.md"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   printf 'window=x:fm-c1\n' > "$dir/smhome/state/c1.meta"
@@ -2018,6 +2029,7 @@ test_secondmate_checkpoint_refuses_unreadable_child_state() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state/bad.meta"
   printf 'sm5\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" sm5 "$dir/smhome"
   {
     echo "window=fmses:fm-sm5"
     echo "endpoint_task_id=sm5"
@@ -2061,6 +2073,7 @@ test_secondmate_checkpoint_ignores_a_vanished_scratch_find_walk() {
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm6\n' > "$dir/smhome/.fm-secondmate-home"
+  fm_register_secondmate "$home/data/secondmates.md" sm6 "$dir/smhome"
   printf '# charter\n' > "$dir/smhome/data/charter.md"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   printf 'window=x:fm-c1\n' > "$dir/smhome/state/c1.meta"

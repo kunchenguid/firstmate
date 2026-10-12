@@ -3776,11 +3776,24 @@ if [ "$KIND" = secondmate ]; then
     exit 1
   }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
-  if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
-    if ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
-      echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
-      exit 1
-    fi
+  # This home's own registry must bind $ID to $FIRSTMATE_HOME before the spawn may
+  # publish state/<id>.meta here. An absent registry is a refusal, not a skip: a
+  # home that never registered $ID would otherwise host the meta of a secondmate
+  # another home supervises. The one exception is the private parent-route
+  # directory of the home being launched (bin/fm-remote-secondmate-control.sh),
+  # recognized structurally: $DATA is that home's .parent-route child and its
+  # identity marker names $ID.
+  sm_data_abs=$(resolve_path "$DATA")
+  sm_parent_route=$(resolve_path "$PROJ_ABS/data/.parent-route")
+  sm_home_marker=
+  [ ! -f "$PROJ_ABS/.fm-secondmate-home" ] || sm_home_marker=$(cat "$PROJ_ABS/.fm-secondmate-home")
+  if [ "$sm_data_abs" = "$sm_parent_route" ] && [ "$sm_home_marker" = "$ID" ]; then
+    : # delegated remote launch into this secondmate's own parent-route directory
+  elif ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
+    echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
+    echo "error: refusing to write state/$ID.meta into $FM_HOME, which does not register secondmate $ID" >&2
+    exit 1
+  else
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
   fi
   WT="$PROJ_ABS"
