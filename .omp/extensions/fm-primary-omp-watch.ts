@@ -112,6 +112,10 @@ type UnconsumedWake = {
 
 type SessionGeneration = {
   id: number;
+  // True once this extension copy has accepted a session_start as its owning
+  // session. Subagent sessions in the same process hit the handler second and
+  // stay bound=false, so their shutdown can never tear down the primary's arm.
+  bound: boolean;
   stopping: boolean;
   replacement: boolean;
   child: ChildProcess | null;
@@ -475,6 +479,7 @@ function classifyClose(
 function createGeneration(): SessionGeneration {
   return {
     id: ++nextGenerationId,
+    bound: false,
     stopping: false,
     replacement: false,
     child: null,
@@ -1108,16 +1113,27 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("session_start", async () => {
-    if (generation.stopping) generation = createGeneration();
-    activateGeneration(generation);
+    // Every in-process session (primary + each task subagent) emits session_start
+    // in this same process; only the FIRST loaded generation may create/activate
+    // a generation. Later loads are subagents and stay read-only: no arm, no
+    // teardown authority.
+    if (generation.bound) return;
+    const candidate = createGeneration();
+    activateGeneration(candidate);
+    generation = candidate;
+    generation.bound = true;
     markLoaded();
     if (lockOwnership() !== "owned") return;
     activateOwnedWatch(generation);
   });
   pi.on?.("session_shutdown", async () => {
-    // omp carries no shutdown reason (verified: `reason` is undefined), so the
-    // replacement handoff is always persisted when anything is pending; a
-    // terminal quit then merely replays an already-drained wake next start.
+    // A subagent's shutdown is indistinguishable from the primary's in omp
+    // (reason is always undefined), so only the generation that was first bound
+    // may stop the arm. A generation bound by a later in-process session is
+    // prevented from binding above and therefore reaches here with
+    // generation.bound === false; ignore it and let the primary's own
+    // lifecycle drive the teardown.
+    if (!generation.bound) return;
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, true);
   });

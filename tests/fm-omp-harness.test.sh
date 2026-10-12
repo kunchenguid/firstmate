@@ -876,3 +876,83 @@ test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole
+test_watch_extension_ignores_subagent_session_shutdown() {
+  # Regression for fm-bn0: omp emits session_start and session_shutdown for
+  # in-process task subagents with reason=null in the same process. Without the
+  # first-bound gate, the subagent's shutdown disarms the primary's arm. The fix
+  # binds generation activation to the FIRST session_start in the process; a
+  # second session_start is a subagent and becomes read-only, so its shutdown
+  # cannot tear down the primary's arm.
+  local repo home out status log
+  repo="$TMP_ROOT/watch-subagent-shutdown/repo"; home="$TMP_ROOT/watch-subagent-shutdown/home"; log="$TMP_ROOT/watch-subagent-shutdown/arm.log"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+echo "arm_$$ up" >> "$FM_ARM_LOG"
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=0 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+
+async function loadExtensionCopy() {
+  const handlers = new Map(); let tool = null;
+  const pi = {
+    on(e, h) { handlers.set(e, h); },
+    registerCommand() {},
+    registerTool(t) { tool = t; },
+    sendUserMessage() {},
+  };
+  const mod = await import(pathToFileURL(process.env.EXT).href + `?v=${Math.random()}`);
+  mod.default(pi);
+  return { handlers, tool };
+}
+
+const primary = await loadExtensionCopy();
+const subagent = await loadExtensionCopy();
+
+await primary.handlers.get("session_start")({ type: "session_start", reason: "startup" }, {});
+for (let i = 0; i < 80 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((r) => setTimeout(r, 50));
+}
+const armPid = (() => { if (!existsSync(process.env.FM_ARM_LOG)) return null; const m = readFileSync(process.env.FM_ARM_LOG, "utf8").match(/arm_([0-9]+) up/); return m && Number(m[1]); })();
+if (!armPid) throw new Error(`arm child pid not observed under ${process.env.FM_ARM_LOG}`);
+
+await subagent.handlers.get("session_start")({ type: "session_start", reason: null }, {});
+try {
+  process.kill(armPid, 0);
+} catch {
+  throw new Error("subagent session_start killed the primary's arm");
+}
+
+await subagent.handlers.get("session_shutdown")({ type: "session_shutdown", reason: null }, {});
+try {
+  process.kill(armPid, 0);
+} catch {
+  throw new Error("subagent session_shutdown killed the primary's arm — the fm-bn0 bug is back");
+}
+
+const arm2 = await primary.tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(arm2.content[0].text)) {
+  throw new Error(`post-subagent-shutdown rearm should be an ownership no-op, got: ${arm2.content[0].text}`);
+}
+
+await primary.handlers.get("session_shutdown")({ type: "session_shutdown", reason: null }, {});
+let alive = true;
+try { process.kill(armPid, 0); } catch { alive = false; }
+if (alive) throw new Error("primary's own shutdown must still retire the arm child");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension ignores subagent session lifecycle: $out"
+  [ -z "$out" ] || fail "omp subagent shutdown test printed output: $out"
+  pass ".omp watch extension: a subagent's in-process session_start/shutdown leaves the primary's arm armed (fm-bn0 fixed)"
+}
+test_watch_extension_ignores_subagent_session_shutdown
