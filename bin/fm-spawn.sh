@@ -182,6 +182,12 @@
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
 #   contention refuses rather than waits.
+#   A secondmate home's `treehouse get` carries `--root <per-home root>` on the
+#   typed line, so a project clone sharing its origin with the main home's clone
+#   pools under that home's own root instead of the main home's shared pool;
+#   bin/fm-wake-lib.sh's fm_treehouse_home_pool_root owns the derivation and the
+#   main home types the bare command unchanged. An underivable root refuses the
+#   spawn before any endpoint exists.
 #   Project capacity: when this machine declares how many workers a project
 #   admits at once (config/project-capacity; bin/fm-project-capacity-lib.sh owns
 #   the declaration, what holds a place, and the race argument), a fresh ship or
@@ -3176,6 +3182,20 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
 fi
+# The Treehouse root this home's slot is acquired under: a secondmate home pools
+# its task worktrees under its own root, so a clone sharing its origin with the
+# main home's clone cannot hand this spawn a worktree of the main home's clone.
+# bin/fm-wake-lib.sh's fm_treehouse_home_pool_root owns the derivation; it is
+# empty for the main home, whose `treehouse get` stays exactly as before.
+# Resolved here, before any endpoint exists, so an underivable root refuses
+# without a window to clean up.
+SPAWN_TREEHOUSE_ROOT=
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_TREEHOUSE_ROOT=$(fm_treehouse_home_pool_root "$FM_HOME") || {
+    echo "error: spawn refused: could not derive the Treehouse pool root for Firstmate home $FM_HOME (docs/configuration.md \"Per-home worktree pools\")" >&2
+    exit 1
+  }
+fi
 if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
   if ! fm_project_capacity_occupants "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE" "$ID"; then
     echo "error: spawn refused: project $(basename "$PROJ_ABS") declares a capacity of $SPAWN_PROJECT_CAPACITY, but this machine's task records cannot all be read to count it ($FM_PROJECT_CAPACITY_ERROR)" >&2
@@ -4441,7 +4461,15 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # A secondmate home's root rides the typed line itself rather than the
+  # window's environment: main and secondmate windows share one tmux session,
+  # so a session-wide TREEHOUSE_ROOT would redirect the main home's pools too.
+  if [ -n "$SPAWN_TREEHOUSE_ROOT" ]; then
+    spawn_treehouse_root_quoted=${SPAWN_TREEHOUSE_ROOT//\'/\'\\\'\'}
+    spawn_send_text_line "$WT_TARGET" "treehouse get --root '$spawn_treehouse_root_quoted'"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -4496,7 +4524,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    spawn_treehouse_root_note=
+    [ -z "$SPAWN_TREEHOUSE_ROOT" ] || spawn_treehouse_root_note="; per-home pool root '$SPAWN_TREEHOUSE_ROOT'"
+    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'$spawn_treehouse_root_note); inspect window $T" >&2
     exit 1
   fi
 

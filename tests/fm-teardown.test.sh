@@ -1569,6 +1569,46 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean() {
   pass "a forced secondmate teardown returns a child scout copy with a nested clone clean"
 }
 
+# A child slot of a secondmate home was acquired under that home's own Treehouse
+# pool root (bin/fm-wake-lib.sh's fm_treehouse_home_pool_root), so forced
+# cleanup must return it with that same root: the parent's pool never held it.
+test_forced_secondmate_child_return_addresses_the_child_home_pool_root() {
+  local case_dir home child_wt rc base
+  case_dir=$(make_case secondmate-child-pool-root)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  base="$case_dir/treehouse-base"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  child_wt="$case_dir/child-scout-wt"
+  git -C "$case_dir/project" worktree add -q -b fm/child-scout "$child_wt" main
+  fm_write_meta "$home/state/child-scout.meta" \
+    "window=firstmate:fm-child-scout" \
+    "endpoint_task_id=child-scout" \
+    "worktree=$child_wt" \
+    "project=$case_dir/project" \
+    "kind=scout" \
+    "mode=local-only"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  TREEHOUSE_ROOT="$base" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "secondmate-child-pool-root: forced secondmate teardown should succeed"
+  grep -Fxq -- "return --root $base/.fm-pools/task-x1 --force $child_wt" "$case_dir/treehouse.log" \
+    || fail "secondmate-child-pool-root: the child return did not carry the child home's pool root; treehouse calls:"$'\n'"$(cat "$case_dir/treehouse.log")"
+  [ "$(grep -c -- '^return ' "$case_dir/treehouse.log")" -eq 1 ] \
+    || fail "secondmate-child-pool-root: expected exactly one return; treehouse calls:"$'\n'"$(cat "$case_dir/treehouse.log")"
+  pass "a forced secondmate teardown returns a child slot under the child home's own pool root"
+}
+
 # Return succeeds but leaves no readable worktree behind to verify.
 add_treehouse_that_removes_copy() {
   local case_dir=$1
@@ -5032,6 +5072,7 @@ test_ship_nested_clone_is_refused_and_bytes_stay
 test_dirty_return_warns_which_slot_was_lost
 test_dirty_return_warns_even_when_a_later_step_refuses
 test_forced_secondmate_child_scout_nested_clone_returns_clean
+test_forced_secondmate_child_return_addresses_the_child_home_pool_root
 test_forced_secondmate_dirty_child_return_warns_and_completes
 test_return_that_removes_copy_warns_cannot_verify
 test_scout_ignored_files_survive_scratch_clean

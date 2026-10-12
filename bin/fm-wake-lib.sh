@@ -1675,6 +1675,82 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# The Treehouse root a Firstmate home's task worktrees are pooled under.
+#
+# Treehouse keys a pool by the project's origin, not by the clone the pool was
+# created from, and lays every pool under one root: <root>/.treehouse/<repo>-
+# <origin-hash>/<slot>/<repo>. Two homes holding clones of the same origin -
+# the main home's clone and a secondmate's - therefore resolve to one shared
+# pool, whose slots are worktrees of whichever clone created it. A secondmate
+# spawning from that pool is handed a worktree of the MAIN home's clone, which
+# its isolation assertion refuses (observed 2026-10-12). So a secondmate home
+# acquires and returns under its own root instead, derived here from the
+# home's identity marker so that spawn, teardown, and any operator status or
+# prune call compute the same root without a recorded value that could drift.
+#
+# The root is ${TREEHOUSE_ROOT:-$HOME}/.fm-pools/<secondmate-id>: the same base
+# Treehouse itself resolves for the main home's pools, so a redirected
+# TREEHOUSE_ROOT keeps every home's pools together, with a per-home directory
+# beneath it. It sits outside every Firstmate home's directory tree on purpose.
+# A worker's harness walks up from its worktree looking for instruction files,
+# and a root inside the home (its state/, say) put the home's CLAUDE.md - which
+# imports the supervisor contract - on that walk, prompting Claude's external
+# import dialog in every worker there. Nothing above .fm-pools/<id>/.treehouse
+# belongs to a Firstmate home.
+#
+# Prints the root for a secondmate home (one carrying .fm-secondmate-home) and
+# returns 0. Prints nothing and returns 0 for any other home, which keeps using
+# Treehouse's own root resolution unchanged. Returns 1, with the reason on
+# stderr, when the home is a secondmate home whose root cannot be derived: an
+# unreadable or malformed identity marker, or no absolute base to derive from.
+# Callers refuse rather than fall back to the shared pool, because that pool is
+# exactly the misrouting this root exists to prevent. An explicit --root wins
+# over a project's treehouse.toml, so a clone that still carries a hand-written
+# per-home root keeps working.
+fm_treehouse_home_pool_root() {  # <home>
+  local home=$1 marker id base
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || {
+    echo "error: cannot resolve Firstmate home '$1' to derive its Treehouse pool root" >&2
+    return 1
+  }
+  marker="$home/.fm-secondmate-home"
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    return 0
+  fi
+  if [ ! -f "$marker" ] || [ -L "$marker" ]; then
+    echo "error: secondmate identity marker $marker is not a regular file; cannot derive this home's Treehouse pool root" >&2
+    return 1
+  fi
+  IFS= read -r id < "$marker" || [ -n "$id" ]
+  case "$id" in
+    ''|.|..|*[!A-Za-z0-9._-]*)
+      echo "error: secondmate identity marker $marker does not name a usable secondmate id ('${id:-}'); cannot derive this home's Treehouse pool root" >&2
+      return 1
+      ;;
+  esac
+  if [ -n "${TREEHOUSE_ROOT:-}" ]; then
+    base=$TREEHOUSE_ROOT
+    case "$base" in
+      /*) ;;
+      *)
+        echo "error: TREEHOUSE_ROOT '$base' is not absolute; a secondmate home's per-home Treehouse pool root needs an absolute base" >&2
+        return 1
+        ;;
+    esac
+  else
+    base=${HOME:-}
+    case "$base" in
+      /*) ;;
+      *)
+        echo "error: HOME is unset or not absolute and TREEHOUSE_ROOT is unset; a secondmate home's per-home Treehouse pool root needs an absolute base" >&2
+        return 1
+        ;;
+    esac
+  fi
+  base=${base%/}
+  printf '%s/.fm-pools/%s\n' "$base" "$id"
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
