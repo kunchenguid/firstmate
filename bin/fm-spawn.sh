@@ -269,6 +269,8 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
+#   Its canonical common git dir must equal the spawning project's, so a
+#   Treehouse pool shared by clones of one origin cannot supply a foreign copy.
 #   On the backends that discover that path by reading the task pane's own cwd,
 #   the same isolation test screens every read: a pane still showing the project
 #   or the repository primary while `treehouse get` prepares the slot is waited
@@ -3387,8 +3389,8 @@ real_path_or_raw() { # <path>
 # per-backend routing (fm_backend_resolve_selector).
 
 # True when <path> is an isolated worktree of the spawning project: a real
-# directory that is its own worktree root, is not the spawning project itself,
-# and does not share the project repository's common git dir. SPAWN_WT_TOP is
+# directory that is its own worktree root, is not the spawning project or the
+# repository primary, and shares the project's canonical common git dir. SPAWN_WT_TOP is
 # left holding the worktree root the check read, and SPAWN_WT_REASON a short
 # phrase naming why a rejected path failed, both for the refusal messages.
 #
@@ -3402,10 +3404,12 @@ real_path_or_raw() { # <path>
 # A read like that is a transient, not a destination: the poll keeps waiting.
 SPAWN_WT_TOP=
 SPAWN_WT_REASON=
+SPAWN_WT_FOREIGN_COMMON=0
 spawn_worktree_isolated() { # <path>
-  local path=$1 wt_real wt_top_real wt_git_dir proj_common
+  local path=$1 wt_real wt_top_real wt_git_dir wt_common proj_common
   SPAWN_WT_TOP=
   SPAWN_WT_REASON=
+  SPAWN_WT_FOREIGN_COMMON=0
   wt_real=
   if ! wt_real=$(cd "$path" 2>/dev/null && pwd -P); then
     wt_real=
@@ -3442,12 +3446,19 @@ spawn_worktree_isolated() { # <path>
     wt_git_dir=$(cd "$wt_git_dir" 2>/dev/null && pwd -P) || wt_git_dir=
   proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
     proj_common=$(cd "$proj_common" 2>/dev/null && pwd -P) || proj_common=
-  if [ -z "$wt_git_dir" ] || [ -z "$proj_common" ]; then
+  wt_common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+    wt_common=$(cd "$wt_common" 2>/dev/null && pwd -P) || wt_common=
+  if [ -z "$wt_git_dir" ] || [ -z "$proj_common" ] || [ -z "$wt_common" ]; then
     SPAWN_WT_REASON="its git directory could not be resolved"
     return 1
   fi
   if [ "$wt_git_dir" = "$proj_common" ]; then
     SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
+    return 1
+  fi
+  if [ "$wt_common" != "$proj_common" ]; then
+    SPAWN_WT_FOREIGN_COMMON=1
+    SPAWN_WT_REASON="its common git dir '$wt_common' differs from the spawning project's '$proj_common'; a shared Treehouse pool keyed by origin URL can return another clone's worktree; refusing to adopt it without discarding anything"
     return 1
   fi
   return 0
@@ -3456,7 +3467,12 @@ spawn_worktree_isolated() { # <path>
 validate_spawn_worktree() { # <source> <inspect-target>
   local source=$1 inspect_target=$2
   if ! spawn_worktree_isolated "$WT"; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    # Orca normally removes a newly allocated copy on abort, but a foreign
+    # common dir proves this copy belongs to another clone. Preserve it instead.
+    if [ "$SPAWN_WT_FOREIGN_COMMON" = 1 ]; then
+      ORCA_ABORT_CLEANUP=0
+    fi
+    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'; $SPAWN_WT_REASON); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
 }
@@ -4457,8 +4473,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
   # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path passes spawn_worktree_isolated too (it resolves to a real,
-  # distinct worktree top-level), so accepting it on one read alone silently
+  # stale path can pass spawn_worktree_isolated too if it is a different slot
+  # of the same repository, so accepting it on one read alone silently
   # records the wrong worktree= in state/<id>.meta. Require two consecutive
   # reads to agree on the same isolated path before accepting it; a mismatch
   # just becomes the new candidate rather than resetting the wait, so a pane

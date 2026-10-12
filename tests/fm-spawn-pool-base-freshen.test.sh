@@ -96,7 +96,7 @@ REC
 
 test_linked_spawning_home_rejects_primary_before_refresh() {
   local rec id out status returned primary spawning before_reflog
-  for returned in primary primary-alias spawning scout; do
+  for returned in primary primary-alias spawning ship scout; do
     id="pool-linked-${returned}-r12"
     rec=$(make_case "linked-$returned" "$id")
     read_case_record "$rec"
@@ -116,7 +116,11 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
     # The assertion concerns identity, not how long an unchanged cwd is polled.
     fm_test_fake_sleep_noop "$FAKEBIN_DIR"
 
-    out=$(run_spawn "$id" --scout)
+    if [ "$returned" = ship ]; then
+      out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    else
+      out=$(run_spawn "$id" --scout)
+    fi
     status=$?
     if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
       printf '# evidence begin: linked-home spawn, returned=%s\n' "$returned"
@@ -136,12 +140,12 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
       fi
       printf '# evidence end\n'
     fi
-    if [ "$returned" = scout ]; then
-      expect_code 0 "$status" "a genuine scout copy from a linked home should launch"$'\n'"$out"
+    if [ "$returned" = scout ] || [ "$returned" = ship ]; then
+      expect_code 0 "$status" "a genuine $returned copy from a linked home should launch"$'\n'"$out"
       assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
-        "spawn did not record the genuine scout copy"
+        "spawn did not record the genuine $returned copy"
       [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
-        || fail "spawn did not refresh the genuine scout copy"
+        || fail "spawn did not refresh the genuine $returned copy"
     else
       [ "$status" -ne 0 ] || fail "linked spawning home accepted $returned as a disposable copy"
       # None of these is an isolated copy, so the worktree poll never adopts one
@@ -160,6 +164,48 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
     [ "$(git -C "$primary" reflog)" = "$before_reflog" ] \
       || fail "spawn touched the primary reflog from a linked home"
     pass "linked spawning home: $returned preserves the primary before any refresh"
+  done
+}
+
+# Two clones of one origin share Treehouse's URL-keyed pool, but not Git's
+# common directory. The fake terminal returns a real worktree of the other
+# clone, exactly as a shared pool can; spawn must refuse before fetching,
+# resetting, or publishing a task record in either ship or scout mode.
+test_foreign_common_dir_refuses_without_touching_the_copy() {
+  local rec id out status kind foreign primary common foreign_common before before_reflog
+  for kind in ship scout; do
+    id="pool-foreign-common-$kind"
+    rec=$(make_case "foreign-common-$kind" "$id")
+    read_case_record "$rec"
+    primary=$PROJECT_DIR
+    foreign="$CASE_DIR/foreign-slot"
+    git -C "$CASE_DIR/publisher" worktree add --quiet --detach "$foreign" HEAD
+    [ "$(git -C "$primary" remote get-url origin)" = "$(git -C "$foreign" remote get-url origin)" ] \
+      || fail "the foreign fixture does not share the spawning project's origin URL"
+    common=$(cd "$primary/.git" && pwd -P)
+    foreign_common=$(cd "$CASE_DIR/publisher/.git" && pwd -P)
+    [ "$common" != "$foreign_common" ] || fail "the fixture common dirs did not diverge"
+    before=$(git -C "$foreign" rev-parse HEAD)
+    before_reflog=$(git -C "$foreign" reflog)
+    POOL_DIR=$foreign
+    fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+    if [ "$kind" = scout ]; then
+      out=$(run_spawn "$id" --scout)
+    else
+      out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    fi
+    status=$?
+    [ "$status" -ne 0 ] || fail "$kind spawn adopted another clone's pooled worktree"$'\n'"$out"
+    assert_contains "$out" "common git dir '$foreign_common'" "the refusal did not name the foreign common dir"
+    assert_contains "$out" "spawning project's '$common'" "the refusal did not name the spawning common dir"
+    assert_contains "$out" "shared Treehouse pool" "the refusal did not explain the shared-pool cause"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused $kind published task metadata"
+    [ ! -e "$CASE_DIR/publisher/.git/FETCH_HEAD" ] || fail "the refused $kind fetched in the foreign clone"
+    [ "$(git -C "$foreign" rev-parse HEAD)" = "$before" ] || fail "the refused $kind moved foreign HEAD"
+    [ "$(git -C "$foreign" reflog)" = "$before_reflog" ] || fail "the refused $kind changed the foreign reflog"
+    [ -f "$foreign/advanced-main.txt" ] || fail "the refused $kind discarded foreign content"
+    pass "$kind spawn refuses a foreign common dir from a shared pool without touching the copy"
   done
 }
 
@@ -874,6 +920,7 @@ test_scout_base_branch_refused_on_gerrit_forge() {
   pass "a based scout on a forge=gerrit project is refused at spawn"
 }
 
+test_foreign_common_dir_refuses_without_touching_the_copy
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh

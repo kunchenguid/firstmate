@@ -62,8 +62,12 @@ case "$1 $2" in
     done
     wt="$DIR/orca-worktrees/$name"
     mkdir -p "$DIR/orca-worktrees"
-    git -C "$DIR/project" worktree add --quiet -b "orca-$name" "$wt" >&2 || exit 1
+    git -C "${FM_TEST_ORCA_PROJECT:-$DIR/project}" worktree add --quiet -b "orca-$name" "$wt" >&2 || exit 1
     printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' "$name" "$wt"
+    exit 0
+    ;;
+  "worktree rm")
+    printf '%s\n' "$*" >> "$DIR/removal-log"
     exit 0
     ;;
   "terminal create")
@@ -118,6 +122,39 @@ EOF
   pass "an Orca-backed fresh spawn enters the worktree Orca created for it, instead of hard-refusing on the post-launch proof"
 }
 
+test_orca_foreign_common_dir_refuses_without_removal() {
+  local case_dir home id=orca-foreign-a3 fb out status wt common foreign_common
+  case_dir="$TMP_ROOT/foreign"
+  home="$case_dir/home"
+  fm_test_spawn_home "$home" codex
+  printf 'manual\n' > "$home/config/backlog-backend"
+  fm_test_spawn_brief "$home" "$id"
+  fm_git_init_commit "$case_dir/project"
+  git clone --quiet "$case_dir/project" "$case_dir/foreign"
+  fb=$(make_orca_fakebin "$case_dir")
+  common=$(cd "$case_dir/project/.git" && pwd -P)
+  foreign_common=$(cd "$case_dir/foreign/.git" && pwd -P)
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" FM_TEST_ORCA_PROJECT="$case_dir/foreign" \
+    PATH="$fb:$PATH" \
+    "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off --backend orca 2>&1)
+  status=$?
+
+  expect_code 1 "$status" "an Orca-backed spawn must refuse a foreign common dir"$'\n'"$out"
+  assert_contains "$out" "common git dir '$foreign_common'" "the refusal omitted the foreign common dir"
+  assert_contains "$out" "spawning project's '$common'" "the refusal omitted the spawning common dir"
+  [ ! -e "$case_dir/removal-log" ] || fail "the refusal attempted to remove the foreign worktree"
+  wt="$case_dir/orca-worktrees/fm-$id"
+  [ -d "$wt" ] || fail "the refused copy did not survive"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$(git -C "$case_dir/foreign" rev-parse HEAD)" ] \
+    || fail "the refusal changed the foreign copy's HEAD"
+  [ ! -e "$home/state/$id.meta" ] || fail "the refused spawn published task metadata"
+  pass "an Orca-backed foreign common dir is refused without invoking worktree removal"
+}
+
 test_orca_relaunch_is_refused_before_the_worktree_carveout_could_run() {
   local case_dir home proj wt id=orca-relaunch-a2 out status
   case_dir="$TMP_ROOT/relaunch"
@@ -165,6 +202,7 @@ EOF
 }
 
 test_orca_fresh_spawn_enters_the_worktree_it_created
+test_orca_foreign_common_dir_refuses_without_removal
 test_orca_relaunch_is_refused_before_the_worktree_carveout_could_run
 
 echo "# all fm-spawn-orca-worktree tests passed"
