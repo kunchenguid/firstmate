@@ -1130,7 +1130,7 @@ test_scout_and_secondmate_scaffold() {
 # ordinary delivery mode, including forge variants, without inventing a web
 # preview obligation for CLI-only work.
 test_ship_review_evidence_contract() {
-  local home mode forge brief id destination
+  local home mode forge brief id destination contents review_line stop_line
   home="$TMP_ROOT/review-evidence-home"
   mkdir -p "$home/data"
   for mode in no-mistakes direct-PR local-only; do
@@ -1144,11 +1144,12 @@ test_ship_review_evidence_contract() {
       "$mode: missing web/UI preview evidence rule"
     assert_grep "exact executable proof commands" "$brief" \
       "$mode: missing CLI-only proof rule"
-    destination='the PR'
-    [ "$mode" = local-only ] && destination='the local ready note'
-    assert_grep "reachable preview of the final head in $destination" "$brief" \
+    destination='the PR body or description'
+    [ "$mode" = local-only ] && destination='a `note [at=<epoch>]: review evidence: {details}` line in the status file before `done:`'
+    contents=$(cat "$brief")
+    assert_contains "$contents" "reachable preview of the final head in $destination" \
       "$mode: web/UI evidence names the wrong delivery artifact"
-    assert_grep "proof commands in $destination" "$brief" \
+    assert_contains "$contents" "proof commands in $destination" \
       "$mode: CLI evidence names the wrong delivery artifact"
     if [ "$mode" = local-only ]; then
       assert_no_grep "preview of the final head in the PR" "$brief" \
@@ -1156,6 +1157,10 @@ test_ship_review_evidence_contract() {
       assert_no_grep "proof commands in the PR" "$brief" \
         "$mode: CLI evidence must not require a PR"
     fi
+    review_line=$(grep -nF '# Review evidence' "$brief" | head -1 | cut -d: -f1)
+    stop_line=$(grep -nF 'append `done' "$brief" | head -1 | cut -d: -f1)
+    [ -n "$review_line" ] && [ -n "$stop_line" ] && [ "$review_line" -lt "$stop_line" ] \
+      || fail "$mode: review evidence must precede the first completion stop"
   done
   for forge in gerrit forgejo; do
     id="brief-review-nm-$forge"
@@ -1165,11 +1170,12 @@ test_ship_review_evidence_contract() {
     assert_grep "# Review evidence" "$brief" "no-mistakes forge=$forge: missing Review evidence section"
     assert_grep "exact executable proof commands" "$brief" \
       "no-mistakes forge=$forge: missing CLI-only proof rule"
-    destination='the PR'
-    [ "$forge" = gerrit ] && destination='the Gerrit change description or ready report'
-    assert_grep "reachable preview of the final head in $destination" "$brief" \
+    destination='the PR body or description'
+    [ "$forge" = gerrit ] && destination='the Gerrit change description or a `note [at=<epoch>]: review evidence: {details}` line in the status file before the ready report'
+    contents=$(cat "$brief")
+    assert_contains "$contents" "reachable preview of the final head in $destination" \
       "no-mistakes forge=$forge: web/UI evidence names the wrong delivery artifact"
-    assert_grep "proof commands in $destination" "$brief" \
+    assert_contains "$contents" "proof commands in $destination" \
       "no-mistakes forge=$forge: CLI evidence names the wrong delivery artifact"
     if [ "$forge" = gerrit ]; then
       assert_no_grep "preview of the final head in the PR" "$brief" \
@@ -1177,19 +1183,29 @@ test_ship_review_evidence_contract() {
       assert_no_grep "proof commands in the PR" "$brief" \
         "no-mistakes forge=$forge: CLI evidence must not require a PR"
     fi
+    review_line=$(grep -nF '# Review evidence' "$brief" | head -1 | cut -d: -f1)
+    stop_line=$(grep -nF 'append `done' "$brief" | head -1 | cut -d: -f1)
+    [ -n "$review_line" ] && [ -n "$stop_line" ] && [ "$review_line" -lt "$stop_line" ] \
+      || fail "no-mistakes forge=$forge: review evidence must precede the first completion stop"
   done
   id='brief-review-direct-gerrit'
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --forge gerrit >/dev/null 2>&1 \
     || fail "fm-brief.sh direct-PR forge=gerrit scaffold exited non-zero"
   brief="$home/data/$id/brief.md"
-  assert_grep "reachable preview of the final head in the Gerrit change description or ready report" "$brief" \
+  destination='the Gerrit change description or a `note [at=<epoch>]: review evidence: {details}` line in the status file before the ready report'
+  contents=$(cat "$brief")
+  assert_contains "$contents" "reachable preview of the final head in $destination" \
     "direct-PR forge=gerrit: web/UI evidence names the wrong delivery artifact"
-  assert_grep "proof commands in the Gerrit change description or ready report" "$brief" \
+  assert_contains "$contents" "proof commands in $destination" \
     "direct-PR forge=gerrit: CLI evidence names the wrong delivery artifact"
   assert_no_grep "preview of the final head in the PR" "$brief" \
     "direct-PR forge=gerrit: web/UI evidence must not require a PR"
   assert_no_grep "proof commands in the PR" "$brief" \
     "direct-PR forge=gerrit: CLI evidence must not require a PR"
+  review_line=$(grep -nF '# Review evidence' "$brief" | head -1 | cut -d: -f1)
+  stop_line=$(grep -nF 'append `done' "$brief" | head -1 | cut -d: -f1)
+  [ -n "$review_line" ] && [ -n "$stop_line" ] && [ "$review_line" -lt "$stop_line" ] \
+    || fail "direct-PR forge=gerrit: review evidence must precede the first completion stop"
   pass "fm-brief: ship modes preserve the shared review-evidence contract"
 }
 

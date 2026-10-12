@@ -10,10 +10,10 @@
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
 # contract.
-# After every successful mode body, fm_review_evidence_block appends the shared
-# review-evidence contract: web or UI work needs a reachable preview of the final
-# head plus meaningful browser flows, and CLI-only work needs executable proof,
-# never a fabricated web preview. Both use the mode's actual review destination.
+# Each mode renders fm_review_evidence_block before its first completion report.
+# Web or UI work needs a reachable preview of the final head plus meaningful
+# browser flows, and CLI-only work needs executable proof, never a fabricated
+# web preview. Both use the mode's actual writable review destination.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -412,7 +412,7 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-# Shared ship review-evidence contract appended by fm_dod_block after every mode.
+# Shared ship review-evidence contract rendered by fm_dod_block for every mode.
 # One owner so ordinary ship briefs and promoted scouts keep the same evidence bar.
 fm_review_evidence_block() {
   local destination=$1
@@ -437,9 +437,9 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
     contract_consent=" upstream-consent=$consent"
   fi
   case "$mode:$forge" in
-    *:gerrit) review_destination='the Gerrit change description or ready report' ;;
-    local-only:*) review_destination='the local ready note' ;;
-    *) review_destination='the PR' ;;
+    *:gerrit) review_destination='the Gerrit change description or a `note [at=<epoch>]: review evidence: {details}` line in the status file before the ready report' ;;
+    local-only:*) review_destination='a `note [at=<epoch>]: review evidence: {details}` line in the status file before `done:`' ;;
+    *) review_destination='the PR body or description' ;;
   esac
   draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
   if [ "$forge" = forgejo ]; then
@@ -462,6 +462,9 @@ Ship branch: $branch
 This task ships **direct-PR** to a Gerrit review server: you publish the change yourself, without the no-mistakes pipeline.
 Gerrit has no pull requests, so there is nothing to open; publishing creates the change.
 The task is complete only when committed on your branch.
+EOF
+      fm_review_evidence_block "$review_destination"
+      cat <<EOF
 When it is implemented and committed, publish it.
 EOF
       fm_gerrit_publish_block
@@ -478,6 +481,9 @@ This project's review server is Gerrit: it has no pull requests and no forge CI 
 Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
 Those three are the only steps that reach a forge, and skipping them is a supported outcome, not a degraded one.
 The task is complete only when committed on your branch.
+EOF
+      fm_review_evidence_block "$review_destination"
+      cat <<EOF
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate.
 That first \`done:\` is the handoff that starts the pipeline; it is not a request to publish.
@@ -508,6 +514,9 @@ Delivery contract: mode=direct-PR$contract_forge$contract_consent
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
+EOF
+      fm_review_evidence_block "$review_destination"
+      cat <<EOF
 When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
 Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
@@ -526,6 +535,9 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+EOF
+      fm_review_evidence_block "$review_destination"
+      cat <<EOF
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
@@ -536,6 +548,9 @@ EOF
 Delivery contract: mode=no-mistakes$contract_forge$contract_consent
 Ship branch: $branch
 The task is complete only when committed on your branch.
+EOF
+      fm_review_evidence_block "$review_destination"
+      cat <<EOF
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
@@ -555,8 +570,6 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
-  printf '\n'
-  fm_review_evidence_block "$review_destination"
 }
 
 # 0 when <sha> is contained in a ref under <namespace> in <repo>.
