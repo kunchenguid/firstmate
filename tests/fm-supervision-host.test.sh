@@ -1085,9 +1085,13 @@ test_attended_close_with_unidentified_main_session_passes_to_main() {
 # Change the task immediately before the second offer computation, rather
 # than racing the successor startup. The first offer accepts the close; the
 # turn-boundary offer must see the new main-owned decision.
-turn_main_only_at_second_offer() {  # <home>
-  local real_node
+turn_main_only_at_second_offer() {  # <home> [quiet]
+  local real_node turn
   real_node=$(command -v node)
+  turn='printf '"'"'needs-decision [at=%s]: which export format?\n'"'"' "$(date +%s)" >> "$FM_HOME/state/demo.status"'
+  # Quiet: the offer alone turns main-only, with no status line for the
+  # successor watcher to close on.
+  [ "${2:-}" != quiet ] || turn='echo eligible=0; exit 0'
   cat > "$1/fakebin/node" <<SH
 #!/usr/bin/env bash
 case "\$*" in
@@ -1096,7 +1100,7 @@ case "\$*" in
     count=\$((count + 1))
     printf '%s\n' "\$count" > "\$FM_HOME/offer-count"
     if [ "\$count" -eq 2 ]; then
-      printf 'needs-decision [at=%s]: which export format?\n' "\$(date +%s)" >> "\$FM_HOME/state/demo.status"
+      $turn
     fi ;;
 esac
 exec "$real_node" "\$@"
@@ -1159,9 +1163,21 @@ start_hook_session() {  # <home>
       while [ ! -e "$FM_HOME/session.stop" ]; do
         if [ -e "$FM_HOME/stop.go" ]; then
           rm -f "$FM_HOME/stop.go"
-          printf "{\"session_id\":\"sess-host-hook\",\"stop_hook_active\":false}\n" \
-            | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/hook.out" 2> "$FM_HOME/hook.err"
-          printf "%s\n" "$?" > "$FM_HOME/hook.rc"
+          if [ -e "$FM_HOME/hook.own-group" ]; then
+            # Claude owns the hook as a process group of its own and tears the
+            # whole group down once the hook has exited.
+            printf "{\"session_id\":\"sess-host-hook\",\"stop_hook_active\":false}\n" > "$FM_HOME/hook.stdin"
+            set -m
+            "$FM_HOME/bin/fm-claude-stop-autoarm.sh" < "$FM_HOME/hook.stdin" > "$FM_HOME/hook.out" 2> "$FM_HOME/hook.err" &
+            printf "%s\n" "$!" > "$FM_HOME/hook.pgid"
+            wait "$!"
+            printf "%s\n" "$?" > "$FM_HOME/hook.rc"
+            set +m
+          else
+            printf "{\"session_id\":\"sess-host-hook\",\"stop_hook_active\":false}\n" \
+              | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/hook.out" 2> "$FM_HOME/hook.err"
+            printf "%s\n" "$?" > "$FM_HOME/hook.rc"
+          fi
         fi
         sleep 0.1
       done
@@ -1393,6 +1409,28 @@ test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn() {
   pass "host+hook: a close that turns main-only at its turn rewakes main and keeps its successor watcher"
 }
 
+# The successor a close that turns main-only at its turn leaves for main
+# outlives the Stop hook's process group teardown, like the pass-through's.
+test_successor_left_at_the_turn_survives_the_hook_process_group_teardown() {
+  local home watcher
+  home=$(make_primary_home hook-turns-main-only-teardown)
+  turn_main_only_at_second_offer "$home" quiet
+  : > "$home/hook.own-group"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "at-turn teardown: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'step one'
+  wait_until 250 hook_exited "$home" || fail "at-turn teardown: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
+  [ "$(cat "$home/offer-count" 2>/dev/null)" -ge 2 ] || fail "fixture: the close was not accepted before it turned main-only"
+  assert_rewoke_main "$home" "at-turn teardown"
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
+  sleep 2
+  kill -0 "$watcher" 2>/dev/null || fail "at-turn teardown: the successor watcher (pid $watcher) did not survive the hook's process group teardown"
+  stop_home_processes "$home"
+  pass "host+hook: the successor a close that turns main-only at its turn leaves for main survives the hook's process group teardown"
+}
+
 # If the at-turn hand-back cannot publish downtime, the healthy successor
 # cannot turn that undelivered close into a silent Stop-hook success.
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails() {
@@ -1449,6 +1487,33 @@ test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end() {
   assert_contains "$drained" 'which region?' "the successor's close must reach main's drain"
   watcher_live "$home" || fail "successor close: the next turn end left no watcher"
   pass "host+hook: a successor close that lands during main's turn is delivered at the next turn end"
+}
+
+# The live loop (2026-10-07): the successor a main-only pass-through leaves
+# for main shared the Stop hook's process group, so Claude's teardown of that
+# group after the exit-2 rewake stopped it mid-turn. The stop published
+# downtime, and the next park's first cycle announced an empty
+# "check: rearm-resurface" that woke main again, over and over. The successor
+# must outlive that teardown, so the next park takes it over quietly.
+test_pass_through_successor_survives_the_hook_process_group_teardown() {
+  local home pgid watcher
+  home=$(make_primary_home hook-group-teardown)
+  : > "$home/hook.own-group"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "group teardown: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 hook_exited "$home" || fail "group teardown: the decision close never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "fixture: the close was not a main-only pass-through"
+  assert_rewoke_main "$home" "group teardown (pass-through)"
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  pgid=$(cat "$home/hook.pgid")
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  sleep 2
+  kill -0 "$watcher" 2>/dev/null || fail "group teardown: the successor watcher (pid $watcher) did not survive the hook's process group teardown"
+  [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" = "$watcher" ] || fail "group teardown: the watcher lock moved"
+  stop_home_processes "$home"
+  pass "host+hook: the successor a pass-through leaves for main survives the hook's process group teardown"
 }
 
 # The arm processes running from <home>'s bin, one "<pid> <ppid>" per line.
@@ -2924,8 +2989,10 @@ test_claude_stop_hook_delivers_a_main_only_pass_through
 test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
 test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
+test_successor_left_at_the_turn_survives_the_hook_process_group_teardown
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
+test_pass_through_successor_survives_the_hook_process_group_teardown
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
 test_unrecorded_successor_is_stopped_rather_than_left_for_main

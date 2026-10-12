@@ -574,7 +574,9 @@ An SSH exit status of 255 while fetching a referenced document leaves the delta 
 
 The process-event runner applies each captured delta through this adapter as soon as it is captured.
 So a mirrored reply reaches the primary status channel without depending on the wake handler running the adapter itself.
-A mirrored line that carries a correlation token settles its pending-reply record and closes that request's own open escalation decision.
+A mirrored line that carries a correlation token settles the pending-reply record only when the mate it came from is the task that request was sent to.
+Another mate echoing the token leaves it open.
+A settled record also closes that request's own open escalation decision.
 
 A remote reply reaches the primary only through this asynchronous mirror.
 Because of that, the primary treats a missing correlated report as a missed report only once the mirror has been read through the end of the remote log after that turn ended.
@@ -587,6 +589,12 @@ The [process-to-event operating contract](configuration.md#process-to-event-sour
 
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
+
+The failure appends one `blocked` line to the parent status stream, which opens a decision.
+The line records the reason, the reader position (the cursor offset and the first 12 characters of the prefix hash), and the retirement count (how many times the route has been retired).
+Reading the same break again, with the cursor where it was and the count unchanged, appends nothing.
+A later break at a different reader position, or after another retirement, appends a new `blocked` line and opens the decision again.
+A line written before that position was recorded does not match, so the next break appends the new line once.
 
 ### SSH exit 255 and unavailable homes
 

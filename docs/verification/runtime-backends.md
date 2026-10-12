@@ -638,6 +638,64 @@ skip-runner: pi-signed is not installed, so its pin check was not exercised
 
 The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude or Pi upgrade.
 
+## Secondmate busy contract
+
+Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 0.86.1, and Grok 1.0.40.
+
+A tmux-backed secondmate's active-turn gate reads the parent home's semantic busy record.
+Launches of opencode, pi, pi-signed, and omp arm that record and load the same hook or extension an ordinary worker uses, and those hooks do not touch the parent's turn-ended marker.
+A Claude secondmate arms the same record through busy hooks in the parent home's `state/<id>.claude-settings.json`, passed as Claude Code's `--settings` file, and does not write the mate home's `.claude/settings.local.json`.
+That `--settings` load and the merge of its hook entries with the home's own hooks rest on Claude Code's documentation (<https://code.claude.com/docs/en/cli-reference>, <https://code.claude.com/docs/en/hooks>) and not on a live run recorded in this section: the sample output below predates the `--settings` mechanism.
+A Claude secondmate is the one exception on Stop: its home's tracked Stop guard is the only Stop writer, recording idle when it allows the Stop and busy when it blocks it into a continuation, because Claude runs Stop hooks in parallel.
+Claude Code 2.1.278 was probed live in a scratch project with logging `UserPromptSubmit` and `Stop` hooks.
+A synchronous Stop hook that exits 2 forced a continuation with no `UserPromptSubmit`, which is why the guard itself records busy when it blocks.
+An `asyncRewake` Stop hook that exited 2 six seconds after the turn ended woke a new turn, and `UserPromptSubmit` fired 45ms after that hook exited.
+So a secondmate turn started by the Stop auto-arm reopens busy through the same `UserPromptSubmit` hook as a typed prompt, and the auto-arm needs no busy writer of its own.
+
+```text
+# asyncRewake probe                # synchronous block probe
+ups    1790092380.194370578        ups   1790092417.676751768
+stop   1790092380.968402195        stop  1790092418.684176531
+rewake 1790092386.979819188        block 1790092418.692480013
+ups    1790092387.025050498        stop  1790092419.717886938
+stop   1790092388.953108486
+```
+Codex stays unverified.
+Grok keeps its rendered-tail verdict and gets no parent turn-end hook.
+Cursor's transcript sidecar is written for a secondmate the same way it is for an ordinary worker, and this host has no Cursor agent binary, so that path was not started.
+Kimi stays unarmed, and a secondmate still gets no parent turn-end token.
+
+The portable regression is `tests/fm-busy-adapter-wiring.test.sh`.
+It spawns those harnesses through the real `bin/fm-spawn.sh --secondmate` path on a fake tmux pane, drives the generated hook or extension, and runs the stall gate while the record is busy and again after it goes idle.
+
+The live guard is `tests/fm-secondmate-busy-contract-live-e2e.test.sh`.
+It runs by default wherever tmux is installed.
+`FM_SECONDMATE_BUSY_LIVE=1` forces an absent binary to fail rather than skip.
+The spawn pane is a sleeper, so the launch brief is never delivered to a model.
+Each installed armed harness is then started for real, with no prompt and no keystrokes.
+
+```sh
+bash tests/fm-secondmate-busy-contract-live-e2e.test.sh
+```
+
+```text
+# claude 2.1.278 (Claude Code): real process stayed up; pane tail classify=busy fm-spawn
+ok - claude 2.1.278 (Claude Code): a tmux secondmate spawn arms a busy verdict the active-turn gate can see
+# opencode 1.18.31: real process stayed up; pane tail classify=busy fm-spawn
+ok - opencode 1.18.31: a tmux secondmate spawn arms a busy verdict the active-turn gate can see
+# pi 0.86.1: real process stayed up; pane tail classify=unknown launch-prompt
+ok - pi 0.86.1: a tmux secondmate spawn arms a busy verdict the active-turn gate can see
+# skip: pi-signed is not installed on this machine, so its secondmate busy contract is unverified here
+# skip: omp is not installed on this machine, so its secondmate busy contract is unverified here
+ok - grok grok 1.0.40 (eb1a2256660d) [stable]: secondmate spawn stays unarmed and does not emit a parent turn-end
+# skip: codex is not installed on this machine, so its secondmate busy contract is unverified here
+# checked 4 harness(es); absent: pi-signed omp codex
+ok - secondmate busy contract live guard checked every installed harness
+```
+
+Pi's real parked pane classified `unknown launch-prompt`.
+That is the launch-prompt backstop: the same spawn's record classified `busy fm-spawn` for a non-prompt mid-turn tail, which is what the active-turn gate reads while a turn is in progress.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.
@@ -1424,7 +1482,10 @@ ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session
 ```
 
 The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
-One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
+One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention remains a deliberate hard refusal by default rather than a flat fallback, which default-on makes reachable from any Herdr home.
+Callers that need concurrent recoveries to serialize can pass `fm-spawn.sh --herdr-resume-lock-wait`.
+The flag applies to a fresh ship or scout spawn, and the multi-task path forwards it to each per-pair spawn.
+It has no effect on `--relaunch` and `--secondmate`, because those paths take no exact-resume presentation-order lock.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 
 The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
@@ -1653,7 +1714,7 @@ ok - real herdr: a stale registration no longer blocks relaunch, and the endpoin
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, and since 2026-09-10 that registration counts as an agent only while `pane process-info` shows a harness process behind it, so the guard backs the registration with a real process named like a harness (a symlink to `sleep`) and then stops that process, with no real harness launched.
+The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, and since 2026-09-10 that registration counts as an agent only while `pane process-info` shows a harness process behind it, so the guard backs the registration with a real process named like a harness (using `fm_agent_standin` from [`tests/lib.sh`](../../tests/lib.sh)) and then stops that process, with no real harness launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
 For Pi on Herdr 0.9.0, `herdr agent get` reflects whether the agent process remains live; its registration does not persist merely because the pane and parent shell do.
