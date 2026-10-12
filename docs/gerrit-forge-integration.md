@@ -116,7 +116,7 @@ Shape already exists on GitHub, it predates Gerrit entirely, and it is load-bear
 
 - `bin/fm-pr-merge.sh` defaults a GitHub merge to `--squash` when the caller selects no method.
 - `bin/fm-fleet-sync.sh`'s branch pruning reasons about it explicitly, dropping the ancestry check on the grounds that pull requests in this fleet are squash-merged, so a merged branch is never an ancestor and such a check would prune nothing.
-- `bin/fm-teardown.sh`'s landed-work test accepts content present in the default branch precisely because a squash collapses the branch's commits and per-commit patch identities stop matching.
+- `bin/fm-teardown.sh`'s landed-work test accepts content present in the landing branch precisely because a squash collapses the branch's commits and per-commit patch identities stop matching.
 - `bin/fm-ff-lib.sh` reconciles a clean secondmate divergence through a three-way tree proof, as happens after an upstream squash merge.
 
 It appears nowhere in the registry.
@@ -188,7 +188,7 @@ The objection bounds how much weight detection can carry alone, which is the wei
 
 Read the modes as stopping points rather than as artifacts and they line up cleanly:
 
-- `local-only` stops at a ready branch and publishes nothing. Nothing about a forge applies, because no artifact is made: `bin/fm-merge-local.sh` fast-forwards the project's *local* default branch, and the intake guidance already allows a `local-only` project to have no remote at all.
+- `local-only` stops at a ready branch and publishes nothing. Nothing about a forge applies, because no artifact is made: `bin/fm-merge-local.sh` fast-forwards the project's local default branch, and the intake guidance already allows a `local-only` project to have no remote at all.
 - `direct-PR` publishes without the pipeline.
 - `no-mistakes` runs the pipeline, then publishes.
 
@@ -201,7 +201,7 @@ The refusal reads as reasonable only because of the name.
 
 The permission is not merely useless, which is worth being plain about, because an inert annotation in a brief is not inert at landing.
 `local-only`'s configured landing is a guarded fast-forward of the project's local default branch.
-On a project whose changes are supposed to reach a review server, that landing advances local `main` with content the server has never seen, and the annotation that was supposed to record "this is a Gerrit project" is the one thing in the posture that does not get consulted.
+On a project whose changes are supposed to reach a review server, that landing advances the project's local default branch with content the server has never seen, and the annotation that was supposed to record "this is a Gerrit project" is the one thing in the posture that does not get consulted.
 
 ## 4. What Gerrit makes structurally impossible
 
