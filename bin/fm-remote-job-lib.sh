@@ -121,6 +121,7 @@ FM_REMOTE_JOB_STDERR=
 FM_REMOTE_JOB_EXIT=
 FM_REMOTE_JOB_ERROR=
 FM_REMOTE_JOB_REPAIRED=0
+FM_REMOTE_JOB_BOOTSTRAP_OUT=
 
 fm_remote_job_die() {
   printf 'error: %s\n' "$1" >&2
@@ -951,6 +952,59 @@ fm_remote_job_gui_available() { # <uid>
   command -v launchctl >/dev/null 2>&1 && launchctl print "gui/$uid" >/dev/null 2>&1
 }
 
+# launchd can refuse a bootstrap with EIO while the gui domain is still
+# draining the job bootout just removed, which is exactly the window a reload
+# lands in. Wait for the label to leave the domain, then retry only that
+# transient refusal, so a cold host's one automated loader is not defeated by a
+# race the operator never sees when running the same commands by hand.
+# The three tunables exist so tests can drive the retry without real waiting.
+FM_REMOTE_JOB_BOOTSTRAP_SETTLE_TRIES=${FM_REMOTE_JOB_BOOTSTRAP_SETTLE_TRIES:-50}
+FM_REMOTE_JOB_BOOTSTRAP_TRIES=${FM_REMOTE_JOB_BOOTSTRAP_TRIES:-10}
+FM_REMOTE_JOB_BOOTSTRAP_DELAY=${FM_REMOTE_JOB_BOOTSTRAP_DELAY:-0.5}
+
+fm_remote_job_launchctl_settled() { # <uid> <label>
+  local uid=$1 label=$2 i=0
+  while [ "$i" -lt "$FM_REMOTE_JOB_BOOTSTRAP_SETTLE_TRIES" ]; do
+    launchctl print "gui/$uid/$label" >/dev/null 2>&1 || return 0
+    i=$((i + 1))
+    sleep 0.1
+  done
+  return 1
+}
+
+# Bootstrap one label into gui/<uid>, leaving the last diagnostic in
+# FM_REMOTE_JOB_BOOTSTRAP_OUT for the caller's own error wording.
+# Only an EIO refusal in a live gui domain whose label has since drained is
+# retried; a missing login session, an already-loaded service, and every other
+# refusal are permanent and reported on the first attempt.
+fm_remote_job_launchctl_bootstrap() { # <uid> <label> <plist>
+  local uid=$1 label=$2 plist=$3 tries=0 out
+  FM_REMOTE_JOB_BOOTSTRAP_OUT=
+  while :; do
+    if out=$(launchctl bootstrap "gui/$uid" "$plist" 2>&1); then
+      FM_REMOTE_JOB_BOOTSTRAP_OUT=$out
+      return 0
+    fi
+    FM_REMOTE_JOB_BOOTSTRAP_OUT=$out
+    tries=$((tries + 1))
+    [ "$tries" -lt "$FM_REMOTE_JOB_BOOTSTRAP_TRIES" ] || return 1
+    case "$out" in *'Input/output error'*) ;; *) return 1 ;; esac
+    fm_remote_job_gui_available "$uid" || return 1
+    fm_remote_job_launchctl_settled "$uid" "$label" || return 1
+    sleep "$FM_REMOTE_JOB_BOOTSTRAP_DELAY"
+  done
+}
+
+# Boot a label out of gui/<uid>, wait for it to leave the domain, then bootstrap
+# it with the EIO retry above.
+fm_remote_job_launchctl_reload() { # <uid> <label> <plist>
+  local uid=$1 label=$2 plist=$3
+  if launchctl bootout "gui/$uid/$label" >/dev/null 2>&1; then
+    fm_remote_job_launchctl_settled "$uid" "$label" || true
+  fi
+  fm_remote_job_launchctl_bootstrap "$uid" "$label" "$plist"
+}
+
 fm_remote_job_launchagent_loaded() { # <remote-root> <account-home> <uid>
   local root=$1 account_home=$2 uid=$3 worker loaded compact
   fm_remote_job_launchagent_paths "$account_home"
@@ -1364,7 +1418,8 @@ fm_remote_job_reload_launchagent() { # <account-home> <uid>
     i=$((i + 1))
     sleep 0.1
   done
-  if ! out=$(launchctl bootstrap "gui/$uid" "$FM_REMOTE_JOB_LAUNCH_AGENT_PLIST" 2>&1); then
+  if ! fm_remote_job_launchctl_bootstrap "$uid" "$FM_REMOTE_JOB_LABEL" "$FM_REMOTE_JOB_LAUNCH_AGENT_PLIST"; then
+    out=$FM_REMOTE_JOB_BOOTSTRAP_OUT
     FM_REMOTE_JOB_ERROR="launchctl bootstrap gui/$uid refused: ${out:-no diagnostic}"
     return 1
   fi
