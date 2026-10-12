@@ -446,13 +446,13 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
       "$mode brief must require the conflict-free merge check against the PR target"
     assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of the default branch; this is not the actual PR merge; if there are new failures, stop before merging and report them without rollback" "$brief" \
       "$mode brief must block merge on new integration failures without rollback"
-    assert_grep "(iii) merge the PR; (iv) end-to-end test and recalculate the target feature on the actually landed repository default branch tree; (v) if this end-to-end verification fails, revert to the state before the merge and report the failure" "$brief" \
+    assert_grep "(iii) merge the PR; (iv) end-to-end test and recalculate the target feature on the actually landed repository's default branch tree; (v) if this end-to-end verification fails, revert to the state before the merge and report the failure" "$brief" \
       "$mode brief must rollback only after failed landed-tree end-to-end verification"
     if [ "$mode" = direct-PR ]; then
-      assert_grep "done [at=<epoch>]: PR {url} verified on landed repository default branch" "$brief" \
+      assert_grep "done [at=<epoch>]: PR {url} verified on landed repository's default branch" "$brief" \
         "$mode brief must report verification on its actual landing branch"
     else
-      assert_grep "done [at=<epoch>]: PR {url} checks green; post-merge verification passed on landed repository default branch" "$brief" \
+      assert_grep "done [at=<epoch>]: PR {url} checks green; post-merge verification passed on landed repository's default branch" "$brief" \
         "$mode brief must retain checks-green and its actual landing branch"
     fi
     assert_no_grep "if any of the mandatory post-merge steps fails" "$brief" \
@@ -469,10 +469,10 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     assert_grep "do not append a terminal \`done:\` line before merging" "$brief" \
       "$mode brief must forbid the terminal done before the merge"
     if [ "$mode" = direct-PR ]; then
-      assert_grep "done [at=<epoch>]: PR {url} verified on landed repository default branch" "$brief" \
+      assert_grep "done [at=<epoch>]: PR {url} verified on landed repository's default branch" "$brief" \
         "$mode brief must pin the post-verification terminal done shape"
     else
-      assert_grep "done [at=<epoch>]: PR {url} checks green; post-merge verification passed on landed repository default branch" "$brief" \
+      assert_grep "done [at=<epoch>]: PR {url} checks green; post-merge verification passed on landed repository's default branch" "$brief" \
         "$mode brief must keep the checks-green token on the post-verification terminal line so the named-head gate fires"
     fi
     assert_grep "blocked [key=merge-rolled-back] until {ISO8601Z}: PR {url} was merged then reverted after post-merge verification failed - the change is NOT landed; {one-line cause and the post-rollback head}" "$brief" \
