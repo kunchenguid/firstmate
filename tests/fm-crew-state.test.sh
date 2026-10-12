@@ -2112,6 +2112,9 @@ test_terminal_failed_ci_genuine_red_stays_failed() {
   FM_FAKE_CI_LOGS="CI checks running
 checks failed: 1 of 2 checks red
 daemon shutting down"
+  # A merged PR would lift the failed run; keep it open so only the red check speaks.
+  FM_FAKE_PR_STATE=OPEN
+  FM_FAKE_PR_MERGED=false
   local out; out=$(run_crew_state "$d" feat-ci-red)
   assert_contains "$out" "state: failed" "a genuinely red check keeps the run failed"
   assert_not_contains "$out" "state: done" "genuine CI failure must not reclassify to done"
@@ -2127,6 +2130,9 @@ test_terminal_failed_ci_orphan_second_failed_step_stays_failed() {
   FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan_second_failure fm/feat-ci-2fail)"
   FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed
 daemon shutting down"
+  # A merged PR would lift the failed run; keep it open so only the steps speak.
+  FM_FAKE_PR_STATE=OPEN
+  FM_FAKE_PR_MERGED=false
   local out; out=$(run_crew_state "$d" feat-ci-2fail)
   assert_contains "$out" "state: failed" "a second failed step keeps the run failed"
   assert_not_contains "$out" "state: done" "a second failed step must not reclassify to done"
