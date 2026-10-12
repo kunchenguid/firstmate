@@ -473,6 +473,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/opencode-2-plugin-port-scope.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/agy.md",
       "audience": "maintainer-verification"
     },

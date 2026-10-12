@@ -116,7 +116,7 @@ run_ahoy_case() {
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
         OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --pure --format json "$preceding"
+        opencode run --standalone --format json "$preceding"
   ) || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label setup exited $status: $first_out"
   session_id=$(printf '%s\n' "$first_out" | jq -r 'select(.sessionID != null) | .sessionID' | head -1)
@@ -127,7 +127,7 @@ run_ahoy_case() {
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
         OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --pure --format json --session "$session_id" "/ahoy"
+        opencode run --standalone --format json --session "$session_id" "/ahoy"
   ) || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label case exited $status: $second_out"
   assistant_text=$(printf '%s\n' "$second_out" | jq -r 'select(.type == "text") | .part.text' | tail -1)
@@ -145,7 +145,7 @@ run_ahoy_case() {
 
 run_ahoy_transcript_regressions() {
   mkdir -p \
-    "$AHOY_PROJECT/.opencode/plugins" \
+    "$AHOY_PROJECT/.opencode/plugins/lib" \
     "$AHOY_PROJECT/.agents/skills/ahoy" \
     "$AHOY_PROJECT/.agents/skills/bearings" \
     "$AHOY_PROJECT/bin"
@@ -153,6 +153,7 @@ run_ahoy_transcript_regressions() {
   cp "$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     "$ROOT/.opencode/plugins/package.json" \
     "$AHOY_PROJECT/.opencode/plugins/"
+  cp "$ROOT/.opencode/plugins/lib/fm-opencode2.js" "$AHOY_PROJECT/.opencode/plugins/lib/fm-opencode2.js"
   cp \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
@@ -294,6 +295,7 @@ git clone -q "$ROOT" "$PROJECT"
 mkdir -p "$PROJECT/.opencode/plugins/lib"
 cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$PROJECT/.opencode/plugins/fm-primary-watch-arm.js"
 cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$PROJECT/.opencode/plugins/lib/fm-operational-input.js"
+cp "$ROOT/.opencode/plugins/lib/fm-opencode2.js" "$PROJECT/.opencode/plugins/lib/fm-opencode2.js"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
 cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-operational-input.sh"
 chmod +x "$PROJECT/bin/fm-operational-input.sh"
