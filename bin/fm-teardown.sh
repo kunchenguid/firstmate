@@ -184,6 +184,9 @@
 # the return to confirm the slot is still held as in-use. If treehouse is absent or
 # status fails the check is skipped (fails open). If the slot is not in-use the return
 # is skipped with a warning rather than returning an unowned slot (batch-race guard).
+# The destructive scrub for scout and --force teardown also runs only after this
+# check passes, so an unowned slot's scratch content is never destroyed before the
+# return is skipped.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, locks each

@@ -6,6 +6,9 @@
 #      $PROJECTS/<name> instead of treating them as literal paths.
 #   3. fm-teardown: teardown_treehouse_lease_is_ours() skips the treehouse return
 #      and emits a warning when treehouse status does not show the slot in-use.
+#   4. fm-teardown: the destructive worktree scrub (`git clean -ffdq`) runs only
+#      after the lease-ownership check passes, so an unowned slot's scratch
+#      content is never destroyed before the return is skipped.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -219,6 +222,49 @@ SH
   pass "teardown skips treehouse return and warns when slot is not in-use (fix 4)"
 }
 
+# Teardown where treehouse is present but reports the slot NOT in-use, and the
+# worktree carries an untracked scratch file. Before the destructive scrub was
+# moved after the lease-ownership check, --force teardown would run
+# `git clean -ffdq` on the worktree BEFORE discovering the lease wasn't ours,
+# destroying scratch content in a slot the task does not own. The fix skips the
+# scrub entirely when the lease check fails, so the untracked file must survive.
+test_teardown_skips_scrub_when_treehouse_slot_not_in_use() {
+  local case_dir rc
+  case_dir=$(make_teardown_case treehouse-not-in-use-scrub)
+  write_teardown_meta "$case_dir"
+
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "task work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  # Untracked scratch file that only a destructive `git clean -ffdq` would remove.
+  echo "scratch" > "$case_dir/wt/untracked-scratch.txt"
+
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status)
+    # Report a different slot as in-use, not our worktree.
+    printf 'slot 0: in-use /some/other/worktree\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "not-in-use-scrub: teardown should exit 0 when skipping unowned slot (got rc=$rc; stderr: $(cat "$case_dir/stderr"))"
+  [ -f "$case_dir/wt/untracked-scratch.txt" ] \
+    || fail "not-in-use-scrub: destructive scrub ran on a worktree whose lease is not ours (fix regressed)"
+  pass "teardown does not scrub the worktree when the treehouse slot is not in-use (fix 5)"
+}
+
 # Teardown where treehouse status exits 0 but produces empty output (treehouse
 # present but project not pool-managed or no pool info). The function fails open
 # (returns 0) and teardown proceeds to attempt the return, which succeeds.
@@ -299,5 +345,6 @@ test_spawn_no_project_arg_does_not_crash_with_unbound_variable
 test_spawn_bare_project_name_resolves_through_projects_dir
 test_spawn_already_pathed_project_arg_passes_through
 test_teardown_skips_return_when_treehouse_slot_not_in_use
+test_teardown_skips_scrub_when_treehouse_slot_not_in_use
 test_teardown_failopen_when_treehouse_status_has_empty_output
 test_teardown_returns_when_treehouse_slot_is_ours
