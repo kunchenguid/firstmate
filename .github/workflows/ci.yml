@@ -107,10 +107,12 @@ jobs:
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Use a per-job npm global prefix on self-hosted runners
+      - name: Use a per-job npm global prefix and tmux server on self-hosted runners
         if: runner.environment == 'self-hosted'
         run: |
           set -eu
+          mkdir -p "$RUNNER_TEMP/tmux"
+          echo "TMUX_TMPDIR=$RUNNER_TEMP/tmux" >> "$GITHUB_ENV"
           echo "npm_config_prefix=$RUNNER_TEMP/npm" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/npm/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
@@ -163,10 +165,12 @@ jobs:
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Use a per-job npm global prefix on self-hosted runners
+      - name: Use a per-job npm global prefix and tmux server on self-hosted runners
         if: runner.environment == 'self-hosted'
         run: |
           set -eu
+          mkdir -p "$RUNNER_TEMP/tmux"
+          echo "TMUX_TMPDIR=$RUNNER_TEMP/tmux" >> "$GITHUB_ENV"
           echo "npm_config_prefix=$RUNNER_TEMP/npm" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/npm/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
@@ -226,10 +230,12 @@ jobs:
             exit 1
           }
           tmux -V
-      - name: Use a per-job npm global prefix on self-hosted runners
+      - name: Use a per-job npm global prefix and tmux server on self-hosted runners
         if: runner.environment == 'self-hosted'
         run: |
           set -eu
+          mkdir -p "$RUNNER_TEMP/tmux"
+          echo "TMUX_TMPDIR=$RUNNER_TEMP/tmux" >> "$GITHUB_ENV"
           echo "npm_config_prefix=$RUNNER_TEMP/npm" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/npm/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi for backlog-handoff delegation
