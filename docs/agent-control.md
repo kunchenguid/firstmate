@@ -62,7 +62,7 @@ Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm
 The opt-in [`bin/fm-terminal-worker-cleanup.sh`](../bin/fm-terminal-worker-cleanup.sh) composition stops a terminal temporary worker through `exit` before it asks teardown to inspect the artifact.
 A teardown refusal therefore preserves the stopped endpoint's local copy and writes one follow-up record for the next reconciliation rather than forcing or discarding it.
 A later retry reruns the idempotent `exit` and ordinary teardown, while a successful cleanup retires the follow-up with the task record.
-Persistent secondmates and remotely placed secondmates remain outside this local control plane.
+Persistent secondmates stay alive, and remotely placed workers are never controlled from the parent home; their artifacts are preserved with a follow-up.
 
 **`resume` is not a verb.**
 It is not deterministic across the verified adapters: codex, grok, gemini, devin, and commandcode resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
