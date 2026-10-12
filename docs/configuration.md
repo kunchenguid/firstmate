@@ -78,12 +78,14 @@ Each effective `FM_HOME` contains private operational directories.
 - Project and secondmate registries.
 - Captain preferences and optional shared captain preferences.
 - Learnings, backlog, briefs, scout reports, and the optional per-task no-mistakes pipeline-spend ledger.
+- Morning handoffs under `data/goodnight/<UTC entry date>.md`, owned by the [`goodnight` skill](../.agents/skills/goodnight/SKILL.md).
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 
 `state/` holds runtime records:
 
 - Task metadata, append-only status events, and endpoint signals.
 - Watcher and wake-queue coordination, away-mode state, and generated Relay artifacts.
+- The UTC entry-time record `state/.goodnight`, owned by the [`goodnight` skill](../.agents/skills/goodnight/SKILL.md), with presence read by `fm_goodnight_active` in `bin/fm-wake-lib.sh`.
 - Inactive terminal-outcome receipts under `state/terminal-outcomes/`.
 - Enabled extension working namespaces under `state/extensions/`.
 - Parent-side remote ledger copies under `state/secondmate-summary-cache/`.

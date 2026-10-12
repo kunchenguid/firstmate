@@ -2715,6 +2715,30 @@ EOF
   pass "next step delegates watcher ownership to the AFK daemon"
 }
 
+test_goodnight_digest_pointer() {
+  local rec root home fakebin out
+  rec=$(new_world goodnight-digest)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  # Use an older entry date: startup must not substitute today's date.
+  printf '2026-10-08T23:59:00Z\n' > "$home/state/.goodnight"
+  printf 'quiet\n' > "$home/state/.afk"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "morning list: $home/data/goodnight/2026-10-08.md" 'goodnight digest lost entry-date pointer'
+  assert_contains "$out" 'Ask whether to lift the hold with /goodmorning' 'startup did not ask to lift goodnight'
+  assert_contains "$out" 'quiet-mode supervision is active' 'goodnight hid existing quiet posture'
+  [ -f "$home/state/.goodnight" ] || fail 'startup cleared goodnight'
+
+  printf 'bad timestamp\n' > "$home/state/.goodnight"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'active; entry time unreadable' 'malformed goodnight entry silently lifted hold'
+  assert_contains "$out" "$home/data/goodnight/" 'malformed record lost recovery directory'
+  pass 'startup preserves goodnight and prints its entry-date morning pointer alongside quiet mode'
+}
+
 test_next_step_quiet_mode_delegates_to_daemon() {
   local rec root home fakebin out
   rec=$(new_world next-step-quiet)
@@ -3054,6 +3078,7 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_goodnight_digest_pointer
 test_next_step_quiet_mode_delegates_to_daemon
 test_quiet_record_digest_holds_nothing_for_a_return
 test_next_step_afk_legacy_empty_flag_defaults_away

@@ -375,6 +375,14 @@ fm_afk_daemon_owns_supervision() {
   [ "$current" = "$recorded" ]
 }
 
+# fm_goodnight_active <state>
+# Presence means the scheduling hold is active, even for a malformed record
+# or a dangling symlink. The goodnight skill owns the record's contents.
+fm_goodnight_active() {
+  local state=$1
+  [ -e "$state/.goodnight" ] || [ -L "$state/.goodnight" ]
+}
+
 # fm_afk_mode <state>
 # The single owner of reading state/.afk's declared mode. Always prints
 # exactly one of "away" or "quiet" and always succeeds - every caller gets a
