@@ -510,7 +510,8 @@ if [ "$PROVIDER" = forgejo ]; then
     echo "error: merging a Forgejo pull request requires $FORGEJO_MISSING on PATH" >&2
     exit 1
   fi
-  FORGEJO_LOGIN=$(fm_pr_forgejo_login "$PR_HOST") || {
+  case "$URL" in http://*) F_SCHEME=http ;; *) F_SCHEME=https ;; esac
+  FORGEJO_LOGIN=$(fm_pr_forgejo_login "$PR_HOST" "$F_SCHEME") || {
     echo "error: merging a Forgejo pull request at $PR_HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
     exit 1
   }
