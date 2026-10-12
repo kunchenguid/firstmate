@@ -41,6 +41,26 @@
 #          check; repair still happens, but inside fm-spawn's launch gate only
 #          when a relaunch is actually authorized.
 #
+# Every remote call this probe makes is bounded by wall clock in both modes,
+# not only by SSH connect time: FM_SECONDMATE_PROBE_TIMEOUT seconds (default
+# 30; zero or invalid values use 30) bounds the `state` call, the full-mode
+# `route` call, and each readiness run fm_remote_readiness_ensure makes in full
+# mode (a readiness run abandoned at the bound returns 255, unknown, never the
+# 1 that would declare a slow host unready). A host that accepts the connection
+# and then hangs inside the remote command answers SSH keepalives forever, so
+# an unbounded call would stop the watcher beating while it holds its lock, or
+# hang session start. At the bound the call's whole process group (ssh and any
+# ProxyCommand child) is killed, whatever it printed before the bound is
+# discarded unread, and the verdict is `skipped` with the route preserved,
+# exactly like an unreachable host: an abandoned call is never evidence of
+# death, drift, liveness, or readiness. The same bound covers the watcher's other
+# remote probe, fm_pending_reply_tick's `observe` call in
+# bin/fm-pending-reply-lib.sh. The bound is fm_exec_timed's, not
+# fm_run_timed's, because its watchdog also reaps the probe when the prober is
+# stopped mid-probe, even by a TERM to its whole process group. bin/fm-on.sh
+# stays unbounded for routed commands by design; only this probe, which
+# supervision waits on, is bounded.
+#
 # Concurrency: fm_secondmate_liveness_lock serializes probe+kill+relaunch per
 # task across the bootstrap sweep and the watcher tick, so a concurrent
 # relaunch can never be observed mid-flight as a dead endpoint and killed.
@@ -58,6 +78,12 @@ FM_SM_LIVE_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$FM_SM_LIVE_LIB_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$FM_SM_LIVE_LIB_DIR/fm-timeout-lib.sh"
+
+# ponytail: the watcher tick probes mates one after another, so N hung hosts
+# cost N x this bound per tick; probe in parallel if a fleet's remote mates
+# ever approach FM_WATCHER_STALE_GRACE / FM_SECONDMATE_PROBE_TIMEOUT.
+FM_SECONDMATE_PROBE_TIMEOUT=${FM_SECONDMATE_PROBE_TIMEOUT:-}
+case "$FM_SECONDMATE_PROBE_TIMEOUT" in ''|0*|*[!0-9]*) FM_SECONDMATE_PROBE_TIMEOUT=30 ;; esac
 
 # Per-task probe+kill+relaunch serialization. A busy lock means another
 # supervisor (the other sweep, or a racing tick) is mid-episode on this mate;
@@ -141,7 +167,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   if [ -n "$remote_host" ]; then
     if [ "$mode" = full ]; then
       remote_rc=0
-      fm_remote_readiness_ensure "$FM_SM_LIVE_LIB_DIR" "$id" || remote_rc=$?
+      fm_remote_readiness_ensure "$FM_SM_LIVE_LIB_DIR" "$id" "$FM_SECONDMATE_PROBE_TIMEOUT" || remote_rc=$?
       if [ "$remote_rc" -eq 255 ]; then
         FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
         return 0
@@ -155,10 +181,15 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
         return 0
       fi
     fi
-    if out=$("$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+    if out=$(fm_exec_timed "$FM_SECONDMATE_PROBE_TIMEOUT" 1 \
+      "$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
       remote_rc=0
     else
       remote_rc=$?
+    fi
+    if fm_timed_out "$remote_rc"; then
+      FM_SM_LIVE_REASON="remote state probe exceeded its ${FM_SECONDMATE_PROBE_TIMEOUT}s bound; endpoint state unknown; route preserved on $remote_host"
+      return 0
     fi
     if [ "$remote_rc" -eq 255 ]; then
       FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
@@ -173,10 +204,15 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
     case "$agent_state" in
       alive)
         if [ "$mode" = full ]; then
-          if route_out=$("$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
+          if route_out=$(fm_exec_timed "$FM_SECONDMATE_PROBE_TIMEOUT" 1 \
+            "$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
             remote_rc=0
           else
             remote_rc=$?
+          fi
+          if fm_timed_out "$remote_rc"; then
+            FM_SM_LIVE_REASON="remote route probe exceeded its ${FM_SECONDMATE_PROBE_TIMEOUT}s bound; endpoint route unknown; route preserved on $remote_host"
+            return 0
           fi
           if [ "$remote_rc" -eq 255 ]; then
             FM_SM_LIVE_REASON="remote host unavailable or endpoint route unknown; route preserved on $remote_host"

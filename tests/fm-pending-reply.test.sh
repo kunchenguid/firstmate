@@ -1652,6 +1652,74 @@ test_remote_repost_waits_for_the_reply_channel() {
   pass "a remote repost waits for the reply channel and still fires on a real miss"
 }
 
+# The watcher tick observes a remote mate over the same ssh transport the
+# liveness probe uses, so it carries the same wall-clock bound: a host that
+# accepts the connection and then hangs inside the remote command answers SSH
+# keepalives forever, and an unbounded observation would stop the watcher
+# beating while it holds the home lock. The fake ssh never returns on its own
+# and holds a child standing in for a ProxyCommand hop; both pids are recorded
+# so the test can prove the abandoned observation left nothing behind. Before
+# hanging it prints a partial observation - `busy`, then `idle` - that would
+# record turn evidence if it were read, so the test fails if an abandoned
+# call's truncated output is ever accepted instead of reading as unknown.
+test_remote_observation_is_bounded_and_reaped() {
+  local home state corr rec fb partial started elapsed leaked ssh_pid child_pid p
+  home=$(setup_parent remote-observe-hung)
+  state="$home/state"
+  fb="$home/fakebin"
+  mkdir -p "$fb" "$home/data"
+  cat > "$fb/ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_PARTIAL:-}" ] || printf '%s\n' "$FM_FAKE_PARTIAL"
+sleep 60 &
+printf '%s %s\n' "$$" "$!" >> "${FM_FAKE_SSH_PIDS:?}"
+wait
+SH
+  chmod +x "$fb/ssh"
+  : > "$home/ssh.pids"
+  cat > "$home/data/secondmates.md" <<'EOF'
+- ios - Remote mate (host: remote-mac; root: /remote/root; home: /remote/ios-home; scope: remote work; projects: alpha; added 2026-01-01)
+EOF
+  export FM_PENDING_REPLY_NOW=7000
+  fm_write_meta "$state/ios.meta" \
+    "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+  corr=$(fm_pending_reply_create "$home" "$state" "ios" "status of the iOS build")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  for partial in busy idle; do
+    started=$(date +%s)
+    (
+      export FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_SSH_BIN="$fb/ssh" \
+        FM_FAKE_SSH_PIDS="$home/ssh.pids" FM_FAKE_PARTIAL="$partial" FM_SECONDMATE_PROBE_TIMEOUT=2
+      fm_pending_reply_tick "$state"
+    ) || fail "the watcher tick must return from a hung remote observation"
+    elapsed=$(( $(date +%s) - started ))
+    [ -s "$home/ssh.pids" ] || fail "the tick never reached its remote observation"
+    [ "$elapsed" -lt 20 ] || fail "a hung remote observation was not abandoned near its 2s bound (${elapsed}s)"
+    [ "$(phase_of "$state" "$corr")" != resolved ] \
+      || fail "an abandoned observation must never resolve the expectation"
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 0 ] \
+      || fail "a partial '$partial' from an abandoned observation was recorded as busy evidence"
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "a partial '$partial' from an abandoned observation completed the request turn"
+  done
+
+  sleep 2
+  leaked=
+  while read -r ssh_pid child_pid; do
+    for p in "$ssh_pid" "$child_pid"; do
+      ! kill -0 "$p" 2>/dev/null || leaked="$leaked $p"
+    done
+  done < "$home/ssh.pids"
+  # shellcheck disable=SC2086 # Deliberate word splitting over the pid list.
+  [ -z "$leaked" ] || kill -KILL $leaked 2>/dev/null || true
+  [ -z "$leaked" ] || fail "an abandoned remote observation left ssh processes running:$leaked"
+  pass "a hung remote observation is abandoned as unknown, reaped, and the tick returns"
+}
+
 test_mirrored_remote_reply_never_triggers_a_repost() {
   local home state corr hook_log
   home=$(setup_parent remote-mirrored-reply)
@@ -2142,6 +2210,7 @@ test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
 test_remote_repost_waits_for_the_reply_channel
+test_remote_observation_is_bounded_and_reaped
 test_mirrored_remote_reply_never_triggers_a_repost
 test_same_basename_self_home_corr_resolves_on_tick
 test_same_basename_reply_resolves_after_recovery_failure
