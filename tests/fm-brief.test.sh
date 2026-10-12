@@ -444,10 +444,10 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
       "$mode brief must require asking, not guessing, when merge authority is unclear"
     assert_grep "(i) verify in a disposable worktree that the branch merges without conflicts into the default branch" "$brief" \
       "$mode brief must require the conflict-free merge check against the PR target"
-    assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of the default branch; this is not the actual PR merge, and a failure here does not trigger rollback" "$brief" \
-      "$mode brief must test integration baseline without treating it as a landed merge"
+    assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of the default branch; this is not the actual PR merge; if there are new failures, stop before merging and report them without rollback" "$brief" \
+      "$mode brief must block merge on new integration failures without rollback"
     assert_grep "(iii) merge the PR; (iv) end-to-end test and recalculate the target feature on the actually landed main tree; (v) if this end-to-end verification fails, revert to the state before the merge and report the failure" "$brief" \
-      "$mode brief must test landed behavior and rollback only on that failure"
+      "$mode brief must rollback only after failed landed-tree end-to-end verification"
     assert_no_grep "if any of the mandatory post-merge steps fails" "$brief" \
       "$mode brief must not rollback on full-suite integration failure"
     assert_grep "report the PR and stop there, awaiting authorization" "$brief" \
@@ -496,8 +496,8 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     base_brief="$home/data/$id/brief.md"
     assert_grep "(i) verify in a disposable worktree that the branch merges without conflicts into the branch this PR targets (its base branch \`release/x\`)" "$base_brief" \
       "$mode brief must merge-check against the PR's base branch"
-    assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of that same base branch" "$base_brief" \
-      "$mode brief must baseline against the PR's base branch"
+    assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of that same base branch; this is not the actual PR merge; if there are new failures, stop before merging and report them without rollback" "$base_brief" \
+      "$mode brief must block merge on new failures against the PR base without rollback"
   done
 
   for kind in scout secondmate; do
