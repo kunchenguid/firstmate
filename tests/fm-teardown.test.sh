@@ -1614,7 +1614,9 @@ seed_pool_slot_under_root() {  # <case-dir> <root> <slot> [<branch>] [<state-ext
 # A secondmate retirement case whose home owns a per-home pool root holding one
 # slot: the task-x1 secondmate home at $CASE/secondmate-home with no children,
 # the slot <slot> under $CASE/treehouse-base/.fm-pools/task-x1, the logging
-# treehouse, and a case-local main home at $CASE/fm-home. Prints the case dir.
+# treehouse, a tmux that records every invocation in $CASE/tmux.log so the
+# secondmate window's close is observable, and a case-local main home at
+# $CASE/fm-home. Prints the case dir.
 make_secondmate_pool_root_case() {  # <name> <slot> [<state-extra>]
   local name=$1 slot=$2 state_extra=${3:-} case_dir home
   case_dir=$(make_case "$name")
@@ -1625,13 +1627,21 @@ make_secondmate_pool_root_case() {  # <name> <slot> [<state-extra>]
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   seed_pool_slot_under_root "$case_dir" "$case_dir/treehouse-base/.fm-pools/task-x1" "$slot" "" "$state_extra" >/dev/null
   add_treehouse_logging "$case_dir"
+  : > "$case_dir/tmux.log"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tmux.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
   make_case_main_home "$case_dir" >/dev/null
   printf '%s\n' "$case_dir"
 }
 
 # Run the forced retirement of a make_secondmate_pool_root_case and assert it
-# refused with <reason> for slot <slot>, leaving the slot, its pool root, the
-# home, and the task record exactly in place.
+# refused with <reason> for slot <slot> before closing anything: the slot, its
+# pool root, the home, the task record, and the secondmate's own window (no
+# kill ever reached tmux) all stay exactly in place.
 expect_pool_root_retirement_refused() {  # <case-dir> <slot> <reason>
   local case_dir=$1 slot=$2 reason=$3 rc=0 label pool
   label=$(basename "$case_dir")
@@ -1648,6 +1658,8 @@ expect_pool_root_retirement_refused() {  # <case-dir> <slot> <reason>
   assert_present "$case_dir/state/task-x1.meta" "$label: the task record was removed despite the refusal"
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "$label: the refusal ran treehouse; calls:"$'\n'"$(cat "$case_dir/treehouse.log")"
+  assert_no_grep "kill-window" "$case_dir/tmux.log" \
+    "$label: the secondmate window was closed before the held slot refused; tmux calls:"$'\n'"$(cat "$case_dir/tmux.log")"
 }
 
 # A child slot of a secondmate home was acquired under that home's own Treehouse
@@ -1802,6 +1814,8 @@ test_secondmate_retirement_removes_the_pool_root_without_reaching_origin() {
   assert_absent "$case_dir/state/task-x1.meta" "secondmate-pool-root-offline: task record was not removed"
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "secondmate-pool-root-offline: retirement ran treehouse; calls:"$'\n'"$(cat "$case_dir/treehouse.log")"
+  assert_grep "kill-window" "$case_dir/tmux.log" \
+    "secondmate-pool-root-offline: the secondmate window was never closed, so the refusal cases' no-close assertion proves nothing; tmux calls:"$'\n'"$(cat "$case_dir/tmux.log")"
   pass "secondmate retirement removes the per-home pool root from local state alone, origin unreachable"
 }
 

@@ -439,7 +439,7 @@ A slot already held under such a root is returned to the pool that holds it: `fm
 Operator `treehouse status` or `treehouse prune` calls inside a secondmate home need the same `--root` to see that home's pools.
 A secondmate home whose identity marker cannot be read, or whose base (`TREEHOUSE_ROOT`, else `HOME`) is not an absolute path, refuses spawn and teardown rather than falling back to the shared pool.
 Retiring a secondmate home also retires its per-home root once every child slot has been returned, since every slot there is a linked worktree of the home's own clone: the home is removed first and the root directory is then removed directly, without contacting the origin.
-Before that, retirement reads local state only: a slot still claimed by a task, or recorded as leased or in use in the pool's `treehouse-state.json`, keeps the root and the home in place and is named in the refusal with that reason; `--force` does not override it.
+Before the secondmate's own window is closed or any of its records removed, retirement reads local state only: a slot still claimed by a task, or recorded as leased or in use in the pool's `treehouse-state.json`, refuses, leaving the secondmate running with its home, route, and records intact, and names the slot and that reason; `--force` does not override it.
 The exact derivation is owned by `fm_treehouse_home_pool_root` and `fm_treehouse_return_root` in [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh).
 
 ### Backend selection order

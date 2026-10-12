@@ -2761,13 +2761,16 @@ remove_firstmate_home() {
 # the root right after the home, from local state alone: it never contacts the
 # origin, so being offline cannot block it.
 #
-# firstmate_home_pool_root_retirable runs before the home is removed and prints
-# the root (empty when the home has none or is already gone). It refuses while
-# any slot is still held - a Firstmate ownership claim beside the checkout, or
-# a treehouse-state.json entry that is leased or in use - naming the slot and
-# that exact reason. It runs only once every child slot has been returned, so a
-# refusal protects a slot some live owner still holds and discards no unlanded
-# work. remove_firstmate_home_pool_root then deletes the root once the home is
+# firstmate_home_pool_root_retirable is a preflight: it runs once every child
+# slot has been returned but before the home's own endpoint is closed or any of
+# its records removed, so a refusal leaves the secondmate running with its home,
+# route, and records intact rather than registered without a supervisor. It
+# prints the root (empty when the home has none or is already gone) and refuses
+# while any slot is still held - a Firstmate ownership claim beside the
+# checkout, or a treehouse-state.json entry that is leased or in use - naming
+# the slot and that exact reason; running after the child returns means it
+# protects a slot some live owner still holds and discards no unlanded work.
+# remove_firstmate_home_pool_root then deletes the root once the home is
 # gone; the clone every slot belonged to went with the home, so git worktree
 # deregistration is moot, and a failed removal is reported rather than undoing
 # a retirement that already happened.
@@ -3369,6 +3372,16 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
+    child_home=
+    child_home_pool_root=
+    if [ "$child_kind" = secondmate ]; then
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+        cleanup_firstmate_home_children "$child_home" || return $?
+        child_home_pool_root=$(firstmate_home_pool_root_retirable "$child_home" "child firstmate home") || return 1
+      fi
+    fi
     if [ -n "$child_t" ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
@@ -3392,11 +3405,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     if [ "$child_kind" = secondmate ]; then
-      child_home=$(meta_value "$child_meta" home)
-      [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home" || return $?
-        child_home_pool_root=$(firstmate_home_pool_root_retirable "$child_home" "child firstmate home") || return 1
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
         remove_firstmate_home_pool_root "$child_home_pool_root" "child firstmate home $child_home"
       fi
@@ -3530,6 +3539,10 @@ fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
+fi
+HOME_POOL_ROOT=
+if [ "$KIND" = secondmate ]; then
+  HOME_POOL_ROOT=$(firstmate_home_pool_root_retirable "$HOME_PATH" "secondmate home") || exit 1
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
@@ -3891,13 +3904,12 @@ if [ "$KIND" != secondmate ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  home_pool_root=$(firstmate_home_pool_root_retirable "$HOME_PATH" "secondmate home") || exit 1
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
     || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
   if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"; then
-    remove_firstmate_home_pool_root "$home_pool_root" "secondmate home $HOME_PATH"
+    remove_firstmate_home_pool_root "$HOME_POOL_ROOT" "secondmate home $HOME_PATH"
   else
     rc=$?
     handoff_wake_retire_stage_restore \
