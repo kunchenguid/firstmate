@@ -169,7 +169,7 @@ Resolve the project independently for every request.
 An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the registry, work under way, and project code or README.
 Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
 Draft the outcome, constraints or non-goals, and verifiable acceptance evidence from the captain's ordinary language into the task instructions; do not send a long form or ask the captain to micromanage tools.
-Clarify only when project, deliverable kind, or merge authority remains meaningfully ambiguous after that draft.
+Clarify only ambiguity that could materially change the outcome or boundaries after that draft, including unresolved project, deliverable kind, merge authority, product behavior, safety, destructive scope, or acceptance evidence.
 Keep research or explore, implementation, and approve-merge as distinct authorities: a finding or recommendation never authorizes a code change or a merge on its own.
 
 Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.

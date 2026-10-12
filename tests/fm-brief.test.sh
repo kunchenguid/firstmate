@@ -1130,7 +1130,7 @@ test_scout_and_secondmate_scaffold() {
 # ordinary delivery mode, including forge variants, without inventing a web
 # preview obligation for CLI-only work.
 test_ship_review_evidence_contract() {
-  local home mode forge brief id
+  local home mode forge brief id destination
   home="$TMP_ROOT/review-evidence-home"
   mkdir -p "$home/data"
   for mode in no-mistakes direct-PR local-only; do
@@ -1144,8 +1144,18 @@ test_ship_review_evidence_contract() {
       "$mode: missing web/UI preview evidence rule"
     assert_grep "exact executable proof commands" "$brief" \
       "$mode: missing CLI-only proof rule"
-    assert_grep "Merged is not the same as deployed or live" "$brief" \
-      "$mode: missing merged-versus-live distinction"
+    destination='the PR'
+    [ "$mode" = local-only ] && destination='the local ready note'
+    assert_grep "reachable preview of the final head in $destination" "$brief" \
+      "$mode: web/UI evidence names the wrong delivery artifact"
+    assert_grep "proof commands in $destination" "$brief" \
+      "$mode: CLI evidence names the wrong delivery artifact"
+    if [ "$mode" = local-only ]; then
+      assert_no_grep "preview of the final head in the PR" "$brief" \
+        "$mode: web/UI evidence must not require a PR"
+      assert_no_grep "proof commands in the PR" "$brief" \
+        "$mode: CLI evidence must not require a PR"
+    fi
   done
   for forge in gerrit forgejo; do
     id="brief-review-nm-$forge"
@@ -1155,7 +1165,31 @@ test_ship_review_evidence_contract() {
     assert_grep "# Review evidence" "$brief" "no-mistakes forge=$forge: missing Review evidence section"
     assert_grep "exact executable proof commands" "$brief" \
       "no-mistakes forge=$forge: missing CLI-only proof rule"
+    destination='the PR'
+    [ "$forge" = gerrit ] && destination='the Gerrit change description or ready report'
+    assert_grep "reachable preview of the final head in $destination" "$brief" \
+      "no-mistakes forge=$forge: web/UI evidence names the wrong delivery artifact"
+    assert_grep "proof commands in $destination" "$brief" \
+      "no-mistakes forge=$forge: CLI evidence names the wrong delivery artifact"
+    if [ "$forge" = gerrit ]; then
+      assert_no_grep "preview of the final head in the PR" "$brief" \
+        "no-mistakes forge=$forge: web/UI evidence must not require a PR"
+      assert_no_grep "proof commands in the PR" "$brief" \
+        "no-mistakes forge=$forge: CLI evidence must not require a PR"
+    fi
   done
+  id='brief-review-direct-gerrit'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --forge gerrit >/dev/null 2>&1 \
+    || fail "fm-brief.sh direct-PR forge=gerrit scaffold exited non-zero"
+  brief="$home/data/$id/brief.md"
+  assert_grep "reachable preview of the final head in the Gerrit change description or ready report" "$brief" \
+    "direct-PR forge=gerrit: web/UI evidence names the wrong delivery artifact"
+  assert_grep "proof commands in the Gerrit change description or ready report" "$brief" \
+    "direct-PR forge=gerrit: CLI evidence names the wrong delivery artifact"
+  assert_no_grep "preview of the final head in the PR" "$brief" \
+    "direct-PR forge=gerrit: web/UI evidence must not require a PR"
+  assert_no_grep "proof commands in the PR" "$brief" \
+    "direct-PR forge=gerrit: CLI evidence must not require a PR"
   pass "fm-brief: ship modes preserve the shared review-evidence contract"
 }
 

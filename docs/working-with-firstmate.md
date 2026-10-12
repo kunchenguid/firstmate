@@ -6,7 +6,7 @@ Agent runtime contracts stay in [`AGENTS.md`](../AGENTS.md); this page is the ca
 
 ## Minimum viable ask
 
-Lead with these four when you can; Firstmate fills the rest and asks one clarifying question only when project, deliverable kind, or merge authority stays meaningfully ambiguous.
+Lead with these four when you can; Firstmate fills the rest and asks one clarifying question only when ambiguity could materially change the outcome or boundaries.
 
 ```text
 OUTCOME: What should be true when this is done? (one sentence)

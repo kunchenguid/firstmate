@@ -12,8 +12,8 @@
 # contract.
 # After every successful mode body, fm_review_evidence_block appends the shared
 # review-evidence contract: web or UI work needs a reachable preview of the final
-# head plus meaningful browser flows; CLI-only work needs executable proof, never
-# a fabricated web preview; merged is distinct from deployed or live.
+# head plus meaningful browser flows, and CLI-only work needs executable proof,
+# never a fabricated web preview. Both use the mode's actual review destination.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -415,18 +415,18 @@ EOF
 # Shared ship review-evidence contract appended by fm_dod_block after every mode.
 # One owner so ordinary ship briefs and promoted scouts keep the same evidence bar.
 fm_review_evidence_block() {
-  cat <<'EOF'
+  local destination=$1
+  cat <<EOF
 # Review evidence
 Match the evidence form to the surface you changed.
-For web or UI work, put a task-specific reachable preview of the final head in the PR (or ready note for local-only), and name the meaningful browser flows a reviewer should exercise.
-For CLI-only or instruction-only work, put exact executable proof commands in the PR instead of inventing a web preview.
-Merged is not the same as deployed or live: after landing, use the project's existing provider verification when it is available, and say the live result is unconfirmed when that evidence cannot be read.
+For web or UI work, put a task-specific reachable preview of the final head in $destination, and name the meaningful browser flows a reviewer should exercise.
+For CLI-only or instruction-only work, put exact executable proof commands in $destination instead of inventing a web preview.
 EOF
 }
 
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check
+  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check review_destination
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   if [ -n "$consent" ]; then
@@ -436,6 +436,11 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
     fi
     contract_consent=" upstream-consent=$consent"
   fi
+  case "$mode:$forge" in
+    *:gerrit) review_destination='the Gerrit change description or ready report' ;;
+    local-only:*) review_destination='the local ready note' ;;
+    *) review_destination='the PR' ;;
+  esac
   draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
   if [ "$forge" = forgejo ]; then
     contract_forge=' forge=forgejo'
@@ -551,7 +556,7 @@ EOF
       return 1 ;;
   esac
   printf '\n'
-  fm_review_evidence_block
+  fm_review_evidence_block "$review_destination"
 }
 
 # 0 when <sha> is contained in a ref under <namespace> in <repo>.
