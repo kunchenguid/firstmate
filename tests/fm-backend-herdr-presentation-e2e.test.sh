@@ -1513,8 +1513,8 @@ assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
 pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
 
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
-# The duplicate case allows flat fallback only when every matching pane is
-# positively agent-free.
+# The duplicate case permits non-projecting dedicated-worker recovery only
+# when every matching pane is positively agent-free.
 # shellcheck source=/dev/null
 . "$ROOT/bin/backends/herdr.sh"
 

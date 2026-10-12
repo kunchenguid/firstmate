@@ -11,6 +11,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 CODE_ROOT=${FM_WORKER_PLACEMENT_CODE_ROOT:-$ROOT}
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 LAB_HOME_HELPER=${LAB_HOME_HELPER:-$ROOT/bin/fm-lab-home.sh}
+HERDR_LAB_HELPER=$(cd "$(dirname "$HERDR_LAB_HELPER")" && pwd -P)/$(basename "$HERDR_LAB_HELPER")
 command -v herdr >/dev/null || { echo 'skip: herdr not found'; exit 0; }
 command -v jq >/dev/null || { echo 'skip: jq not found'; exit 0; }
 # shellcheck source=tests/herdr-test-safety.sh

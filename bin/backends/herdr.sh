@@ -2809,9 +2809,10 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
 # fm_backend_herdr_projection_reclaim_task: replace one exact agent-free
 # restored projection husk inside its original workspace.
 # The caller holds the session presentation lock and has already established
-# that flat fallback is safe across every token match.
+# that a dedicated-worker recovery cannot duplicate an agent across token
+# matches.
 # Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
-# refusal with flat fallback permitted, and 1 means a live/unknown or
+# refusal with dedicated-worker recovery permitted, and 1 means a live/unknown or
 # post-mutation uncertainty that must refuse the launch.
 fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
@@ -2959,8 +2960,8 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
 # fm_backend_herdr_projection_recovery_allows_flat: inspect an existing
 # journal's exact token matches without adopting, reusing, renaming, closing,
 # or deleting anything.
-# Missing matches safely degrade to the normal flat workspace.
-# One or more matches allow flat fallback only when every pane is positively
+# Missing matches preserve the option to create a dedicated worker workspace.
+# One or more matches permit that recovery only when every pane is positively
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
 fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id>
   local session=$1 journal=$2 id=$3 token list wsids count wsid panes pane_ids pane state

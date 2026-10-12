@@ -1457,10 +1457,10 @@ trap spawn_abort_cleanup EXIT
 # is required so secondmate and primary spawns serialize against the same
 # session without writing any other home's state directory.
 #
-# Default mode is one BOUNDED attempt. A clean create uses that default and
-# falls back to the ordinary flat layout on contention. An exact resume also
-# defaults to the bounded attempt and hard-refuses on contention (it does not
-# degrade flat). Passing mode `wait` makes this call WAIT for the lock instead
+# Default mode is one BOUNDED attempt. A clean create refuses on contention
+# rather than placing a worker in its parent's workspace. An exact resume also
+# defaults to the bounded attempt and hard-refuses on contention. Passing mode
+# `wait` makes this call WAIT for the lock instead
 # (`fm_lock_acquire_wait`, the same unbounded-wait idiom this file already uses
 # for its other fleet-shared locks). Only the recovery path under the explicit
 # --herdr-resume-lock-wait opt-in passes `wait`, so unbounded blocking on a
@@ -3559,7 +3559,8 @@ herdr_projection_meta_field_exact() { # <meta> <key>
 
 # A stale presentation journal never grants launch authority.
 # Under the session lock, authoritative metadata must identify one positively
-# dead or agent-free endpoint before token inspection may allow flat fallback.
+# dead or agent-free endpoint before token inspection may permit dedicated
+# worker recovery.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() { # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane

@@ -1689,8 +1689,8 @@ test_presentation_unrecognized_value_warns_and_keeps_the_default() {
   [ "$verdict" = on ] || fail "an unrecognized value at the floor must keep the default on, got '$verdict'"
   assert_contains "$(cat "$stderr")" 'unrecognized value' \
     "an unrecognized value must warn so a typo is visible"
-  # A typo is not a deliberate opt-in, so below the floor it takes the default's
-  # flat fallback rather than forcing a focus-unsafe projection.
+  # A typo is not a deliberate opt-in, so below the floor it disables automatic
+  # grouping rather than forcing a focus-unsafe projection.
   fb=$(make_release_fakebin "$dir" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
   verdict=$(presentation_enabled_verdict "$config" "$fb" 2>"$stderr")
   [ "$verdict" = off ] || fail "an unrecognized value below the floor must follow the default, got '$verdict'"

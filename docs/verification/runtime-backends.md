@@ -1435,25 +1435,7 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 The current dedicated-worker placement proof is recorded above; this older suite retains coverage of secondmate home isolation, legacy container discovery, and exact cleanup without scanning other homes.
 
-The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
-
-```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-```
-
-Observed guarantees included:
-
-```text
-ok - real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block
-ok - real Herdr lab: concurrent primary/A/B spawns stay session-locked with zero focus drift
-ok - real Herdr lab: session lock contention from a secondmate home falls back flat with no journal
-ok - real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated
-ok - real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority
-ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session tripwire intact
-```
-
-The suite also covers lost or failed move responses, restart husks, missing and duplicate tokens, manual renames, concurrent cleanup, and exact focus restoration.
+The current placement proof above supersedes the pre-dedicated-worker projection run from 2026-07-21.
 
 The mandatory projection suite ran again on 2026-07-24 against Herdr 0.7.5 protocol 16:
 
@@ -1489,7 +1471,7 @@ ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session
 ```
 
 The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
-One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention remains a deliberate hard refusal by default rather than a flat fallback, which default-on makes reachable from any Herdr home.
+One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention remains a deliberate hard refusal by default rather than a shared-parent placement, which default-on makes reachable from any Herdr home.
 Callers that need concurrent recoveries to serialize can pass `fm-spawn.sh --herdr-resume-lock-wait`.
 The flag applies to a fresh ship or scout spawn, and the multi-task path forwards it to each per-pair spawn.
 It has no effect on `--relaunch` and `--secondmate`, because those paths take no exact-resume presentation-order lock.
@@ -1513,7 +1495,7 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-focus-flash-e2e.test.sh
 ```
 
-Observed output on Herdr 0.7.5:
+Focus-related output on Herdr 0.7.5:
 
 ```text
 ok - old path: the explicit last-pane close of a non-focused workspace stole focus (w3	w3:t1 -> w2	w2:t1)
@@ -1522,7 +1504,6 @@ ok - mitigation: no explicit close and no corrective focus were needed on the de
 ok - fallback: a doomed pane holding a persistent child exhausts the proof and takes the plain explicit close
 ok - fallback on a defective release: a bounded wrong-focus window of 4 samples was fully restored to the anchor
 ok - version floor: herdr 0.7.5 protocol 17 remains conservatively below the floor with steal_live=1
-ok - version floor: an unconfigured home falls back flat on herdr 0.7.5 and the explicit opt-in still projects
 evidence: herdr=0.7.5 protocol=17 steal_live=1 floor_verdict=1 default-session-tripwire=armed
 ```
 
@@ -1609,7 +1590,7 @@ The classifier itself, the config preference it composes with, and the one-warni
 tests/fm-backend-herdr.test.sh
 ```
 
-Observed guarantees: every measured release classifies as the table records; either the protocol or the version signal alone carries an at-or-above verdict, and each divergent pair flips once the carrying signal is removed; client and running selected-session server verdicts compose conservatively, an unreadable server-running state and losing both release signals report indeterminate and fall back flat, the default is rechecked after server ensure before projection publication, an unconfigured home is projected only at or above the floor, an explicit `on`, including the historical empty opt-in file, is honored below it, and the below-floor warning is emitted once per home per detected release rather than once per spawn.
+Observed guarantees: every measured release classifies as the table records; either the protocol or the version signal alone carries an at-or-above verdict, and each divergent pair flips once the carrying signal is removed; client and running selected-session server verdicts compose conservatively, and an unreadable server-running state or loss of both release signals disables automatic grouping rather than guessing. The default is rechecked after server ensure before projection publication, an unconfigured home is projected only at or above the floor, an explicit `on`, including the historical empty opt-in file, is honored below it, and the below-floor warning is emitted once per home per detected release rather than once per spawn. The worker-placement contract above separately refuses an unsafe dedicated-worker creation instead of using a shared parent.
 
 The whole real-Herdr lane was run on 2026-08-05 against both the CI-pinned Herdr 0.7.4 protocol 16, which is below the floor, and Herdr 0.8.0 protocol 19, which is at it:
 
@@ -1618,12 +1599,7 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh bin/fm-test-run.sh --lane real-herdr-gated
 ```
 
 Both runs reported `family=real-herdr-gated count=11 failed=0`.
-The projection suite's unconfigured-home case is release-aware rather than pinned to one outcome, so it proves the projected default on 0.8.0 and the flat fallback with its naming warning on 0.7.4:
-
-```text
-ok - real Herdr lab: a home that configured nothing is projected by default on herdr 0.8.0
-ok - real Herdr lab: a home that configured nothing falls back flat on below-floor herdr 0.7.4 with one naming warning
-```
+That historical projection-selection run predates dedicated-worker placement and establishes release-floor classification and focus evidence only.
 
 Every other case in that suite uses an explicit opt-in or opt-out, so the floor leaves them unchanged on both releases.
 
