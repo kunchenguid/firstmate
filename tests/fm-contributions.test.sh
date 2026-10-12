@@ -329,10 +329,12 @@ quiet_checkpoint_clock() {
   mkdir -p "$home/quietbin"
   cat > "$home/quietbin/timeout" <<SH
 #!/usr/bin/env bash
-case "\${2:-}" in */fm-watch.sh) ;; *) exec $(printf '%q' "$real") "\$@" ;; esac
-seconds=\$1
-shift
-sh -c 'printf "%s\n" "\$\$" > "\$FORGE/quiet-watcher"; exec "\$@"' sh $(printf '%q' "$real") "\$seconds" "\$@" &
+watcher=0
+for arg in "\$@"; do
+  case "\$arg" in */fm-watch.sh) watcher=1 ;; esac
+done
+[ "\$watcher" -eq 1 ] || exec $(printf '%q' "$real") "\$@"
+sh -c 'printf "%s\n" "\$\$" > "\$FORGE/quiet-watcher"; exec "\$@"' sh $(printf '%q' "$real") "\$@" &
 rc=0
 wait "\$!" || rc=\$?
 rm -f "\$FORGE/quiet-watcher"
