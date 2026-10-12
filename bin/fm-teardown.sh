@@ -3694,12 +3694,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
-    teardown_scrub_scratch_copy "$WT" || exit 1
-  fi
   if ! teardown_treehouse_lease_is_ours "$WT" "$PROJ"; then
     echo "warning: worktree $WT is not currently held as an in-use treehouse lease; skipping return to avoid returning an unowned slot" >&2
   else
+    if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
+      teardown_scrub_scratch_copy "$WT" || exit 1
+    fi
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
