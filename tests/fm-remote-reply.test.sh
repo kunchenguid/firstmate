@@ -102,14 +102,23 @@ stop_reply_listener() {
 
 # Block until this generation's capture has been applied. A live listener keeps
 # its claim across polls, so start is only launched when nothing owns the source.
+# One ownership-checked wait is not always enough: a listener lost mid-wait to a
+# transient failed read exits so reconciliation can replace it, and the line
+# already sitting behind the cursor then needs THIS helper to start the
+# replacement - the same recovery await_recapture_result's attempts provide for
+# slow recaptures. Each attempt re-checks ownership, so a retry bounds recovery
+# instead of failing the generation; the happy path still returns first try.
+AWAIT_REPLY_ATTEMPTS=2
 await_reply_result() { # <result-path>
-  local result=$1 handled=${1%.result}.handled _
-  if [ "$(reply_owner)" != live ]; then
-    remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
-  fi
-  for _ in $(seq 1 800); do
-    [ -s "$result" ] && [ -f "$handled" ] && return 0
-    sleep 0.05
+  local result=$1 handled=${1%.result}.handled _ attempt
+  for attempt in $(seq 1 "$AWAIT_REPLY_ATTEMPTS"); do
+    if [ "$(reply_owner)" != live ]; then
+      remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+    fi
+    for _ in $(seq 1 800); do
+      [ -s "$result" ] && [ -f "$handled" ] && return 0
+      sleep 0.05
+    done
   done
   return 1
 }
@@ -469,6 +478,25 @@ assert_no_document_decision() { # <label>
   fi
   assert_no_grep '[key=remote-reply-document-' "$PARENT/state/ios.status" "$1"
 }
+
+# A listener lost mid-wait must not wedge its generation. The line below is
+# appended only after the loss, so only a listener the await itself STARTS can
+# capture it: the await is already polling when the loss happens, the way a
+# transient failed read loses one in CI, so recovery has to come from a later
+# attempt's ownership re-check rather than the entry check that already ran.
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" &
+lost_wait_pid=$!
+wait_for "$CLAIMS/$SID.claim" || fail "no listener came up to be lost mid-wait"
+stop_reply_listener || fail "the listener could not be stopped mid-wait"
+printf 'working [key=lost-listener]: line sat behind a lost listener\n' \
+  >> "$REMOTE/state/parent-replies.status"
+wait "$lost_wait_pid" \
+  || fail "a listener lost mid-wait wedged its generation instead of recovering"
+assert_grep 'working [key=lost-listener]: line sat behind a lost listener' "$PARENT/state/ios.status" \
+  "the generation recovered after a lost listener did not mirror its line"
+mirrored_cursor_is_current "the generation recovered after a lost listener did not advance the cursor"
+pass "a listener lost mid-wait is replaced and its generation still lands"
 
 printf '# valid report behind a malformed pointer\n' > "$REMOTE/data/reply/result.md"
 mirror_lines 'working [key=malformed-report]: malformed offer report=data/reply/result.md.bak'
