@@ -464,6 +464,9 @@ EOF
   data_override="$w/primary-data-override"
   mkdir -p "$data_override"
   write_shared "$data_override/captain-shared.md" "shared from override"
+  # A --secondmate spawn refuses unless the spawning home's own registry binds the
+  # id to this home, so the fixture registers it the way fm-home-seed.sh would.
+  fm_register_secondmate "$data_override/secondmates.md" sm "$sm"
   fakebin=$(make_fake_spawn_toolchain "$w")
 
   PATH="$fakebin:$BASE_PATH" TMUX='' \
