@@ -275,7 +275,7 @@ fm_brief_base_branches() {  # <brief>
 
 fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-}
-  local branch=${3:-fm/$id} target='the default branch' merge_target='the default branch' baseline_target='the default branch' landed_target='main'
+  local branch=${3:-fm/$id} target='the default branch' merge_target='the default branch' baseline_target='the default branch' landed_target='repository default branch'
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_ship_rule_one || return 1
   [ -z "$base" ] || { target="the base branch \`$base\` or the default branch"; merge_target="the branch this PR targets (its base branch \`$base\`)"; baseline_target="that same base branch"; landed_target="$base"; }
