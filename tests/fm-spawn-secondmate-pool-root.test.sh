@@ -153,6 +153,7 @@ common_dir_of() {  # <path>
 derive_root() {  # <home> [env assignments...]
   local home=$1
   shift
+  # shellcheck disable=SC2016  # $1/$2 are expanded by the inner bash from its positional arguments, not here
   env "$@" bash -c '. "$1"; fm_treehouse_home_pool_root "$2"' _ "$WAKE_LIB" "$home"
 }
 
@@ -192,7 +193,7 @@ test_resolver_derives_per_home_root_only_for_secondmate_homes() {
 
 test_secondmate_spawn_lands_in_its_own_clone_under_the_per_home_root() {
   local rec id out status pane_log slot_common second_common main_common claim
-  id=pool-root-second-spawn-r1
+  id='pool-root-second-spawn-r1'
   rec=$(make_fleet second-spawn "$id" mate-second)
   read_fleet_record "$rec"
   pane_log="$CASE_DIR/second-home.pane.log"
@@ -237,7 +238,7 @@ test_secondmate_spawn_lands_in_its_own_clone_under_the_per_home_root() {
 
 test_secondmate_teardown_returns_the_slot_to_the_per_home_root() {
   local rec id out status th_log claim
-  id=pool-root-second-teardown-r1
+  id='pool-root-second-teardown-r1'
   rec=$(make_fleet second-teardown "$id" mate-teardown)
   read_fleet_record "$rec"
   th_log="$CASE_DIR/second-home.treehouse.log"
@@ -274,7 +275,7 @@ test_secondmate_teardown_returns_the_slot_to_the_per_home_root() {
 
 test_main_home_spawn_and_teardown_are_unchanged() {
   local rec id out status pane_log th_log slot_common main_common
-  id=pool-root-main-r1
+  id='pool-root-main-r1'
   rec=$(make_fleet main-unchanged "$id" mate-unused)
   read_fleet_record "$rec"
   pane_log="$CASE_DIR/main-home.pane.log"
@@ -307,7 +308,7 @@ test_main_home_spawn_and_teardown_are_unchanged() {
 
 test_secondmate_spawn_refuses_an_underivable_root_before_any_window() {
   local rec id out status pane_log
-  id=pool-root-refuse-r1
+  id='pool-root-refuse-r1'
   rec=$(make_fleet refuse "$id" mate-refuse)
   read_fleet_record "$rec"
   pane_log="$CASE_DIR/second-home.pane.log"
