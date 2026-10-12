@@ -432,6 +432,14 @@ curl -sS "$BASE/" > "$TMP_ROOT/index.html"
 if grep -q 'onerror=alert' "$TMP_ROOT/index.html"; then fail "private log-derived markup reached the static HTML response"; fi
 content_type=$(curl -sS -D - -o /dev/null "$BASE/app.js" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')
 case "$content_type" in text/javascript*) ;; *) fail "browser script has unsafe content type $content_type" ;; esac
+content_type=$(curl -sS -D - -o /dev/null "$BASE/vendor/mermaid.min.js" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')
+case "$content_type" in text/javascript*) ;; *) fail "local Mermaid renderer has unsafe content type $content_type" ;; esac
+csp=$(curl -sS -D - -o /dev/null "$BASE/" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-security-policy" {print $2}')
+case "$csp" in *"script-src 'self'"*"style-src 'self'"*) ;; *) fail "viewer CSP lost its self-only script or style boundary: $csp" ;; esac
+case "$csp" in *unsafe-inline*|*unsafe-eval*) fail "Mermaid support relaxed the viewer CSP: $csp" ;; esac
+renderer_csp=$(curl -sS -D - -o /dev/null "$BASE/mermaid-renderer.html" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-security-policy" {print $2}')
+case "$renderer_csp" in *"script-src 'self'"*"style-src 'unsafe-inline'"*"connect-src 'none'"*"img-src 'none'"*) ;; *) fail "isolated Mermaid renderer CSP lost its bounded script, style, or network policy: $renderer_csp" ;; esac
+case "$renderer_csp" in *unsafe-eval*) fail "isolated Mermaid renderer enabled eval: $renderer_csp" ;; esac
 
 # Current owner failures cannot be hidden by the task overview's display cache.
 cp "$HOME_FIXTURE/data/task-one/task.json" "$TMP_ROOT/task-one.saved"

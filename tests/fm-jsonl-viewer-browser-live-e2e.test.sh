@@ -164,6 +164,87 @@ Code keeps `**literal markers**` unchanged.
 const literal = "<img id=code-unsafe src=x>";
 ```
 
+```mermaid
+flowchart LR
+  am[Advanced MC] -->|manages 1:N| mc[Merchant account]
+  mc -->|owns 1:N| ds[Data source]
+  ds -->|supplies| inputs[Primary / supplemental inputs]
+  inputs -->|processed into| product[Product]
+  product -->|member of N:M| scopes[Ad product scopes]
+  mc -->|linked N:M| ads[Ads account]
+  ads -->|owns 1:N| campaign[Campaign]
+  campaign -->|Standard Shopping / Demand Gen| group[Ad group]
+  group -->|has| tree[Listing group tree + Ads]
+  campaign -->|PMax| asset[Asset group]
+  asset -->|has| filters[Listing group filters + Creative assets]
+  tree -->|define| scopes
+  filters -->|define| scopes
+  scopes -->|constrain candidates for| serving[Serving]
+```
+
+```mermaid
+flowchart LR
+  business[Business] -->|owns / manages| catalog[Catalog]
+  business -->|owns / manages| adacct[Ad account]
+  catalog -->|contains 1:N| items[Product items]
+  pgroup[Product group] -->|groups 1:N| variants[Variant product items]
+  catalog -->|has 1:N| sets[Product sets]
+  sets -->|selects N:M| items
+  catalog -->|receives| feed[Feed / item API inputs]
+  catalog -->|linked to| eventsrc[External event sources]
+  adacct -->|owns 1:N| campaign[Campaign]
+  campaign -->|owns 1:N| adset[Ad set]
+  adset -->|owns 1:N| ad[Ad]
+  ad -->|references| creative[Creative]
+  adset -->|catalog configuration| sets
+  creative -->|catalog configuration| sets
+  eventsig[Event signals] -->|used in| serving[Serving]
+  sets -->|used in| serving
+  creative -->|used in| serving
+```
+
+```mermaid
+flowchart LR
+  sku[Selected SKU] -->|submit| submitted[Submitted]
+  submitted -->|process| processed[Processed item]
+  processed -->|review / market rules| eligible[Eligible]
+  submitted -->|input failure| fixdata[Fix data]
+  fixdata -->|retry latest state| submitted
+  processed -->|review issue| fixissue[Fix issue]
+  fixissue -->|recheck| processed
+  eligible -->|not included| scope[Check scope]
+  scope -->|recheck| inclusion[Ad inclusion]
+  eligible -->|with| inclusion
+  inclusion -->|with delivery opportunity| exposure[Product exposure]
+  exposure -->|click / interaction| outcome[Attributed outcome]
+  outcome -->|verify against| sold[Sold item / refund evidence]
+```
+
+```mermaid
+flowchart LR
+  truth[Toko product truth] -->|catalog input| catalogs[Google / Meta catalogs]
+  actions[Toko user actions] -->|events + item IDs| eventsrc[Media event sources]
+  catalogs -->|processing / eligibility diagnostics| toko[Toko]
+  serving[Media serving] -->|product performance + ad metadata| toko
+  attribution[Media attribution] -->|ad outcome / supported item reports| toko
+  orders[Toko orders] -->|sold SKU + customer cohort + refunds| analysis[Analysis]
+  toko -->|diagnostics + performance| analysis
+  catalogs -->|same keys and windows| analysis
+  orders -->|same keys and windows| analysis
+  analysis -->|recommend| actions2[Selection / feed quality / ad scope / budget]
+```
+
+```mermaid
+flowchart LR
+  broken[Malformed diagram -->
+```
+
+```mermaid
+flowchart LR
+  unsafe[Unsafe interaction] --> safe[Safe text]
+  click unsafe "https://example.invalid/diagram"
+```
+
 <script id="report-script">globalThis.reportExecuted = true</script>
 <img id="report-event" src=x onerror="globalThis.eventExecuted = true">
 [unsafe link](javascript:globalThis.linkExecuted=true)
@@ -352,6 +433,14 @@ await page.route("**/api/task-document?*", async route => {
 });
 let remoteAssetRequests = 0;
 let rejectedSessionRequests = 0;
+let cspViolations = 0;
+let cspViolationMessages = [];
+page.on("console", message => {
+  if (message.type() === "error" && message.text().includes("Content Security Policy")) {
+    cspViolations += 1;
+    if (cspViolationMessages.length < 3) cspViolationMessages.push(`${JSON.stringify(message.location())}: ${message.text()}`);
+  }
+});
 page.on("request", request => {
   if (request.url().startsWith("https://example.invalid/")) remoteAssetRequests += 1;
   if (request.url().includes("/api/sessions") && request.headers().authorization === "Bearer invalid-saved-token") rejectedSessionRequests += 1;
@@ -722,6 +811,8 @@ try {
   if (generationOrder[0] !== "replacement generation record 201" || generationOrder[199] !== "replacement generation record 2" || !generationOrder[200]?.startsWith("boundary:The journal was rotated.") || !generationOrder.slice(201).some(value => value.includes("oldest ordered record"))) throw new Error(`dense rotation boundary did not separate the newest replacement tail from the prior generation: ${generationOrder.join("|")}`);
   if (!await retainedDetails.evaluate(element => element.open)) throw new Error("journal rotation collapsed retained record details");
   if (!await page.locator("#journal-filters").isVisible() || !await page.locator("#journal-actions").isVisible() || !await page.locator("#events").isVisible()) throw new Error("journal controls were hidden in journal mode");
+  cspViolations = 0;
+  cspViolationMessages = [];
   await page.locator("#source").selectOption("report");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_REPORT_ID }).click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
@@ -732,6 +823,47 @@ try {
   if ((await page.locator("#report-rendered").textContent()).includes("**strong prose**") || (await page.locator("#report-rendered table").textContent()).includes("**A**")) throw new Error("Markdown strong delimiters remained literal in rendered content");
   if (!await page.locator(".markdown-body code").filter({ hasText: "**literal markers**" }).count()) throw new Error("Markdown code literal containing strong markers was not preserved");
   if (!await page.locator(".markdown-body pre code").filter({ hasText: "const literal" }).count()) throw new Error("fenced code was not rendered");
+  await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').first().waitFor({ state: "visible", timeout: 10000 });
+  await page.waitForFunction(() => document.querySelectorAll('.mermaid-diagram[data-mermaid-state="rendered"] svg').length === 4, null, { timeout: 10000 });
+  if (await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').count() !== 4) throw new Error("the four report flowcharts were not rendered as SVG graphics");
+  if (await page.locator('.mermaid-diagram[data-mermaid-state="error"]').count() !== 2) throw new Error("malformed or interactive Mermaid did not use the localized source fallback");
+  if (await page.locator('.mermaid-diagram[data-mermaid-state="error"] pre code').count() !== 2) throw new Error("Mermaid fallback did not preserve local source text");
+  const renderedDiagramText = (await page.locator('.mermaid-diagram[data-mermaid-state="rendered"]').allTextContents()).join("|");
+  for (const label of ["Advanced MC", "Business", "Selected SKU", "Toko product truth", "Selection", "feed quality", "budget"]) {
+    if (!renderedDiagramText.includes(label)) throw new Error(`rendered Mermaid omitted label ${label}`);
+  }
+  const diagramBounds = await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').evaluateAll(nodes => nodes.map(node => ({
+    clientWidth: node.clientWidth,
+    clientHeight: node.clientHeight,
+    scrollWidth: node.parentElement.scrollWidth,
+    containerWidth: node.parentElement.clientWidth,
+  })));
+  if (diagramBounds.some(bounds => bounds.clientWidth < 650 || bounds.clientHeight < 80 || bounds.scrollWidth < bounds.containerWidth)) throw new Error(`Mermaid diagrams were clipped or unreadably sized: ${JSON.stringify(diagramBounds)}`);
+  const clippedLabels = await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').evaluateAll(nodes => nodes.flatMap((svg, diagramIndex) => {
+    const viewBox = svg.viewBox.baseVal;
+    return [...svg.querySelectorAll("text")].flatMap(text => {
+      const bounds = text.getBBox();
+      const matrix = text.getCTM();
+      if (!matrix) return [{ diagramIndex, label: text.textContent, reason: "missing transform" }];
+      const corners = [
+        new DOMPoint(bounds.x, bounds.y),
+        new DOMPoint(bounds.x + bounds.width, bounds.y),
+        new DOMPoint(bounds.x, bounds.y + bounds.height),
+        new DOMPoint(bounds.x + bounds.width, bounds.y + bounds.height),
+      ].map(point => point.matrixTransform(matrix));
+      const transformed = {
+        left: Math.min(...corners.map(point => point.x)),
+        top: Math.min(...corners.map(point => point.y)),
+        right: Math.max(...corners.map(point => point.x)),
+        bottom: Math.max(...corners.map(point => point.y)),
+      };
+      const clipped = transformed.left < viewBox.x - 1 || transformed.top < viewBox.y - 1 || transformed.right > viewBox.x + viewBox.width + 1 || transformed.bottom > viewBox.y + viewBox.height + 1;
+      return clipped ? [{ diagramIndex, label: text.textContent, transformed, viewBox: { x: viewBox.x, y: viewBox.y, width: viewBox.width, height: viewBox.height } }] : [];
+    });
+  }));
+  if (clippedLabels.length) throw new Error(`Mermaid labels exceeded their SVG view boxes: ${JSON.stringify(clippedLabels)}`);
+  if (await page.locator('.mermaid-diagram style, .mermaid-diagram [style], .mermaid-diagram script, .mermaid-diagram foreignObject, .mermaid-diagram iframe, .mermaid-diagram object, .mermaid-diagram embed, .mermaid-diagram image, .mermaid-diagram a').count()) throw new Error("Mermaid introduced inline styling, executable, interactive, or remote-resource nodes");
+  if (cspViolations) throw new Error(`Mermaid rendering caused ${cspViolations} Content Security Policy violations: ${JSON.stringify(cspViolationMessages)}`);
   if (!await page.locator(".markdown-body blockquote").filter({ hasText: "quoted evidence" }).count()) throw new Error("blockquote was not rendered");
   if (await page.locator(".markdown-body li").count() !== 2) throw new Error("Markdown list was not rendered");
   if (await page.locator("#report-script").count()) throw new Error("raw report HTML became active DOM");
@@ -745,6 +877,9 @@ try {
   fs.appendFileSync(report, "\n## Refreshed section\n\nreport refresh marker\n");
   await page.getByRole("heading", { name: "Refreshed section" }).waitFor({ state: "visible", timeout: 3000 });
   if (await page.locator("#report .document-toc a").count() !== 7) throw new Error("report refresh did not rebuild the directory from the changed document");
+  await page.locator('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').first().waitFor({ state: "visible", timeout: 10000 });
+  await page.waitForFunction(() => document.querySelectorAll('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').length === 4, null, { timeout: 10000 });
+  if (await page.locator('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').count() !== 4) throw new Error("report refresh did not re-render all valid Mermaid diagrams");
   let releaseArtifactReport = () => {};
   let markArtifactReportStarted;
   const artifactReportStarted = new Promise(resolve => { markArtifactReportStarted = resolve; });

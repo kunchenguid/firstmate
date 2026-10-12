@@ -32,6 +32,10 @@ const state = {
 };
 
 const TOKEN_STORAGE_KEY = "firstmate.jsonlViewer.accessToken.v1";
+const MERMAID_LANGUAGE = "mermaid";
+let mermaidSequence = 0;
+let mermaidFrameReady = null;
+const mermaidRequests = new Map();
 
 const elements = {
   loginPage: document.getElementById("login-page"),
@@ -290,6 +294,119 @@ function clearRenderedDocument(container) {
   renderDocumentDirectory(container, []);
 }
 
+function mermaidFallback(container, source) {
+  container.replaceChildren();
+  container.classList.add("mermaid-error");
+  const message = document.createElement("p");
+  message.textContent = "Diagram could not be rendered. Source follows.";
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  code.dataset.language = MERMAID_LANGUAGE;
+  code.textContent = source;
+  pre.append(code);
+  container.append(message, pre);
+}
+
+function safeMermaidSvg(svgText) {
+  const withoutInlineStyles = svgText
+    .replace(/<style(?:\s[^>]*)?>[\s\S]*?<\/style\s*>/gi, "")
+    .replace(/\s(?:style|font-style|font-weight)\s*=\s*(?:"[^"]*"|'[^']*')/gi, "");
+  const parsed = new DOMParser().parseFromString(withoutInlineStyles, "image/svg+xml");
+  const root = parsed.documentElement;
+  if (root.localName !== "svg" || parsed.querySelector("parsererror,script,foreignObject,iframe,object,embed,image,a")) return null;
+  for (const style of root.querySelectorAll("style")) {
+    if (/url\s*\(/i.test(style.textContent)) return null;
+  }
+  for (const element of root.querySelectorAll("*")) {
+    for (const attribute of element.attributes) {
+      const value = attribute.value.trim();
+      if (/^on/i.test(attribute.name)) return null;
+      if (/^(?:href|xlink:href)$/i.test(attribute.name) && value && !value.startsWith("#")) return null;
+      if (/url\s*\(/i.test(value) && !/^url\(#[^)]+\)$/i.test(value)) return null;
+    }
+  }
+  root.querySelectorAll("style").forEach(style => style.remove());
+  root.removeAttribute("style");
+  root.querySelectorAll("[style]").forEach(element => element.removeAttribute("style"));
+  const viewBox = root.viewBox.baseVal;
+  if (viewBox.width > 0 && viewBox.height > 0) {
+    root.setAttribute("width", String(viewBox.width));
+    root.setAttribute("height", String(viewBox.height));
+    const aspectRatio = viewBox.width / viewBox.height;
+    if (aspectRatio >= 6) root.classList.add("mermaid-extra-wide");
+    else if (aspectRatio >= 4) root.classList.add("mermaid-wide");
+  }
+  return document.importNode(root, true);
+}
+
+function ensureMermaidFrame() {
+  if (mermaidFrameReady) return mermaidFrameReady;
+  mermaidFrameReady = new Promise((resolve, reject) => {
+    const frame = document.createElement("iframe");
+    frame.className = "mermaid-render-frame";
+    frame.sandbox = "allow-scripts";
+    frame.src = "/mermaid-renderer.html";
+    frame.title = "Isolated Mermaid renderer";
+    frame.tabIndex = -1;
+    frame.setAttribute("aria-hidden", "true");
+    const timeout = window.setTimeout(() => reject(new Error("Mermaid renderer did not start")), 10000);
+    window.addEventListener("message", event => {
+      if (event.source !== frame.contentWindow || !event.data || event.data.type !== "firstmate-mermaid") return;
+      if (event.data.ready) {
+        window.clearTimeout(timeout);
+        resolve(frame);
+        return;
+      }
+      const request = mermaidRequests.get(event.data.id);
+      if (!request) return;
+      mermaidRequests.delete(event.data.id);
+      window.clearTimeout(request.timeout);
+      if (typeof event.data.svg === "string") request.resolve(event.data.svg);
+      else request.reject(new Error("Mermaid renderer rejected the diagram"));
+    });
+    frame.addEventListener("error", () => reject(new Error("Mermaid renderer could not load")), { once: true });
+    document.body.append(frame);
+  });
+  return mermaidFrameReady;
+}
+
+async function mermaidSvg(source) {
+  const frame = await ensureMermaidFrame();
+  const id = `fm-mermaid-${++mermaidSequence}`;
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      mermaidRequests.delete(id);
+      reject(new Error("Mermaid rendering timed out"));
+    }, 10000);
+    mermaidRequests.set(id, { resolve, reject, timeout });
+    frame.contentWindow.postMessage({ type: "firstmate-mermaid", id, source }, "*");
+  });
+}
+
+function supportedMermaidFlowchart(source) {
+  const declaration = source.split("\n").find(line => line.trim() && !line.trim().startsWith("%%"))?.trim() ?? "";
+  if (!/^(?:flowchart|graph)\s+(?:TB|TD|BT|RL|LR)\b/i.test(declaration)) return false;
+  return !/(?:^|\n)\s*(?:click\b|classDef\b|class\b|style\b|linkStyle\b|%%\{)|\$\$/i.test(source);
+}
+
+async function renderMermaid(container, source) {
+  try {
+    if (!supportedMermaidFlowchart(source)) throw new Error("Unsupported Mermaid content");
+    const svg = await mermaidSvg(source);
+    const graphic = safeMermaidSvg(svg);
+    if (!graphic) throw new Error("Mermaid returned unsafe SVG");
+    if (!container.isConnected) return;
+    container.replaceChildren(graphic);
+    container.classList.remove("mermaid-pending");
+    container.dataset.mermaidState = "rendered";
+  } catch {
+    if (!container.isConnected) return;
+    container.classList.remove("mermaid-pending");
+    container.dataset.mermaidState = "error";
+    mermaidFallback(container, source);
+  }
+}
+
 function renderMarkdown(container, source) {
   clearRenderedDocument(container);
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
@@ -305,6 +422,15 @@ function renderMarkdown(container, source) {
       index += 1;
       while (index < lines.length && !/^ {0,3}```\s*$/.test(lines[index])) parts.push(lines[index++]);
       if (index < lines.length) index += 1;
+      if (fence[1].toLocaleLowerCase() === MERMAID_LANGUAGE) {
+        const diagram = document.createElement("figure");
+        diagram.className = "mermaid-diagram mermaid-pending";
+        diagram.dataset.mermaidState = "pending";
+        diagram.setAttribute("aria-label", "Mermaid diagram");
+        container.append(diagram);
+        void renderMermaid(diagram, parts.join("\n"));
+        continue;
+      }
       const pre = document.createElement("pre");
       const code = document.createElement("code");
       if (fence[1]) code.dataset.language = fence[1];

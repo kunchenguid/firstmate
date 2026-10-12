@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "1.73.0"
+    "@larksuiteoapi/node-sdk": "1.73.0",
+    "mermaid": "11.17.2"
   }
 }
