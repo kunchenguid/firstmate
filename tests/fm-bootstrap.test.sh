@@ -40,7 +40,8 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
 
 # A fake toolchain where every required tool is present and gh is authenticated.
-# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1,
+# and then also --root unless FM_FAKE_TREEHOUSE_ROOT_HELP=0 (a 2.0.x-2.1.x shape).
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -66,7 +67,9 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
+  if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ] && [ "${FM_FAKE_TREEHOUSE_ROOT_HELP:-}" != 0 ]; then
+    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>] [--root <dir>]'
+  elif [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
   else
     printf '%s\n' 'Usage: treehouse get'
@@ -730,6 +733,43 @@ test_treehouse_lease_check_follows_resolved_backend() {
   pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
 }
 
+test_treehouse_root_check_reports_upgrade() {
+  local case_dir fakebin out
+  # A treehouse that leases but predates `get --root` (added in 2.2.0) cannot
+  # serve a secondmate home's per-home pool: bootstrap must report the upgrade
+  # instead of letting the spawn's `treehouse get --root` be rejected later.
+  case_dir="$TMP_ROOT/treehouse-lease-no-root"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_ROOT_HELP=0 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)" \
+    "a treehouse with --lease but without --root must report an upgrade"
+
+  # The same home with a treehouse advertising both --lease and --root stays silent.
+  case_dir="$TMP_ROOT/treehouse-lease-and-root"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a treehouse advertising --lease and --root must be accepted silently, got: $out"
+
+  # Orca owns its own worktrees, so a root-less treehouse is not its problem.
+  case_dir="$TMP_ROOT/orca-treehouse-no-root"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" orca
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_ROOT_HELP=0 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "backend=orca must not require treehouse --root, got: $out"
+  pass "bootstrap: a treehouse whose get lacks --root is reported as an upgrade for treehouse-backed homes"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -1259,6 +1299,7 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
+test_treehouse_root_check_reports_upgrade
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

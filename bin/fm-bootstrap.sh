@@ -855,6 +855,12 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
+# `get --root` (treehouse >= 2.2.0) is what a secondmate home's per-home worktree
+# pool is built on; without it the spawn's `treehouse get --root` is rejected.
+treehouse_supports_root() {
+  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--root([^[:alnum:]_-]|$)'
+}
+
 # Shared semantic-version floor for the tool gates below. A version string that
 # cannot be parsed into exactly one major.minor.patch triple is incompatible,
 # never assumed current, so a development or vendored build cannot pass a floor
@@ -1414,11 +1420,13 @@ detect_local_tools() {
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
-  # The treehouse lease-support upgrade check is only relevant when the resolved
-  # backend actually requires treehouse (every backend except orca, which owns its
-  # own worktrees); an orca home must not be told to upgrade a provider it never uses.
+  # The treehouse lease- and root-support upgrade check is only relevant when the
+  # resolved backend actually requires treehouse (every backend except orca, which
+  # owns its own worktrees); an orca home must not be told to upgrade a provider it
+  # never uses.
   if fm_backend_list_contains "$TOOLS" treehouse \
-    && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+    && command -v treehouse >/dev/null 2>&1 \
+    && { ! treehouse_supports_lease || ! treehouse_supports_root; }; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
