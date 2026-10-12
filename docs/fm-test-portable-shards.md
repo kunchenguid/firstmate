@@ -51,6 +51,7 @@ On green CI run [30725985757](https://github.com/kunchenguid/firstmate/actions/r
 On [PR 1495](https://github.com/kunchenguid/firstmate/pull/1495), its main step ran about 19m51s before the job was cancelled at that boundary.
 `portable-serial-<k>of<n>` splits it across `n` separate CI runners.
 Each shard is still strictly serial in itself, and separate runners mean no two of these stateful scripts ever share a machine, so the split needs no concurrency isolation proof.
+That guarantee holds only on GitHub-hosted runners: outside `kunchenguid/firstmate`, trusted push and same-repository PR runs route these jobs to shared self-hosted runners, where shards may run concurrently on one host and each job gets only a per-job `TMUX_TMPDIR` and npm global prefix as isolation.
 
 `bin/fm-test-run.sh` owns `n` and refuses any lane whose `of<n>` disagrees with it.
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.

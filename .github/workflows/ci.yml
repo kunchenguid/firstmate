@@ -195,7 +195,8 @@ jobs:
   # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
   # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
   # Split across separate runners so no two of these stateful scripts ever share
-  # a machine: each shard is still strictly serial in itself. Shard membership
+  # a hosted machine (fork self-hosted exception: docs/fm-test-portable-shards.md):
+  # each shard is still strictly serial in itself. Shard membership
   # and the shard count both belong to bin/fm-test-run.sh, which refuses a lane
   # whose "ofN" disagrees with it (docs/fm-test-portable-shards.md).
   tests-portable-serial:

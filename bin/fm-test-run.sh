@@ -133,8 +133,10 @@
 #
 # portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
 # split it across separate runners, so two of its stateful scripts still never
-# share a machine. This script owns <n>: a lane whose <n> disagrees with the
-# configured shard count is refused, so a CI matrix cannot silently drop a shard.
+# share a hosted machine (fork self-hosted exception:
+# docs/fm-test-portable-shards.md). This script owns <n>: a lane whose <n>
+# disagrees with the configured shard count is refused, so a CI matrix cannot
+# silently drop a shard.
 # --check-coverage also reports serial_max_ms (largest packed hint sum, including
 # default weights) and serial_budget_ms (the 20-minute packing target), refusing
 # a split above that target. Neither figure is an execution timeout or proof of
