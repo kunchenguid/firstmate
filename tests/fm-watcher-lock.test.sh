@@ -766,6 +766,117 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+test_lock_stale_plain_file_is_reclaimed() {
+  local dir state lockdir rc newpid
+  dir=$(make_case lock-plain-reclaim)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  : > "$lockdir"
+  touch -t 200001010000 "$lockdir"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer spun on a stale plain-file lock path (rc=$rc)"
+  [ -L "$lockdir" ] || fail "reclaimed lock path is not a symlink lock"
+  [ -n "$newpid" ] || fail "reclaimed lock has no pid recorded"
+  pass "stale plain-file lock path is reclaimed and acquired"
+}
+
+test_lock_fresh_plain_file_is_respected() {
+  local dir state lockdir out
+  dir=$(make_case lock-plain-fresh)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  : > "$lockdir"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "fresh plain-file lock path was stolen mid-acquire: $out" ;;
+  esac
+  [ -f "$lockdir" ] || fail "fresh plain-file lock path disappeared"
+  [ ! -L "$lockdir" ] || fail "fresh plain-file lock path was replaced by a symlink"
+  pass "fresh plain-file lock path is respected during its grace"
+}
+
+test_lock_symlink_lock_is_never_reclaimed_as_plain_file() {
+  local dir state lockdir holder_file holder out owner_before owner_after lockpid holderpid i
+  dir=$(make_case lock-symlink-noop)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder_file="$dir/holder"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 3
+  ' _ "$LIB" "$lockdir" "$holder_file" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || fail "symlink lock holder did not start"
+  owner_before=$(readlink "$lockdir" 2>/dev/null || true)
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  wait "$holder" || fail "symlink lock holder failed"
+  holderpid=$(cat "$holder_file")
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "live symlink lock was acquired instead of refused: $out" ;;
+  esac
+  case "$out" in
+    *"held=$holderpid"*) ;;
+    *) fail "live symlink holder pid not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  owner_after=$(readlink "$lockdir" 2>/dev/null || true)
+  [ "$owner_after" = "$owner_before" ] || fail "live symlink lock was replaced (was '$owner_before', now '$owner_after')"
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$lockpid" = "$(cat "$holder_file")" ] || fail "live symlink holder's lock pid was clobbered (got '$lockpid')"
+  pass "live symlink lock is never deleted by the plain-file reclaim"
+}
+
+test_lock_stale_plain_file_single_winner_under_concurrency() {
+  local dir state lockdir marker i pids pid wins
+  dir=$(make_case lock-plain-concurrency)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  marker="$dir/wins"
+  : > "$lockdir"
+  touch -t 200001010000 "$lockdir"
+  : > "$marker"
+  pids=
+  i=1
+  while [ "$i" -le 40 ]; do
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then
+        printf "%s\n" "${BASHPID:-$$}" >> "$3"
+        sleep 1
+      fi
+    ' _ "$LIB" "$lockdir" "$marker" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  [ "$wins" -eq 1 ] || fail "expected exactly one plain-file reclaimer, got $wins"
+  [ -L "$lockdir" ] || fail "reclaimed lock path is not a symlink lock after the race"
+  pass "concurrent stale plain-file reclaim yields exactly one winner"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i
   dir=$(make_case restart-reused-pid)
@@ -1594,6 +1705,10 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_stale_plain_file_is_reclaimed
+test_lock_fresh_plain_file_is_respected
+test_lock_symlink_lock_is_never_reclaimed_as_plain_file
+test_lock_stale_plain_file_single_winner_under_concurrency
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
