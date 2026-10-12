@@ -14,10 +14,17 @@
 # from the stored URL and refuses any record whose parts do not reconstruct that
 # exact URL.
 #
-# A validated exact merged result is retired through a private receipt only
-# after its durable wake is appended.
+# A validated exact terminal result - merged or closed-without-merging - is
+# retired through a private receipt only after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# A ship task's cleanup may keep an armed poll alive past the task record it
+# was bound to: when the recorded PR is still open at teardown, the same three
+# poll artifacts stay behind bound to state/<id>.merge-watch, a home-owned
+# record carrying the canonical identity the removed metadata used to prove.
+# The merge watch fires through the same watcher check and the same terminal
+# results, only its wake names a task whose record is already gone.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -92,9 +99,16 @@ FM_PR_RETIRE_REG_HASH=
 FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
+FM_PR_RETIRE_RESULT=
 FM_PR_RECORD_STATE=
 FM_PR_RECORD_MERGED=
 FM_PR_POLL_RETIREMENT_REJECTED=
+FM_PR_WATCH_ID=
+FM_PR_WATCH_PROVIDER=
+FM_PR_WATCH_URL=
+FM_PR_WATCH_HOST=
+FM_PR_WATCH_PATH=
+FM_PR_WATCH_NUMBER=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -400,6 +414,29 @@ fm_pr_metadata_identity_parse() {
   [ -n "$FM_PR_META_URL" ]
 }
 
+# The canonical PR identity a poll's artifacts are bound to. The task's
+# metadata is authoritative whenever it exists, including the teardown window
+# where a kept merge watch already exists while the record still does - both
+# present is never an error. With the record gone, a valid merge watch stands
+# in for it, which is exactly the poll a ship task's cleanup left behind. On
+# success the FM_PR_META_* outputs hold the bound identity either way; the
+# call fails when neither source is present and valid.
+fm_pr_poll_identity_binding_parse() {  # <state> <id>
+  local state=$1 id=$2 meta
+  fm_pr_task_id_valid "$id" || return 1
+  meta="$state/$id.meta"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    fm_pr_metadata_identity_parse "$meta"
+    return
+  fi
+  fm_pr_merge_watch_valid "$state" "$id" || return 1
+  FM_PR_META_PROVIDER=$FM_PR_WATCH_PROVIDER
+  FM_PR_META_URL=$FM_PR_WATCH_URL
+  FM_PR_META_HOST=$FM_PR_WATCH_HOST
+  FM_PR_META_PATH=$FM_PR_WATCH_PATH
+  FM_PR_META_NUMBER=$FM_PR_WATCH_NUMBER
+}
+
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar
 # written before the provider tag existed has a URL on its first line and one
 # line fewer, so it fails both the field count and the provider comparison and
@@ -670,19 +707,16 @@ fm_pr_poll_artifacts_valid() {
 # never authentication. On success FM_PR_DATA_*, FM_PR_REG_*, and FM_PR_META_*
 # hold the parsed records.
 fm_pr_poll_artifacts_content_valid() {
-  local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash
+  local state=$1 id=$2 template=$3 state_device check data registration data_hash template_hash
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   check="$state/$id.check.sh"
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
-  meta="$state/$id.meta"
   fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
   fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
   cmp -s "$template" "$check" || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
@@ -696,7 +730,7 @@ fm_pr_poll_artifacts_content_valid() {
   [ "$FM_PR_REG_NUMBER" = "$FM_PR_DATA_NUMBER" ] || return 1
   [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
-  fm_pr_metadata_identity_parse "$meta" || return 1
+  fm_pr_poll_identity_binding_parse "$state" "$id" || return 1
   [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
   [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1
   [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
@@ -842,6 +876,7 @@ fm_pr_poll_retirement_parse() {
   FM_PR_RETIRE_CHECK_IDENTITY=
   FM_PR_RETIRE_REG_HASH=
   FM_PR_RETIRE_REG_IDENTITY=
+  FM_PR_RETIRE_RESULT=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 9< "$file" || return 1
   IFS= read -r version <&9 || { exec 9<&-; return 1; }
@@ -876,7 +911,8 @@ fm_pr_poll_retirement_parse() {
   [[ "$check_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   [[ "$reg_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$reg_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
-  [ "$result" = merged ] || return 1
+  # A receipt written before the closed result existed always says merged.
+  case "$result" in merged|closed) ;; *) return 1 ;; esac
   FM_PR_RETIRE_ID=$id
   FM_PR_RETIRE_PROVIDER=$provider
   FM_PR_RETIRE_URL=$url
@@ -889,10 +925,13 @@ fm_pr_poll_retirement_parse() {
   FM_PR_RETIRE_CHECK_IDENTITY=$check_identity
   FM_PR_RETIRE_REG_HASH=$reg_hash
   FM_PR_RETIRE_REG_IDENTITY=$reg_identity
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RETIRE_RESULT=$result
 }
 
 fm_pr_poll_retirement_receipt_valid() {
-  local state=$1 id=$2 receipt state_device meta
+  local state=$1 id=$2 receipt state_device
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -900,8 +939,7 @@ fm_pr_poll_retirement_receipt_valid() {
   fm_pr_private_file_valid "$receipt" 600 "$state_device" || return 1
   fm_pr_poll_retirement_parse "$receipt" || return 1
   [ "$FM_PR_RETIRE_ID" = "$id" ] || return 1
-  meta="$state/$id.meta"
-  fm_pr_metadata_identity_parse "$meta" || return 1
+  fm_pr_poll_identity_binding_parse "$state" "$id" || return 1
   [ "$FM_PR_META_PROVIDER" = "$FM_PR_RETIRE_PROVIDER" ] || return 1
   [ "$FM_PR_META_URL" = "$FM_PR_RETIRE_URL" ] || return 1
   [ "$FM_PR_META_HOST" = "$FM_PR_RETIRE_HOST" ] || return 1
@@ -1234,7 +1272,7 @@ fm_pr_poll_retirement_discard_obsolete() {
 
 fm_pr_poll_retirement_publish() {
   local state=$1 id=$2 template=$3 result=$4 receipt state_device tmp
-  [ "$result" = merged ] || return 1
+  case "$result" in merged|closed) ;; *) return 1 ;; esac
   fm_pr_poll_snapshot_matches "$state" "$id" "$template" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   receipt="$state/$id.pr-poll-retirement"
@@ -1256,7 +1294,7 @@ fm_pr_poll_retirement_publish() {
       "$FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY" \
       "$FM_PR_POLL_SNAPSHOT_REG_HASH" \
       "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" \
-      merged > "$tmp" \
+      "$result" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
     || ! fm_pr_poll_retirement_parse "$tmp" \
@@ -1323,19 +1361,30 @@ fm_pr_poll_retirement_recover_all() {
   [ -z "$FM_PR_POLL_RETIREMENT_REJECTED" ]
 }
 
-# --- merge-notification canonical-identity marker ----------------------------
-# A merged-PR poll retires (fm_pr_poll_retirement_recover_one) in the same
-# watcher cycle that detects it, which is normally enough on its own to stop a
-# duplicate detection: the check.sh is gone, so nothing re-polls it. The
-# exception is the same poll re-registered after its merge was already
-# surfaced. Its retirement state is scoped to one registration, so this marker
-# carries the canonical PR identity across registrations for the task. Only a
-# matching identity is a no-op; a different PR for the same task reaches its
-# role-routed supervision destination and replaces the marker when its first
-# outcome is published.
-fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number>
-  local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
-  local version provider host path number
+# --- terminal-outcome canonical-identity markers -----------------------------
+# A terminal PR poll result (merged or closed) retires
+# (fm_pr_poll_retirement_recover_one) in the same watcher cycle that detects
+# it, which is normally enough on its own to stop a duplicate detection: the
+# check.sh is gone, so nothing re-polls it. The exception is the same poll
+# re-registered after its outcome was already surfaced. Its retirement state
+# is scoped to one registration, so a marker carries the canonical PR identity
+# across registrations for the task. Only a matching identity is a no-op; a
+# different PR for the same task reaches its role-routed supervision
+# destination and replaces the marker when its first outcome is published.
+# Each terminal result has its own marker kind, which names both the filename
+# suffix (state/<id>.pr-poll-<kind>-notified) and the record's version tag.
+fm_pr_poll_notify_marker_tag() {  # <kind>
+  case "${1-}" in
+    merge)  printf '%s\n' fm-pr-poll-merge-notified-v1 ;;
+    closed) printf '%s\n' fm-pr-poll-closed-notified-v1 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_pr_poll_notify_marker_matches() {  # <kind> <marker> <device> <provider> <host> <path> <number>
+  local kind=$1 marker=$2 device=$3 expected_provider=$4 expected_host=$5 expected_path=$6 expected_number=$7
+  local version provider host path number tag
+  tag=$(fm_pr_poll_notify_marker_tag "$kind") || return 1
   fm_pr_private_file_valid "$marker" 600 "$device" || return 1
   exec 8< "$marker" || return 1
   IFS= read -r version <&8 || { exec 8<&-; return 1; }
@@ -1348,40 +1397,41 @@ fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path
     return 1
   fi
   exec 8<&-
-  [ "$version" = fm-pr-poll-merge-notified-v1 ] \
+  [ "$version" = "$tag" ] \
     && [ "$provider" = "$expected_provider" ] \
     && [ "$host" = "$expected_host" ] \
     && [ "$path" = "$expected_path" ] \
     && [ "$number" = "$expected_number" ]
 }
 
-fm_pr_poll_merge_already_notified() {  # <state> <id> <provider> <host> <path> <number>
-  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker state_device
+fm_pr_poll_notify_already() {  # <kind> <state> <id> <provider> <host> <path> <number>
+  local kind=$1 state=$2 id=$3 provider=$4 host=$5 path=$6 number=$7 marker state_device
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
-  marker="$state/$id.pr-poll-merge-notified"
-  fm_pr_poll_merge_marker_matches "$marker" "$state_device" \
+  marker="$state/$id.pr-poll-$kind-notified"
+  fm_pr_poll_notify_marker_matches "$kind" "$marker" "$state_device" \
     "$provider" "$host" "$path" "$number"
 }
 
-fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <number>
-  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker tmp state_device
+fm_pr_poll_notify_mark() {  # <kind> <state> <id> <provider> <host> <path> <number>
+  local kind=$1 state=$2 id=$3 provider=$4 host=$5 path=$6 number=$7 marker tmp state_device tag
   fm_pr_task_id_valid "$id" || return 1
+  tag=$(fm_pr_poll_notify_marker_tag "$kind") || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
-  marker="$state/$id.pr-poll-merge-notified"
+  marker="$state/$id.pr-poll-$kind-notified"
   fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
   umask 077
-  tmp=$(mktemp "$state/.fm-pr-poll-merge-notified.XXXXXX") || return 1
+  tmp=$(mktemp "$state/.fm-pr-poll-$kind-notified.XXXXXX") || return 1
   if ! printf '%s\n%s\n%s\n%s\n%s\n' \
-      fm-pr-poll-merge-notified-v1 "$provider" "$host" "$path" "$number" > "$tmp" \
+      "$tag" "$provider" "$host" "$path" "$number" > "$tmp" \
     || ! chmod 0600 "$tmp" \
-    || ! fm_pr_poll_merge_marker_matches "$tmp" "$state_device" \
+    || ! fm_pr_poll_notify_marker_matches "$kind" "$tmp" "$state_device" \
       "$provider" "$host" "$path" "$number" \
     || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
     || ! mv -f -- "$tmp" "$marker" \
-    || ! fm_pr_poll_merge_marker_matches "$marker" "$state_device" \
+    || ! fm_pr_poll_notify_marker_matches "$kind" "$marker" "$state_device" \
       "$provider" "$host" "$path" "$number"; then
     rm -f -- "$tmp"
     return 1
@@ -1390,11 +1440,230 @@ fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <num
 
 # Removed at teardown alongside the other per-task PR-poll artifacts
 # (bin/fm-teardown.sh) so a retired task id leaves no residue behind.
-fm_pr_poll_merge_notified_remove() {  # <state> <id>
-  local state=$1 id=$2 marker
+fm_pr_poll_notify_remove() {  # <kind> <state> <id>
+  local kind=$1 state=$2 id=$3 marker
   fm_pr_task_id_valid "$id" || return 1
-  marker="$state/$id.pr-poll-merge-notified"
+  fm_pr_poll_notify_marker_tag "$kind" >/dev/null || return 1
+  marker="$state/$id.pr-poll-$kind-notified"
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
+}
+
+fm_pr_poll_merge_already_notified() {  # <state> <id> <provider> <host> <path> <number>
+  fm_pr_poll_notify_already merge "$@"
+}
+
+fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <number>
+  fm_pr_poll_notify_mark merge "$@"
+}
+
+fm_pr_poll_merge_notified_remove() {  # <state> <id>
+  fm_pr_poll_notify_remove merge "$@"
+}
+
+fm_pr_poll_closed_already_notified() {  # <state> <id> <provider> <host> <path> <number>
+  fm_pr_poll_notify_already closed "$@"
+}
+
+fm_pr_poll_closed_mark_notified() {  # <state> <id> <provider> <host> <path> <number>
+  fm_pr_poll_notify_mark closed "$@"
+}
+
+fm_pr_poll_closed_notified_remove() {  # <state> <id>
+  fm_pr_poll_notify_remove closed "$@"
+}
+
+# --- home-owned merge watch ----------------------------------------------------
+# A merge watch is the record a ship task's cleanup leaves behind when its
+# armed poll outlives the task: teardown keeps the three poll artifacts and
+# publishes state/<id>.merge-watch in place of the removed metadata, so the
+# watcher keeps polling the still-open PR with no agent behind it. The record
+# carries the canonical identity on its own (fm_pr_poll_identity_binding_parse
+# reads it when no <id>.meta exists) and the watcher retires it with the poll.
+#
+# Record layout: version tag, task id, then the same provider-tagged identity
+# as the sidecar (provider, url, host, path, number), one per line.
+fm_pr_merge_watch_parse() {
+  local file=$1 version id provider url host path number
+  FM_PR_WATCH_ID=
+  FM_PR_WATCH_PROVIDER=
+  FM_PR_WATCH_URL=
+  FM_PR_WATCH_HOST=
+  FM_PR_WATCH_PATH=
+  FM_PR_WATCH_NUMBER=
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  exec 6< "$file" || return 1
+  IFS= read -r version <&6 || { exec 6<&-; return 1; }
+  IFS= read -r id <&6 || { exec 6<&-; return 1; }
+  IFS= read -r provider <&6 || { exec 6<&-; return 1; }
+  IFS= read -r url <&6 || { exec 6<&-; return 1; }
+  IFS= read -r host <&6 || { exec 6<&-; return 1; }
+  IFS= read -r path <&6 || { exec 6<&-; return 1; }
+  IFS= read -r number <&6 || { exec 6<&-; return 1; }
+  if IFS= read -r _extra <&6; then
+    exec 6<&-
+    return 1
+  fi
+  exec 6<&-
+  [ "$version" = fm-pr-merge-watch-v1 ] || return 1
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
+  [ "$host" = "$FM_PR_HOST" ] || return 1
+  [ "$path" = "$FM_PR_PATH" ] || return 1
+  [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  FM_PR_WATCH_ID=$id
+  FM_PR_WATCH_PROVIDER=$FM_PR_PROVIDER
+  FM_PR_WATCH_URL=$FM_PR_URL
+  FM_PR_WATCH_HOST=$FM_PR_HOST
+  FM_PR_WATCH_PATH=$FM_PR_PATH
+  FM_PR_WATCH_NUMBER=$FM_PR_NUMBER
+}
+
+fm_pr_merge_watch_valid() {  # <state> <id>
+  local state=$1 id=$2 record state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  record="$state/$id.merge-watch"
+  fm_pr_private_file_valid "$record" 600 "$state_device" || return 1
+  fm_pr_merge_watch_parse "$record" || return 1
+  [ "$FM_PR_WATCH_ID" = "$id" ]
+}
+
+# Publishes the watch record atomically and refuses outright when one already
+# exists: a teardown that races itself, or a second cleanup of the same id,
+# must not silently rebind the watch to a different PR.
+fm_pr_merge_watch_publish() {  # <state> <id> <provider> <url> <host> <path> <number>
+  local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 record state_device tmp
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
+  [ "$host" = "$FM_PR_HOST" ] || return 1
+  [ "$path" = "$FM_PR_PATH" ] || return 1
+  [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  record="$state/$id.merge-watch"
+  fm_pr_regular_destination_on_device_or_absent "$record" "$state_device" || return 1
+  [ ! -e "$record" ] && [ ! -L "$record" ] || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-merge-watch.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-merge-watch-v1 "$id" "$provider" "$url" "$host" "$path" "$number" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+    || ! fm_pr_merge_watch_parse "$tmp" \
+    || [ "$FM_PR_WATCH_ID" != "$id" ] \
+    || [ "$FM_PR_WATCH_URL" != "$url" ] \
+    || ! fm_pr_regular_destination_on_device_or_absent "$record" "$state_device" \
+    || [ -e "$record" ] || [ -L "$record" ] \
+    || ! mv -f -- "$tmp" "$record" \
+    || ! fm_pr_merge_watch_valid "$state" "$id"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Removed when the watch retires (bin/fm-watch.sh, after its poll's terminal
+# result) so a finished watch leaves no residue behind.
+fm_pr_merge_watch_remove() {  # <state> <id>
+  local state=$1 id=$2 record
+  fm_pr_task_id_valid "$id" || return 1
+  record="$state/$id.merge-watch"
+  [ -e "$record" ] || [ -L "$record" ] || return 0
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  rm -f -- "$record"
+}
+
+# Finishes a merge watch whose poll reached a terminal result. The
+# notification markers go first, then the record last: a crash between them
+# leaves a poll that re-detects the same terminal result, which the surviving
+# marker absorbs, rather than an unvalidatable check.
+fm_pr_merge_watch_retire() {  # <state> <id>
+  local state=$1 id=$2
+  fm_pr_task_id_valid "$id" || return 1
+  [ -e "$state/$id.merge-watch" ] || [ -L "$state/$id.merge-watch" ] || return 0
+  fm_pr_poll_merge_notified_remove "$state" "$id" || return 1
+  fm_pr_poll_closed_notified_remove "$state" "$id" || return 1
+  fm_pr_merge_watch_remove "$state" "$id"
+}
+
+# The full removal of a task's PR-check artifacts, shared by task cleanup
+# (bin/fm-teardown.sh) and a fresh spawn retiring a kept merge watch
+# (bin/fm-spawn.sh). The preflight refuses any unsafe artifact before anything
+# is removed; a pending retirement receipt finishes its own removal first.
+fm_pr_poll_artifacts_removal_valid() {  # <state> <id>
+  local state_dir=$1 id=$2 state_device artifact has_artifact=0
+  fm_task_id_path_safe "$id" || return 0
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
+  [ "$has_artifact" -eq 1 ] || return 0
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+  state_device=$(fm_pr_file_device "$state_dir") || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ] \
+      || { [ "$artifact" = "$state_dir/$id.merge-authority" ] \
+        && [ "$(fm_pr_file_mode "$artifact")" != 600 ]; }; then
+      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+  if [ -e "$state_dir/$id.pr-poll-retirement" ] \
+    || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
+    fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
+      echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
+      return 1
+    }
+  fi
+}
+
+fm_pr_poll_artifacts_remove() {  # <state> <id> <template>
+  local state_dir=$1 id=$2 template=$3
+  fm_pr_poll_artifacts_removal_valid "$state_dir" "$id" || return 1
+  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$template" || return 1
+  fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
+  fm_pr_poll_closed_notified_remove "$state_dir" "$id" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
+}
+
+# Retires a kept merge watch whose PR is not terminal, for a fresh task taking
+# over its id: the poll artifacts go first, then fm_pr_merge_watch_retire drops
+# the markers and the record last, so a crash between them leaves only an
+# orphan record fm_pr_merge_watch_prune_orphans sweeps. On success and on a
+# failed removal FM_PR_WATCH_URL names the watched PR; it is empty only when the
+# record itself is invalid.
+fm_pr_merge_watch_release() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3
+  fm_pr_merge_watch_valid "$state" "$id" || return 1
+  fm_pr_poll_artifacts_remove "$state" "$id" "$template" || return 1
+  fm_pr_merge_watch_retire "$state" "$id"
+}
+
+# A merge-watch record whose check is gone is crash residue of a half-finished
+# watch retirement, never a live watch: the poll the record bound is already
+# retired, so the record itself is what is swept.
+fm_pr_merge_watch_prune_orphans() {  # <state>
+  local state=$1 record id
+  for record in "$state"/*.merge-watch; do
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    id=${record##*/}
+    id=${id%.merge-watch}
+    fm_pr_task_id_valid "$id" || continue
+    if [ ! -e "$state/$id.check.sh" ] && [ ! -L "$state/$id.check.sh" ]; then
+      fm_pr_merge_watch_remove "$state" "$id" || true
+    fi
+  done
 }

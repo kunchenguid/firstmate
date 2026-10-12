@@ -27,25 +27,34 @@ fm_sup_stat_mtime() {
 #   FM_SUP_SOURCES        count of registered process-to-event sources
 #   FM_SUP_CHECKS         count of registered custom checks: a state/<id>.check.sh
 #                         with the state/<id>.check-trust binding that
-#                         bin/fm-check-register.sh writes. Task PR polls carry no
-#                         such binding and are torn down with their task, and the
-#                         relay shim keeps its own trust path, so neither counts
-#                         here. Presence of the binding is the whole test: whether
-#                         those bytes are still the registered ones is the check
-#                         sweep's call at execution time, and a home whose check
-#                         no longer validates needs the watcher precisely so the
-#                         sweep can report the rejection instead of going quiet.
+#                         bin/fm-check-register.sh writes. An ordinary task PR
+#                         poll carries no such binding and is torn down with its
+#                         task, and the relay shim keeps its own trust path, so
+#                         neither counts here. Presence of the binding is the
+#                         whole test: whether those bytes are still the
+#                         registered ones is the check sweep's call at execution
+#                         time, and a home whose check no longer validates needs
+#                         the watcher precisely so the sweep can report the
+#                         rejection instead of going quiet.
+#   FM_SUP_WATCHES        count of kept merge watches: a state/<id>.merge-watch
+#                         record with its state/<id>.check.sh poll still armed.
+#                         A kept watch is the task PR poll that is not torn down
+#                         with its task - teardown removes the task's trust
+#                         binding along with its record - so the binding test
+#                         above cannot see it, and presence of the two files is
+#                         the whole test for the same reason: validating the
+#                         record is the check sweep's job, not this predicate's.
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata),
-#                         or a registered custom check
+#                         a registered custom check, or a kept merge watch
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check watch id beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -72,10 +81,19 @@ fm_supervision_status() {
     [ -e "$state/$id.check-trust" ] || continue
     FM_SUP_CHECKS=$((FM_SUP_CHECKS + 1))
   done
+  FM_SUP_WATCHES=0
+  for watch in "$state"/*.merge-watch; do
+    [ -e "$watch" ] || continue
+    id=${watch##*/}
+    id=${id%.merge-watch}
+    [ -e "$state/$id.check.sh" ] || continue
+    FM_SUP_WATCHES=$((FM_SUP_WATCHES + 1))
+  done
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ] \
-    || [ "$FM_SUP_CHECKS" -gt 0 ]; then
+    || [ "$FM_SUP_CHECKS" -gt 0 ] \
+    || [ "$FM_SUP_WATCHES" -gt 0 ]; then
     FM_SUP_NEEDED=true
   fi
 

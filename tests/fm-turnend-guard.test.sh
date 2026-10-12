@@ -490,6 +490,31 @@ test_hook_registered_check_only_blocks_with_check_banner() {
   pass "fm-turnend-guard: registered-check-only supervision is named in the block banner"
 }
 
+# A kept merge watch is a poll that survived its task's teardown: no meta, no
+# check-trust binding, so only the .merge-watch record plus its armed check.sh
+# can still mark this home as needing supervision.
+test_hook_merge_watch_only_blocks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-merge-watch-only")
+  : > "$dir/state/watch-a.merge-watch"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/state/watch-a.check.sh"
+  chmod 700 "$dir/state/watch-a.check.sh"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block a home whose only remaining work is a kept merge watch"
+  assert_contains "$out" "$REQUIRED_REASON" "merge-watch-only blind stop must carry the required instruction"
+  pass "fm-turnend-guard: a kept merge watch alone keeps supervision needed"
+}
+
+test_hook_merge_watch_without_poll_needs_nothing() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-merge-watch-orphan")
+  : > "$dir/state/watch-a.merge-watch"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a merge-watch record without its armed check is residue, not supervision need"
+  [ -z "$out" ] || fail "orphaned merge-watch record produced hook output: $out"
+  pass "fm-turnend-guard: a merge-watch record with no armed check needs nothing"
+}
+
 test_hook_ignores_repo_state_when_fm_home_set() {
   local dir home out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-fm-home-ignore-root")
@@ -2218,6 +2243,8 @@ test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_x_mode_only_blocks_in_default_mode
 test_hook_registered_check_only_blocks_with_check_banner
+test_hook_merge_watch_only_blocks
+test_hook_merge_watch_without_poll_needs_nothing
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
