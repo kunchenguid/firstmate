@@ -421,6 +421,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/supervision-protocols/antigravity.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },

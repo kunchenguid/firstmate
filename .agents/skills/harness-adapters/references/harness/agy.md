@@ -1,7 +1,7 @@
 # Antigravity CLI
 
 Antigravity's `agy` TUI, verified end to end on 2026-09-10 with agy 1.2.0 on Linux through the Herdr backend.
-Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because `../../../../../docs/supervision-protocols/` carries no agy wake protocol.
+Verified as a primary harness and as a crewmate and scout adapter; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because agy exposes no hook surface for secondmate supervision.
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
 ## Operating facts
@@ -17,7 +17,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Interrupt | Single `Escape`, which prints the Interrupted row and leaves an idle composer with no repollution, so no clear key follows. |
 | Skill | No verified slash-skill form; use natural language. |
 | Autonomy | `--dangerously-skip-permissions` auto-approves tool calls for the run. |
-| Marker | None; a live TUI carries no `AGY_*` or `ANTIGRAVITY_*` variable. |
+| Marker | `ANTIGRAVITY_AGENT=1` or `AGY_AGENT=1` identifies the harness; ambient or foreign variables are not promoted. |
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
@@ -38,9 +38,9 @@ The unauthenticated failure mode was not observed, so treat any auth prompt or r
 
 ## Detection
 
-Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy`, never `*agy*`.
-No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - but a structural agy ancestor now outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
-agy is deliberately absent from the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, where muse, gemini, and rovo are also absent: a crewmate-only adapter must never own a home session lock.
+Detected by ancestry or environment marker: `../../../../../bin/fm-harness.sh` matches the anchored process names `agy`, `agy.exe`, `antigravity`, or `antigravity.exe`, or the `ANTIGRAVITY_AGENT=1` or `AGY_AGENT=1` marker.
+A structural agy ancestor outranks an inherited `CLAUDECODE` marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
+`antigravity` and `agy` are included in the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh` (`FM_HARNESS_RE` and `FM_HARNESS_NAMES`), allowing an Antigravity primary session to acquire and own the home session lock.
 
 ## Worker busy state and turn end
 
@@ -50,6 +50,6 @@ Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
 ## Primary integration
 
-Unsupported and unverified.
-`../../../../../docs/supervision-protocols/` carries no agy protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, and exit.
-`references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.
+Supported through Antigravity agentic supervision.
+`../../../../../docs/supervision-protocols/antigravity.md` owns the rendered supervision protocol emitted by `bin/fm-supervision-instructions.sh`.
+Antigravity manages background tasks through its native agentic runtime (`manage_task`, `run_command`, `schedule`, `invoke_subagent`) with automatic reactive wakeup upon task completion.
