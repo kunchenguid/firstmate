@@ -442,16 +442,14 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
       "$mode brief must state that firstmate's word is not merge authorization"
     assert_grep "If you cannot tell whether you are authorized to merge, do not guess and do not merge - append a needs-decision asking first." "$brief" \
       "$mode brief must require asking, not guessing, when merge authority is unclear"
-    assert_grep "(i) verify in a disposable copy that the branch merges without conflicts into the default branch" "$brief" \
+    assert_grep "(i) verify in a disposable worktree that the branch merges without conflicts into the default branch" "$brief" \
       "$mode brief must require the conflict-free merge check against the PR target"
-    assert_grep "(ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of the default branch" "$brief" \
-      "$mode brief must test the merged tree against the target's baseline"
-    assert_grep "(iii) end-to-end test and recalculate the target feature on the merged tree" "$brief" \
-      "$mode brief must verify functionality after merge"
-    assert_grep "(iv) if any of the mandatory post-merge steps fails after the merge, revert to the state before the merge and report the failure" "$brief" \
-      "$mode brief must require rollback and reporting on any post-merge verification failure"
-    assert_no_grep "if step (iii) fails" "$brief" \
-      "$mode brief must not limit rollback to step (iii) alone"
+    assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of the default branch; this is not the actual PR merge, and a failure here does not trigger rollback" "$brief" \
+      "$mode brief must test integration baseline without treating it as a landed merge"
+    assert_grep "(iii) merge the PR; (iv) end-to-end test and recalculate the target feature on the actually landed main tree; (v) if this end-to-end verification fails, revert to the state before the merge and report the failure" "$brief" \
+      "$mode brief must test landed behavior and rollback only on that failure"
+    assert_no_grep "if any of the mandatory post-merge steps fails" "$brief" \
+      "$mode brief must not rollback on full-suite integration failure"
     assert_grep "report the PR and stop there, awaiting authorization" "$brief" \
       "$mode brief must default to reporting the PR and awaiting authorization"
     assert_no_grep "You are finished" "$brief" \
@@ -496,9 +494,9 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" --base-branch release/x >/dev/null 2>&1 \
       || fail "$mode base-branch brief scaffold failed"
     base_brief="$home/data/$id/brief.md"
-    assert_grep "(i) verify in a disposable copy that the branch merges without conflicts into the branch this PR targets (its base branch \`release/x\`)" "$base_brief" \
+    assert_grep "(i) verify in a disposable worktree that the branch merges without conflicts into the branch this PR targets (its base branch \`release/x\`)" "$base_brief" \
       "$mode brief must merge-check against the PR's base branch"
-    assert_grep "(ii) run the full test suite on the merged tree and confirm zero failures beyond the baseline of that same base branch" "$base_brief" \
+    assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of that same base branch" "$base_brief" \
       "$mode brief must baseline against the PR's base branch"
   done
 
