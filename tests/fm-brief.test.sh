@@ -448,6 +448,13 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
       "$mode brief must block merge on new integration failures without rollback"
     assert_grep "(iii) merge the PR; (iv) end-to-end test and recalculate the target feature on the actually landed main tree; (v) if this end-to-end verification fails, revert to the state before the merge and report the failure" "$brief" \
       "$mode brief must rollback only after failed landed-tree end-to-end verification"
+    if [ "$mode" = direct-PR ]; then
+      assert_grep "done [at=<epoch>]: PR {url} verified on landed main" "$brief" \
+        "$mode brief must report verification on its actual landing branch"
+    else
+      assert_grep "done [at=<epoch>]: PR {url} checks green; post-merge verification passed on landed main" "$brief" \
+        "$mode brief must retain checks-green and its actual landing branch"
+    fi
     assert_no_grep "if any of the mandatory post-merge steps fails" "$brief" \
       "$mode brief must not rollback on full-suite integration failure"
     assert_grep "report the PR and stop there, awaiting authorization" "$brief" \
@@ -498,6 +505,15 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
       "$mode brief must merge-check against the PR's base branch"
     assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of that same base branch; this is not the actual PR merge; if there are new failures, stop before merging and report them without rollback" "$base_brief" \
       "$mode brief must block merge on new failures against the PR base without rollback"
+    assert_grep "end-to-end test and recalculate the target feature on the actually landed release/x tree" "$base_brief" \
+      "$mode brief must verify on its actual named landing branch"
+    if [ "$mode" = direct-PR ]; then
+      assert_grep "done [at=<epoch>]: PR {url} verified on landed release/x" "$base_brief" \
+        "$mode brief must report verification on the named landing branch"
+    else
+      assert_grep "done [at=<epoch>]: PR {url} checks green; post-merge verification passed on landed release/x" "$base_brief" \
+        "$mode brief must retain checks-green on the named landing branch"
+    fi
   done
 
   for kind in scout secondmate; do
