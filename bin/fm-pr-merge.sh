@@ -59,6 +59,23 @@
 # own view still proves a landed merge, and every outcome it cannot prove
 # refuses, reporting the failed gh read and naming both failed reads when the
 # gh-axi view could not prove the outcome either.
+# A source-branch update is only a substep of an already-authorized merge
+# request: fm-pr-merge resolves the merge authority, passes the captain-hold
+# check and full live preflight, then re-resolves authority under the merge
+# locks before it updates. This helper has no standalone branch-update path;
+# any refused guard stops before the update.
+# Updating a green BEHIND PR requires explicit --update-branch consent on the
+# authorized merge request; without it, refusal leaves the source branch alone.
+# Consent includes retaining the update if checks on the new head later fail.
+# With that opt-in, any merge method may update the branch.
+# The update uses GitHub's merge-commit default, records the new head, then
+# waits briefly (five poll delays, 15 seconds by default) under the merge and
+# away locks for that head to appear and for its checks and a transient UNKNOWN
+# mergeable state to settle, and repeats this full preflight before the
+# exact-head merge. If the head or its checks are not ready in that time, the
+# helper stops without merging and says to run the merge again once checks
+# pass. Any unwaived failed check refuses immediately, even while other checks
+# are pending; only unsettled checks or mergeability are awaited.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, an attended refusal names the queue's configured merge
 # method and exact --attended-override -- --auto --<method> retry flags. While
@@ -135,7 +152,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--update-branch] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -194,6 +211,7 @@ if [ "$PROVIDER" = gerrit ]; then
 fi
 shift 2
 ATTENDED_OVERRIDE=false
+UPDATE_BRANCH=false
 ALLOW_RED=()
 ALLOW_MISSING=()
 while [ "$#" -gt 0 ]; do
@@ -201,6 +219,14 @@ while [ "$#" -gt 0 ]; do
     --attended-override)
       ATTENDED_OVERRIDE=true
       shift
+      ;;
+    --update-branch)
+      UPDATE_BRANCH=true
+      shift
+      ;;
+    --update-branch=*)
+      echo "error: --update-branch takes no value" >&2
+      exit 2
       ;;
     --attended-override=*)
       echo "error: --attended-override takes no value" >&2
@@ -230,6 +256,10 @@ while [ "$#" -gt 0 ]; do
     *) break ;;
   esac
 done
+if [ "$UPDATE_BRANCH" = true ] && [ "$PROVIDER" != github ]; then
+  echo "error: --update-branch applies only to GitHub" >&2
+  exit 2
+fi
 if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
   exit 2
@@ -579,7 +609,7 @@ FIELDS
 # unnamed checks must not be treated as one.
 github_checks_not_green() {
   local json=$1
-  printf '%s' "$json" | jq -r '
+  printf '%s' "$json" | jq -r --argjson settled_only "${2:-false}" '
     def settled_at:
       if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
       then . else null end;
@@ -588,6 +618,9 @@ github_checks_not_green() {
         | to_entries[]
         | .key as $i
         | .value
+        | select($settled_only == false or
+            (if .__typename == "CheckRun" then .status == "COMPLETED"
+             else .state != "PENDING" and .state != "EXPECTED" end))
         | if .__typename == "CheckRun" then
             {
               kind: "check_run",
@@ -719,9 +752,14 @@ github_required_checks_missing() {
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
 # caller can retry a still-computing mergeability read instead of refusing.
 github_verify_mergeable() {
-  local json fields line red name covered missing unreported producers runs
+  local json fields line red failed name covered missing unreported producers runs pending
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
+  FM_PR_GITHUB_BEHIND=false
+  FM_PR_GITHUB_CHECKS_PENDING=false
+  FM_PR_GITHUB_CHECKS_FAILED=false
+  FM_PR_GITHUB_UNREPORTED=false
+  FM_PR_GITHUB_LIVE_HEAD=
 
   if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
@@ -765,10 +803,29 @@ FIELDS
     echo "error: could not read the GitHub pull request head commit before merging" >&2
     return 1
   fi
+  FM_PR_GITHUB_LIVE_HEAD=$live_head
+  [ "$merge_state" != BEHIND ] || FM_PR_GITHUB_BEHIND=true
   if ! red=$(github_checks_not_green "$json"); then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
+  # Reuse current-run supersession when separating settled failures from waits.
+  if ! failed=$(github_checks_not_green "$json" true); then
+    echo "error: could not read the GitHub pull request checks before merging" >&2
+    return 1
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ "${#ALLOW_RED[@]}" -eq 0 ] || [ "${ALLOW_RED[0]}" != "$name" ] || continue
+    FM_PR_GITHUB_CHECKS_FAILED=true
+  done <<EOF
+$failed
+EOF
+  pending=$(printf '%s' "$json" | jq -r '.statusCheckRollup[] |
+    if .__typename == "CheckRun" and .status != "COMPLETED" then .name // "(unnamed check)"
+    elif .__typename == "StatusContext" and (.state == "PENDING" or .state == "EXPECTED") then .context // "(unnamed check)"
+    else empty end' 2>/dev/null) || pending=''
+  [ -z "$pending" ] || FM_PR_GITHUB_CHECKS_PENDING=true
 
   case "$state" in
     [oO][pP][eE][nN]) ;;
@@ -836,6 +893,7 @@ EOF
       [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "${ALLOW_MISSING[0]}" = "$name" ] && continue
       refusals="$refusals  - required check '$name' has not reported at head $live_head
 "
+      FM_PR_GITHUB_UNREPORTED=true
       unreported="${unreported:+$unreported, }$name"
     done <<EOF
 $missing
@@ -860,6 +918,72 @@ EOF
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
+}
+
+github_update_behind_branch() {
+  local old_head=$FM_PR_MERGE_HEAD new_head attempt_error status
+  local poll=${mergeable_retry_delay:-3} deadline
+  deadline=$((SECONDS + poll * 5))
+  attempt_error=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-update.XXXXXX") || return 1
+  if ! gh pr update-branch "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO"; then
+    rm -f "$attempt_error"
+    return 1
+  fi
+  while :; do
+    new_head=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) || new_head=
+    if fm_pr_head_valid "$new_head" && [ "$new_head" != "$old_head" ]; then
+      break
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "error: $URL was updated but its new head is not visible yet; run the merge again once its checks pass" >&2
+      rm -f "$attempt_error"
+      return 1
+    fi
+    sleep "$poll"
+  done
+  if ! record_pr_metadata || ! grep -qxF "pr_head=$new_head" "$META"; then
+    echo "error: could not record the updated GitHub head $new_head" >&2
+    rm -f "$attempt_error"
+    return 1
+  fi
+  while :; do
+    status=0
+    github_verify_mergeable 2> "$attempt_error" || status=$?
+    if [ "$status" -eq 0 ]; then
+      if [ "$FM_PR_MERGE_HEAD" = "$new_head" ] && [ "$FM_PR_GITHUB_BEHIND" = false ]; then
+        cat "$attempt_error" >&2
+        rm -f "$attempt_error"
+        return 0
+      fi
+      echo "error: the GitHub pull request head or base moved again after its branch update" >&2
+      rm -f "$attempt_error"
+      return 1
+    fi
+    if [ -z "$FM_PR_GITHUB_LIVE_HEAD" ]; then
+      cat "$attempt_error" >&2
+      rm -f "$attempt_error"
+      return 1
+    fi
+    if [ "$FM_PR_GITHUB_LIVE_HEAD" != "$new_head" ]; then
+      echo "error: the GitHub pull request head moved again after its branch update" >&2
+      rm -f "$attempt_error"
+      return 1
+    fi
+    if [ "$status" -ne 3 ] && { [ "$FM_PR_GITHUB_CHECKS_FAILED" = true ] || {
+      [ "$FM_PR_GITHUB_CHECKS_PENDING" != true ] \
+      && [ "$FM_PR_GITHUB_UNREPORTED" != true ]; }; }; then
+      cat "$attempt_error" >&2
+      rm -f "$attempt_error"
+      return 1
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      cat "$attempt_error" >&2
+      echo "error: $URL was updated to $new_head but its checks are not ready; run the merge again once its checks pass" >&2
+      rm -f "$attempt_error"
+      return 1
+    fi
+    sleep "$poll"
+  done
 }
 
 # Read one live GitHub pull request view after gh returns. The selected
@@ -1384,6 +1508,13 @@ case "$PROVIDER" in
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
+    if [ "$FM_PR_GITHUB_BEHIND" = true ]; then
+      if [ "$UPDATE_BRANCH" != true ]; then
+        echo "error: $URL is behind its base; updating its source branch requires explicit --update-branch consent on this authorized merge request (the update remains if new checks prevent merging)" >&2
+        exit 1
+      fi
+      github_update_behind_branch || exit 1
+    fi
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
