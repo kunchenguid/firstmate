@@ -97,7 +97,7 @@ The guard cooperates with that arm rather than trusting a beacon left by the cyc
 
 ### Foreign session-lock owner
 
-When an active home instead has a session lock that the current session does not own and the shared `fm_session_lock_pid_blocks_reclaim` verdict refuses to reclaim, the Claude guard emits a read-only ownership diagnostic and allows the turn to end safely.
+When an active home instead has a session lock that the current session does not own and the shared `fm_session_lock_pid_blocks_reclaim` verdict refuses to reclaim, the Claude guard (`--claude`) and the Pi guard (`--pi`, passed by `.pi/extensions/fm-primary-turnend-guard.ts`) emit a read-only ownership diagnostic and allow the turn to end safely.
 
 Ownership is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
 The current session owns the lock when either of these holds:
