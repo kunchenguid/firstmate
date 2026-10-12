@@ -60,8 +60,8 @@ stop_lab_codex_daemon() {
     "$LAB/codex-home/app-server-daemon/daemon.pid"; do
     [ -r "$pid_file" ] || continue
     pid=$(sed -n 's/^{"pid":\([0-9][0-9]*\).*/\1/p' "$pid_file")
-    [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || continue
-    tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q codex || continue
+    [ -n "$pid" ] || continue
+    ps -p "$pid" -o args= 2>/dev/null | grep -q codex || continue
     kill "$pid" 2>/dev/null || true
   done
 }
@@ -154,10 +154,10 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # codex start (account/read fails with "failed to load workspace
   # requirements"). tmux -e sets the variable while keeping codex itself as the
   # pane process; an env wrapper would become the pane's process name instead.
-  launch_env=""
-  [ "$harness" = codex ] && launch_env="-e CODEX_HOME=$LAB/codex-home"
+  launch_env=()
+  [ "$harness" = codex ] && launch_env=(-e "CODEX_HOME=$LAB/codex-home")
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" $launch_env -- "$bin_path" $launch_args \
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" "${launch_env[@]}" -- "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"
 
   state=
