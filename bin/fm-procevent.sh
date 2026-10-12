@@ -245,6 +245,15 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# A home is legitimately spelled through a symlinked ancestor - /tmp and $TMPDIR
+# are symlinks on macOS. Resolve it to its physical path once, here, and export
+# it, so the claim this runner records, every adapter, and the extension host
+# (which resolves its own home the same way) all compare one value.
+if home_physical=$(CDPATH='' cd -P -- "$FM_HOME" 2>/dev/null && pwd -P); then
+  FM_HOME=$home_physical
+fi
+unset home_physical
+export FM_HOME
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
@@ -2062,8 +2071,16 @@ stop_runner_pid() {  # <pid> <identity>
 # caller can trust the reported first-time/repeat distinction to authorize a
 # paired external effect at most once.
 cmd_classify() {
-  local result=${1-} adapter script owner_state
+  local result=${1-} adapter script owner_state directory
   [ "$#" -eq 1 ] || usage
+  # Name the result through its directory's physical path, as capture recorded
+  # it, so a result spelled through a symlinked ancestor reaches its adapter and
+  # the extension host's inbox confinement check as one value. The result file
+  # itself is not resolved: a result that is a symlink is still refused.
+  if [ -n "${result##*/}" ] \
+    && directory=$(CDPATH='' cd -P -- "$(dirname -- "$result")" 2>/dev/null && pwd -P); then
+    result="${directory%/}/${result##*/}"
+  fi
   adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null) \
     || die "captured result has no readable adapter identity: $result"
   fm_procevent_result_extension_load "$result"
