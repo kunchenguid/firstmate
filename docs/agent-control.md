@@ -121,7 +121,7 @@ Every transient or self-contradicting read stays `unreadable` or `ambiguous` and
 That proof has one owner for the whole control plane (`fm_control_endpoint_absence_verdict` in `bin/fm-control-lib.sh`), so `exit` and `relaunch` cannot reach two different answers about one endpoint.
 `exit` reports what the proof established and nothing more - see its row in the verb table above.
 The same proof applies when the pane disappears after delivery of the exit command.
-The persist-gated restart shares the automatic-recovery lock from stop through replacement confirmation; `bin/fm-secondmate-liveness-lib.sh` owns that serialization contract.
+[`bin/fm-secondmate-liveness-lib.sh`](../bin/fm-secondmate-liveness-lib.sh) owns persist-gated restart's serialization with automatic recovery.
 
 What a reclaim is not:
 
