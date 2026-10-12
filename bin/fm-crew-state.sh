@@ -143,6 +143,10 @@
 #      running/fixing with recent reported activity: a killed or timed-out drive
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
+#      A TERMINAL failed run (never a live one) yields to the worker's own newest
+#      paused:/done: line when that line is stamped after the run record last
+#      updated, and to a merged recorded PR; a failure with no later declaration,
+#      or only a later working: line, still reads failed.
 #   4. No current run for this crew (pre-validation, uninitialized repository,
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
@@ -1172,6 +1176,40 @@ if [ "$HAVE_RUN" = 1 ]; then
       emit_ship_status_done "run still monitoring PR"
     fi
   fi
+
+  # A TERMINAL failed or cancelled run stops outranking the worker's own newest
+  # declaration once nothing live remains to override. Two durable facts lift it,
+  # and a live run never reaches here (its RUN_STATE is working):
+  #   - the recorded PR has merged, so the work landed whatever the run did; or
+  #   - the newest status line is a paused:/done: declaration stamped AFTER the
+  #     run record last updated, so the worker spoke after the run ended.
+  # A failed run with no later line, or only a later working: line, stays failed,
+  # and a declaration stamped before the run ended cannot talk past it.
+  case "$RUN_DETAIL" in
+    "run failed"|"run cancelled: no verdict")
+      if [ -z "$RUN_DEAD_DAEMON" ]; then
+        run_detail_prior=$RUN_DETAIL
+        # A cancelled run carries no verdict to lift, so only a failed one is
+        # answered by the merge.
+        if [ "$run_detail_prior" = "run failed" ] \
+          && [ "$(passed_pr_detail)" = "run passed: PR merged" ]; then
+          merged_pr_url=$(strip_quotes "$(nm_field pr)")
+          [ -n "$merged_pr_url" ] || merged_pr_url=$(meta_value pr)
+          emit "done" run-step "earlier $run_detail_prior${SEP}PR merged${merged_pr_url:+: $merged_pr_url}${SELECTED_RUN_ID:+${SEP}run: $SELECTED_RUN_ID}"
+        fi
+        if [ "$(status_line_verb "$(last_status_line "$LOG")")" = "$LOG_VERB" ] \
+          && { [ "$LOG_VERB" = "done" ] || status_is_paused "$LOG_LINE"; } \
+          && log_epoch=$(status_line_at_epoch "$LOG_LINE") \
+          && run_ended=$(fm_nm_run_updated_at "$WT" "$NM_TIMEOUT" "${SELECTED_RUN_ID:-$(strip_quotes "$(nm_field id)")}") \
+          && [ "$log_epoch" -gt "$run_ended" ]; then
+          if [ "$LOG_VERB" = "done" ]; then
+            emit_ship_status_done "earlier $run_detail_prior, declared done after it ended"
+          fi
+          emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}earlier $run_detail_prior, declared after it ended${SELECTED_RUN_ID:+${SEP}run: $SELECTED_RUN_ID}"
+        fi
+      fi
+      ;;
+  esac
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically

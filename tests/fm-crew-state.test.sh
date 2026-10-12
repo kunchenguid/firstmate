@@ -1690,6 +1690,89 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
+# A terminal failed run whose record last updated at <updated_at>. The run's
+# end time is the only durable witness a later declaration is judged against.
+make_terminal_failed_case() {  # <case> <branch> <updated_at> [pr-url]
+  local d; d=$(new_case "$1")
+  make_repo_on_branch "$d/wt" "$2"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/$1.meta" "window=fm:fm-$1" "worktree=$d/wt" "kind=ship" ${4:+"pr=$4"}
+  NM_HOME="$d/nm"
+  mkdir -p "$NM_HOME"
+  python3 -I - "$NM_HOME/state.sqlite" "$3" <<'PY' || fail 'could not create the run record fixture'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("CREATE TABLE runs (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL)")
+    db.execute("INSERT INTO runs VALUES ('01RUN', ?)", (int(sys.argv[2]),))
+PY
+  FM_FAKE_AXI_STATUS="$(run_failed "$2")"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/status: completed/status: failed}
+}
+
+test_terminal_failed_run_yields_to_later_paused() {
+  reset_fakes
+  make_terminal_failed_case tf-paused fm/tf-paused 1000
+  local d=$TMP_ROOT/tf-paused out
+  printf 'paused [at=2000]: waiting on the follow-up review\n' > "$d/state/tf-paused.status"
+  out=$(run_crew_state "$d" tf-paused)
+  assert_contains "$out" "state: paused" "terminal failed run + later paused -> paused"
+  assert_not_contains "$out" "state: failed" "later paused must not read as failed"
+  pass "terminal failed run yields to a later paused declaration"
+}
+
+test_terminal_failed_run_ignores_earlier_paused() {
+  reset_fakes
+  make_terminal_failed_case tf-early fm/tf-early 3000
+  local d=$TMP_ROOT/tf-early out
+  printf 'paused [at=2000]: waiting on my own validation round\n' > "$d/state/tf-early.status"
+  out=$(run_crew_state "$d" tf-early)
+  assert_contains "$out" "state: failed" "a pause declared before the run ended cannot hide its failure"
+  pass "terminal failed run outranks an earlier paused declaration"
+}
+
+test_terminal_failed_run_without_later_line_stays_failed() {
+  reset_fakes
+  make_terminal_failed_case tf-none fm/tf-none 1000
+  local d=$TMP_ROOT/tf-none out
+  out=$(run_crew_state "$d" tf-none)
+  assert_contains "$out" "state: failed" "terminal failed run with no log -> failed"
+  printf 'paused [at=500]: waiting\nworking [at=2000]: resumed\n' > "$d/state/tf-none.status"
+  out=$(run_crew_state "$d" tf-none)
+  assert_contains "$out" "state: failed" "a later working line alone does not hide the failure"
+  pass "terminal failed run with no later declaration stays failed"
+}
+
+test_live_run_still_supersedes_later_paused() {
+  reset_fakes
+  make_terminal_failed_case tf-live fm/tf-live 1000
+  local d=$TMP_ROOT/tf-live out
+  FM_FAKE_AXI_STATUS="$(run_running fm/tf-live)"
+  printf 'paused [at=2000]: waiting on the follow-up review\n' > "$d/state/tf-live.status"
+  out=$(run_crew_state "$d" tf-live)
+  assert_contains "$out" "state: working" "a live run keeps outranking a later paused line"
+  assert_not_contains "$out" "state: paused" "worker cannot talk past a live run"
+  pass "live run still supersedes a later paused declaration"
+}
+
+test_terminal_failed_run_with_merged_pr_is_not_failed() {
+  reset_fakes
+  make_terminal_failed_case tf-merged fm/tf-merged 1000 https://github.com/o/r/pull/1
+  local d=$TMP_ROOT/tf-merged out
+  FM_FAKE_PR_STATE=MERGED
+  FM_FAKE_PR_MERGED=true
+  out=$(run_crew_state "$d" tf-merged)
+  assert_not_contains "$out" "state: failed" "merged PR must not read as failed"
+  assert_contains "$out" "state: done" "terminal failed run with merged PR -> done"
+  assert_contains "$out" "PR merged" "the merge is named"
+  FM_FAKE_PR_STATE=OPEN
+  FM_FAKE_PR_MERGED=false
+  out=$(run_crew_state "$d" tf-merged)
+  assert_contains "$out" "state: failed" "an open PR does not lift a failed run"
+  pass "terminal failed run with a merged PR is not failed"
+}
+
 # Recovered delivery cases, varying only the terminal route and the optional
 # rebase step. The already-fixed passed-run case remains a control.
 test_cancelled_delivery_and_skipped_rebase() {
@@ -5558,6 +5641,11 @@ test_terminal_passed_with_open_gerrit_change_does_not_claim_merged
 test_terminal_passed_with_merged_gerrit_change_reports_merged
 test_terminal_passed_with_unreadable_gerrit_change_reports_unknown
 test_terminal_failed
+test_terminal_failed_run_yields_to_later_paused
+test_terminal_failed_run_ignores_earlier_paused
+test_terminal_failed_run_without_later_line_stays_failed
+test_live_run_still_supersedes_later_paused
+test_terminal_failed_run_with_merged_pr_is_not_failed
 test_terminal_failed_ci_orphan_after_green_reads_done
 test_terminal_failed_ci_orphan_status_only_reads_done
 test_terminal_failed_ci_genuine_red_stays_failed
