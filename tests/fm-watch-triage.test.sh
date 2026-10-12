@@ -6284,7 +6284,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
 # must still hand off the plain window identity to the daemon, rather than running
 # the normal-mode pause re-surface and decorating the stale identity.
 test_afk_paused_changed_pane_hands_off_plain_stale() {
-  local dir state fakebin out drain_out capture_file statusf window key sig pid back
+  local dir state fakebin out drain_out capture_file statusf window key sig pid back round
   dir=$(make_case afk-paused-changed-pane); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-afk-held"
@@ -6313,7 +6313,27 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after AFK paused stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "stale: $window" >/dev/null \
     || fail "AFK paused stale was not queued with the plain window identity"
-  pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the away paused-wait handoff"
+  round=1
+  while [ "$round" -le 3 ]; do
+    printf 'idle, awaiting upstream, elapsed %ss\n' "$round" > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+      || fail "away paused wait re-fired during unchanged declaration round $round"
+    [ ! -s "$state/.wake-queue" ] || fail "pane churn queued another wake for the same away paused wait"
+    round=$(( round + 1 ))
+  done
+  # A replacement declaration must get its own first sight even on the same
+  # static pane; dedupe must not silence a new wait or a resumed worker.
+  printf 'paused: awaiting the replacement tool release\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-held_status"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "a replacement away pause inherited the old declaration's suppression"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the replacement away wait"
+  printf 'working: dependency cleared, resuming\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-held_status"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "a resumed worker retained paused-wait suppression"
+  pass "away paused waits hand off once per declaration despite pane churn, and re-arm on replacement or resume"
 }
 
 # --- the away-posture record: captain-held items are never rechecked ----------
