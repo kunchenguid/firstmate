@@ -4,23 +4,21 @@
 # (recovery) into one ordered digest.
 #
 # Coverage:
-#   - absent-file markers vs empty-but-present files in the context digest
+#   - absent-file markers vs empty-but-present files
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's seven mutating sweeps, verified by their
-#     ABSENCE), the digest still completes
-#   - output section ordering: the safety preamble leads unchanged, live fleet
-#     state precedes the curated memory a truncated tail may take, and the
-#     read-once contract precedes both
+#     skipped (verified by their ABSENCE), the digest still completes
+#   - output section ordering: the safety preamble leads unchanged, then the
+#     supervision block, fleet rows, network checks, context, and next step
+#   - the core, preferences, and learnings parts: each part's two header
+#     lines, the byte budget per harness, the inline WITHHELD lines and the
+#     read-only commands they print, and the never-cut sections
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
 #     watcher ownership
-#   - status-tail bounding, default and FM_SESSION_START_STATUS_TAIL override
-#   - the per-line status-tail cap and its truncation marker
-#   - startup backlog composition: done rows dropped, every in-flight/held/
-#     blocked row kept whole, the dispatchable queued listing bounded with an
-#     exact disclosed remainder
-#   - orphan status logs whose task meta has already disappeared
-#   - per-task endpoint-liveness lines for a live and a dead recorded target,
-#     tmux and herdr both
+#   - one capped fleet row per task with its last status state, and orphan
+#     status logs whose task meta has already disappeared
+#   - the startup backlog summary: counts and ids, no hold reasons or done rows
+#   - per-task endpoint verdicts for live, dead, failed, and hung reads, tmux
+#     and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -554,22 +552,20 @@ SH
   chmod +x "$fakebin/herdr"
 }
 
-# run_session_start <home> <root> <path>
-# Drop every harness env marker from bin/fm-harness.sh detect_own so the
-# surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
-# codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# harness_marker returns before FM_PI_HARNESS. detect_own then keeps a comm ancestor of another family, so a Cursor shell reports plain pi for a pi-signed fixture.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+      -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+      -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -793,7 +789,8 @@ EOF
   ' "$home/state/home-summary.json" >/dev/null \
     || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
-  assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
+  assert_contains "$out" "projects: demo" "digest did not print the project name"
+  assert_contains "$out" "WITHHELD projects lines :: sed -n p " "digest did not name how to read the project registry"
 
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
@@ -1011,13 +1008,9 @@ SH
 
 # --- output ordering ----------------------------------------------------------
 
-# The digest is delivered through a harness that truncates from the TAIL, so
-# section order decides what a truncated startup loses. The safety preamble
-# still leads, live fleet identity now outranks curated memory, and the
-# read-once contract arrives before the payload it governs.
 test_output_ordering_diagnostics_lead() {
-  local rec root home fakebin out lock_line boot_line wake_line read_once_line
-  local context_line fleet_line next_line inventory_line missing_line
+  local rec root home fakebin out lock_line boot_line wake_line
+  local context_line fleet_line next_line inventory_line missing_line header_line
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1032,37 +1025,35 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)")
 
+  header_line=$(printf '%s\n' "$out" | grep -n 'withheld sections are named inline' | head -1 | cut -d: -f1)
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
   wake_line=$(printf '%s\n' "$out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
-  read_once_line=$(printf '%s\n' "$out" | grep -n '^READ-ONCE CONTRACT$' | head -1 | cut -d: -f1)
   context_line=$(printf '%s\n' "$out" | grep -n '^CONTEXT$' | head -1 | cut -d: -f1)
   fleet_line=$(printf '%s\n' "$out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
   next_line=$(printf '%s\n' "$out" | grep -n '^NEXT STEP$' | head -1 | cut -d: -f1)
-  inventory_line=$(printf '%s\n' "$out" | grep -n '^--- task-a ---$' | head -1 | cut -d: -f1)
+  inventory_line=$(printf '%s\n' "$out" | grep -n '^task-a kind=' | head -1 | cut -d: -f1)
 
-  if [ -z "$lock_line" ] || [ -z "$boot_line" ] || [ -z "$wake_line" ] \
-    || [ -z "$read_once_line" ] || [ -z "$context_line" ] || [ -z "$fleet_line" ] \
+  if [ -z "$header_line" ] || [ -z "$lock_line" ] || [ -z "$boot_line" ] || [ -z "$wake_line" ] \
+    || [ -z "$context_line" ] || [ -z "$fleet_line" ] \
     || [ -z "$next_line" ] || [ -z "$inventory_line" ]; then
     fail "one or more section headers missing from digest: $out"
   fi
 
-  # The safety preamble's order is unchanged: mutation authority, then
-  # diagnostics, then this turn's work queue, before anything bulky is read.
+  [ "$header_line" -lt "$lock_line" ] || fail "the part header did not precede LOCK"
   [ "$lock_line" -lt "$boot_line" ] || fail "LOCK did not precede BOOTSTRAP"
   [ "$boot_line" -lt "$wake_line" ] || fail "BOOTSTRAP did not precede WAKE QUEUE"
-  [ "$wake_line" -lt "$read_once_line" ] || fail "WAKE QUEUE did not precede the read-once contract"
-
-  [ "$read_once_line" -lt "$fleet_line" ] || fail "the read-once contract did not precede FLEET STATE"
+  [ "$wake_line" -lt "$fleet_line" ] || fail "WAKE QUEUE did not precede FLEET STATE"
   [ "$fleet_line" -lt "$context_line" ] || fail "FLEET STATE did not precede CONTEXT"
   [ "$context_line" -lt "$next_line" ] || fail "CONTEXT did not precede NEXT STEP"
-
-  # The live-task inventory - the record recovery actually depends on - must sit
-  # ahead of the curated memory a truncated tail is allowed to take.
   [ "$inventory_line" -lt "$context_line" ] \
-    || fail "the live-task inventory was buried behind the curated memory files"
+    || fail "the live-task row was buried behind the context lines"
   assert_contains "$out" "Captain memory that may be truncated away safely." \
-    "the ordering fixture did not actually print a memory file"
+    "the ordering fixture did not print captain preferences"
+  assert_contains "$out" "Full protocol: bin/fm-supervision-instructions.sh --harness claude " \
+    "Claude startup did not keep the short supervision block and its pointer"
+  assert_not_contains "$out" "4. On the one" \
+    "Claude startup printed supervision steps past the brief cut"
 
   missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: node' | head -1 | cut -d: -f1)
   [ -n "$missing_line" ] || fail "MISSING diagnostic did not appear at all"
@@ -1071,11 +1062,9 @@ EOF
   pass "digest sections are ordered safety-preamble first, live fleet state before curated memory"
 }
 
-# The contract has to survive tail truncation and stay honest once it precedes
-# the sections it governs, so it carries the truncated-stage escape itself.
-test_read_once_contract_is_stated_once_before_its_subject() {
-  local rec root home fakebin out contract_count
-  rec=$(new_world read-once)
+test_startup_names_preview_and_absent_parts() {
+  local rec root home fakebin out
+  rec=$(new_world preview-lines)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
@@ -1084,18 +1073,16 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "Do NOT re-read any of them after reading this digest" \
-    "the read-once contract lost its core instruction"
-  assert_contains "$out" "STARTUP TRUNCATED banner named the stage that would have printed it" \
-    "the read-once contract does not void itself for a stage that never ran"
-  assert_contains "$out" "The READ-ONCE CONTRACT" \
-    "the closing reminder does not point back at the contract"
+  assert_contains "$out" "If this message reached you as a truncated preview, read the full output file the harness named before any other action." \
+    "startup did not name a truncated preview"
+  assert_contains "$out" "If preferences are absent, read data/captain-shared.md and data/captain.md now." \
+    "startup did not name the preferences files"
+  assert_contains "$out" "If the learnings message is absent, read data/learnings.md now." \
+    "startup did not name the learnings file"
+  assert_not_contains "$out" "READ-ONCE CONTRACT" \
+    "startup still prints the old read-once section"
 
-  contract_count=$(printf '%s\n' "$out" | grep -c 'Do NOT re-read any of them')
-  [ "$contract_count" -eq 1 ] \
-    || fail "the read-once contract is stated $contract_count times instead of once: $out"
-
-  pass "the read-once contract is stated once, ahead of the sources it governs"
+  pass "startup names a truncated preview and the files a missing part would have carried"
 }
 
 test_herdr_backend_diagnostics_follow_real_session_start() {
@@ -1141,7 +1128,7 @@ SH
 # --- status tail bounding -----------------------------------------------------
 
 test_status_tail_bounding() {
-  local rec root home fakebin out
+  local rec root home fakebin out row
   rec=$(new_world status-tail)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1151,30 +1138,26 @@ EOF
   make_fake_tmux "$fakebin" "fm-sess:live"
 
   printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-a.meta"
-  printf 'working: step 1\nworking: step 2\nworking: step 3\nworking: step 4\nworking: step 5\nworking: step 6\nworking: step 7\n' \
+  printf 'working: step 1\nworking: step 2\nworking: step 3\nworking: step 4\nworking: step 5\nworking: step 6\nworking [at=1]: step 7\n' \
     > "$home/state/task-a.status"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "working: step 7" "default status tail missing the most recent line"
-  assert_contains "$out" "working: step 3" "default status tail (5 lines) missing an expected recent line"
-  assert_not_contains "$out" "working: step 1" "default status tail (5 lines) leaked an older line"
-  assert_contains "$out" "$home/state/task-a.status" "digest did not print the full status log path for a deeper read"
-  assert_contains "$out" "a bounded tail of every state/*.status" "read-once contract does not distinguish bounded status tails"
+  row=$(printf '%s\n' "$out" | grep '^task-a kind=' | head -1)
+  [ -n "$row" ] || fail "the fleet row for task-a was missing: $out"
+  assert_contains "$row" "last=working" "the fleet row did not keep the latest status state"
+  assert_contains "$out" "Records: state/<id>.meta and state/<id>.status" "the fleet block did not name the status files"
+  assert_not_contains "$out" "working: step 1" "the fleet row dumped an older status line"
+  assert_not_contains "$out" "step 7" "the fleet row dumped the status note"
 
-  out=$(FM_SESSION_START_STATUS_TAIL=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "working: step 7" "FM_SESSION_START_STATUS_TAIL=2 tail missing the most recent line"
-  assert_not_contains "$out" "working: step 5" "FM_SESSION_START_STATUS_TAIL=2 did not bound the tail to 2 lines"
-
-  pass "status tail is bounded to the configured line count, with the full log path always printed"
+  pass "a fleet row keeps the latest status state and the status path, not the tail"
 }
 
-# A crewmate writes its own status lines, so nothing upstream bounds their
-# length: an observed one ran 865 characters. The tail is a wake-EVENT view
-# whose full log path is printed beside it, so a long line is cut, marked, and
-# left recoverable rather than allowed to scale the digest with fleet load.
-test_status_tail_line_cap() {
-  local rec root home fakebin out lede longest capped tail_section
-  rec=$(new_world status-line-cap)
+# The fleet row reads the verb and [at=] stamp through bin/fm-classify-lib.sh:
+# a stamp in the note, a duplicate stamp, or a future stamp is unknown time,
+# and a line without a recognized status verb prints last=-.
+test_fleet_row_status_fields_use_owner_grammar() {
+  local rec root home fakebin out row
+  rec=$(new_world fleet-row-grammar)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
@@ -1182,36 +1165,73 @@ EOF
   make_fake_ps_claude "$fakebin"
   make_fake_tmux "$fakebin" "fm-sess:live"
 
-  lede='needs-decision: [key=cap] pick the rendering strategy'
-  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-cap.meta"
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-note.meta"
+  printf 'done:merged relayed [at=1]\n' > "$home/state/task-note.status"
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-dup.meta"
+  printf 'working [at=1] [at=2]: step\n' > "$home/state/task-dup.status"
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-future.meta"
+  printf 'working [at=%s]: step\n' "$(( $(date +%s) + 3600 ))" > "$home/state/task-future.status"
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-ok.meta"
+  printf 'working [at=%s]: step\n' "$(( $(date +%s) - 30 ))" > "$home/state/task-ok.status"
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-prose.meta"
+  printf 'Rebasing onto main now\n' > "$home/state/task-prose.status"
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-ci.meta"
+  printf 'waiting on ci: run 3\n' > "$home/state/task-ci.status"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  row=$(printf '%s\n' "$out" | grep '^task-note kind=' | head -1)
+  assert_contains "$row" "last=done age=- " "a done:merged row or a note stamp leaked into the fleet row"
+  row=$(printf '%s\n' "$out" | grep '^task-dup kind=' | head -1)
+  assert_contains "$row" "last=working age=- " "a duplicate stamp gave a fleet row age"
+  row=$(printf '%s\n' "$out" | grep '^task-future kind=' | head -1)
+  assert_contains "$row" "last=working age=- " "a future stamp gave a fleet row age"
+  row=$(printf '%s\n' "$out" | grep '^task-ok kind=' | head -1)
+  assert_contains "$row" "last=working age=3" "a well-formed stamp lost its fleet row age"
+  row=$(printf '%s\n' "$out" | grep '^task-prose kind=' | head -1)
+  assert_contains "$row" "last=- age=- " "a prose-only status line leaked into the fleet row"
+  row=$(printf '%s\n' "$out" | grep '^task-ci kind=' | head -1)
+  assert_contains "$row" "last=- age=- " "an unrecognized verb leaked into the fleet row"
+
+  pass "a fleet row reads the status verb and stamp through the owner grammar"
+}
+
+# A fleet row is in the never-cut set: its open decision keys come last, and in a read-only session the row is the only place the
+# keys appear. A long PR URL plus two run-scoped keys must not push them off.
+test_fleet_row_is_never_cut() {
+  local rec root home fakebin out pr row
+  rec=$(new_world fleet-row-uncut)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  pr="https://example.invalid/$(awk 'BEGIN { while (i++ < 200) printf "w" }')"
+  printf 'window=fm-sess:live\nkind=ship\npr=%s\nremote_host=build-box\n' "$pr" > "$home/state/task-cap.meta"
   {
-    printf '%s' "$lede"
-    awk 'BEGIN { while (i++ < 400) printf " padding" }'
-    printf '\n'
-    printf 'working: short line kept whole\n'
+    printf 'needs-decision [key=nm-01m4nv304ctj1efpvckk8xaa7g-review]: pick one\n'
+    printf 'needs-decision [key=nm-01m4nv304ctj1efpvckk8xaa7g-push]: confirm push\n'
   } > "$home/state/task-cap.status"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  row=$(printf '%s\n' "$out" | grep '^task-cap kind=' | head -1)
+  [ -n "$row" ] || fail "the long fleet row was missing: $out"
+  assert_not_contains "$row" "[truncated]" "a fleet row was cut"
+  assert_contains "$row" "pr=$pr " "the fleet row lost its PR URL"
+  assert_contains "$row" "nm-01m4nv304ctj1efpvckk8xaa7g-review" "the fleet row lost the first decision key"
+  assert_contains "$row" "nm-01m4nv304ctj1efpvckk8xaa7g-push" "the fleet row lost the second decision key"
+  case "$row" in
+    *" decisions=nm-01m4nv304ctj1efpvckk8xaa7g-review,nm-01m4nv304ctj1efpvckk8xaa7g-push") ;;
+    *) fail "the fleet row did not end with its decision keys: $row" ;;
+  esac
+  assert_not_contains "$row" "pick one" "the fleet row dumped the status note"
 
-  assert_contains "$out" "$lede" "the cap discarded the lede that carries the state word and decision key"
-  assert_contains "$out" " [truncated]" "an over-long status line was not marked as truncated"
-  assert_contains "$out" "working: short line kept whole" "the cap mangled a status line already under it"
-  assert_contains "$out" "each capped at 220 characters" "the status tail header does not disclose its per-line cap"
-  assert_contains "$out" "$home/state/task-cap.status" "a capped tail dropped the full log path that recovers the rest"
-
-  # Nothing the tail emits may exceed the cap, and the padded line really was
-  # long enough to exercise it.
-  tail_section=$(printf '%s\n' "$out" | awk '/^status tail \(/ { flag = 1; next } flag && /^$/ { flag = 0 } flag')
-  longest=$(printf '%s\n' "$tail_section" | awk '{ if (length($0) > max) max = length($0) } END { print max + 0 }')
-  [ "$longest" -le 220 ] || fail "a status tail line ran $longest characters past the 220-character cap"
-  capped=$(printf '%s\n' "$tail_section" | grep -c ' \[truncated\]$')
-  [ "$capped" -eq 1 ] || fail "expected exactly one truncated tail line, got $capped: $tail_section"
-
-  pass "status tail lines are capped with a truncation marker while the full log stays reachable"
+  pass "a fleet row prints whole, with every decision key"
 }
 
 test_orphan_status_logs_are_printed() {
-  local rec root home fakebin out matched_count orphan_count
+  local rec root home fakebin out matched_count
   rec=$(new_world orphan-status)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1226,18 +1246,18 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "Orphan status logs (state/*.status without matching .meta)" "digest did not label orphan status logs"
-  assert_contains "$out" "--- task-orphan ---" "digest did not print the orphan status id"
-  assert_contains "$out" "working: orphan step 6" "orphan status tail missing the newest line"
-  assert_not_contains "$out" "working: orphan step 1" "orphan status tail was not bounded"
-  assert_contains "$out" "$home/state/task-orphan.status" "orphan status tail did not print the full log path"
+  assert_contains "$out" "Orphan status logs: 1" "digest did not count the orphan status log"
+  assert_contains "$out" "state/<id>.status with no matching state/<id>.meta" \
+    "digest did not say where an orphan status log lives"
+  assert_not_contains "$out" "working: orphan step 6" "orphan status tail was printed"
+  assert_not_contains "$out" "working: orphan step 1" "orphan status tail was printed"
+  assert_contains "$out" "task-a kind=" "the task that still has meta lost its fleet row"
+  assert_not_contains "$out" "working: surfaced once" "a matched status log dumped its tail"
 
-  matched_count=$(printf '%s\n' "$out" | grep -F -c 'working: surfaced once')
-  orphan_count=$(printf '%s\n' "$out" | grep -F -c 'working: orphan step 6')
-  [ "$matched_count" -eq 1 ] || fail "matched status log was printed $matched_count times: $out"
-  [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
+  matched_count=$(printf '%s\n' "$out" | grep -c '^task-a kind=')
+  [ "$matched_count" -eq 1 ] || fail "matched fleet row was printed $matched_count times: $out"
 
-  pass "orphan status logs are printed once with bounded tails"
+  pass "orphan status logs are counted, and status tails are not printed"
 }
 
 # --- session-start secondmate recovery boundary -----------------------------
@@ -1316,7 +1336,7 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
     "session start did not distinguish an existing Pi-shaped process from a missing window"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "$SESSION_START_SECOND_MATE_ID kind=secondmate project=- endpoint=alive" \
     "the later fleet read should still see the ambiguous endpoint"
   pass "session start: an existing ambiguous Pi process prevents duplicate recovery"
 }
@@ -1335,7 +1355,7 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "$SESSION_START_SECOND_MATE_ID kind=secondmate project=- endpoint=DEAD" \
     "the later cheap presence read should preserve the visible offline symptom"
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
@@ -1393,8 +1413,8 @@ EOF
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "task-live kind=ship project=- endpoint=alive" "live tmux endpoint not reported alive"
+  assert_contains "$out" "task-dead kind=ship project=- endpoint=DEAD" "dead tmux endpoint not reported dead"
 
   pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
 }
@@ -1414,11 +1434,11 @@ EOF
   printf 'window=sess:p-odd\nkind=ship\nbackend=herdr\n' > "$home/state/task-odd.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-odd)" \
+  assert_contains "$out" "task-live kind=ship project=- endpoint=alive" "live herdr endpoint not reported alive"
+  assert_contains "$out" "task-dead kind=ship project=- endpoint=DEAD" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "task-odd kind=ship project=- endpoint=DEAD" \
     "a probe exiting 4 for a gone surface was not reported dead"
-  assert_not_contains "$out" "endpoint: error (backend=herdr window=sess:p-odd" \
+  assert_not_contains "$out" "task-odd kind=ship project=- endpoint=ERROR" \
     "a probe exiting 4 was mislabelled as a failed read"
 
   pass "herdr endpoint liveness is reported per task: alive, dead for exit 1, dead for any other probe status"
@@ -1442,13 +1462,12 @@ EOF
   out=$(FM_SESSION_START_ENDPOINT_TIMEOUT=bogus run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "one killed endpoint read must not fail the digest"
-  assert_contains "$out" \
-    "endpoint: error (backend=herdr window=sess:p-doom - the endpoint read died or hit its 10s bound; the digest continued past it)" \
-    "a killed endpoint read was not reported as that task's own error line"
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" \
+  assert_contains "$out" "task-a-doom kind=ship project=- endpoint=ERROR last=working" \
+    "a killed endpoint read was not reported as that task's own error row"
+  assert_contains "$out" "endpoint=ERROR means the read died or hit its 10s bound" \
+    "the fleet block did not explain an ERROR endpoint"
+  assert_contains "$out" "task-z-live kind=ship project=- endpoint=alive" \
     "the digest did not continue past the killed read to the next task"
-  assert_contains "$out" "working: doomed task marker" \
-    "the doomed task's status tail was lost along with its endpoint read"
   assert_contains "$out" "$(printf '\nCONTEXT\n')" \
     "a killed endpoint read cost the digest its context section"
   assert_contains "$out" "NEXT STEP" \
@@ -1481,10 +1500,11 @@ EOF
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "a hung endpoint read must not fail the digest"
-  assert_contains "$out" \
-    "endpoint: error (backend=herdr window=sess:p-slow - the endpoint read died or hit its 2s bound; the digest continued past it)" \
-    "a hung endpoint read was not bounded into that task's own configured bound"
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" \
+  assert_contains "$out" "task-a-slow kind=ship project=- endpoint=ERROR" \
+    "a hung endpoint read was not reported as that task's own error row"
+  assert_contains "$out" "endpoint=ERROR means the read died or hit its 2s bound" \
+    "a hung endpoint read was not bounded into the configured bound"
+  assert_contains "$out" "task-z-live kind=ship project=- endpoint=alive" \
     "the digest did not continue past the hung read to the next task"
   assert_contains "$out" "$(printf '\nCONTEXT\n')" \
     "a hung endpoint read cost the digest its context section"
@@ -1516,9 +1536,10 @@ EOF
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "a padded-zero per-read bound must not fail the digest"
-  assert_contains "$out" \
-    "endpoint: error (backend=herdr window=sess:p-slow - the endpoint read died or hit its 10s bound; the digest continued past it)" \
-    "a padded-zero bound did not fall back to the 10s default, so the hung read went unbounded"
+  assert_contains "$out" "task-a-slow kind=ship project=- endpoint=ERROR" \
+    "a padded-zero bound did not bound the hung read into that task's error row"
+  assert_contains "$out" "endpoint=ERROR means the read died or hit its 10s bound" \
+    "a padded-zero bound did not fall back to the 10s default"
   assert_contains "$out" "$(printf '\nCONTEXT\n')" \
     "a padded-zero bound cost the digest its context section"
 
@@ -1607,7 +1628,7 @@ SH
   assert_contains "$out" 'stopped during the "lock" stage' \
     "the abnormal-death banner did not name the stage that never finished"
   assert_contains "$out" \
-    "wake-queue supervision-instructions read-once fleet-state network-checks context next-step" \
+    "wake-queue supervision-instructions fleet-state network-checks context next-step" \
     "the abnormal-death banner did not list every stage that never ran"
   assert_not_contains "$out" "RUNTIME BOUND" \
     "an abnormal death was misreported as the runtime bound firing"
@@ -2027,51 +2048,51 @@ EOF
   out=$(FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TASKS_AXI_READY=3 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to 20; task bodies omitted)" \
-    "compatible tasks-axi backend did not render the compact backlog listing"
-  assert_contains "$out" "tasks[1]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:" \
-    "tasks-axi compact listing omitted the expected structured field header"
-  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending" \
-    "tasks-axi compact listing omitted in-flight identity, state, or hold metadata"
-  assert_contains "$out" "held-queued,queued,ship,firstmate,Held queued work,none,captain,captain choice pending" \
-    "tasks-axi compact listing omitted a held row or its hold metadata"
-  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
-    "tasks-axi compact listing omitted blocked-by metadata"
-  assert_contains "$out" "ready-3,queued,ship,firstmate,Ready item 3" \
-    "tasks-axi compact listing omitted a dispatchable queued row inside the bound"
-  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "tasks-axi compact digest leaked an in-flight task body"
-  assert_not_contains "$out" "QUEUED-BODY-LINE" "tasks-axi compact digest leaked a queued task body"
-  assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
-  assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
-  assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
-  assert_contains "$out" "Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full" \
-    "compact digest omitted the full-body lookup pointer"
+  assert_contains "$out" "backlog (tasks-axi): in_flight=1 held=1 blocked=1 ready=3" \
+    "tasks-axi startup did not print the group counts"
+  assert_contains "$out" "ready ids: ready-1 ready-2 ready-3" \
+    "tasks-axi startup omitted a ready id"
+  assert_contains "$out" "captain-held ids: compact-startup held-queued" \
+    "tasks-axi startup omitted a captain-held id"
+  assert_contains "$out" "other holds: 0" "tasks-axi startup did not count other holds"
+  assert_contains "$out" "done rows omitted" "tasks-axi startup did not say done rows were omitted"
+  assert_not_contains "$out" "captain choice pending" "tasks-axi startup printed a hold reason"
+  assert_not_contains "$out" "tasks[1]{" "tasks-axi startup printed a raw table header"
+  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "tasks-axi startup leaked an in-flight task body"
+  assert_not_contains "$out" "QUEUED-BODY-LINE" "tasks-axi startup leaked a queued task body"
+  assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi startup listed a done row"
+  assert_contains "$out" "compact-startup kind=ship project=firstmate" \
+    "in-flight fleet identity disappeared from startup"
+  assert_contains "$out" "Records: state/<id>.meta and state/<id>.status" \
+    "the fleet block did not name the record files"
+  assert_not_contains "$out" "worktree=$home/projects/firstmate" \
+    "startup printed the whole meta record"
+  assert_contains "$out" "Full task bodies: bin/fm-tasks-axi.sh show <id> --full" \
+    "startup omitted the full-body lookup pointer"
+  assert_contains "$out" "WITHHELD hold reasons :: bin/fm-tasks-axi.sh list --state held --fields hold_kind,hold_reason" \
+    "startup did not name how to read hold reasons"
   assert_contains "$out" "ready_public_followups: 0 delivery-ready obligations" \
-    "the composed listing dropped a real signal from the dispatchable set"
-  # One section pointer, not one repeated help block per composed group.
+    "startup dropped the ready follow-up signal"
   assert_not_contains "$out" "help[1]:" \
-    "the composed listing repeated tasks-axi's per-group help block"
+    "startup repeated tasks-axi's per-group help block"
 
-  # The fake refuses a body field, an unfiltered listing, and a done listing, so
-  # a clean render already proves those were never asked for; pin the group
-  # filters the listing is built from.
-  assert_grep "--state in_flight --fields blocked_by,hold_kind,hold_reason" "$log" \
+  assert_grep "--state in_flight --fields hold_kind,hold_until" "$log" \
     "session start did not ask tasks-axi for the in-flight group"
-  assert_grep "--state held --fields blocked_by,hold_kind,hold_reason" "$log" \
+  assert_grep "--state held --fields hold_kind,hold_until" "$log" \
     "session start did not ask tasks-axi for the held group"
-  assert_grep "--state queued --blocked --fields blocked_by,hold_kind,hold_reason" "$log" \
+  assert_grep "--state queued --blocked --fields blocked_by" "$log" \
     "session start did not ask tasks-axi for the blocked queued group"
   assert_grep "ready --file $home/data/backlog.md" "$log" \
     "session start did not ask tasks-axi for the dispatchable queued set"
+  assert_not_contains "$(cat "$log")" "--state done" "session start listed done rows"
+  assert_not_contains "$(cat "$log")" "body" "session start requested a task body"
 
-  pass "compatible tasks-axi backlog rendering drops done rows and keeps every in-flight, held, and blocked row"
+  pass "tasks-axi startup prints counts and ids, and does not print hold reasons or done rows"
 }
 
-# The bound may only ever cut the dispatchable-now listing, and whatever it cuts
-# must be disclosed with an exact count and the command that shows the rest.
-test_backlog_queued_bound_discloses_its_remainder() {
-  local rec root home fakebin out
-  rec=$(new_world backlog-queued-bound)
+test_backlog_budget_withholds_the_summary() {
+  local rec root home fakebin out full
+  rec=$(new_world backlog-budget)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
@@ -2080,26 +2101,26 @@ EOF
   make_fake_ps_claude "$fakebin"
   write_long_body_backlog "$home/data/backlog.md"
 
-  out=$(FM_FAKE_TASKS_AXI_READY=7 FM_SESSION_START_QUEUED_LIMIT=3 \
+  full=$(FM_FAKE_TASKS_AXI_READY=7 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$full" "ready ids: ready-1 ready-2 ready-3 ready-4 ready-5 ready-6 ready-7" \
+    "a normal budget dropped a ready id"
+  assert_not_contains "$full" "captain choice pending" "a normal budget printed a hold reason"
+
+  out=$(FM_FAKE_TASKS_AXI_READY=7 FM_SESSION_START_BUDGET_BYTES=1 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "LOCK" "a tight budget dropped the lock result"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS" \
+    "a tight budget dropped the supervision block"
+  assert_contains "$out" "WITHHELD backlog ready=7 :: bin/fm-tasks-axi.sh ready" \
+    "a tight budget did not name the ready retrieval"
+  assert_contains "$out" "WITHHELD backlog in_flight=1 :: bin/fm-tasks-axi.sh list --state in_flight --fields hold_kind,hold_until" \
+    "a tight budget did not name the in-flight retrieval"
+  assert_contains "$out" "WITHHELD backlog held=1 captain=1 other=0 :: bin/fm-tasks-axi.sh list --state held --fields hold_kind,hold_reason" \
+    "a tight budget counted an in-flight captain hold in the held retrieval"
+  assert_not_contains "$out" "ready-7" "a tight budget still printed the ready id list"
+  assert_not_contains "$out" "captain choice pending" "a tight budget printed a hold reason"
 
-  assert_contains "$out" "ready-3,queued,ship,firstmate,Ready item 3" \
-    "the queued bound dropped a row inside its own limit"
-  assert_not_contains "$out" "ready-4,queued" "the queued bound did not actually bound the ready listing"
-  assert_contains "$out" "(shown 3 of 7 ready queued item(s))" \
-    "the bounded queued listing did not report what it showed"
-  assert_contains "$out" "(4 more queued - bin/fm-tasks-axi.sh ready)" \
-    "the bounded queued listing did not disclose an exact remainder and how to see it"
-
-  # The bound is for dispatchable work only: held and blocked rows stay whole.
-  assert_contains "$out" "held-queued,queued,ship,firstmate,Held queued work,none,captain,captain choice pending" \
-    "the queued bound swallowed a held row"
-  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
-    "the queued bound swallowed a blocked row"
-  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending" \
-    "the queued bound swallowed an in-flight row"
-
-  pass "the startup backlog bound cuts only dispatchable queued rows and discloses the remainder exactly"
+  pass "a tight byte budget withholds the backlog summary and keeps the never-cut sections"
 }
 
 test_backlog_compact_manual_backend_skips_indented_bodies() {
@@ -2113,34 +2134,24 @@ EOF
   printf '%s\n' manual > "$home/config/backlog-backend"
   write_long_body_backlog "$home/data/backlog.md"
 
-  out=$(FM_SESSION_START_QUEUED_LIMIT=4 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact backlog listing (manual backend; done rows omitted; every in-flight, held, and blocked title line kept; other queued bounded to 4; indented task bodies omitted)" \
-    "manual backend did not use compact title-line rendering"
-  assert_contains "$out" "## In flight" "manual compact rendering omitted the in-flight section heading"
-  assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
-    "manual compact rendering omitted the in-flight title line"
-  assert_contains "$out" "(hold: captain choice pending) (hold-kind: captain)" \
-    "manual compact rendering omitted hold metadata"
-  assert_contains "$out" "blocked-by: compact-startup - waits for implementation" \
-    "manual compact rendering omitted blocker metadata"
-  assert_contains "$out" "- [ ] held-queued - Held queued work" \
-    "manual compact rendering dropped a held queued title line"
-  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "manual compact digest leaked an in-flight task body"
-  assert_not_contains "$out" "QUEUED-BODY-LINE" "manual compact digest leaked a queued task body"
-  assert_not_contains "$out" "DONE-ROW-LINE" "manual compact digest listed a done row at startup"
-  assert_not_contains "$out" "## Done" "manual compact digest printed the done heading it never fills"
-  assert_contains "$out" "- [ ] plain-4 - Plain queued item 4" \
-    "manual compact rendering dropped a queued title line inside its bound"
-  assert_not_contains "$out" "- [ ] plain-5 - Plain queued item 5" \
-    "manual compact rendering did not bound its plain queued listing"
-  assert_contains "$out" "(shown 1 in-flight, 2 held or blocked queued, 4 of 25 other queued title line(s); 1 done row(s) omitted)" \
-    "manual compact rendering did not report its bound accounting"
-  assert_contains "$out" "(21 more queued - raise FM_SESSION_START_QUEUED_LIMIT or read data/backlog.md for the rest)" \
-    "manual compact rendering did not disclose an exact queued remainder"
-  assert_contains "$out" "or data/backlog.md" "manual compact digest omitted the data/backlog.md full-body pointer"
+  assert_contains "$out" "backlog (manual backend): in_flight=1 held=1 blocked=1 ready=25" \
+    "manual backend did not print backlog counts"
+  assert_contains "$out" "captain-held ids: compact-startup held-queued" \
+    "manual backend omitted a captain-held id"
+  assert_contains "$out" "ready ids: plain-1 " "manual backend omitted the first ready id"
+  assert_contains "$out" " plain-25" "manual backend omitted the last ready id"
+  assert_contains "$out" "done rows omitted: 1" "manual backend did not count omitted done rows"
+  assert_not_contains "$out" "captain choice pending" "manual backend printed a hold reason"
+  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "manual backend leaked an in-flight task body"
+  assert_not_contains "$out" "QUEUED-BODY-LINE" "manual backend leaked a queued task body"
+  assert_not_contains "$out" "DONE-ROW-LINE" "manual backend listed a done row"
+  assert_not_contains "$out" "## Done" "manual backend printed the done heading"
+  assert_contains "$out" "WITHHELD backlog file :: sed -n p " \
+    "manual backend did not name the backlog file"
 
-  pass "manual backlog rendering drops done rows, keeps every held or blocked title line, and bounds the rest"
+  pass "manual backlog rendering prints counts and ids, and does not print bodies or hold reasons"
 }
 
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback() {
@@ -2155,14 +2166,14 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact backlog listing (tasks-axi unavailable or incompatible; done rows omitted;" \
-    "unavailable tasks-axi did not fall back to compact title-line rendering"
-  assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
-    "unavailable tasks-axi fallback omitted a backlog title line"
+  assert_contains "$out" "backlog (tasks-axi unavailable or incompatible): in_flight=1 held=1 blocked=1 ready=25" \
+    "unavailable tasks-axi did not fall back to title-line counts"
+  assert_contains "$out" "captain-held ids: compact-startup held-queued" \
+    "unavailable tasks-axi fallback omitted a captain-held id"
   assert_not_contains "$out" "OVERSIZED-BODY-LINE" "unavailable tasks-axi fallback leaked an in-flight task body"
   assert_not_contains "$out" "DONE-ROW-LINE" "unavailable tasks-axi fallback listed a done row at startup"
 
-  pass "unavailable or incompatible tasks-axi falls back to compact manual backlog rendering"
+  pass "unavailable or incompatible tasks-axi falls back to title-line counts"
 }
 
 # --- runtime bound -----------------------------------------------------------
@@ -2241,7 +2252,7 @@ EOF
   assert_contains "$out" "RUNTIME BOUND" "the truncation banner did not name the bound it hit"
   assert_contains "$out" 'stopped during the "bootstrap" stage' "the truncation banner did not name the incomplete stage"
   assert_contains "$out" "RECONCILE these stages" "the truncation banner did not tell the agent what to reconcile"
-  assert_contains "$out" "wake-queue supervision-instructions read-once fleet-state network-checks context next-step" \
+  assert_contains "$out" "wake-queue supervision-instructions fleet-state network-checks context next-step" \
     "the truncation banner did not list every stage that never ran"
   assert_not_contains "$out" "NEXT STEP" "a truncated digest claimed to have reached its closing reminder"
   assert_absent "$home/state/.session-start-complete" \
@@ -2310,8 +2321,7 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  # The banner line itself, not the phrase: the read-once contract names the
-  # banner as the condition that voids it, and that mention is not a banner.
+  # The banner line itself. A finished digest must not claim it was cut.
   assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START HIT ITS" \
     "a digest that finished in time reported itself truncated"
   assert_contains "$out" "NEXT STEP" "a digest that finished in time lost its closing reminder"
@@ -2382,6 +2392,45 @@ SH
     "a session start eight shells below its harness was wrongly refused the lock"
 
   pass "the runtime bound leaves enough ancestry headroom for a deeply nested session to take the lock"
+}
+
+test_harness_is_detected_above_the_runtime_bound() {
+  local rec root home fakebin nest out
+  rec=$(new_world runtime-bound-harness)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" codex
+
+  # A Codex exec hook starts the composer a few shells below codex. The
+  # composer's parent can still see codex inside the eight levels
+  # bin/fm-harness.sh climbs, but the timed child sits further down, so the
+  # harness must be detected before the runtime bound adds its levels.
+  nest="$home/nest.sh"
+  cat > "$nest" <<'SH'
+#!/usr/bin/env bash
+set -u
+levels=$1
+shift
+if [ "$levels" -gt 0 ]; then
+  bash "$0" $((levels - 1)) "$@"
+  exit $?
+fi
+exec "$@"
+SH
+  chmod +x "$nest"
+
+  # shellcheck disable=SC2016 # $$ must expand in the launched shell, not here.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    bash -c 'export FM_FAKE_HARNESS_PID=$$; exec "$1" 5 "$2" --part core' _ "$nest" "$SESSION_START")
+
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" \
+    "the timed child lost the codex harness above the runtime bound"
+  assert_contains "$out" "budget 7000 bytes" "a codex hook did not get the codex byte budget"
+
+  pass "the harness is detected above the runtime bound, so a codex hook gets its budget"
 }
 
 # --- context re-emit (--reemit) ----------------------------------------------
@@ -3014,13 +3063,274 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_preference_and_learnings_parts_stay_separate() {
+  local rec root home fakebin prefs learnings status=0
+  rec=$(new_world parts)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'standing outside voice\n' > "$home/data/captain.md"
+  printf 'a learning line\n' > "$home/data/learnings.md"
+
+  prefs=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part preferences)
+  assert_contains "$prefs" "preferences part, budget 8500 bytes" "preferences did not name its budget"
+  assert_contains "$prefs" "standing outside voice" "preferences did not print captain.md"
+  assert_not_contains "$prefs" "lock acquired" "preferences took the fleet lock"
+  assert_not_contains "$prefs" "SESSION START - $home" "preferences reused the core banner"
+
+  learnings=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part learnings)
+  assert_contains "$learnings" "learnings part, budget 8500 bytes" "learnings did not name its budget"
+  assert_contains "$learnings" "a learning line" "learnings did not print data/learnings.md"
+  assert_not_contains "$learnings" "lock acquired" "learnings took the fleet lock"
+  assert_not_contains "$learnings" "standing outside voice" "learnings printed captain preferences"
+
+  awk 'BEGIN { while (length(s) < 9000) s = s "x"; print s }' > "$home/data/captain.md"
+  prefs=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part preferences)
+  assert_contains "$prefs" "OVERFLOW " \
+    "an over-budget preferences part did not say it overflowed"
+  assert_contains "$prefs" "read data/captain-shared.md and data/captain.md" \
+    "an over-budget preferences part did not name both files"
+  assert_contains "$prefs" "xxxxx" "an over-budget preferences part dropped the file"
+
+  status=0
+  run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part nope >/dev/null 2>"$home/part-err" || status=$?
+  expect_code 2 "$status" "an unknown --part must be refused"
+  assert_contains "$(cat "$home/part-err")" "unknown --part: nope" "an unknown --part did not name itself"
+
+  pass "preferences and learnings are separate messages, and an unknown part is refused"
+}
+
+test_pi_supervision_stays_complete() {
+  local rec root home fakebin out
+  rec=$(new_world pi-brief)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  out=$(run_named_harness_session_start pi "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  assert_contains "$out" "4. If the extension says no live session holds the lock" \
+    "Pi startup cut the supervision block"
+  assert_not_contains "$out" "Full protocol:" \
+    "Pi startup treated --brief as a cut"
+  assert_contains "$out" "budget 8500 bytes" "Pi did not use the default byte budget"
+
+  out=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  assert_contains "$out" "budget 7000 bytes" "Codex did not use its smaller byte budget"
+
+  pass "Pi keeps the full supervision block, and Codex uses the 7000 byte budget"
+}
+
+test_withheld_project_command_reads_the_file() {
+  local rec root home fakebin out cmd shown status=0
+  rec=$(new_world withheld-cmd)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  cmd=$(printf '%s\n' "$out" | sed -n 's/^WITHHELD projects lines :: //p' | head -1)
+  [ -n "$cmd" ] || fail "core did not print a project retrieval command: $out"
+  shown=$(bash -c "$cmd") || status=$?
+  expect_code 0 "$status" "the project retrieval command failed"
+  assert_contains "$shown" "- demo [no-mistakes] - a demo project (added 2026-07-01)" \
+    "the project retrieval command did not print the registry"
+
+  pass "a WITHHELD project command reads the registry and changes nothing"
+}
+
+test_core_budget_fits_a_small_home_and_keeps_a_large_fleet() {
+  local rec root home fakebin out bytes i
+  rec=$(new_world core-budget)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" claude
+  out=$(FM_FAKE_HARNESS=claude run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  bytes=$(printf '%s\n' "$out" | wc -c | tr -d ' ')
+  [ "$bytes" -le 8500 ] || fail "claude core was $bytes bytes, above the 8500 budget: $out"
+  assert_contains "$out" "budget 8500 bytes" "claude core did not name its budget"
+
+  make_fake_ps_harness "$fakebin" codex
+  out=$(FM_FAKE_HARNESS=codex run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  bytes=$(printf '%s\n' "$out" | wc -c | tr -d ' ')
+  [ "$bytes" -le 7000 ] || fail "codex core was $bytes bytes, above the 7000 budget: $out"
+  assert_contains "$out" "budget 7000 bytes" "codex core did not name its budget"
+
+  make_fake_ps_harness "$fakebin" claude
+  i=1
+  while [ "$i" -le 40 ]; do
+    printf 'kind=ship\nproject=firstmate\n' > "$home/state/fleet-$i.meta"
+    i=$((i + 1))
+  done
+  {
+    printf '%s\n' '# Backlog' '' '## Queued'
+    i=1
+    while [ "$i" -le 60 ]; do
+      printf -- '- [ ] held-%s - Held row %s (repo: firstmate) (kind: ship) (hold: SECRET-HOLD-REASON-%s) (hold-kind: captain)\n' \
+        "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  out=$(FM_FAKE_HARNESS=claude run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  i=1
+  while [ "$i" -le 40 ]; do
+    assert_contains "$out" "fleet-$i kind=ship" "a large fleet dropped fleet-$i"
+    i=$((i + 1))
+  done
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: claude" \
+    "a large fleet dropped the supervision block"
+  assert_contains "$out" "LOCK" "a large fleet dropped the lock section"
+  assert_not_contains "$out" "SECRET-HOLD-REASON" "a large fleet printed hold reasons"
+  assert_contains "$out" "WITHHELD" "a large fleet did not name an omission"
+
+  pass "a small core stays inside its budget, and a large fleet keeps every row without printing hold reasons"
+}
+
+# snapshot_home_records <home>: one checksum line per file under state/ and
+# data/, so a retrieval command that writes anything there changes the result.
+# The detached network stage's own lock files are skipped: that stage still
+# releases them after the digest returns, and no retrieval command takes them.
+snapshot_home_records() {
+  (cd "$1" && find state data -type f ! -path 'state/.startup-network.lock*' -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    printf '%s %s\n' "$(cksum < "$f")" "$f"
+  done)
+}
+
+# run_every_retrieval_line <out> <home> <root> <path> <label>: runs each
+# WITHHELD command and the supervision pointer exactly as printed, from the
+# code root, and fails on a nonzero exit or any change under state/ or data/.
+# Echoes how many commands it ran.
+run_every_retrieval_line() {
+  local out=$1 home=$2 root=$3 path=$4 label=$5 cmds cmd before after status n=0
+  cmds=$(printf '%s\n' "$out" | sed -n 's/^WITHHELD .* :: //p; s/^Full protocol: //p')
+  # The digest's detached network stage still writes its own state files, so
+  # let it finish before the snapshot.
+  wait_for_network_stage "$home" "$root" >/dev/null 2>&1 || true
+  before=$(snapshot_home_records "$home")
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    n=$((n + 1))
+    status=0
+    (cd "$root" && env -u CLAUDECODE FM_HOME="$home" PATH="$path" bash -c "$cmd") >/dev/null 2>"$home/retrieval-err" \
+      || status=$?
+    expect_code 0 "$status" "$label retrieval failed: $cmd: $(cat "$home/retrieval-err")"
+  done <<CMDS
+$cmds
+CMDS
+  rm -f "$home/retrieval-err"
+  after=$(snapshot_home_records "$home")
+  [ "$before" = "$after" ] || fail "$label retrieval commands changed the home records"
+  printf '%s\n' "$n"
+}
+
+test_every_withheld_command_is_read_only() {
+  local rec root home fakebin out n
+  if ! command -v tasks-axi >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+    printf 'skip - WITHHELD retrieval commands need a real tasks-axi and node\n'
+    return 0
+  fi
+  rec=$(new_world withheld-all)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  ln -s "$ROOT/bin" "$root/bin"
+  ln -s "$ROOT/docs" "$root/docs"
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  # The fake toolchain stubs node, so the real tasks-axi runs through the real
+  # interpreter by absolute path.
+  printf '#!/usr/bin/env bash\nexec %q %q "$@"\n' "$(command -v node)" "$(command -v tasks-axi)" > "$fakebin/tasks-axi"
+  chmod +x "$fakebin/tasks-axi"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'BACKLOG'
+## In flight
+
+- [ ] live-one - Live work (repo: firstmate) (kind: ship)
+
+## Queued
+
+- [ ] held-one - Held work (repo: firstmate) (kind: ship) (hold: captain choice pending) (hold-kind: captain)
+- [ ] blocked-one - Blocked work (repo: firstmate) (kind: ship) (blocked-by: live-one)
+- [ ] ready-one - Ready work (repo: firstmate) (kind: ship)
+
+## Done
+BACKLOG
+  printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
+  printf 'window=fm-sess:live-one\nproject=firstmate\nkind=ship\n' > "$home/state/live-one.meta"
+
+  out=$(FM_SESSION_START_BUDGET_BYTES=1 run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  assert_contains "$out" "WITHHELD backlog held=" "a tight budget did not withhold the backlog: $out"
+  assert_contains "$out" "Full protocol: " "the Claude supervision block named no full-protocol command"
+  n=$(run_every_retrieval_line "$out" "$home" "$root" "$fakebin:$BASE_PATH" "tasks-axi tight budget") \
+    || fail "a tight-budget retrieval command failed"
+  [ "$n" -ge 6 ] || fail "expected at least six retrieval lines under a tight budget, ran $n: $out"
+
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  assert_contains "$out" "WITHHELD hold reasons :: " "a normal budget did not name the hold-reason command: $out"
+  run_every_retrieval_line "$out" "$home" "$root" "$fakebin:$BASE_PATH" "tasks-axi normal budget" >/dev/null
+
+  printf 'manual\n' > "$home/config/backlog-backend"
+  out=$(FM_SESSION_START_BUDGET_BYTES=1 run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  assert_contains "$out" "WITHHELD backlog in_flight=" "a manual backend did not withhold the backlog: $out"
+  run_every_retrieval_line "$out" "$home" "$root" "$fakebin:$BASE_PATH" "manual tight budget" >/dev/null
+
+  pass "every WITHHELD command and the supervision pointer run as printed, exit 0, and change no home record"
+}
+
+test_budgeted_sections_leave_room_for_the_closing_text() {
+  local rec root home fakebin out bytes full budget i
+  rec=$(new_world budget-tail)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  {
+    printf '%s\n' '# Backlog' '' '## Queued'
+    i=1
+    while [ "$i" -le 30 ]; do
+      printf -- '- [ ] ready-row-with-a-long-identifier-%s - Ready row %s (repo: firstmate) (kind: ship)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+  out=$(FM_SESSION_START_BUDGET_BYTES=100000 run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  assert_contains "$out" "ready-row-with-a-long-identifier-30" "a large budget did not print the ready ids"
+  full=$(printf '%s\n' "$out" | LC_ALL=C wc -c | tr -d ' ')
+  # One byte short of the whole core: the backlog summary still fits in
+  # front of the closing text, but not together with it.
+  budget=$((full - 1))
+  out=$(FM_SESSION_START_BUDGET_BYTES=$budget run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --part core)
+  bytes=$(printf '%s\n' "$out" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -le "$budget" ] || fail "the core grew to $bytes bytes past its $budget byte budget: $out"
+  assert_contains "$out" "WITHHELD backlog in_flight=" "the backlog summary was not withheld"
+  assert_not_contains "$out" "ready-row-with-a-long-identifier-30" "the withheld summary still printed its ids"
+  assert_contains "$out" "NEXT STEP" "the closing text was dropped"
+
+  pass "a budgeted section that would push the closing text past the budget is withheld instead"
+}
+
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
-test_read_once_contract_is_stated_once_before_its_subject
+test_startup_names_preview_and_absent_parts
+test_preference_and_learnings_parts_stay_separate
+test_pi_supervision_stays_complete
+test_withheld_project_command_reads_the_file
+test_core_budget_fits_a_small_home_and_keeps_a_large_fleet
+test_every_withheld_command_is_read_only
+test_budgeted_sections_leave_room_for_the_closing_text
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
 test_deferred_relaunch_is_always_reported
@@ -3034,7 +3344,8 @@ test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
-test_status_tail_line_cap
+test_fleet_row_status_fields_use_owner_grammar
+test_fleet_row_is_never_cut
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
@@ -3048,7 +3359,7 @@ test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
 test_session_start_seeds_the_outcome_display_tail_while_away
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
-test_backlog_queued_bound_discloses_its_remainder
+test_backlog_budget_withholds_the_summary
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
@@ -3070,6 +3381,7 @@ test_runtime_bound_truncates_loudly_and_exits_zero
 test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
+test_harness_is_detected_above_the_runtime_bound
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity

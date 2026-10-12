@@ -228,11 +228,25 @@ run_hook() {  # <root> [args...]
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
 
+# run_hook_pi gives Pi an ancestor, not only its markers: this test shell
+# reports as pi, so a real harness further up the host (an agent running these
+# tests) cannot outrank the Pi markers in bin/fm-harness.sh.
+PI_FAKEBIN="$TMP_ROOT/pi-fakebin"
+mkdir -p "$PI_FAKEBIN"
+cat > "$PI_FAKEBIN/ps" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" -p $$ "*comm=* | *comm=*" -p $$ "* | *" -p $$ "*args=* | *args=*" -p $$ "*) echo pi; exit 0 ;;
+esac
+exec /bin/ps "\$@"
+SH
+chmod +x "$PI_FAKEBIN/ps"
+
 run_hook_pi() {  # <root> [args...]
   local root=$1
   shift
   env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
-    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$PI_FAKEBIN:$RUN_PATH" "$RUN" "$@"
 }
 
 # Every run-tier assertion keys off the digest banner, which fm-session-start.sh
@@ -1083,6 +1097,45 @@ test_run_reports_a_state_dir_it_cannot_create() {
   pass "run wrapper: a fresh primary that cannot create its state dir says so on stderr, then stands down"
 }
 
+test_preferences_and_learnings_stay_silent_when_context_is_restored() {
+  local root="$TMP_ROOT/run-part-resume" part source out status
+  make_run_primary "$root"
+  for part in preferences learnings; do
+    for source in resume reload fork; do
+      status=0
+      out=$(run_hook "$root" --source "$source" --part "$part" </dev/null) || status=$?
+      expect_code 0 "$status" "$part on $source"
+      [ -z "$out" ] || fail "$part on $source printed output: $out"
+    done
+    status=0
+    out=$(run_hook "$root" --source clear --part "$part" </dev/null) || status=$?
+    expect_code 0 "$status" "$part on clear"
+    assert_contains "$out" "$part part" "clear dropped the $part part"
+  done
+  pass "run wrapper: preferences and learnings stay silent on resume, reload, and fork, and print on clear"
+}
+
+test_part_hooks_stay_silent_for_gate_scope_and_foreign_host() {
+  local root="$TMP_ROOT/run-part-silent" base="$TMP_ROOT/run-part-base" linked="$TMP_ROOT/run-part-linked"
+  local part out
+  make_run_primary "$root"
+  for part in core preferences learnings; do
+    expect_silent_zero "gate $part" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
+      FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" \
+      "$RUN" --source startup --part "$part"
+    out=$(printf '%s' '{"cursor_version":"test","source":"startup"}' | run_hook "$root" --part "$part") \
+      || fail "foreign host $part exited nonzero"
+    [ -z "$out" ] || fail "a Cursor payload still printed the $part part: $out"
+  done
+  fm_git_worktree "$base" "$linked" fm/run-part-linked
+  mkdir -p "$linked/bin" "$linked/state"
+  : > "$linked/AGENTS.md"
+  for part in preferences learnings; do
+    expect_silent_zero "linked $part" run_hook "$linked" --source startup --part "$part"
+  done
+  pass "run wrapper: gate, unmarked worktree, and a Cursor payload stay silent for every part"
+}
+
 test_run_reports_a_failed_session_start_as_digest_text() {
   local root="$TMP_ROOT/run-unwritable" out status=0
   make_run_primary "$root"
@@ -1115,6 +1168,8 @@ test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_creates_missing_state_on_a_fresh_primary
 test_run_reports_a_state_dir_it_cannot_create
+test_preferences_and_learnings_stay_silent_when_context_is_restored
+test_part_hooks_stay_silent_for_gate_scope_and_foreign_host
 test_run_reports_a_failed_session_start_as_digest_text
 test_pi_startup_classifies_cli_continuations
 test_pi_sessionstart_generation_prerequisite

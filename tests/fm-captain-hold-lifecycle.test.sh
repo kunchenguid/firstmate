@@ -4604,16 +4604,24 @@ SH
     start=$(PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
       FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
-    assert_contains "$start" "$quoted_reason" "startup $mode changed the encoded reason"
-    assert_contains "$start" 'Investigate literal %28' "startup $mode changed the title"
-    assert_contains "$start" "$legacy" "startup $mode changed the legacy reason"
-    assert_contains "$start" '"fm-hold-v1:bm9ydGg="' "startup $mode decoded a reason twice"
-    for malformed in "${malformed_reasons[@]}"; do
-      assert_contains "$start" "$malformed" "startup $mode changed historical literal $malformed"
-    done
+    assert_not_contains "$start" "$quoted_reason" "startup $mode printed a hold reason"
+    assert_not_contains "$start" "$legacy" "startup $mode printed a legacy hold reason"
     if [ "$mode" = fallback ]; then
       assert_contains "$start" 'read failed: literal %28 and fm-hold-v1:bm9ydGg=' \
-        "startup changed unrelated error text"
+        "startup dropped the tasks-axi list error"
+    else
+      listed=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+        FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+        PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+        "$ROOT/bin/fm-tasks-axi.sh" list --state held --fields hold_reason) \
+        || fail "public list of held reasons failed in $mode"
+      assert_contains "$listed" "$quoted_reason" "list $mode changed the encoded reason"
+      assert_contains "$listed" 'Investigate literal %28' "list $mode changed the title"
+      assert_contains "$listed" "$legacy" "list $mode changed the legacy reason"
+      assert_contains "$listed" '"fm-hold-v1:bm9ydGg="' "list $mode decoded a reason twice"
+      for malformed in "${malformed_reasons[@]}"; do
+        assert_contains "$listed" "$malformed" "list $mode changed historical literal $malformed"
+      done
     fi
   done
   rm "$home/fakebin/tasks-axi"
@@ -4626,7 +4634,7 @@ SH
   for malformed in "${malformed_reasons[@]}"; do
     assert_contains "$out" "$malformed" "return brief changed historical literal $malformed"
   done
-  pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
+  pass "marked hold reasons round-trip through public reads, fleet, held list, and return; startup prints the list error and not the reasons"
 }
 
 test_hold_reason_round_trips_awkward_characters

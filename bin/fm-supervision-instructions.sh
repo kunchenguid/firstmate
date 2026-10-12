@@ -26,13 +26,17 @@ AFK_MODE=away
 X_MODE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
+BRIEF=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--brief] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
+--brief keeps Claude's current-state lines, mode line, and steps 1-3, then one
+pointer that repeats these flags without --brief. On every other harness --brief
+changes nothing, so a first-action line is never dropped.
 --afk-mode only matters when --afk 1 (present); it selects the away-mode vs
 quiet-mode (kunchenguid/firstmate#2356) wording, and defaults to away.
 EOF
@@ -79,6 +83,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -gt 1 ] || { echo "error: --queue-pending requires 0 or 1" >&2; exit 2; }
       QUEUE_PENDING=$(bool_value "$2")
       shift 2
+      ;;
+    --brief)
+      BRIEF=1
+      shift
       ;;
     --repair-line)
       REPAIR_LINE=1
@@ -139,8 +147,16 @@ if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
 fi
 
 render_snippet() {  # [snippet]
-  local line tags snippet=${1:-$SNIPPET}
+  local line tags snippet=${1:-$SNIPPET} stop_before_step4=0
+  if [ "$BRIEF" -eq 1 ] && [ "$HARNESS" = claude ] && [ "$snippet" = "$SNIPPET" ]; then
+    stop_before_step4=1
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$stop_before_step4" -eq 1 ]; then
+      case "$line" in
+        '4.'*) break ;;
+      esac
+    fi
     case "$line" in
       '{'*'} '*)
         tags=${line%%\} *}
@@ -269,13 +285,20 @@ else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
 if [ -n "$HOST_SNIPPET" ]; then
-  printf '%s\n' '- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block).'
+  if [ "$BRIEF" -eq 1 ] && [ "$HARNESS" = claude ]; then
+    printf '%s\n' '- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol from the Full protocol command at the end of this block).'
+  else
+    printf '%s\n' '- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block).'
+  fi
 fi
 ordinary_wake_line
 printf '\n'
 render_snippet
 printf '\n'
-if [ -n "$HOST_SNIPPET" ]; then
+if [ "$BRIEF" -eq 1 ] && [ "$HARNESS" = claude ]; then
+  printf 'Full protocol: bin/fm-supervision-instructions.sh --harness %s --read-only %s --afk %s --afk-mode %s --x-mode %s\n' \
+    "$HARNESS" "$READ_ONLY" "$AFK" "$AFK_MODE" "$X_MODE"
+elif [ -n "$HOST_SNIPPET" ]; then
   render_snippet "$HOST_SNIPPET"
   printf '\n'
 fi

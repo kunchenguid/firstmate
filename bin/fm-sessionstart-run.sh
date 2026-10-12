@@ -11,12 +11,18 @@
 # discretion - the helm is taken before the model's first turn, whatever the
 # first turn is.
 #
-# Usage: fm-sessionstart-run.sh [--source <source>] [--pi-prerequisite]
+# Usage: fm-sessionstart-run.sh [--source <source>] [--part core|preferences|learnings|all] [--pi-prerequisite]
 #   --source  The harness's own session-open source. When omitted, the source is
 #             read from a Claude/Codex-shaped JSON hook payload on stdin
 #             (the `source` field). An unreadable or unrecognized source is
 #             treated as `startup`, because taking the helm redundantly is
 #             cheap and idempotent while not taking it is the whole bug.
+#   --part    Which session-start message to print. Default `all` prints the
+#             core, then captain preferences, then learnings, so a manual run
+#             and every single-message harness stay complete. `preferences`
+#             and `learnings` print only that part, take no lock, and print
+#             nothing on resume, reload, or fork (that context was restored).
+#             `core` prints the budgeted startup message without those files.
 #   --pi-prerequisite
 #             Internal Pi extension mode. An intentional gate/scope stand-down
 #             exits 3 so provider preflight can distinguish it from an eligible
@@ -63,6 +69,7 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 SOURCE=
+PART=all
 PI_PREREQUISITE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -73,10 +80,23 @@ while [ $# -gt 0 ]; do
       if [ $# -ge 2 ]; then shift 2; else shift; fi
       ;;
     --source=*) SOURCE=${1#--source=}; shift ;;
+    --part)
+      PART=${2:-}
+      if [ $# -ge 2 ]; then shift 2; else shift; fi
+      ;;
+    --part=*) PART=${1#--part=}; shift ;;
     --pi-prerequisite) PI_PREREQUISITE=1; shift ;;
     *) shift ;;
   esac
 done
+
+case "$PART" in
+  core|preferences|learnings|all) ;;
+  *)
+    printf 'fm-sessionstart-run: unknown --part: %s\n' "$PART" >&2
+    exit 2
+    ;;
+esac
 
 stand_down() {
   if [ "$PI_PREREQUISITE" = 1 ]; then
@@ -137,19 +157,32 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   ')
 fi
 
+run_session_start() {
+  if [ "$1" = reemit ]; then
+    "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" --part "$PART" || true
+  elif [ -n "$SOURCE" ]; then
+    "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" --part "$PART" || true
+  else
+    "$SCRIPT_DIR/fm-session-start.sh" --part "$PART" || true
+  fi
+}
+
 case "$SOURCE" in
   resume|reload|fork)
+    case "$PART" in
+      preferences|learnings) exit 0 ;;
+    esac
     exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
     ;;
   clear|compact)
     if session_start_completed; then
-      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" || true
+      run_session_start reemit
     else
-      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+      run_session_start full
     fi
     ;;
   *)
-    "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+    run_session_start full
     ;;
 esac
 exit 0

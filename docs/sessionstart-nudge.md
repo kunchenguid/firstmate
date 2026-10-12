@@ -145,7 +145,7 @@ Some digest work remains local but unbounded:
 So the whole digest still runs as one bounded child, default 120s via `FM_SESSION_START_TIMEOUT`.
 
 Each per-task endpoint liveness read runs serially in its own crash-isolated child, bounded by `FM_SESSION_START_ENDPOINT_TIMEOUT` (default 10s; a non-numeric or zero value falls back to the default).
-So a read that hangs or dies becomes that task's own `endpoint: error` line and the digest continues.
+So a read that hangs or dies becomes that task's own `endpoint=ERROR` row and the digest continues.
 With a wedged backend the stage's ceiling is tasks times that per-read bound and can itself reach the digest bound.
 
 The per-item backlog row reads inside bootstrap's reconcile and close-replay sweeps are the exception.
@@ -168,7 +168,9 @@ The parent then prints a `STARTUP TRUNCATED` banner on any nonzero child exit, n
 
 The parent still exits 0.
 The regression evidence for both shapes is in [`docs/verification/supervision.md`](verification/supervision.md#per-task-endpoint-reads-cannot-truncate-the-digest).
-The registered hook timeouts sit above that budget, so the harness never preempts the banner.
+The core hook timeout sits above that bound, so the harness does not preempt the truncation banner.
+The preferences hook and the learnings hook each use a 10s timeout.
+Those parts take no lock and do not run the digest's sweeps.
 
 The deferred startup stage deliberately runs in its own process group under its own deadline.
 So a truncated digest does neither of these:
@@ -235,9 +237,13 @@ Each subsection below gives one harness surface's tier, its tracked transport, a
 ### Claude
 
 Claude is a run-tier harness.
-`.claude/settings.json` registers one unmatched `SessionStart` hook, invoked through `CLAUDE_PROJECT_DIR` with a 180s timeout.
+`.claude/settings.json` registers three unmatched `SessionStart` hooks, invoked through `CLAUDE_PROJECT_DIR`.
+The core hook uses a 180s timeout and passes `--part core`.
+The preferences hook and the learnings hook each use a 10s timeout and pass `--part preferences` or `--part learnings`.
+Each command starts with the Grok guard, so a Grok session does not run the Claude registration.
 The wrapper reads `source` from the hook payload.
 Native stdout context injection is supported.
+Each hook is its own message, so each part is measured against the harness cap on its own.
 
 ### Codex exec
 
@@ -246,7 +252,9 @@ The `.codex/hooks.json` transport does three things:
 
 1. It anchors to the hook process working directory.
 2. It verifies a Firstmate-shaped hook-bearing root.
-3. It pipes the hook payload into the wrapper with a 180s timeout.
+3. It pipes the hook payload into the wrapper.
+   The core entry uses a 180s timeout and passes `--part core`.
+   The preferences entry and the learnings entry each use a 10s timeout and pass `--part preferences` or `--part learnings`.
 
 Native stdout context injection is supported under `codex exec`.
 
@@ -421,6 +429,7 @@ Through the extension's public event surface, the same portable suite proves:
 ### Runtime bound test
 
 `tests/fm-session-start.test.sh` proves the runtime bound through the forced pure-Bash fallback.
+It also proves the core, preferences, and learnings parts, the byte budget, and the inline withheld lines.
 It uses a TERM-resistant digest that exceeds its budget and proves that the digest:
 
 - Is force-killed with its grandchild.
@@ -448,6 +457,8 @@ It uses a TERM-resistant digest that exceeds its budget and proves that the dige
 
 `tests/fm-sessionstart-hook-live-e2e.test.sh` is the opt-in live guard for the Claude, Codex exec, and Pi run-tier adapters.
 It confirms each installed adapter in that suite invokes the run wrapper and delivers its output into context.
+On Claude and Codex exec the recorder prints a core token, a late token after about 6,700 bytes of core output, and separate preferences and learnings tokens, each stamped per open.
+[`verification/supervision.md`](verification/supervision.md#native-session-start-delivery) records the dated result for that split.
 It verifies context-preserving reopen sources for those adapters, and context-reset delivery wherever their tracked TUI surface is reachable.
 
 Its separate `FM_PI_SESSIONSTART_RACE_LIVE_E2E=1` mode uses real Pi with an offline deterministic provider and a barrier-controlled `/new` digest.

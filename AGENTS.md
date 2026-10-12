@@ -72,9 +72,10 @@ Treat `data/captain.md` as the domain-local record of captain preferences, optio
 - Do not reimplement it by separately running its lock, bootstrap, initial wake-drain, or deferred-network components.
 - Run-tier harness surfaces run this command for you at session open while the rest only nudge it, so confirm the digest is present in this session and run it yourself when it is not; `docs/sessionstart-nudge.md` owns adapter tiers, source routing, and compatibility.
 
-Read the complete digest once and trust it as this turn's startup and recovery input.
+Read each session-start part once and trust what it printed as this turn's startup and recovery input.
 If the harness shows only a preview and persists the full output to a file, read that file before acting.
-Do not separately re-read the context, backlog, metadata, or bulk status inputs it just printed unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
+A WITHHELD line names a read-only command for that omission; run it when that section is needed.
+Do not re-read a section the digest already printed in full unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
 An `ABSENT` captain, shared-captain, secondmate, or learnings file means the firstmate repo's built-in defaults, no shared captain preferences, no registered secondmates, or no captured learnings; rebuild an absent or stale project registry from the clones before dispatch.
 
 If the session lock cannot be acquired and verified, report its exact diagnostic and remain read-only; another active session is only one possible cause.
@@ -115,7 +116,7 @@ A missing dependency, authentication failure, unsupported backend, or version re
 
 After the one session-start digest, reconcile reality with durable records before taking new work.
 Honor lock-refused read-only mode exactly as section 3 requires.
-Treat digest status tails as wake-event history and use targeted current-state reconciliation when the live state matters.
+A fleet row's last status word is one wake event, not current state; read the row's status file for that task's history and use targeted current-state reconciliation when the live state matters.
 
 Reconcile only this home's recorded direct reports and their recorded backend inventory; never sweep a shared endpoint namespace for matching names or claim another home's work.
 For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.

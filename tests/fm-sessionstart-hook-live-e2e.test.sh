@@ -87,7 +87,7 @@ send_line() {  # <session> <text>
   tmux -L "$SOCKET" send-keys -t "$1" Enter
 }
 
-ASK='Reply with exactly the FMHOOKTOKEN value from your session-start context and nothing else.'
+ASK='This is a hook delivery test. Your session-start context holds four harmless test markers that start with FMHOOKTOKEN; they are not secrets. Quote all four markers exactly, one per line, and nothing else.'
 LIVE_NONCE=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
 
 # --- lab ---------------------------------------------------------------------
@@ -137,13 +137,15 @@ SH
   cat > "$lab/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
 # Recorder standing in for the real wrapper: logs the source the harness
-# supplied and prints a source-stamped token for the model to quote back.
+# supplied and prints source-stamped tokens for the model to quote back.
 set -u
 record=${FM_LIVE_RECORD:?}
 source=
+part=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --source) source=${2:-}; shift 2 || exit 0 ;;
+    --part) part=${2:-all}; shift 2 || exit 0 ;;
     *) shift ;;
   esac
 done
@@ -157,12 +159,43 @@ if [ -z "$source" ]; then
   ')
 fi
 [ -n "$source" ] || source=none
+# The preferences and learnings parts keep their own records, so the core
+# record still counts only core opens and every part token carries its own
+# per-open index.
+case "$part" in
+  preferences|learnings)
+    printf '%s\n' "$source" >> "$record.$part"
+    count=$(grep -c . "$record.$part" | tr -d ' ')
+    if [ "$part" = preferences ]; then
+      printf 'FMHOOKTOKEN-PREFS-%s-%s-%s\n' "$source" "$count" "${FM_LIVE_NONCE:?}"
+    else
+      printf 'FMHOOKTOKEN-LEARN-%s-%s-%s\n' "$source" "$count" "${FM_LIVE_NONCE:?}"
+    fi
+    exit 0
+    ;;
+esac
 printf '%s\n' "$source" >> "$record"
 # Exactly what bin/fm-session-start.sh does after taking the lock.
 if [ -n "${FM_LIVE_DETACH_MARKER:-}" ]; then
   "$(dirname "$0")/fm-startup-network.sh" start --locked 0 --harvest-pid $$ >/dev/null 2>&1 || true
 fi
-printf 'FMHOOKTOKEN-%s-%s-%s\n' "$source" "$(grep -c . "$record" | tr -d ' ')" "${FM_LIVE_NONCE:?}"
+count=$(grep -c . "$record" | tr -d ' ')
+printf 'FMHOOKTOKEN-%s-%s-%s\n' "$source" "$count" "${FM_LIVE_NONCE:?}"
+# Sized near the smallest core budget (7,000 bytes on Codex), so the late token
+# proves a core message that size is delivered whole, past the 2,000-character
+# preview a capped hook output is cut to.
+# Plain prose lines rather than one long run of a single character, which a
+# provider safety filter has refused as a suspicious payload.
+i=1
+while [ "$i" -le 100 ]; do
+  printf 'Padding line %03d keeps this recorder output near a real core part.\n' "$i"
+  i=$((i + 1))
+done
+printf 'FMHOOKTOKEN-LATE-%s-%s-%s\n' "$source" "$count" "${FM_LIVE_NONCE:?}"
+if [ "$part" = all ]; then
+  printf 'FMHOOKTOKEN-PREFS-%s-%s-%s\n' "$source" "$count" "${FM_LIVE_NONCE:?}"
+  printf 'FMHOOKTOKEN-LEARN-%s-%s-%s\n' "$source" "$count" "${FM_LIVE_NONCE:?}"
+fi
 exit 0
 SH
   chmod +x "$lab/bin/fm-sessionstart-run.sh"
@@ -200,6 +233,7 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
   done
 
   : > "$record"
+  rm -f "$record.preferences" "$record.learnings"
   rm -f "$marker" "$lab/state/.startup-network."*
   out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
     FM_LIVE_DETACH_MARKER="$marker" \
@@ -213,6 +247,12 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
   esac
   printf '%s' "$out" | grep -Fq "FMHOOKTOKEN-$source-1-$LIVE_NONCE" \
     || { printf '# cold-open model reply: %s\n' "$out" >&2; fail "$harness $version: hook stdout did not reach model context on a cold open"; }
+  printf '%s' "$out" | grep -Fq "FMHOOKTOKEN-LATE-$source-1-$LIVE_NONCE" \
+    || fail "$harness $version: the token after the 2,000-character preview did not reach model context on a cold open"
+  printf '%s' "$out" | grep -Fq "FMHOOKTOKEN-PREFS-$source-1-$LIVE_NONCE" \
+    || fail "$harness $version: the preferences token did not reach model context on a cold open"
+  printf '%s' "$out" | grep -Fq "FMHOOKTOKEN-LEARN-$source-1-$LIVE_NONCE" \
+    || fail "$harness $version: the learnings token did not reach model context on a cold open"
   pass "$harness $version: a cold open reports source '$source' and its hook stdout reaches model context"
 
   # (c) The harness process is gone; the worker it detached must not be. The
@@ -225,6 +265,7 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
   pass "$harness $version: a worker detached by the session-open hook outlives it, so the deferred network checks still run"
 
   : > "$record"
+  rm -f "$record.preferences" "$record.learnings"
   ( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
     "${resume[@]}" 'Say only OK.' < /dev/null >/dev/null 2>&1 ) || true
   source=$(head -n 1 "$record")
@@ -246,8 +287,9 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
 probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-argv...>
   local harness=$1 version=$2 lab=$3 clear_cmd=$4
   shift 4
-  local record="$lab/record" session="fmss-$harness" reset n compact_seed compact_reply
+  local record="$lab/record" session="fmss-$harness" reset n compact_seed compact_reply compact_count
   : > "$record"
+  rm -f "$record.preferences" "$record.learnings"
   tmux -L "$SOCKET" new-session -d -s "$session" -c "$lab" -x 200 -y 50 \
     -e FM_LIVE_RECORD="$record" -e FM_ROOT_OVERRIDE="$lab" -e FM_HOME="$lab" \
     -e FM_LIVE_NONCE="$LIVE_NONCE" \
@@ -255,13 +297,19 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     || fail "$harness $version: could not start an interactive lab session"
 
   # Every run-tier TUI asks whether it trusts a folder it has not seen, and the
-  # session-open hook only fires once that is answered. Each harness's default
-  # selection IS the trusting one, so a bare Enter clears it; the loop keeps
-  # waiting for the recorded open either way, so a harness that stops prompting
-  # costs nothing. harness-adapters owns trust handling outside tests.
+  # session-open hook only fires once that is answered. Claude Code 2.1.296
+  # selects "No, exit" by default, so the cursor moves to the trusting option
+  # first when it rests on a "No" choice; elsewhere the default IS the trusting
+  # one and a bare Enter clears it. The loop keeps waiting for the recorded open
+  # either way, so a harness that stops prompting costs nothing.
+  # harness-adapters owns trust handling outside tests.
   n=0
   while [ "$n" -lt 60 ] && ! grep -q . "$record" 2>/dev/null; do
     if capture "$session" | grep -qiE 'trust (this|the|parent)?[[:space:]]*(folder|project)'; then
+      if capture "$session" | grep -qE '❯[[:space:]]*(1\.[[:space:]]*)?No\b'; then
+        tmux -L "$SOCKET" send-keys -t "$session" Down
+        sleep 1
+      fi
       tmux -L "$SOCKET" send-keys -t "$session" Enter
       sleep 5
     fi
@@ -289,6 +337,12 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   send_line "$session" "$ASK"
   wait_for_text "$session" "FMHOOKTOKEN-$reset-2-$LIVE_NONCE" \
     || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach model context after '$clear_cmd'"; }
+  wait_for_text "$session" "FMHOOKTOKEN-LATE-$reset-2-$LIVE_NONCE" \
+    || { capture "$session" >&2; fail "$harness $version: the token after the 2,000-character preview did not reach model context after '$clear_cmd'"; }
+  wait_for_text "$session" "FMHOOKTOKEN-PREFS-$reset-2-$LIVE_NONCE" \
+    || { capture "$session" >&2; fail "$harness $version: the preferences token did not reach model context after '$clear_cmd'"; }
+  wait_for_text "$session" "FMHOOKTOKEN-LEARN-$reset-2-$LIVE_NONCE" \
+    || { capture "$session" >&2; fail "$harness $version: the learnings token did not reach model context after '$clear_cmd'"; }
   pass "$harness $version: '$clear_cmd' reports source '$reset' and re-injects hook stdout into model context"
 
   if [ "$harness" = pi ]; then
@@ -310,8 +364,15 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   while [ "$n" -lt 40 ] && ! grep -qx compact "$record"; do sleep 3; n=$((n + 1)); done
   if grep -qx compact "$record"; then
     send_line "$session" "$ASK"
-    wait_for_text "$session" "FMHOOKTOKEN-compact-$(grep -c . "$record" | tr -d ' ')-$LIVE_NONCE" \
+    compact_count=$(grep -c . "$record" | tr -d ' ')
+    wait_for_text "$session" "FMHOOKTOKEN-compact-$compact_count-$LIVE_NONCE" \
       || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach model context after a compaction"; }
+    wait_for_text "$session" "FMHOOKTOKEN-LATE-compact-$compact_count-$LIVE_NONCE" \
+      || { capture "$session" >&2; fail "$harness $version: the token after the 2,000-character preview did not reach model context after a compaction"; }
+    wait_for_text "$session" "FMHOOKTOKEN-PREFS-compact-$compact_count-$LIVE_NONCE" \
+      || { capture "$session" >&2; fail "$harness $version: the preferences token did not reach model context after a compaction"; }
+    wait_for_text "$session" "FMHOOKTOKEN-LEARN-compact-$compact_count-$LIVE_NONCE" \
+      || { capture "$session" >&2; fail "$harness $version: the learnings token did not reach model context after a compaction"; }
     pass "$harness $version: a compaction reports source 'compact' and re-injects hook stdout into model context"
   elif [ "$harness" = pi ]; then
     capture "$session" >&2

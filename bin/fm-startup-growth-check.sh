@@ -16,8 +16,8 @@
 # model calls, repository refreshes, /stow, or full preference/learning
 # rereads.  The budget total, its verdict, and its secondmate exception come
 # from `bin/fm-startup-memory-budget.sh report`, the single owner of
-# config/startup-memory-budget, and are never re-derived here.  data/projects.md
-# and data/secondmates.md are printed in full by every session start too, so
+# config/startup-memory-budget, and are never re-derived here.  Every session
+# start also prints the names in data/projects.md and data/secondmates.md, so
 # they are watched for prompt growth without entering that budget total.
 # The tracked set is the startup entrypoints session start executes directly
 # plus the agent instruction files, not every script and library the startup

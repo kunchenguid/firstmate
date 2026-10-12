@@ -286,6 +286,47 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_brief_keeps_each_harness_first_action() {
+  local home config harness full brief
+  home="$TMP_ROOT/brief-home"
+  config="$TMP_ROOT/brief-config"
+  mkdir -p "$home/state" "$config"
+  : > "$config/supervision-host"
+  for harness in claude codex opencode pi pi-signed grok cursor omp; do
+    full=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness" --read-only 0 --afk 0 --afk-mode away --x-mode 0)
+    brief=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness" --read-only 0 --afk 0 --afk-mode away --x-mode 0 --brief)
+    assert_contains "$full" "1. Drain first with \`bin/fm-wake-drain.sh\`." \
+      "$harness full render lost the first action"
+    assert_contains "$brief" "1. Drain first with \`bin/fm-wake-drain.sh\`." \
+      "$harness brief render lost the first action"
+    if [ "$harness" = claude ]; then
+      assert_contains "$brief" "On a \`Stop hook feedback\` wake" \
+        "claude brief dropped the stop-hook step"
+      assert_not_contains "$brief" '4. On the one' \
+        "claude brief kept a step after 3"
+      assert_contains "$brief" 'Full protocol: bin/fm-supervision-instructions.sh --harness claude --read-only 0 --afk 0 --afk-mode away --x-mode 0' \
+        "claude brief pointer dropped the flags the composer passes"
+      assert_not_contains "$brief" '--brief' \
+        "claude brief pointer repeated --brief"
+      assert_contains "$brief" '(protocol from the Full protocol command at the end of this block).' \
+        "claude brief host line did not name the Full protocol command"
+      assert_not_contains "$brief" '(protocol at the end of this block).' \
+        "claude brief host line still promised a protocol in the block"
+      assert_not_contains "$brief" 'supervision-host: cycle boundary' \
+        "claude brief kept the supervision-host addendum"
+      assert_contains "$full" 'supervision-host: cycle boundary' \
+        "claude full render dropped the supervision-host addendum"
+    elif [ "$harness" = codex ]; then
+      assert_contains "$brief" 'First cycle: run one foreground watcher checkpoint' \
+        "codex brief dropped the first checkpoint"
+      assert_equals "$brief" "$full" "codex --brief changed the full protocol"
+    else
+      assert_equals "$brief" "$full" "$harness --brief changed the full protocol"
+    fi
+  done
+  pass "brief keeps each harness first action and shortens only Claude"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -315,4 +356,5 @@ test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_brief_keeps_each_harness_first_action
 test_pi_snippet_uses_effective_extension_path

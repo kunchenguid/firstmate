@@ -571,8 +571,8 @@ EOF
   pass "fm-config-push source-only edit after inherit stays quiet"
 }
 
-test_session_start_digest_labels_shared_file_and_read_once_rule() {
-  local rec w root home _sm fakebin out contract
+test_session_start_digest_labels_shared_file() {
+  local rec w root home _sm fakebin out
   rec=$(new_git_world session-start-label)
   IFS='|' read -r w root home _sm <<EOF
 $rec
@@ -587,9 +587,10 @@ EOF
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
     "session-start digest should label the shared captain file unmistakably"
   assert_contains "$out" "shared from primary" "session-start digest should render the shared file"
-  contract=$(printf '%s\n' "$out" | awk '/^READ-ONCE CONTRACT$/ { f = 1 } /^FLEET STATE$/ { f = 0 } f')
-  assert_contains "$contract" "data/captain-shared.md" \
-    "read-once contract should name captain-shared.md among the files it covers"
+  assert_contains "$out" "preferences part" \
+    "the shared file should print in the preferences part"
+  assert_not_contains "$out" "READ-ONCE CONTRACT" \
+    "session start still prints the old read-once section"
   pass "session-start digest renders data/captain-shared.md with the shared read-only label"
 }
 
@@ -604,7 +605,7 @@ test_spawn_convergence_point_copies_shared_file
 test_bootstrap_convergence_point_copies_shared_file
 test_config_push_convergence_point_updates_changed_source
 test_config_push_source_only_edit_after_inherit_stays_quiet
-test_session_start_digest_labels_shared_file_and_read_once_rule
+test_session_start_digest_labels_shared_file
 test_header_check_names_the_missing_phrase
 
 echo "# all fm-shared-captain-inheritance tests passed"
