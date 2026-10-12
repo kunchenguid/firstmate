@@ -213,7 +213,6 @@ harness_process_verdict() {  # <pid>
     *grok*) echo "comm grok"; return ;;
     kimi) echo "comm kimi"; return ;;
     rovo) echo "comm rovo"; return ;;
-    agy|agy.exe|antigravity|antigravity.exe) echo "comm agy"; return ;;
     # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
     # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
     # name carries the version and CHANGES on every auto-update. Match the stable
@@ -242,7 +241,7 @@ harness_process_verdict() {  # <pid>
     # carries no AGY_* or ANTIGRAVITY_* variable; AGENT=1 seen there is an
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
-    agy) echo "comm agy"; return ;;
+    agy|agy.exe|antigravity|antigravity.exe) echo "comm agy"; return ;;
     devin) echo "comm devin"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
