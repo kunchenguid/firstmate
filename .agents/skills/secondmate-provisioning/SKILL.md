@@ -253,8 +253,9 @@ When retirement proceeds, teardown kills the direct endpoint, removes every pare
 An endpoint close that could not be made stops the retirement before any record naming that endpoint is removed, so a cleanup never reports success for an agent that may still be live with nothing left on disk naming it.
 `--force` overrides that stop only for the retiring secondmate's own endpoint, never for a child endpoint inside forced cleanup, and a forced continue still names the endpoint you must then reconcile yourself; [`docs/verification/runtime-backends.md`](../../../docs/verification/runtime-backends.md) "Endpoint close" owns what each backend can prove about its own close.
 Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
+Because that return restores tracked content without touching gitignored files, teardown first clears the home's own gitignored identity - the `.fm-secondmate-home` marker and the `.fm-secondmate-parent` binding - so the freed slot cannot hand a retired secondmate's identity to the next task that leases it.
 A plain-clone home with no pool slot is simply removed.
-If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
+If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease, restoring the identity files it had cleared because a preserved home is still a home.
 Before either return or direct removal, teardown asks the target home's process-event runner to retire its registrations and physically owned machine-wide claims through the safe generation-bound path.
 It refuses retirement while that cleanup is uncertain or unavailable, preserving the home and retirement records for a later retry.
 Raw deletion is unsupported because a blocking process-event child can outlive its home.
