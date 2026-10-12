@@ -562,6 +562,25 @@ reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   return "$rc"
 }
 
+# A cleanup refusal preserves one follow-up record. Retry those records at the
+# existing bounded inactive cadence so a later landed commit or repaired
+# endpoint can converge without another interactive captain turn.
+retry_terminal_worker_cleanup() {
+  local report id data_dir config_dir
+  [ -d "$STATE/terminal-worker-cleanup" ] && [ ! -L "$STATE/terminal-worker-cleanup" ] || return 0
+  data_dir=${FM_DATA_OVERRIDE:-$FM_HOME/data}
+  config_dir=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  for report in "$STATE/terminal-worker-cleanup"/*.pending; do
+    [ -f "$report" ] && [ ! -L "$report" ] || continue
+    id=$(basename "$report" .pending)
+    valid_id "$id" || continue
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$data_dir" FM_CONFIG_OVERRIDE="$config_dir" \
+      "${FM_TERMINAL_WORKER_CLEANUP_BIN:-$SCRIPT_DIR/fm-terminal-worker-cleanup.sh}" "$id" \
+      >/dev/null 2>&1 || true
+  done
+}
+
 # SCAN_FIRST_VISIT_PENDING is armed by scan() before its passes. The deadline
 # below is whole-second arithmetic, so a small budget can quantize to zero
 # between the deadline computation and these checks; without the guaranteed
@@ -603,6 +622,7 @@ scan() {
   local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
+  retry_terminal_worker_cleanup
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
     ledger_pass

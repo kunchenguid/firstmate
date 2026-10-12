@@ -3930,6 +3930,21 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
+retire_terminal_worker_cleanup_followup() {
+  local dir="$STATE/terminal-worker-cleanup" report="$STATE/terminal-worker-cleanup/$ID.pending"
+  [ -e "$dir" ] || [ -L "$dir" ] || return 0
+  [ -d "$dir" ] && [ ! -L "$dir" ] || {
+    echo "warning: preserving unsafe terminal-worker cleanup follow-up path $dir" >&2
+    return 0
+  }
+  [ -e "$report" ] || [ -L "$report" ] || return 0
+  [ -f "$report" ] && [ ! -L "$report" ] || {
+    echo "warning: preserving unsafe terminal-worker cleanup follow-up for $ID" >&2
+    return 0
+  }
+  rm -f -- "$report" || echo "warning: terminal-worker cleanup follow-up remains at $report" >&2
+}
+retire_terminal_worker_cleanup_followup
 if [ "$TEARDOWN_POOL_SLOT_LOST" = 1 ]; then
   echo "teardown $ID finished its cleanup and removed its task record, but a returned pool slot did not come back clean (see the warning above); clear those paths so the pool can reuse the slot" >&2
 elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
