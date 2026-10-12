@@ -15,16 +15,18 @@
 # is open, not a draft, mergeable, free of conflicts, every unwaived check
 # is green at the exact current head commit, where github_checks_not_green below
 # owns what makes a check green and judges each one by its current run, and
-# every unwaived check the forge requires for the base branch has reported at
-# that head. When mergeable is the only failing condition and reads UNKNOWN,
+# every unwaived required check has reported at that head. When mergeable is
+# the only failing condition and reads UNKNOWN,
 # meaning GitHub has not finished recomputing it, the caller re-reads and
 # re-checks every condition after a short bounded wait instead of refusing;
 # once that bound is spent it reports mergeability still pending rather than
 # unmergeable, with the same nonzero exit as any other refusal.
 # A required check that never reported is absent from the checks
 # list rather than red, so github_read_required_contexts below reads the
-# required set from classic branch protection and active rulesets. Check-run
-# requirements retain their producer app binding: a same-named check run from another app cannot
+# required set from classic branch protection and active rulesets, supplemented
+# by local declarations; docs/configuration.md "Required checks" owns their
+# configuration contract. Check-run requirements retain their producer app
+# binding: a same-named check run from another app cannot
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
 # Unbound requirements match by name. A bound requirement reported as a check
 # run also needs a matching producer in the check-runs read at the verified
@@ -634,9 +636,43 @@ FM_PR_GITHUB_REQUIRED=
 FM_PR_GITHUB_REQUIRED_ERROR=
 github_read_required_contexts() {
   local base=$1 branch_path branch_json rules_json classic='' ruleset='' api_err api_err_text
+  local declared='' declaration_present declaration_json declaration_error file="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/required-checks"
   FM_PR_GITHUB_REQUIRED='[]'
   FM_PR_GITHUB_REQUIRED_ERROR=
   branch_path=$(github_urlencode_path_segment "$base")
+
+  # Shell file tests also return false on inspection errors, not just absence.
+  if ! declaration_present=$(perl -MErrno=ENOENT -e '
+    if (lstat $ARGV[0]) { print 1 }
+    elsif ($! == ENOENT) { print 0 }
+    else { exit 1 }
+  ' -- "$file" 2>/dev/null); then
+    FM_PR_GITHUB_REQUIRED_ERROR="required-check declarations in $file could not be read"
+  elif [ "$declaration_present" = 1 ]; then
+    if [ ! -f "$file" ] || [ ! -r "$file" ] \
+      || ! declaration_json=$(jq -Rsc --arg repo "$PR_OWNER/$PR_REPO" --arg file "$file" '
+        split("\n") | to_entries
+        | map(.key as $line | .value | gsub("^[ \t]+|[ \t]+$"; "")
+          | select(. != "" and (startswith("#") | not))
+          | if test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+[ \t]+.+$") then
+              capture("^(?<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)[ \t]+(?<context>.+)$")
+              | if (.context | test("[\u0000-\u001f\u007f]")) then
+                  {error: "malformed required-check declaration in \($file) at line \($line + 1): check name contains a control character"}
+                else . end
+            else
+              {error: "malformed required-check declaration in \($file) at line \($line + 1): expected <owner>/<repo> <check-or-status-name>"}
+            end)
+        | {required: [.[] | select(has("error") | not)
+            | select((.repo | ascii_downcase) == ($repo | ascii_downcase)) | {context, app_id: null}],
+           error: ([.[] | .error // empty] | join("\n"))}
+      ' "$file" 2>/dev/null); then
+      FM_PR_GITHUB_REQUIRED_ERROR="required-check declarations in $file could not be read"
+    else
+      declared=$(printf '%s' "$declaration_json" | jq -c '.required[]')
+      declaration_error=$(printf '%s' "$declaration_json" | jq -r '.error')
+      FM_PR_GITHUB_REQUIRED_ERROR=$declaration_error
+    fi
+  fi
 
   if ! branch_json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$branch_path" 2>/dev/null) \
     || [ -z "$branch_json" ] \
@@ -659,7 +695,8 @@ github_read_required_contexts() {
         | if .app_id == -1 then .app_id = null else . end
       end' 2>/dev/null); then
     classic=''
-    FM_PR_GITHUB_REQUIRED_ERROR="the branch protection summary for base branch $base could not be read"
+    FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch protection summary for base branch $base could not be read"
   fi
 
   if ! api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-required-rules.XXXXXX"); then
@@ -688,7 +725,7 @@ github_read_required_contexts() {
     rm -f "$api_err"
   fi
 
-  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n' "$classic" "$ruleset" | jq -sc '
+  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n%s\n' "$classic" "$ruleset" "$declared" | jq -sc '
     unique_by([.context, .app_id]) | group_by(.context)
     | map(if any(.[]; .app_id != null) then map(select(.app_id != null)) else . end) | add // []')
   [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
