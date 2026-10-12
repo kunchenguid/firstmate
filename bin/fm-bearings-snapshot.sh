@@ -428,9 +428,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         end
       end;
   def as_gate($owner):
-    {id, title:(.title | trunc(60)),
-     blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
-     reason:(hold_gate_reason | trunc(40)), owner:$owner,
+    {id, title:.title,
+     blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end),
+     reason:hold_gate_reason, owner:$owner,
      filed:((.since // null) | trunc(40))};
   def round_robin_landed($n):
     . as $groups
@@ -495,7 +495,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                   elif .bearings_state == "externally_held" then
                     ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
                   elif .bearings_state == "no_active_work" then "No active child work"
-                  else (.current.reason // "Current home state unavailable") end) | trunc(120)),
+                  else (.current.reason // "Current home state unavailable") end)),
           provenance:(if .provenance.summary_source == "remote-ledger-cache" then "structured-home-cache"
                       else .provenance.selected end),freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
@@ -508,9 +508,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         state: .current_state.state,
         repo:(.backlog.repo // .project // null),
         name:((.backlog.title // "") as $name
-              | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),
+              | (if ($name | test("[^[:space:]]")) then $name else .id end)),
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end))
       } ]
      + [ $secondmate_views[] as $m
          | $m.active_children[]?
@@ -520,8 +520,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             repo:(.repo // null),
             name:((.name // "") as $name
                   | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
-                     then $name else ($m.id + "/" + .id) end) | trunc(70)),
-            doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
+                     then $name else ($m.id + "/" + .id) end)),
+            doing:((.doing // .state))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and .hold_bucket != null)
@@ -641,7 +641,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         | select(.reconcile_inventory != null)
         | {id, spawn_gen:(.spawn_gen // null), host:(.host // null), kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
-      landed: ($done | map({id, what:(.title | trunc(70)),
+      landed: ($done | map({id, what:.title,
                             artifact:(landed_artifact // "-"),owner:.home_id})),
       gates: ($return_catchup_gate
               + ($gates_all | newest_filed_first
