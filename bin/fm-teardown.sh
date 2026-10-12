@@ -2876,7 +2876,7 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup identity_backup
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -2905,11 +2905,17 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
-      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+    identity_backup=$(stash_firstmate_home_identity "$abs_home_path" "$label") || {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      restore_firstmate_home_identity "$abs_home_path" "$label" "$identity_backup" || true
+      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+      return 1
+    }
+    [ -z "$identity_backup" ] || rm -rf -- "$identity_backup"
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -2998,6 +3004,58 @@ restore_firstmate_home_process_events() {
     echo "error: process-event restoration could not rearm $label $home; active waits may remain retired; recover registrations from $backup" >&2
     return "$TEARDOWN_PROCEVENT_RESTORE_FAILED"
   fi
+  rm -rf -- "$backup"
+}
+
+# `treehouse return` restores a pool slot's tracked content but leaves gitignored
+# files in place, and the two files that make a directory a secondmate home -
+# the .fm-secondmate-home identity marker and the .fm-secondmate-parent binding
+# written beside it - are both gitignored. A retired home therefore used to hand
+# its identity to whatever crewmate task next leased that slot, and
+# bin/fm-primary-scope-lib.sh force-includes any marked root as a primary home,
+# so every primary-only guard fired inside an ordinary task worktree. Retirement
+# is the one moment that knows the home has stopped being a home, so clear the
+# identity here.
+#
+# Stash rather than delete outright: a failed return preserves the home, and a
+# preserved home must keep its identity.
+FM_HOME_IDENTITY_FILES=".fm-secondmate-home .fm-secondmate-parent"
+
+stash_firstmate_home_identity() {
+  local home=$1 label=$2 backup="" name path
+  for name in $FM_HOME_IDENTITY_FILES; do
+    path="$home/$name"
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    if [ -z "$backup" ]; then
+      backup=$(umask 077; mktemp -d "${home%/*}/.fm-identity-restore.XXXXXX") || {
+        echo "REFUSED: cannot stage recoverable home-identity files for $label $home" >&2
+        return 1
+      }
+    fi
+    if ! mv -- "$path" "$backup/$name"; then
+      restore_firstmate_home_identity "$home" "$label" "$backup" || true
+      echo "REFUSED: cannot clear the home-identity file $path for $label $home" >&2
+      return 1
+    fi
+  done
+  printf '%s\n' "$backup"
+}
+
+restore_firstmate_home_identity() {
+  local home=$1 label=$2 backup=$3 name path
+  [ -n "$backup" ] || return 0
+  [ -d "$backup" ] && [ ! -L "$backup" ] || {
+    echo "error: home-identity restoration failed for $label $home; recovery backup is unavailable at $backup" >&2
+    return 1
+  }
+  for name in $FM_HOME_IDENTITY_FILES; do
+    path="$backup/$name"
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    if ! mv -- "$path" "$home/$name"; then
+      echo "error: home-identity restoration failed for $label $home; recover $name from $backup" >&2
+      return 1
+    fi
+  done
   rm -rf -- "$backup"
 }
 

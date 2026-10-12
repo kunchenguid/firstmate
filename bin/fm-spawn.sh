@@ -4179,6 +4179,50 @@ real_path_or_raw() { # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 
+# Reject or clear a secondmate-home identity marker left behind in a leased task
+# worktree. Pool slots are reused: bin/fm-home-seed.sh seeds a secondmate home
+# into the same kind of slot a crewmate task later leases, and a `treehouse
+# return` restores tracked content without removing gitignored files, so a slot
+# that once held a secondmate home comes back still carrying its
+# .fm-secondmate-home marker. bin/fm-primary-scope-lib.sh force-includes any
+# marked root as a primary home, so that leftover marker makes every
+# primary-only guard - the subagent pre-tool check, the turn-end guard, the
+# session-start nudge, and the Claude Stop auto-arm - fire inside an ordinary
+# task worktree.
+#
+# Decide by identity, never by shape. A genuine secondmate home is a linked
+# worktree too (docs/turnend-guard.md), so "linked worktree" cannot distinguish
+# a stale marker from a live home. An id this home still registers, or the
+# durable .fm-secondmate-parent binding a seed writes beside the marker, names a
+# home that is still provisioned: that is the pool handing out a LIVE
+# secondmate's home, which is a refusal rather than something to clean up.
+# Anything else is a leftover from a retired or never-provisioned home, and
+# removing it restores the slot to a plain task worktree.
+spawn_clear_stale_secondmate_marker() {  # <worktree> <source> <inspect-target>
+  local wt=$1 source=$2 inspect_target=$3 marker parent id
+  # A secondmate spawn launches INTO a home whose marker is the point, so this
+  # hygiene is for task worktrees only.
+  [ "$KIND" != secondmate ] || return 0
+  marker="$wt/$SUB_HOME_MARKER"
+  parent="$wt/.fm-secondmate-parent"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  id=
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    IFS= read -r id < "$marker" 2>/dev/null || id=
+    id=${id//[[:space:]]/}
+  fi
+  if { [ -n "$id" ] && secondmate_registry_field "$DATA/secondmates.md" "$id" home >/dev/null 2>&1; } ||
+     [ -e "$parent" ] || [ -L "$parent" ]; then
+    echo "error: $source handed back '$wt', which is still the provisioned home of secondmate '${id:-unreadable}'; refusing to launch a task into a live secondmate home. Free that pool slot or retire the secondmate first. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  rm -f -- "$marker" || {
+    echo "error: could not clear the stale secondmate-home marker at '$marker'; refusing to launch because every primary-home guard would misfire in this task worktree. Inspect target $inspect_target" >&2
+    exit 1
+  }
+  echo "notice: cleared a stale secondmate-home marker ('${id:-unreadable}') left in leased worktree $wt" >&2
+}
+
 # True when <path> is an isolated worktree of the spawning project: a real
 # directory that is its own worktree root, is not the spawning project itself,
 # and does not share the project repository's common git dir. SPAWN_WT_TOP is
@@ -4267,6 +4311,7 @@ validate_spawn_worktree() { # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  spawn_clear_stale_secondmate_marker "$WT" "$source" "$inspect_target"
 }
 
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:

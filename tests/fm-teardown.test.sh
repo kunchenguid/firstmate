@@ -3597,6 +3597,91 @@ SH
   pass "forced secondmate teardown preflights every Herdr child before cleanup mutation"
 }
 
+# --- secondmate retirement clears the home's identity -----------------------
+
+# A treehouse-leased secondmate home is returned to the pool, not deleted, and
+# `treehouse return` restores tracked content without touching gitignored files.
+# The two files that make a directory a secondmate home - the
+# .fm-secondmate-home identity marker and the .fm-secondmate-parent binding
+# written beside it - are both gitignored, so retirement used to hand a retired
+# home's identity to whatever crewmate task next leased that slot, and
+# bin/fm-primary-scope-lib.sh force-includes any marked root as a primary home.
+# Retirement is the one moment that knows the home has stopped being a home.
+# Build the home as a real worktree of the case's project and point FM_ROOT at
+# that project, because "is this a treehouse slot" is exactly "is this a
+# registered worktree of FM_ROOT".
+configure_pooled_secondmate_home() {  # <case-dir>
+  local case_dir=$1 home="$1/sm-home"
+  git -C "$case_dir/project" worktree add -q --detach "$home" main
+  # FM_ROOT is the case project here, and teardown runs $FM_ROOT/bin/fm-guard.sh
+  # advisorily; give it one so the run's stderr carries only real diagnostics.
+  mkdir -p "$case_dir/project/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/project/bin/fm-guard.sh"
+  chmod +x "$case_dir/project/bin/fm-guard.sh"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+    "$case_dir/project" > "$home/.fm-secondmate-parent"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' "$home"
+}
+
+run_teardown_pooled() {  # <case-dir> [args...]
+  local case_dir=$1; shift
+  FM_HOME='' \
+  FM_ROOT_OVERRIDE="$case_dir/project" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" task-x1 "$@"
+}
+
+test_secondmate_retirement_clears_pooled_home_identity() {
+  local case_dir home rc
+  case_dir=$(make_case retire-identity)
+  write_meta "$case_dir" local-only secondmate
+  home=$(configure_pooled_secondmate_home "$case_dir")
+
+  rc=0
+  run_teardown_pooled "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || fail "retire-identity: pooled secondmate teardown failed: $(cat "$case_dir/stderr")"
+  [ -d "$home" ] || fail "retire-identity: a returned lease must leave the slot directory in place"
+  assert_absent "$home/.fm-secondmate-home" \
+    "retire-identity: the retired home kept its identity marker for the next lease"
+  assert_absent "$home/.fm-secondmate-parent" \
+    "retire-identity: the retired home kept its parent binding for the next lease"
+  pass "secondmate retirement clears a pooled home's identity before returning the lease"
+}
+
+# A failed return preserves the home, so it must also preserve the identity that
+# makes it a home - otherwise a retry, or the captain, would find an anonymous
+# directory where a secondmate still lives.
+test_failed_return_restores_pooled_home_identity() {
+  local case_dir home rc
+  case_dir=$(make_case retire-identity-restore)
+  write_meta "$case_dir" local-only secondmate
+  home=$(configure_pooled_secondmate_home "$case_dir")
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+echo "treehouse: return refused" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown_pooled "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "retire-identity-restore: teardown reported success despite a failed return"
+  [ -d "$home" ] || fail "retire-identity-restore: a failed return removed the home"
+  assert_present "$home/.fm-secondmate-home" \
+    "retire-identity-restore: a failed return left the preserved home without its identity marker"
+  assert_present "$home/.fm-secondmate-parent" \
+    "retire-identity-restore: a failed return left the preserved home without its parent binding"
+  [ "$(head -1 "$home/.fm-secondmate-home")" = task-x1 ] \
+    || fail "retire-identity-restore: the restored identity marker lost its id"
+  pass "a failed lease return restores the preserved secondmate home's identity"
+}
+
 configure_secondmate_with_tmux_children() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" child child_wt
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -5991,6 +6076,8 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_herdr_teardown_presentation_lock_namespace_is_per_account
+test_secondmate_retirement_clears_pooled_home_identity
+test_failed_return_restores_pooled_home_identity
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
