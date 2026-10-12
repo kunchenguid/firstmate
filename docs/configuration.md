@@ -616,7 +616,7 @@ The optional local, gitignored `config/auto-exit-temporary-workers` presence fla
 With the flag absent, worker lifetime and safe artifact cleanup keep their existing independent behavior.
 The default flag covers current `done` and `failed` states only.
 `config/auto-exit-blocked-workers` and `config/auto-exit-parked-workers` are separate presence flags for homes that also choose to stop blocked or parked workers.
-Persistent secondmates are excluded, and a remotely placed secondmate is never controlled from the parent home.
+Persistent secondmates are excluded, and a remotely placed worker is never controlled from the parent home.
 The supervision path uses [`bin/fm-control.sh`](../bin/fm-control.sh) `exit` first, so every uncommitted change and every uncertain artifact remains preserved.
 It then invokes [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) without `--force`.
 A dirty, unlanded, uncertain, or unsupported cleanup leaves one durable follow-up under `state/terminal-worker-cleanup/` naming the preserved copy and the action needed to resume it.
