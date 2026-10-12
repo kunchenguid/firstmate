@@ -1751,6 +1751,32 @@ fm_treehouse_home_pool_root() {  # <home>
   printf '%s/.fm-pools/%s\n' "$base" "$id"
 }
 
+# The Treehouse root a task's slot is returned under.
+#
+# A secondmate home's slot normally sits under the home's per-home root above,
+# but a slot acquired before that root existed - under a hand-written
+# treehouse.toml root in the project clone, say - still sits in the pool that
+# holds it, and only that pool can take it back. The slot's own path names
+# that pool: Treehouse lays every slot out as <root>/.treehouse/<pool>/<slot>/
+# <repo>, so the root is four directories above the checkout whenever the
+# pool's state file is present and the layout matches. The recorded path
+# therefore wins, and the per-home root stands in only when the path does not
+# have the pool layout. Prints nothing when <home-pool-root> is empty: the main
+# home's returns carry no root.
+fm_treehouse_return_root() {  # <home-pool-root> <worktree>
+  local home_root=$1 worktree=$2 slot pool state
+  [ -n "$home_root" ] || return 0
+  if slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P); then
+    pool=$(dirname "$(dirname "$slot")")
+    state="$pool/treehouse-state.json"
+    if [ -f "$state" ] && [ ! -L "$state" ] && [ "$(basename "$(dirname "$pool")")" = .treehouse ]; then
+      dirname "$(dirname "$pool")"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$home_root"
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"

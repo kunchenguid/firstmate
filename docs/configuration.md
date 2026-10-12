@@ -435,9 +435,12 @@ A secondmate home therefore pools its task worktrees under its own root, `${TREE
 The root lives outside every firstmate home's directory tree on purpose: a worker's harness walks up from its worktree looking for instruction files, and a root inside the home would put the home's `CLAUDE.md`, which imports the supervisor contract, on that walk.
 
 An explicit `--root` overrides a project clone's `treehouse.toml`, so a clone that still carries a hand-written per-home root keeps working.
+A slot already held under such a root is returned to the pool that holds it: `fm-teardown.sh` derives the return root from the recorded worktree path whenever it has Treehouse's pool layout, and uses the per-home root only when it does not.
 Operator `treehouse status` or `treehouse prune` calls inside a secondmate home need the same `--root` to see that home's pools.
 A secondmate home whose identity marker cannot be read, or whose base (`TREEHOUSE_ROOT`, else `HOME`) is not an absolute path, refuses spawn and teardown rather than falling back to the shared pool.
-The exact derivation is owned by `fm_treehouse_home_pool_root` in [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh).
+Retiring a secondmate home also retires its per-home root once every child slot has been returned, since every slot there is a linked worktree of the home's own clone: each pool is emptied with `treehouse destroy --all`, which removes only returned, clean, merged, unleased slots, and the root directory is then removed.
+A slot still claimed by a task, or one `treehouse destroy` leaves behind, keeps the root and the home in place and is named in the refusal; `--force` does not override it.
+The exact derivation is owned by `fm_treehouse_home_pool_root` and `fm_treehouse_return_root` in [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh).
 
 ### Backend selection order
 
@@ -743,7 +746,7 @@ A preexisting project-bearing charter is also refused until it is re-scaffolded 
 
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
-The home's own task worktrees pool under a per-home Treehouse root rather than the main home's pool; see [Per-home worktree pools](#per-home-worktree-pools).
+The home's own task worktrees pool under a per-home Treehouse root rather than the main home's pool, and retirement removes that root once every slot in it has been returned; see [Per-home worktree pools](#per-home-worktree-pools).
 
 ### Project modes and backlog handoff
 
