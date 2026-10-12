@@ -51,11 +51,12 @@ LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness-drift.XXXXXX")
 SESSION=drift
 
 # The lab codex's app-server daemon detaches from its pane and survives
-# kill-server, so stop it before its home is deleted. The updater goes first so
-# nothing respawns the daemon, and a pid is signalled only while its cmdline
-# still names codex, so a reused pid never takes an unrelated process down.
+# kill-server, so stop it before its home is deleted. The updater goes first to
+# avoid respawning the daemon. Check portable ps command arguments for codex
+# before signalling a recorded pid; a name check cannot prove pid ownership.
+# A shutdown timeout fails cleanup and retains the lab for the surviving process.
 stop_lab_codex_daemon() {
-  local pid_file pid
+  local pid_file pid attempt process_state
   for pid_file in "$LAB/codex-home/app-server-daemon/daemon-updater.pid" \
     "$LAB/codex-home/app-server-daemon/daemon.pid"; do
     [ -r "$pid_file" ] || continue
@@ -63,12 +64,25 @@ stop_lab_codex_daemon() {
     [ -n "$pid" ] || continue
     ps -p "$pid" -o args= 2>/dev/null | grep -q codex || continue
     kill "$pid" 2>/dev/null || true
+    # SIGTERM is asynchronous; let final state writes finish before rm -rf.
+    for attempt in $(seq 1 100); do
+      process_state=$(ps -p "$pid" -o stat= 2>/dev/null) || break
+      case "$process_state" in *Z*) break ;; esac
+      ps -p "$pid" -o args= 2>/dev/null | grep -q codex || break
+      sleep 0.05
+    done
+    [ "$attempt" -lt 100 ] || {
+      printf 'not ok - lab codex process %s did not stop after SIGTERM\n' "$pid" >&2
+      return 1
+    }
   done
 }
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  [ -n "${LAB:-}" ] && stop_lab_codex_daemon
+  if [ -n "${LAB:-}" ]; then
+    stop_lab_codex_daemon || return 1
+  fi
   [ -n "${LAB:-}" ] && rm -rf "$LAB"
 }
 trap cleanup_all EXIT
@@ -263,5 +277,5 @@ if [ -n "$SKIPPED" ]; then
 fi
 note "checked $CHECKED installed harness(es)"
 
-cleanup_all
+cleanup_all || exit 1
 trap - EXIT
