@@ -76,6 +76,9 @@
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
 #              that no longer resolves or is signed out refuses before the old
 #              agent stops.
+#              The same pre-stop refusal applies to this home's worker tool
+#              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
+#              replacement runtime that cannot hide the listed tools.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -176,6 +179,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-exclude-tools-lib.sh
+. "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -565,9 +570,65 @@ do_interrupt() {
   printf '%s cancel=%s' "$proof" "$cancel"
 }
 
+# Drop busy_gen from the task record when it still names <gen>.
+# fm-busy-event.sh owns the sidecar and the record; fm_backlog_atomic_transition
+# publish owns the task record. Clearing the line inside the busy writer would
+# take the task-record lock that teardown and spawn already hold; the busy
+# writer is their child process, so it would wait on a live holder that is
+# itself waiting on the child, and neither would ever proceed.
+clear_retired_meta_busy_gen() {  # <gen>
+  local gen=$1 meta="$STATE/$ID.meta" lock tmp current line
+  [ -n "$gen" ] || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  if ! declare -F fm_backlog_atomic_transition >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+  fi
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock"
+  current=$(fm_meta_get "$meta" busy_gen)
+  if [ "$current" != "$gen" ]; then
+    fm_lock_release "$lock"
+    return 0
+  fi
+  tmp=$(mktemp "$STATE/.$ID.meta.retire.XXXXXX") || {
+    fm_lock_release "$lock"
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      busy_gen=*) ;;
+      *)
+        printf '%s\n' "$line" >> "$tmp" || {
+          rm -f "$tmp"
+          fm_lock_release "$lock"
+          return 1
+        }
+        ;;
+    esac
+  done < "$meta" || {
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  }
+  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+}
+
 retire_busy_incarnation() {
+  local gen=
   if [ -f "$STATE/$ID.busy-gen" ]; then
-    "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --current-gen >/dev/null 2>&1 || true
+    gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
+    if [ -n "$gen" ] \
+      && "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$gen" >/dev/null 2>&1; then
+      clear_retired_meta_busy_gen "$gen" || true
+    fi
   fi
 }
 
@@ -900,6 +961,12 @@ resolve_relaunch_profile() {
   [ "$account_model" != default ] || account_model=
   fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
+  # Likewise config/crew-exclude-tools: a malformed file, or a replacement
+  # runtime that cannot hide the listed tools, refuses here, before the old
+  # agent stops. Secondmate agents are not covered.
+  if [ "$KIND" != secondmate ]; then
+    fm_exclude_tools_check "$TARGET_HARNESS" 0 "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" >/dev/null || return 1
+  fi
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
