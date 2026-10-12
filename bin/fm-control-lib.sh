@@ -89,7 +89,10 @@ fm_control_harness_family() {  # <recorded-harness>
     pi) printf 'pi' ;;
     pi-signed) printf 'pi-signed' ;;
     omp) printf 'omp' ;;
-    agy) printf 'agy' ;;
+    # `antigravity` is the agy vendor binary's own name: on agy 1.3.3 the
+    # installed `agy` launcher is a sh wrapper that execs it, so a raw relaunch
+    # command can record that basename, and it maps to the agy family.
+    agy|antigravity) printf 'agy' ;;
     devin) printf 'devin' ;;
     commandcode) printf 'commandcode' ;;
     polytoken) printf 'polytoken' ;;

@@ -9,9 +9,12 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 |---|---|
 | Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
 | Verified | 2026-09-10 |
-| Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
-| Platform | Linux x64 (Arch, kernel 7.2.3) |
+| Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable on the 1.2.0 host; on the 1.3.3 re-verification host `/home/ubuntu/.local/bin/agy` is a POSIX sh wrapper that `exec`s the vendor binary `antigravity` |
+| Platform | Linux x64 (Arch, kernel 7.2.3) for 1.2.0; Linux x64 (kernel 5.15.0-1081-oracle) for the 1.3.3 re-verification |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
+
+Re-verified 2026-10-11 and 2026-10-12 against `agy 1.3.3` on the second host above, for detection, launch-flag handling, first-run onboarding, effort rendering, and the models listing, and, after the operator accepted the first-run consent on 2026-10-12, for every rendered turn surface (trust dialog text, busy and idle rows, single-`Escape` interrupt, and `/quit` exit).
+The 1.3.3 binary self-reports its version through an in-place self-updater, so the mise pin still labels `1.2.16` while `agy --version` prints `1.3.3`; trust the binary's own report.
 
 Every command below ran inside the disposable firstmate task worktree or the named Herdr lab session.
 No captain fleet state was touched.
@@ -23,11 +26,11 @@ $ agy --version
 1.2.0
 ```
 
-A live TUI's `/proc/<pid>/environ` carries no `AGY_*` or `ANTIGRAVITY_*` variable.
-It does carry `AGENT=1` and `CLAUDECODE=1`, both inherited from the launching environment, so neither is an agy identity and neither is promoted to a marker.
-Herdr's `pane process-info` for the same pane reports the foreground process as `name=agy` with `argv=["agy", ...]`, and `ps -o comm=` reports `agy`.
-`bin/fm-harness.sh` therefore matches the anchored process name `agy` alone, and the spawn clears `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` at the launch boundary.
-`tests/fm-agy-harness.test.sh` pins the anchored match, the rejection of unrelated names containing the fragment, and that an inherited `CLAUDECODE` never outranks a real `agy` ancestor once the spawn clears it.
+A live TUI's `/proc/<pid>/environ` carries no `AGY_*` or `ANTIGRAVITY_*` variable, re-verified on 1.3.3 (2026-10-11).
+It does carry `AGENT=1` and `CLAUDECODE=1` on the 1.2.0 host, both inherited from the launching environment, so neither is an agy identity and neither is promoted to a marker.
+The process name is version-dependent: the 1.2.0 Go single binary reported `agy` for `ps -o comm=` and Herdr's `pane process-info` (`name=agy`, `argv=["agy", ...]`), while 1.3.3's `agy` launcher is a POSIX sh wrapper that `exec`s the vendor binary, so under the spawn's exec-shaped tmux launch both `ps -o comm=` and `#{pane_current_command}` report exactly `antigravity` (2026-10-11).
+`bin/fm-harness.sh` therefore matches the anchored names `agy` or `antigravity`, never a glob, and the spawn clears `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` at the launch boundary.
+`tests/fm-agy-harness.test.sh` pins both anchored matches, the rejection of unrelated names containing either fragment, and that an inherited `CLAUDECODE` never outranks a real `agy` ancestor once the spawn clears it.
 
 ## Launch: positional prompt-interactive with auto-submit
 
@@ -38,6 +41,20 @@ $ agy --prompt-interactive "Reply with exactly AGY_LIVE_PROBE_OK and nothing els
 The brief submitted itself with no extra Enter, the turn ran, and the reply rendered in the pane.
 A second launch into the same directory answered a fresh prompt the same way, so the shape is repeatable, not a first-run accident.
 The footer rendered `Gemini 3.8 Flash · low`, proving both flags were accepted together.
+On 1.3.3 `--prompt-interactive` strictly requires its prompt as a flag value: launched without one it consumes the following flag as the prompt and exits 2 (`Error: --prompt-interactive took "--effort" as its prompt`, 2026-10-11), a shape the launch template's value form avoids.
+
+## First-run onboarding on 1.3.3: picker, then Terms of Service consent
+
+On an unonboarded machine every 1.3.3 `--prompt-interactive` launch parks behind a first-run chain instead of running its turn: first a color-scheme picker (`Welcome to Antigravity CLI!`, default `terminal`), then a `Terms of Service & Data Use` dialog whose telemetry-consent checkbox arrives pre-ticked.
+The chain still rendered after a fresh Google login on 2026-10-11, so login alone does not clear it, and print mode (`-p`) bypasses it entirely.
+Consent is an operator decision that no guard or spawn may answer, so `tests/fm-agy-signals-live-e2e.test.sh` fail-fasts the moment either dialog renders, before spending any model call:
+
+```
+not ok - agy's first-run onboarding is unaccepted on this machine; complete one interactive agy launch (color scheme, then the Terms of Service consent) as the operator, then rerun this guard
+```
+
+The first guard run (2026-10-11) failed fast in about 5 seconds on this host, recording the wait.
+The operator completed one interactive launch and accepted the consent on 2026-10-12, and the guard then passed in about 9 seconds, re-proving every rendered turn surface below on 1.3.3.
 
 ## Trust dialog: pre-registered before launch, gated on a busy turn as the backstop
 
@@ -55,6 +72,7 @@ Antigravity CLI requires permission to read, edit, and execute files here.
 > Yes, I trust this folder
   No, exit
 ```
+The dialog text above is the 1.2.0 rendering; 1.3.3 re-rendered it verbatim on a fresh workspace in the 2026-10-12 guard run, where the guard answered it once.
 `agy --help` (1.2.0) lists no trust flag or pre-registration command, but agy honours a `trustedWorkspaces` entry written to `~/.gemini/antigravity-cli/settings.json` ahead of launch.
 Verified under a throwaway `HOME` holding a copy of `~/.gemini` (the real settings file was never written): a folder appended to that array by hand launched `--prompt-interactive` straight into its turn and rendered the reply with no dialog, while an unregistered sibling folder launched the same way parked on the dialog.
 agy compares the pane's logical working directory, not its resolved path: a symlinked cwd whose real path alone was registered still parked on the dialog, so `bin/fm-agy-trust.sh` records both the logical path and its resolved form when they differ.
@@ -81,11 +99,14 @@ gemini-3.8-flash-low	Gemini 3.8 Flash (Low)
 ...
 ```
 
-`agy --help` documents `--effort` as `low|medium|high` and `--model` as the model for the session.
+`agy --help` documented `--effort` as `low|medium|high` on 1.2.0 and documents `low|medium|high|xhigh|max` on 1.3.3, but the rendered footer proves the wider values silently clamp: `--effort xhigh` and `--effort max` both launch with footer `Gemini 3.8 Flash · high`, where `--effort low` shows `· low` (2026-10-11).
+Because a clamped value must never claim a level the binary does not render, `bin/fm-spawn.sh` keeps recording `xhigh` and `max` in task metadata and omitting `--effort` for them.
 The bare `gemini-3.8-flash` id from this home's previous config is not listed; only the suffixed `-high`, `-medium`, and `-low` variants are.
 `bin/fm-spawn.sh`'s `agy_model_validate` refuses a requested id a reachable `agy models` listing omits, and launches unvalidated with a stderr notice when the listing is unreachable.
 The listing is a remote fetch (`Fetching available models...`), so the probe runs with stdin detached under the shared hard bound from `bin/fm-timeout-lib.sh` (15 seconds by default, `FM_AGY_MODELS_TIMEOUT`; a non-positive or non-numeric value clamps back to that default, because a non-positive bound is not a bound); a stalled fetch or a sign-in prompt is cut off and falls through to the unvalidated launch instead of blocking the spawn before any pane exists.
+On 1.3.3 the listing answered unauthenticated with exit 0 in about a second (2026-10-11), so on that shape an unreachable listing now means network trouble rather than an auth wall.
 Print mode (`agy -p "Reply with exactly: AGY_PRINT_PROBE_OK" --model gemini-3.8-flash-low`) returned the exact reply with exit 0 in about 8 seconds, proving the credential path without a pane.
+On 1.3.3 the same print shape confirmed the captain's Google entitlement live (2026-10-11).
 
 ## Busy state: the pinned status row, unknown on absence
 
@@ -109,6 +130,7 @@ The completed turn showed the reply, then the idle composer:
 `fm_busy_agy_tail_busy` and the delivery guard in `bin/fm-composer-lib.sh` match the `esc to cancel` token alone: the TUI pins that status row to the bottom of the pane for the whole turn, and the idle row replaces it with `? for shortcuts`.
 The `Generating...` spinner word is deliberately not a signal: it is a free-floating output line, so ordinary worker output such as `Generating report...` would otherwise classify an idle worker as busy or acknowledge a submit that did not land.
 No busy phase without the status row was observed live; every captured mid-turn frame carried it.
+The 2026-10-12 guard run re-proved the row on 1.3.3: it matched `fm_busy_agy_tail_busy` live mid-turn, the settled pane showed the `? for shortcuts` idle row, and the settled tail no longer matched either classifier.
 `fm_busy_classify` reports `unknown agy-regex` when the token is absent, because a long turn can scroll the marker out of the captured tail.
 The signature is hardcoded with no environment override, so a stray variable can never change worker-state classification.
 Herdr's own registry agreed throughout: `agent get` reported `agent_status=working` mid-turn and `idle` after, so on Herdr the native verdict carries busy with no new code.
@@ -123,6 +145,7 @@ A single `Escape` sent mid-turn through `herdr pane send-keys` cancelled it and 
 
 Sending `/quit` plus Enter exited the process; the pane closed under the `exec` launch, and Herdr reported the pane gone.
 `bin/fm-control-lib.sh` records `Escape` once, no clear key, no ack source, and `/quit` for agy.
+The 2026-10-12 guard run re-proved all three on 1.3.3 - the single-`Escape` `Interrupted` row, the settled idle composer, and the `/quit` exit - with the live pane reporting `antigravity` as `#{pane_current_command}` until it closed.
 
 ## Backend liveness: Herdr recognizes agy, tmux names it
 
@@ -155,7 +178,7 @@ No automatic quota failover was exercised or claimed; every handoff above was an
 
 ## What is still unproven
 
-The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
+The unauthenticated turn failure mode was never observed (`agy models` does answer unauthenticated on 1.3.3); this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
 No primary or secondmate behavior was built or tested, and none is claimed.

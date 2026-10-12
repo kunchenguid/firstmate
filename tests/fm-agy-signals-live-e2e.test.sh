@@ -77,11 +77,22 @@ capture() {
 # A fresh workspace stops on the folder-trust dialog. Answer the preselected
 # safe choice once it renders. The answer appends the workspace to
 # trustedWorkspaces in the throwaway HOME's copy of the agy settings store.
+# Before that, fail fast if agy's first-run onboarding chain renders instead:
+# on a machine that has never completed one interactive launch, agy 1.3.3
+# parks every prompt-interactive turn behind the color-scheme picker and then
+# the "Terms of Service & Data Use" consent dialog (verified live on 1.3.3;
+# print mode bypasses them, the TUI does not), and the consent step belongs
+# to the operator, never to this guard.
 screen=
 for _ in $(seq 1 150); do
   screen=$(capture)
   case "$screen" in
     *"Do you trust the contents of this project?"*|*80235*|*80,235*) break ;;
+  esac
+  case "$screen" in
+    *"Terms of Service & Data Use"*|*"Choose your color scheme"*)
+      fail "agy's first-run onboarding is unaccepted on this machine; complete one interactive agy launch (color scheme, then the Terms of Service consent) as the operator, then rerun this guard"
+      ;;
   esac
   sleep 0.5
 done
@@ -184,7 +195,15 @@ pass "a single Escape cancels the real agy turn"
 gone=
 for _ in $(seq 1 60); do
   current=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{pane_current_command}' 2>/dev/null || true)
-  case "$current" in *agy*) sleep 0.5 ;; *) gone=1; break ;; esac
+  # agy 1.2.0 ran as the bare name `agy`; 1.3.3's launcher is a sh wrapper
+  # that execs the vendor binary `antigravity`, so the pane command is that
+  # exact name (verified live on 1.3.3). Both names are anchored: the old
+  # `*agy*` glob never matched `antigravity`, which would have declared the
+  # pane gone while the process was still running.
+  case "$current" in
+    agy | antigravity) sleep 0.5 ;;
+    *) gone=1; break ;;
+  esac
 done
 [ -n "$gone" ] || fail "/quit never stopped the real agy process"
 pass "/quit stops the real agy process"

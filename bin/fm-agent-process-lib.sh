@@ -44,17 +44,20 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
     # unrelated commands such as ompd or comp.
     *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
-    # agy (Antigravity CLI) is anchored for the same reason as muse and omp: its
-    # live process name is the bare word `agy` (verified, agy 1.2.0: a Go-compiled
-    # single binary, comm=agy with argv[0]=agy), and a glob would claim
-    # unrelated commands containing that fragment. devin is anchored the same
-    # way (verified, devin 3000.11.1: comm=devin), so a `*devin*` glob never
-    # claims an unrelated command. Command Code is anchored on its own process
+    # agy (Antigravity CLI) is anchored for the same reason as muse and omp: a
+    # glob would claim unrelated commands containing that fragment. Its 1.2.0
+    # build was a Go-compiled single binary with comm exactly `agy` (verified:
+    # comm=agy with argv[0]=agy), while on 1.3.3 the installed `agy` launcher
+    # is a sh wrapper that execs the vendor binary `antigravity`, so the live
+    # pane command under an exec-shaped launch is exactly `antigravity`
+    # (verified live on 1.3.3). devin is anchored the same way (verified,
+    # devin 3000.11.1: comm=devin), so a `*devin*` glob never claims an
+    # unrelated command. Command Code is anchored on its own process
     # title (verified, Command Code 1.74.1: comm=command-code). polytoken is
     # anchored the same way (verified, polytoken 0.8.19: a TUI pane's foreground
     # process is comm `polytoken`, the same binary name as its per-session
     # daemon), so a `*polytoken*` glob never claims an unrelated command.
-    agy|devin|command-code|polytoken) printf 'agent' ;;
+    agy|antigravity|devin|command-code|polytoken) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then

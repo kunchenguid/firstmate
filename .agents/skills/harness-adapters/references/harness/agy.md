@@ -1,6 +1,7 @@
 # Antigravity CLI
 
 Antigravity's `agy` TUI, verified end to end on 2026-09-10 with agy 1.2.0 on Linux through the Herdr backend.
+The 2026-10-11 and 2026-10-12 drift refresh against agy 1.3.3 re-proved detection, launch-flag handling, first-run onboarding, effort rendering, the models listing, and, once the operator accepted the first-run consent, every rendered turn surface (trust dialog text, busy and idle rows, interrupt, exit).
 Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because `../../../../../docs/supervision-protocols/` carries no agy wake protocol.
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
@@ -8,7 +9,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 
 | Fact | Value |
 |---|---|
-| Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
+| Binary | Absolute `agy` from `PATH`, refused if absent; the live process name is exactly `agy` on the 1.2.0 Go single binary and exactly `antigravity` on 1.3.3, whose `agy` launcher is a POSIX sh wrapper that `exec`s the vendor binary, so both anchored names are matched. |
 | Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
 | Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
@@ -20,7 +21,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Marker | None; a live TUI carries no `AGY_*` or `ANTIGRAVITY_*` variable. |
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
-| Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
+| Effort | `--effort low\|medium\|high`; 1.3.3 also documents `xhigh` and `max`, but its rendered footer proves both silently clamp to `high`, so they stay in task metadata under the record-and-omit contract. |
 | Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
 
 ## Trust, and where the decision persists
@@ -34,11 +35,13 @@ Never steer into a pane still showing the dialog; a spawn that reported success 
 ## Credential precondition
 
 A verified agy worker ran under a signed-in Google account with no key export and no dialog.
-The unauthenticated failure mode was not observed, so treat any auth prompt or refusal as a credential blocker under `../../../../../AGENTS.md` section 9, fix the environment, and retire the endpoint rather than typing into it.
+The unauthenticated turn failure mode was not observed (`agy models` does answer unauthenticated on 1.3.3), so treat any auth prompt or refusal as a credential blocker under `../../../../../AGENTS.md` section 9, fix the environment, and retire the endpoint rather than typing into it.
+A first interactive launch on an unonboarded machine parks behind the 1.3.3 first-run chain: a color-scheme picker, then a `Terms of Service & Data Use` dialog with pre-ticked telemetry consent, while print mode bypasses it.
+Completing that chain once is an operator decision the spawn and guards must never answer; `../../../../../docs/verification/agy.md` owns the dated evidence, including the live guard's fail-fast on an unaccepted machine.
 
 ## Detection
 
-Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy`, never `*agy*`.
+Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process names `agy` or `antigravity`, never a `*agy*` glob.
 No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - but a structural agy ancestor now outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
 agy is deliberately absent from the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, where muse, gemini, and rovo are also absent: a crewmate-only adapter must never own a home session lock.
 

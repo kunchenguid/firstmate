@@ -93,6 +93,33 @@ SH
   pass "fm-harness.sh: ancestry detects a natively-named agy command"
 }
 
+test_agy_ancestry_detects_the_wrapper_exec_name() {
+  # agy 1.3.3's installed launcher is a POSIX sh wrapper that execs the vendor
+  # binary `antigravity`, so under a firstmate exec-shaped launch the live
+  # comm and tmux pane command are exactly `antigravity` (verified live on
+  # 1.3.3). The ancestry detector must resolve that name to agy the same way
+  # it resolves a natively-named `agy`, and it must still outrank an inherited
+  # CLAUDECODE marker rather than being renamed away from it.
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-wrapper")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' 'antigravity'; exit 0 ;;
+  *"args="*) printf '%s\n' 'antigravity --prompt-interactive hello'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "an exec'd antigravity command must be detected as agy by ancestry, got '$out'"
+  out=$(CLAUDECODE=1 PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "an exec'd antigravity ancestor must outrank an inherited CLAUDECODE, got '$out'"
+  pass "fm-harness.sh: ancestry detects the exec'd antigravity name as agy"
+}
+
 test_agy_ancestry_rejects_unrelated_mentions() {
   local fakebin out
   fakebin=$(fm_fakebin "$TMP_ROOT/anc-negatives")
@@ -148,6 +175,8 @@ SH
 test_agy_control_mechanics_are_the_verified_ones() {
   fm_control_harness_supported agy || fail "agy must be a supported control harness"
   [ "$(fm_control_harness_family agy)" = agy ] || fail "agy must map to its own family"
+  [ "$(fm_control_harness_family antigravity)" = agy ] \
+    || fail "a raw antigravity relaunch command must map to the agy family"
   fm_control_harness_supports_kind agy scout || fail "agy must run scouts"
   fm_control_harness_supports_kind agy ship || fail "agy must run ships"
   fm_control_harness_supports_kind agy secondmate \
@@ -209,6 +238,13 @@ test_agy_tmux_names_the_native_binary_an_agent() {
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
   got=$(fm_agent_process_classify_name agy)
   [ "$got" = agent ] || fail "tmux liveness must read the agy binary as an agent, got '$got'"
+  # agy 1.3.3's launcher execs the vendor binary `antigravity`, so the live
+  # pane command is that exact name (verified live on 1.3.3); it must classify
+  # as an agent while an unrelated longer name still must not.
+  got=$(fm_agent_process_classify_name antigravity)
+  [ "$got" = agent ] || fail "tmux liveness must read the exec'd antigravity binary as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name antigravityx)
+  [ "$got" = other ] || fail "tmux liveness must not read antigravityx as an agent, got '$got'"
   got=$(fm_agent_process_classify_name magyk)
   [ "$got" = other ] || fail "tmux liveness must not read magyk as an agent, got '$got'"
   got=$(fm_agent_process_classify_name bash)
@@ -598,9 +634,13 @@ EOF
 
 # The spawn drives the real bin/fm-agy-trust.sh and the fake tmux's trust
 # lookup under this base PATH, and both read agy's settings store with node,
-# which runners do not keep in the system bin dirs. Carry the directory the
-# invoking environment resolves node from, the fm-kimi-harness shape.
-NODE_BIN=$(command -v node) || fail "test needs node"
+# which runners do not keep in the system bin dirs. Carry a directory that
+# resolves node, resolving it through wrappers and symlinks first: on hosts
+# where node's wrapper directory also carries an agy (a mise-managed
+# ~/.local/bin here), carrying the wrapper directory would leak that agy onto
+# the staged PATH and the missing-binary refusal below would resolve the real
+# agy instead of refusing.
+NODE_BIN=$(readlink -f -- "$(command -v node)") || fail "test needs node"
 NODE_BIN_DIR=$(dirname "$NODE_BIN")
 BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
@@ -899,6 +939,7 @@ test_agy_spawn_arms_no_busy_wiring() {
 }
 
 test_agy_ancestry_detects_the_native_command_name
+test_agy_ancestry_detects_the_wrapper_exec_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
 test_agy_control_mechanics_are_the_verified_ones

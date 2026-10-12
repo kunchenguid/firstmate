@@ -3089,8 +3089,13 @@ effort_flag_for_harness() {
     esac
     ;;
   agy)
-    # agy 1.2.0 --effort accepts exactly low|medium|high, so xhigh and max are
-    # omitted rather than passed as known-bad values (record-and-omit).
+    # agy 1.3.3 --help documents low|medium|high|xhigh|max and the CLI accepts
+    # xhigh and max without error, but the rendered footer proves they are
+    # silently clamped: `--effort xhigh` and `--effort max` both launch with
+    # footer `Gemini 3.8 Flash · high` while `--effort low` shows `· low`, and
+    # no catalog model carries an xhigh or max variant, so xhigh and max stay
+    # omitted rather than passed as silently-downgraded values
+    # (record-and-omit; 1.2.0 documented only low|medium|high).
     case "$effort" in
     low | medium | high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
     esac
