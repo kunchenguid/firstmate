@@ -57,14 +57,19 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-TARGET_HOME=${FM_HOME:?FM_HOME is required}
-CONTROL_STATE="$TARGET_HOME/state/parent-route"
-CONTROL_DATA="$TARGET_HOME/data/.parent-route"
 # Same deployment choice bin/fm-remote-doctor.sh owns: FM_REMOTE_HERDR_SESSION
 # points the remote-secondmate session elsewhere without editing code, and
 # defaults to `default`.
 REMOTE_HERDR_SESSION=${FM_REMOTE_HERDR_SESSION:-default}
 
+# TARGET_HOME/CONTROL_STATE/CONTROL_DATA are resolved lazily by require_home,
+# only for a command that actually operates on the home. Resolving them here at
+# top level (the historical `TARGET_HOME=${FM_HOME:?...}`) aborted every
+# invocation without FM_HOME - including --help and an unknown command, which
+# never touch the home - so help was unreachable. See require_home below.
+
+# shellcheck source=bin/fm-home-lib.sh
+. "$SCRIPT_DIR/fm-home-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-ff-lib.sh
@@ -77,6 +82,17 @@ REMOTE_HERDR_SESSION=${FM_REMOTE_HERDR_SESSION:-default}
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
+
+# Resolve the target secondmate home for a command that needs it. FM_HOME, when
+# set, is the remote secondmate home fm-on selected; unset resolves to the
+# conventional default and errors with a clear diagnostic only when that default
+# does not exist (bin/fm-home-lib.sh). Called after help/usage dispatch, so
+# --help and an unknown command never require FM_HOME.
+require_home() {
+  TARGET_HOME=$(fm_resolve_home) || exit 1
+  CONTROL_STATE="$TARGET_HOME/state/parent-route"
+  CONTROL_DATA="$TARGET_HOME/data/.parent-route"
+}
 
 validate_home() { # <id> [allow-absent]
   local id=$1 allow_absent=${2:-no} marker
@@ -437,6 +453,14 @@ cmd_retire() {
       "$SCRIPT_DIR/fm-teardown.sh" "$id"
   fi
 }
+
+# Dispatch home resolution: help and an unknown command never touch the home, so
+# they run without FM_HOME; every real command resolves TARGET_HOME first.
+case "${1:-}" in
+  ''|-h|--help|help) usage ;;
+  launch|relaunch|state|route|send|key|capture|observe|sync|update|retire) require_home ;;
+  *) die "unknown command: ${1:-}" ;;
+esac
 
 case "${1:-}" in
   launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;

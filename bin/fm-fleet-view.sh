@@ -8,6 +8,9 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# shellcheck source=bin/fm-home-lib.sh
+. "$SCRIPT_DIR/fm-home-lib.sh"
+
 usage() {
   cat <<'EOF'
 usage: fm-fleet-view.sh [--json]
@@ -17,10 +20,19 @@ Use --json to print the underlying snapshot.
 EOF
 }
 
+# Help never needs a home. Every state-reading path resolves FM_HOME first
+# (unset defaults to ${HOME}/data/firstmate, with a clear error only when that
+# home is absent, never a bare abort) and exports it so the snapshot child reads
+# the same home this view resolved.
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
-  --json) "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; exit $? ;;
-  "") ;;
+  --json)
+    FM_HOME=$(fm_resolve_home) || exit 1
+    export FM_HOME
+    "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; exit $? ;;
+  "")
+    FM_HOME=$(fm_resolve_home) || exit 1
+    export FM_HOME ;;
   *) usage >&2; exit 2 ;;
 esac
 
@@ -58,6 +70,13 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
   def backlog_row($r):
     "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
+  def mate_host($r): if ($r.host // "") == "" then "local" else $r.host end;
+  def mate_status($r):
+    if ($r.current.state // "unknown") != "unknown" then "present"
+    elif ($r.remote == true) then "unreachable"
+    else "unknown" end;
+  def mate_row($r):
+    "| \($r.id) | \(mate_host($r)) | \(mate_status($r)) | \($r.current.state // "unknown") | \(dash($r.current.reason)) |";
 
   "# Fleet View",
   "",
@@ -92,5 +111,16 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
    end),
   "",
   "## Secondmates",
+  (if (.secondmate_current.total // 0) == 0 then
+    "No secondmate registered."
+   else
+    "| ID | Host | Status | State | Detail |",
+    "| --- | --- | --- | --- | --- |",
+    (.secondmate_current.records[] | mate_row(.))
+   end),
+  (if (.secondmate_current.truncated // 0) > 0 then
+    "_\(.secondmate_current.truncated) more secondmate(s) not shown._"
+   else empty end),
+  "",
   .secondmate_guidance.note
 '

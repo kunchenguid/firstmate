@@ -1152,6 +1152,101 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# FM_HOME resolution (bin/fm-home-lib.sh) and the remote-secondmate control
+# script's help must never hard-fail on an unset FM_HOME: an unset home resolves
+# to the conventional default, an absent default is a clear diagnostic rather
+# than a bare ${VAR:?} abort, and --help needs no home at all.
+test_fm_home_resolution_default_and_control_help() {
+  local lib ctrl got err rc present absent help_out help_rc
+  lib="$ROOT/bin/fm-home-lib.sh"
+  ctrl="$ROOT/bin/fm-remote-secondmate-control.sh"
+
+  # An explicitly set FM_HOME is honored as-is, even when it does not exist:
+  # downstream validation owns usability, exactly as before this helper.
+  got=$(FM_HOME=/explicit/does/not/exist bash -c '. "$1"; fm_resolve_home' _ "$lib") \
+    || fail "resolver must succeed for an explicit FM_HOME"
+  [ "$got" = "/explicit/does/not/exist" ] \
+    || fail "resolver must honor an explicit FM_HOME unchanged, got '$got'"
+
+  # Unset FM_HOME resolves to the conventional default when that home exists.
+  present=$(make_home resolve-home-present)
+  mkdir -p "$present/data/firstmate"
+  # shellcheck disable=SC2016 # $1 is expanded by the child bash, not this shell.
+  got=$(env -u FM_HOME HOME="$present" bash -c '. "$1"; fm_resolve_home' _ "$lib") \
+    || fail "resolver must succeed when the default home exists"
+  [ "$got" = "$present/data/firstmate" ] \
+    || fail "resolver must default to \$HOME/data/firstmate, got '$got'"
+
+  # Unset FM_HOME with an absent default is a clear diagnostic, not a bare abort.
+  absent=$(make_home resolve-home-absent)
+  # shellcheck disable=SC2016 # $1 is expanded by the child bash, not this shell.
+  err=$(env -u FM_HOME HOME="$absent" bash -c '. "$1"; fm_resolve_home 2>&1 >/dev/null' _ "$lib")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "resolver must fail when the default home is absent"
+  assert_contains "$err" "$absent/data/firstmate" \
+    "resolver diagnostic must name the missing default home"
+  assert_contains "$err" "does not exist" \
+    "resolver diagnostic must be a clear message, not a bare abort"
+
+  # The remote-secondmate control script's --help must not require FM_HOME.
+  help_out=$(env -u FM_HOME "$ctrl" --help 2>&1)
+  help_rc=$?
+  [ "$help_rc" -eq 2 ] || fail "control --help should print usage and exit 2, got $help_rc"
+  assert_contains "$help_out" "Host-local lifecycle control" \
+    "control --help should print its usage banner"
+  assert_not_contains "$help_out" "FM_HOME is required" \
+    "control --help must not abort demanding FM_HOME"
+  pass "FM_HOME resolves to a default and control --help never demands it"
+}
+
+# A home with no registered secondmate and no secondmate task is a clean,
+# first-class reported state - not an error - and the view exits 0.
+test_view_reports_no_secondmate_as_first_class_state() {
+  local home fakebin view view_rc
+  home=$(make_home no-secondmate)
+  fakebin=$(make_fakebin "$home")
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  view_rc=$?
+  [ "$view_rc" -eq 0 ] \
+    || fail "a home with no secondmate must render cleanly and exit 0, got $view_rc"
+  assert_contains "$view" "## Secondmates" "view must have a Secondmates section"
+  assert_contains "$view" "No secondmate registered." \
+    "no secondmate must be a first-class reported state, not an error"
+  pass "fleet view reports no-secondmate as a clean exit-0 state"
+}
+
+# Each registered remote secondmate is enumerated with its own reachability, and
+# one unreachable host never aborts the others. A failing ssh stub makes every
+# remote probe fail fast and offline, so the state is deterministic.
+test_view_reports_unreachable_remote_secondmate() {
+  local home fakebin view view_rc ssh_fail
+  home=$(make_home unreachable-secondmate)
+  fakebin=$(make_fakebin "$home")
+  ssh_fail="$fakebin/ssh-fail"
+  cat > "$ssh_fail" <<'SH'
+#!/usr/bin/env bash
+# Stand in for ssh: every remote reach fails fast (exit 255) with no network, so
+# the snapshot marks a registered remote home unreachable deterministically.
+exit 255
+SH
+  chmod +x "$ssh_fail"
+  cat > "$home/data/secondmates.md" <<'EOF'
+# registered secondmates
+- mini1-mate (host: mini1; root: /Users/mini1/code/firstmate; home: /Users/mini1/data/firstmate; scope: alpha work; projects: alpha; added 2026-08-07)
+- mini2-mate (host: mini2; root: /Users/mini2/code/firstmate; home: /Users/mini2/data/firstmate; scope: beta work; projects: beta; added 2026-08-07)
+EOF
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SSH_BIN="$ssh_fail" \
+    FM_SNAPSHOT_SECONDMATE_TIMEOUT=5 "$VIEW")
+  view_rc=$?
+  [ "$view_rc" -eq 0 ] \
+    || fail "one unreachable host must not abort the fleet view, got $view_rc"
+  assert_contains "$view" "| mini1-mate | mini1 | unreachable |" \
+    "first remote secondmate must be reported unreachable"
+  assert_contains "$view" "| mini2-mate | mini2 | unreachable |" \
+    "second remote secondmate must still be reported (an unreachable host does not abort the sweep)"
+  pass "fleet view enumerates each remote host and reports unreachable distinctly"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1170,3 +1265,6 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_fm_home_resolution_default_and_control_help
+test_view_reports_no_secondmate_as_first_class_state
+test_view_reports_unreachable_remote_secondmate

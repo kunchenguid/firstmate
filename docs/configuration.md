@@ -35,6 +35,9 @@ When `FM_HOME` is unset, it also behaves as the old whole-root override.
 
 `bin/fm-send.sh` requires `FM_HOME` to be set before resolving a target.
 Unlike most scripts, it does not use the general fallback, because a steer must not silently resolve against the wrong home.
+The fleet-facing `bin/fm-fleet-view.sh` and `bin/fm-remote-secondmate-control.sh` take the opposite exception.
+An unset `FM_HOME` resolves to the conventional operational home `$HOME/data/firstmate` rather than the repo root, and they fail with a path-naming diagnostic only when that defaulted home does not exist.
+An explicitly set `FM_HOME` is honored unchanged, and their `--help` and unknown-command paths never resolve a home.
 These variables override individual operational directories for tests and specialized harness setup:
 
 | Variable | Directory selected |
