@@ -72,6 +72,8 @@
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-send-status-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-send-status-lib.sh"
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -1007,7 +1009,7 @@ fm_config_reread_send_pointer() {
     FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" \
     FM_SEND_SETTLE="${FM_SEND_SETTLE:-0}" \
     "$send_bin" "$selector" "$message" 2>&1) && rc=0 || rc=$?
-  if [ "$rc" -eq 0 ]; then
+  if fm_send_delivered "$rc" "$out"; then
     rm -f "$pending_path"
     return 0
   fi

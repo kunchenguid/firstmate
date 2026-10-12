@@ -91,6 +91,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-send-status-lib.sh
+. "$SCRIPT_DIR/fm-send-status-lib.sh"
 
 # One nudge per home per four hours.
 FM_RECONCILE_COOLDOWN_SECONDS=${FM_RECONCILE_COOLDOWN_SECONDS:-14400}
@@ -528,7 +530,7 @@ cmd_notify() {
       "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.
-    if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then
+    if [ "$send_rc" -ne 3 ] && ! fm_send_delivered "$send_rc"; then
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
       continue

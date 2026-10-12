@@ -232,6 +232,30 @@ test_an_inventory_mismatch_asks_the_mate_once_per_window() {
   pass "a home in mismatch is asked once, and later recaps stay silent"
 }
 
+# fm-send exit 4 (composer-held doorbell skip) is a durable delivery: the ask
+# is recorded and starts the cooldown, so a wedged composer cannot turn every
+# later recap into one more duplicate record behind it.
+test_a_composer_held_skip_counts_as_delivered() {
+  local home mate fakebin snap out rc=0
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home wedged mate)
+  snap="$home/snapshot.json"
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
+  # A composer holding text that no key clears: clear-or-submit fails, so
+  # fm-send exits 4 with the ask durably recorded.
+  printf '❯ leftover txt\n' > "$TMP_ROOT/wedged-fake/pane.txt"
+
+  out=$(run_notify "$home" "$fakebin" wedged "$snap" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a composer-held skip was reported as a failed ask: $out"
+  assert_contains "$out" "sent: mate orphan_in_flight" "the skipped doorbell hid the delivered ask: $out"
+  assert_contains "$out" "warning: " "the doorbell skip was not surfaced: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 1 ] || fail "the ask was not durably recorded once"
+  out=$(run_notify "$home" "$fakebin" wedged "$snap" 2>&1) || fail "the repeat run failed: $out"
+  assert_contains "$out" "cooldown: mate" "a composer-held skip did not start the cooldown: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
+    || fail "a composer-held skip was resent as a duplicate record"
+  pass "a composer-held doorbell skip is a delivered ask, never a resend"
+}
+
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge() {
   local home mate fakebin snap out
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home window mate)
@@ -991,6 +1015,7 @@ test_reconcile_requests_coalesce_per_target_until_delivery
 test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
 test_an_inventory_mismatch_asks_the_mate_once_per_window
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
+test_a_composer_held_skip_counts_as_delivered
 test_the_cooldown_starts_when_delivery_finishes
 test_the_window_is_four_hours
 test_each_home_carries_its_own_cooldown

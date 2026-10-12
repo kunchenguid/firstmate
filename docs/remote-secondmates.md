@@ -474,6 +474,7 @@ The [`fm-send.sh` header](../bin/fm-send.sh) owns the exact delivery-status cont
 A routed request is delivered as a durable record in the remote home's steering inbox plus a best-effort doorbell, a constant line rung into the terminal.
 It is never delivered by typing the payload into the pane.
 Exit 0 means the record durably exists.
+Exit 4 also means the record durably exists, but the remote composer held pending text that clear-or-submit could not recover, so the doorbell was skipped; do not resend, because the skip is counted toward the supervisor page.
 
 ### Retries and safe resends
 

@@ -269,7 +269,7 @@ cmd_relaunch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock
+  local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock doorbell_deferred=0 recovery_rc=0
   validate_id "$id"
   [ -z "$delivery_mode" ] || [ "$delivery_mode" = fire-and-forget ] || die "invalid send delivery mode"
   validate_home "$id"
@@ -288,8 +288,7 @@ cmd_send() {
   # write is idempotent - re-running the same request after an ambiguous
   # transport failure lands on the existing record instead of a duplicate - so
   # the parent may safely repeat this leg. Exit 0 once the record durably
-  # exists; no ring outcome changes it, because the parent transport owns any
-  # retry or reply-tracking policy from here.
+  # exists; a composer-held skip exits 4 so the parent can count and page it.
   if ! rec=$(fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message" "$delivery_mode"); then
     fm_lock_release "$meta_lock"
     die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
@@ -304,8 +303,28 @@ cmd_send() {
       ;;
   esac
   fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
+  doorbell_deferred=0
+  if [ "$ring_rc" -eq 1 ]; then
+    recovery_rc=0
+    fm_task_inbox_composer_clear_or_submit "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" || recovery_rc=$?
+    if [ "$recovery_rc" -eq 0 ]; then
+      ring_rc=0
+      fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
+    fi
+    if [ "$ring_rc" -eq 1 ] \
+      && [ "$(fm_backend_busy_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || true)" = busy ]; then
+      doorbell_deferred=1
+    fi
+  fi
   case "$ring_rc" in
-    1) printf 'notice: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at %s\n' "$rec" >&2 ;;
+    1)
+      if [ "$doorbell_deferred" = 1 ]; then
+        printf 'notice: doorbell deferred (the agent in %s is mid-turn and its composer holds pending text); the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2
+        return 0
+      fi
+      printf 'notice: doorbell-skip (the composer in %s holds pending text and clear-or-submit failed); the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2
+      return 4
+      ;;
     2) printf 'notice: doorbell did not reach %s; the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
     3) printf 'notice: doorbell not typed because the agent in %s has exited; the steer is durably recorded at %s for recovery\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
   esac

@@ -29,6 +29,9 @@
 #      slash) keeps its exit-3 delivered-unconfirmed contract, never closes a
 #      --resolve-key decision unconfirmed, and keeps a marked expectation
 #      armed.
+#   9. A wedged remote composer cannot skip silently: it produces countable
+#      exit-4 skips, pages the supervisor at threshold, and resets the streak
+#      on a healthy ring or mid-turn deferral.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -371,6 +374,32 @@ test_remote_retry_failure_preserves_ambiguous_expectation() {
   pass "fm-send remote: a failed retry cannot erase an earlier ambiguous delivery"
 }
 
+test_remote_retry_wedged_composer_counts_skip() {
+  local dir fb ssh_log home rhome rc err pend
+  dir="$TMP_ROOT/remote-ambiguous-then-wedged"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-ambiguous-then-wedged)
+  home=$(setup_remote_parent_home remote-ambiguous-then-wedged "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_AFTER_AMBIGUOUS_RC=4 \
+    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+  err=$(cat "$dir/err")
+  expect_code 4 "$rc" "a retry that reaches a wedged composer must exit 4, got $rc: $err"
+  assert_contains "$err" "consecutive composer-held skips for rsm: 1" \
+    "a retry that reaches a wedged composer must count the skip"
+  assert_not_contains "$err" "unconfirmed" \
+    "a retry confirmed as durable must not be reported as unconfirmed"
+  [ "$(cat "$home/state/rsm.doorbell-skip" 2>/dev/null)" = 1 ] \
+    || fail "the retry's skip should record streak count 1"
+  pend=$(pending_record "$home")
+  [ -z "$pend" ] || [ "$(grep '^phase=' "$pend" | tail -1 | cut -d= -f2-)" != delivery_unknown ] \
+    || fail "a durable retry must not leave the expectation delivery_unknown: $(cat "$pend")"
+  [ "$(remote_inbox_records "$rhome" | grep -c . || true)" = 1 ] \
+    || fail "the first attempt's durable record must remain the sole remote record"
+  pass "fm-send remote: a retry that reaches a wedged composer counts the skip as durable delivery"
+}
+
 test_remote_fire_and_forget_never_arms_reply_recovery() {
   local dir fb ssh_log home rhome rc count delivery action
   dir="$TMP_ROOT/remote-fire-and-forget"; mkdir -p "$dir"
@@ -707,6 +736,133 @@ test_remote_send_budget_bounds_busy_lane() {
   pass "fm-send remote: the remote leg is budget-bounded and stays idempotent across the bound"
 }
 
+test_remote_wedged_composer_pages_and_skips() {
+  local dir fb ssh_log home rhome rc err wakes status_file
+
+  dir="$TMP_ROOT/remote-wedged"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-wedged)
+  home=$(setup_remote_parent_home remote-wedged "$rhome")
+  status_file="$dir/agent-status"
+  printf 'idle\n' > "$status_file"
+
+  # Stub herdr on PATH for the remote control command executed by fake-ssh:
+  cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-} \${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "\${3:-}" ;;
+  "pane read")
+    if [ -f "$dir/composer-cleared" ]; then
+      printf '╭────╮\n│    │\n╰────╯\n'
+    else
+      printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
+    fi
+    ;;
+  "pane send-keys"|"pane send-text")
+    if [ -f "$dir/recover-on-enter" ]; then
+      case "\$*" in
+        *enter*) : > "$dir/composer-cleared" ;;
+      esac
+    fi
+    exit 0
+    ;;
+  "agent get") printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "\$(cat "$status_file")" ;;
+  "pane process-info") printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":100,"foreground_process_group_id":200,"foreground_processes":[{"pid":200,"name":"claude","argv":["claude"]}]}}}\n' "\${4:-}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+
+  # 1. First send: composer is wedged with leftover text that cannot be cleared.
+  # The steer lands in the remote inbox, clear-or-submit fails, exit is 4,
+  # skip count is 1, and no page is sent yet.
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_SEND_SKIP_PAGE_MAX=2 \
+    "$SEND" rsm "first steer to wedged remote" >"$dir/out1" 2>"$dir/err1" || rc=$?
+  err=$(cat "$dir/err1")
+  expect_code 4 "$rc" "a wedged remote composer must exit 4, got $rc: $err"
+  assert_contains "$err" "doorbell-skip" \
+    "a wedged remote composer must emit the countable skip line"
+  assert_contains "$err" "consecutive composer-held skips for rsm: 1" \
+    "the first skip should report streak count 1"
+  [ -f "$rhome/state/parent-route/rsm.inbox/001.msg" ] \
+    || fail "the steer must still be durably recorded in the remote inbox on exit 4"
+  [ "$(cat "$home/state/rsm.doorbell-skip" 2>/dev/null)" = 1 ] \
+    || fail "the first skip should record streak count 1"
+  [ ! -e "$home/state/rsm.doorbell-skip.paged" ] \
+    || fail "the first skip must not arm the paged marker"
+  wakes=$(grep -c 'rsm.doorbell-skip' "$home/state/.wake-queue" 2>/dev/null || true)
+  [ "${wakes:-0}" = 0 ] || fail "the first skip must not queue a page"
+
+  # 2. Second send: still wedged. With FM_SEND_SKIP_PAGE_MAX=2, this consecutive
+  # skip reaches the threshold and queues a page to the supervisor!
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_SEND_SKIP_PAGE_MAX=2 \
+    "$SEND" rsm "second steer to wedged remote" >"$dir/out2" 2>"$dir/err2" || rc=$?
+  err=$(cat "$dir/err2")
+  expect_code 4 "$rc" "the second wedged send must still exit 4, got $rc: $err"
+  assert_contains "$err" "consecutive composer-held skips for rsm: 2" \
+    "the second skip should report streak count 2"
+  assert_contains "$err" "paged the supervisor at 2 consecutive skips" \
+    "the second skip should report the supervisor page"
+  [ -f "$rhome/state/parent-route/rsm.inbox/002.msg" ] \
+    || fail "the second steer must be durably recorded in the remote inbox"
+  [ "$(cat "$home/state/rsm.doorbell-skip" 2>/dev/null)" = 2 ] \
+    || fail "the second skip should record streak count 2"
+  [ -e "$home/state/rsm.doorbell-skip.paged" ] \
+    || fail "the second skip must arm the paged marker"
+  wakes=$(grep -c 'rsm.doorbell-skip' "$home/state/.wake-queue" 2>/dev/null || true)
+  [ "${wakes:-0}" = 1 ] || fail "the second consecutive skip must queue exactly one page"
+
+  # 3. Third send: mid-turn agent (agent_status: working) defers the doorbell,
+  # breaking the streak and resetting the counter and page marker.
+  printf 'working\n' > "$status_file"
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_SEND_SKIP_PAGE_MAX=2 \
+    "$SEND" rsm "third steer while mid-turn" >"$dir/out3" 2>"$dir/err3" || rc=$?
+  err=$(cat "$dir/err3")
+  expect_code 0 "$rc" "a mid-turn remote agent defers the doorbell and exits 0, got $rc: $err"
+  assert_contains "$err" "doorbell deferred" \
+    "a mid-turn remote agent should report doorbell deferred"
+  [ ! -e "$home/state/rsm.doorbell-skip" ] \
+    || fail "a deferred doorbell must reset the skip streak"
+  [ ! -e "$home/state/rsm.doorbell-skip.paged" ] \
+    || fail "a deferred doorbell must clear the paged marker"
+
+  # 4. Fourth send: healthy composer (cleared) rings successfully and exits 0.
+  printf 'idle\n' > "$status_file"
+  : > "$dir/composer-cleared"
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_SEND_SKIP_PAGE_MAX=2 \
+    "$SEND" rsm "fourth steer healthy composer" >"$dir/out4" 2>"$dir/err4" || rc=$?
+  err=$(cat "$dir/err4")
+  expect_code 0 "$rc" "a healthy composer rings and exits 0, got $rc: $err"
+  assert_not_contains "$err" "doorbell-skip" \
+    "a healthy send must not report a skip"
+  assert_not_contains "$err" "doorbell deferred" \
+    "a healthy send must not report a deferral"
+  [ ! -e "$home/state/rsm.doorbell-skip" ] \
+    || fail "a healthy send must keep the skip counter clean"
+
+  # 5. Fifth send: remote composer holds submitted text that clear-or-submit recovers.
+  # It recovers, re-rings, and exits 0 without skipping.
+  rm -f "$dir/composer-cleared"
+  : > "$dir/recover-on-enter"
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_SEND_SKIP_PAGE_MAX=2 \
+    "$SEND" rsm "fifth steer recovered by clear-or-submit" >"$dir/out5" 2>"$dir/err5" || rc=$?
+  err=$(cat "$dir/err5")
+  expect_code 0 "$rc" "a recovered remote composer rings and exits 0, got $rc: $err"
+  assert_not_contains "$err" "doorbell-skip" \
+    "a recovered remote composer must not report a skip"
+  [ -f "$dir/composer-cleared" ] \
+    || fail "clear-or-submit should have cleared the remote composer on Enter"
+
+  pass "fm-send remote: a wedged remote composer produces countable exit-4 skips, pages at threshold, and resets on healthy ring"
+}
+
 test_local_secondmate_pending_keeps_expectation_armed() {
   local dir fb log home rc rec corr
   dir="$TMP_ROOT/local-pending-expectation"; mkdir -p "$dir"
@@ -760,34 +916,59 @@ test_local_pending_reports_delivered_unconfirmed() {
   pass "fm-send local: an unconfirmed submit exits 3 with an honest non-error report"
 }
 
+# A --resolve-key answer has no typed plane at all, so the typed unconfirmed
+# ladder cannot govern one: even a harness-native answer rides the durable
+# record (bin/fm-send.sh's decision-closure contract). That moves this
+# guarantee - an answer that was NOT delivered must never close its decision -
+# from the composer read-back to the enqueue, which is the stronger place for
+# it: an enqueue either leaves a durable record or fails, with no unconfirmed
+# middle state to strand an answer in. Both halves are pinned here.
 test_local_pending_does_not_close_resolve_key() {
   local dir fb log home rc out
+
+  # An unconfirmed COMPOSER no longer withholds the close: the record is the
+  # delivery and the doorbell is best-effort. The answer text is harness-native
+  # precisely because that is the shape that used to ride the typed plane.
   dir="$TMP_ROOT/local-pending-key"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home local-pending-key)
   fm_write_meta "$home/state/t2.meta" "window=sess:fm-t2" "kind=ship"
   printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t2.status"
-
-  # A harness-native slash answer keeps the typed plane, so the unconfirmed
-  # ladder still governs it; a plain-text answer would close at enqueue instead.
   : > "$log"
   rc=0
   env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" t2 --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>&1 || rc=$?
-  expect_code 3 "$rc" "an unconfirmed local answer must exit with the delivered-unconfirmed status"
-  if grep -F 'resolved' "$home/state/t2.status" >/dev/null; then
-    fail "an unconfirmed local answer must not close the decision: $(cat "$home/state/t2.status")"
+  expect_code 0 "$rc" "a durably recorded answer must not inherit the typed unconfirmed ladder"
+  grep -qF "/vault fetch deploy-token" "$home/state/t2.inbox/001.msg" \
+    || fail "the answer did not land as a durable record under an unconfirmed composer"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t2.status" | grep -qF 'resolved [key=creds]' \
+    || fail "a durably recorded answer did not close its blocker:"$'\n'"$(cat "$home/state/t2.status")"
+
+  # A failed ENQUEUE is the undelivered case, and it still closes nothing.
+  home=$(setup_home local-pending-key-undelivered)
+  fm_write_meta "$home/state/t3.meta" "window=sess:fm-t3" "kind=ship"
+  printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t3.status"
+  : > "$home/state/t3.inbox"   # a FILE where the inbox dir must go
+  : > "$log"
+  rc=0
+  env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t3 --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "an undelivered answer must exit nonzero"
+  if grep -F 'resolved' "$home/state/t3.status" >/dev/null; then
+    fail "an undelivered answer closed the decision: $(cat "$home/state/t3.status")"
   fi
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=creds]' >/dev/null \
-    || fail "the blocker must stay open after an unconfirmed local answer: $out"
-  pass "fm-send local: an unconfirmed submit still never closes a --resolve-key decision"
+    || fail "the blocker must stay open after an undelivered answer: $out"
+  pass "fm-send local: an answer closes once durably recorded, and never when undelivered"
 }
 
 test_remote_steer_lands_in_remote_inbox
 test_remote_rerun_is_idempotent
 test_remote_retry_failure_preserves_ambiguous_expectation
+test_remote_retry_wedged_composer_counts_skip
 test_remote_fire_and_forget_never_arms_reply_recovery
 test_remote_send_revalidates_after_retirement_lock
 test_remote_send_revalidates_parent_route_after_retirement_lock
@@ -798,6 +979,7 @@ test_remote_real_failure_still_fails
 test_remote_exit3_no_longer_delivered
 test_remote_transport_loss_preserves_expectation
 test_remote_send_budget_bounds_busy_lane
+test_remote_wedged_composer_pages_and_skips
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key
 test_local_secondmate_pending_keeps_expectation_armed
