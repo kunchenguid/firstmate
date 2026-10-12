@@ -242,9 +242,9 @@ TIMEOUT_SERVER_PID=
 CANDIDATE_CODE_ROOT="$TMP_ROOT/candidate-code"
 CANDIDATE_HOME="$TMP_ROOT/candidate-home"
 CANDIDATE_LOG="$TMP_ROOT/candidate-server.log"
-mkdir -p "$CANDIDATE_CODE_ROOT/bin" "$CANDIDATE_CODE_ROOT/web" "$CANDIDATE_HOME/data" "$CANDIDATE_HOME/state"
+mkdir -p "$CANDIDATE_CODE_ROOT/bin" "$CANDIDATE_CODE_ROOT/web/jsonl-viewer" "$CANDIDATE_HOME/data" "$CANDIDATE_HOME/state"
 cp "$ROOT/bin/fm-jsonl-viewer.mjs" "$CANDIDATE_CODE_ROOT/bin/fm-jsonl-viewer.mjs"
-cp "$ROOT/web/jsonl-viewer/"* "$CANDIDATE_CODE_ROOT/web/"
+cp -R "$ROOT/web/jsonl-viewer/." "$CANDIDATE_CODE_ROOT/web/jsonl-viewer/"
 cat > "$CANDIDATE_CODE_ROOT/bin/fm-fleet-snapshot.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -266,6 +266,10 @@ for _ in $(seq 1 100); do
 done
 [ -n "${CANDIDATE_PORT:-}" ] || fail "candidate viewer did not report its bound port"
 CANDIDATE_BASE="http://127.0.0.1:$CANDIDATE_PORT"
+content_type=$(curl -sS -D - -o "$TMP_ROOT/candidate-mermaid.js" "$CANDIDATE_BASE/vendor/mermaid.min.js" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')
+[ "$content_type" = "text/javascript; charset=utf-8" ] || fail "clean-copy Mermaid bundle returned unexpected content type $content_type"
+grep -q '__esbuild_esm_mermaid_nm' "$TMP_ROOT/candidate-mermaid.js" || fail "clean-copy viewer did not serve its bundled Mermaid runtime"
+kill -0 "$CANDIDATE_SERVER_PID" 2>/dev/null || fail "clean-copy viewer exited while serving its bundled Mermaid runtime"
 curl -sS -H "Authorization: Bearer $TOKEN" "$CANDIDATE_BASE/api/tasks" > "$TMP_ROOT/candidate-tasks.json"
 jq -e '
   (.tasks | any(.id=="archive-working" and .status=="Archived" and .warning==null and .progress==null))

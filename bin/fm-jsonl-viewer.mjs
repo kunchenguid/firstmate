@@ -745,9 +745,7 @@ function serve() {
     "/mermaid-renderer.html": ["mermaid-renderer.html", "text/html; charset=utf-8", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'"],
     "/mermaid-renderer.js": ["mermaid-renderer.js", "text/javascript; charset=utf-8"],
     "/style.css": ["style.css", "text/css; charset=utf-8"],
-  };
-  const dependencyAssets = {
-    "/vendor/mermaid.min.js": [resolve(codeRoot, "node_modules/mermaid/dist/mermaid.min.js"), "text/javascript; charset=utf-8"],
+    "/vendor/mermaid.min.js": ["vendor/mermaid.min.js", "text/javascript; charset=utf-8"],
   };
 
   const server = http.createServer((req, res) => {
@@ -761,10 +759,6 @@ function serve() {
     if (Object.hasOwn(assets, url.pathname)) {
       const [name, contentType, contentSecurityPolicy] = assets[url.pathname];
       return text(res, 200, readFileSync(join(assetRoot, name), "utf8"), contentType, contentSecurityPolicy);
-    }
-    if (Object.hasOwn(dependencyAssets, url.pathname)) {
-      const [path, contentType] = dependencyAssets[url.pathname];
-      return text(res, 200, readFileSync(path, "utf8"), contentType);
     }
     if (!authorized(req, token)) {
       res.setHeader("WWW-Authenticate", 'Bearer realm="Firstmate JSONL viewer"');

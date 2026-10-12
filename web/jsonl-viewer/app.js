@@ -308,16 +308,11 @@ function mermaidFallback(container, source) {
 }
 
 function safeMermaidSvg(svgText) {
-  const withoutInlineStyles = svgText
-    .replace(/<style(?:\s[^>]*)?>[\s\S]*?<\/style\s*>/gi, "")
-    .replace(/\s(?:style|font-style|font-weight)\s*=\s*(?:"[^"]*"|'[^']*')/gi, "");
-  const parsed = new DOMParser().parseFromString(withoutInlineStyles, "image/svg+xml");
+  const parsed = new DOMParser().parseFromString(svgText, "image/svg+xml");
   const root = parsed.documentElement;
   if (root.localName !== "svg" || parsed.querySelector("parsererror,script,foreignObject,iframe,object,embed,image,a")) return null;
-  for (const style of root.querySelectorAll("style")) {
-    if (/url\s*\(/i.test(style.textContent)) return null;
-  }
-  for (const element of root.querySelectorAll("*")) {
+  root.querySelectorAll("style").forEach(style => style.remove());
+  for (const element of [root, ...root.querySelectorAll("*")]) {
     for (const attribute of element.attributes) {
       const value = attribute.value.trim();
       if (/^on/i.test(attribute.name)) return null;
@@ -325,9 +320,11 @@ function safeMermaidSvg(svgText) {
       if (/url\s*\(/i.test(value) && !/^url\(#[^)]+\)$/i.test(value)) return null;
     }
   }
-  root.querySelectorAll("style").forEach(style => style.remove());
-  root.removeAttribute("style");
-  root.querySelectorAll("[style]").forEach(element => element.removeAttribute("style"));
+  for (const element of [root, ...root.querySelectorAll("*")]) {
+    element.removeAttribute("style");
+    element.removeAttribute("font-style");
+    element.removeAttribute("font-weight");
+  }
   const viewBox = root.viewBox.baseVal;
   if (viewBox.width > 0 && viewBox.height > 0) {
     root.setAttribute("width", String(viewBox.width));

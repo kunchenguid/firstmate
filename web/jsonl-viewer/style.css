@@ -50,6 +50,8 @@ nav a.active { color:#fff; border-bottom-color:var(--accent); }
 .mermaid-diagram .node rect,.mermaid-diagram .node circle,.mermaid-diagram .node ellipse,.mermaid-diagram .node polygon,.mermaid-diagram .node path { fill:#e8f0f7; stroke:#55738e; stroke-width:1px; }
 .mermaid-diagram .node .label text,.mermaid-diagram .label text,.mermaid-diagram .flowchartTitleText { fill:#182b3d; }
 .mermaid-diagram .node .label text,.mermaid-diagram .rough-node .label text { text-anchor:middle; }
+.mermaid-diagram .cluster rect { fill:#eef3f8; stroke:#55738e; stroke-width:1px; }
+.mermaid-diagram .cluster-label text { fill:#182b3d; }
 .mermaid-diagram .flowchart-link,.mermaid-diagram .edgePath .path { fill:none; stroke:#55738e; stroke-width:1.5px; }
 .mermaid-diagram .marker,.mermaid-diagram .arrowheadPath { fill:#55738e; stroke:#55738e; }
 .mermaid-diagram .edgeLabel rect { fill:#f7f9fc; opacity:.94; }

@@ -235,6 +235,13 @@ flowchart LR
 ```
 
 ```mermaid
+flowchart TD
+  subgraph group[Readable group]
+    styled["Use style='compact'"]
+  end
+```
+
+```mermaid
 flowchart LR
   broken[Malformed diagram -->
 ```
@@ -824,44 +831,53 @@ try {
   if (!await page.locator(".markdown-body code").filter({ hasText: "**literal markers**" }).count()) throw new Error("Markdown code literal containing strong markers was not preserved");
   if (!await page.locator(".markdown-body pre code").filter({ hasText: "const literal" }).count()) throw new Error("fenced code was not rendered");
   await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').first().waitFor({ state: "visible", timeout: 10000 });
-  await page.waitForFunction(() => document.querySelectorAll('.mermaid-diagram[data-mermaid-state="rendered"] svg').length === 4, null, { timeout: 10000 });
-  if (await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').count() !== 4) throw new Error("the four report flowcharts were not rendered as SVG graphics");
+  await page.waitForFunction(() => document.querySelectorAll('.mermaid-diagram[data-mermaid-state="rendered"] svg').length === 5, null, { timeout: 10000 });
+  if (await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').count() !== 5) throw new Error("the four report flowcharts and style-label regression flowchart were not rendered as SVG graphics");
   if (await page.locator('.mermaid-diagram[data-mermaid-state="error"]').count() !== 2) throw new Error("malformed or interactive Mermaid did not use the localized source fallback");
   if (await page.locator('.mermaid-diagram[data-mermaid-state="error"] pre code').count() !== 2) throw new Error("Mermaid fallback did not preserve local source text");
   const renderedDiagramText = (await page.locator('.mermaid-diagram[data-mermaid-state="rendered"]').allTextContents()).join("|");
-  for (const label of ["Advanced MC", "Business", "Selected SKU", "Toko product truth", "Selection", "feed quality", "budget"]) {
+  for (const label of ["Advanced MC", "Business", "Selected SKU", "Toko product truth", "Selection", "feed quality", "budget", "Use style='compact'", "Readable group"]) {
     if (!renderedDiagramText.includes(label)) throw new Error(`rendered Mermaid omitted label ${label}`);
   }
-  const diagramBounds = await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').evaluateAll(nodes => nodes.map(node => ({
+  const clusterColors = await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] .cluster').last().evaluate(cluster => ({
+    background: getComputedStyle(cluster.querySelector("rect")).fill,
+    label: getComputedStyle(cluster.parentElement.querySelector(".cluster-label text")).fill,
+  }));
+  if (clusterColors.background === clusterColors.label) throw new Error(`Mermaid subgraph title has no contrast: ${JSON.stringify(clusterColors)}`);
+  const diagramBounds = await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').evaluateAll(nodes => nodes.slice(0, 4).map(node => ({
     clientWidth: node.clientWidth,
     clientHeight: node.clientHeight,
     scrollWidth: node.parentElement.scrollWidth,
     containerWidth: node.parentElement.clientWidth,
   })));
   if (diagramBounds.some(bounds => bounds.clientWidth < 650 || bounds.clientHeight < 80 || bounds.scrollWidth < bounds.containerWidth)) throw new Error(`Mermaid diagrams were clipped or unreadably sized: ${JSON.stringify(diagramBounds)}`);
-  const clippedLabels = await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').evaluateAll(nodes => nodes.flatMap((svg, diagramIndex) => {
-    const viewBox = svg.viewBox.baseVal;
-    return [...svg.querySelectorAll("text")].flatMap(text => {
-      const bounds = text.getBBox();
-      const matrix = text.getCTM();
-      if (!matrix) return [{ diagramIndex, label: text.textContent, reason: "missing transform" }];
-      const corners = [
-        new DOMPoint(bounds.x, bounds.y),
-        new DOMPoint(bounds.x + bounds.width, bounds.y),
-        new DOMPoint(bounds.x, bounds.y + bounds.height),
-        new DOMPoint(bounds.x + bounds.width, bounds.y + bounds.height),
-      ].map(point => point.matrixTransform(matrix));
-      const transformed = {
-        left: Math.min(...corners.map(point => point.x)),
-        top: Math.min(...corners.map(point => point.y)),
-        right: Math.max(...corners.map(point => point.x)),
-        bottom: Math.max(...corners.map(point => point.y)),
-      };
-      const clipped = transformed.left < viewBox.x - 1 || transformed.top < viewBox.y - 1 || transformed.right > viewBox.x + viewBox.width + 1 || transformed.bottom > viewBox.y + viewBox.height + 1;
-      return clipped ? [{ diagramIndex, label: text.textContent, transformed, viewBox: { x: viewBox.x, y: viewBox.y, width: viewBox.width, height: viewBox.height } }] : [];
-    });
-  }));
-  if (clippedLabels.length) throw new Error(`Mermaid labels exceeded their SVG view boxes: ${JSON.stringify(clippedLabels)}`);
+  const clipping = await page.evaluate(() => {
+    const clippedLabelsFor = (svg, diagramIndex) => {
+      const viewport = svg.getBoundingClientRect();
+      return [...svg.querySelectorAll("text")].flatMap(text => {
+        const bounds = text.getBoundingClientRect();
+        const clipped = bounds.left < viewport.left - 1 || bounds.top < viewport.top - 1 || bounds.right > viewport.right + 1 || bounds.bottom > viewport.bottom + 1;
+        return clipped ? [{ diagramIndex, label: text.textContent, bounds: { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom }, viewport: { left: viewport.left, top: viewport.top, right: viewport.right, bottom: viewport.bottom } }] : [];
+      });
+    };
+    const actual = [...document.querySelectorAll('.mermaid-diagram[data-mermaid-state="rendered"] svg')].flatMap(clippedLabelsFor);
+    const namespace = "http://www.w3.org/2000/svg";
+    const probe = document.createElementNS(namespace, "svg");
+    probe.setAttribute("viewBox", "0 0 100 50");
+    probe.style.cssText = "position:fixed;left:0;top:0;width:200px;height:100px";
+    const label = document.createElementNS(namespace, "text");
+    label.setAttribute("x", "98");
+    label.setAttribute("y", "25");
+    label.setAttribute("font-size", "20");
+    label.textContent = "deliberately clipped";
+    probe.append(label);
+    document.body.append(probe);
+    const detectsScaledClipping = clippedLabelsFor(probe, "probe").length > 0;
+    probe.remove();
+    return { actual, detectsScaledClipping };
+  });
+  if (!clipping.detectsScaledClipping) throw new Error("Mermaid clipping assertion did not detect a deliberately clipped scaled label");
+  if (clipping.actual.length) throw new Error(`Mermaid labels exceeded their SVG viewports: ${JSON.stringify(clipping.actual)}`);
   if (await page.locator('.mermaid-diagram style, .mermaid-diagram [style], .mermaid-diagram script, .mermaid-diagram foreignObject, .mermaid-diagram iframe, .mermaid-diagram object, .mermaid-diagram embed, .mermaid-diagram image, .mermaid-diagram a').count()) throw new Error("Mermaid introduced inline styling, executable, interactive, or remote-resource nodes");
   if (cspViolations) throw new Error(`Mermaid rendering caused ${cspViolations} Content Security Policy violations: ${JSON.stringify(cspViolationMessages)}`);
   if (!await page.locator(".markdown-body blockquote").filter({ hasText: "quoted evidence" }).count()) throw new Error("blockquote was not rendered");
@@ -878,8 +894,8 @@ try {
   await page.getByRole("heading", { name: "Refreshed section" }).waitFor({ state: "visible", timeout: 3000 });
   if (await page.locator("#report .document-toc a").count() !== 7) throw new Error("report refresh did not rebuild the directory from the changed document");
   await page.locator('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').first().waitFor({ state: "visible", timeout: 10000 });
-  await page.waitForFunction(() => document.querySelectorAll('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').length === 4, null, { timeout: 10000 });
-  if (await page.locator('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').count() !== 4) throw new Error("report refresh did not re-render all valid Mermaid diagrams");
+  await page.waitForFunction(() => document.querySelectorAll('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').length === 5, null, { timeout: 10000 });
+  if (await page.locator('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').count() !== 5) throw new Error("report refresh did not re-render all valid Mermaid diagrams");
   let releaseArtifactReport = () => {};
   let markArtifactReportStarted;
   const artifactReportStarted = new Promise(resolve => { markArtifactReportStarted = resolve; });
