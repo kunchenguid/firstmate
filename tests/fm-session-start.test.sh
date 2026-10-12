@@ -834,6 +834,8 @@ EOF
   fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
   git -C "$root" checkout -q -B fm/read-only-tangle
+  FM_HOME="$home" "$ROOT/bin/fm-inbox.sh" note "ship the winter banner on the site" >/dev/null \
+    || fail "seed note failed"
 
   sleep 300 &
   holder_pid=$!
@@ -848,12 +850,16 @@ EOF
   assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
   assert_contains "$out" "another live firstmate session holds the lock" "read-only banner did not surface fm-lock.sh's own error text"
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
+  assert_contains "$out" "bin/fm-lock.sh handover request" "read-only banner did not name the scripted handover"
   assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
   assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" "read-only guard did not surface watcher-liveness alarm"
   assert_contains "$out" "queued wakes pending - left untouched because this session lacks verified fleet-lock ownership" "read-only guard did not leave queued wakes untouched without verified lock ownership"
   assert_contains "$out" "TANGLE: primary checkout on feature branch 'fm/read-only-tangle'" "read-only bootstrap did not surface the tangle diagnostic"
   assert_contains "$out" "read-only session must leave restore work" "read-only tangle diagnostic did not explain restore ownership"
   assert_contains "$out" "Stay read-only: do not arm" "read-only next step did not block direct watcher repair"
+  assert_contains "$out" "ship the winter banner on the site" "read-only digest did not list the unacknowledged captain note"
+  assert_contains "$out" "owed by the lock holder" "read-only digest did not say the captain notes belong to the lock holder"
+  assert_not_contains "$out" "fm-inbox.sh drain --ack" "read-only digest told the session to acknowledge captain notes"
   assert_not_contains "$out" "drain them with bin/fm-wake-drain.sh" "read-only guard printed a mutating drain instruction"
   assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
@@ -1649,6 +1655,38 @@ EOF
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
 
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
+}
+
+test_digest_prints_handover_and_unacknowledged_captain_notes_early() {
+  local rec root home fakebin out note_id
+  rec=$(new_world handover-digest)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  FM_HOME="$home" "$ROOT/bin/fm-inbox.sh" note "ship the winter banner on the site" >/dev/null \
+    || fail "seed note failed"
+  note_id=$(FM_HOME="$home" "$ROOT/bin/fm-inbox.sh" list --ids)
+  # The note's one wake is drained without acknowledging the note itself: the
+  # exact gap a session swap fell into.
+  : > "$home/state/.wake-queue"
+  printf '%s\n' 'fm_handover=v1' 'kind=release' 'from_pid=1' 'to_pid=1' 'to_session=' \
+    "written_at=$(date +%s)" '--' '## Work in progress' 'pricing page in ~/Documents/site' > "$home/state/handover.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "release handover record written" "the digest did not print the handover record"
+  assert_contains "$out" "pricing page in ~/Documents/site" "the digest did not print the handover body"
+  assert_contains "$out" "CAPTAIN INBOX - UNACKNOWLEDGED NOTES" "the digest has no captain inbox section"
+  assert_contains "$out" "$note_id" "the digest did not name the unacknowledged captain note"
+  assert_contains "$out" "ship the winter banner on the site" "the digest did not print the captain note body"
+  assert_contains "$out" "handle it, then fm-inbox.sh drain --ack <id>" "the lock holder's digest did not say to handle and ack the notes"
+  [ "$(printf '%s\n' "$out" | grep -n '^CAPTAIN INBOX' | cut -d: -f1)" -lt "$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP' | cut -d: -f1)" ] \
+    || fail "the handover and captain inbox sections must precede bootstrap so a truncated digest keeps them"
+
+  pass "the digest prints the handover record and every unacknowledged captain note ahead of the bulk sections"
 }
 
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep() {
@@ -3044,6 +3082,7 @@ test_endpoint_bound_rejects_padded_zero
 test_perl_timeout_fallback_reports_signal_death_nonzero
 test_abnormal_digest_death_banners_and_exits_zero
 test_composition_invokes_real_scripts
+test_digest_prints_handover_and_unacknowledged_captain_notes_early
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
 test_session_start_seeds_the_outcome_display_tail_while_away
