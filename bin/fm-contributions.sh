@@ -31,7 +31,8 @@
 # conclusion; projection picks the newest attempt per distinct name. The last
 # observation's lane names also disclose a lane absent from the next head.
 # Reviews keep only id, state, submitted_at, commit_id and user.login, so a
-# long review history cannot push a record past the 1 MiB read cap.
+# long review history cannot push a task's file past the 1 MiB cap above which
+# a read refuses it as an unreadable record.
 # A verdict records the EXACT judged head, source URL, actor and summary. The
 # actor is exactly one of captain, fleet, maintainer or nobody; any other value
 # is refused. A comment's arrival time never supplies its judged head. Record a
