@@ -21,6 +21,14 @@ write_merge_marker() {  # <state> <id> <provider> <host> <path> <number>
   chmod 600 "$1/$2.pr-poll-merge-notified"
 }
 
+file_mode() {  # the octal permission bits a path carries
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 test_scout_done_is_not_gated() {
   local repo wt
   repo="$TMP_ROOT/scout-repo"
@@ -192,10 +200,11 @@ test_merge_marker_binds_to_the_named_pr() {
   write_merge_marker "$state" bind github github.com o/r 7
   reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/9" "$state" bind "$meta")
   rc=$?
-  [ "$rc" -eq 1 ] || fail "merge of recorded PR 7 accepted an unpushed done naming PR 9"
+  [ "$rc" -eq "$FM_DOD_RC_WAIT_PR_RECORD" ] \
+    || fail "a merge marker for recorded PR 7 authorized a done naming PR 9 (exit $rc)"
   case "$reason" in
-    *"named head $sha is unreachable outside the worker copy") ;;
-    *) fail "PR 9 refusal did not name the unpushed head: $reason" ;;
+    *"waiting on the PR record for https://github.com/o/r/pull/9"*) ;;
+    *) fail "the unrecorded PR 9 report did not name the record it waits on: $reason" ;;
   esac
   write_merge_marker "$state" bind github github.com other/r 7
   accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/7" "$state" bind "$meta" >/dev/null \
@@ -266,7 +275,7 @@ test_ci_ready_variants_are_gated() {
     'done: PR https://github.com/o/r/pull/5 (checks green)'; do
     rc=0
     accept_done ship no-mistakes "$wt" "$repo" "$line" >/dev/null || rc=$?
-    [ "$rc" -eq 1 ] || fail "no-mistakes CI-ready variant skipped the gate: $line"
+    [ "$rc" -ne 0 ] || fail "no-mistakes CI-ready variant skipped the gate: $line"
   done
   pass "no-mistakes CI-ready done: with extra text is gated"
 }
@@ -285,7 +294,7 @@ test_keyed_and_spaced_done_lines_are_gated() {
     mode=${line%%|*}
     rc=0
     accept_done ship "$mode" "$wt" "$repo" "${line#*|}" >/dev/null || rc=$?
-    [ "$rc" -eq 1 ] || fail "$mode done line skipped the gate: ${line#*|}"
+    [ "$rc" -ne 0 ] || fail "$mode done line skipped the gate: ${line#*|}"
   done
   pass "keyed and spaced ship done: lines are gated"
 }
@@ -367,6 +376,334 @@ EOF
   pass "fenced and indented Captain lines are not authorized intent"
 }
 
+# A ship done: naming the pull request the review gate just pushed can arrive
+# while bin/fm-pr-check.sh, the separate step that writes pr= and pr_head=, has
+# not run: that push routinely outruns the remote-tracking refs either copy can
+# see. The window waits on the recording step instead of claiming lost work.
+test_unrecorded_pr_done_waits_for_the_recording_step() {
+  local repo wt state meta reason rc
+  repo="$TMP_ROOT/wait-repo"
+  wt="$TMP_ROOT/wait-wt"
+  state="$TMP_ROOT/wait-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/wait
+  git -C "$wt" commit -q --allow-empty -m 'the fix, in no ref either copy can read'
+  meta="$state/wait.meta"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\n' "$wt" "$repo" > "$meta"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" \
+    "done [at=$(date +%s)]: PR https://github.com/o/r/pull/20 checks green" \
+    "$state" wait "$meta")
+  rc=$?
+  [ "$rc" -eq "$FM_DOD_RC_WAIT_PR_RECORD" ] \
+    || fail "a done naming an unrecorded PR did not read as the wait (exit $rc)"
+  case "$reason" in
+    *'PR record for https://github.com/o/r/pull/20'*) ;;
+    *) fail "the wait did not name the pull request it waits on: $reason" ;;
+  esac
+  case "$reason" in
+    *'carries no pr='*) ;;
+    *) fail "the wait did not name what is missing: $reason" ;;
+  esac
+  case "$reason" in
+    *'unreachable outside the worker copy'*) fail "the timing window raised the lost-work alarm: $reason" ;;
+  esac
+  pass "a ship done: naming an unrecorded PR waits on the recording step"
+}
+
+# The wait is re-derived from the task's own record on every read, so the same
+# report is accepted as soon as the recording step writes the URL and its head.
+test_recording_the_pr_accepts_the_same_done() {
+  local repo wt state meta line rc
+  repo="$TMP_ROOT/recorded-repo"
+  wt="$TMP_ROOT/recorded-wt"
+  state="$TMP_ROOT/recorded-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/recorded
+  git -C "$wt" commit -q --allow-empty -m 'the fix, pushed by the review gate'
+  meta="$state/recorded.meta"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\n' "$wt" "$repo" > "$meta"
+  line="done [at=$(date +%s)]: PR https://github.com/o/r/pull/20 checks green"
+  accept_done ship no-mistakes "$wt" "$repo" "$line" "$state" recorded "$meta" >/dev/null && rc=0 || rc=$?
+  [ "$rc" -eq "$FM_DOD_RC_WAIT_PR_RECORD" ] \
+    || fail "the unrecorded report did not reach the gate as the wait (exit $rc)"
+  printf 'pr=https://github.com/o/r/pull/20\npr_head=%s\n' "$(git -C "$wt" rev-parse HEAD)" >> "$meta"
+  accept_done ship no-mistakes "$wt" "$repo" "$line" "$state" recorded "$meta" \
+    || fail "the same report stayed refused after pr= and pr_head= were written"
+  pass "recording the PR accepts the done that was waiting on it"
+}
+
+# The recording step's own refusal, not a timer, restores the alarm: its reason
+# comes back with the lost-work claim, and only for the pull request it named.
+test_recorded_recording_refusal_restores_the_alarm() {
+  local repo wt state meta reason rc url other
+  repo="$TMP_ROOT/refused-repo"
+  wt="$TMP_ROOT/refused-wt"
+  state="$TMP_ROOT/refused-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/refused
+  git -C "$wt" commit -q --allow-empty -m 'the fix, never pushed'
+  meta="$state/refused.meta"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\n' "$wt" "$repo" > "$meta"
+  url=https://github.com/o/r/pull/20
+  other=https://github.com/o/r/pull/21
+  fm_dod_pr_refusal_write "$state" refused "$url" "$url is a draft pull request" \
+    || fail "the recording refusal could not be written"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" \
+    "done [at=$(date +%s)]: PR $url checks green" "$state" refused "$meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a refused recording did not read as the lost-work alarm (exit $rc)"
+  case "$reason" in
+    *'unreachable outside the worker copy'*) ;;
+    *) fail "the refused recording lost the alarm: $reason" ;;
+  esac
+  case "$reason" in
+    *'is a draft pull request'*) ;;
+    *) fail "the alarm lost the recording refusal's own reason: $reason" ;;
+  esac
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" \
+    "done [at=$(date +%s)]: PR $other checks green" "$state" refused "$meta")
+  rc=$?
+  [ "$rc" -eq "$FM_DOD_RC_WAIT_PR_RECORD" ] \
+    || fail "a refusal naming PR 20 was applied to a done naming PR 21 (exit $rc)"
+  case "$reason" in
+    *'unreachable outside the worker copy'*) fail "a refusal for another PR raised the alarm: $reason" ;;
+  esac
+  fm_dod_pr_refusal_remove "$state" refused "$url" || fail "the recording refusal could not be cleared"
+  accept_done ship no-mistakes "$wt" "$repo" \
+    "done [at=$(date +%s)]: PR $url checks green" "$state" refused "$meta" >/dev/null && rc=0 || rc=$?
+  [ "$rc" -eq "$FM_DOD_RC_WAIT_PR_RECORD" ] \
+    || fail "a cleared refusal still answered the gate (exit $rc)"
+  pass "the recording step's refusal restores the alarm for its own pull request"
+}
+
+# One task can carry reports naming two pull requests. Recording one spends only
+# the refusal naming it, so a report naming the other still reads as the refusal
+# that was recorded for it.
+test_recording_one_pull_request_leaves_another_pull_request_s_refusal_intact() {
+  local state url_a url_b reason
+  state="$TMP_ROOT/two-pr-state"
+  mkdir -p "$state"
+  url_a=https://github.com/o/r/pull/20
+  url_b=https://github.com/o/r/pull/21
+  fm_dod_pr_refusal_write "$state" two_prs "$url_a" "$url_a is a draft pull request" \
+    || fail "the refusal for the first pull request could not be recorded"
+  fm_dod_pr_refusal_remove "$state" two_prs "$url_b" \
+    && fail "recording the second pull request cleared the first one's refusal"
+  reason=$(fm_dod_pr_refusal_reason "$state" two_prs "$url_a") \
+    || fail "the first refusal stopped being readable"
+  [ "$reason" = "$url_a is a draft pull request" ] \
+    || fail "the surviving refusal lost its cause: $reason"
+  fm_dod_pr_refusal_remove "$state" two_prs "$url_a" \
+    || fail "recording the refused pull request did not clear its own refusal"
+  if fm_dod_pr_refusal_reason "$state" two_prs "$url_a" >/dev/null; then
+    fail "the cleared refusal still reads back"
+  fi
+  pass "recording one pull request leaves another pull request's refusal intact"
+}
+
+# A forge resolves an owner and repository without case, so one pull request keeps
+# one identity whichever spelling a report or a recording run arrived with.
+test_one_pull_request_keeps_one_refusal_identity_in_another_spelling() {
+  local state stored reported reason
+  state="$TMP_ROOT/spelling-state"
+  mkdir -p "$state"
+  stored=https://github.com/Owner/Repo/pull/20
+  reported=https://github.com/owner/repo/pull/20
+  fm_dod_pr_refusal_write "$state" spelled "$stored" "$stored is a draft pull request" \
+    || fail "the refusal could not be recorded under the spelling it arrived with"
+  reason=$(fm_dod_pr_refusal_reason "$state" spelled "$reported") \
+    || fail "a report in the other spelling found no refusal to read"
+  [ "$reason" = "$stored is a draft pull request" ] \
+    || fail "the refusal read in the other spelling lost its cause: $reason"
+  fm_dod_pr_refusal_remove "$state" spelled "$reported" \
+    || fail "recording the pull request in the other spelling could not clear the refusal"
+  if fm_dod_pr_refusal_reason "$state" spelled "$stored" >/dev/null; then
+    fail "the refusal outlived the record made in the other spelling"
+  fi
+  pass "one pull request keeps one refusal identity in another spelling"
+}
+
+# The wait states only what the reader can see. Nothing here measures elapsed
+# time, so a named pull request the record does not carry waits whether or not the
+# report carries a time tag, and the reason says what the record lacks instead of
+# reasoning about a step it cannot observe.
+test_the_wait_names_only_what_the_record_lacks() {
+  local repo wt state meta reason rc note
+  repo="$TMP_ROOT/unstamped-repo"
+  wt="$TMP_ROOT/unstamped-wt"
+  state="$TMP_ROOT/unstamped-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/unstamped
+  git -C "$wt" commit -q --allow-empty -m 'the fix, never pushed'
+  meta="$state/unstamped.meta"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\n' "$wt" "$repo" > "$meta"
+  for note in \
+    "done [at=$(date +%s)]: PR https://github.com/o/r/pull/20 checks green" \
+    'done: PR https://github.com/o/r/pull/20 checks green'; do
+    reason=$(accept_done ship no-mistakes "$wt" "$repo" "$note" "$state" unstamped "$meta")
+    rc=$?
+    [ "$rc" -eq "$FM_DOD_RC_WAIT_PR_RECORD" ] \
+      || fail "[$note] did not wait on the missing record (exit $rc)"
+    case "$reason" in
+      *'waiting on the PR record for https://github.com/o/r/pull/20'*) ;;
+      *) fail "[$note] did not name the pull request it waits on: $reason" ;;
+    esac
+    case "$reason" in
+      *'carries no pr='*) ;;
+      *) fail "[$note] did not say what the record lacks: $reason" ;;
+    esac
+    case "$reason" in
+      *'unreachable outside the worker copy'*) fail "[$note] raised the lost-work alarm: $reason" ;;
+    esac
+    case "$reason" in
+      *'within '*|*'elapsed'*|*'not run'*|*'never ran'*) \
+        fail "[$note] reasoned from elapsed time or claimed a cause: $reason" ;;
+    esac
+  done
+  pass "the wait names only the missing record, stamped or not, and never a clock"
+}
+
+# The record holds the one cause the last recording run stated. A later run
+# replaces it instead of accumulating onto it, and it stays a single bounded line,
+# because the reader quotes it inside the captain-facing lost-work alarm.
+test_a_re_recorded_refusal_keeps_only_this_runs_cause() {
+  local repo wt state meta reason stored url line rc cause quotes
+  repo="$TMP_ROOT/rerun-repo"
+  wt="$TMP_ROOT/rerun-wt"
+  state="$TMP_ROOT/rerun-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/rerun
+  git -C "$wt" commit -q --allow-empty -m 'the fix, never pushed'
+  meta="$state/rerun.meta"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\n' "$wt" "$repo" > "$meta"
+  url=https://github.com/o/r/pull/20
+  line="done [at=$(date +%s)]: PR $url checks green"
+  fm_dod_pr_refusal_write "$state" rerun "$url" \
+    'watching a GitLab merge request requires glab on PATH' \
+    || fail "the first refusal could not be written"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "$line" "$state" rerun "$meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a recorded refusal did not read as the alarm (exit $rc)"
+  case "$reason" in
+    *'was refused: watching a GitLab merge request requires glab on PATH'*) ;;
+    *) fail "the alarm lost the refusal it recorded: $reason" ;;
+  esac
+  cause="$url is a draft pull request; mark it ready for review and arm again"
+  fm_dod_pr_refusal_write "$state" rerun "$url" "$cause" \
+    || fail "the second refusal could not be recorded"
+  stored=$(fm_dod_pr_refusal_reason "$state" rerun "$url") \
+    || fail "the second refusal left an unreadable record"
+  [ "$stored" = "$cause" ] \
+    || fail "a re-run did not record only its own cause: $stored"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "$line" "$state" rerun "$meta")
+  case "$reason" in
+    *glab*) fail "the superseded cause still reached the alarm: $reason" ;;
+  esac
+  quotes=$(printf '%s\n' "$reason" | grep -o 'is a draft pull request' | wc -l | tr -d ' ')
+  [ "$quotes" = 1 ] || fail "the alarm quoted the stored cause $quotes times: $reason"
+  fm_dod_pr_refusal_write "$state" rerun "$url" "$(printf 'x%.0s' $(seq 1 900))" \
+    || fail "an over-long refusal reason could not be recorded"
+  stored=$(fm_dod_pr_refusal_reason "$state" rerun "$url") \
+    || fail "an over-long refusal reason broke the record's six-line format"
+  [ "${#stored}" -le 512 ] || fail "the stored reason grew past its cap: ${#stored}"
+  pass "a re-recorded refusal keeps only this run's cause inside one bounded line"
+}
+
+# The marker writer borrows a private mask to create its file, and a mask is
+# process-wide, so the only question a reader can act on is whether the caller
+# gets back the mask it handed in. The suite chooses its own mask, calls the writer
+# in its own shell the way a sourced caller does, and reads the mode a later write
+# produces on both sides of the call.
+test_a_refusal_write_returns_the_mask_its_caller_came_in_with() {
+  local state url marker before after probe_before probe_after mode_before mode_after
+  state="$TMP_ROOT/caller-mask-state"
+  mkdir -p "$state"
+  url=https://github.com/o/r/pull/20
+  # A mask of the caller's own choosing: a writer that merely reset the mask on the
+  # way out would still fail this check.
+  umask 002
+  before=$(umask)
+  probe_before="$TMP_ROOT/caller-mask-probe-before"
+  : > "$probe_before"
+  mode_before=$(file_mode "$probe_before")
+  fm_dod_pr_refusal_write "$state" masky "$url" "$url is a draft pull request" \
+    || fail "the refusal could not be recorded"
+  after=$(umask)
+  marker="$state/masky.pr-record-refused"
+  umask "$before"
+  [ "$before" = "$after" ] \
+    || fail "the writer left the caller holding mask $after instead of $before"
+  [ "$(file_mode "$marker")" = 600 ] \
+    || fail "the returned mask cost the marker its own privacy: $(file_mode "$marker")"
+  probe_after="$TMP_ROOT/caller-mask-probe-after"
+  : > "$probe_after"
+  mode_after=$(file_mode "$probe_after")
+  [ "$mode_before" = "$mode_after" ] \
+    || fail "a file the caller wrote after the refusal came out $mode_after, not $mode_before"
+  pass "a refusal write returns the mask its caller came in with and keeps its marker private"
+}
+
+# Only the named-but-unrecorded window changed. A note naming no pull request, a
+# URL that is not a canonical pull request, a local-only lane, and a recorded URL
+# whose head disagrees all keep today's refusal byte-for-byte, and no report that
+# names a pipeline status is ever consulted.
+test_every_other_unreachable_claim_still_refuses() {
+  local repo wt state meta reason rc now note mode claim
+  repo="$TMP_ROOT/boundary-repo"
+  wt="$TMP_ROOT/boundary-wt"
+  state="$TMP_ROOT/boundary-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/boundary
+  git -C "$wt" commit -q --allow-empty -m 'the fix, never pushed'
+  git -C "$wt" checkout -q --detach HEAD
+  git -C "$wt" branch -q -D fm/boundary
+  meta="$state/boundary.meta"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\n' "$wt" "$repo" > "$meta"
+  now=$(date +%s)
+  for claim in \
+    'no-mistakes|PR https://github.com/o/r/pull/not-a-number checks green' \
+    'no-mistakes|PR https://example.test/o/r/pull/20 checks green' \
+    'no-mistakes|PR ready to merge, checks green' \
+    'direct-PR|implementation complete' \
+    'local-only|PR https://github.com/o/r/pull/20'; do
+    mode=${claim%%|*}
+    note="done [at=$now]: ${claim#*|}"
+    reason=$(accept_done ship "$mode" "$wt" "$repo" "$note" "$state" boundary "$meta")
+    rc=$?
+    [ "$rc" -eq 1 ] || fail "$mode claim [$note] waited instead of refusing (exit $rc)"
+    case "$reason" in
+      *'unreachable outside the worker copy') ;;
+      *) fail "$mode claim [$note] lost today's refusal: $reason" ;;
+    esac
+  done
+  # The pipeline's own verdict proves nothing about where the commit is saved: a
+  # passed run for this very copy cannot turn the wait into an acceptance.
+  local fakebin
+  fakebin="$TMP_ROOT/boundary-fakebin"
+  mkdir -p "$fakebin"
+  { printf '#!/usr/bin/env bash\n'
+    printf 'printf "run: 1\\noutcome: passed\\nhead_sha: %s\\n" \n' "$(git -C "$wt" rev-parse HEAD)"
+  } > "$fakebin/no-mistakes"
+  chmod +x "$fakebin/no-mistakes"
+  reason=$(PATH="$fakebin:$PATH" accept_done ship no-mistakes "$wt" "$repo" \
+    "done [at=$now]: PR https://github.com/o/r/pull/20 checks green" "$state" boundary "$meta")
+  rc=$?
+  [ "$rc" -eq "$FM_DOD_RC_WAIT_PR_RECORD" ] \
+    || fail "a passed no-mistakes run was trusted as proof the head is saved (exit $rc)"
+
+  printf 'pr=https://github.com/o/r/pull/20\n' >> "$meta"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" \
+    "done [at=$now]: PR https://github.com/o/r/pull/20 checks green" \
+    "$state" boundary "$meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a recorded pr= whose head was never proven was accepted (exit $rc)"
+  case "$reason" in
+    *'unreachable outside the worker copy') ;;
+    *) fail "a recorded headless pr= lost today's refusal: $reason" ;;
+  esac
+  pass "every unreachable claim but the named-but-unrecorded window still refuses"
+}
+
 # The draft check the DoD hands a worker must be the gh-axi path that rule 3 of
 # every ship brief requires for GitHub operations, never raw gh (issue 5325).
 test_pr_based_dod_draft_check_uses_gh_axi() {
@@ -440,6 +777,15 @@ test_local_only_linked_branch_is_accepted
 test_local_only_detached_head_is_refused
 test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
+test_unrecorded_pr_done_waits_for_the_recording_step
+test_recording_the_pr_accepts_the_same_done
+test_recorded_recording_refusal_restores_the_alarm
+test_the_wait_names_only_what_the_record_lacks
+test_a_re_recorded_refusal_keeps_only_this_runs_cause
+test_a_refusal_write_returns_the_mask_its_caller_came_in_with
+test_recording_one_pull_request_leaves_another_pull_request_s_refusal_intact
+test_one_pull_request_keeps_one_refusal_identity_in_another_spelling
+test_every_other_unreachable_claim_still_refuses
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
 test_promotion_keeps_the_recorded_base_branch
