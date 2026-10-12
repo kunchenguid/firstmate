@@ -160,7 +160,7 @@ CURSOR="$STATE_DIR/.mail-seen"
 # recovery exactly-once instead of racing the drain.
 WOKEN="$STATE_DIR/.mail-woken"
 # Generation-scoped retry set: a uid whose header fetch failed is recorded
-# here after its degraded wake so a later poll can fetch the real metadata.
+# here for degraded or held mail so a later poll can fetch the real metadata.
 # Cleared with the cursor and journal on a UIDVALIDITY change. The retry-scan
 # position (.mail-retry-pos) is a durable cursor over this set so the bounded
 # per-poll retry window marches through every uid; it is cleared with the set.
@@ -401,7 +401,7 @@ wake_for() {
   # published, so the retry record is cleared only after a successful append.
   # This removes the kill-window between "retry removed" and "wake published"
   # that could strand recovered metadata: the uid would be cursor-recorded from
-  # the earlier degraded wake but no longer in the retry set, so later polls
+  # degraded or held mail but no longer in the retry set, so later polls
   # would never re-fetch it.
   if { [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; } && [ -n "$retry_id" ]; then
     if ! mail_retry_remove "$retry_id"; then
@@ -627,7 +627,7 @@ mail_poll() {
       # Clear the retry record as part of the wake publish transaction. For a
       # recovered uid this removes the dangerous gap where the retry was cleared
       # but the wake had not yet published; a kill in that gap would leave the
-      # uid cursor-recorded from the degraded wake but no longer retry-eligible,
+      # uid cursor-recorded from degraded or held mail but no longer retry-eligible,
       # so its recovered metadata could never surface. For normal (ok) mail it
       # also clears any stale retry entry left by a rolled-back earlier wake.
       # Degraded mail keeps its retry entry so the next poll retries the fetch.

@@ -5,7 +5,7 @@
 #   read                   List unseen INBOX mail as a compact digest.
 #   send <to> <subj> <body | ->   Send one SMTP message; "-" reads stdin.
 #   poll_list              Emit unseen mail as tab-separated rows for the bash
-#                          poll, bounded to uids this home has not surfaced,
+#                          poll, bounded to uids this home has not processed,
 #                          plus a retry-set of previously unfetchable uids;
 #                          persists the retry-scan position and cap-1 turn flag.
 #   seen <cursor>          Print a cursor file (used by `status`).
