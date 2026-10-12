@@ -105,6 +105,81 @@ unit_enter_records_the_posture_in_one_step_without_a_daemon() {
   rm -rf "$st"
 }
 
+
+# ---------------------------------------------------------------------------
+# UNIT 0b: config/afk-default-words. A plain enter records the file as the
+# mandate, an enter with words gets the file prepended, a no-words refresh of
+# the standing record stays a refresh, a blank file changes nothing, and a
+# malformed words flag still surfaces the contract's own usage error.
+# ---------------------------------------------------------------------------
+unit_enter_composes_default_words_from_config() {
+  local st out rc words
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-defaults.XXXXXX")
+  mkdir -p "$st/state" "$st/config"
+  : > "$st/config/supervision-host-off"
+  printf 'merge tested LetAI work without asking\n' > "$st/config/afk-default-words"
+  words_of() { FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" words; }
+  enter_with() { FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_CONFIG_OVERRIDE="$st/config" "$LAUNCH" enter "$@" 2>&1; }
+
+  out=$(enter_with); rc=$?
+  words=$(words_of)
+  if [ "$rc" -eq 0 ] && [ "$words" = 'merge tested LetAI work without asking' ] \
+    && printf '%s' "$out" | grep -F 'Default away words: no words were given, so config/afk-default-words is the recorded mandate.' >/dev/null \
+    && printf '%s' "$out" | grep -F '    merge tested LetAI work without asking' >/dev/null; then
+    pass "default words: a plain enter records config/afk-default-words as the mandate and says so"
+  else
+    fail "default words: a plain enter did not record the file (rc=$rc, words='$words'): $out"
+  fi
+
+  out=$(enter_with --words 'also land the windows fix'); rc=$?
+  words=$(words_of)
+  if [ "$rc" -eq 0 ] && [ "$words" = "$(printf 'merge tested LetAI work without asking\nalso land the windows fix')" ] \
+    && printf '%s' "$out" | grep -F 'Default away words: config/afk-default-words was prepended to your words' >/dev/null; then
+    pass "default words: an enter with words records the file, one newline, then the words"
+  else
+    fail "default words: --words was not composed after the file (rc=$rc, words='$words'): $out"
+  fi
+
+  out=$(enter_with); rc=$?
+  words=$(words_of)
+  if [ "$rc" -eq 0 ] && [ "$words" = "$(printf 'merge tested LetAI work without asking\nalso land the windows fix')" ] \
+    && printf '%s' "$out" | grep -F 'a refresh leaves it untouched' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'Default away words' >/dev/null; then
+    pass "default words: a plain enter over a standing away record is still a refresh"
+  else
+    fail "default words: a refresh replaced the standing mandate (rc=$rc, words='$words'): $out"
+  fi
+
+  printf 'hold the release PR\n' > "$st/captain-words"
+  out=$(enter_with --words-file "$st/captain-words"); rc=$?
+  words=$(words_of)
+  if [ "$rc" -eq 0 ] && [ "$words" = "$(printf 'merge tested LetAI work without asking\nhold the release PR')" ]; then
+    pass "default words: --words-file bytes follow the file after one newline"
+  else
+    fail "default words: --words-file was not composed after the file (rc=$rc, words='$words'): $out"
+  fi
+
+  out=$(enter_with --words); rc=$?
+  if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -F -- '--words requires text' >/dev/null; then
+    pass "default words: a malformed words flag still gets the contract's usage error"
+  else
+    fail "default words: a malformed --words was not refused by the contract (rc=$rc): $out"
+  fi
+
+  rm -rf "$st/state"; mkdir -p "$st/state"
+  printf ' \n\n' > "$st/config/afk-default-words"
+  out=$(enter_with); rc=$?
+  words=$(words_of)
+  if [ "$rc" -eq 0 ] && [ -z "$words" ] && ! printf '%s' "$out" | grep -F 'Default away words' >/dev/null \
+    && printf '%s' "$out" | grep -F 'your words: (none)' >/dev/null; then
+    pass "default words: a blank file changes nothing"
+  else
+    fail "default words: a blank file was treated as a mandate (rc=$rc, words='$words'): $out"
+  fi
+  unset -f words_of enter_with
+  rm -rf "$st"
+}
+
 # No launch path waits for a separate go: the retired two-step subcommands are
 # refused by name and write nothing, so no caller can stage a mandate that then
 # waits on a human response before it binds.
@@ -1723,6 +1798,7 @@ e2e_tmux() {
 
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
+unit_enter_composes_default_words_from_config
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker

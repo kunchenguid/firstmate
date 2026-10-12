@@ -15,6 +15,17 @@
 # (bin/fm-afk-contract.sh owns the record schema; the words are the whole
 # mandate and no script parses them). The record is the posture in every
 # harness.
+# DEFAULT WORDS. An optional config/afk-default-words file (captain-private;
+# docs/configuration.md "Away default words") holds standing away words the
+# captain does not want to retype: a plain /afk with no words would otherwise
+# record no mandate and hold every routine worker question for the return
+# (2026-10-08/09). With that file present and non-blank, `enter` with no
+# --words/--words-file uses its bytes verbatim as the mandate, and `enter` with
+# words prepends them (the file's text, trailing newlines dropped, one newline,
+# then the captain's words exactly as given), then says so after the read-back.
+# A no-words refresh of a standing record of the same mode stays a refresh. The
+# composition happens here, before the contract records the result verbatim;
+# nothing reads the words.
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet
@@ -72,7 +83,10 @@
 #                              separate confirmation, then print the entry
 #                              announcement and the read-back. With no words
 #                              while away it is a refresh; new words replace
-#                              the mandate. On Pi this is the whole entry.
+#                              the mandate. A non-blank config/afk-default-words
+#                              supplies the mandate when no words are given and
+#                              is prepended to words that are (DEFAULT WORDS
+#                              above). On Pi this is the whole entry.
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
@@ -366,6 +380,93 @@ fm_afk_launch_record_require() {
   }
 }
 
+# The default away words file (DEFAULT WORDS in the header). Prints its path;
+# true only when it is a regular, readable file with a non-blank byte.
+fm_afk_launch_default_words_file() {
+  local file
+  file="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/afk-default-words"
+  printf '%s' "$file"
+  [ -f "$file" ] && [ -r "$file" ] && grep -q '[^[:space:]]' "$file" 2>/dev/null
+}
+
+# True when an `enter` carrying no words would be the contract's refresh of a
+# standing record (same mode as this entry writes), which the defaults must
+# leave alone exactly as the contract does.
+fm_afk_launch_enter_is_refresh() {
+  local record standing entry_mode=away
+  record=$(fm_afk_contract_path)
+  [ -f "$record" ] || return 1
+  [ "${FM_AFK_MODE:-}" != quiet ] || entry_mode=quiet
+  standing=$(fm_afk_contract_record_mode "$record")
+  [ "$standing" = quiet ] || entry_mode=away
+  [ "$standing" = "$entry_mode" ]
+}
+
+# Run the contract's enter with config/afk-default-words composed in (DEFAULT
+# WORDS in the header). Arguments the composition does not own pass through
+# unchanged; a malformed words flag or a missing words file also passes
+# through, so the contract's own usage error is the one the captain reads.
+fm_afk_launch_enter_with_defaults() {
+  local default_file default_words captain_words='' words_file='' words_given=0 tmp rc
+  local -a passthrough=()
+  if ! default_file=$(fm_afk_launch_default_words_file); then
+    "$FM_AFK_CONTRACT_CMD" enter "$@"
+    return
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --words|--words-file)
+        [ "$#" -gt 1 ] || { passthrough+=("$1"); shift; continue; }
+        words_given=1
+        if [ "$1" = --words ]; then captain_words=$2; words_file=''; else words_file=$2; fi
+        shift 2 ;;
+      *) passthrough+=("$1"); shift ;;
+    esac
+  done
+  if [ "$words_given" -eq 0 ] && fm_afk_launch_enter_is_refresh; then
+    "$FM_AFK_CONTRACT_CMD" enter "${passthrough[@]+"${passthrough[@]}"}"
+    return
+  fi
+  if [ -n "$words_file" ]; then
+    [ -f "$words_file" ] || {
+      "$FM_AFK_CONTRACT_CMD" enter --words-file "$words_file" "${passthrough[@]+"${passthrough[@]}"}"
+      return
+    }
+    captain_words=$(cat "$words_file"; rc=$?; printf x; exit "$rc") || {
+      fm_afk_launch_log "words file unreadable: $words_file"
+      return 1
+    }
+    captain_words=${captain_words%x}
+  fi
+  default_words=$(cat "$default_file"; rc=$?; printf x; exit "$rc") || {
+    fm_afk_launch_log "default away words unreadable: $default_file"
+    return 1
+  }
+  default_words=${default_words%x}
+  if [ "$words_given" -eq 1 ]; then
+    while [ "${default_words%$'\n'}" != "$default_words" ]; do default_words=${default_words%$'\n'}; done
+    default_words="$default_words"$'\n'"$captain_words"
+  fi
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-afk-words.XXXXXX") || {
+    fm_afk_launch_log "cannot stage the composed away words"
+    return 1
+  }
+  printf '%s' "$default_words" > "$tmp" || {
+    rm -f -- "$tmp"
+    fm_afk_launch_log "cannot stage the composed away words"
+    return 1
+  }
+  "$FM_AFK_CONTRACT_CMD" enter --words-file "$tmp" "${passthrough[@]+"${passthrough[@]}"}"
+  rc=$?
+  rm -f -- "$tmp"
+  [ "$rc" -eq 0 ] || return "$rc"
+  if [ "$words_given" -eq 1 ]; then
+    printf 'Default away words: config/afk-default-words was prepended to your words in the recorded mandate.\n'
+  else
+    printf 'Default away words: no words were given, so config/afk-default-words is the recorded mandate.\n'
+  fi
+}
+
 fm_afk_launch_enter() {
   fm_afk_launch_catchup_pending && return 1
   if [ "${FM_AFK_MODE:-}" = quiet ]; then
@@ -379,7 +480,7 @@ fm_afk_launch_enter() {
         return 3 ;;
     esac
   fi
-  "$FM_AFK_CONTRACT_CMD" enter "$@" || return
+  fm_afk_launch_enter_with_defaults "$@" || return
   fm_afk_launch_host_engine_note
 }
 

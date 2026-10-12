@@ -26,6 +26,8 @@ Hold-for-return is the default and the only reach profile this release records: 
    The words are the whole mandate: `bin/fm-afk-contract.sh` records them exactly as given, with no clause fields, verbs, ids, or merge-grant list, and by the captain's mandate no parser, tokenizer, classifier, or grammar reads them anywhere.
    Read `bin/fm-afk-contract.sh --help` for the flags rather than memorizing them.
    Plain `/afk` with no words is a valid entry with no mandate; the announcement says no instructions were recorded.
+   A captain-private `config/afk-default-words` file changes that: `bin/fm-afk-launch.sh enter` records its text as the mandate of a plain `/afk`, prepends it to any words the captain gives, and prints a `Default away words:` line after the read-back whenever it did either (`docs/configuration.md` "Away default words" owns the file).
+   Restate the defaults in the read-back like any other words; the captain who wants a mandate without them edits or removes that file.
    Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate at once, preserve the original session entry, and archive the superseded words for the return brief.
 2. **Per harness, after the record exists:**
    - **Pi and pi-signed**: nothing to launch; go on to the announcement.
