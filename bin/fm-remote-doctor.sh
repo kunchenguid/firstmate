@@ -376,6 +376,13 @@ check_remote_job_worker() {
     return 0
   fi
   if [ "$PLATFORM" = darwin ]; then
+    if ! fm_remote_job_resolve_bash; then
+      record remote-job-worker "human: no bash 4 or newer is installed to run the remote job worker" \
+        "install bash 4 or newer (brew install bash), then rerun this command with --fix"
+      record remote-job-worker-loaded "skip: no bash 4 or newer is available to run the worker"
+      record remote-job-probe "skip: no bash 4 or newer is available to run the worker"
+      return 0
+    fi
     fm_remote_job_launchagent_paths "${HOME:-}"
     if fm_remote_job_launchagent_contract_matches "$FM_ROOT" "${HOME:-}"; then
       record remote-job-worker "ok: $FM_REMOTE_JOB_LAUNCH_AGENT_PLIST matches the Firstmate-owned Aqua worker contract"

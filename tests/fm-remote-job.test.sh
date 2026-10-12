@@ -128,6 +128,7 @@ SH
   [ -z "$legacy" ] || export FM_REMOTE_JOB_POLL_SECONDS="$legacy"
   # shellcheck disable=SC2030 # The active override is local to this cadence fixture.
   [ -z "$active" ] || export FM_REMOTE_JOB_ACTIVE_POLL_SECONDS="$active"
+  # shellcheck disable=SC2030 # The cadence fixture owns its subshell's environment.
   export FM_REMOTE_JOB_STATE_ROOT="$poll_dir/state" FM_ROOT_OVERRIDE="$REMOTE_ROOT"
   # shellcheck disable=SC2030 # Each cadence fixture owns its subshell's bounds.
   export FM_REMOTE_JOB_QUEUE_TIMEOUT=60 FM_REMOTE_JOB_TIMEOUT=30
@@ -187,6 +188,43 @@ SH
 poll_cadence_case default '' '' 0.25 0.05 || exit 1
 poll_cadence_case legacy 0.07 '' 0.07 0.07 || exit 1
 poll_cadence_case active 0.07 0.12 0.12 0.07 || exit 1
+
+# A worker started as "<interpreter> worker.sh" keeps that interpreter for the
+# lane processes it forks. On macOS the LaunchAgent names a privacy-approved
+# bash, and a lane that fell back to the script's shebang would run under an
+# interpreter that cannot read the code root.
+lane_interpreter_case() (
+  local interp="$TMP_ROOT/lane-interp/bash" lane_dir="$TMP_ROOT/lane-interp" pid='' i lane_pid lane_command=''
+  mkdir -p "$lane_dir"
+  ln -s "$BASH" "$interp"
+  trap '[ -z "$pid" ] || { kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }' EXIT
+  # shellcheck disable=SC2031 # Each fixture owns its subshell's environment.
+  export FM_REMOTE_JOB_STATE_ROOT="$lane_dir/state" FM_ROOT_OVERRIDE="$REMOTE_ROOT"
+  # shellcheck disable=SC2030,SC2031 # Each fixture owns its subshell's bounds.
+  export FM_REMOTE_JOB_QUEUE_TIMEOUT=60 FM_REMOTE_JOB_TIMEOUT=30
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+    fm-delay-job.sh 3 "$lane_dir/ran" </dev/null >/dev/null || fail "$FM_REMOTE_JOB_ERROR"
+  HOME="$ACCOUNT_HOME" "$interp" "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" > "$lane_dir/worker.log" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 200; i++)); do
+    lane_pid=$(pgrep -f -- "$REMOTE_ROOT/bin/fm-remote-job-worker.sh --lane" | head -n 1)
+    [ -z "$lane_pid" ] || lane_command=$(ps -o command= -p "$lane_pid")
+    [ -z "$lane_command" ] || break
+    /bin/sleep 0.05
+  done
+  [ -n "$lane_command" ] || fail 'the worker never started a command lane'
+  case "$lane_command" in
+    "$interp "*) ;;
+    *) fail "the command lane did not keep the worker's interpreter: $lane_command" ;;
+  esac
+  kill -TERM "$pid" || fail 'the worker stopped unexpectedly'
+  wait "$pid" 2>/dev/null || true
+  pid=''
+  pass 'a command lane runs under the interpreter that started the worker'
+)
+lane_interpreter_case || exit 1
 
 DEFAULT_STATE="$TMP_ROOT/default-timeout-jobs"
 DEFAULT_BOUNDS=$(

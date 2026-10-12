@@ -143,7 +143,22 @@ case "${1:-}" in
   *) exit 2 ;;
 esac
 SH
-chmod +x "$STUB_BIN/rmdir" "$STUB_BIN/touch" "$STUB_BIN/mv" "$STUB_BIN/launchctl"
+# Stand-in interpreters that only answer the version probe, so the fixture
+# does not depend on which bash the host installs.
+FAKE_BASH5="$STUB_BIN/bash5"
+FAKE_BASH3="$STUB_BIN/bash3"
+cat > "$FAKE_BASH5" <<'SH'
+#!/bin/sh
+[ "${1:-}" = -c ] && { printf 5; exit 0; }
+exit 64
+SH
+cat > "$FAKE_BASH3" <<'SH'
+#!/bin/sh
+[ "${1:-}" = -c ] && { printf 3; exit 0; }
+exit 64
+SH
+chmod +x "$STUB_BIN/rmdir" "$STUB_BIN/touch" "$STUB_BIN/mv" "$STUB_BIN/launchctl" "$FAKE_BASH5" "$FAKE_BASH3"
+export FM_TEST_REMOTE_JOB_BASH="$FAKE_BASH5"
 export PATH="$STUB_BIN:$PATH"
 export FM_TEST_REAL_RMDIR="$REAL_RMDIR" FM_TEST_LAUNCH_LOG="$LAUNCH_LOG"
 export FM_TEST_REAL_TOUCH="$REAL_TOUCH" FM_TEST_STALE_GATE="$TMP_ROOT/stale-gate"
@@ -175,6 +190,61 @@ cleanup() {
   rm -rf -- "$TMP_ROOT"
 }
 trap cleanup EXIT
+
+# --- the LaunchAgent launches the worker through a resolved bash >= 4 --------
+
+plist_args() { # <plist> -> one ProgramArguments entry per line
+  python3 -c 'import plistlib,sys; print("\n".join(plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"]))' "$1"
+}
+plist_key() { # <plist> <key>
+  python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))[sys.argv[2]])' "$1" "$2"
+}
+
+fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "could not write the LaunchAgent: ${FM_REMOTE_JOB_ERROR:-no diagnostic}"
+[ "$(plist_args "$FM_TEST_PLIST")" = "$FAKE_BASH5
+$FM_TEST_WORKER" ] \
+  || fail "the LaunchAgent does not launch the worker through the resolved bash: $(plist_args "$FM_TEST_PLIST" | tr '\n' ' ')"
+[ "$(plist_key "$FM_TEST_PLIST" LimitLoadToSessionType)" = Aqua ] || fail 'the LaunchAgent lost its Aqua scope'
+[ "$(plist_key "$FM_TEST_PLIST" KeepAlive)" = True ] || fail 'the LaunchAgent lost KeepAlive'
+[ "$(plist_key "$FM_TEST_PLIST" StandardOutPath)" = "$ACCOUNT_HOME/Library/Logs/dev.firstmate.remote-job.log" ] \
+  || fail 'the LaunchAgent lost its log path'
+fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail 'a freshly written LaunchAgent does not match its own contract'
+pass 'the LaunchAgent launches the worker through the resolved bash and keeps its Aqua, KeepAlive and log contract'
+
+# A plist written by an older Firstmate names the worker script as the Program
+# itself, so launchd runs it under the shebang interpreter and macOS privacy
+# protection can refuse that interpreter access to the code root.
+python3 - "$FM_TEST_PLIST" "$FM_TEST_WORKER" <<'PY'
+import plistlib, sys
+path, worker = sys.argv[1:3]
+with open(path, "rb") as f:
+    plist = plistlib.load(f)
+plist["ProgramArguments"] = [worker]
+with open(path, "wb") as f:
+    plistlib.dump(plist, f)
+PY
+fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  && fail 'a LaunchAgent that runs the worker directly still matched the contract'
+fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'could not rewrite the old-shape LaunchAgent'
+fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail 'the rewritten LaunchAgent does not match the contract'
+pass 'a LaunchAgent that runs the worker directly no longer matches and is rewritten'
+
+# With no bash >= 4 there is nothing to launch the worker through, so the
+# library refuses to write an agent that cannot run and leaves the old one.
+cp "$FM_TEST_PLIST" "$TMP_ROOT/plist.before"
+FM_TEST_REMOTE_JOB_BASH="$FAKE_BASH3" fm_remote_job_resolve_bash && fail 'a bash older than 4 resolved'
+FM_TEST_REMOTE_JOB_BASH="$FAKE_BASH3" fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  && fail 'a LaunchAgent was written with no bash >= 4'
+cmp -s "$TMP_ROOT/plist.before" "$FM_TEST_PLIST" || fail 'a refused write changed the installed LaunchAgent'
+FM_TEST_REMOTE_JOB_BASH="$FAKE_BASH3" fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" 2>/dev/null
+case "$FM_REMOTE_JOB_ERROR" in
+  *'bash 4'*) ;;
+  *) fail "the refused write did not name the bash gap: ${FM_REMOTE_JOB_ERROR:-no diagnostic}" ;;
+esac
+pass 'no bash >= 4 refuses the LaunchAgent write and names the gap'
+rm -f "$FM_TEST_PLIST" "$TMP_ROOT/plist.before"
 
 ensure_darwin() (
   fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || {
