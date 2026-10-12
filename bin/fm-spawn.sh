@@ -5243,7 +5243,7 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
   # Preserved lines go last: a pr= line's identity block must end the record,
-  # because fm_pr_metadata_identity_parse rejects any other key after pr=.
+  # because fm_pr_metadata_identity_parse rejects unrelated keys after pr=.
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
   fi
