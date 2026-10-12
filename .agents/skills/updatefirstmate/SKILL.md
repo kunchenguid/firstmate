@@ -1,9 +1,9 @@
 ---
 name: updatefirstmate
 description: >-
-  Self-update a running firstmate and its secondmates to the latest from origin.
-  Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
-  Updates this firstmate repo's default branch and every local or remote secondmate through its guarded convergence path (never forced, never disruptive), then re-reads AGENTS.md and restarts every live second mate through the persist-gated restart, with a fallback re-read nudge only where a restart cannot be proven.
+  Self-update a running firstmate, its secondmates, and the stack tools it installs on this host to the latest.
+  Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate", "update the stack").
+  Updates this firstmate repo's default branch and every local or remote secondmate through its guarded convergence path (never forced, never disruptive), updates no-mistakes, treehouse, and the axi tools through their own update paths, then re-reads AGENTS.md and restarts every live second mate through the persist-gated restart, with a fallback re-read nudge only where a restart cannot be proven.
 user-invocable: true
 metadata:
   internal: true
@@ -15,6 +15,7 @@ Self-update firstmate in place.
 Firstmate is its own repo, behind the same no-mistakes gate as any project, so new tracked material (`AGENTS.md`, `bin/`, `.agents/skills/`, and public `skills/`) reaches `main` and then sits there until each running firstmate pulls it.
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruction surface; public `skills/` is installer-facing and is not loaded by firstmate.
 This skill performs that pull for the running main firstmate and every secondmate, without disturbing any in-flight work.
+It also updates the stack tools firstmate installs on this host, so the whole toolchain moves together.
 
 Pulling the files is only half of it.
 A running agent holds `AGENTS.md` and every skill it has already loaded frozen from the moment it launched, and no verified harness offers a reload, so new bytes on disk change nothing for it until it starts a fresh conversation.
@@ -52,12 +53,22 @@ This touches only the firstmate repo and its own worktrees, never anything under
    A mate reaches neither set only because its home was skipped, because it has no live endpoint recorded here, or because its endpoint was positively classified as dead or missing.
    A skipped genuine divergence still requires attention through its durable reconciliation record; the other two cases need no update action from you.
 
-2. **Re-read AGENTS.md if your own instructions changed.**
+2. **Update the rest of the stack:**
+   ```sh
+   bin/fm-stack-update.sh
+   ```
+   Run it after step 1 so it runs from the freshly pulled bytes.
+   It updates no-mistakes, treehouse, gh-axi, chrome-devtools-axi, lavish-axi, tasks-axi, and quota-axi on this host, each through its own update path, and prints one line per tool: `updated <old>..<new>` / `already current (<version>)` / `deferred: <reason>` / `skipped: <reason>`.
+   Its header owns the tool list, the update commands, and the safety rules; do not run any tool's update yourself around it.
+   It never touches harness CLIs, the session backend that hosts live workers, system packages, or CI pins.
+   A `deferred` no-mistakes means pipeline runs were active on the shared daemon, so the update was left for a later pass rather than restarting the daemon under them.
+
+3. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.
    **Read `AGENTS.md` now** (CLAUDE.md is a real `@AGENTS.md` pointer to it) to refresh your operating instructions before doing anything else, so you are acting on the new instructions rather than the stale ones you were started with.
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
-3. **Restart every second mate the updater named.**
+4. **Restart every second mate the updater named.**
    Pass the whole `restart-secondmates:` list to one command (skip this step entirely when it says `none`):
    ```sh
    FM_HOME=<this-firstmate-home> bin/fm-secondmate-restart.sh <fm-id>...
@@ -77,7 +88,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
      Never report one of these as a clean reload.
    - `unreached: <id>: <reason>` - no safe running outcome could be confirmed, including an ambiguous relaunch result.
 
-4. **Send the re-read message to the rest.**
+5. **Send the re-read message to the rest.**
    For every target on the `nudge-secondmates:` line (do nothing when it says `none`), send the one-line re-read steer:
    ```sh
    FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
@@ -86,11 +97,12 @@ This touches only the firstmate repo and its own worktrees, never anything under
    It is a gentle steer, not an interruption: the mate already got a safe tracked-files fast-forward, and the steer never forces, tears down, or discards its work.
    Never describe one of these as reloaded; its agent is still running the wiring it launched with.
 
-5. **Report to the captain in plain outcomes, in one line where you can.**
-   Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
+6. **Report to the captain in plain outcomes, in one line where you can.**
+   Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet and the stack are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
    Say plainly when a mate got the message rather than a clean reload, and why - never let a partial reload read as a full one.
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
+   Name a deferred or failed stack tool and why, such as no-mistakes waiting for active pipeline runs to finish.
 
 ## Safety
 
@@ -100,6 +112,8 @@ This touches only the firstmate repo and its own worktrees, never anything under
   Nothing with unlanded work is ever discarded - this is prime directive #3.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.
+- **Only Kun's stack tools change outside the repo**, through `bin/fm-stack-update.sh` alone.
+  The shared no-mistakes daemon is never forced to restart under an active pipeline run, and tools the operator owns are left alone.
 - **Nothing with work in it is disrupted.**
   A local or remote second mate gets a tracked-files fast-forward only when its own checkout is safe to advance, and a mate whose home was skipped is not restarted either.
   A restart replaces that mate's agent in the same home and endpoint after its open work is written down; it is never a teardown and never forced.
