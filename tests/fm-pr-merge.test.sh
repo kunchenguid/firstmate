@@ -4211,13 +4211,14 @@ test_oversized_producer_list_still_verifies() {
   jq '.protection.required_status_checks.checks[0].app_id = 15368' \
     "$case_dir/github-branch.json" > "$case_dir/updated.json"
   mv "$case_dir/updated.json" "$case_dir/github-branch.json"
-  # A busy PR head reports hundreds of check runs, and the producer list
-  # built from them exceeds the kernel exec argument limit when it reaches
-  # jq through --argjson. The required check must still verify and merge.
-  jq -n --argjson head "$head" '{check_runs: [range(700) | {id: ., name: ("job-\(.)|tostring)"), head_sha: $head, app: {id: 15368}, html_url: ("https://github.com/example/repo/actions/runs/\(.)|tostring)"}]}' \
+  # A busy PR head reports over a thousand check runs, and the compact producer
+  # list built from them exceeds Linux's 128 KiB single-argument exec limit when
+  # it reaches jq through --argjson. The required check, produced by the
+  # required app among them, must still verify and merge.
+  jq -n --arg head "$head" '{check_runs: [range(1200) | {id: ., name: (if . == 0 then "ci" else "job-\(.)" end), head_sha: $head, app: {id: 15368}, html_url: "https://github.com/example/repo/actions/runs/\(.)"}]}' \
     > "$case_dir/github-runs.json"
-  [ "$(wc -c < "$case_dir/github-runs.json")" -gt 128000 ] \
-    || fail "oversized-producers: the fixture must exceed the exec argument limit"
+  [ "$(jq -c '.check_runs' "$case_dir/github-runs.json" | wc -c)" -gt 131072 ] \
+    || fail "oversized-producers: the producer list must exceed the single-argument exec limit"
   run_required_case "$case_dir" 105
   expect_code 0 "$RC" "oversized-producers: a green merge must not fail on producer-list size: $(cat "$case_dir/stderr")"
   assert_logged_gh_merge "$case_dir" 105 example/repo --squash
