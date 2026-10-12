@@ -18,6 +18,13 @@
 # item held for the captain is never rechecked at all, in either posture.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
+#   check: committed-not-shipped: <task> head=<sha>
+#                          A clean, idle no-mistakes ship is ahead of its base
+#                          without a run for that head (fm-crew-state.sh).
+#                          Raised once per task/head across watcher restarts.
+#                          config/committed-not-shipped-steer instead opts into
+#                          one durable start-the-pipeline instruction via fm-send;
+#                          absent by default. Failed delivery surfaces the wake.
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
 #                          positive execution evidence, unless afk is active
@@ -2413,6 +2420,40 @@ event_wait_or_sleep() {
   esac
 }
 
+# Check only eligible ship metadata; current-state reconciliation owns all Git,
+# busy, handoff-grace and run evidence. Persistent per-head markers are written
+# only after a queued wake or a durably delivered steer. Never clear
+# them on intermediate busy/dirty/run states, so a head cannot fire twice.
+committed_not_shipped_tick() {
+  local meta task line head marker reason
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$(fm_meta_get "$meta" kind)" = ship ] || continue
+    [ "$(fm_meta_get "$meta" mode)" = no-mistakes ] || continue
+    task=${meta##*/}; task=${task%.meta}
+    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
+    case "$line" in 'state: committed-not-shipped · source: git · head: '*) ;; *) continue ;; esac
+    head=${line#*head: }; head=${head%%;*}
+    case "$head" in ''|*[!a-fA-F0-9]*) continue ;; esac
+    [ "${#head}" -eq 40 ] || continue
+    marker="$STATE/.committed-not-shipped-$task-$head"
+    [ ! -e "$marker" ] || continue
+    reason="check: committed-not-shipped: $task head=$head"
+    if [ -e "$CONFIG/committed-not-shipped-steer" ]; then
+      if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        "$SCRIPT_DIR/fm-send.sh" "$task" \
+        'Start the no-mistakes pipeline with /no-mistakes, following your brief and its authorized intent. Do not push from your copy.' >/dev/null 2>&1; then
+        touch "$marker" || return 1
+        continue
+      fi
+      reason="$reason (opt-in pipeline steer could not be delivered)"
+    fi
+    fm_wake_append check "committed-not-shipped:$task:$head" "$reason" || return 1
+    touch "$marker" || return 1
+    wake "$reason"
+  done
+}
+
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -2791,6 +2832,12 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    # Run attribution can make bounded CLI reads; keep it on the existing
+    # slow-check cadence rather than adding one read per worker every poll.
+    committed_not_shipped_tick || {
+      echo "watcher: committed-not-shipped check failed" >&2
+      exit 1
+    }
     rejected_checks=
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do

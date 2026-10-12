@@ -79,6 +79,51 @@ fm_nm_state_db() {  # <worktree>
   printf '%s/state.sqlite\n' "$root"
 }
 
+# Positive proof that no run records this head and no active run owns this
+# branch. Uses the CLI-resolved repo identity and the complete read-only run
+# database, never a capped listing. Missing Python, database, identity, or
+# unreadable records means no proof (return 1), not an absent run.
+# Call after ordinary current-run attribution so pipeline descendants retain
+# their existing attribution. Every terminal outcome counts as a recorded run.
+fm_nm_head_run_absent() {  # <worktree> <branch> <head> <timeout_secs>
+  local overview
+  overview=$(fm_nm_run_checked "$1" "$4" axi) || return 1
+  fm_nm_bounded "$1" "$4" python3 - "$overview" "$(fm_nm_state_db "$1")" "$2" "$3" 2>/dev/null <<'PY'
+import json
+import os
+import re
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+overview, database, branch, head = sys.argv[1:]
+try:
+    repos = [line[6:].strip() for line in overview.splitlines() if line.startswith("repo: ")]
+    if len(repos) != 1:
+        raise ValueError
+    repo_path = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
+    if not isinstance(repo_path, str) or not os.path.isabs(repo_path):
+        raise ValueError
+    with closing(sqlite3.connect(Path(database).as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
+        db.execute("BEGIN")
+        repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (repo_path,)).fetchall()
+        if len(repo) != 1:
+            raise ValueError
+        rows = db.execute("SELECT status, head_sha FROM runs WHERE repo_id = ? AND branch = ?",
+                          (repo[0][0], branch)).fetchall()
+    for status, recorded_head in rows:
+        if status not in ("pending", "running", "completed", "failed", "cancelled"):
+            raise ValueError
+        if not isinstance(recorded_head, str) or not re.fullmatch(r"[a-fA-F0-9]{7,40}", recorded_head):
+            raise ValueError
+        if status in ("pending", "running") or head.lower().startswith(recorded_head.lower()):
+            sys.exit(1)
+except (ValueError, TypeError, OSError, sqlite3.Error):
+    sys.exit(1)
+PY
+}
+
 # Scalar value of a TOON key in captured `axi status` output $1.
 fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
