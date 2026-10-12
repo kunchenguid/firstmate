@@ -122,6 +122,10 @@ install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
+# A detached auto-gc after the commit repacks and prunes loose objects while
+# the provisioning clone is still copying them, which fails the clone at random.
+git -C "$REMOTE_ROOT" config gc.auto 0
+git -C "$REMOTE_ROOT" config maintenance.auto false
 git -C "$REMOTE_ROOT" add .
 git -C "$REMOTE_ROOT" commit -qm 'remote fixture root'
 REMOTE_ORIGIN="$TMP_ROOT/firstmate-origin.git"
