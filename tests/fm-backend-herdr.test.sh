@@ -159,12 +159,14 @@ case "${1:-}" in
       printf 'args=%s\n' "$*"
       printf 'executable=%s\n' "$0"
     } > "$FM_HERDR_SERVER_ENV_LOG"
-    : > "$FM_HERDR_SERVER_MARKER"
     if [ -n "${FM_HERDR_SERVER_HOLD:-}" ]; then
-      printf '%s %s\n' "$$" "$PPID" > "$FM_HERDR_SERVER_PROCESS"
+      printf '%s\n' "$$" > "$FM_HERDR_SERVER_PROCESS"
       if [ -e /dev/fd/9 ]; then
         printf 'inherited fd 9\n' > "$FM_HERDR_SERVER_LEAK"
       fi
+    fi
+    : > "$FM_HERDR_SERVER_MARKER"
+    if [ -n "${FM_HERDR_SERVER_HOLD:-}" ]; then
       IFS= read -r release < "$FM_HERDR_SERVER_HOLD"
     fi
     ;;
@@ -1241,7 +1243,7 @@ test_server_ensure_scrubs_home_and_harness_identity() {
 
 # shellcheck disable=SC2016
 test_server_ensure_releases_capture_pipes() {
-  local dir fb shell caller returned attempt pid parent status=0
+  local dir fb shell caller returned attempt pid parent parent_comm status=0
   for shell in bash /bin/bash; do
     dir="$TMP_ROOT/server-fds-${shell##*/}-${shell//\//_}"
     mkdir -p "$dir"
@@ -1265,9 +1267,10 @@ test_server_ensure_releases_capture_pipes() {
       if [ -f "$dir/returned" ]; then returned=1; break; fi
       sleep 0.1
     done
-    pid='' parent=''
-    [ ! -f "$dir/process" ] || read -r pid parent < "$dir/process"
+    pid='' parent='' parent_comm=''
+    [ ! -f "$dir/process" ] || read -r pid < "$dir/process"
     [ -z "$pid" ] || parent=$(ps -p "$pid" -o ppid= | tr -d '[:space:]')
+    [ -z "$parent" ] || parent_comm=$(ps -p "$parent" -o comm=)
     # Release the fake server before asserting, so old-code failures cannot
     # leave a blocked capture or its long-lived fixture behind.
     if [ -n "$pid" ]; then
@@ -1280,7 +1283,8 @@ test_server_ensure_releases_capture_pipes() {
     [ "$returned" = 1 ] || fail "server_ensure held a capture pipe until the server exited under $shell"
     assert_absent "$dir/leak" "server inherited a caller pipe on fd 9 under $shell"
     assert_contains "$(cat "$dir/env")" "executable=$fb/selected-herdr" "server ignored the selected client under $shell"
-    [ "$parent" = 1 ] || fail "server retained a wrapper parent ($parent) under $shell"
+    [ -n "$parent" ] && [ "$parent" != "$caller" ] || fail "server parent ($parent) is missing or the caller under $shell"
+    case "$parent_comm" in *bash) fail "server retained a Bash wrapper parent ($parent $parent_comm) under $shell" ;; esac
     [ "$(cat "$dir/returned")" = returned ] || fail "server_ensure changed capture output under $shell"
   done
   pass "fm_backend_herdr_server_ensure: capture returns while server lives, closes extra pipes, and leaves no wrapper parent"

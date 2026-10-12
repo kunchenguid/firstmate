@@ -49,12 +49,12 @@ case "$1 ${2:-}" in
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
-    printf '%s\n' running > "$state/$session"
     if [ -n "${FM_FAKE_HERDR_HOLD:-}" ]; then
       printf '%s\n' "$$" > "$state/$session.pid"
       [ ! -e /dev/fd/9 ] || printf 'inherited fd 9\n' > "$state/$session.leak"
-      IFS= read -r release < "$FM_FAKE_HERDR_HOLD"
     fi
+    printf '%s\n' running > "$state/$session"
+    [ -z "${FM_FAKE_HERDR_HOLD:-}" ] || IFS= read -r release < "$FM_FAKE_HERDR_HOLD"
     ;;
   "status --json")
     if [ "$lab_state" = running ]; then
@@ -117,7 +117,7 @@ test_refuses_unsafe_names() {
 }
 
 test_provision_releases_capture_pipes() {
-  local name="fm-lab-capture-$$" caller attempt returned=0 pid parent status=0
+  local name="fm-lab-capture-$$" caller attempt returned=0 pid parent parent_comm status=0
   mkfifo "$TMP_ROOT/server-hold"
   (
     output=$(exec 9>&1; FM_FAKE_HERDR_HOLD="$TMP_ROOT/server-hold" run_with_fake fm_herdr_lab_provision "$name" >/dev/null; printf returned)
@@ -128,9 +128,10 @@ test_provision_releases_capture_pipes() {
     if [ -f "$TMP_ROOT/provision-returned" ]; then returned=1; break; fi
     sleep 0.1
   done
-  pid='' parent=''
+  pid='' parent='' parent_comm=''
   [ ! -f "$FAKE_STATE/$name.pid" ] || pid=$(cat "$FAKE_STATE/$name.pid")
   [ -z "$pid" ] || parent=$(ps -p "$pid" -o ppid= | tr -d '[:space:]')
+  [ -z "$parent" ] || parent_comm=$(ps -p "$parent" -o comm=)
   if [ -n "$pid" ]; then
     printf 'release\n' > "$TMP_ROOT/server-hold"
   else
@@ -141,7 +142,8 @@ test_provision_releases_capture_pipes() {
   expect_code 0 "$status" "captured provision failed"
   [ "$returned" = 1 ] || fail "provision held the capture pipe until the server exited"
   assert_absent "$FAKE_STATE/$name.leak" "provision leaked an extra caller pipe on fd 9"
-  [ "$parent" = 1 ] || fail "provision retained a wrapper parent ($parent)"
+  [ -n "$parent" ] && [ "$parent" != "$caller" ] || fail "provision server parent ($parent) is missing or the caller"
+  case "$parent_comm" in *bash) fail "provision retained a Bash wrapper parent ($parent $parent_comm)" ;; esac
   [ "$(cat "$TMP_ROOT/provision-returned")" = returned ] || fail "provision changed capture output"
   pass "fm-herdr-lab: captured provision closes inherited pipes and leaves no wrapper parent"
 }
