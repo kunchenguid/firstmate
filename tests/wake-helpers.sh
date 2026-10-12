@@ -101,6 +101,11 @@ fi
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+  # The heartbeat's reaper dry run (bin/fm-reap.sh) would otherwise read the
+  # host's real staleness store through PATH; a fake that fails its list keeps
+  # every case hermetic.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/staleness"
+  chmod +x "$fakebin/staleness"
   make_fake_crew_state "$fakebin" >/dev/null
   printf '%s\n' "$dir"
 }

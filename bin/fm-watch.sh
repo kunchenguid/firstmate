@@ -2259,6 +2259,18 @@ EOF
 # surfaced when it wakes firstmate, this normally finds nothing and the heartbeat
 # is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
+# heartbeat_reap_finds_actionable: 0 iff bin/fm-reap.sh's dry run names at
+# least one record or staleness row with a pending action. Read-only: the
+# reaper acts only under the heartbeat handler's `scan --act`. A reaper that
+# cannot run (missing, refused, or over its budget) finds nothing, so the
+# heartbeat is absorbed exactly as before rather than fired on an error.
+heartbeat_reap_finds_actionable() {
+  local reap=${FM_WATCH_REAP_BIN:-$SCRIPT_DIR/fm-reap.sh}
+  [ -x "$reap" ] || return 1
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$reap" scan --actionable 2>/dev/null \
+    | grep -q .
+}
+
 heartbeat_scan_finds_actionable() {
   local f task record rest endpoint ident rc found=1 sig marker
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
@@ -3233,6 +3245,14 @@ EOF
       # Enqueue first, then record every status log surfaced through its end so the
       # next heartbeat does not re-fire it (enqueue-before-suppress preserved);
       # this wake sends firstmate to the whole fleet, so every log is read.
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
+      mark_all_captain_relevant_surfaced || true
+      wake "heartbeat"
+    elif heartbeat_reap_finds_actionable; then
+      # A finished or dead record the reaper can clear (bin/fm-reap.sh's dry run
+      # names a pending action): the heartbeat handler runs `scan --act`, so the
+      # record stops jamming the spawn cap instead of waiting for a captain event.
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced || true

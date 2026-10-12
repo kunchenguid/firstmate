@@ -6274,6 +6274,28 @@ test_heartbeat_no_change_absorbed() {
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
 }
 
+# --- heartbeat: a record the reaper can clear fires the heartbeat ------------
+
+test_heartbeat_reap_candidate_fires() {
+  local dir state fakebin out pid
+  dir=$(make_case heartbeat-reap); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'working: routine heartbeat history\n' > "$state/routine.status"
+  printf '%s' "$(seen_sig "$state/routine.status")" > "$state/.seen-routine_status"
+  # A reaper whose dry run names one pending action; the watcher only reads it.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nprintf "ghost GHOST slot reassigned -> fm-teardown.sh ghost --record-only\\n"\n' \
+    "$dir/reap.calls" > "$fakebin/fm-reap.sh"
+  chmod +x "$fakebin/fm-reap.sh"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_REAP_BIN="$fakebin/fm-reap.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a reap candidate did not fire the heartbeat"
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "reap candidate did not exit with a heartbeat wake: $(cat "$out")"
+  grep -q "heartbeat" "$state/.wake-queue" || fail "reap candidate did not enqueue a heartbeat wake"
+  grep -q -- "scan --actionable" "$dir/reap.calls" || fail "the watcher should only ask the reaper for its dry run: $(cat "$dir/reap.calls" 2>/dev/null)"
+  ! grep -qE -- "(^| )--act( |$)" "$dir/reap.calls" || fail "the watcher must never run the reaper with --act: $(cat "$dir/reap.calls")"
+  pass "a heartbeat fires when the reaper's dry run names a pending action, and the watcher never acts itself"
+}
+
 test_heartbeat_backstop_surfaces_a_masked_status() {
   local dir state fakebin out sig pid
   dir=$(make_case heartbeat-masked); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6792,6 +6814,7 @@ test_inbox_note_not_resurfaced_after_acknowledgement
 test_inbox_note_handled_before_surfacing_stays_quiet
 test_unrelated_check_keys_are_not_surfaced_by_the_note_scan
 test_heartbeat_no_change_absorbed
+test_heartbeat_reap_candidate_fires
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing

@@ -1525,7 +1525,7 @@ if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
 spawn_refuse_if_away_spend_cap() {
-  local cap live meta
+  local cap live meta candidates
   [ "$RELAUNCH" -ne 1 ] || return 0
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
@@ -1542,6 +1542,10 @@ spawn_refuse_if_away_spend_cap() {
   done
   if [ "$live" -ge "$cap" ]; then
     echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
+    # Records the reaper can clear are listed as evidence only; the refusal
+    # stands and the heartbeat handler's `bin/fm-reap.sh scan --act` clears them.
+    candidates=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-reap.sh" scan --actionable 2>/dev/null || true)
+    [ -z "$candidates" ] || printf 'cleanup candidates (bin/fm-reap.sh scan --act):\n%s\n' "$candidates" >&2
     exit 1
   fi
 }

@@ -176,7 +176,17 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--record-only]
+#   --record-only retires a record whose pool slot was reassigned to another
+#   task (bin/fm-reap.sh's GHOST class). It replaces the two slot gates below
+#   with one stricter proof: the slot's owner claim must name a different task
+#   whose record exists in this home, and this record's endpoint must read dead
+#   or missing (windowless tmux counts as missing). The claimant record then
+#   legitimately names the same slot, so the record-overlap scan that would
+#   otherwise refuse is not run; every other refusal, the slot steps (which the
+#   reassignment already skips), and the per-task cleanup are unchanged. It
+#   refuses a mine, absent, or unreadable claim, a claimant with no record here,
+#   a live or unreadable endpoint, and any combination with --force.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -385,11 +395,13 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+RECORD_ONLY=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --record-only) RECORD_ONLY=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -397,6 +409,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ "$RECORD_ONLY" = 1 ] && [ "$FORCE" = --force ]; then
+  echo "error: invalid teardown request: --record-only never combines with --force" >&2
+  exit 2
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -3353,8 +3369,64 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
-require_owned_task_worktree_slot || exit 1
+# --record-only (script header): the slot was reassigned, so the claimant's
+# record naming this slot is expected rather than a contradiction. The owner
+# claim and a dead or missing endpoint are the proof; the reassigned-slot
+# outcome then skips every slot step exactly as the ordinary gate would.
+require_record_only_reassigned_slot() {
+  local slot endpoint
+  if [ "$KIND" = secondmate ]; then
+    echo "REFUSED: --record-only applies to task records, not a secondmate home; nothing was changed" >&2
+    return 1
+  fi
+  slot=$(teardown_live_slot_path) || {
+    echo "REFUSED: task $ID names no live pool slot, so --record-only has no reassignment to prove; run teardown without it. Nothing was changed." >&2
+    return 1
+  }
+  fm_treehouse_slot_owner_state "$slot" "$ID"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    other) ;;
+    mine)
+      echo "REFUSED: task $ID's recorded worktree $slot still carries its own slot-owner claim, so the slot was not reassigned; --record-only refuses and ordinary teardown applies. Nothing was changed." >&2
+      return 1
+      ;;
+    absent)
+      echo "REFUSED: task $ID's recorded worktree $slot carries no slot-owner claim, so the slot was not proved reassigned; --record-only refuses and ordinary teardown applies. Nothing was changed." >&2
+      return 1
+      ;;
+    *)
+      echo "REFUSED: task $ID's recorded worktree $slot carries a slot-owner claim that cannot be read; nothing was changed." >&2
+      return 1
+      ;;
+  esac
+  if ! fm_task_id_path_safe "$FM_TREEHOUSE_SLOT_OWNER_ID" || [ ! -f "$STATE/$FM_TREEHOUSE_SLOT_OWNER_ID.meta" ]; then
+    echo "REFUSED: task $ID's recorded worktree $slot is claimed by $FM_TREEHOUSE_SLOT_OWNER_ID, which has no record in this home, so the reassignment cannot be confirmed; nothing was changed." >&2
+    return 1
+  fi
+  if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
+    endpoint=missing
+  else
+    endpoint=$(fm_backend_agent_state "$BACKEND" "$T")
+  fi
+  case "$endpoint" in
+    dead|missing) ;;
+    *)
+      echo "REFUSED: task $ID's recorded endpoint reads '$endpoint', not confidently dead or agent-less; --record-only refuses while an agent may still be bound to it. Nothing was changed." >&2
+      return 1
+      ;;
+  esac
+  TEARDOWN_SLOT_REASSIGNED=1
+  TEARDOWN_SLOT_REASSIGNED_TO=$FM_TREEHOUSE_SLOT_OWNER_ID
+  TEARDOWN_SLOT_REASSIGNED_HOME=$FM_TREEHOUSE_SLOT_OWNER_HOME
+  echo "warning: task $ID's recorded worktree $slot was reassigned to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)} and its endpoint reads $endpoint; only $ID's own record cleanup runs." >&2
+}
+
+if [ "$RECORD_ONLY" = 1 ]; then
+  require_record_only_reassigned_slot || exit 1
+else
+  require_exclusive_task_worktree_slot || exit 1
+  require_owned_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3805,7 +3877,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" "$STATE/$ID.devin-config.json" \
-  "$STATE/.$ID.branch-outcome-index" \
+  "$STATE/.$ID.branch-outcome-index" "$STATE/$ID.reap" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any

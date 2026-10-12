@@ -1383,6 +1383,142 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+# --- --record-only: retiring a ghost record whose slot was reassigned -----------
+
+# A record-only teardown is the reaper's path for a record whose pool slot was
+# handed to another task: the ordinary gate refuses because two records name
+# one slot, so the stale one jams the spawn cap until a human intervenes. The
+# flag proves the reassignment (another task's claim, that task's record in
+# this home, and a dead endpoint) and then cleans up only the stale record.
+record_only_case() {  # <name> -> case dir with a pool slot and a stale record
+  local dir
+  dir=$(make_case "$1")
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/stale.meta" \
+    "window=firstmate:fm-stale" "endpoint_task_id=stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  printf '%s\n' "$dir"
+}
+
+run_record_only() {  # <case> <id> [extra args]
+  local dir=$1 id=$2
+  shift 2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --record-only "$@" > "$dir/stdout" 2> "$dir/stderr"
+}
+
+assert_record_only_refused() {  # <case> <id> <rc> <stderr-needle> <description>
+  local dir=$1 id=$2 rc=$3 needle=$4 description=$5
+  [ "$rc" -ne 0 ] || fail "$description: --record-only did not refuse"
+  assert_present "$dir/home/state/$id.meta" "$description: the record was removed on a refusal"
+  assert_present "$dir/worktree/sentinel" "$description: the slot was reset on a refusal"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "$description: the slot was returned on a refusal: $(cat "$dir/runtime.log")"
+  [ -z "$needle" ] || assert_contains "$(cat "$dir/stderr")" "$needle" "$description: refusal should explain itself"
+}
+
+test_record_only_refuses_without_a_proved_reassignment() {
+  local dir rc
+
+  dir=$(record_only_case record-only-force)
+  claim_pool_slot "$dir" claimant
+  fm_write_meta "$dir/home/state/claimant.meta" \
+    "window=firstmate:fm-claimant" "endpoint_task_id=claimant" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  set +e; run_record_only "$dir" stale --force; rc=$?; set -e
+  [ "$rc" -eq 2 ] || fail "--record-only with --force should be rejected as an invalid request, got $rc: $(cat "$dir/stderr")"
+  assert_record_only_refused "$dir" stale "$rc" "never combines with --force" "record-only with --force"
+
+  dir=$(record_only_case record-only-mine)
+  claim_pool_slot "$dir" stale
+  set +e; run_record_only "$dir" stale; rc=$?; set -e
+  assert_record_only_refused "$dir" stale "$rc" "still carries its own slot-owner claim" "slot still claimed by the task"
+  assert_present "$dir/pool/1/.fm-slot-owner" "the task's own claim was removed by a refused record-only teardown"
+
+  dir=$(record_only_case record-only-absent)
+  set +e; run_record_only "$dir" stale; rc=$?; set -e
+  assert_record_only_refused "$dir" stale "$rc" "carries no slot-owner claim" "slot without a claim"
+
+  dir=$(record_only_case record-only-unreadable)
+  printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner"
+  set +e; run_record_only "$dir" stale; rc=$?; set -e
+  assert_record_only_refused "$dir" stale "$rc" "cannot be read" "unreadable claim"
+
+  dir=$(record_only_case record-only-no-claimant-record)
+  claim_pool_slot "$dir" claimant "$dir/other-home"
+  set +e; run_record_only "$dir" stale; rc=$?; set -e
+  assert_record_only_refused "$dir" stale "$rc" "no record in this home" "claimant without a record here"
+
+  dir=$(make_case record-only-no-pool)
+  fm_write_meta "$dir/home/state/stale.meta" \
+    "window=firstmate:fm-stale" "endpoint_task_id=stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  set +e; run_record_only "$dir" stale; rc=$?; set -e
+  assert_record_only_refused "$dir" stale "$rc" "names no live pool slot" "worktree outside a pool"
+
+  # A claim by another recorded task, but the stale task's own window still
+  # runs an agent: the reassignment may be real, yet an agent bound to this
+  # record is never retired behind its back.
+  dir=$(record_only_case record-only-alive)
+  claim_pool_slot "$dir" claimant
+  fm_write_meta "$dir/home/state/claimant.meta" \
+    "window=firstmate:fm-claimant" "endpoint_task_id=claimant" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+case "${1:-}" in
+  list-windows) printf 'fm-stale\nfm-claimant\n' ;;
+  display-message)
+    case "${@: -1}" in
+      '#{pane_tty}') printf '\n' ;;
+      '#{pane_current_command}') printf 'claude\n' ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  set +e; run_record_only "$dir" stale; rc=$?; set -e
+  assert_record_only_refused "$dir" stale "$rc" "" "live agent at the stale record's endpoint"
+  ! grep -Fq "kill-window" "$dir/runtime.log" \
+    || fail "a live endpoint was closed by a refused record-only teardown: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: --record-only refuses unless another recorded task holds the slot and the endpoint is dead"
+}
+
+test_record_only_retires_the_ghost_record_beside_its_claimant() {
+  local dir rc
+  dir=$(record_only_case record-only-ghost)
+  claim_pool_slot "$dir" claimant
+  fm_write_meta "$dir/home/state/claimant.meta" \
+    "window=firstmate:fm-claimant" "endpoint_task_id=claimant" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  printf 'refused_fp=abc\n' > "$dir/home/state/stale.reap"
+
+  # The ordinary gate is what jams: two records name one slot, so the stale one
+  # cannot be torn down the usual way.
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" stale > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ordinary teardown should refuse a slot two records name"
+  assert_present "$dir/home/state/stale.meta" "ordinary teardown removed the record it refused"
+
+  set +e; run_record_only "$dir" stale; rc=$?; set -e
+  [ "$rc" -eq 0 ] || fail "record-only teardown of a proved ghost failed: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" stale claimant "record-only ghost"
+  assert_absent "$dir/home/state/stale.reap" "record-only teardown left the reaper's sidecar behind"
+  assert_present "$dir/home/state/claimant.meta" "record-only teardown removed the claimant's record"
+  assert_present "$dir/worktree/sentinel" "record-only teardown reset the claimant's slot"
+  ! grep -Fq -- "--force" "$dir/stderr" \
+    || fail "record-only teardown should never mention forcing: $(cat "$dir/stderr")"
+  pass "fm-teardown: --record-only retires a ghost record while the claimant's slot, claim, and record stay untouched"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -1409,3 +1545,5 @@ test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
+test_record_only_refuses_without_a_proved_reassignment
+test_record_only_retires_the_ghost_record_beside_its_claimant
