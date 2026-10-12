@@ -386,31 +386,22 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
-# Ids of completed rows tasks-axi pruned into the Done archive, as a JSON array.
-archived_done_ids_json() {  # <archive-path>
-  [ -f "$1" ] || { printf '[]\n'; return 0; }
-  jq -Rn '[inputs
-    | capture("^[-*][[:space:]]+\\[[xX]\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+")
-    | .id]' < "$1"
-}
-
 backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
-  local backlog=${1:-$BACKLOG} archived_done_ids
+  local backlog=${1:-$BACKLOG} archive
   if [ ! -f "$backlog" ]; then
     jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
   fi
   # The data directory's parent is the tasks-axi addressing root, as in
   # bin/fm-backlog-transition-lib.sh, so the archive matches where prune wrote.
-  archived_done_ids=$(archived_done_ids_json \
-    "$(fm_tasks_axi_markdown_archive_resolve "$(dirname "$(dirname "$backlog")")" "$backlog")") \
-    || return 1
+  archive=$(fm_tasks_axi_markdown_archive_resolve "$(dirname "$(dirname "$backlog")")" "$backlog")
+  { [ -f "$archive" ] && [ -r "$archive" ]; } || archive=/dev/null
 
   set -o pipefail
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
     --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" \
-    --argjson archived_done_ids "$archived_done_ids" '
+    --rawfile archive "$archive" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -563,7 +554,9 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
         else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record
-         (reduce $archived_done_ids[] as $id ({}; .[$id] = true);
+         (reduce ($archive | split("\n")[]
+             | capture("^[-*][[:space:]]+\\[[xX]\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+")
+             | .id) as $id ({}; .[$id] = true);
          .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
     | .records |= map(
         if .structured then
