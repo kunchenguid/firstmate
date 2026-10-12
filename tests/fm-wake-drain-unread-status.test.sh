@@ -449,6 +449,98 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
+test_manifest_is_read_once_per_presentation() {
+  local dir state out fakebin probe real_cat i reads
+  dir=$(make_case cursor-read-once); state="$dir/state"; out="$dir/drain.out"
+  fakebin="$dir/bin"; probe="$dir/manifest-reads"; real_cat=$(command -v cat)
+  mkdir -p "$fakebin"
+  for ((i=1; i<=8; i++)); do
+    printf 'note: bootstrap cursor line\n' > "$state/task-$i.status"
+  done
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null || fail "could not seed the fleet cursor"
+  cat > "$fakebin/cat" <<EOF
+#!/usr/bin/env bash
+if [ "\$#" -eq 1 ] && [ "\$1" = "$state/.status-presentation-cursor" ]; then
+  printf 'read\\n' >> "$probe"
+fi
+exec "$real_cat" "\$@"
+EOF
+  chmod +x "$fakebin/cat"
+  for ((i=1; i<=8; i++)); do
+    printf 'note: new answer %s\ndone: new outcome %s\n' "$i" "$i" >> "$state/task-$i.status"
+  done
+  append_wake "$state" signal task-1.status 'signal: task-1.status' \
+    || fail "could not queue a signal for the cursor reuse regression"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while sharing the parsed cursor"
+  reads=$(wc -l < "$probe"); reads=${reads//[[:space:]]/}
+  [ "$reads" = 1 ] || fail "one presentation read the cursor $reads times, expected once"
+  grep -F 'task-1.status: note: new answer 1' "$out" >/dev/null \
+    || fail "the annotation pass did not use the shared cursor"
+  for ((i=1; i<=8; i++)); do
+    grep -F "task-$i note: new answer $i" "$out" >/dev/null \
+      || fail "shared cursor omitted task-$i from the unread pass"
+    grep -F "task-$i done: new outcome $i" "$out" >/dev/null \
+      || fail "shared cursor omitted task-$i from the backstop pass"
+  done
+  printf 'note: next presentation answer\n' >> "$state/task-8.status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "next drain failed after committing the shared cursor"
+  reads=$(wc -l < "$probe"); reads=${reads//[[:space:]]/}
+  [ "$reads" = 2 ] || fail "two presentations read the cursor $reads times, expected twice"
+  grep -F 'task-8 note: next presentation answer' "$out" >/dev/null \
+    || fail "a new presentation reused stale parsed cursor data"
+  if grep -F 'new answer' "$out" >/dev/null || grep -F 'new outcome' "$out" >/dev/null; then
+    fail "the cached cursor changed acknowledgement or replay behavior"
+  fi
+  pass "annotation, acknowledgement, unread, backstop and commit share one cursor parse per presentation"
+}
+
+test_parsed_cursor_preserves_validation_order() {
+  local dir state
+  dir=$(make_case cursor-validation-order); state="$dir/state"
+  printf 'note: current status history\n' > "$state/task.status"
+  bash -c '
+    set -u
+    . "$1/bin/fm-classify-lib.sh"
+    state=$2; f="$state/task.status"; manifest="$state/.status-presentation-cursor"
+    ident=$(_fm_open_decisions_file_ident "$f") || exit 1
+    check() {
+      local FM_PRESENTATION_CURSOR_STATE FM_PRESENTATION_CURSOR_MODE FM_PRESENTATION_CURSOR_VALID FM_PRESENTATION_CURSOR_COUNT
+      local -a FM_PRESENTATION_CURSOR_TASKS=() FM_PRESENTATION_CURSOR_IDENTS=()
+      local -a FM_PRESENTATION_CURSOR_PRESENTED=() FM_PRESENTATION_CURSOR_BACKSTOP=() FM_PRESENTATION_CURSOR_PREFIX_VALID=()
+      status_presentation_cursor_load "$state"
+      # Backstop has always stopped at its first matching row, whereas the
+      # presented offset validates the entire manifest and rejects duplicates.
+      [ "$(status_outcome_backstop_cursor_offset "$f")" = 2 ] || exit 1
+      if status_presentation_cursor_offset "$f" >/dev/null; then exit 1; fi
+    }
+    printf "task\t%s\t3\t2\nbad\tidentity\tinvalid\t0\n" "$ident" > "$manifest"
+    check
+    printf "task\t%s\t3\t2\ntask\t%s\t4\t1\n" "$ident" "$ident" > "$manifest"
+    check
+    printf "bad\tidentity\tinvalid\t0\ntask\t%s\t3\t2\n" "$ident" > "$manifest"
+    if status_outcome_backstop_cursor_offset "$f" >/dev/null; then exit 1; fi
+    # An empty parsed manifest must remain usable under nounset, including on
+    # stock Bash where expanding an empty indexed array is unsafe.
+    : > "$manifest"
+    status_presentation_cursor_load "$state"
+    [ "$(status_presentation_cursor_offset "$f")" = 0 ] || exit 1
+    [ "$(status_outcome_backstop_cursor_offset "$f")" = 0 ] || exit 1
+    unset FM_PRESENTATION_CURSOR_STATE
+    # Standalone calls must reload, including legacy three-column manifests.
+    printf "task\t%s\t3\n" "$ident" > "$manifest"
+    [ "$(status_presentation_cursor_offset "$f")" = 3 ] || exit 1
+    [ "$(status_outcome_backstop_cursor_offset "$f")" = 0 ] || exit 1
+    printf "task\t%s\t4\t1\n" "$ident" > "$manifest"
+    [ "$(status_presentation_cursor_offset "$f")" = 4 ] || exit 1
+    [ "$(status_outcome_backstop_cursor_offset "$f")" = 1 ] || exit 1
+  ' _ "$ROOT" "$state" || fail "parsed cursor changed validation order or standalone freshness"
+  pass "parsed cursors preserve duplicate rejection, backstop validation order and standalone freshness"
+}
+
+test_manifest_is_read_once_per_presentation
+test_parsed_cursor_preserves_validation_order
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
