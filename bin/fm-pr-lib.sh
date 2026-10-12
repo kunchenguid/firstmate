@@ -1001,9 +1001,15 @@ fm_pr_github_read_record() {  # <owner> <repo> <number>
   fm_pr_github_read_record_with_gh_axi "$@"
 }
 
-fm_pr_gitlab_read_record() {  # <host> <path> <number>
-  local host=$1 path=$2 number=$3 project_url json fields line
-  local total=0 named=0 state='' merged=''
+# State-only reads preserve the lightweight consumer contract. Proof reads
+# additionally bind the MR to its target project and require a live source head
+# and an exact Git branch name; merge/squash commit IDs are not source heads.
+fm_pr_gitlab_read_record() {  # <host> <path> <number> [proof]
+  local host=$1 path=$2 number=$3 proof=${4:-} project_url json fields line project
+  local total=0 named=0 state='' merged='' head target
+  FM_PR_RECORD_HEAD=
+  FM_PR_RECORD_TARGET=
+  FM_PR_RECORD_URL=
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
   command -v glab >/dev/null 2>&1 || return 1
@@ -1039,12 +1045,79 @@ FIELDS
     return 1
   fi
 
+  if [ "$proof" = proof ]; then
+    fm_pr_forge_host_valid "$host" && fm_pr_gitlab_path_valid "$path" || return 1
+    case "$number" in ''|0*|*[!0-9]*) return 1 ;; esac
+    case "$state" in merged|opened|closed|locked) ;; *) return 1 ;; esac
+    printf '%s' "$json" | jq -e --arg url "$project_url/-/merge_requests/$number" --arg iid "$number" '
+      .iid == ($iid | tonumber) and .web_url == $url
+      and (.target_project_id | type == "number" and . > 0 and floor == .)
+      and (.target_branch | type == "string" and length > 0 and (test("[\u0000-\u0020\u007f]") | not))
+      and ((.sha // .diff_refs.head_sha) | type == "string"
+           and (length == 40 or length == 64) and (test("[^0-9a-f]") | not))
+      and (if .sha != null and .diff_refs.head_sha != null
+           then .sha == .diff_refs.head_sha else true end)
+    ' >/dev/null 2>&1 || return 1
+    head=$(printf '%s' "$json" | jq -r '.sha // .diff_refs.head_sha') || return 1
+    target=$(printf '%s' "$json" | jq -r '.target_branch') || return 1
+    fm_pr_head_valid "$head" || return 1
+    git check-ref-format --branch "$target" >/dev/null 2>&1 || return 1
+    git check-ref-format "refs/heads/$target" >/dev/null 2>&1 || return 1
+    # web_url names the target project, including for fork MRs. Verify its
+    # numeric identity too rather than confusing source_project_id with it.
+    project=$(GITLAB_HOST="$host" glab api "projects/${path//\//%2F}" 2>/dev/null) || return 1
+    printf '%s' "$project" | jq -e --arg path "$path" --arg url "$project_url" \
+      --argjson id "$(printf '%s' "$json" | jq '.target_project_id')" '
+        type == "object" and .id == $id and .path_with_namespace == $path and .web_url == $url
+      ' >/dev/null 2>&1 || return 1
+    # Output globals consumed by teardown and review-diff.
+    # shellcheck disable=SC2034
+    FM_PR_RECORD_HEAD=$head
+    # shellcheck disable=SC2034
+    FM_PR_RECORD_TARGET=$target
+    # shellcheck disable=SC2034
+    FM_PR_RECORD_URL="$project_url/-/merge_requests/$number"
+  elif [ -n "$proof" ]; then
+    return 1
+  fi
   # Consumed by bin/fm-crew-state.sh passed_pr_detail.
   # shellcheck disable=SC2034
   FM_PR_RECORD_STATE=$state
   # Consumed by bin/fm-crew-state.sh passed_pr_detail.
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
+}
+
+# Only explicit HTTPS/SSH origin identities are accepted. SSH aliases, ports,
+# credentials and transport rewrites are not inferred as project identities.
+# Read the configured URL before Git applies insteadOf transport rewrites.
+fm_pr_gitlab_origin_matches() {  # <repository> <host> <path>
+  local origin rest host path
+  origin=$(git -C "$1" config --get remote.origin.url) || return 1
+  case "$origin" in
+    https://*) rest=${origin#https://}; host=${rest%%/*}; path=${rest#*/} ;;
+    git@*:*) rest=${origin#git@}; host=${rest%%:*}; path=${rest#*:} ;;
+    ssh://git@*) rest=${origin#ssh://git@}; host=${rest%%/*}; path=${rest#*/} ;;
+    *) return 1 ;;
+  esac
+  path=${path%.git}
+  fm_pr_forge_host_valid "$host" && fm_pr_gitlab_path_valid "$path" || return 1
+  [ "$host" = "$2" ] && [ "$path" = "$3" ]
+}
+
+# Fetch an MR source head into a task-private ref and bind the fetched object
+# to the reader's exact live SHA. An expired ref or rewritten head is unknown.
+fm_pr_gitlab_fetch_head() {  # <repository> <host> <path> <iid> <sha> <private-ref>
+  local repository=$1 host=$2 path=$3 iid=$4 sha=$5 ref=$6 resolved
+  fm_pr_gitlab_origin_matches "$repository" "$host" "$path" || return 1
+  case "$iid" in ''|0*|*[!0-9]*) return 1 ;; esac
+  fm_pr_head_valid "$sha" || return 1
+  case "$ref" in refs/fm-review/*|refs/fm-teardown/*) ;; *) return 1 ;; esac
+  git check-ref-format "$ref" >/dev/null 2>&1 || return 1
+  git -C "$repository" fetch --quiet origin "+refs/merge-requests/$iid/head:$ref" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$repository" rev-parse --verify "$ref^{commit}" 2>/dev/null) || return 1
+  [ "$resolved" = "$sha" ] || return 1
+  printf '%s' "$resolved"
 }
 
 # gerrit-axi resolves its server from the current directory's origin remote

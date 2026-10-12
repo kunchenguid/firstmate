@@ -116,7 +116,7 @@ Shape already exists on GitHub, it predates Gerrit entirely, and it is load-bear
 
 - `bin/fm-pr-merge.sh` defaults a GitHub merge to `--squash` when the caller selects no method.
 - `bin/fm-fleet-sync.sh`'s branch pruning reasons about it explicitly, dropping the ancestry check on the grounds that pull requests in this fleet are squash-merged, so a merged branch is never an ancestor and such a check would prune nothing.
-- `bin/fm-teardown.sh`'s landed-work test accepts content present in the default branch precisely because a squash collapses the branch's commits and per-commit patch identities stop matching.
+- [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns target selection and landed-work proof after a squash collapses the branch's commits and per-commit patch identities stop matching.
 - `bin/fm-ff-lib.sh` reconciles a clean secondmate divergence through a three-way tree proof, as happens after an upstream squash merge.
 
 It appears nowhere in the registry.

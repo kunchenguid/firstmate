@@ -28,6 +28,64 @@ REAL_CHMOD=$(command -v chmod)
 # depending on the host keeping jq in one of those four directories.
 REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
+test_gitlab_proof_reader_and_fetch() {
+  local lab="$TMP_ROOT/gitlab-proof" json head url bad
+  mkdir -p "$lab/fakebin"
+  fm_git_init_commit "$lab/repo"
+  fm_git_add_origin "$lab/repo" "$lab/origin.git"
+  head=$(git -C "$lab/repo" rev-parse HEAD)
+  url=https://gitlab.example.test/group/sub/project/-/merge_requests/7
+  json=$(jq -n --arg sha "$head" --arg url "$url" '{iid:7,web_url:$url,state:"merged",sha:$sha,diff_refs:{head_sha:$sha},target_branch:"release",source_project_id:22,target_project_id:11}')
+  cat > "$lab/fakebin/glab" <<SH
+#!/usr/bin/env bash
+[ "\$GITLAB_HOST" = gitlab.example.test ] || exit 1
+case "\$*" in
+  'mr view 7 -R https://gitlab.example.test/group/sub/project -F json') cat '$lab/mr.json' ;;
+  'api projects/group%2Fsub%2Fproject') cat '$lab/project.json' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$lab/fakebin/glab"
+  printf '%s\n' '{"id":11,"path_with_namespace":"group/sub/project","web_url":"https://gitlab.example.test/group/sub/project"}' > "$lab/project.json"
+  printf '%s\n' '{"state":"merged"}' > "$lab/mr.json"
+  PATH="$lab/fakebin:$PATH" fm_pr_gitlab_read_record gitlab.example.test group/sub/project 7 \
+    || fail 'state-only GitLab consumer now requires proof fields'
+  if PATH="$lab/fakebin:$PATH" fm_pr_gitlab_read_record gitlab.example.test group/sub/project 7 proof; then
+    fail 'state-only evidence authorized GitLab proof'
+  fi
+  for bad in '.iid=8' '.web_url="https://gitlab.example.test/other/project/-/merge_requests/7"' \
+    '.sha="bad"' '.diff_refs.head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+    'del(.sha,.diff_refs)' '.target_branch="../main"' '.target_branch="main\n"' \
+    '.target_branch="-main"' '.target_branch="HEAD"' '.target_branch="@{-1}"' \
+    '.target_project_id=22' '.state="unknown"'; do
+    printf '%s' "$json" | jq "$bad" > "$lab/mr.json"
+    if PATH="$lab/fakebin:$PATH" fm_pr_gitlab_read_record gitlab.example.test group/sub/project 7 proof; then
+      fail "GitLab proof accepted $bad"
+    fi
+    [ -z "$FM_PR_RECORD_HEAD$FM_PR_RECORD_TARGET$FM_PR_RECORD_URL" ] || fail 'failed proof left reusable globals'
+  done
+  printf '%s' "$json" > "$lab/mr.json"
+  PATH="$lab/fakebin:$PATH" fm_pr_gitlab_read_record gitlab.example.test group/sub/project 7 proof \
+    || fail 'valid fork MR target identity refused'
+  [ "$FM_PR_RECORD_HEAD/$FM_PR_RECORD_TARGET" = "$head/release" ] || fail 'source head/target not preserved'
+  git -C "$lab/repo" config remote.origin.url https://gitlab.example.test/group/sub/project.git
+  git -C "$lab/repo" config "url.$lab/origin.git.insteadOf" https://gitlab.example.test/group/sub/project.git
+  git -C "$lab/origin.git" update-ref refs/merge-requests/7/head "$head"
+  fm_pr_gitlab_fetch_head "$lab/repo" gitlab.example.test group/sub/project 7 "$head" refs/fm-review/task/merge-request/7/head >/dev/null \
+    || fail 'exact MR head fetch failed'
+  if fm_pr_gitlab_fetch_head "$lab/repo" gitlab.example.test other/project 7 "$head" refs/fm-review/task/head; then
+    fail 'foreign MR repository identity fetched'
+  fi
+  if fm_pr_gitlab_fetch_head "$lab/repo" gitlab.example.test group/sub/project 7 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/fm-review/task/head; then
+    fail 'wrong fetched object authorized MR proof'
+  fi
+  git -C "$lab/origin.git" update-ref -d refs/merge-requests/7/head
+  if fm_pr_gitlab_fetch_head "$lab/repo" gitlab.example.test group/sub/project 7 "$head" refs/fm-review/task/merge-request/7/head; then
+    fail 'expired MR ref reused stale private head'
+  fi
+  pass 'GitLab state-only reads, strict fork target proof and exact private head fetch'
+}
+
 ack_watcher_cycle() {  # <state>
   local state=$1 err sequence generation
   err="$state/.test-wake-drain.err"
@@ -786,7 +844,7 @@ test_valid_recording_and_merge_derivation() {
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "guarded merge poll retirement failed: $(cat "$dir/merged-watch.err")"
+  [ "$rc" -eq 0 ] || fail "guarded merge poll retirement failed (exit $rc): $(cat "$dir/merged-watch.err") $(cat "$dir/merged-watch.out")"
   assert_poll_absent "$dir/home/state" task-a
   assert_no_grep "merged-task-a" "$dir/home/state/.wake-queue" \
     "the drained self-merge outcome was republished by its poll"
@@ -3439,6 +3497,7 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+test_gitlab_proof_reader_and_fetch
 test_parser_matrix
 test_gitlab_merge_watch
 test_gerrit_merge_watch
