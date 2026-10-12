@@ -44,6 +44,7 @@ fm_antigravity_process_matches() {  # <comm> <args> [argv0]
 
 # Checks if Antigravity is active on the host / WSL
 fm_antigravity_is_active() {
+  [ -n "${FM_TEST_SEAM:-}" ] && return 1
   [ "${ANTIGRAVITY_AGENT:-0}" = "1" ] && return 0
   [ "${AGY_AGENT:-0}" = "1" ] && return 0
   [ "${GEMINI_AGENT:-0}" = "1" ] && return 0
@@ -61,6 +62,7 @@ fm_antigravity_is_active() {
 
 # Finds an active Antigravity session PID
 fm_antigravity_session_pid() {
+  [ -n "${FM_TEST_SEAM:-}" ] && return 1
   local config_harness=""
   if [ -f "$CONFIG_AGY/harness" ]; then
     config_harness=$(tr -d '[:space:]' < "$CONFIG_AGY/harness" 2>/dev/null || true)

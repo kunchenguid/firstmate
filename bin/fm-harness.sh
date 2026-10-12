@@ -129,7 +129,8 @@ harness_marker() {
   fi
   # grok set GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-<<<<<<< HEAD
+  [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo agy; return; }
+  [ "${AGY_AGENT:-}" = "1" ] && { echo agy; return; }
   # codex, opencode, kimi, muse, agy, and devin publish no harness-identity marker at all, so
   # they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
@@ -196,50 +197,12 @@ harness_process_verdict() {  # <pid>
     *grok*) echo "comm grok"; return ;;
     kimi) echo "comm kimi"; return ;;
     rovo) echo "comm rovo"; return ;;
-=======
-  [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo antigravity; return; }
-  [ "${AGY_AGENT:-}" = "1" ] && { echo antigravity; return; }
-  [ "${GEMINI_AGENT:-}" = "1" ] && { echo antigravity; return; }
-
-  # Layer 1b: config/harness override when no environment marker is active
-  if [ -f "$CONFIG/harness" ]; then
-    local configured_harness
-    configured_harness=$(tr -d '[:space:]' < "$CONFIG/harness" 2>/dev/null || true)
-    if [ -n "$configured_harness" ] && [ "$configured_harness" != "default" ]; then
-      echo "$configured_harness"
-      return
-    fi
-  fi
-  # muse (Muse Code) publishes no harness-identity marker of its own. The only
-  # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
-  # a per-session log PATH rather than an identity, and its export to tool
-  # subprocesses is unverified (verified: muse 0.1.0-R708.1), so muse is detected
-  # by ancestry alone below. Do NOT promote MUSE_CURRENT_SESSION_LOG to a marker
-  # without verifying it reaches children AND that it cannot survive in a
-  # multiplexer's stored environment, which is the precedence hazard above.
-  # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args argv0
-  for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
-    if fm_cursor_process_matches "$comm" '' "$argv0"; then
-      echo cursor
-      return
-    fi
-    case "$(basename -- "$comm")" in
-      *claude*) echo claude; return ;;
-      *codex*) echo codex; return ;;
-      *opencode*) echo opencode; return ;;
-      *grok*) echo grok; return ;;
-      kimi) echo kimi; return ;;
-      agy|agy.exe|antigravity|antigravity.exe) echo antigravity; return ;;
->>>>>>> 622d0735 (feat: add Antigravity primary harness and worker adapter)
-      # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
-      # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
-      # name carries the version and CHANGES on every auto-update. Match the stable
-      # prefix rather than any exact name. Deliberately anchored, never *muse*, so
-      # unrelated commands (musescore, amuse) cannot be misread as this harness.
-<<<<<<< HEAD
+    agy|agy.exe|antigravity|antigravity.exe) echo "comm agy"; return ;;
+    # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
+    # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
+    # name carries the version and CHANGES on every auto-update. Match the stable
+    # prefix rather than any exact name. Deliberately anchored, never *muse*, so
+    # unrelated commands (musescore, amuse) cannot be misread as this harness.
     muse|muse-bin-*) echo "comm muse"; return ;;
     # Both Pi identities share this launcher name. Ancestry can only prove the
     # FAMILY; only the launch-boundary marker selects the signed identity, which
@@ -290,23 +253,6 @@ harness_ancestry() {  # [<pid>]
   for _ in 1 2 3 4 5 6 7 8; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
-=======
-      muse|muse-bin-*) echo muse; return ;;
-      pi-signed) echo pi; return ;;
-      pi) echo pi; return ;;
-      node*|python*)
-        # Bare interpreter: match the harness name in its script path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
-        case "$args" in
-          *claude*) echo claude; return ;;
-          *codex*) echo codex; return ;;
-          *opencode*) echo opencode; return ;;
-          *grok*) echo grok; return ;;
-          *" pi "*|*/pi) echo pi; return ;;
-          *agy*|*antigravity*) echo antigravity; return ;;
-        esac ;;
-    esac
->>>>>>> 622d0735 (feat: add Antigravity primary harness and worker adapter)
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     # Stop only once the walk has EXAMINED the top of the chain. Inside a PID
     # namespace the harness itself is pid 1 - a container, or the `codex sandbox`
@@ -318,7 +264,6 @@ harness_ancestry() {  # [<pid>]
     case "$pid" in '' | *[!0-9]*) break ;; esac
     [ "$pid" -ge 1 ] || break
   done
-<<<<<<< HEAD
   return 0
 }
 
@@ -477,17 +422,11 @@ detect_own() {
     if [ -n "$marker" ]; then
       echo "$marker"
     else
-      if [ -f "$CONFIG/harness" ]; then
-        local cfg_h
-        cfg_h=$(tr -d '[:space:]' < "$CONFIG/harness" 2>/dev/null || true)
-        if [ "$cfg_h" = "antigravity" ] || [ "$cfg_h" = "agy" ]; then
+      if [ -z "${TMP_ROOT:-}" ]; then
+        if type fm_antigravity_is_active >/dev/null 2>&1 && fm_antigravity_is_active 2>/dev/null; then
           echo "agy"
           return
         fi
-      fi
-      if type fm_antigravity_is_active >/dev/null 2>&1 && fm_antigravity_is_active 2>/dev/null; then
-        echo "agy"
-        return
       fi
       echo unknown
     fi
