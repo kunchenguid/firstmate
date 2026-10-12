@@ -107,6 +107,12 @@ jobs:
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Use a per-job npm global prefix on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -eu
+          echo "npm_config_prefix=$RUNNER_TEMP/npm" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/npm/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
         run: |
           set -eu
@@ -117,6 +123,12 @@ jobs:
           set -eu
           npm install -g @earendil-works/pi-coding-agent
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
+      - name: Install TypeScript on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -eu
+          npm install -g typescript
+          tsc --version
       - name: Run portable parallel shard 1
         run: |
           set -eu
@@ -151,6 +163,12 @@ jobs:
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Use a per-job npm global prefix on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -eu
+          echo "npm_config_prefix=$RUNNER_TEMP/npm" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/npm/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
         run: |
           set -eu
@@ -208,6 +226,12 @@ jobs:
             exit 1
           }
           tmux -V
+      - name: Use a per-job npm global prefix on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -eu
+          echo "npm_config_prefix=$RUNNER_TEMP/npm" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/npm/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi for backlog-handoff delegation
         run: |
           set -eu
@@ -221,6 +245,12 @@ jobs:
           set -eu
           npm install -g @earendil-works/pi-coding-agent
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
+      - name: Install TypeScript on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -eu
+          npm install -g typescript
+          tsc --version
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix

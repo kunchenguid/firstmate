@@ -10,8 +10,6 @@ jobs:
   measure:
     name: Measure Herdr automation primitives
     runs-on: windows-latest
-    # The fork's self-hosted Linux runners cannot run Windows jobs.
-    if: github.repository == 'kunchenguid/firstmate'
     timeout-minutes: 20
     defaults:
       run:
