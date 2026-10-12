@@ -401,6 +401,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/propel.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },

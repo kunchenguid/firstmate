@@ -37,7 +37,7 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- `python3` for optional protocol-16 presentation-space ordering, native event subscription, and the peer roster.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -110,6 +110,17 @@ A secondmate launched by the primary receives a narrowly scoped home override du
 
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
+
+### Hand-launched peer roster
+
+Run `FM_HOME=<active-home> bin/fm-peer-roster.sh` from a directory where `bd where` resolves the intended board, or set `BEADS_DIR`.
+Use `--json` for the complete structured view; peer reports older than four hours count as stale.
+The roster observes agent tabs in the current Herdr workspace, exact peer identities from the home's registry, Beads assigned by exact peer name with their blocking dependencies, and timestamped historical peer reports.
+Herdr reads target the `HERDR_SESSION` session (default `default`), the same session used to recognise Firstmate-managed worker tabs.
+Any `blocked` or `needs-decision` report key in a peer's log with no later `resolved` line for the same key stays open; the peer is blocked regardless of report age and every open key is listed.
+It identifies Firstmate-managed worker tabs separately and shows unmapped tabs, unavailable or ambiguous peers, and unassigned Beads without taking ownership or changing any of them.
+An unavailable Herdr or Beads read yields an explicit partial/unknown result and a nonzero exit status rather than an empty or unblocked roster.
+The script header owns CLI flags, output fields, and observation boundaries.
 
 ### Focus
 
