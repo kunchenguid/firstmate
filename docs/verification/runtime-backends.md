@@ -906,7 +906,7 @@ Kimi was not installed on the verification machine; its receive path is the same
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
 The doorbell no longer prints the inbox's absolute path, so its length no longer grows with the home's depth.
-It names the inbox as `"$FM_TASK_INBOX"`, which `bin/fm-spawn.sh` exports into every launch as the absolute `state/<task>.inbox` path, followed by the short `<task>.inbox` name; the brief's full path remains the fallback for a worker launched without that export.
+It names the inbox as `"$FM_TASK_INBOX"`, which `bin/fm-spawn.sh` exports into every launch as the absolute `state/<task>.inbox` path, and carries no task name, so the line is short and fixed (a long line wraps in the composer and makes a Claude pane repaint and scroll-jump); the brief's full path remains the fallback for a worker launched without that export.
 The guard now launches each worker with `FM_TASK_INBOX` exported and no brief, so the worker must resolve the inbox from the doorbell and its environment alone.
 It is the refresh command for that shape, which has not yet been recorded live here.
 The run below, on 2026-09-30 on tmux 3.6, Linux (WSL2), with the same command, covered the earlier brief-primed shape, whose doorbell named only the short `<task>.inbox` name and whose guard gave each worker the brief's steering-inbox sentence before the steer:
