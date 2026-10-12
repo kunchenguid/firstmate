@@ -431,7 +431,7 @@ The main home leaves that resolution to Treehouse unchanged, so its task worktre
 
 A secondmate home's project clone usually shares its origin with the main home's clone, so under Treehouse's own resolution both homes would resolve to one pool whose slots are worktrees of whichever clone created it, and the secondmate's worker would be handed a worktree of the main home's clone.
 A secondmate home therefore pools its task worktrees under its own root, `${TREEHOUSE_ROOT:-$HOME}/.fm-pools/<secondmate-id>`, derived from the home's `.fm-secondmate-home` identity marker.
-`fm-spawn.sh` passes it as `--root` on the `treehouse get` it types into the worker's window, so the choice never reaches the shared tmux session's environment, and `fm-teardown.sh` passes the same root on every `treehouse return` for that home's slots.
+`fm-spawn.sh` passes it as `--root` on the `treehouse get` it types into the worker's window, so the choice never reaches the shared tmux session's environment, and `fm-teardown.sh` passes a `--root` on every `treehouse return` for that home's slots.
 The root lives outside every firstmate home's directory tree on purpose: a worker's harness walks up from its worktree looking for instruction files, and a root inside the home would put the home's `CLAUDE.md`, which imports the supervisor contract, on that walk.
 
 An explicit `--root` overrides a project clone's `treehouse.toml`, so a clone that still carries a hand-written per-home root keeps working.
