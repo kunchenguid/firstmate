@@ -22,7 +22,7 @@ concurrency:
 jobs:
   check:
     name: PR must be raised via no-mistakes
-    runs-on: ${{ github.repository == 'kunchenguid/firstmate' && 'ubuntu-latest' || fromJSON('["self-hosted", "hezki-pc"]') }}
+    runs-on: ${{ github.repository != 'kunchenguid/firstmate' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "hezki-pc"]') || 'ubuntu-latest' }}
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
