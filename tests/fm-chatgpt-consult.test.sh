@@ -204,6 +204,20 @@ test_consult_records_channel_evidence() {
   pass "a consult records durable channel evidence so a later dead bridge is reported"
 }
 
+test_audit_template_missing_fails_closed() {
+  local dir out rc
+  dir="$TMP_ROOT/notemplate"
+  mkdir -p "$dir/bin"
+  cp "$ROOT/bin/fm-chatgpt-consult.sh" "$ROOT/bin/fm-chatgpt-bridge-lib.sh" "$dir/bin/"
+  new_prompt
+  out=$(bash "$dir/bin/fm-chatgpt-consult.sh" \
+    --prompt-file "$TMP_ROOT/prompt.txt" --mode audit --thread t-notemplate 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "an audit consult without the audit-brief template must refuse"
+  assert_contains "$out" "audit-brief template missing" "the refusal must name the missing template"
+  assert_contains "$out" "audit-brief-template.md" "the refusal must name the required file"
+  pass "an audit consult refuses before contacting the bridge when the audit-brief template is missing"
+}
+
 test_audit_request_shape() {
   local dir=$TMP_ROOT/audit pid out rc
   mkdir -p "$dir"
@@ -223,6 +237,13 @@ test_audit_request_shape() {
   assert_contains "$instr" "report shape" "the generated audit prompt must carry the report shape"
   assert_contains "$instr" "stop rules" "the generated audit prompt must carry explicit stop rules"
   assert_contains "$instr" "no local tools" "an audit request must state that local tools are unavailable and unneeded"
+  assert_contains "$instr" "Audit-brief template" "an audit request must inject the shared audit-brief template"
+  assert_contains "$instr" "never a whitelist" "the generated audit prompt must state the initial file list is never a whitelist"
+  assert_contains "$instr" "Bounded initial reconnaissance" "the generated audit prompt must carry the bounded reconnaissance phase"
+  assert_contains "$instr" "Reading budget - effort guidance, never a hard limit" "the generated audit prompt must carry reading budgets as effort guidance"
+  assert_contains "$instr" "Expansion triggers" "the generated audit prompt must carry the expansion triggers"
+  assert_contains "$instr" "Carry-forward discipline" "the generated audit prompt must carry the carry-forward rule"
+  assert_contains "$instr" "scope sufficient" "the generated audit prompt must require an evidence-backed scope-sufficiency statement"
   assert_contains "$(jq -r '.input[0].content' "$dir/request.json")" "login handler" "the request must carry the prompt file text"
   pass "an audit consult asks for a generated worker audit prompt with the prompt text and prints only the answer"
 }
@@ -341,6 +362,7 @@ test_rejection_without_reported_size_invents_nothing() {
   pass "a rejection without a reported size relays the bridge message and invents no number"
 }
 
+test_audit_template_missing_fails_closed
 test_audit_request_shape
 test_plan_request_shape
 test_metadata_stamping

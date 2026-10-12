@@ -974,6 +974,7 @@ The address selects the existing shared server; it does not authorize starting o
 ## ChatGPT consultation channel (bin/fm-chatgpt-consult.sh)
 
 Firstmate can ask ChatGPT to generate a worker audit prompt and to generate an execution plan through a consultation script that POSTs one openai-responses request to the already-running local codex-chatgpt-web bridge and prints the answer.
+The audit stage injects [`.agents/skills/audit-brief/audit-brief-template.md`](../.agents/skills/audit-brief/audit-brief-template.md) verbatim into its instructions, so that template - not the script - is the single owner of the generated audit prompt's shape, and a missing template refuses the consult before any bridge contact.
 This channel is not a Pi provider: it registers nothing with Pi, touches no spawn path, needs no entry in `config/pi-account`, and never executes local tools.
 A Pi worker executes the resulting audit prompt or plan through the ordinary `fm-spawn.sh` path; `dispatch` defaults to `--effort low` and accepts a per-stage `--effort` selection, and each dispatch puts exactly one `--effort` in the spawned argv, using a caller-supplied spawn-side `--effort` when present, refusing when both sources disagree, and refusing a duplicated or empty spawn-side `--effort` before launch.
 `CHATGPT_WEB_BRIDGE_URL` overrides the bridge base URL, and the default is the loopback `http://127.0.0.1:17841/v1`.

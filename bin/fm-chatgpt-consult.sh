@@ -8,6 +8,12 @@
 # owns that contract), POSTs it to the already-running loopback bridge, and
 # prints ChatGPT's response text to stdout and nothing else.
 #
+# The --mode audit instructions inject .agents/skills/audit-brief/
+# audit-brief-template.md verbatim, so the generated audit prompt's shape
+# (exact initial scope, expansion clause, reading budgets, carry-forward
+# discipline, stop rules) has one owner and this script holds no second copy;
+# a missing template refuses on stderr before any bridge contact.
+#
 # --thread is required and names the Firstmate-owned turn-identity id stamped
 # into every request. It does not carry conversation continuity by itself:
 # the bridge replays prior turns only via previous_response_id chaining or
@@ -63,7 +69,25 @@ fm_chatgpt_record_channel_use
 
 case "$MODE" in
   audit)
-    INSTRUCTIONS="You are a senior engineer writing audit instructions for a worker. Read the objective and context below and return only a self-contained audit prompt that the worker will follow; this is prompt generation, not the audit itself. The prompt must state the specific questions the worker must answer, the evidence and scope to inspect, the required report shape, and explicit stop rules, and it must carry the objective's essential details so it stands alone. This turn has no local tools and does not need any local tools: do not attempt tool use and never emit or discuss a tool-availability notice or banner. Return only the audit prompt."
+    # The audit-brief template is the single owner of the generated prompt's
+    # shape (exact initial scope, expansion clause, reading budgets, carry-
+    # forward discipline, stop rules); it is injected verbatim so this script
+    # never holds a second copy of that contract. A missing template refuses
+    # before any bridge contact rather than generating prompts without it.
+    AUDIT_TEMPLATE_FILE="$LIBDIR/../.agents/skills/audit-brief/audit-brief-template.md"
+    [ -f "$AUDIT_TEMPLATE_FILE" ] || {
+      printf 'fm-chatgpt: audit-brief template missing: %s\n' "$AUDIT_TEMPLATE_FILE" >&2
+      printf 'fm-chatgpt: the audit stage needs .agents/skills/audit-brief/audit-brief-template.md so every generated audit prompt carries the shared scope, expansion, and carry-forward contract\n' >&2
+      exit 1
+    }
+    AUDIT_TEMPLATE=$(cat "$AUDIT_TEMPLATE_FILE") || {
+      printf 'fm-chatgpt: audit-brief template could not be read: %s\n' "$AUDIT_TEMPLATE_FILE" >&2
+      exit 1
+    }
+    INSTRUCTIONS="You are a senior engineer writing audit instructions for a worker. Read the objective and context below and return only a self-contained audit prompt that the worker will follow; this is prompt generation, not the audit itself. The prompt must state the specific questions the worker must answer, the evidence and scope to inspect, the required report shape, and explicit stop rules, and it must carry the objective's essential details so it stands alone. Structure the returned prompt on the audit-brief template below, filling every field the objective and context support; where they supply no files, symbols, or line ranges, the prompt opens with the template's bounded reconnaissance phase to establish exact initial scope before deep inspection. This turn has no local tools and does not need any local tools: do not attempt tool use and never emit or discuss a tool-availability notice or banner. Return only the audit prompt.
+
+Audit-brief template the returned prompt must follow:
+$AUDIT_TEMPLATE"
     ;;
   plan)
     INSTRUCTIONS="You are a senior implementation planner. Read the objective, context, and any findings below and return a concrete step-by-step execution plan a junior worker can follow without further design decisions. Return the plan only."

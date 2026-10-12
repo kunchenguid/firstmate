@@ -121,6 +121,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/audit-brief/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/audit-brief/audit-brief-template.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/bearings/SKILL.md",
       "audience": "agent-runtime"
     },
