@@ -1395,27 +1395,34 @@ Placement is owned by:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
+  bash bin/fm-test-run.sh tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 ```
 
-Observed guarantees on 2026-07-30 against Herdr 0.7.5 protocol 17:
+Measured on 2026-10-12 PT against Herdr 0.9.3 protocol 22, using the command above through `bin/fm-test-run.sh` in a guarded named lab session.
+The regression failed on the baseline with `not ok - contended was placed in its secondmate's workspace`.
+The candidate produced:
 
 ```text
-ok - real herdr E2E: with one 'firstmate' workspace and no herdr parent, a crewmate still lands in this home's own workspace without stealing focus
-ok - real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace
-ok - real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus
-ok - real herdr E2E: with two 'firstmate' workspaces, a worker spawned from inside the second one lands in that exact workspace
-ok - real herdr E2E: the duplicate-labeled sibling workspace is left entirely untouched and focus is preserved
-ok - real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched
-ok - real herdr E2E: an ambiguous home label with no launcher identity refuses before any worker endpoint exists
-ok - real herdr E2E: a launcher pane that no longer exists refuses before any worker endpoint exists
-ok - real herdr E2E: a secondmate launching its own worker gets the same exact-workspace guarantee, and its same-labeled sibling is untouched
-ok - real herdr E2E: a --secondmate launch still stands up that secondmate's own workspace instead of inheriting the launcher's
-ok - real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact
+ok - real Herdr: lock contention refuses without creating a worker under the secondmate identity
+ok - real Herdr: releasing the same lock lets the retry create its own correctly labelled workspace
+ok - real Herdr: a task ID already prefixed fm- preserves its concise projected title and endpoint on relaunch
+ok - real Herdr: presentation opt-out still gives the worker its own task-labelled workspace
+ok - real Herdr: an actual secondmate-pane caller creates a dedicated worker using its injected launcher identity
+ok - real Herdr: relaunch preserves a surviving dedicated worker endpoint
+ok - real Herdr: proved-gone reclaim creates a dedicated replacement, never a parent tab
+ok - real Herdr: a legacy shared endpoint refuses relaunch without moving or closing it
+ok - real Herdr: a primary outside Herdr also creates a dedicated worker workspace
+ok - real Herdr: secondmate launch retains its own home-labelled workspace
+ok - real Herdr: exact worker cleanup preserves the parent, sibling pane, and active focus
 ```
 
-That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
-Cross-session and contradictory bindings are covered deterministically in `tests/fm-backend-herdr.test.sh`, which can script a second server's socket without provisioning one.
+The guard's teardown completed and verified the default-session tripwire.
+It uses scratch clones instead of allocating or returning shared worktree-pool slots.
+The in-pane case obtains the launcher identity from Herdr's own process environment.
+`tests/fm-backend-herdr.test.sh` also verifies that a worker never adopts a parent or same-labelled workspace and that surviving shared shapes refuse relaunch.
+Cross-session and contradictory launcher bindings retain their deterministic coverage in that portable suite.
+This placement change is confined to the Herdr arm; the tmux, Zellij, Orca, and cmux integration arms do not use this workspace resolver.
+It applies equally to every worker harness because placement precedes harness launch.
 
 ### Per-home and presentation topology
 
@@ -1426,7 +1433,7 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 ```
 
-Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
+The current dedicated-worker placement proof is recorded above; this older suite retains coverage of secondmate home isolation, legacy container discovery, and exact cleanup without scanning other homes.
 
 The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
 
