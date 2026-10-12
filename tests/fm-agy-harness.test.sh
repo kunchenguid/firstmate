@@ -42,7 +42,8 @@ set -u
 # ancestry the detection cases set up. Drop the ambient markers so the asserted
 # verdict does not depend on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
-  ATLASSIAN_AGENT_TYPE ROVODEV_CLI GEMINI_CLI AGENT FM_OMP_HARNESS
+  ATLASSIAN_AGENT_TYPE ROVODEV_CLI GEMINI_CLI AGENT FM_OMP_HARNESS \
+  ANTIGRAVITY_AGENT AGY_AGENT GEMINI_AGENT
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
@@ -50,6 +51,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-antigravity-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -887,6 +890,76 @@ test_agy_spawn_arms_no_busy_wiring() {
   pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
 }
 
+test_fm_antigravity_resolve_binary() {
+  local fakebin bin
+  fakebin=$(fm_fakebin "$TMP_ROOT/res-bin")
+  touch "$fakebin/agy" && chmod +x "$fakebin/agy"
+  bin=$(PATH="$fakebin:$PATH" fm_antigravity_resolve_binary)
+  [ "$bin" = "$fakebin/agy" ] || fail "fm_antigravity_resolve_binary should resolve agy on PATH, got '$bin'"
+  pass "fm-antigravity-lib: fm_antigravity_resolve_binary resolves binary from PATH"
+}
+
+test_fm_antigravity_process_matches() {
+  fm_antigravity_process_matches agy "" agy || fail "fm_antigravity_process_matches should match 'agy'"
+  fm_antigravity_process_matches antigravity "" antigravity || fail "fm_antigravity_process_matches should match 'antigravity'"
+  fm_antigravity_process_matches agy.exe "" agy.exe || fail "fm_antigravity_process_matches should match 'agy.exe'"
+  fm_antigravity_process_matches "/usr/local/bin/agy" "" "/usr/local/bin/agy" || fail "fm_antigravity_process_matches should match full path '/usr/local/bin/agy'"
+  if fm_antigravity_process_matches magy "" magy; then
+    fail "fm_antigravity_process_matches must not match 'magy'"
+  fi
+  if fm_antigravity_process_matches agysync "" agysync; then
+    fail "fm_antigravity_process_matches must not match 'agysync'"
+  fi
+  if fm_antigravity_process_matches bash "" bash; then
+    fail "fm_antigravity_process_matches must not match 'bash'"
+  fi
+  pass "fm-antigravity-lib: fm_antigravity_process_matches matches agy variants and rejects unrelated comms"
+}
+
+test_fm_antigravity_is_active() {
+  local confdir
+  confdir="$TMP_ROOT/active-conf"
+  mkdir -p "$confdir"
+
+  # Unset env should not be active
+  FM_CONFIG_OVERRIDE="$confdir" ANTIGRAVITY_AGENT=0 AGY_AGENT=0 GEMINI_AGENT=0 fm_antigravity_is_active && fail "fm_antigravity_is_active should not be active when unconfigured"
+
+  # ANTIGRAVITY_AGENT=1 should be active
+  FM_CONFIG_OVERRIDE="$confdir" ANTIGRAVITY_AGENT=1 AGY_AGENT=0 GEMINI_AGENT=0 fm_antigravity_is_active || fail "fm_antigravity_is_active should be active when ANTIGRAVITY_AGENT=1"
+
+  # AGY_AGENT=1 should be active
+  FM_CONFIG_OVERRIDE="$confdir" ANTIGRAVITY_AGENT=0 AGY_AGENT=1 GEMINI_AGENT=0 fm_antigravity_is_active || fail "fm_antigravity_is_active should be active when AGY_AGENT=1"
+
+  # GEMINI_AGENT=1 must NOT be active (finding: conflates different harness)
+  if FM_CONFIG_OVERRIDE="$confdir" ANTIGRAVITY_AGENT=0 AGY_AGENT=0 GEMINI_AGENT=1 fm_antigravity_is_active; then
+    fail "fm_antigravity_is_active must NOT be active when only GEMINI_AGENT=1 is set"
+  fi
+
+  # Config harness agy should be active
+  printf 'agy\n' > "$confdir/harness"
+  FM_CONFIG_OVERRIDE="$confdir" ANTIGRAVITY_AGENT=0 AGY_AGENT=0 GEMINI_AGENT=0 fm_antigravity_is_active || fail "fm_antigravity_is_active should be active when config/harness=agy"
+
+  # Config harness antigravity should be active
+  printf 'antigravity\n' > "$confdir/harness"
+  FM_CONFIG_OVERRIDE="$confdir" ANTIGRAVITY_AGENT=0 AGY_AGENT=0 GEMINI_AGENT=0 fm_antigravity_is_active || fail "fm_antigravity_is_active should be active when config/harness=antigravity"
+
+  # Config harness claude should not be active
+  printf 'claude\n' > "$confdir/harness"
+  FM_CONFIG_OVERRIDE="$confdir" ANTIGRAVITY_AGENT=0 AGY_AGENT=0 GEMINI_AGENT=0 fm_antigravity_is_active && fail "fm_antigravity_is_active should not be active when config/harness=claude"
+
+  rm -rf "$confdir"
+  pass "fm-antigravity-lib: fm_antigravity_is_active respects agy env and config while ignoring GEMINI_AGENT"
+}
+
+test_harness_marker_detects_antigravity_agent_env() {
+  local out
+  out=$(ANTIGRAVITY_AGENT=1 AGY_AGENT=0 "$HARNESS" marker)
+  [ "$out" = agy ] || fail "harness_marker should identify ANTIGRAVITY_AGENT=1 as agy, got '$out'"
+  out=$(ANTIGRAVITY_AGENT=0 AGY_AGENT=1 "$HARNESS" marker)
+  [ "$out" = agy ] || fail "harness_marker should identify AGY_AGENT=1 as agy, got '$out'"
+  pass "fm-harness.sh: harness_marker detects ANTIGRAVITY_AGENT and AGY_AGENT markers"
+}
+
 test_agy_ancestry_detects_the_native_command_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
@@ -917,3 +990,7 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_no_busy_wiring
+test_fm_antigravity_resolve_binary
+test_fm_antigravity_process_matches
+test_fm_antigravity_is_active
+test_harness_marker_detects_antigravity_agent_env
