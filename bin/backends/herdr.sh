@@ -3843,7 +3843,7 @@ fm_backend_herdr_list_live() {  # <session>
 
 # --- native event push: pane.agent_status_changed subscriber -----------------
 #
-# The push half of the immediate blocked-state escalation (AGENTS.md section 8,
+# The push half of the immediate blocked-state escalation (the `supervision-protocol` skill,
 # docs/herdr-backend.md "Native pane.agent_status_changed push escalation").
 # fm_backend_herdr_wait_transition is the watcher's bounded wait primitive for
 # herdr homes: instead of a blind sleep, it blocks on herdr's native event

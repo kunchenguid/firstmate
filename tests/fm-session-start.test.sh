@@ -2515,6 +2515,46 @@ $(hash_file_for_test "$root/AGENTS.md")" ] \
   pass "true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract"
 }
 
+test_pi_compact_refreshes_changed_routed_skill_only() {
+  local rec root home fakebin out baseline
+  rec=$(new_world agents-refresh-skill)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  cat > "$root/AGENTS.md" <<'EOF'
+FIRSTMATE_TEST_INSTRUCTION=original
+## Routing
+
+| situation | NAME |
+|---|---|
+| intake | task-lifecycle ship-landing |
+
+This table is the single trigger index.
+EOF
+  mkdir -p "$root/.agents/skills/task-lifecycle" "$root/.agents/skills/ship-landing"
+  printf 'SKILL_BODY=task-original\n' > "$root/.agents/skills/task-lifecycle/SKILL.md"
+  printf 'SKILL_BODY=landing-original\n' > "$root/.agents/skills/ship-landing/SKILL.md"
+
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+  baseline=$(cat "$home/state/.session-start-agents-baseline")
+
+  out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_not_contains "$out" "INSTRUCTION REFRESH" "unchanged AGENTS and skills triggered a refresh"
+
+  printf 'SKILL_BODY=task-updated\n' > "$root/.agents/skills/task-lifecycle/SKILL.md"
+  out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$out" "INSTRUCTION REFRESH" "a changed routed skill did not trigger a refresh"
+  assert_contains "$out" ".agents/skills/task-lifecycle/SKILL.md" "refresh omitted the changed skill path"
+  assert_contains "$out" "SKILL_BODY=task-updated" "refresh omitted the changed skill content"
+  assert_not_contains "$out" "SKILL_BODY=landing-original" "refresh re-emitted an unchanged skill"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a skill refresh rebased the true-start baseline"
+
+  pass "a changed routed skill alone triggers a compact refresh that re-emits only that skill"
+}
+
 test_read_only_pi_compact_refreshes_against_its_own_session_identity() {
   local rec root home fakebin holder_pid out baseline_before completion_before
   rec=$(new_world agents-refresh-read-only)
@@ -3072,6 +3112,7 @@ test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
+test_pi_compact_refreshes_changed_routed_skill_only
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion

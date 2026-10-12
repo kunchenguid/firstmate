@@ -55,6 +55,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.
    **Read `AGENTS.md` now** (CLAUDE.md is a real `@AGENTS.md` pointer to it) to refresh your operating instructions before doing anything else, so you are acting on the new instructions rather than the stale ones you were started with.
+   Also re-read every `.agents/skills/NAME/SKILL.md` named in its routing table that you have already loaded this session; a loaded skill is as stale as `AGENTS.md` after the update.
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
 3. **Restart every second mate the updater named.**
@@ -87,7 +88,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    Never describe one of these as reloaded; its agent is still running the wiring it launched with.
 
 5. **Report to the captain in plain outcomes, in one line where you can.**
-   Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
+   Summarize what landed under the `captain-etiquette` skill without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
    Say plainly when a mate got the message rather than a clean reload, and why - never let a partial reload read as a full one.
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.

@@ -49,7 +49,7 @@ It RENDERS THE KEY IN PLAINTEXT in the pane once a value is present, where any c
 Worse, it is a credential field that accepts whatever is typed next: sending the ordinary exit command to a wedged pane submits `/quit` INTO it and persists it as a stored credential in `~/.gemini/gemini-credentials.json`.
 That poisons the machine for every later run - a credential-less run then stops failing cleanly with exit 41 and instead reaches the API and fails per request with `API key not valid` - and it is repairable only by clearing that stored credential.
 So never drive lifecycle text into a gemini pane that is showing this dialog.
-Treat it as a credential blocker under `../../../../../AGENTS.md` section 9, fix the environment, and retire the endpoint rather than typing into it.
+Treat it as a credential blocker under the `captain-etiquette` skill, fix the environment, and retire the endpoint rather than typing into it.
 
 Do NOT give a worker an isolated `GEMINI_CLI_HOME`.
 It hides `~/.agents/skills`, so `/no-mistakes` and every other user skill silently disappear from that worker.

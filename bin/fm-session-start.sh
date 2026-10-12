@@ -142,8 +142,8 @@
 #     reporting surfaces (bin/fm-bearings-snapshot.sh, /ahoy), and at startup it
 #     is pure weight - 10 done rows cost 3.3KB in an observed main-home digest.
 #   - Every in-flight, held, and blocked row is listed IN FULL, with its
-#     hold_kind/hold_reason and blocked_by. Those are the rows AGENTS.md
-#     sections 7 and 10 make actionable at startup, so they are never bounded
+#     hold_kind/hold_reason and blocked_by. Those are the rows the task-lifecycle and backlog-contract skills
+#     make actionable at startup, so they are never bounded
 #     away.
 #   - Only the plain queued (dispatchable-now) listing is bounded, by
 #     FM_SESSION_START_QUEUED_LIMIT, default 20. Anything it omits is disclosed
@@ -171,7 +171,7 @@
 # STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
 # tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
 # may be. Both bounds are safe because the section prints every task's full
-# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
+# status log path, and the `supervision-protocol` skill treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed through a native session-open
@@ -610,11 +610,38 @@ hash_file_sha256() {
 # The baseline describes instructions this true session started with, not the
 # most recently emitted instructions. It is intentionally immutable for this
 # lock owner: every later stale-context rebuild needs the current file again.
-write_agents_baseline() {  # <lock-pid> <agents-hash>
-  local lock_pid=$1 agents_hash=$2 tmp
+# Skills named in the AGENTS.md routing table, one name per line. The table is
+# the single trigger index, so its skills are the procedures a running session
+# can have loaded and the ones a refresh must cover.
+routed_skill_names() {
+  [ -f "$FM_ROOT/AGENTS.md" ] || return 0
+  awk '
+    /^## Routing/ { in_table=1; next }
+    in_table && /^## / { exit }
+    in_table && /^\|/ && !/^\| *situation/ && !/^\|---/ {
+      n = split($0, c, "|")
+      m = split(c[n-1], names, " ")
+      for (i = 1; i <= m; i++) print names[i]
+    }
+  ' "$FM_ROOT/AGENTS.md" 2>/dev/null | sort -u
+}
+
+# "<hash> <relative path>" for every routed skill file present on disk.
+routed_skill_hash_lines() {
+  local name rel h
+  routed_skill_names | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    rel=".agents/skills/$name/SKILL.md"
+    h=$(hash_file_sha256 "$FM_ROOT/$rel" 2>/dev/null) || continue
+    printf '%s %s\n' "$h" "$rel"
+  done
+}
+
+write_agents_baseline() {  # <lock-pid> <agents-hash> [skill-hash-lines]
+  local lock_pid=$1 agents_hash=$2 skill_lines=${3:-} tmp
   [ -n "$lock_pid" ] && [ -n "$agents_hash" ] || return 1
   tmp=$(mktemp "$STATE/.session-start-agents-baseline.XXXXXX" 2>/dev/null) || return 1
-  if printf '%s\n%s\n' "$lock_pid" "$agents_hash" > "$tmp" 2>/dev/null \
+  if { printf '%s\n%s\n' "$lock_pid" "$agents_hash"; [ -z "$skill_lines" ] || printf '%s\n' "$skill_lines"; } > "$tmp" 2>/dev/null \
     && mv -f "$tmp" "$AGENTS_BASELINE_FILE" 2>/dev/null; then
     return 0
   fi
@@ -629,7 +656,23 @@ agents_baseline_drifted() {  # <rebuilding-session-pid>
   baseline_hash=$(sed -n '2p' "$AGENTS_BASELINE_FILE" 2>/dev/null || true)
   current_hash=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
   [ -n "$current_hash" ] || return 0
-  [ "$baseline_pid" = "$lock_pid" ] && [ "$baseline_hash" = "$current_hash" ] && return 1
+  [ "$baseline_pid" = "$lock_pid" ] && [ "$baseline_hash" = "$current_hash" ] || return 0
+  [ -z "$(changed_routed_skills)" ] && return 1
+  return 0
+}
+
+# Relative paths of routed skills whose current hash differs from the baseline
+# record. A skill with no baseline record is not reported: only skills the true
+# start recorded can have been loaded from stale content.
+changed_routed_skills() {
+  local line h rel base
+  [ -f "$AGENTS_BASELINE_FILE" ] && [ ! -L "$AGENTS_BASELINE_FILE" ] || return 0
+  routed_skill_hash_lines | while IFS= read -r line; do
+    h=${line%% *}
+    rel=${line#* }
+    base=$(awk -v p="$rel" 'NR > 2 && $2 == p { print $1; exit }' "$AGENTS_BASELINE_FILE" 2>/dev/null || true)
+    [ -n "$base" ] && [ "$base" != "$h" ] && printf '%s\n' "$rel"
+  done
   return 0
 }
 
@@ -659,11 +702,19 @@ EOF
   else
     printf 'The original AGENTS.md baseline no longer matches, but the current file is absent.\n'
   fi
+  local rel
+  changed_routed_skills | while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    printf '\n--- CHANGED SKILL: %s (supersedes the copy loaded this session) ---\n' "$rel"
+    cat "$FM_ROOT/$rel"
+  done
 }
 
 AGENTS_START_HASH=
+AGENTS_START_SKILLS=
 if [ "$REEMIT" -eq 0 ] && [ "$SESSION_SOURCE" = startup ]; then
   AGENTS_START_HASH=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
+  AGENTS_START_SKILLS=$(routed_skill_hash_lines)
 fi
 
 if [ "$REEMIT" -eq 1 ]; then
@@ -761,7 +812,7 @@ fi
 # separate 900-second cadence remains unchanged.
 # Presented records are this turn's first work queue and remain durable until
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
-# remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
+# remains actionable even when that queue is empty (AGENTS.md section 3 and the supervision-protocol skill).
 # The drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
 # below. The read-only path never touches the queue because it lacks mutation
@@ -1078,7 +1129,7 @@ if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
     printf '\nSESSION_START_COMPLETION: not recorded - the next clear or compact will run a full startup.\n'
   fi
   if [ "$SESSION_SOURCE" = startup ] && [ "$COMPLETION_RECORDED" -eq 1 ] && [ -n "$AGENTS_START_HASH" ]; then
-    if ! write_agents_baseline "$COMPLETION_PID" "$AGENTS_START_HASH"; then
+    if ! write_agents_baseline "$COMPLETION_PID" "$AGENTS_START_HASH" "$AGENTS_START_SKILLS"; then
       printf '\nSESSION_START_AGENTS_BASELINE: not recorded - a later supported rebuild will re-emit AGENTS.md.\n'
     fi
   fi

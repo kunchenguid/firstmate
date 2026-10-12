@@ -34,7 +34,7 @@ Never steer into a pane still showing the dialog; a spawn that reported success 
 ## Credential precondition
 
 A verified agy worker ran under a signed-in Google account with no key export and no dialog.
-The unauthenticated failure mode was not observed, so treat any auth prompt or refusal as a credential blocker under `../../../../../AGENTS.md` section 9, fix the environment, and retire the endpoint rather than typing into it.
+The unauthenticated failure mode was not observed, so treat any auth prompt or refusal as a credential blocker under the `captain-etiquette` skill, fix the environment, and retire the endpoint rather than typing into it.
 
 ## Detection
 
