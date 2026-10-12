@@ -338,7 +338,7 @@ function safeMermaidSvg(svgText) {
 
 function ensureMermaidFrame() {
   if (mermaidFrameReady) return mermaidFrameReady;
-  mermaidFrameReady = new Promise((resolve, reject) => {
+  const readiness = new Promise((resolve, reject) => {
     const frame = document.createElement("iframe");
     frame.className = "mermaid-render-frame";
     frame.sandbox = "allow-scripts";
@@ -346,10 +346,21 @@ function ensureMermaidFrame() {
     frame.title = "Isolated Mermaid renderer";
     frame.tabIndex = -1;
     frame.setAttribute("aria-hidden", "true");
-    const timeout = window.setTimeout(() => reject(new Error("Mermaid renderer did not start")), 10000);
-    window.addEventListener("message", event => {
+    let settled = false;
+    const fail = error => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", handleMessage);
+      frame.remove();
+      if (mermaidFrameReady === readiness) mermaidFrameReady = null;
+      reject(error);
+    };
+    const handleMessage = event => {
       if (event.source !== frame.contentWindow || !event.data || event.data.type !== "firstmate-mermaid") return;
       if (event.data.ready) {
+        if (settled) return;
+        settled = true;
         window.clearTimeout(timeout);
         resolve(frame);
         return;
@@ -360,11 +371,14 @@ function ensureMermaidFrame() {
       window.clearTimeout(request.timeout);
       if (typeof event.data.svg === "string") request.resolve(event.data.svg);
       else request.reject(new Error("Mermaid renderer rejected the diagram"));
-    });
-    frame.addEventListener("error", () => reject(new Error("Mermaid renderer could not load")), { once: true });
+    };
+    const timeout = window.setTimeout(() => fail(new Error("Mermaid renderer did not start")), 10000);
+    window.addEventListener("message", handleMessage);
+    frame.addEventListener("error", () => fail(new Error("Mermaid renderer could not load")), { once: true });
     document.body.append(frame);
   });
-  return mermaidFrameReady;
+  mermaidFrameReady = readiness;
+  return readiness;
 }
 
 async function mermaidSvg(source) {
@@ -383,7 +397,8 @@ async function mermaidSvg(source) {
 function supportedMermaidFlowchart(source) {
   const declaration = source.split("\n").find(line => line.trim() && !line.trim().startsWith("%%"))?.trim() ?? "";
   if (!/^(?:flowchart|graph)\s+(?:TB|TD|BT|RL|LR)\b/i.test(declaration)) return false;
-  return !/(?:^|\n)\s*(?:click\b|classDef\b|class\b|style\b|linkStyle\b|%%\{)|\$\$/i.test(source);
+  if (/%%\s*\{|:::|\$\$/i.test(source)) return false;
+  return !/(?:^|[;\n])\s*(?:click\b|classDef\b|class\b|style\b|linkStyle\b)/i.test(source);
 }
 
 async function renderMermaid(container, source) {

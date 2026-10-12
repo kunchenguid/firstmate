@@ -252,6 +252,14 @@ flowchart LR
   click unsafe "https://example.invalid/diagram"
 ```
 
+```mermaid
+flowchart LR; configured[Configured] --> graph[Graph]; %%{init: {"htmlLabels": true}}%%
+```
+
+```mermaid
+flowchart LR; hidden:::mermaid-render-frame --> visible[Visible]
+```
+
 <script id="report-script">globalThis.reportExecuted = true</script>
 <img id="report-event" src=x onerror="globalThis.eventExecuted = true">
 [unsafe link](javascript:globalThis.linkExecuted=true)
@@ -455,6 +463,7 @@ page.on("request", request => {
 let failed;
 let storagePage;
 let directPage;
+let recoveryPage;
 try {
   await page.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
   await page.evaluate(() => window.localStorage.clear());
@@ -833,8 +842,8 @@ try {
   await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').first().waitFor({ state: "visible", timeout: 10000 });
   await page.waitForFunction(() => document.querySelectorAll('.mermaid-diagram[data-mermaid-state="rendered"] svg').length === 5, null, { timeout: 10000 });
   if (await page.locator('.mermaid-diagram[data-mermaid-state="rendered"] svg').count() !== 5) throw new Error("the four report flowcharts and style-label regression flowchart were not rendered as SVG graphics");
-  if (await page.locator('.mermaid-diagram[data-mermaid-state="error"]').count() !== 2) throw new Error("malformed or interactive Mermaid did not use the localized source fallback");
-  if (await page.locator('.mermaid-diagram[data-mermaid-state="error"] pre code').count() !== 2) throw new Error("Mermaid fallback did not preserve local source text");
+  if (await page.locator('.mermaid-diagram[data-mermaid-state="error"]').count() !== 4) throw new Error("malformed, interactive, configured, or styled Mermaid did not use the localized source fallback");
+  if (await page.locator('.mermaid-diagram[data-mermaid-state="error"] pre code').count() !== 4) throw new Error("Mermaid fallback did not preserve local source text");
   const renderedDiagramText = (await page.locator('.mermaid-diagram[data-mermaid-state="rendered"]').allTextContents()).join("|");
   for (const label of ["Advanced MC", "Business", "Selected SKU", "Toko product truth", "Selection", "feed quality", "budget", "Use style='compact'", "Readable group"]) {
     if (!renderedDiagramText.includes(label)) throw new Error(`rendered Mermaid omitted label ${label}`);
@@ -942,6 +951,27 @@ try {
   const changedTaskTotal = await page.locator('#sessions .task-card').count();
   if (changedTaskTotal !== preChangedTaskTotal + 1) throw new Error(`changed refresh did not render the changed task inventory: ${preChangedTaskTotal} -> ${changedTaskTotal}`);
 
+  recoveryPage = await browser.contexts()[0].newPage();
+  let rendererRequests = 0;
+  await recoveryPage.route("**/mermaid-renderer.html", async route => {
+    rendererRequests += 1;
+    if (rendererRequests === 1) await new Promise(resolve => setTimeout(resolve, 10500));
+    await route.continue().catch(() => {});
+  });
+  await recoveryPage.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await recoveryPage.evaluate(() => window.localStorage.clear());
+  await recoveryPage.reload({ waitUntil: "domcontentloaded", timeout: 3000 });
+  await recoveryPage.locator("#token").fill(process.env.VIEWER_TOKEN);
+  await recoveryPage.locator("#remember-token").check();
+  await recoveryPage.locator("#connect").click();
+  await recoveryPage.locator("#app-shell").waitFor({ state: "visible", timeout: 5000 });
+  await recoveryPage.goto(`${process.env.VIEWER_URL}/report/${process.env.VIEWER_REPORT_ID}`, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await recoveryPage.waitForFunction(() => document.querySelectorAll('#report-rendered .mermaid-diagram[data-mermaid-state="error"]').length === 9, null, { timeout: 13000 });
+  fs.appendFileSync(`${process.env.VIEWER_HOME}/data/${process.env.VIEWER_REPORT_ID}/report.md`, "\nRenderer retry marker.\n");
+  await recoveryPage.waitForFunction(() => document.querySelectorAll('#report-rendered .mermaid-diagram[data-mermaid-state="rendered"] svg').length === 5, null, { timeout: 10000 });
+  if (rendererRequests < 2) throw new Error(`Mermaid renderer startup was not retried after timeout: ${rendererRequests} request(s)`);
+  await recoveryPage.close();
+
   storagePage = await browser.contexts()[0].newPage();
   await storagePage.addInitScript(() => {
     Object.defineProperty(window, "localStorage", { configurable: true, get() { throw new DOMException("denied", "SecurityError"); } });
@@ -960,6 +990,7 @@ try {
   releaseDelayedReport();
   if (storagePage && !storagePage.isClosed()) await storagePage.close();
   if (directPage && !directPage.isClosed()) await directPage.close();
+  if (recoveryPage && !recoveryPage.isClosed()) await recoveryPage.close();
   await page.close();
 }
 if (failed) throw failed;
