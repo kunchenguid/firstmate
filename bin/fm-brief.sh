@@ -99,7 +99,8 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known wait expected to clear on its own, including
 # the worker's own background work, pipeline or long command; blocked when
-# firstmate must act. The first-sight alert remains; repeats use the long cadence.
+# firstmate must act. The first-sight alert remains; repeats use the long cadence
+# unless the worker declares local completion fields owned by fm-classify-lib.sh
 # Emission-time syntax and legacy unknown-time handling are owned by
 # bin/fm-classify-lib.sh; each scaffold renders the stamp as a literal <epoch>
 # placeholder the worker replaces with a numeric Unix time as it appends, so a
@@ -154,9 +155,12 @@ PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
    Before ending your turn with your own background shell or monitor still running, or before waiting on your own pipeline run or a long foreground command, append \`$PAUSED_VERB [at=<epoch>]: {job and completion condition}\` to the status file.
+   For a job you background, include \`[wait-file=<absolute completion path>]\` and/or \`[wait-pid=<positive pid>]\` before the colon, alongside the timestamp, naming only a file or process you own on this host.
+   Use a completion file written after the result is captured, or the job's \`\$!\` pid (both when available); the watcher rings your steering inbox when that file appears or that process exits, even if it exits without writing the file.
+   The local-field grammar is owned by \`bin/fm-classify-lib.sh\`; use a path without colon, bracket, or control characters, and never a relative path or a process-group id.
    Name what you are waiting for and what will let you resume; do not repeat the declaration on every poll.
    Do not declare active implementation or reasoning as a wait.
-   Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.
+   Firstmate may still raise one first-sight alert; while the declared wait has not cleared, it uses the existing long recheck cadence instead of repeated possible-wedge alarms.
    When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time.
    Follow the resolution rule below when the wait clears, then resume the task.
    Use \`blocked:\` when you are stuck and need help.

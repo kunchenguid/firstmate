@@ -348,7 +348,8 @@ ${pr_return_line}Whenever a drive call returns without a gate or an outcome - it
   else
     drive_block="One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
 So background the drive call instead of sitting in one blocking hold your harness will kill, and read its return when it finishes.
-Declare that wait using the brief's status-reporting rule before waiting on the backgrounded drive call.
+Declare that wait using the brief's status-reporting rule before waiting on the backgrounded drive call, including its \`[wait-pid=<pid>]\` and/or \`[wait-file=<absolute completion path>]\` so monitoring can wake you when it returns.
+Backgrounding and ending your turn without those fields leaves nobody listening to the return, so the run can park at a gate until the long declared-wait recheck.
 Where a harness's own command limit is not established, assume it bounds commands and use that same backgrounded shape.
 ${pr_return_line}Whenever a drive call returns without a gate or an outcome - its own wait elapsed, or it was killed or timed out - reattach at once by re-running \`no-mistakes axi run\` without flags, backgrounded the same way${pr_reattach_clause} if it refuses because no run is active, read the finished outcome from \`no-mistakes axi status\`."
   fi

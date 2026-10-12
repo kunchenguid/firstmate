@@ -16,6 +16,8 @@
 # beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
 # while an away record (state/.afk-contract, never quiet mode's) exists an
 # item held for the captain is never rechecked at all, in either posture.
+# Declared worker-owned local completion uses paused_local_wait_notice below
+# instead of waiting for that cadence (field grammar in fm-classify-lib.sh)
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -512,6 +514,56 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
     exit 1
   fi
   wake "$reason"
+}
+
+# Observe a worker's explicit local completion on EVERY poll, before the pane
+# stale/paused paths can absorb it. This is independent of no-mistakes gate
+# verdicts: both notices use the existing inbox writer, doorbell and retry ladder
+# Either an existing wait-file or a gone wait-pid ends the wait. A pid exiting
+# without its file is still a notice, not proof of success; the worker reads the
+# job's output. Only local ordinary workers are probed, never a remote pid/path
+# One ordinary inbox record per declaration, even across endpoint replacement
+# The marker outlives busy-pane pause resets and caches the status signature plus
+# the declaration identity so unrelated resolved events cannot ring it again
+# Enqueue precedes the marker:
+# a crash may duplicate a notice, but must never swallow one. Once enqueued,
+# delivery failures and unacknowledged records belong to inbox_steer_check alone
+paused_local_wait_notice() {  # <window> <task> <declared-line>
+  local win=$1 task=$2 line=$3 file='' pid='' finished='' marker sig identity cached rest rec ring_rc=0
+  [ -n "$task" ] || return 0
+  status_paused_local_wait_fields "$line" file pid
+  [ -n "$file$pid" ] || return 0
+  [ "$(window_kind "$win")" != secondmate ] || return 0
+  [ -z "$(fm_meta_get "$STATE/$task.meta" remote_host)" ] || return 0
+  if [ -n "$file" ] && [ -e "$file" ]; then
+    finished="Your declared completion file appeared: $file"
+  elif [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+    finished="Your declared process $pid exited."
+    [ -z "$file" ] || finished="$finished Its completion file has not appeared: $file"
+  else
+    return 0
+  fi
+  marker="$STATE/.paused-local-wait-$task"
+  sig=$(fm_wake_signal_sig "$STATE/$task.status") || return 0
+  cached=$(cat "$marker" 2>/dev/null || true)
+  [ "${cached%%$'\n'*}" != "$sig" ] || return 0
+  # A new event can replace the declaration between the poll read and the probe
+  [ "$(status_declared_wait_line "$STATE/$task.status")" = "$line" ] || return 0
+  identity=$(status_declared_wait_identity "$STATE/$task.status" "$line") || return 0
+  rest=${cached#*$'\n'}
+  if [ "$rest" != "$identity" ]; then
+    rec=$(fm_task_inbox_write "$STATE" "$task" "$finished
+Read your job's output now and resume the task or handle its failure; do not keep waiting on this declaration.") || {
+      triage_log "local-wait notice not written (steering inbox unwritable, retried next poll): $win"
+      return 0
+    }
+    fm_task_inbox_ring "$(window_backend "$win")" "$win" "$rec" "$(window_label "$win")" || ring_rc=$?
+    triage_log "local-wait notice: $task ${rec##*/} ring=$ring_rc"
+  fi
+  printf '%s\n%s' "$sig" "$identity" > "$marker" || {
+    echo "error: local-wait notice marker unwritable for $task" >&2
+    exit 1
+  }
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
@@ -3055,6 +3107,7 @@ EOF
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(status_declared_wait_line "$STATE/$task.status")
+    paused_local_wait_notice "$w" "$task" "$last"
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
