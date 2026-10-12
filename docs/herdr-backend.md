@@ -424,10 +424,10 @@ Any of these preserves the candidate and lets session startup continue with at m
 ### Operational compromises
 
 - Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.
-- A failed journal publication or projected workspace create stops that spawn instead of falling back flat.
+- A failed journal publication or projected workspace create stops that spawn instead of continuing in an ungrouped worker workspace.
   So a Herdr create failure surfaces as a spawn failure in every Herdr home, rather than only in homes that opted in.
   An unavailable server or contended placement lock refuses creation; an unavailable grouping parent may use a dedicated ungrouped worker workspace.
-- Recovery of an existing presentation journal refuses by default when the shared presentation lock is contended, rather than falling back flat.
+- Recovery of an existing presentation journal refuses by default when the shared presentation lock is contended, rather than creating an ungrouped worker workspace.
   Pass `fm-spawn.sh --herdr-resume-lock-wait` to opt that recovery into waiting for the lock instead, so concurrent recoveries can serialize.
   The flag applies to a fresh ship or scout spawn that recovers a journal.
   The multi-task path forwards the flag to each per-pair spawn.

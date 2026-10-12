@@ -2957,10 +2957,10 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   return 0
 }
 
-# fm_backend_herdr_projection_recovery_allows_flat: inspect an existing
-# journal's exact token matches without adopting, reusing, renaming, closing,
-# or deleting anything.
-# Missing matches preserve the option to create a dedicated worker workspace.
+# fm_backend_herdr_projection_recovery_allows_flat is the legacy name for
+# read-only eligibility inspection of an existing journal's exact token matches.
+# A zero permits only later creation of a dedicated ungrouped worker workspace;
+# it never authorizes adopting, reusing, renaming, closing, or deleting anything.
 # One or more matches permit that recovery only when every pane is positively
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
 fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id>
