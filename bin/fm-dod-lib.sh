@@ -401,7 +401,7 @@ EOF
 }
 
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-}
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} code_root
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
@@ -411,6 +411,15 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
     nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto, opens its PR against, and watches CI for that branch.
 "
   fi
+  code_root=${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+  cat <<EOF
+# Integration checkpoint
+You may implement against frozen contracts while an integration-only provider is still working.
+Before the final rebase, validation run, publication, or ready report, run \`"$code_root/bin/fm-integrate-after.sh" check "$id"\`.
+If it refuses, declare \`paused: integrate-after: <provider-id>\` and resume those final steps only after the provider's landing is confirmed.
+This checkpoint never turns an ordinary \`blocked-by\` implementation blocker into dispatchable work.
+
+EOF
   case "$mode:$forge" in
     direct-PR:gerrit)
       cat <<EOF

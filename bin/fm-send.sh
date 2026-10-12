@@ -723,6 +723,16 @@ fm_send_close_resolved_keys() { # <answer-text>
     esac
     i=$((i + 1))
   done
+  for k in $RESOLVE_STATUS_KEYS; do
+    case "$k" in
+      nm-*)
+        if ! "$SCRIPT_DIR/fm-ask-user-intake.sh" answer "$RESOLVE_TASK_ID" "$k" "$note" >/dev/null; then
+          echo "error: the answer and status close were delivered, but ask-user hold $k could not be answered; reconcile its authority owner without resending the answer" >&2
+          return 1
+        fi
+        ;;
+    esac
+  done
 }
 
 # Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed

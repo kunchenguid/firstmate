@@ -1335,6 +1335,10 @@ require_current_away_authority || away_status=$?
 require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
+FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-integrate-after.sh" check "$ID" >/dev/null || {
+  echo "error: integration-only dependency is not ready; PR merge refused" >&2
+  exit 1
+}
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
 # oversight: if this lock-owning shell dies while its gh or glab child lives,

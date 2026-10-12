@@ -34,6 +34,7 @@ Establish it from the tool's discovery surface and `quota-axi auth --json` per-p
 ## Discovery
 
 Treat model and provider knowledge as current discovery, not a permanent namespace or mapping.
+Before reporting a requested model unavailable, run `bin/fm-model-availability.sh <harness> <model>` for each plausible harness and inspect its separate harness-catalog and quota evidence; `uncertain` calls for the harness's documented account-specific picker or listing, not an unavailability claim.
 Use the selected tool reference's authoritative surface in the current authenticated environment because availability changes by version, account, and configuration.
 
 For an unfamiliar namespace, establish support and provider identity from that harness's CLI help, model listing, or current documentation.

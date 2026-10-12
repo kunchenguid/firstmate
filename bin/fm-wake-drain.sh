@@ -466,7 +466,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open task key verb note line file intake item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
 
   if [ -n "$snapshot" ]; then
@@ -478,6 +478,20 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
+    # A worker's ask-user event is durable in its status log, but an event log
+    # alone cannot own a decision. Materialize one parked Firstmate work item
+    # before presenting it. Promotion to captain remains a separate judgment.
+    if [ "$verb" = needs-decision ] && [[ "$key" == nm-* ]]; then
+      case "$note" in
+        'ask-user findings='*' file='*)
+          file=${note##* file=}
+          if ! intake=$("$SCRIPT_DIR/fm-ask-user-intake.sh" ensure "$task" "$key" "$file" 2>&1); then
+            printf 'ASK-USER INTAKE FAILED: %s %s\n' "$task" "$intake" >&2
+            return 2
+          fi
+          ;;
+      esac
+    fi
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
@@ -749,19 +763,22 @@ cap_outcome_line() {  # <line> <max-bytes>
 }
 
 print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
+  local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared rc
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
-  if ! {
+  if {
     print_unread_status_section "$snapshot" \
       && print_status_outcome_backstop_section "$snapshot" \
       && print_open_decisions_section "$snapshot" \
       && print_record_divergence_section
   } > "$prepared"; then
+    :
+  else
+    rc=$?
     rm -f -- "$prepared"
-    return 1
+    return "$rc"
   fi
   # Prepare every section before presentation, but do not commit its receipt
   # until the prepared bytes reach stdout. If the consumer closes or fails,
@@ -804,7 +821,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=$?; fi
   fm_lock_release "$lock"
   return "$rc"
 }
@@ -987,7 +1004,9 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  (print_status_presentation) || true
+  presentation_rc=0
+  (print_status_presentation) || presentation_rc=$?
+  [ "$presentation_rc" -ne 2 ] || exit 1
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
@@ -1009,7 +1028,9 @@ if [ "$ACTOR" = main ]; then
     print_branch_held_notice
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
-    (print_status_presentation) || true
+    presentation_rc=0
+    (print_status_presentation) || presentation_rc=$?
+    [ "$presentation_rc" -ne 2 ] || exit 1
     print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
     assert_watcher_liveness
     exit "$BRANCH_OUTCOMES_RC"
@@ -1069,10 +1090,11 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
+presentation_rc=0
+(print_status_presentation "$RAW_ROWS") || presentation_rc=$?
+[ "$presentation_rc" -ne 2 ] || exit 1
+print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
-
-(print_status_presentation "$RAW_ROWS") || true
-print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 assert_watcher_liveness
 exit "$BRANCH_OUTCOMES_RC"

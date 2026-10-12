@@ -3711,6 +3711,84 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
   pass "a record whose endpoint is dead or missing reports itself once and is never re-escalated"
 }
 
+test_completed_dead_pane_churn_reports_once() {
+  local dir state fakebin out capture window key failed sig
+  window='test:fm-wedge'; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture completed-dead-churn 'done: checks green' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  failed='state: failed · source: run-step · no agent'
+  gone_endpoint_env dead; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  printf 'completed pane render one\n' > "$capture"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "completed stopped pane had no first wake: $(cat "$out")"
+  grep -F 'agent dead' "$out" >/dev/null || fail 'first completed-pane wake did not name dead agent'
+  [ -s "$state/.dead-reported-$key" ] || fail 'completed pane had no once marker'
+  ack_stopped_cycle "$state" || fail 'could not acknowledge completed-pane first wake'
+  : > "$out"
+  printf 'completed pane render two\n' > "$capture"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+    || fail "completed stopped pane churn re-alarmed: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] || fail 'completed stopped pane queued a repeated stale wake'
+  ack_stopped_cycle "$state" || fail 'could not acknowledge completed-pane quiet cycle'
+  printf 'done: a new completion event\n' >> "$state/wedge.status"
+  sig=$(seen_sig "$state/wedge.status")
+  printf '%s' "$sig" > "$state/.seen-wedge_status"
+  : > "$out"
+  printf 'completed pane render three\n' > "$capture"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "new completion failed to re-arm stopped-pane report: $(cat "$out")"
+  grep -F 'agent dead' "$out" >/dev/null || fail 'new completion did not re-arm the stopped-pane alert'
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass 'a completed stopped worker survives pane churn and a new completion re-arms the alert'
+}
+
+test_integration_dependency_pause_rechecks_once_then_quiet() {
+  local dir state fakebin out capture statusf window key sig pid
+  dir=$(make_case integration-dependency-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; statusf="$state/dependency.status"
+  window='test:fm-dependency'; key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'waiting on provider\n' > "$capture"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/dependency.meta"
+  printf 'paused: integrate-after: provider, waiting for landing\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-dependency_status"
+  printf '%s' "$(hash_text "$(cat "$capture")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · integration dependency' \
+    watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail 'integration dependency lost its first stale alert'; }
+  ack_stopped_cycle "$state" || fail 'could not acknowledge first integration dependency alert'
+  [ -e "$state/.paused-resurfaced-$key" ] || fail 'integration dependency has no recheck marker'
+
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-resurfaced-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · integration dependency' \
+    watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail 'integration dependency lost its first long-cadence recheck'; }
+  grep -F 'awaiting external' "$out" >/dev/null || fail 'integration dependency recheck lost its reason'
+  ack_stopped_cycle "$state" || fail 'could not acknowledge integration dependency recheck'
+
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-resurfaced-$key"
+  : > "$out"
+  printf 'waiting on provider, pane render changed\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · integration dependency' \
+    watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=240
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail 'unchanged integration dependency woke again'; }
+  [ ! -s "$out" ] || { reap "$pid"; fail 'unchanged integration dependency printed a repeat wake'; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail 'unchanged integration dependency queued a repeat wake'; }
+  reap "$pid"
+  pass 'integration dependency gets its first alert and recheck, then remains quiet through pane churn'
+}
+
 # The load-bearing direction. A genuinely wedged LIVE agent must escalate exactly
 # as it did before, and so must every verdict short of proof: an unattributable
 # foreground process (`ambiguous`) and an unreadable endpoint keep the identical
@@ -6698,6 +6776,8 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_completed_dead_pane_churn_reports_once
+test_integration_dependency_pause_rechecks_once_then_quiet
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_own_work_wait_keeps_first_alert_then_long_cadence
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
