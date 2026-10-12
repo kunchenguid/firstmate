@@ -405,6 +405,40 @@ test_sweep_skips_mate_whose_liveness_lock_is_held() {
   pass "sweep: a mate mid-episode under the shared liveness lock is skipped entirely"
 }
 
+test_sweep_leaves_mate_to_sibling_spawn_in_progress() {
+  local w fb tmuxfb log out holder i=0
+  w=$(new_world sweep-spawn-held)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # A manual relaunch holds the per-task spawn lock while the endpoint still
+  # reads dead; the sweep must report that spawn in progress, not race it into
+  # a lock refusal it would report as a relaunch failure.
+  ( STATE="$w/home/state" bash -c \
+      '. "$1" && fm_lock_acquire_wait "$2" && sleep 30' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$w/home/state/.spawn-sm1.lock" ) &
+  holder=$!
+  while [ ! -s "$w/home/state/.spawn-sm1.lock/pid" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$w/home/state/.spawn-sm1.lock/pid" ] || fail "the fixture never acquired the spawn lock"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: a spawn of sm1 is already in progress" \
+    "a mate a sibling spawn is relaunching should be reported in progress"
+  assert_not_contains "$out" "respawn failed" \
+    "lock contention with a sibling spawn must not be reported as a relaunch failure"
+  if grep -E 'kill-window|new-window' "$log" >/dev/null 2>&1; then
+    fail "a mate under a sibling spawn must never be killed or respawned: $(cat "$log")"
+  fi
+  pass "sweep: a mate whose sibling spawn is in progress is left to that spawn"
+}
+
 test_sweep_refuses_relaunch_on_ledger_errors() {
   local w fb tmuxfb log out mode ledger word
   if [ "$(id -u)" -eq 0 ]; then
@@ -718,6 +752,7 @@ test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
 test_sweep_skips_mate_whose_liveness_lock_is_held
+test_sweep_leaves_mate_to_sibling_spawn_in_progress
 test_sweep_refuses_relaunch_on_ledger_errors
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route

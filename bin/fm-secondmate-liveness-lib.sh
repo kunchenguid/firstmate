@@ -130,6 +130,21 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 # The caller must hold fm_secondmate_liveness_lock for <id> whenever a
 # relaunchable verdict could be acted on.
 fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
+  local pid
+  fm_sm_live_probe_endpoint "$@"
+  [ "$FM_SM_LIVE_STATUS" = relaunchable ] || return 0
+  # A sibling spawn of this mate (a manual relaunch, say) holds the per-task
+  # spawn lock, and until it finishes the endpoint reads dead or missing. A
+  # second spawn would only lose that lock and report a failure, so the
+  # sibling is left to finish.
+  pid=$(cat "$STATE/.spawn-$2.lock/pid" 2>/dev/null) || return 0
+  fm_sm_live_require_locks || return 0
+  fm_pid_alive "$pid" || return 0
+  FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_KILL=0
+  FM_SM_LIVE_REASON="a spawn of $2 is already in progress (pid $pid); relaunch left to it"
+}
+
+fm_sm_live_probe_endpoint() {  # <meta> <id> <full|poll>
   local meta=$1 id=$2 mode=$3
   FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0
   FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE=''

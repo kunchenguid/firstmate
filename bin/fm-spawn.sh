@@ -533,7 +533,13 @@
 #   identity is owned by the parent home that holds its task metadata, while the
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
-set -eu
+set -eEu
+# An errexit abort prints nothing of its own, so a non-zero exit would carry no
+# error text; name the function, line, and command it stopped on (errtrace, -E,
+# carries this into functions). Where errexit is off, as in a deliberate set +e
+# window or a command substitution, a failure does not exit and is not reported.
+spawn_errexit_rc=0
+trap 'spawn_errexit_rc=$?; case $- in *e*) printf "error: fm-spawn stopped in %s at line %s (exit %s): %s\n" "${FUNCNAME[0]:-main}" "$LINENO" "$spawn_errexit_rc" "${BASH_COMMAND%%$'\''\n'\''*}" >&2 ;; esac' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -1331,6 +1337,8 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  # The script is already exiting, so a failure in here is not a stopped stage.
+  trap - ERR
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&

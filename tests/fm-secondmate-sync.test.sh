@@ -832,6 +832,41 @@ SH
 # and any other plain `git status --porcelain` check counts the untracked marker,
 # so a seeded home reported STUCK/dirty forever. With the marker in .gitignore, a
 # home seeded from a primary that carries the fix reads clean to that exact signal.
+# --- T11b: a stage that stops without its own error text is named -----------
+test_spawn_names_stage_of_silent_failure() {
+  local w c1 fakebin err rc=0
+  w=$(new_world spawn-silent)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'sm\n' > "$w/sm/.fm-secondmate-home"
+  mkdir -p "$w/sm/data"
+  printf 'charter\n' > "$w/sm/data/charter.md"
+
+  fakebin="$w/fakebin"
+  err="$w/spawn.err"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/tmux"
+  # A helper that fails without printing anything, as a silent stage does.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/basename"
+  chmod +x "$fakebin/tmux" "$fakebin/basename"
+
+  PATH="$fakebin:$BASE_PATH" TMUX='' \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "a spawn whose helper failed still exited 0"
+  assert_contains "$(cat "$err")" "error: fm-spawn stopped in main at line" \
+    "a non-zero spawn exit must carry error text naming where it stopped"
+  assert_contains "$(cat "$err")" "basename" \
+    "the stopped stage must name the command that failed"
+  [ "$(grep -c 'fm-spawn stopped' "$err")" -eq 1 ] ||
+    fail "one silent failure must be reported exactly once: $(cat "$err")"
+  pass "T11b spawn names the stage of a failure that printed nothing"
+}
+
 test_seed_marker_clean_when_gitignored() {
   local w base
   w=$(new_world marker-clean)
@@ -1360,6 +1395,7 @@ test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
+test_spawn_names_stage_of_silent_failure
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
