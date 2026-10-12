@@ -954,7 +954,8 @@ _fm_recovery_marker_arm_check() {
 }
 
 # Apply the owner-documented announced-episode arm transition atomically with
-# the queue read. Handling successors must not call this transition.
+# the queue read. Handling successors and foreground checkpoints must not call
+# this transition.
 _fm_recovery_marker_reopen_announced() {
   local marker=$1 lock
   lock="${marker}.lock"
