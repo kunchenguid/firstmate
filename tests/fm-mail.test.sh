@@ -2737,7 +2737,7 @@ test_poll_sender_allow_wakes_only_matching_senders() {
 }
 
 test_poll_held_prefix_progresses_and_recovers() {
-  local home out rc cap window u tail wakeq round
+  local home out rc cap window u tail wakeq
   for cap in 20 1; do
     home=$(allow_fixture "held-prefix-$cap")
     window=$((cap * 4))
@@ -2756,7 +2756,7 @@ test_poll_held_prefix_progresses_and_recovers() {
       grep -qx "$u" "$home/state/.mail-seen" || fail "held uid $u enters progress state"
       grep -qx "$u" "$home/state/.mail-retry" || fail "held uid $u remains retryable"
     done
-    for round in 1 2; do
+    for _ in 1 2; do
       rc=0
       out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=@example.com FM_MAIL_POLL_MAX_WAKES="$cap" 2>&1) || rc=$?
       expect_code 0 "$rc" "later polls succeed despite persistent failures"
@@ -2764,7 +2764,7 @@ test_poll_held_prefix_progresses_and_recovers() {
     assert_grep "mail:90009/$tail" "$home/state/.wake-queue" "later allowed mail wakes past the held prefix"
     printf '1|From: blocked@evil.test\\r\\nSubject: hidden\\r\\n\\r\\n\n' > "$home/mailbox"
     printf '%s|From: recovered@example.com\\r\\nSubject: recovered\\r\\n\\r\\n\n' "$window" >> "$home/mailbox"
-    for round in 1 2 3; do
+    for _ in 1 2 3; do
       rc=0
       out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=@example.com FM_MAIL_POLL_MAX_WAKES="$cap" 2>&1) || rc=$?
       expect_code 0 "$rc" "held retries recover through the rotating scan"
