@@ -65,11 +65,12 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 # --- scratch world: a primary-shaped home, a secondmate-shaped home, two projects ---
 
-# This test asserts the per-home FLAT workspace shape, so both homes opt out of
-# the default-on presentation projection rather than depending on that default.
+# This test asserts distinct worker and secondmate workspace shapes.
+# Both homes explicitly enable dedicated worker placement so the fixture remains
+# valid below the default-on presentation safety floor.
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
-printf 'off\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"
+printf 'on\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"
 cat > "$PRIMARY_HOME/data/cm1/brief.md" <<'EOF'
 # Task
 ## Captain's intent
@@ -81,7 +82,7 @@ EOF
 
 SM_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin"
-printf 'off\n' > "$SM_HOME/config/herdr-presentation-spaces"
+printf 'on\n' > "$SM_HOME/config/herdr-presentation-spaces"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM_HOME/AGENTS.md"
 printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
@@ -188,7 +189,11 @@ assert_contains_local "$CM2_CAPTURE" "sm-crew-ok" "cm2's raw launch command did 
 
 CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ "$CM2_WSID" != "$SM_WSID" ] || fail "a crewmate must never share its secondmate's workspace"
-[ "$(herdr workspace list --session "$SESSION" | jq -r --arg ws "$CM2_WSID" '.result.workspaces[] | select(.workspace_id==$ws) | .label')" = fm-cm2 ] || fail "secondmate worker lacks its own task label"
+CM2_WS_LABEL=$(herdr workspace list --session "$SESSION" | jq -r --arg ws "$CM2_WSID" '.result.workspaces[] | select(.workspace_id==$ws) | .label')
+case "$CM2_WS_LABEL" in
+  fm-cm2|"└ cm2 · p:"*) : ;;
+  *) fail "secondmate worker lacks its own task label: '$CM2_WS_LABEL'" ;;
+esac
 [ "$CM2_WSID" != "$CM1_WSID" ] || fail "a crewmate spawned FROM the secondmate home must NOT land in the primary's workspace"
 pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in its own task-labelled workspace, separate from the secondmate"
 

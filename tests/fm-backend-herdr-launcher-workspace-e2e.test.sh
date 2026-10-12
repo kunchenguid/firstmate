@@ -74,6 +74,9 @@ export PATH="$TMP_ROOT/bin:$PATH"
 export HERDR_SESSION="$HERDR_LAB_SESSION"
 export FM_HOME="$TMP_ROOT/home"
 printf 'frontdesk\n' > "$FM_HOME/.fm-secondmate-home"
+# This test drives successful dedicated worker placement on every supported
+# real-Herdr release, including releases below the default-on safety floor.
+printf 'on\n' > "$FM_HOME/config/herdr-presentation-spaces"
 
 PROJ="$TMP_ROOT/project"
 mkdir -p "$PROJ"
@@ -178,12 +181,14 @@ assert_worker fm-prefixed
 [ "$(field fm-prefixed window)" = "$prefixed_endpoint" ] || fail 'prefixed projected relaunch relocated the worker'
 pass 'real Herdr: a task ID already prefixed fm- preserves its concise projected title and endpoint on relaunch'
 
-printf 'off\n' > "$FM_HOME/config/herdr-presentation-spaces"
 make_task ungrouped
-spawn_task ungrouped || fail "opt-out spawn failed: $(cat "$TMP_ROOT/ungrouped.err")"
+spawn_task ungrouped || fail "dedicated worker spawn failed: $(cat "$TMP_ROOT/ungrouped.err")"
 assert_worker ungrouped
-[ "$(label_of "$(field ungrouped herdr_workspace_id)")" = fm-ungrouped ] || fail 'ungrouped worker has a parent title'
-pass 'real Herdr: presentation opt-out still gives the worker its own task-labelled workspace'
+case "$(label_of "$(field ungrouped herdr_workspace_id)")" in
+  fm-ungrouped|"└ ungrouped · p:"*) : ;;
+  *) fail 'ungrouped worker has a parent title' ;;
+esac
+pass 'real Herdr: every worker gets its own task-labelled workspace'
 
 # Drive one launch from the real parent pane, using Herdr's own injected
 # identity rather than only the API-derived identity of this driver.
@@ -259,7 +264,7 @@ pass 'real Herdr: a legacy shared endpoint refuses relaunch without moving or cl
 
 # Cold external primary has no launcher and no existing home workspace.
 unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH
-rm "$FM_HOME/.fm-secondmate-home" "$FM_HOME/config/herdr-presentation-spaces"
+rm "$FM_HOME/.fm-secondmate-home"
 make_task external
 spawn_task external || fail "external-primary spawn failed: $(cat "$TMP_ROOT/external.err")"
 assert_worker external
@@ -270,6 +275,7 @@ SM_HOME="$TMP_ROOT/secondmate-home"
 git clone -q "$PROJ" "$SM_HOME"
 printf 'nested\n' > "$SM_HOME/.fm-secondmate-home"
 mkdir -p "$SM_HOME/data" "$SM_HOME/state" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin" "$FM_HOME/data/nested"
+printf 'on\n' > "$SM_HOME/config/herdr-presentation-spaces"
 printf 'Isolated charter.\n' > "$SM_HOME/data/charter.md"
 printf 'Isolated secondmate instructions.\n' > "$SM_HOME/AGENTS.md"
 printf 'Isolated launch brief.\n' > "$FM_HOME/data/nested/brief.md"
