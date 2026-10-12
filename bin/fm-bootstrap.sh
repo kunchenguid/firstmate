@@ -716,6 +716,7 @@ secondmate_liveness_sweep() {
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
+    ! grep -q '^parked=1$' "$meta" 2>/dev/null || continue
     # Identity for the timing record is read here, in the loop, so the per-meta
     # body below keeps its single-exit-per-outcome shape.
     id=$(basename "$meta" .meta)

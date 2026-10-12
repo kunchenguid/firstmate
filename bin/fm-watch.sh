@@ -818,6 +818,7 @@ recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
+    [ "$(fm_meta_get "$meta" parked)" != 1 ] || continue
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] || continue
     case "$seen" in
@@ -960,6 +961,7 @@ secondmate_wake_stall_tick() {
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] || continue
+    [ "$(fm_meta_get "$meta" parked)" != 1 ] || continue
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -z "$remote_host" ] || continue
     task=${meta##*/}
@@ -1073,6 +1075,7 @@ secondmate_liveness_tick() {
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
     [ "$kind" = secondmate ] || continue
+    [ "$(fm_meta_get "$meta" parked)" != 1 ] || continue
     id=${meta##*/}
     id=${id%.meta}
     case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac

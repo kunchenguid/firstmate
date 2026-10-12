@@ -232,6 +232,11 @@ if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
 fi
 
+if [ "$(meta_value parked)" = 1 ]; then
+  PARKED_NOTE=$(meta_value parked_note)
+  emit parked none "seat parked with unlanded work${PARKED_NOTE:+ · $PARKED_NOTE}"
+fi
+
 # --- status log ------------------------------------------------------------
 
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is

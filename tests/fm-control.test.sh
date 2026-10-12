@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SEND="$ROOT/bin/fm-send.sh"
@@ -1172,6 +1174,49 @@ EOF
   pass "fm-control-lib: only a runtime's own recorded session has a relaunch resume form"
 }
 
+test_park_and_unpark() {
+  local dir out rc meta w_key
+  dir=$(new_case park)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  meta="$dir/home/state/t1.meta"
+  w_key="fmses_fm-t1"
+
+  # Stage stale and pause markers
+  touch "$dir/home/state/.stale-$w_key" "$dir/home/state/.stale-since-$w_key" "$dir/home/state/.paused-$w_key"
+
+  # Park with note
+  out=$(run_control "$dir" t1 park --note "waiting for upstream review"); rc=$?
+  expect_code 0 "$rc" "parking a running agent should succeed"
+  assert_contains "$out" "parked t1 exit_result=stopped" "park should report stopped"
+  assert_contains "$out" "note=\"waiting for upstream review\"" "park should echo note"
+
+  # Verify meta updated
+  [ "$(fm_meta_get "$meta" parked)" = 1 ] || fail "meta should have parked=1"
+  [ "$(fm_meta_get "$meta" parked_note)" = "waiting for upstream review" ] || fail "meta should have parked_note"
+  [ -n "$(fm_meta_get "$meta" parked_at)" ] || fail "meta should have parked_at"
+
+  # Verify markers cleared
+  [ ! -e "$dir/home/state/.stale-$w_key" ] || fail "stale marker should be cleared"
+  [ ! -e "$dir/home/state/.stale-since-$w_key" ] || fail "stale-since marker should be cleared"
+  [ ! -e "$dir/home/state/.paused-$w_key" ] || fail "paused marker should be cleared"
+
+  # Park again while already stopped (idempotent)
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 park); rc=$?
+  expect_code 0 "$rc" "parking an already-stopped agent should succeed"
+  assert_contains "$out" "parked t1 exit_result=already-stopped" "park should report already-stopped"
+
+  # Unpark
+  out=$(run_control "$dir" t1 unpark); rc=$?
+  expect_code 0 "$rc" "unparking should succeed"
+  assert_contains "$out" "unparked t1" "unpark should report unparked"
+  [ -z "$(fm_meta_get "$meta" parked)" ] || fail "meta should not have parked after unpark"
+  [ -z "$(fm_meta_get "$meta" parked_note)" ] || fail "meta should not have parked_note after unpark"
+
+  pass "fm-control: park and unpark manage metadata and markers correctly"
+}
+
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
@@ -1217,3 +1262,4 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+test_park_and_unpark

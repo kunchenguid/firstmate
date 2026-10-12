@@ -1171,6 +1171,21 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+test_spawn_relaunch_clears_the_parked_record() {
+  local dir out
+  dir=$(new_case spawnparked rl43)
+  add_ship_task "$dir" rl43 claude
+  printf 'parked=1\nparked_at=2026-01-01T00:00:00Z\nparked_note=held\n' >> "$dir/home/state/rl43.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl43 --relaunch)
+  assert_contains "$out" "spawned rl43" "the relaunch should complete"
+  [ -z "$(meta_field "$dir" rl43 parked)" ] || fail "a fresh launch must clear parked"
+  [ -z "$(meta_field "$dir" rl43 parked_at)" ] || fail "a fresh launch must clear parked_at"
+  [ -z "$(meta_field "$dir" rl43 parked_note)" ] || fail "a fresh launch must clear parked_note"
+  [ "$(meta_field "$dir" rl43 window)" = "fmses:fm-rl43" ] || fail "the endpoint must survive the relaunch"
+  pass "fm-spawn --relaunch: relaunching a parked seat clears the parked record"
+}
+
 # A promoted scout records kind=ship and a custom ship branch in its meta, but
 # its brief is the scout scaffold: it never gained a Ship branch line, and a
 # relaunch cannot regenerate the brief (--branch-prefix is refused there). The
@@ -2563,6 +2578,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
+test_spawn_relaunch_clears_the_parked_record
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch

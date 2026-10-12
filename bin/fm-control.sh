@@ -7,6 +7,8 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> park [--note <text> | --note-file <path>]
+#        fm-control.sh <task-id> unpark
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -89,6 +91,11 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#   park       Stop the agent if running, set parked=1 in the task metadata,
+#              and clear stale markers so watcher probing is suppressed while
+#              preserving the endpoint record, worktree, and unlanded commits.
+#   unpark     Clear parked=1 in the task metadata so normal watcher probing
+#              resumes on later dispatch.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -292,8 +299,11 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] \
+    || die "--harness, --model, and --effort apply to 'relaunch' only"
+  if [ "$VERB" != park ]; then
+    [ "$NOTE_SET" = 0 ] || die "--note and --note-file apply to 'relaunch' and 'park' only"
+  fi
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -1153,6 +1163,76 @@ do_relaunch() {
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
+# --- park / unpark ----------------------------------------------------------
+
+update_meta_parked() {  # <0|1> [note]
+  local parked=$1 note=${2:-} lock tmp line now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  note=$(printf '%s' "$note" | tr '\n\r' '  ' | sed 's/  */ /g; s/^ //; s/ $//')
+  if ! declare -F fm_backlog_atomic_transition >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+  fi
+  lock=$(fm_meta_lock_path "$META") || die "could not resolve metadata lock for $ID"
+  fm_lock_acquire_wait "$lock"
+  tmp=$(mktemp "$STATE/.$ID.meta.park.XXXXXX") || {
+    fm_lock_release "$lock"
+    die "could not create temporary metadata file for $ID"
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      parked=*|parked_at=*|parked_note=*) ;;
+      *)
+        printf '%s\n' "$line" >> "$tmp" || {
+          rm -f "$tmp"
+          fm_lock_release "$lock"
+          die "could not write to temporary metadata file for $ID"
+        }
+        ;;
+    esac
+  done < "$META" || {
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    die "could not read metadata file for $ID"
+  }
+  if [ "$parked" = 1 ]; then
+    printf 'parked=1\nparked_at=%s\n' "$now" >> "$tmp" || {
+      rm -f "$tmp"
+      fm_lock_release "$lock"
+      die "could not append parked fields to $tmp"
+    }
+    if [ -n "$note" ]; then
+      printf 'parked_note=%s\n' "$note" >> "$tmp" || {
+        rm -f "$tmp"
+        fm_lock_release "$lock"
+        die "could not append parked_note to $tmp"
+      }
+    fi
+  fi
+  if ! fm_backlog_atomic_transition publish "$tmp" "$META" "task record" "$STATE"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    die "could not atomically update metadata for $ID"
+  fi
+  fm_lock_release "$lock"
+}
+
+clear_parked_markers() {
+  local w_key task_key
+  w_key=${T//:/_}; w_key=${w_key//\//_}; w_key=${w_key//./_}
+  task_key=${ID//:/_}; task_key=${task_key//\//_}; task_key=${task_key//./_}
+  rm -f "$STATE/.stale-$w_key" "$STATE/.stale-since-$w_key" \
+    "$STATE/.hash-$w_key" "$STATE/.count-$w_key" \
+    "$STATE/.wedge-escalations-$w_key" "$STATE/.paused-$w_key" \
+    "$STATE/.paused-resurfaced-$w_key" "$STATE/.paused-rechecked-$w_key" \
+    "$STATE/.writing-since-$w_key" "$STATE/.writing-resurfaced-$w_key" \
+    "$STATE/.waiting-resurfaced-$w_key" \
+    "$STATE/.subsuper-paused-$task_key" "$STATE/.subsuper-pause-until-due-$task_key" \
+    "$STATE/.subsuper-stale-$task_key"
+}
+
 # --- verbs ------------------------------------------------------------------
 
 case "$VERB" in
@@ -1178,5 +1258,19 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ;;
+  park)
+    result=$(do_exit)
+    update_meta_parked 1 "$NOTE"
+    clear_parked_markers
+    if [ -n "$NOTE" ]; then
+      echo "parked $ID exit_result=$result harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT note=\"$NOTE\""
+    else
+      echo "parked $ID exit_result=$result harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    fi
+    ;;
+  unpark)
+    update_meta_parked 0
+    echo "unparked $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
 esac

@@ -1036,6 +1036,20 @@ test_genuine_parked_not_superseded() {
   pass "genuine parked run is not flagged superseded"
 }
 
+test_parked_seat_in_metadata() {
+  reset_fakes
+  local d; d=$(new_case parked-seat)
+  make_repo_on_branch "$d/wt" fm/feat-p
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p.meta" "window=fm:fm-feat-p" "worktree=$d/wt" "kind=ship" "parked=1" "parked_note=waiting for dispatch"
+  local out; out=$(run_crew_state "$d" feat-p)
+  assert_contains "$out" "state: parked" "parked seat -> state: parked"
+  assert_contains "$out" "source: none" "parked seat -> source: none"
+  assert_contains "$out" "seat parked with unlanded work" "parked seat detail"
+  assert_contains "$out" "waiting for dispatch" "parked seat includes note"
+  pass "parked seat in metadata reports state: parked · source: none"
+}
+
 # Which HUMAN owes a parked gate its answer is the distinction the watcher's
 # wedge deferral rests on, so the component that carries it must come from the
 # findings table's `action` column and from nothing else. Both directions, plus
@@ -5740,5 +5754,6 @@ test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
+test_parked_seat_in_metadata
 
 echo "all fm-crew-state tests passed"
