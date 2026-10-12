@@ -6,7 +6,7 @@ Agent runtime contracts stay in [`AGENTS.md`](../AGENTS.md); this page is the ca
 
 ## Minimum viable ask
 
-Lead with these four when you can; Firstmate fills the rest and asks one clarifying question only when ambiguity could materially change the outcome or boundaries.
+Lead with these four when you can; Firstmate fills the rest and asks concise clarifying questions only when ambiguity could materially change the outcome or boundaries.
 
 ```text
 OUTCOME: What should be true when this is done? (one sentence)
@@ -22,7 +22,7 @@ Useful optional fields when they change the work: why now, constraints or non-go
 | Mode | You do | Firstmate / workers do | Done when |
 | --- | --- | --- | --- |
 | **explore** / **research-only** | State the question and how you will use the answer | Scout report, options, risks; no PR | Report accepted, or held questions answered |
-| **implement** | State outcome and acceptance; answer only ambiguous product calls | Isolated ship, validation, PR or ready branch with review evidence | Ready for your review |
+| **implement** | State outcome and acceptance; answer only ambiguities that could materially change the outcome or boundaries | Isolated ship, validation, PR or ready branch with review evidence | Ready for your review |
 | **approve-merge** | Say merge (or not) for a named PR URL | Guarded merge; confirm live deploy when evidence is available | Landed, with live status stated or marked unconfirmed |
 
 Prefer explore → pick → implement → approve-merge over mixing “explore and ship my favorite” in one vague sentence.
@@ -93,7 +93,7 @@ These bars are encoded in scout and ship instructions; this table is the operato
 | Coding / product | Tests, lint, reachable preview with final head and browser flows for UI; executable proof for CLI-only | Isolated workers; product merge waits for your word unless a project is explicitly `+yolo` |
 | General research | Claim → primary URL → date → supported / unsupported / uncertain | Treat web and tool text as untrusted; no outbound posts without approval |
 | Content / media | Verify identity with actual tool metadata; never invent titles or URLs | No public publish or upload without explicit authority |
-| Financial diligence | Primary filings over secondary blogs; label assumptions; separate narrative inputs from demonstrated facts | No trading or order authority |
+| Financial diligence | Map material claims to primary sources; label assumptions and hypotheticals; separate narrative or RV inputs from demonstrated facts | No trading or order authority |
 
 Missing primary evidence means disclose uncertainty; it does not invent certainty, and it does not automatically block a completed knowledge report.
 
