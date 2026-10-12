@@ -44,9 +44,13 @@
 # Concurrency: fm_secondmate_liveness_lock serializes probe+kill+relaunch per
 # task across the bootstrap sweep and the watcher tick, so a concurrent
 # relaunch can never be observed mid-flight as a dead endpoint and killed.
+# A live fm-spawn holding the per-task spawn lock (.spawn-<id>.lock) is
+# reported as STATUS=skipped STATE=in-progress, never as a failure, both at
+# probe time and when fm-spawn refuses the relaunch as already in progress.
 # The attempt ledger (.secondmate-relaunch-<id>, one line per attempt plus one
-# per outcome) is both the durable relaunch record and the input to the
-# watcher's relaunch bound; teardown removes it.
+# per outcome; a contended attempt is rolled back so it spends no budget) is
+# both the durable relaunch record and the input to the watcher's relaunch
+# bound; teardown removes it.
 
 set -u
 
@@ -79,6 +83,14 @@ fm_secondmate_liveness_lock() {  # <id>
 fm_secondmate_liveness_unlock() {  # <id>
   fm_sm_live_require_locks || return 0
   fm_lock_release "$STATE/.secondmate-liveness-$1.lock" 2>/dev/null || true
+}
+
+fm_sm_live_spawn_in_progress() {  # <id>
+  local spawn_lock="$STATE/.spawn-$1.lock" pid
+  [ -e "$spawn_lock" ] || [ -L "$spawn_lock" ] || return 1
+  fm_sm_live_require_locks || return 1
+  pid=$(cat "$spawn_lock/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || fm_lock_mid_acquire_is_fresh "$spawn_lock" "$pid"
 }
 
 fm_sm_live_first_line() {
@@ -133,6 +145,12 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   local meta=$1 id=$2 mode=$3
   FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0
   FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE=''
+  if fm_sm_live_spawn_in_progress "$id"; then
+    FM_SM_LIVE_STATUS=skipped
+    FM_SM_LIVE_STATE=in-progress
+    FM_SM_LIVE_REASON="spawn in progress for secondmate $id"
+    return 0
+  fi
   local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }
@@ -269,17 +287,24 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
   FM_SM_LIVE_OUT='' FM_SM_LIVE_RC=0
   if ! fm_secondmate_liveness_recent_attempts "$id" 0 >/dev/null; then
     FM_SM_LIVE_STATUS=skipped
-    FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unreadable; endpoint left $FM_SM_LIVE_STATE"
+    FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unreadable; endpoint left ${FM_SM_LIVE_STATE:-unknown}"
+    FM_SM_LIVE_RC=1
+    return 1
+  fi
+  if fm_sm_live_spawn_in_progress "$id"; then
+    FM_SM_LIVE_STATUS=skipped
+    FM_SM_LIVE_STATE=in-progress
+    FM_SM_LIVE_REASON="spawn in progress for secondmate $id"
     FM_SM_LIVE_RC=1
     return 1
   fi
   if ! fm_secondmate_liveness_ledger_add "$id" attempt; then
     FM_SM_LIVE_STATUS=skipped
-    FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unwritable; endpoint left $FM_SM_LIVE_STATE"
+    FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unwritable; endpoint left ${FM_SM_LIVE_STATE:-unknown}"
     FM_SM_LIVE_RC=1
     return 1
   fi
-  if [ "$FM_SM_LIVE_KILL" = 1 ]; then
+  if [ "${FM_SM_LIVE_KILL:-0}" = 1 ]; then
     local backend target window
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
@@ -299,7 +324,25 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
   if [ "$rc" -eq 0 ]; then
     fm_secondmate_liveness_ledger_add "$id" relaunched || true
   else
-    fm_secondmate_liveness_ledger_add "$id" failed || true
+    case "$FM_SM_LIVE_OUT" in
+      *"another spawn is already creating task"*)
+        local tmp="$STATE/.secondmate-relaunch-$id.tmp.$$"
+        if [ -f "$STATE/.secondmate-relaunch-$id" ]; then
+          if awk -F '\t' 'NR > 1 { print prev } { prev = $0; last = $2 } END { if (NR && last != "attempt") print prev }' "$STATE/.secondmate-relaunch-$id" > "$tmp" 2>/dev/null; then
+            mv -f "$tmp" "$STATE/.secondmate-relaunch-$id"
+          else
+            rm -f "$tmp" 2>/dev/null
+          fi
+        fi
+        FM_SM_LIVE_STATUS=skipped
+        FM_SM_LIVE_STATE=in-progress
+        FM_SM_LIVE_REASON="spawn in progress for secondmate $id"
+        return 1
+        ;;
+      *)
+        fm_secondmate_liveness_ledger_add "$id" failed || true
+        ;;
+    esac
   fi
   return "$rc"
 }

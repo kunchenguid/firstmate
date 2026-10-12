@@ -579,12 +579,12 @@ resolve_directory_input() {
   printf '%s\n' "$resolved"
 }
 
-FM_HOME=$(resolve_directory_input FM_HOME "$FM_HOME") || exit 1
+FM_HOME=$(resolve_directory_input FM_HOME "$FM_HOME") || { echo "error: failed to resolve FM_HOME directory" >&2; exit 1; }
 if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
-  FM_STATE_OVERRIDE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
+  FM_STATE_OVERRIDE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || { echo "error: failed to resolve FM_STATE_OVERRIDE directory" >&2; exit 1; }
 fi
 if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
-  FM_DATA_OVERRIDE=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
+  FM_DATA_OVERRIDE=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || { echo "error: failed to resolve FM_DATA_OVERRIDE directory" >&2; exit 1; }
 fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -595,6 +595,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
 if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
+  echo "error: failed to inspect config/launch-env-allowlist" >&2
   exit 1
 fi
 LAUNCH_ENV_NAMES=
@@ -616,6 +617,7 @@ fi
 # relaunch, before any mutation, so a malformed file refuses instead of
 # launching a worker on a permission posture the captain did not choose.
 if ! CLAUDE_PERM_PRESENT=$(fm_config_source_present "$CONFIG/claude-permission-mode"); then
+  echo "error: failed to inspect config/claude-permission-mode" >&2
   exit 1
 fi
 CLAUDE_PERMISSION_MODE=bypass
@@ -641,6 +643,7 @@ esac
 # shared Lavish server. Read it once per launch and refuse malformed values so
 # every worker reaches the same server instead of starting a second one.
 if ! LAVISH_AXI_HOST_CONFIG_PRESENT=$(fm_config_source_present "$CONFIG/lavish-axi-host"); then
+  echo "error: failed to inspect config/lavish-axi-host" >&2
   exit 1
 fi
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
@@ -648,7 +651,7 @@ if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
     echo "error: config/lavish-axi-host must be a readable regular file" >&2
     exit 1
   fi
-  LAVISH_AXI_HOST=$(cat "$CONFIG/lavish-axi-host") || exit 1
+  LAVISH_AXI_HOST=$(cat "$CONFIG/lavish-axi-host") || { echo "error: failed to read config/lavish-axi-host" >&2; exit 1; }
   case "$LAVISH_AXI_HOST" in
     ''|*[[:space:][:cntrl:]]*)
       echo "error: config/lavish-axi-host must contain one non-empty address without whitespace" >&2
@@ -657,6 +660,7 @@ if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   esac
 fi
 if ! KEEP_AI_TRAILERS=$(fm_config_source_present "$CONFIG/keep-ai-trailers"); then
+  echo "error: failed to inspect config/keep-ai-trailers" >&2
   exit 1
 fi
 SUB_HOME_MARKER=".fm-secondmate-home"
@@ -1763,8 +1767,8 @@ if [ "$RELAUNCH" -eq 0 ]; then
   else
     BACKEND=$(fm_backend_name)
   fi
-  fm_backend_validate_spawn "$BACKEND" || exit 1
-  fm_backend_source "$BACKEND" || exit 1
+  fm_backend_validate_spawn "$BACKEND" || { echo "error: backend validate failed for $BACKEND" >&2; exit 1; }
+  fm_backend_source "$BACKEND" || { echo "error: backend source failed for $BACKEND" >&2; exit 1; }
   if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=orca does not support --secondmate spawns yet" >&2
     exit 1
@@ -1774,7 +1778,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   if [ "$BACKEND" = orca ]; then
-    fm_backend_orca_runtime_check || exit 1
+    fm_backend_orca_runtime_check || { echo "error: orca runtime check failed" >&2; exit 1; }
   fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
@@ -1811,18 +1815,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
     exit 1
   }
-  SPAWN_META_LOCK=$(fm_meta_lock_path "$RELAUNCH_META") || exit 1
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$RELAUNCH_META") || { echo "error: metadata lock path resolution failed for $RELAUNCH_META" >&2; exit 1; }
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
   fm_backlog_record_present "$RELAUNCH_META" "task record" "$STATE" || {
     echo "error: --relaunch refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
     exit 1
   }
-  fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
+  fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || { echo "error: task endpoint validation failed for $ID" >&2; exit 1; }
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
-  fm_backend_validate_spawn "$BACKEND" || exit 1
-  fm_backend_source "$BACKEND" || exit 1
+  fm_backend_validate_spawn "$BACKEND" || { echo "error: backend validate failed for $BACKEND" >&2; exit 1; }
+  fm_backend_source "$BACKEND" || { echo "error: backend source failed for $BACKEND" >&2; exit 1; }
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only tmux and herdr have a recovery-grade
   # classifier that can (bin/fm-control-lib.sh owns that capability table).
@@ -2413,7 +2417,7 @@ fi
 # if this launch cannot honor the list. Secondmate agents are not covered.
 EXCLUDE_TOOLS=
 if [ "$KIND" != secondmate ]; then
-  EXCLUDE_TOOLS=$(fm_exclude_tools_check "$HARNESS" "$RAW_LAUNCH" "$CONFIG") || exit 1
+  EXCLUDE_TOOLS=$(fm_exclude_tools_check "$HARNESS" "$RAW_LAUNCH" "$CONFIG") || { echo "error: exclude-tools check failed for $HARNESS" >&2; exit 1; }
 fi
 
 case "$HARNESS" in
@@ -2453,7 +2457,7 @@ cursor)
   # verified owner rather than a bare command lookup. Refusing here keeps a
   # missing install a loud spawn refusal instead of a pane that dies with a
   # command-not-found the supervisor would read as a wedged worker.
-  CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
+  CURSOR_BIN=$(fm_cursor_resolve_binary) || { echo "error: cursor binary resolution failed" >&2; exit 1; }
   if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
     if CURSOR_MODELS=$(fm_cursor_list_models "$CURSOR_BIN"); then
       if ! printf '%s\n' "$CURSOR_MODELS" | fm_cursor_catalog_has_model "$MODEL"; then
@@ -2506,17 +2510,17 @@ fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then
-  "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
+  "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || { echo "error: native effort validation failed for $HARNESS" >&2; exit 1; }
   [ "$RAW_LAUNCH" = 0 ] || {
     echo "error: --effort ultra requires the canonical --harness pi or pi-signed launch so its native flag cannot be omitted" >&2
     exit 1
   }
 fi
 if [ "$HARNESS" = omp ]; then
-  omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
+  omp_model_validate "$OMP_BIN" "$MODEL" || { echo "error: omp model validation failed for $MODEL" >&2; exit 1; }
 fi
 if [ "$HARNESS" = agy ]; then
-  agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+  agy_model_validate "$AGY_BIN" "$MODEL" || { echo "error: agy model validation failed for $MODEL" >&2; exit 1; }
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
@@ -2524,7 +2528,7 @@ fi
 # trust registration below writes the store the worker will actually read.
 RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
-WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND") || exit 1
+WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND") || { echo "error: worker account selection failed for $HARNESS" >&2; exit 1; }
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
@@ -2818,9 +2822,9 @@ effort_flag_for_harness() {
 
 case "$LAUNCH" in
 *__MUSEBIN__*)
-  MUSE_BIN=$(resolve_muse_binary) || exit 1
-  MUSE_CONFIG_HOME=$(resolve_directory_input XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-${HOME:-}/.config}") || exit 1
-  MUSE_DATA_HOME=$(resolve_directory_input XDG_DATA_HOME "${XDG_DATA_HOME:-${HOME:-}/.local/share}") || exit 1
+  MUSE_BIN=$(resolve_muse_binary) || { echo "error: muse binary resolution failed" >&2; exit 1; }
+  MUSE_CONFIG_HOME=$(resolve_directory_input XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-${HOME:-}/.config}") || { echo "error: muse config home resolution failed" >&2; exit 1; }
+  MUSE_DATA_HOME=$(resolve_directory_input XDG_DATA_HOME "${XDG_DATA_HOME:-${HOME:-}/.local/share}") || { echo "error: muse data home resolution failed" >&2; exit 1; }
   MUSE_AUTH_FILE="$MUSE_CONFIG_HOME/muse/auth.json"
   if ! muse_credential_present "$MUSE_AUTH_FILE"; then
     if [ -n "${META_API_KEY:-}" ]; then
@@ -2838,7 +2842,7 @@ esac
 
 case "$LAUNCH" in
 *__KIMIBIN__*)
-  KIMI_BIN=$(resolve_kimi_binary) || exit 1
+  KIMI_BIN=$(resolve_kimi_binary) || { echo "error: kimi binary resolution failed" >&2; exit 1; }
   LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
   fm_backend_visible_capture_supported "$BACKEND" || {
     echo "error: refusing Kimi spawn because backend '$BACKEND' has no verified viewport-bounded capture; Kimi 2.0.0 gates a fresh worktree on a trust dialog that can only be answered and confirmed cleared from a scrollback-free read of the live pane" >&2
@@ -2855,7 +2859,7 @@ esac
 
 case "$LAUNCH" in
 *__ROVOBIN__*)
-  ROVO_BIN=$(resolve_rovo_binary) || exit 1
+  ROVO_BIN=$(resolve_rovo_binary) || { echo "error: rovo binary resolution failed" >&2; exit 1; }
   LAUNCH=${LAUNCH//__ROVOBIN__/$(shell_quote "$ROVO_BIN")}
   ;;
 esac
@@ -3222,8 +3226,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       echo "error: --base-branch requires a branch name" >&2
       exit 1
     }
-    BASE_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$(basename "$PROJ_ABS")") || exit 1
-    fm_base_branch_valid "$BASE_BRANCH" "$MODE" "${BASE_FORGE:-none}" "fm-spawn.sh --base-branch" || exit 1
+    BASE_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$(basename "$PROJ_ABS")") || { echo "error: project forge resolution failed for $(basename "$PROJ_ABS")" >&2; exit 1; }
+    fm_base_branch_valid "$BASE_BRANCH" "$MODE" "${BASE_FORGE:-none}" "fm-spawn.sh --base-branch" || { echo "error: base branch validation failed for $BASE_BRANCH" >&2; exit 1; }
     if ! fm_brief_base_branches "$BRIEF" >/dev/null || fm_brief_base_branches "$BRIEF" | grep -vxF -- "$BASE_BRANCH" >/dev/null; then
       echo "error: $BRIEF must record Base branch: $BASE_BRANCH and no other Base branch line to spawn with --base-branch $BASE_BRANCH; scaffold it with bin/fm-brief.sh --base-branch $BASE_BRANCH" >&2
       exit 1
@@ -3691,7 +3695,7 @@ else
 fi
 
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
-  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || { echo "error: metadata lock path resolution failed for $ID" >&2; exit 1; }
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
@@ -3776,7 +3780,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || { echo "error: herdr task creation failed for $W" >&2; exit 1; }
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -3799,7 +3803,7 @@ else
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || { echo "error: tmux create task failed for $W in session $SES" >&2; exit 1; }
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -3851,10 +3855,10 @@ else
           }
         fi
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
-          herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+          herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || { echo "error: herdr presentation: existing metadata forbids flat layout" >&2; exit 1; }
         fi
         fm_backend_herdr_projection_recovery_allows_flat \
-          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || { echo "error: herdr presentation: recovery forbids flat layout" >&2; exit 1; }
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
@@ -3878,7 +3882,10 @@ else
           2)
             spawn_herdr_presentation_order_lock_release
             ;;
-          *) exit 1 ;;
+          *)
+            echo "error: herdr presentation: unexpected reclaim status $HERDR_RECLAIM_STATUS" >&2
+            exit 1
+            ;;
           esac
         else
           spawn_herdr_presentation_order_lock_release
@@ -3906,6 +3913,7 @@ else
           2) HERDR_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_parent_workspace_exact \
             "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null || true) ;;
           *)
+            echo "error: herdr launcher identity resolution failed with status $HERDR_LAUNCHER_STATUS" >&2
             spawn_herdr_presentation_order_lock_release
             exit 1
             ;;
@@ -3914,7 +3922,7 @@ else
             echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
             spawn_herdr_presentation_order_lock_release
           else
-            HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
+            HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || { echo "error: herdr projection journal create failed for $ID" >&2; exit 1; }
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
@@ -3924,6 +3932,7 @@ else
                 HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
                 HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
               fi
+              echo "error: herdr projection create task failed for $W" >&2
               exit 1
             fi
             HERDR_PROJECTED=1
@@ -3959,7 +3968,7 @@ else
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
-      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
+      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || { echo "error: herdr container ensure failed for $PROJ_ABS" >&2; exit 1; }
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
       # rather than creating a fresh one). Split on the guaranteed single tab
@@ -3970,7 +3979,7 @@ else
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || { echo "error: herdr task creation failed for $W" >&2; exit 1; }
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -3982,8 +3991,8 @@ EOF
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
   zellij)
-    ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || { echo "error: zellij container ensure failed" >&2; exit 1; }
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || { echo "error: zellij task creation failed for $W" >&2; exit 1; }
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -3994,8 +4003,8 @@ EOF
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
   cmux)
-    fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    fm_backend_cmux_container_ensure || { echo "error: cmux container ensure failed" >&2; exit 1; }
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || { echo "error: cmux task creation failed for $W" >&2; exit 1; }
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -4016,6 +4025,7 @@ EOF
           ORCA_ABORT_CLEANUP=1
         fi
       fi
+      echo "error: orca worktree create failed for $W (status $ORCA_WT_STATUS)" >&2
       exit 1
     fi
     parse_orca_worktree_result "$ORCA_WT_RAW" || true
@@ -4026,7 +4036,7 @@ EOF
     fi
     validate_spawn_worktree "orca worktree create" "$W"
     if [ -z "$ORCA_TERMINAL" ]; then
-      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || { echo "error: orca terminal create failed for $W" >&2; exit 1; }
     fi
     T="$ORCA_TERMINAL"
     ;;
@@ -4523,7 +4533,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || { echo "error: sync: freshen worktree base failed for $WT" >&2; exit 1; }
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
@@ -4775,7 +4785,7 @@ BUSY_GEN=
     ;;
   devin)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
-      FM_KEEP_AI_TRAILERS="$KEEP_AI_TRAILERS" "$SCRIPT_DIR/fm-devin-config.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
+      FM_KEEP_AI_TRAILERS="$KEEP_AI_TRAILERS" "$SCRIPT_DIR/fm-devin-config.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || { echo "error: devin config failed for $ID" >&2; exit 1; }
     fi
     ;;
   gemini)
@@ -5171,7 +5181,7 @@ META_WINDOW=$T
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
-  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || { echo "error: metadata lock path resolution failed for $ID" >&2; exit 1; }
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
@@ -5347,7 +5357,7 @@ sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || { echo "error: effort flag resolution failed for $HARNESS" >&2; exit 1; }
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
@@ -5750,7 +5760,7 @@ fi
 # the spawn has succeeded. Re-read and transition while holding the same
 # per-task lock as metadata publication, then and only then report success.
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
-  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || { echo "error: metadata lock path resolution failed for $ID" >&2; exit 1; }
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi

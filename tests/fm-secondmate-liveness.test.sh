@@ -405,6 +405,91 @@ test_sweep_skips_mate_whose_liveness_lock_is_held() {
   pass "sweep: a mate mid-episode under the shared liveness lock is skipped entirely"
 }
 
+test_sweep_skips_mate_when_spawn_lock_is_held() {
+  local w fb tmuxfb log out holder i=0
+  w=$(new_world sweep-spawn-lock-held)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # Hold the per-task spawn lock ($STATE/.spawn-$id.lock)
+  ( STATE="$w/home/state" bash -c \
+      '. "$1" && fm_lock_acquire_wait "$2" && sleep 30' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$w/home/state/.spawn-sm1.lock" ) &
+  holder=$!
+  while [ ! -d "$w/home/state/.spawn-sm1.lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -d "$w/home/state/.spawn-sm1.lock" ] || fail "the fixture never acquired the spawn lock"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: spawn in progress for secondmate sm1" \
+    "a mate under an active spawn lock should be skipped with in-progress diagnostic"
+  [ ! -s "$log" ] || fail "a mate with active spawn lock must never be killed or respawned: $(cat "$log")"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "sweep: a mate with spawn lock held is reported as skipped in-progress"
+}
+
+test_relaunch_lock_contention_does_not_burn_attempts() {
+  local w meta rc attempts holder i=0 fake_root
+  w=$(new_world relaunch-lock-contention)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  meta="$w/home/state/sm1.meta"
+
+  # Scenario 1: Spawn lock held before relaunch
+  ( STATE="$w/home/state" bash -c \
+      '. "$1" && fm_lock_acquire_wait "$2" && sleep 30' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$w/home/state/.spawn-sm1.lock" ) &
+  holder=$!
+  while [ ! -d "$w/home/state/.spawn-sm1.lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -d "$w/home/state/.spawn-sm1.lock" ] || fail "failed to acquire spawn lock"
+
+  STATE="$w/home/state" FM_ROOT="$ROOT" bash -c '
+    . "$0/bin/fm-secondmate-liveness-lib.sh"
+    fm_secondmate_liveness_lock sm1 || exit 2
+    fm_secondmate_liveness_relaunch "$1" sm1
+    rc=$?
+    [ "$FM_SM_LIVE_STATUS" = skipped ] || exit 3
+    [ "$FM_SM_LIVE_STATE" = in-progress ] || exit 4
+    exit "$rc"' "$ROOT" "$meta"
+  rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 1 ] || fail "relaunch should return 1 on skipped in-progress, got $rc"
+  attempts=$(STATE="$w/home/state" bash -c '. "$0/bin/fm-secondmate-liveness-lib.sh" && fm_secondmate_liveness_recent_attempts sm1 3600' "$ROOT")
+  [ "$attempts" -eq 0 ] || fail "relaunch lock contention must not burn retry attempts, found $attempts attempts"
+
+  # Scenario 2: Spawn execution hits lock contention
+  fake_root="$w/fake_root"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+echo "error: another spawn is already creating task sm1" >&2
+exit 1
+SH
+  chmod +x "$fake_root/bin/fm-spawn.sh"
+  STATE="$w/home/state" FM_ROOT="$fake_root" bash -c '
+    . "$0/bin/fm-secondmate-liveness-lib.sh"
+    fm_secondmate_liveness_lock sm1 || exit 2
+    fm_secondmate_liveness_relaunch "$1" sm1
+    rc=$?
+    [ "$FM_SM_LIVE_STATUS" = skipped ] || exit 3
+    [ "$FM_SM_LIVE_STATE" = in-progress ] || exit 4
+    exit "$rc"' "$ROOT" "$meta"
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "relaunch during contention should return 1 on skipped in-progress, got $rc"
+  attempts=$(STATE="$w/home/state" bash -c '. "$0/bin/fm-secondmate-liveness-lib.sh" && fm_secondmate_liveness_recent_attempts sm1 3600' "$ROOT")
+  [ "$attempts" -eq 0 ] || fail "spawn-time lock contention must not burn retry attempts, found $attempts attempts"
+
+  pass "relaunch: lock contention reports skipped in-progress and does not burn attempts"
+}
+
 test_sweep_refuses_relaunch_on_ledger_errors() {
   local w fb tmuxfb log out mode ledger word
   if [ "$(id -u)" -eq 0 ]; then
@@ -718,6 +803,8 @@ test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
 test_sweep_skips_mate_whose_liveness_lock_is_held
+test_sweep_skips_mate_when_spawn_lock_is_held
+test_relaunch_lock_contention_does_not_burn_attempts
 test_sweep_refuses_relaunch_on_ledger_errors
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
