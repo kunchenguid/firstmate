@@ -157,7 +157,7 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   launch_env=()
   [ "$harness" = codex ] && launch_env=(-e "CODEX_HOME=$LAB/codex-home")
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" "${launch_env[@]}" -- "$bin_path" $launch_args \
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" ${launch_env[@]+"${launch_env[@]}"} -- "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"
 
   state=
