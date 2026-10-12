@@ -41,10 +41,13 @@
 # lift the deferral (it authorizes discarding unlanded WORK, never the
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
+# REFUSES an ordinary ship whose recorded pr= is still OPEN and unmerged, because
+# cleanup deletes the record merge recording depends on; --force bypasses it.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
+# reachable from any remote-tracking branch other than the local no-mistakes
+# mirror (a fork counts as a remote, so upstream-contribution PRs pushed to a
+# fork satisfy this in any mode; the mirror is not a forge), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
@@ -1687,7 +1690,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$WT" log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -2107,6 +2110,18 @@ teardown_note_dirty_return() {
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
 }
 
+# Is the recorded pr= still OPEN? Only an explicitly recorded PR counts, and any
+# lookup error answers no, so an unreachable forge never blocks teardown here.
+recorded_pr_is_open() {
+  local state
+  [ -n "$PR_URL" ] || return 1
+  state=$(cd "$WT" && gh pr view "$PR_URL" --json state -q .state 2>/dev/null) || return 1
+  case "$state" in
+    OPEN|open) return 0 ;;
+  esac
+  return 1
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -2114,6 +2129,14 @@ validate_worktree_teardown_safety() {
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
+
+  # Teardown deletes the record that merge recording and identity binding depend
+  # on, so an ordinary ship must not be torn down while its PR can still merge.
+  if recorded_pr_is_open; then
+    echo "REFUSED: $ID has an open, unmerged PR: $PR_URL" >&2
+    echo "Land or close the PR first, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
@@ -2125,7 +2148,7 @@ validate_worktree_teardown_safety() {
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi

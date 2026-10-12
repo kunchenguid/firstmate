@@ -938,6 +938,84 @@ test_no_mistakes_truly_unpushed_refuses() {
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
 }
 
+# Override GitHub lookups to report the recorded PR as OPEN.
+add_gh_pr_open() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view") printf '%s\n' OPEN ; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+test_open_pr_refuses_and_force_bypasses() {
+  local case_dir rc
+  case_dir=$(make_case open-pr)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_open "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "open-pr: teardown should refuse an open PR"
+  grep -q 'open, unmerged PR' "$case_dir/stderr" || fail "open-pr: no open-PR refusal in stderr"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "open-pr: meta was deleted despite refusal"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "open-pr: --force should bypass the open-PR refusal"
+  pass "ordinary ship with an open recorded PR is refused, and --force bypasses it"
+}
+
+test_merged_pr_passes_open_pr_check() {
+  local case_dir rc pr_head
+  case_dir=$(make_case merged-pr-open-check)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "merged-pr-open-check: merged PR should tear down"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-open-check: unexpected REFUSED"
+  pass "ordinary ship with a merged recorded PR is not refused by the open-PR check"
+}
+
+test_no_mistakes_mirror_only_branch_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-mirror-only)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "mirror-only work"
+  # A branch pushed only to the local pipeline mirror is not on a forge.
+  git init -q --bare "$case_dir/mirror.git"
+  git -C "$case_dir/project" remote add no-mistakes "$case_dir/mirror.git"
+  git -C "$case_dir/wt" push -q no-mistakes fm/task-x1
+  git -C "$case_dir/project" fetch -q no-mistakes
+  git -C "$case_dir/wt" rev-parse --verify -q refs/remotes/no-mistakes/fm/task-x1 >/dev/null \
+    || fail "nm-mirror-only: mirror remote-tracking ref was not created"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "nm-mirror-only: teardown should refuse mirror-only work"
+  grep -q REFUSED "$case_dir/stderr" || fail "nm-mirror-only: no REFUSED line in stderr"
+  pass "branch pushed only to the no-mistakes mirror is refused as unlanded"
+}
+
 test_squash_merged_branch_deleted_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-merged)
@@ -5976,6 +6054,9 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_no_mistakes_mirror_only_branch_refuses
+test_open_pr_refuses_and_force_bypasses
+test_merged_pr_passes_open_pr_check
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_pr_ready_line_waits_for_green_when_opted_in
