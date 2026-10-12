@@ -122,6 +122,19 @@ run_report() { # <home> <child>
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" report "$child"
 }
 
+retain_child() { # <home> <child> <mode> <state>
+  local home=$1 child=$2 mode=$3 state=$4 spawn_gen
+  spawn_gen=$(sed -n 's/^spawn_gen=//p' "$home/state/$child.meta")
+  printf '%s\n' \
+    'lifecycle=retained' \
+    "retained_mode=$mode" \
+    'retained_at=1700000000' \
+    'retained_reason=preserved terminal work' \
+    "retained_state=$state" \
+    'retained_source=archive-only' \
+    "retained_spawn_gen=$spawn_gen" >> "$home/state/$child.meta"
+}
+
 wake_count() { # <home> <key prefix>
   grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
 }
@@ -170,6 +183,68 @@ test_main_direct_terminal_presentation_receipt() {
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
   pass "main direct terminal presentation has a durable receipt"
+}
+
+test_retained_children_are_retired_from_reconciliation() {
+  make_world retained-main
+  write_child "$MAIN" child 'done: retained implementation'
+  retain_child "$MAIN" child inactive "done"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ -z "$(wake_count "$MAIN" 'inactive-outcome:')" ] \
+    || fail 'retained main child queued another inactive outcome'
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] \
+    || fail 'retained main child created another terminal receipt'
+
+  make_world retained-mate
+  bind_secondmate local
+  write_mate_meta
+  write_child "$MATE" child 'done: retained implementation'
+  retain_child "$MATE" child awaiting-acceptance "done"
+  run_report "$MATE" child || fail 'retained report entry point failed'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail 'retained secondmate child did not preserve one terminal receipt'
+  [ "$(grep -c 'child child done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail 'retained secondmate child did not publish exactly one parent outcome'
+  pass 'validated retained children retire inactive scans without retiring owed parent reports'
+}
+
+test_retained_child_retries_failed_parent_delivery() {
+  make_world retained-report-retry
+  bind_secondmate local
+  write_mate_meta
+  write_child "$MATE" child 'failed: retained failure'
+  retain_child "$MATE" child inactive "failed"
+  cp "$MATE/.fm-secondmate-parent" "$WORLD/parent-binding"
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(outcome_count "$MATE" pending)" = 1 ] \
+    || fail 'retained child did not preserve its failed parent delivery'
+  cp "$WORLD/parent-binding" "$MATE/.fm-secondmate-parent"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail 'retained child delivery retry did not gain one durable receipt'
+  [ "$(grep -c 'child child failed: retained failure' "$MAIN/state/mate.status")" = 1 ] \
+    || fail 'retained child delivery retry was missing or duplicated'
+  pass 'retained terminal children retry failed parent delivery exactly once'
+}
+
+test_relaunched_generation_is_not_retired_by_old_retention() {
+  make_world retained-relaunched
+  write_child "$MAIN" child 'done: archived generation'
+  retain_child "$MAIN" child awaiting-acceptance "done"
+  sed 's/^spawn_gen=.*/spawn_gen=relaunched-generation/' \
+    "$MAIN/state/child.meta" > "$MAIN/state/child.meta.next"
+  mv "$MAIN/state/child.meta.next" "$MAIN/state/child.meta"
+  printf '%s\n' 'done: relaunch produced a new outcome' > "$MAIN/state/child.status"
+  age "$MAIN/state/child.meta" "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail 'a retained marker from an older generation hid the relaunched outcome'
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail 'the relaunched generation did not create its terminal receipt'
+  pass 'retention from an older spawn generation cannot retire relaunched work'
 }
 
 # Away-posture regression: a branch-actor drain that consumes an
@@ -1039,6 +1114,9 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_retained_children_are_retired_from_reconciliation
+test_retained_child_retries_failed_parent_delivery
+test_relaunched_generation_is_not_retired_by_old_retention
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_delivered_ledger_done_skips_git_gate

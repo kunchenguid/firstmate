@@ -52,8 +52,12 @@
 #     but mutable current-state, status, report, and endpoint evidence is discarded
 #     rather than attributed to the replacement generation.
 #     Local current_state is parsed from bin/fm-crew-state.sh <id> and preserves
-#     state, source, detail, and raw line separately. Remote secondmate rows use
-#     an explicit unknown value because their endpoint liveness belongs to
+#     state, source, detail, and raw line separately. A validated
+#     lifecycle=retained metadata record carries its retention disposition,
+#     reason, terminal proof, archived spawn generation, and provenance without
+#     hiding endpoint evidence.
+#     Remote secondmate rows use an explicit unknown value because their endpoint
+#     liveness belongs to
 #     supervision rather than this snapshot path.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state. age_seconds is null when the emission time is unknown;
@@ -250,6 +254,11 @@ aggregation, includes generated_epoch for freshness arithmetic, and marks
 inventory contradictions or unavailable child state invalid.
 kind=secondmate meta records are not child inventory for unowned_current or
 terminal_in_flight; they never have backlog rows.
+Validated lifecycle=retained records are preserved runtime custody, not active
+children: inactive records are omitted from current-work contradictions, while
+awaiting-acceptance records remain held and routable in queued and holds.
+Their endpoint and current-state evidence stays visible, including warnings for
+unavailable observations.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until,
@@ -281,6 +290,8 @@ FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
 FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
 Every captain hold carries hold_bucket, decided only from structured fields and
 never from hold reason or body prose: "blocked", "dated", "aged", or "live".
+A retained runtime record is published in `retained` with its disposition and
+terminal proof, and a missing endpoint or current-state read remains in `warnings`.
 An undated hold ages once its hold-set timestamp is at least
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; 0 ages every hold with a
 non-negative computed age); legacy holds without a stamp fall back to their
@@ -743,9 +754,9 @@ prefetch_task_current_states() {
 }
 
 task_json_lines() {
-  local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
+  local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen lifecycle retained_mode retained_at retained_reason retained_state retained_source retained_spawn_gen backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line index=0
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json retention_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -764,6 +775,13 @@ task_json_lines() {
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
     spawn_gen=$(meta_value "$meta" spawn_gen)
+    lifecycle=$(meta_value "$meta" lifecycle)
+    retained_mode=$(meta_value "$meta" retained_mode)
+    retained_at=$(meta_value "$meta" retained_at)
+    retained_reason=$(meta_value "$meta" retained_reason)
+    retained_state=$(meta_value "$meta" retained_state)
+    retained_source=$(meta_value "$meta" retained_source)
+    retained_spawn_gen=$(meta_value "$meta" retained_spawn_gen)
     branch=$(meta_value "$meta" branch)
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)
@@ -847,6 +865,20 @@ task_json_lines() {
     status_json=$event_json
     report_json=$(path_present_json "$DATA/$id/report.md" "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
+    retention_json=$(jq -n \
+      --arg lifecycle "$lifecycle" \
+      --arg mode "$retained_mode" \
+      --arg at "$retained_at" \
+      --arg reason "$retained_reason" \
+      --arg state "$retained_state" \
+      --arg source "$retained_source" \
+      --arg spawn_gen "$spawn_gen" \
+      --arg retained_spawn_gen "$retained_spawn_gen" \
+      '($lifecycle == "retained" and ($mode == "inactive" or $mode == "awaiting-acceptance")
+        and $at != "" and ($at | test("^[0-9]+$")) and $reason != ""
+        and ($state == "done" or $state == "failed") and $source == "archive-only"
+        and $spawn_gen != "" and $retained_spawn_gen == $spawn_gen) as $valid
+       | {valid:$valid,lifecycle:($lifecycle | if . == "" then null else . end),mode:($mode | if . == "" then null else . end),at:($at | if . == "" then null else . end),reason:($reason | if . == "" then null else . end),state:($state | if . == "" then null else . end),source:($source | if . == "" then null else . end),spawn_gen:($retained_spawn_gen | if . == "" then null else . end)}')
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
       home_json=$(jq -n --arg path "$home" '{path:$path,present:null}')
     elif [ -n "$home" ]; then
@@ -871,6 +903,8 @@ task_json_lines() {
       --arg target "$target" \
       --arg remote_host "$remote_host" \
       --arg remote_root "$remote_root" \
+      --arg lifecycle "$lifecycle" \
+      --argjson retention "$retention_json" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg pr_head "$(meta_value "$meta" pr_head)" \
@@ -897,6 +931,8 @@ task_json_lines() {
         branch:($branch | if . == "" then null else . end),
         project:($project // ""),
         spawn_gen:($spawn_gen | if . == "" then null else . end),
+        lifecycle:($lifecycle | if . == "" then null else . end),
+        retention:$retention,
         backend:$backend,
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
         paths:{
@@ -998,12 +1034,33 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
+    | ([ $tasks[]
+         | select(.retention.valid == true)
+         | select(.current_state.state == "done" or .current_state.state == "failed" or .current_state.state == "unknown")
+       ]) as $retained_tasks
+    | ([ $owned_in_flight[] as $work
+         | $retained_tasks[] as $retained
+         | select($retained.id == $work.id and $retained.retention.mode == "awaiting-acceptance")
+         | $work + {
+             retained_record:true,
+             retained_custody:{mode:$retained.retention.mode,reason:$retained.retention.reason,
+               at:$retained.retention.at,state:$retained.retention.state,
+               spawn_gen:$retained.retention.spawn_gen}
+           }
+         | if .hold_reason == null and .hold_kind == null then
+             . + {hold_reason:$retained.retention.reason,hold_kind:"retained",
+                  captain_actionable:false}
+           else . end ]) as $retained_queued
     | ([ $backlog.records[]?
          | select(.structured and
              (.hold_bucket != null or .state == "queued" or
               (.state == "in_flight" and .current_role == "held"
                and (.id as $id
-                    | any($tasks[]; .id == $id and .current_state.state == "working") | not)))) ]) as $queued_all
+                    | any($tasks[]; .id == $id and .current_state.state == "working") | not)))) ]) as $queued_base
+    | (([ $queued_base[] as $row
+          | select(([$retained_queued[].id] | index($row.id)) == null)
+          | $row ]
+        ) + $retained_queued) as $queued_all
     | ([ $queued_all[]
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
@@ -1019,18 +1076,22 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
-    | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
+    | ([ $tasks[]
+         | select(.current_state.state == "unknown")
+         | select(.id as $id | ([$retained_tasks[].id] | index($id) | not)) ]) as $unknown_children
     | ([ $owned_in_flight[]
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
     | ([ $tasks[]
          | select(.kind != "secondmate")
          | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
+         | select(.id as $id | ([$retained_tasks[].id] | index($id) | not))
          | {id,state:.current_state.state} ]) as $unowned_children
     | ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.kind != "secondmate")
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
+         | select(.id as $id | ([$retained_tasks[].id] | index($id) | not))
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
@@ -1125,6 +1186,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           hold_bucket:(.hold_bucket // null),
           hold_age_days:(.hold_age_days // null),
           captain_actionable:(.captain_actionable // false),
+          retained_record:(.retained_record // false),
+          retained_custody:(.retained_custody // null),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
           since:((.since // null) | if . == null then null else trunc(40) end)}]
@@ -1132,6 +1195,14 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
              + (map(select(.captain_actionable == true)) | newest_filed_first))
           | .[:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
+        retained:([$retained_tasks[] | {id,mode:.retention.mode,reason:.retention.reason,
+          state:.retention.state,current_state:.current_state,endpoint:.endpoint}][:$child_n]),
+        warnings:([$retained_tasks[]
+          | select(.current_state.state == "unknown" or .endpoint.status == "unknown")
+          | {kind:"retained_state_unavailable",id,
+             reason:(if .current_state.state == "unknown"
+                     then (.current_state.detail // "retained current state is unavailable")
+                     else "retained endpoint state is unavailable" end)}]),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
         counts:{
@@ -1140,6 +1211,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           holds:($holds_all | length),
           queued:($queued_all | length),
           landed:($landed_all | length),
+          retained:($retained_tasks | length),
           endpoints:($tasks | length)
         },
         omitted:[
@@ -1890,6 +1962,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          freshness:{status:$summary_freshness,observed_at:$observed,age_seconds:$summary_age},
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
+         retained:($summary.retained // []),warnings:($summary.warnings // []),
          contributions:($summary.contributions // null),
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
@@ -1922,7 +1995,10 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          reconcile_inventory:(if $summary_sampled then $summary.invalidity else null end),
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$observed_age},
-         active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
+         active_children:[],decisions_open:[],holds:[],queued:[],
+         retained:(if $summary_sampled then ($summary.retained // []) else [] end),
+         warnings:(if $summary_sampled then ($summary.warnings // []) else [] end),
+         landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}' >> "$records_file" || return 1
     fi
