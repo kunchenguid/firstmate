@@ -6,7 +6,7 @@
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded; a Forgejo
 # pull request is addressed through tea by the derived owner and repository
-# plus a "tea login" resolved fresh from the parsed host on every run. A Gerrit
+# plus a "tea login" resolved fresh from the parsed host and scheme on every run. A Gerrit
 # change is refused outright: that adapter is read-only, and the refusal at the
 # parse below owns why.
 #
