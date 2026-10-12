@@ -1773,6 +1773,49 @@ test_terminal_failed_run_with_merged_pr_is_not_failed() {
   pass "terminal failed run with a merged PR is not failed"
 }
 
+test_terminal_failed_run_ignores_later_done_alone() {
+  reset_fakes
+  make_terminal_failed_case tf-done fm/tf-done 1000
+  local d=$TMP_ROOT/tf-done out
+  printf 'done [at=2000]: shipped\n' > "$d/state/tf-done.status"
+  out=$(run_crew_state "$d" tf-done)
+  assert_contains "$out" "state: failed" "a later done line alone does not lift a failed run"
+  assert_not_contains "$out" "state: done" "the worker's word alone is not a merge"
+  pass "terminal failed run ignores a later done line alone"
+}
+
+test_terminal_cancelled_run_ignores_later_paused() {
+  reset_fakes
+  make_terminal_failed_case tc-paused fm/tc-paused 1000
+  local d=$TMP_ROOT/tc-paused out
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/outcome: failed/outcome: cancelled}
+  printf 'paused [at=2000]: waiting on the follow-up review\n' > "$d/state/tc-paused.status"
+  out=$(run_crew_state "$d" tc-paused)
+  assert_contains "$out" "state: unknown" "a cancelled run keeps reading unknown"
+  assert_contains "$out" "run cancelled: no verdict" "the cancelled verdict is named"
+  pass "terminal cancelled run is not lifted by a later paused line"
+}
+
+# On the coarse path the active-or-latest run belongs to another branch, so
+# neither its merged PR nor its record's end time can answer for this crew.
+test_terminal_failed_coarse_run_ignores_foreign_run_fields() {
+  reset_fakes
+  make_terminal_failed_case tf-foreign fm/tf-foreign 1000
+  local d=$TMP_ROOT/tf-foreign out short
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/other-crew https://github.com/o/r/pull/9)"
+  FM_FAKE_RUNS_LIST="  failed     fm/tf-foreign ${short}  2026-10-02 09:00"
+  FM_FAKE_PR_STATE=MERGED
+  FM_FAKE_PR_MERGED=true
+  out=$(run_crew_state "$d" tf-foreign)
+  assert_contains "$out" "state: failed" "another branch's merged PR does not lift this crew's failed run"
+  assert_not_contains "$out" "pull/9" "another branch's PR is never named"
+  printf 'paused [at=2000]: waiting on the follow-up review\n' > "$d/state/tf-foreign.status"
+  out=$(run_crew_state "$d" tf-foreign)
+  assert_contains "$out" "state: failed" "another branch's run end time cannot date this crew's pause"
+  pass "coarse failed run ignores a foreign branch's run fields"
+}
+
 # Recovered delivery cases, varying only the terminal route and the optional
 # rebase step. The already-fixed passed-run case remains a control.
 test_cancelled_delivery_and_skipped_rebase() {
@@ -5646,6 +5689,9 @@ test_terminal_failed_run_ignores_earlier_paused
 test_terminal_failed_run_without_later_line_stays_failed
 test_live_run_still_supersedes_later_paused
 test_terminal_failed_run_with_merged_pr_is_not_failed
+test_terminal_failed_run_ignores_later_done_alone
+test_terminal_cancelled_run_ignores_later_paused
+test_terminal_failed_coarse_run_ignores_foreign_run_fields
 test_terminal_failed_ci_orphan_after_green_reads_done
 test_terminal_failed_ci_orphan_status_only_reads_done
 test_terminal_failed_ci_genuine_red_stays_failed
