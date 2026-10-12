@@ -124,7 +124,7 @@ Unless you override it for a concrete task:
 - Scout versus ship when unresolved uncertainty should change whether or what to build
 - Quota-aware crew routing within configured dispatch profiles
 - no-mistakes on product-facing registered projects that select it, then wait for your merge word
-- Exact review evidence on ship instructions, and domain evidence bars on scout reports
+- Exact review evidence on ship instructions, and domain evidence bars on ship and scout instructions
 - Durable steering and recovery of stuck workers
 - Filing research recommendations without implementing them
 
