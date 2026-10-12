@@ -131,7 +131,7 @@ test_text_steer_rides_inbox() {
   body=$(record_body _ "$rec")
   [ "$body" = "please rebase onto main" ] || fail "the recorded body differs: $body"
   typed=$(cat "$dir/send.log")
-  assert_contains "$typed" "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't1.inbox' steering inbox" \
+  assert_contains "$typed" "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg" \
     "the doorbell should direct the worker to drain the inbox"
   case "$typed" in
   *"please rebase onto main"*) fail "the payload must never be typed:"$'\n'"$typed" ;;
@@ -165,11 +165,10 @@ test_deep_home_doorbell_stays_short() {
   case "$typed" in
   *"$deep"* | *"$TMP_ROOT"*) fail "the doorbell should not carry the home's absolute path: $typed" ;;
   esac
-  rest=${typed#*t1.inbox}
-  [ "$rest" != "$typed" ] || fail "the doorbell should name the inbox: $typed"
-  case "$rest" in
-  *t1.inbox*) fail "the doorbell should name the inbox once: $typed" ;;
+  case "$typed" in
+  *t1.inbox*) fail "the doorbell should be constant and not name the task inbox: $typed" ;;
   esac
+  [ "${#typed}" -le 110 ] || fail "the doorbell should stay a short single line, got ${#typed}: $typed"
   found=$(cd / && FM_TASK_INBOX="$home/state/t1.inbox" bash -c 'ls "$FM_TASK_INBOX"/*.msg') ||
     fail "a shell with FM_TASK_INBOX exported could not list the deep inbox"
   [ "$found" = "$home/state/t1.inbox/001.msg" ] ||
