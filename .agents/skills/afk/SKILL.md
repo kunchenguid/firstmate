@@ -29,7 +29,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate at once, preserve the original session entry, and archive the superseded words for the return brief.
 2. **Per harness, after the record exists:**
    - **Pi and pi-signed**: nothing to launch; go on to the announcement.
-     The away daemon is no longer launched on Pi; the ordinary supervision session (`docs/pi-supervision-branch.md`) keeps running with the record present, and `bin/fm-afk-launch.sh start` refuses on these harnesses.
+     Pi runs no away daemon; the ordinary supervision session (`docs/pi-supervision-branch.md`) keeps running with the record present, and `bin/fm-afk-launch.sh start` refuses on these harnesses.
      With the record present main is parked: the supervision branch takes every safe actionable wake, captain outcomes accumulate for the return brief, and main's standing authority relocates to the branch through the guarded scripts (`docs/pi-supervision-branch.md` "Postures"); only a wake the branch declines (including a broken branch or unsafe scan) or a watcher failure wakes main.
      `/quiet` needs nothing extra on Pi: the attended branch already keeps routine wakes out of this conversation, so quiet-while-present is the attended posture's own shape there.
    - **A home that runs the supervision host** (a Claude home unless `config/supervision-host-off` opts it out, or a Cursor, OpenCode, omp, Grok, or Codex home with `config/supervision-host` and no opt-out; `docs/configuration.md` "Supervision host"): nothing to launch for `/afk`; go on to the announcement.
@@ -86,7 +86,7 @@ No `/back` is needed. The first genuine message is the return signal:
 - Re-invoking `/afk` while already away -> stay away (refresh); this does **not** trigger an exit.
 
 Bias ambiguous cases toward exit: a present captain beats token savings, and a false exit is self-correcting (the captain re-runs `/afk`).
-When the captain wants this same token-saving supervision while staying present and chatting - ordinary messages should NOT exit it - that is `/quiet` (kunchenguid/firstmate#2356), not `/afk`.
+When the captain wants this same token-saving supervision while staying present and chatting - ordinary messages should NOT exit it - that is `/quiet`, not `/afk`.
 
 ## Orthogonal to approval authority
 

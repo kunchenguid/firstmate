@@ -28,7 +28,7 @@ The shared classifier keeps that text pending, and retry sends the second Enter 
 
 On 2026-07-03 two Grok 0.2.82 Herdr workers left `/no-mistakes` typed for minutes while send returned success.
 Old Herdr logic treated any pane delta as submission, including popup closure and placeholder fill.
-Tmux and Herdr now route captures through `../../../bin/fm-composer-lib.sh`, which classifies real text on every proven content row.
+Tmux and Herdr route captures through `../../../bin/fm-composer-lib.sh`, which classifies real text on every proven content row.
 `../../../docs/herdr-backend.md` owns the boundary and `../../../tests/fm-backend-herdr.test.sh` covers it.
 
 On 2026-09-24, on the first dispatches after Grok was added to this fleet, a steer landed in the Grok 1.0.41 composer unsent.

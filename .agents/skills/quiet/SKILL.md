@@ -11,9 +11,7 @@ metadata:
 
 # quiet
 
-Quiet supervision mode (kunchenguid/firstmate#2356): the same token-saving
-daemon tradeoff as `/afk`, made explicit for a captain who is staying,
-watching the session, and does not want to exit the mode just by chatting.
+Quiet supervision mode is the same token-saving daemon tradeoff as `/afk`, made explicit for a captain who is staying, watching the session, and does not want to exit the mode just by chatting.
 
 Where a daemon runs, this skill is a thin wrapper.
 The `afk` skill owns the daemon's injection, busy/composer guards, and reliability properties; quiet mode uses that machinery while the captain remains present.

@@ -12,7 +12,7 @@ metadata:
 # firstmate-coding-guidelines
 
 Load this before changing firstmate's shared, tracked material, as defined by `AGENTS.md` section 1.
-It exists because `AGENTS.md` grew from 585 to 958 lines between its last two restructures, entirely from conditional detail added inline instead of routed to its right home.
+It exists because conditional detail added inline, instead of routed to its right home, is what makes `AGENTS.md` grow.
 Applying the rules below on every change is what keeps that from happening again.
 
 ## Knowledge-placement decision tree
@@ -116,7 +116,7 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 
 Never configure a deterministic suite-walk `commands.test` in any repository's no-mistakes config, whether it selects the full suite, changed tests, a family, or a fixed script list.
 Targeted validation belongs to the no-mistakes evidence path, while CI owns broad deterministic regression coverage.
-Firstmate PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7 minutes per validation, while removing it restored the 3.6-minute targeted-validation posture.
+A pinned walk turns a targeted validation of a few minutes into one of half an hour or more, for coverage CI already provides.
 
 ## Repo style rules
 
