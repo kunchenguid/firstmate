@@ -3836,6 +3836,34 @@ test_startup_receipt_failure_prevents_consumption() {
   pass "startup receipt failure leaves the owned row intact and retryable"
 }
 
+test_startup_producer_repairs_a_surviving_unreceipted_row() {
+  local dir state generation rc out err
+  dir=$(make_case startup-producer-repair)
+  state="$dir/state"
+  generation=fixture.5378.producer-repair
+  seed_startup_result "$state" "$generation"
+  mkdir -p "$state/.startup-network-wake-receipts/$generation"
+  rc=0
+  append_wake "$state" check "startup-network:$generation" 'check: startup-network: first row' || rc=$?
+  [ "$rc" -ne 0 ] || fail "blocked producer receipt reported success"
+  cp "$state/.wake-queue" "$dir/row.before"
+  cp "$state/.wake-queue.seq" "$dir/seq.before"
+  rmdir "$state/.startup-network-wake-receipts/$generation"
+  append_wake "$state" check "startup-network:$generation" 'check: startup-network: retried row' \
+    || fail "the producer did not repair its surviving row's receipt"
+  cmp -s "$state/.wake-queue" "$dir/row.before" || fail "producer repair changed or duplicated the original row"
+  cmp -s "$state/.wake-queue.seq" "$dir/seq.before" || fail "producer repair advanced the row sequence"
+  [ "$(cat "$state/.startup-network-wake-receipts/$generation")" = "$generation" ] \
+    || fail "producer repair did not commit the generation receipt"
+  out="$dir/drain.out"; err="$dir/drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "repaired producer row did not drain"
+  ack_drain_err "$state" "$err" || fail "repaired producer row did not acknowledge"
+  append_wake "$state" check "startup-network:$generation" 'check: startup-network: consumed retry' \
+    || fail "consumed producer-repair retry failed"
+  [ ! -s "$state/.wake-queue" ] || fail "retry duplicated the producer-repaired consumed row"
+  pass "startup producer repairs a surviving row before consumption without changing its sequence"
+}
+
 # Startup delivery tokens are an owned serialized protocol; exercise the real
 # append and acknowledgement interfaces, including retry after consumption.
 test_startup_generation_enqueue_is_once_after_consumption() {
@@ -3844,10 +3872,7 @@ test_startup_generation_enqueue_is_once_after_consumption() {
   state="$dir/state"
   generation=fixture.5378.once
   key="startup-network:$generation"
-  mkdir -p "$state/.startup-network-results/$generation"
-  printf 'generation=%s\nstate=done\nreport_published=1\n' "$generation" > "$state/.startup-network.status"
-  printf 'generation=%s\nstate=done\n' "$generation" > "$state/.startup-network-results/$generation/status"
-  printf 'ACTIONABLE_RESULT\n' > "$state/.startup-network-results/$generation/report"
+  seed_startup_result "$state" "$generation"
   append_wake "$state" check "$key" 'check: startup-network: fixture result' || fail "startup append refused its current generation"
   append_wake "$state" check "$key" 'check: startup-network: fixture result' || fail "startup retry failed"
   rows=$(awk -F '\t' -v key="$key" '$3 == "check" && $4 == key { n++ } END { print n+0 }' "$state/.wake-queue")
@@ -3937,6 +3962,7 @@ test_startup_consumer_receipts_follow_actor_and_cutoff
 test_startup_receipt_requires_a_real_owned_row
 test_startup_interrupted_append_survives_consumer_removal
 test_startup_receipt_failure_prevents_consumption
+test_startup_producer_repairs_a_surviving_unreceipted_row
 test_startup_generation_enqueue_is_once_after_consumption
 
 test_self_held_lock_reclaims_instead_of_deadlocking

@@ -2706,7 +2706,6 @@ fm_wake_startup_receipt_write() { # <generation>, caller owns queue lock
   fm_startup_generation_valid "$generation" || return 1
   fm_current_pid current || return 1
   [ "$(cat "$FM_WAKE_QUEUE_LOCK/pid" 2>/dev/null || true)" = "$current" ] || return 1
-  receipt="$root/$generation"
   fm_startup_wake_receipted "$STATE" "$generation" && return 0
   [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] \
     && awk -F '\t' -v key="startup-network:$generation" \
