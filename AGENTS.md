@@ -77,6 +77,7 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
 The digest order is lock, bootstrap, wake queue, harness-specific supervision instructions, read-once contract, fleet state, network checks, context, then next step.
 Lock ownership gates every startup mutation; lock refusal leaves the queue and fleet untouched and permits only read-only diagnostics.
 The locked wake stage presents raw durable records before other startup context, plus any `OPEN DECISIONS`, `STATUS OUTCOME BACKSTOP`, `UNREAD STATUS`, or `RECORD DIVERGENCE` recovery input; section 8 owns how MAIN reconciles and acknowledges them.
+A `STATUS OUTCOME BACKSTOP` is handled as a recovered wake even when no queue row remains.
 The emitted protocol in `docs/supervision-protocols/` owns the exact wait, continuity, and repair path for the detected primary harness; the startup script never starts supervision itself.
 Fleet state is a compact projection rather than a full current-state read, and its printed source paths are the on-demand recovery route.
 Network and inactive-outcome checks run off the blocking path under `bin/fm-startup-network.sh`; `IN PROGRESS` is unconfirmed until `bin/fm-startup-network.sh report` finishes, and actionable results also arrive as `check: startup-network` wakes.
