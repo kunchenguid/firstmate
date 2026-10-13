@@ -1036,6 +1036,7 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
 };
 
 const explicitRequest = "Please give me a fresh mini system-resource report.";
+const customRequest = `${explicitRequest} This is extension content, not captain input.`;
 const longRequests = [
   `${explicitRequest}${" head context".repeat(500)}`,
   `${"middle context ".repeat(250)}${explicitRequest}${" middle context".repeat(250)}`,
@@ -1053,6 +1054,10 @@ const mainCtx = {
     getEntries: () => entries,
   },
 };
+await fire("before_agent_start", {
+  messageType: "custom",
+  message: { role: "custom", customType: "test-notice", content: customRequest, display: false },
+}, mainCtx);
 const operational = spawnSync(
   "bash",
   [`${realRoot}/bin/fm-operational-input.sh`, "encode", "watcher"],
@@ -1095,7 +1100,8 @@ for (let index = 0; index < requestedPrompts.length; index += 1) {
   if (index < longRequests.length && content.length <= 4000) {
     throw new Error(`request fixture ${index} did not exceed the mirror bound`);
   }
-  await fire("before_agent_start", { prompt: content }, mainCtx);
+  // Cover both the legacy prompt-only event and Pi 1.2's user discriminant.
+  await fire("before_agent_start", { messageType: "user", prompt: content }, mainCtx);
   // Pi persists this only after every before_agent_start handler has returned.
   entries.push({ type: "message", message: { role: "user", content } });
   await fire("agent_start", {}, mainCtx);
@@ -1121,9 +1127,9 @@ for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }
 if (mirroredCaptainText.some((text) =>
-  text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
+  text.includes(customRequest) || text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
 )) {
-  throw new Error("canonical current or legacy operational input entered captain mirror context");
+  throw new Error("custom or operational input entered captain mirror context");
 }
 if ((globalThis.__fmPrompts ?? []).length !== 5) throw new Error("a handled fleet wake was rerun");
 let processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
@@ -2116,13 +2122,28 @@ if (stolen?.messages?.some((message) => message.customType === "fm-branch-proces
 }
 await fire("agent_end", {});
 aborted = false;
-await fire("before_agent_start", { prompt: pending.message.content }, abortCtx);
-await fire("agent_start", {}, defaultSessionCtx);
-const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
-if (!aborted) throw new Error("a dedicated processing turn with history was not aborted under the record");
-if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
-  throw new Error(`dedicated processing with history was not stripped: ${JSON.stringify(openedByRequest)}`);
+for (const event of [
+  { prompt: pending.message.content },
+  { messageType: "custom", message: processingMsg },
+]) {
+  aborted = false;
+  await fire("before_agent_start", event, abortCtx);
+  await fire("agent_start", {}, defaultSessionCtx);
+  const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+  if (!aborted) throw new Error("a dedicated processing turn with history was not aborted under the record");
+  if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
+    throw new Error(`dedicated processing with history was not stripped: ${JSON.stringify(openedByRequest)}`);
+  }
+  await fire("agent_end", {});
 }
+// A later unrelated custom run must clear the processing-opened flag.
+aborted = false;
+await fire("before_agent_start", {
+  messageType: "custom",
+  message: { role: "custom", customType: "test-notice", content: [{ type: "text", text: "unrelated notice" }], display: false },
+}, abortCtx);
+await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+if (aborted) throw new Error("an unrelated custom run inherited the processing turn's abort");
 await fire("agent_end", {});
 await fire("agent_settled", {});
 if (requests().length !== 1) throw new Error("a request pending when the record appeared was re-presented to the parked main");
