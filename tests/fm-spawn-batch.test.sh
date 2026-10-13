@@ -68,7 +68,6 @@ test_batch_mode_boundaries() {
     esac
   done <<'ROWS'
 single id=repo pair routes through batch|yes|batch: FAILED to spawn nope-batch-solo-z3 (projects/none-solo)|nope-batch-solo-z3=projects/none-solo
-non-pair arg in batch is rejected|yes|batch dispatch expects every argument as id=repo; got 'bogus-no-equals'|nope-batch-mix-z5=projects/none-mix bogus-no-equals
 plain '<id> <repo>' is single-task|no||nope-single-z4 projects/none-single
 id part containing '/' is not a pair|no||weird/id-z6=projects/none projects/none
 ROWS
@@ -113,6 +112,61 @@ ROWS
 # A ship batch carries one shared delivery contract. Missing flags must stop the
 # whole batch before any pair is dispatched, so a batch can never launch workers
 # whose delivery posture was never decided.
+test_batch_empty_fields_refuse_with_actionable_errors() {
+  local out status
+  out=$(run_ship_spawn batch-empty-project-z13=)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a batch pair without a project should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'error: ship spawn requires a project directory positional argument (<project-dir>)' >/dev/null \
+    || fail "an empty batch project did not name the required project directory argument"
+  assert_not_contains "$out" "cd: " "an empty batch project must not expose a raw cd error"
+  assert_not_contains "$out" "unbound variable" "an empty batch project must not expose a shell error"
+
+  out=$(run_ship_spawn '=projects/none')
+  status=$?
+  [ "$status" -ne 0 ] || fail "a batch pair without a task id should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'error: spawn requires a task id positional argument (<task-id>)' >/dev/null \
+    || fail "an empty batch task did not name the required task id argument"
+  assert_not_contains "$out" "unbound variable" "an empty batch task must not expose a shell error"
+  pass "batch dispatch refuses a missing or empty task id or project dir before re-exec"
+}
+
+test_mixed_batch_preflights_every_pair_before_reexecution() {
+  local out status
+  out=$(run_ship_spawn valid-batch-before-empty-project=projects/none empty-project-later=)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mixed batch with an empty project should refuse"
+  printf '%s\n' "$out" | grep -F 'error: ship spawn requires a project directory positional argument (<project-dir>)' >/dev/null \
+    || fail "mixed batch did not name the missing project argument"
+  assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-empty-project' \
+    "a valid pair was re-executed before a later empty project was rejected"
+
+  out=$(run_ship_spawn valid-batch-before-empty-id=projects/none =projects/also-none)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mixed batch with an empty task id should refuse"
+  printf '%s\n' "$out" | grep -F 'error: spawn requires a task id positional argument (<task-id>)' >/dev/null \
+    || fail "mixed batch did not name the missing task id"
+  assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-empty-id' \
+    "a valid pair was re-executed before a later empty task id was rejected"
+
+  out=$(run_ship_spawn valid-batch-before-invalid-id=projects/none bad/id=projects/also-none)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mixed batch with an invalid task id should refuse"
+  printf '%s\n' "$out" | grep -F "error: invalid task id 'bad/id'" >/dev/null \
+    || fail "mixed batch did not name the invalid task id"
+  assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-invalid-id' \
+    "a valid pair was re-executed before a later invalid task id was rejected"
+
+  out=$(run_ship_spawn valid-batch-before-nonpair=projects/none bogus-no-equals)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mixed batch with a non-pair argument should refuse"
+  printf '%s\n' "$out" | grep -F "error: batch dispatch expects every argument as id=repo; got 'bogus-no-equals'" >/dev/null \
+    || fail "mixed batch did not name the non-pair argument"
+  assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-nonpair' \
+    "a valid pair was re-executed before a later non-pair argument was rejected"
+  pass "a missing or empty task id or project dir, or a non-pair argument, in any batch pair refuses before any pair is re-executed"
+}
+
 test_batch_requires_the_shared_delivery_contract() {
   local out status
   out=$(run_spawn nope-batch-nomode-z9=projects/none-a nope-batch-nomode-z10=projects/none-b)
@@ -145,6 +199,8 @@ test_scout_batch_refuses_delivery_flags() {
 
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
+test_batch_empty_fields_refuse_with_actionable_errors
+test_mixed_batch_preflights_every_pair_before_reexecution
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
 test_projects_path_scoping
