@@ -59,8 +59,28 @@ fm_startup_report_requires_wake() { # <report> <state>
   awk 'NF && $0 !~ /^BOOTSTRAP_INFO:/ { found=1; exit } END { exit !found }' "$1"
 }
 
+# The worker's existing aggregate age allowance also bounds running-only
+# supervision. PID liveness alone can refer to an unrelated reused process.
+fm_startup_stage_budget() {
+  local budget=${FM_STARTUP_NETWORK_TIMEOUT:-120}
+  case "$budget" in ''|*[!0-9]*|0) budget=120 ;; esac
+  printf '%s' "$budget"
+}
+
+fm_startup_worker_alive() { # <state>
+  local record="$1/.startup-network.status" pid started age
+  pid=$(fm_startup_field "$record" pid) || return 1
+  case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  started=$(fm_startup_field "$record" started) || return 1
+  case "$started" in ''|*[!0-9]*) return 0 ;; esac
+  age=$(( $(date +%s) - started ))
+  case "$age" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$age" -le "$(( $(fm_startup_stage_budget) + 30 ))" ]
+}
+
 fm_startup_supervision_pending() { # <state>
-  local state=$1 generation pid result
+  local state=$1 generation result
   if [ -f "$state/.wake-queue" ] && [ ! -L "$state/.wake-queue" ] \
     && awk -F '\t' 'NF == 5 && $2 ~ /^[0-9]+$/ && $3 == "check" \
       && $4 ~ /^startup-network(:[A-Za-z0-9._-]+)?$/ { found=1; exit } END { exit !found }' \
@@ -74,7 +94,5 @@ fm_startup_supervision_pending() { # <state>
     return $?
   fi
   [ "$(fm_startup_field "$state/.startup-network.status" state)" = running ] || return 1
-  pid=$(fm_startup_field "$state/.startup-network.status" pid) || return 1
-  case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null
+  fm_startup_worker_alive "$state"
 }

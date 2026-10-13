@@ -190,9 +190,7 @@ age_of() {  # <epoch> - seconds since, or empty when unreadable
 }
 
 stage_budget() {
-  local budget=${FM_STARTUP_NETWORK_TIMEOUT:-120}
-  case "$budget" in ''|*[!0-9]*|0) budget=120 ;; esac
-  printf '%s' "$budget"
+  fm_startup_stage_budget
 }
 
 delivery_budget() {
@@ -229,14 +227,7 @@ held_by() {  # human-readable holder of the lock the last take_lock refused
 # treated as abandoned no matter what its pid says, which keeps "in progress"
 # from becoming a permanent state.
 worker_alive() {
-  local pid started age
-  pid=$(status_get pid)
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
-  started=$(status_get started)
-  age=$(age_of "$started")
-  case "$age" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$age" -le "$(( $(stage_budget) + 30 ))" ]
+  fm_startup_worker_alive "$STATE"
 }
 
 # The exact phase names the digest and the report use, so "what has not been
@@ -381,7 +372,8 @@ retain_result() { # <generation> <state> <phases> <locked> <started> <rc> <repor
   if [ -e "$root" ] || [ -L "$root" ]; then
     [ -d "$root" ] && [ ! -L "$root" ] || return 1
   else
-    (umask 077; mkdir "$root") || return 1
+    (umask 077; mkdir "$root") \
+      || { [ -d "$root" ] && [ ! -L "$root" ]; } || return 1
   fi
   result="$root/$generation"
   if [ -e "$result" ] || [ -L "$result" ]; then
@@ -390,7 +382,9 @@ retain_result() { # <generation> <state> <phases> <locked> <started> <rc> <repor
   fi
   (umask 077; mkdir "$result") || return 1
   cp "$out" "$result/report" || return 1
-  [ -z "$timings" ] || cp "$timings" "$result/timings" || return 1
+  if [ -n "$timings" ] && ! cp "$timings" "$result/timings"; then
+    rm -f -- "$result/timings"
+  fi
   write_atomic "$result/status" <<EOF
 state=$state
 phases=$phases
