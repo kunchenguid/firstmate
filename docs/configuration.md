@@ -1590,7 +1590,7 @@ The dashboard owns account creation, identity linking, bot installation, and tok
 
 The locked session-start bootstrap step turns the token into local generated state.
 It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
-Independent home-local watcher overrides belong in `config/watch.env` as exported shell assignments; every current watcher loader sources it before `config/x-mode.env`, so Relay retains its required cadence and bootstrap never removes non-Relay tuning.
+Independent home-local watcher overrides belong in `config/watch.env` as exported shell assignments; `bin/fm-watch-arm.sh` loads it before `config/x-mode.env`, and every primary-harness adapter reaches it by launching the watcher through that arm, so Relay retains its required cadence and bootstrap never removes non-Relay tuning.
 
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script directly instead of executing state-file source.
 This section owns the Relay cadence contract:
