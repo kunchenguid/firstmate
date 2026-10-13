@@ -27,6 +27,7 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 - `<!--t:NAME-->` - pending capture: a tier-owned entry that the declared memory tier `NAME` does not yet hold because no session that wrote or curated it could reach that tier; it follows any tier marker the entry already carries.
   Stow never prunes, ages out, evicts, offloads, consolidates away, or moves to the cold archive an entry carrying it, whatever its tier clock says.
   A later pass that can reach `NAME` captures the entry there under the tier's declared rule, then removes the marker, after which the entry is curated like any other.
+  When the declaration no longer names `NAME` because the home renamed or retired that tier, the next pass retargets the marker to the declared tier that now owns the entry's knowledge class, or removes it when no declared tier owns that class, so no entry stays pinned by a tier that no longer exists.
 
 ```markdown
 - Treehouse pool slots share one repo, so workers must create their task branch before editing. <!--a:2026-08-03-->
@@ -89,7 +90,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
 2. Read every current memory file completely: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`.
    Treat an absent local file as absent, not as an invitation to manufacture content.
    Note any `Memory layering` declaration in them (schema: `docs/configuration.md`) and which declared tiers this session can reach; every later step consults it.
-   When neither `data/captain.md` nor `data/captain-shared.md` holds one, note that for the receipt and treat the local files as the only owners.
+   When neither `data/captain.md` nor `data/captain-shared.md` holds one, treat the local files as the only owners.
    In a primary home, all three are curation inputs under their existing ownership rules.
    In a secondmate home, `data/captain-shared.md` is a read-only primary-owned input: count it, never edit it, and curate only the editable local files.
    Every mutation in the rest of this pass, including reinforcement, retiering, decay archival, legacy migration, consolidation, budget archival, and offload, applies only to an editable memory file.
@@ -119,14 +120,14 @@ Every `/stow` invocation performs this complete pass, even when the session cont
 7. When the total is still over budget after decay and consolidation, make aggressive reduction the default, using editable files only and in this order: archive every editable stale, superseded, or low-utility entry that is eligible for archival; consolidate tighter; run the over-budget offload sweep below and autonomously relocate every eligible non-pinned conditional entry into an already-existing allowed owner only after that owner holds it; then, only when the convergence precondition below holds, archive eligible `aging` entries oldest-reinforced-first until within budget.
    A proposal, a future migration, or an accepted exception is never budget relief in this pass.
    Budget eviction considers only editable `aging` entries that carry a last-reinforced date and are not pending offload or pending capture; a `<!--g-->` legacy-grace entry is ineligible until its grace cycle resolves, so eviction can neither cancel a promised grace cycle nor prefer just-validated entries over unvalidated ones.
-   Convergence precondition: before evicting anything, total the eligible pool and check that archiving all of it would reach the budget; when even that cannot, skip the eviction rung entirely, archive nothing for budget reasons, and carry the concrete inability to the final step, naming the exempt pinned floor that crowds out the budget.
+   Convergence precondition: before evicting anything, total the eligible pool and check that archiving all of it would reach the budget; when even that cannot, skip the eviction rung entirely, archive nothing for budget reasons, and carry the concrete inability to the final step, naming the exempt pinned and pending-capture floor that crowds out the budget.
    Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, immediate budget archiving, and autonomous offload do not apply to it.
    The sole exception is relocation to a JIT owner after explicit, per-item captain approval under the offload flow below, and that entry remains in memory until its destination is live.
 8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
    Finish at or below the effective budget, or open a concrete captain decision before ending the pass.
    A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
    Route that constraint to the primary owner and open one concrete captain decision at the primary owning level that names the shortfall, with exactly these options: raise the affected home's effective budget, or explicitly approve the primary owner trimming or offloading each named shared-file entry.
-   When the convergence precondition skipped eviction, report the exempt pinned floor and the remaining shortfall as that concrete inability rather than archiving eligible knowledge that could not close the gap.
+   When the convergence precondition skipped eviction, report the exempt pinned and pending-capture floor and the remaining shortfall as that concrete inability rather than archiving eligible knowledge that could not close the gap.
    Only after every safe non-pinned archival, consolidation, offload, and eligible eviction action is exhausted may a remaining excess be attributed to pinned safety, authority, or genuine captain-preference entries.
    In that last-resort case, create one captain-held decision that names the shortfall and each relevant pinned entry, with exactly these options: raise the effective budget, or explicitly approve offloading or trimming a named pinned entry.
    Route a read-only ownership constraint to its primary owner, and make every other unresolved excess a concrete captain decision that names the safe action still required.
@@ -274,7 +275,6 @@ Report the outcome in plain captain-facing language with all of these facts:
 - one or more actions for each of `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, using only `unchanged`, `added`, `rewritten`, `pruned`, `routed`, `archived`, or `proposed-offload`; adding or replacing a migration marker is `rewritten`, never a new action verb such as `migrated`;
 - each durable finding filed outside memory and its authoritative owner, including every capture to a declared memory tier;
 - every finding or entry a declared tier should hold but this session could not reach, left carrying its pending-capture marker and named so a session that can reach it captures it;
-- when no `Memory layering` declaration was found, one line saying so and pointing at the re-seed step in `docs/configuration.md` under External memory tiers;
 - each archived entry's reason, each autonomous offload's live destination and actual relief, and, when a pinned candidate was proposed, the `proposed-offload` section with every candidate's fields;
 - every unresolved exception, including a primary-owned shared-file constraint in a secondmate home, and every concrete captain decision opened for an over-budget result;
 - each open record this pass filed or corrected, and each one it deliberately left alone with the judgment it is waiting on;
