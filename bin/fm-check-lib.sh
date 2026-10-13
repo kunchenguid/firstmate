@@ -79,6 +79,7 @@ fm_custom_check_snapshot_prepare() {
     || { fm_custom_check_snapshot_cleanup; return 1; }
   FM_CUSTOM_CHECK_REJECTION='its bytes differ from its registration'
   [ "$hash" = "$FM_CUSTOM_CHECK_HASH" ] || { fm_custom_check_snapshot_cleanup; return 1; }
+  # shellcheck disable=SC2034 # Read by the sourcing watcher (bin/fm-watch.sh) on rejection.
   FM_CUSTOM_CHECK_REJECTION=
 }
 
