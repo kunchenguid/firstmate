@@ -19,9 +19,11 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-TMP_ROOT=$(fm_test_tmproot fm-remote-trace-context)
-mkdir -p "$TMP_ROOT"
-TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
+TMP_ROOT=$(fm_test_tmproot fm-remote-trace-context) || fail "could not create the isolated remote trace fixture"
+[ -n "$TMP_ROOT" ] && [ -d "$TMP_ROOT" ] || fail "the remote trace fixture directory must exist and be non-empty"
+TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P) || fail "could not resolve the remote trace fixture directory"
+case "$TMP_ROOT/" in "$ROOT/"*) fail "the remote trace fixture must not be inside its source tree" ;; esac
+case "$ROOT/" in "$TMP_ROOT/"*) fail "the remote trace fixture must not contain its source tree" ;; esac
 PARENT="$TMP_ROOT/parent"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
@@ -33,7 +35,16 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
-trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+cleanup_remote_fixture() {
+  FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
+    kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true
+  fi
+  # Spawn deliberately leaves its hook directories read-only.
+  find "$TMP_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup_remote_fixture EXIT
 
 # The remote host's tracked code root is this branch, as a real git repository:
 # fm-on and the remote entrypoint both require the dispatched command to be
@@ -44,9 +55,8 @@ trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-proceven
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
 
 # The remote host runs the Herdr fixture, whose every invocation is logged
-# verbatim, so the pre-launch `export TRACEPARENT=` line and the launch
-# literal's FM_TRACE_CONTEXT prefix are both observable exactly as the pane
-# received them. The tmux fixture below only keeps the remote home's own
+# verbatim, so the staged file sent to the pane can be read back and its
+# pre-launch exports and FM_TRACE_CONTEXT prefix are observable at delivery. The tmux fixture below only keeps the remote home's own
 # non-second-mate tooling resolvable.
 cat > "$REMOTE_ROOT/bin/tmux" <<SH
 #!/usr/bin/env bash
@@ -148,9 +158,9 @@ freeze_parent_session() {
   )
 }
 
-# What the remote pane actually received, read back from the remote tmux log.
+# Read the actual launch file delivered through the remote Herdr boundary.
 remote_injected_traceparent() {
-  sed -n 's/.*export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' "$HERDR_LOG" | tail -1
+  remote_staged_launch | sed -n 's/^export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' | tail -1
 }
 remote_staged_launch() {
   local staged
@@ -177,14 +187,15 @@ remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
 assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no parent metadata"
 ! grep -q '^traceparent=' "$PARENT/state/ios.meta" \
   || fail "default-off remote spawn must not record a traceparent= line"
-! grep -q 'export TRACEPARENT=' "$HERDR_LOG" \
+! remote_staged_launch | grep -q '^export TRACEPARENT=' \
   || fail "default-off remote spawn must not export a carrier into the remote pane"
 ! grep -q '^traceparent=' "$REMOTE_HOME/state/parent-route/ios.meta" \
   || fail "default-off remote spawn must not record a carrier on the remote host"
 [ "$(remote_launch_snapshot)" = off ] \
   || fail "default-off remote spawn must deliver FM_TRACE_CONTEXT=off (got '$(remote_launch_snapshot)')"
 assert_absent "$REMOTE_HOME/config/trace-context" "default-off remote spawn inherited an enablement flag"
-grep -q 'export GOTMPDIR=' "$HERDR_LOG" || fail "the remote spawn should still run (GOTMPDIR is always exported)"
+remote_staged_launch | grep -q '^export GOTMPDIR=' \
+  || fail "the remote spawn should still run (GOTMPDIR is always exported)"
 pass "disabled: a remote-routed second mate records and receives no carrier and stays enabled-off end to end"
 
 # --- enabled: one carrier is recorded by the parent and received remotely ----
@@ -210,15 +221,15 @@ fm_trace_context_valid "$INJECTED_TP" \
   || fail "an enabled remote spawn must deliver FM_TRACE_CONTEXT=on (got '$(remote_launch_snapshot)')"
 assert_present "$REMOTE_HOME/config/trace-context" \
   "an enabled remote launch did not inherit the enablement flag into the remote home"
-GOTMP_LINE=$(grep -n 'export GOTMPDIR=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
-TP_LINE=$(grep -n 'export TRACEPARENT=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
-LAUNCH_LINE=$(grep -n "^pane send-text [^ ]* \\. '.*' --session " "$HERDR_LOG" | tail -1 | cut -d: -f1)
+GOTMP_LINE=$(remote_staged_launch | grep -n '^export GOTMPDIR=' | tail -1 | cut -d: -f1)
+TP_LINE=$(remote_staged_launch | grep -n '^export TRACEPARENT=' | tail -1 | cut -d: -f1)
+LAUNCH_LINE=$(remote_staged_launch | grep -n 'FM_TRACE_CONTEXT=on' | tail -1 | cut -d: -f1)
 [ -n "$GOTMP_LINE" ] && [ -n "$TP_LINE" ] && [ -n "$LAUNCH_LINE" ] \
-  || fail "remote pane log missing GOTMPDIR/TRACEPARENT/launch lines"
+  || fail "remote staged launch missing GOTMPDIR/TRACEPARENT/launch lines"
 [ "$TP_LINE" -gt "$GOTMP_LINE" ] \
   || fail "the remote TRACEPARENT export must ride the GOTMPDIR pre-launch site (gotmp=$GOTMP_LINE tp=$TP_LINE)"
 [ "$TP_LINE" -lt "$LAUNCH_LINE" ] \
-  || fail "the remote TRACEPARENT export must be sent before the launch command (tp=$TP_LINE launch=$LAUNCH_LINE)"
+  || fail "the remote TRACEPARENT export must precede the launch command (tp=$TP_LINE launch=$LAUNCH_LINE)"
 pass "enabled: a remote-routed second mate receives one carrier in its pane, identical to the parent's recorded identity, before launch"
 
 # --- relaunch stability on the remote path ----------------------------------

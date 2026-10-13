@@ -32,7 +32,7 @@ HERDR_STATE="$TMP_ROOT/remote-herdr.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" \
   "$REMOTE_ROOT" "$CLAIMS" "$PROBEBIN" "$TMP_ROOT/pane-home"
-trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; chmod -R u+w "$TMP_ROOT" 2>/dev/null || true; rm -rf -- "$TMP_ROOT"' EXIT
 
 # A synthetic value the remote launch must override rather than inherit, so a
 # launch that only forwarded the ambient environment cannot pass as a floor.
@@ -114,12 +114,13 @@ remote_env() {
 # What the remote pane received, read back from the fixture's verbatim log. The
 # fixture logs one line per invocation as the joined argv, so each payload sits
 # between the pane id and the trailing session selector. The Herdr adapter sends
-# a pre-launch export as a `pane run` line and the launch command itself as the
-# unsubmitted literal `pane send-text`.
+# the unsubmitted literal `pane send-text` that sources the staged launch file;
+# that file carries the pane-shell exports as leading single-statement lines,
+# then the launch command, which itself opens with its own export statements.
 remote_pane_payload() {  # <verb>
   sed -n "s/^pane $1 [^ ]* \\(.*\\) --session [^ ]*\$/\\1/p" "$HERDR_LOG"
 }
-remote_launch_command() {
+remote_staged_launch() {
   local source_line staged
   source_line=$(remote_pane_payload send-text | grep "^\. '.*'\$" | tail -1)
   staged=${source_line#". '"}
@@ -128,7 +129,10 @@ remote_launch_command() {
   cat "$staged"
 }
 remote_pane_exports() {
-  remote_pane_payload run | grep '^export '
+  remote_staged_launch | awk '!/^export [^;]*$/{exit} {print}'
+}
+remote_launch_command() {
+  remote_staged_launch | awk 'f || !/^export [^;]*$/{f=1; print}'
 }
 
 # Provision and register the remote route from the captain-facing primary.
