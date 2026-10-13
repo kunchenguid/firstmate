@@ -922,14 +922,14 @@ pooled_recover() {
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE \
     PATH="$W/fakebin:$PATH" FM_HOME="$W/home" FM_ROOT="$W/root" FM_ROOT_OVERRIDE="$W/root" \
     STATE="$W/home/state" CONFIG="$W/home/config" DATA="$W/home/data" \
-    FM_TEST_SPAWN_LOG="$W/spawn.log" FM_TEST_BEFORE="${1:-}" bash -c '
+    FM_TEST_SPAWN_LOG="$W/spawn.log" FM_TEST_BEFORE="${1:-}" FM_TEST_RECOVERY_TIMEOUT="${2:-}" bash -c '
       . "$0/bin/fm-secondmate-liveness-lib.sh"
       fm_secondmate_liveness_lock sm1 || { echo "lock|busy|"; exit 0; }
       fm_secondmate_liveness_probe "$STATE/sm1.meta" sm1 poll
       [ "$FM_SM_LIVE_STATUS" = relaunchable ] || { echo "probe|$FM_SM_LIVE_STATUS|$FM_SM_LIVE_REASON"; exit 0; }
       [ -z "$FM_TEST_BEFORE" ] || eval "$FM_TEST_BEFORE"
       rc=0
-      fm_secondmate_liveness_relaunch "$STATE/sm1.meta" sm1 || rc=$?
+      fm_secondmate_liveness_relaunch "$STATE/sm1.meta" sm1 "$FM_TEST_RECOVERY_TIMEOUT" || rc=$?
       printf "%s|%s|%s\n" "$rc" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_REASON"
       fm_secondmate_liveness_unlock sm1
     ' "$ROOT" 2>&1
@@ -980,6 +980,82 @@ test_recovery_uses_the_recorded_socket() {
   assert_absent "$W/endpoint/wrong-socket" "recovery touched the ambient server"
   assert_equals '' "$(cat "$W/endpoint/windows")" "the owned dead endpoint survived"
   pass "recovery probes and closes only the generation's owning socket"
+}
+
+test_recovery_retries_terminal_generation_after_home_lock_timeout() {
+  local out holder lock i file
+  make_pooled_world pooled-terminal-retry
+  pooled_meta g1
+  pooled_dispatch g1
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming g1"
+  printf 'bash\n' > "$W/endpoint/command"
+  : > "$W/endpoint/require-socket"
+  lock="$W/home/state/.secondmate-relaunch.lock"
+  STATE="$W/home/state" bash -c '. "$1" && fm_lock_try_acquire "$2" && exec sleep 600' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$lock" &
+  holder=$!
+  for i in $(seq 1 100); do
+    [ ! -f "$lock/pid" ] || break
+    sleep 0.05
+  done
+  [ -f "$lock/pid" ] || { kill "$holder"; wait "$holder" 2>/dev/null; fail "home lock was not acquired"; }
+  out=$(TMUX="$W/unrelated/socket,0,0" pooled_recover '' 1)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" '1|skipped|another secondmate relaunch still owns' "home lock did not block recovery"
+  assert_equals reclaimed "$(pooled_lifecycle g1)" "timeout did not leave a terminal generation"
+  assert_equals fm-sm1 "$(cat "$W/endpoint/windows")" "timeout closed the endpoint"
+  assert_absent "$W/spawn.log" "timeout launched a replacement"
+  out=$(TMUX="$W/unrelated/socket,0,0" pooled_recover)
+  assert_equals '0|relaunchable|' "$out" "terminal-generation retry lost the recorded socket"
+  assert_absent "$W/endpoint/wrong-socket" "terminal retry probed the ambient server"
+  assert_equals '' "$(cat "$W/endpoint/windows")" "terminal retry left its dead endpoint"
+  assert_present "$W/spawn.log" "terminal retry did not launch"
+  for file in "$W/home/state/fleet-seats/holders/"*.json; do
+    jq '(.incarnations[] | select(.generation == "g1") | .route.socket_path) = null' "$file" > "$file.new"
+    mv "$file.new" "$file"
+  done
+  out=$(TMUX="$W/unrelated/socket,0,0" pooled_recover)
+  assert_contains "$out" 'probe|skipped|the recorded tmux socket is unverified' "terminal route without a socket authorized recovery"
+  assert_absent "$W/endpoint/wrong-socket" "unverified terminal route probed the ambient server"
+  pass "home-lock timeout retries retain terminal socket ownership and refuse missing identity"
+}
+
+test_recovery_refuses_unknown_or_changed_tracked_routes() {
+  local out file route
+  for route in missing relative unknown changed absent-generation; do
+    make_pooled_world "pooled-route-$route"
+    pooled_meta g1
+    pooled_dispatch g1
+    printf 'claude\n' > "$W/endpoint/command"
+    pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming g1"
+    printf 'bash\n' > "$W/endpoint/command"
+    : > "$W/endpoint/require-socket"
+    for file in "$W/home/state/fleet-seats/holders/"*.json; do
+      case "$route" in
+        missing) jq '(.incarnations[] | select(.generation == "g1") | .route.socket_path) = null' "$file" > "$file.new" ;;
+        relative) jq '(.incarnations[] | select(.generation == "g1") | .route.socket_path) = "relative/socket"' "$file" > "$file.new" ;;
+        unknown) jq --arg s "$W/unknown/socket" '(.incarnations[] | select(.generation == "g1") | .route.socket_path) = $s' "$file" > "$file.new" ;;
+        absent-generation) jq '.incarnations = []' "$file" > "$file.new" ;;
+        changed) continue ;;
+      esac
+      mv "$file.new" "$file"
+    done
+    if [ "$route" = changed ]; then
+      out=$(pooled_recover 'for file in "$STATE/fleet-seats/holders/"*.json; do jq '\''(.incarnations[] | select(.generation == "g1") | .route.socket_path) = "relative/socket"'\'' "$file" > "$file.new"; mv "$file.new" "$file"; done')
+      assert_contains "$out" '1|skipped|' "changed socket authorized a stale verdict"
+    else
+      out=$(TMUX="$W/unrelated/socket,0,0" pooled_recover)
+      assert_contains "$out" 'probe|skipped|' "unverified tracked route authorized recovery: $route"
+    fi
+    assert_equals fm-sm1 "$(cat "$W/endpoint/windows")" "denied route closed the endpoint: $route"
+    assert_absent "$W/spawn.log" "denied route launched a replacement: $route"
+    if [ "$route" != absent-generation ]; then
+      assert_equals confirmed "$(pooled_lifecycle g1)" "denied route changed the generation: $route"
+    fi
+  done
+  pass "unknown and stale tracked routes refuse recovery before endpoint or ledger mutation"
 }
 
 test_recovery_abandons_a_verdict_whose_generation_changed() {
@@ -1085,7 +1161,7 @@ SH
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_recovery_leaves_an_unconfirmed_launch_counted|test_recovery_reclaims_exactly_the_probed_dead_generation|test_recovery_abandons_a_verdict_whose_generation_changed|test_recovery_adopts_current_ledger_generation|test_recovery_distinguishes_missing_and_unreadable_endpoints|test_recovery_does_not_kill_a_late_confirmed_start) "$focused_test" ;;
+      test_recovery_uses_the_recorded_socket|test_recovery_retries_terminal_generation_after_home_lock_timeout|test_recovery_refuses_unknown_or_changed_tracked_routes|test_recovery_leaves_an_unconfirmed_launch_counted|test_recovery_reclaims_exactly_the_probed_dead_generation|test_recovery_abandons_a_verdict_whose_generation_changed|test_recovery_adopts_current_ledger_generation|test_recovery_distinguishes_missing_and_unreadable_endpoints|test_recovery_does_not_kill_a_late_confirmed_start) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -1127,3 +1203,5 @@ test_recovery_distinguishes_missing_and_unreadable_endpoints
 test_recovery_does_not_kill_a_late_confirmed_start
 
 test_recovery_uses_the_recorded_socket
+test_recovery_retries_terminal_generation_after_home_lock_timeout
+test_recovery_refuses_unknown_or_changed_tracked_routes

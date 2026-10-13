@@ -368,15 +368,19 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   fi
   if [ -n "$seat_record" ]; then
     incarnation=$(printf '%s\n' "$seat_record" | jq -c --arg g "$FM_SM_LIVE_GENERATION" '
-      [.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")]
-      | (map(select(.generation == $g)) | last) // (map(select(.lifecycle == "confirmed")) | last) // last // empty')
-    if [ -n "$incarnation" ]; then
-      FM_SM_LIVE_GENERATION=$(printf '%s\n' "$incarnation" | jq -r .generation)
-      if [ "$(printf '%s\n' "$incarnation" | jq -r '.route.placement // empty')" = local ]; then
-        backend=$(printf '%s\n' "$incarnation" | jq -r .route.backend)
-        target=$(printf '%s\n' "$incarnation" | jq -r .route.target)
-        FM_SM_LIVE_SOCKET=$(printf '%s\n' "$incarnation" | jq -r '.route.socket_path // empty')
-      fi
+      .incarnations as $all
+      | [$all[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")]
+      | (map(select(.generation == $g)) | last) // (map(select(.lifecycle == "confirmed")) | last) // last
+        // ($all | map(select(.generation == $g)) | last) // empty')
+    if [ -z "$incarnation" ]; then
+      FM_SM_LIVE_REASON="the recorded incarnation has no verified fleet route; recovery is refused"
+      return 0
+    fi
+    FM_SM_LIVE_GENERATION=$(printf '%s\n' "$incarnation" | jq -r .generation)
+    if [ "$(printf '%s\n' "$incarnation" | jq -r '.route.placement // empty')" = local ]; then
+      backend=$(printf '%s\n' "$incarnation" | jq -r .route.backend)
+      target=$(printf '%s\n' "$incarnation" | jq -r .route.target)
+      FM_SM_LIVE_SOCKET=$(printf '%s\n' "$incarnation" | jq -r '.route.socket_path // empty')
     fi
   fi
   FM_SM_LIVE_BACKEND=$backend FM_SM_LIVE_TARGET=$target
@@ -462,6 +466,10 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
     return 0
   fi
 
+  if [ -n "$seat_record" ] && [ "$(printf '%s\n' "$incarnation" | jq -r '.route.placement // empty')" != local ]; then
+    FM_SM_LIVE_REASON="the recorded local incarnation has no verified local route; recovery is refused"
+    return 0
+  fi
   if [ "$backend" = tmux ] && [ -n "${incarnation:-}" ]; then
     case "$FM_SM_LIVE_SOCKET" in
       /*) ;;

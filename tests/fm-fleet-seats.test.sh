@@ -1640,6 +1640,28 @@ test_terminal_holders_survive_opt_out_readmission() {
   pass "terminal holders record local and remote opt-out readmissions without reviving old generations or undercounting defaults"
 }
 
+test_reconciliation_distinguishes_matching_and_reused_owner_pids() {
+  local home="$TMP_ROOT/reconcile-owner-identity/home" out file identity
+  make_home "$home"
+  pools "$home" 2
+  new_holder
+  reserve "$home" matching pool-model-a >/dev/null || fail "reserving matching owner"
+  reserve "$home" reused pool-model-a >/dev/null || fail "reserving reused owner"
+  identity=$(seats "$home" show matching | jq -r '.incarnations[0].owner_pid_identity')
+  [ -n "$identity" ] && [ "$identity" != null ] || fail "matching owner has no process identity"
+  for file in "$home/state/fleet-seats/holders/"*.json; do
+    [ "$(jq -r .task "$file")" = reused ] || continue
+    jq '.incarnations[0].owner_pid_identity = "previous-process-identity"' "$file" > "$file.new"
+    mv "$file.new" "$file"
+  done
+  out=$(seats "$home" reconcile --limit 2 2>&1) || fail "identity-aware maintenance failed: $out"
+  assert_contains "$out" 'reclaimed id=reused generation=g-reused' "a reused live PID pinned its old reservation"
+  assert_equals reclaimed "$(lifecycle_of "$home" reused g-reused)" "reused owner reservation remained counted"
+  assert_equals reserved "$(lifecycle_of "$home" matching g-matching)" "a genuinely live owner lost its reservation"
+  kill -0 "$LAST_HOLDER" 2>/dev/null || fail "maintenance stopped the unrelated live process"
+  pass "maintenance retains matching process owners and reclaims reservations with reused PIDs"
+}
+
 test_bounded_reconciliation_progresses_past_uncertain_holders() {
   local base="$TMP_ROOT/reconcile-progress" home fakebin out file task gen tick n
   home="$base/home"
@@ -1720,7 +1742,7 @@ project=$home"
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -1771,6 +1793,7 @@ test_opt_out_records_only_existing_holder_successors
 
 test_terminal_holders_survive_opt_out_readmission
 test_bounded_reconciliation_progresses_past_uncertain_holders
+test_reconciliation_distinguishes_matching_and_reused_owner_pids
 
 test_legacy_routes_support_recovery_and_retain_invalid_endpoints
 
