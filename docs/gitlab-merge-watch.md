@@ -30,6 +30,22 @@ GNU bash, version 5.2.15(1)-release (x86_64-amazon-linux-gnu)
 
 That `glab` is a locally built 1.82.0; only its build tag and commit are elided, because they name a private build rather than a released version.
 
+The 2026-10-13 end-to-end pass below was collected with:
+
+```
+$ glab --version
+glab 1.122.0 (89d0008af)
+
+$ jq --version
+jq-1.6
+
+$ git --version
+git version 2.39.5
+
+$ bash --version | head -1
+GNU bash, version 5.2.15(1)-release (x86_64-pc-linux-gnu)
+```
+
 ## The evidence project
 
 All live evidence here reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
@@ -201,7 +217,7 @@ pr=https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
 pr_head=33762fcf6777c8d993220d25fb541e56c48081b9
 ```
 
-The public fixture holds no draft merge request, so the draft refusal is pinned by `tests/fm-pr-check-security.test.sh` against a fixture JSON rather than reproduced here.
+That arming refusal also ran live against a real draft merge request on 2026-10-13 (the section below), so both the unit pin and a real forge reading exist now.
 An unreadable draft state still does not refuse, matching how the head read is optional.
 
 ## Registration version
@@ -303,3 +319,65 @@ A Gerrit task records none, because a Gerrit revision names one patch set and ev
 The merge path still does not depend on one, and deliberately so.
 A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.
 Reading the head live at merge time, reporting a recorded value that disagrees, and binding the merge to what was actually verified is what closes that gap.
+
+## Live end to end: draft refusal, fresh review fetch, real squash merge, landed-work proof (2026-10-13)
+
+The earlier sections proved each guard with refusals read live but never drove a merge request all the way through arm, draft refusal, review, merge, and teardown on a real instance.
+This pass did, against a fresh public throwaway fixture, https://gitlab.com/gh0stwin/firstmate-gitlab-port-fixture, merge request https://gitlab.com/gh0stwin/firstmate-gitlab-port-fixture/-/merge_requests/1.
+Every command below ran with the real `glab`, `git`, and `jq` on PATH; only the non-forge surroundings (tmux window close, worktree return, the no-mistakes run check) ran as no-op stubs, exactly the hermetic split the unit tests use, because the surface under evidence is the GitLab paths.
+The fixture repo's one-job pipeline ran on a project-scoped runner created for it on this box after the personal namespace had no shared runner available; the runner was stopped and its registration deleted after the merge, and the repo carries only throwaway content.
+
+A draft merge request refuses arming live, exactly as designed:
+
+```
+$ glab mr update 1 --draft -R gh0stwin/firstmate-gitlab-port-fixture
+✓ marked as Draft
+$ fm-pr-check.sh live-evidence https://gitlab.com/gh0stwin/firstmate-gitlab-port-fixture/-/merge_requests/1
+error: https://gitlab.com/gh0stwin/firstmate-gitlab-port-fixture/-/merge_requests/1 is a draft merge request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate
+$ echo $?
+1
+```
+
+The task metadata was byte-identical after the refusal and no poll was armed.
+Marked ready, the same arm records the head and arms:
+
+```
+$ glab mr update 1 --ready -R gh0stwin/firstmate-gitlab-port-fixture
+$ fm-pr-check.sh live-evidence https://gitlab.com/gh0stwin/firstmate-gitlab-port-fixture/-/merge_requests/1
+armed: state/live-evidence.check.sh
+$ grep -E '^(pr|pr_head)=' state/live-evidence.meta
+pr=https://gitlab.com/gh0stwin/firstmate-gitlab-port-fixture/-/merge_requests/1
+pr_head=d93a01ff9e15a8c61eda208cad96ce1a24629e07
+```
+
+Advancing the source branch to `852919f4e3dd57a222f6ab3b4e825138eed149ed` then left that recorded head stale, and `bin/fm-review-diff.sh` still compared against the freshly fetched `refs/merge-requests/1/head` rather than the record:
+
+```
+$ fm-review-diff.sh live-evidence --stat
+diff base: origin/main
+ .gitlab-ci.yml | 2 ++
+ NOTES.md       | 2 ++
+ 2 files changed, 4 insertions(+)
+```
+
+`NOTES.md` at the stale head would have shown one insertion; two proves the fresh ref won, the offline fallback never fired.
+With the head pipeline at `852919f` green, the guarded merge verified every condition live, named the stale record, and squashed:
+
+```
+$ fm-pr-merge.sh live-evidence https://gitlab.com/gh0stwin/firstmate-gitlab-port-fixture/-/merge_requests/1
+armed: state/live-evidence.check.sh
+notice: recorded head d93a01ff9e15a8c61eda208cad96ce1a24629e07 disagrees with the live head 852919f4e3dd57a222f6ab3b4e825138eed149ed; verifying the live head
+verified: https://gitlab.com/gh0stwin/firstmate-gitlab-port-fixture/-/merge_requests/1 is open and mergeable, with a successful pipeline at head 852919f4e3dd57a222f6ab3b4e825138eed149ed
+✓ Pipeline succeeded.
+✓ Merged!
+```
+
+The merge request reports `state=merged` with merge commit `dccd89d`, and the teardown landed-work proof accepted it through the merged-state read plus the `refs/merge-requests/1/head` fetch, syncing the project clone and completing the task:
+
+```
+$ fm-teardown.sh live-evidence
+/home/node/firstmate/data/track-firstmate-upstream-pr-7226/live/project: synced 55b08d0..dccd89d
+teardown live-evidence complete (window firstmate:fm-live-evidence, worktree /home/node/firstmate/data/track-firstmate-upstream-pr-7226/live/wt)
+$ echo $?
+0
+```

@@ -73,10 +73,11 @@
 # worker opens its own merge request with glab-axi instead of a GitHub pull
 # request with gh-axi, and on forgejo a direct-PR worker opens its pull request
 # with tea instead of gh-axi, while a no-mistakes run's pull request stays the
-# pipeline's own publish at its configured push target, so that block's
-# readback keeps naming gh-axi. A forge composes with the two modes that
-# publish and is refused on local-only, which publishes nothing. On gerrit the
-# worker publishes one squashed change with
+# pipeline's own publish at its configured push target: that readback keeps
+# gh-axi for none and gitlab, and only forgejo's stays on tea, because its
+# pull request lives on the Forgejo forge. A forge composes with the two
+# modes that publish and is refused on local-only, which publishes nothing. On
+# gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
 # that straight away, and no-mistakes first runs the pipeline with its three
 # forge-facing steps skipped and recovers the pipeline's own fix commits into its
@@ -248,9 +249,11 @@ fm_ship_branch_prefix() {  # <branch> <task-id>
 # bin/fm-spawn.sh takes it as --base-branch, refuses a brief whose Base branch
 # lines (fm_brief_base_branches) disagree, and records base_branch= in the task
 # metadata, and every later consumer reads that metadata field. It is
-# refused on local-only, whose landing fast-forwards local main, and on a Gerrit
-# forge, whose publish path targets the change's own branch; a GitLab merge
-# request targets any branch, so a base branch is ordinary there.
+# refused on local-only, whose landing fast-forwards local main, on a Gerrit
+# forge, whose publish path targets the change's own branch, and on an
+# external review tool, which never targets a pull request at all; a GitLab
+# merge request or a Forgejo pull request targets any branch, so a base branch
+# is ordinary there.
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   local base=$1 mode=$2 forge=$3 caller=$4
   [ -n "$base" ] || return 0
@@ -262,10 +265,11 @@ fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
     echo "error: $caller: a base branch cannot ship mode=local-only, whose landing fast-forwards local main; ship no-mistakes or direct-PR, which open a pull request against the base" >&2
     return 1
   fi
-  if [ "$forge" = gerrit ]; then
-    echo "error: $caller: a base branch is not supported on forge=$forge" >&2
-    return 1
-  fi
+  case "$forge" in
+    gerrit|external)
+      echo "error: $caller: a base branch is not supported on forge=$forge" >&2
+      return 1 ;;
+  esac
   return 0
 }
 
@@ -545,7 +549,7 @@ EOF
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q
-  local forge_token='' contract_forge='' contract_consent='' publish_action='' forge_cli=gh-axi draft_check='' adapter
+  local forge_token='' contract_forge='' contract_consent='' publish_action='' forge_cli=gh-axi draft_check='' nm_draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   fm_pr_text_valid "$pr" "$mode" "$forge" fm_dod_block || return 1
@@ -566,10 +570,12 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
   # its own branches), so this split names every tool the worker reads. A
   # gitlab direct-PR worker publishes the merge request itself and a forgejo
   # direct-PR worker its pull request, so each gets its own forge CLI
-  # sentences; a no-mistakes run's pull request is the pipeline's own publish
-  # at its configured push target, so that block keeps the gh-axi readback for
-  # every non-gerrit forge.
+  # sentences; the no-mistakes readback below is scoped to the pipeline's own
+  # publish at its configured push target instead: none and gitlab keep the
+  # gh-axi sentence, and only forgejo, whose pull request lives on the
+  # Forgejo forge, overrides it with the tea sentence.
   [ "$forge" = none ] || forge_token=" forge=$forge"
+  nm_draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
   # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backticked command snippets must reach the reading agent verbatim, not expand at render time.
   if [ "$forge" = gitlab ]; then
     if [ -n "$base" ]; then
@@ -580,6 +586,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
   elif [ "$forge" = forgejo ]; then
     publish_action='push your branch and open a PR with `tea` that is ready for review, not a draft'
     draft_check="Before you report done, read the PR back from the forge and confirm it is not a draft (\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
+    nm_draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
   else
     publish_action='push your branch and open a PR with `gh-axi` that is ready for review, not a draft'
     draft_check='Before you report done, read the PR back from the forge and confirm it is not a draft (`gh-axi pr view <number>` must print `draft: no`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with `gh-axi pr ready <number>`.'
@@ -695,7 +702,7 @@ EOF
       if [ "$pr" = manual ]; then
         [ -z "$nm_base" ] || nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto that branch, and open the PR against it with \`--base $base_q\`.
 "
-        fm_dod_manual_pr_block "$branch" "$forge_cli" "$draft_check" "$contract_forge$contract_consent" "$nm_base" "$pr_base"
+        fm_dod_manual_pr_block "$branch" "$forge_cli" "$nm_draft_check" "$contract_forge$contract_consent" "$nm_base" "$pr_base"
         return
       fi
       cat <<EOF
@@ -711,7 +718,7 @@ EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $nm_draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
