@@ -4471,6 +4471,9 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
+# tmux parses `.` in a target as the window/pane separator, so a dotted task id
+# needs a dot-free window name; fm_backend_validate_task_endpoint accepts it.
+[ "$BACKEND" = tmux ] && W=${W//./-}
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.

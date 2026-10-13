@@ -259,6 +259,12 @@ test_supported_backend_endpoint_records_validate() {
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid tmux endpoint refused"
   [ "$FM_BACKEND_VALIDATED_BACKEND:$FM_BACKEND_VALIDATED_TARGET" = "tmux:firstmate:fm-$id" ] || fail "tmux endpoint validation returned wrong identity"
 
+  id=task-dotted.3
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-task-dotted-3" "worktree=$dir/worktree" "project=$dir/project"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "dot-sanitized tmux endpoint for a dotted task id refused"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = "firstmate:fm-task-dotted-3" ] || fail "dotted-id tmux validation returned wrong target"
+
   id=tmux-spaced-session
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=team work:fm-$id" "worktree=$dir/worktree" "project=$dir/project"
