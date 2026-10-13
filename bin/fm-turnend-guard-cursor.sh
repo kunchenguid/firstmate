@@ -295,9 +295,6 @@ if ! fm_supervision_needed "$STATE" "$GRACE"; then
   exit 0
 fi
 
-# Home-local watcher tuning persists independently of Relay.
-# shellcheck source=/dev/null
-[ -f "$CONFIG/watch.env" ] && . "$CONFIG/watch.env"
 # X mode cadence: an opted-in home polls Relay at its generated cadence.
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
