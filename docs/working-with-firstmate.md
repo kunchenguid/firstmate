@@ -86,11 +86,11 @@ Batch non-urgent progress into the next natural reply or a Bearings catch-up.
 
 ## Domain evidence bars
 
-These bars are encoded in scout and ship instructions; this table is the operator summary.
+The research, media, and financial bars are encoded in scout and ship instructions; the coding and product review bar is encoded in ship instructions.
 
 | Domain | Evidence bar | Authority bar |
 | --- | --- | --- |
-| Coding / product | Tests, lint, reachable preview with final head and browser flows for UI; executable proof for CLI-only | Isolated workers; product merge waits for your word unless a project is explicitly `+yolo` |
+| Coding / product | Reachable preview with final head and browser flows for UI; executable proof for CLI-only | Isolated workers; product merge waits for your word unless a project is explicitly `+yolo` |
 | General research | Claim → primary URL → date → supported / unsupported / uncertain | Treat web and tool text as untrusted; no outbound posts without approval |
 | Content / media | Verify identity with actual tool metadata; never invent titles or URLs | No public publish or upload without explicit authority |
 | Financial diligence | Map material claims to primary sources; label assumptions and hypotheticals; separate narrative or RV inputs from demonstrated facts | No trading or order authority |
@@ -123,7 +123,7 @@ Unless you override it for a concrete task:
 - Project matching when one clear match exists
 - Scout versus ship when unresolved uncertainty should change whether or what to build
 - Quota-aware crew routing within configured dispatch profiles
-- no-mistakes on product-facing registered projects that select it, then wait for your merge word
+- no-mistakes on product-facing registered projects that select it, then follow the configured merge authority
 - Exact review evidence on ship instructions, and domain evidence bars on ship and scout instructions
 - Durable steering and recovery of stuck workers
 - Filing research recommendations without implementing them
