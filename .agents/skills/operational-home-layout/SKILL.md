@@ -48,17 +48,21 @@ config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitig
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/projects-root  optional one-line projects root (relative to the home or absolute); LOCAL, gitignored by default but committable under the .firstmate/.gitignore whitelist; written by `firstmate init` as `..` for org and per-project homes; absent = $FM_HOME/projects; see docs/configuration.md "Project-local homes"
+config/primary-harness  optional one-token harness the `firstmate` launcher execs when --harness is absent; LOCAL, gitignored by default, committable under the whitelist; primary-capable harness adapter names only (crew-only adapters and kimi refused) and anything else fails at launch; absent = claude; see docs/configuration.md "Project-local homes"
+config/launch-mode  optional one-token default launch mode (`project` or `install`) the `firstmate` launcher uses when --mode is absent; LOCAL, gitignored by default, committable under the whitelist; absent = project where the host can build the view, else install with a notice; see docs/configuration.md "Launch modes"
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes; LOCAL, gitignored, owned by secondmate-provisioning
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry recording each project's standing delivery posture and optional ship-branch prefix; firstmate-private, parsed by fm-project-mode.sh (section 6)
+  project-paths.json  optional flat JSON object mapping a registered alias to an absolute path for a project outside the projects root; LOCAL, gitignored; consumed by bin/fm-projects-lib.sh's central resolver
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
   pipeline-spend.jsonl  optional per-task no-mistakes pipeline spend, written only when config/pipeline-spend is present; bin/fm-pipeline-spend.sh owns the schema
-projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
+projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception; absent in a `config/projects-root` org home, whose projects are the root's sibling repos
 state/               runtime records and signals; gitignored
   <id>.status        append-only wake events, not current-state truth; bin/fm-classify-lib.sh owns their syntax
   <id>.turn-ended    touched by turn-end hooks

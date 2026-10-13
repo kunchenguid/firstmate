@@ -123,6 +123,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # owner; this adapter contributes only capture and capability facts).
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-composer-lib.sh"
+# shellcheck source=bin/fm-view-lib.sh
+. "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-view-lib.sh"
 
 # Verified minimum: report.md recommends "likely Zellij 0.44 or newer" for
 # returned pane/tab IDs and dump-screen --pane-id; empirically verified
@@ -236,6 +238,7 @@ fm_backend_zellij_session_exists() {  # <session>
 fm_backend_zellij_server_ensure() {  # <session>
   local session=$1 i
   fm_backend_zellij_session_exists "$session" && return 0
+  fm_view_refuse_server_start zellij || return 1
   ( nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     fm_backend_zellij_session_exists "$session" && return 0
