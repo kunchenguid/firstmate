@@ -79,6 +79,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
+   Before any note or stop, the transaction reserves the replacement under the [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats); `bin/fm-control.sh`'s header owns the generation check and seat rollback mechanics.
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
@@ -99,7 +100,7 @@ The task's worktree, branch, commits, and uncommitted changes all survive that; 
 
 **Reclaim is Herdr-only.** On tmux, both verbs refuse a `missing` endpoint, leaving it exactly as deadlocked as it was before this mechanism existed - deliberately, and with the reason stated rather than guessed past.
 
-Two endpoint verdicts are agent-free, and both license a relaunch:
+Two endpoint verdicts are agent-free candidates for relaunch, subject to the [fleet seat predecessor proof](configuration.md#fleet-seat-pools-configfleet-seats):
 
 - `dead` - the endpoint exists and confidently holds no agent. It is **adopted**, so the task keeps its exact recorded address.
 - gone, **proven** - there is no endpoint and therefore no agent, and it cannot be adopted, so the launch owner **creates one fresh endpoint in the recorded worktree** and the republished record rebinds the task to it.
