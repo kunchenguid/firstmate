@@ -372,10 +372,11 @@ When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
-Before you start or restart a run on a branch that a crashed, aborted, or recovered run has touched, run \`$FM_DOD_GATE_REF_PROBE\` from this copy.
+Immediately before every \`no-mistakes axi run\` that starts a new run, and after any custody recovery \`branch_sync.next_action\` asked for, run \`$FM_DOD_GATE_REF_PROBE\` from this copy; never before a flagless reattach to a run that is active.
 \`no-mistakes axi sync --check\` reporting \`custody_returned\` with next action \`run_pipeline\` does not prove the gate will take your push: its relation compares your head with the run's own record, never with the gate's branch ref that the push is judged against.
-Exit 0 means go ahead; exit 10 or 11 means that push would be rejected as non-fast-forward.
-On exit 10 or 11, do not run, retry, force, delete a ref in the gate, or rebuild the work under a new branch name on your own: append \`needs-decision [at=<epoch>] [key=gate-ref-stale]: <the probe's verdict line>\` and stop.
+Exit 0 means only that the gate ref will not reject the push; keep following \`branch_sync.next_action\`, and the recovery it offers comes first.
+Exit 10 or 11 means that push would be rejected as non-fast-forward.
+On exit 10 or 11, once any offered recovery is done, do not run, retry, force, delete a ref in the gate, or rebuild the work under a new branch name on your own: append \`needs-decision [at=<epoch>] [key=gate-ref-stale]: <the probe's verdict line>\` and stop.
 
 $drive_block
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.

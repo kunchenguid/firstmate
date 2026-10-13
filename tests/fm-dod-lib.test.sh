@@ -473,6 +473,10 @@ test_driving_text_routes_through_the_gate_ref_probe() {
   fm_dod_block no-mistakes gate-ref-lane >"$out" || fail "could not render the no-mistakes definition of done"
   assert_grep "$ROOT/bin/fm-gate-ref-probe.sh" "$out" "driving text did not name the gate-ref probe"
   assert_grep 'key=gate-ref-stale' "$out" "driving text did not name the keyed decision"
+  assert_grep "Immediately before every \`no-mistakes axi run\` that starts a new run" "$out" \
+    "driving text left the trigger to the worker's judgment of whether the branch was touched"
+  assert_grep 'never before a flagless reattach' "$out" "driving text would probe an active run"
+  assert_grep 'the recovery it offers comes first' "$out" "driving text lets the probe pre-empt an offered recovery"
   [ -x "$ROOT/bin/fm-gate-ref-probe.sh" ] || fail "the probe the driving text names is not executable"
   pass "driving text routes a recovered lane through the gate-ref probe"
 }

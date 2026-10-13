@@ -24,8 +24,10 @@ Once ownership is settled, validate exactly once against that final head so no o
 A worker whose run cannot start because its gate ref is stale reports `needs-decision` with key `gate-ref-stale`, carrying the verdict line of `bin/fm-gate-ref-probe.sh`, whose header owns the verdicts and exit codes.
 `axi sync --check` reading `custody_returned` with `run_pipeline` does not rule that out, and once custody is stamped no supported no-mistakes command moves the ref.
 Never force the push, delete or rewrite the gate ref, or hand-edit the shared gate repository, and never tell a worker to; the ref is tool-owned state every lane on the project shares.
-Exit 10 means the gate ref carries nothing the worker's head lacks, so the work is safe and the choice is between a fresh branch name for it (a clean create, at the cost of a new ship branch and one more validation) and waiting for a no-mistakes release that moves the ref itself.
+Exit 10 means no non-merge commit is unique to the gate ref, so the work is safe; check any merge commit the probe counts before treating the ref as disposable.
+Its only route is a fresh branch name, and firstmate cannot re-point a running ship's branch: the brief's ship branch, the spawn metadata, and the PR and landed-work checks all name the old one, so that route is a re-dispatch of the same work, not a rename.
 Exit 11 means the gate ref holds work the worker's head lacks: have the worker recover custody first, and treat anything left as the captain's call.
+A probe that exits 0 does not clear a worker whose `axi sync --check` is blocked for another reason, such as `blocked_recover_manual_reconciliation`; that refusal is a different path and still needs its own decision.
 
 An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
