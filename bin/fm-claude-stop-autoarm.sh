@@ -323,9 +323,6 @@ trap 'handle_autoarm_signal HUP' HUP
 trap 'handle_autoarm_signal TERM' TERM
 trap 'handle_autoarm_signal INT' INT
 
-# Home-local watcher tuning persists independently of Relay.
-# shellcheck source=/dev/null
-[ -f "$CONFIG/watch.env" ] && . "$CONFIG/watch.env"
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
 # shellcheck source=/dev/null
