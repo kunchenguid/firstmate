@@ -602,6 +602,10 @@ take_spool() {  # <spool-file>
       return 1
     fi
   fi
+  if ! printf '%s\n' "$HOST_PID" > "$BUSY_FILE"; then
+    fm_lock_release "$spool.lock"
+    return 1
+  fi
   : > "$spool"
   fm_lock_release "$spool.lock"
   [ -n "$SPOOL_TEXT" ]
@@ -798,8 +802,12 @@ start_successor() {  # <predecessor-arm-pid>
 # stays tracked so the EXIT trap unlinks it; the arm already holds that
 # descriptor and keeps waiting on the watcher.
 detach_successor() {
-  local identity tmp=
+  local identity tmp='' locked=0
   [ -n "${SUCCESSOR_PID:-}" ] || return 0
+  if [ -n "$SUCCESSOR_SPOOL" ]; then
+    fm_lock_acquire_wait "$SUCCESSOR_SPOOL.lock"
+    locked=1
+  fi
   identity=$(identity_of "$SUCCESSOR_PID")
   if [ -z "$identity" ] || ! tmp=$(mktemp "$LEFT_RECORD.tmp.XXXXXX" 2>/dev/null) \
     || ! printf '%s\t%s\n' "$SUCCESSOR_PID" "$identity" > "$tmp" 2>/dev/null \
@@ -808,11 +816,16 @@ detach_successor() {
     || [ "$(cat "$LEFT_RECORD" 2>/dev/null)" != "$SUCCESSOR_PID"$'\t'"$identity" ]; then
     [ -z "$tmp" ] || rm -f "$tmp" "$LEFT_RECORD/${tmp##*/}" 2>/dev/null || true
     log_line "pass-through	successor-unrecorded	$(printf '%s\n' "$REASON" | head -n 1)"
+    [ "$locked" -eq 0 ] || fm_lock_release "$SUCCESSOR_SPOOL.lock"
     return 1
   fi
   if [ "$PRESTARTED" -eq 1 ] && [ -n "$SUCCESSOR_GENERATION" ]; then
-    fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1 || return 1
+    if ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+      [ "$locked" -eq 0 ] || fm_lock_release "$SUCCESSOR_SPOOL.lock"
+      return 1
+    fi
   fi
+  [ "$locked" -eq 0 ] || fm_lock_release "$SUCCESSOR_SPOOL.lock"
   disown "$SUCCESSOR_PID" 2>/dev/null || true
   forget_process "$SUCCESSOR_PID"
   SUCCESSOR_PID=
@@ -984,7 +997,7 @@ handle_wake() {  # <reason-lines>
     scope=$ATTENDED_OFFER
   else
     set --
-    case "$first" in heartbeat*) set -- --heartbeat ;; esac
+    if printf '%s\n' "$reason" | grep -Eq '^heartbeat($|:)'; then set -- --heartbeat; fi
     if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" --afk 2>/dev/null); then
       HANDLE_WHY="branch eligibility could not be computed"
       return 1
@@ -1158,7 +1171,7 @@ turn_captain_seqs() {  # <turn>
 # or nothing when the supervision session may take it. Sets ATTENDED_WHY, and
 # ATTENDED_OFFER to the offer's verdict and the scope it judged.
 attended_acceptor() {  # <first-reason-line>
-  local offer='' line
+  local offer='' heartbeat_offer='' line
   ATTENDED_WHY=
   ATTENDED_OFFER=
   if ! fm_supervision_host_attended_ready "$CONFIG" "$PRIMARY"; then
@@ -1176,9 +1189,10 @@ attended_acceptor() {  # <first-reason-line>
         ATTENDED_WHY="main-only"
         break
       fi
+      case "$line" in heartbeat|heartbeat:*) heartbeat_offer=$offer ;; esac
     done <<< "$1"
   fi
-  ATTENDED_OFFER=$offer
+  ATTENDED_OFFER=${heartbeat_offer:-$offer}
   [ -z "$ATTENDED_WHY" ]
 }
 
@@ -1209,7 +1223,9 @@ ARM_OUT=$STARTED_ARM_OUT
 while :; do
   # Idle while waiting: a continuing arm's close exits to this wait instead of
   # going to its spool (bin/fm-watch-arm.sh, "Scheduling continuation").
+  [ -z "$ARM_SPOOL" ] || fm_lock_acquire_wait "$ARM_SPOOL.lock"
   rm -f "$BUSY_FILE" 2>/dev/null || true
+  [ -z "$ARM_SPOOL" ] || fm_lock_release "$ARM_SPOOL.lock"
   boundary_reached && boundary_exit
   await_close || boundary_exit
   printf '%s\n' "$HOST_PID" > "$BUSY_FILE" 2>/dev/null || true

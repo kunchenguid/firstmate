@@ -88,11 +88,12 @@ printf '%s\n' "$drain" > "$FM_HOME/engine-drain.$n"
 ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
 task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }')
 [ -n "$task" ] || task=fleet
+[ "$mode" != fleet ] || task=fleet
 verdict=routine
 [ "$mode" != go-away ] || verdict=captain
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|captain-close-before-return|held|captain-held|hold-lease|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
+  handle|fleet|captain|captain-close-before-return|held|captain-held|hold-lease|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
     case "$mode" in held|captain-held) read -r _ < "$FM_HOME/stub-release" ;; esac
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
@@ -3204,6 +3205,105 @@ SH
   pass "host: a detached arm continues scanning while its relinquished reader cleans up"
 }
 
+
+test_spool_consumption_becomes_busy_before_the_next_close() {
+  local home saved spool real_rm
+  home=$(make_primary_home consume-busy)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo held > "$home/stub-mode"
+  mkfifo "$home/stub-release" "$home/consume-release"
+  register_sweep_check "$home"
+  real_rm=$(command -v rm)
+  cat > "$home/fakebin/rm" <<SH
+#!/usr/bin/env bash
+"$real_rm" "\$@"
+for arg in "\$@"; do
+  case "\$arg" in "$home/state"/.supervision-host-spool.*.lock)
+    spool=\${arg%.lock}
+    host=\$(awk -F '\t' '\$1 == "host" { print \$2 }' "$home/state/.supervision-host")
+    if [ "\$PPID" = "\$host" ] && [ -e "$home/pause-consume" ] && [ ! -s "\$spool" ]; then
+      "$real_rm" "$home/pause-consume"
+      : > "$home/consume-ready"
+      printf '%s\\n' "\$$" > "$home/orphan-pid"
+      read -r _ < "$home/consume-release"
+      "$real_rm" "$home/orphan-pid"
+    fi
+    ;;
+  esac
+done
+SH
+  chmod +x "$home/fakebin/rm"
+  saved=$FM_CHECK_INTERVAL
+  export FM_CHECK_INTERVAL=1
+  start_hook_session "$home"
+  export FM_CHECK_INTERVAL=$saved
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "consume busy: no initial watcher"
+  append_status "$home" 'first actionable wake'
+  wait_until 250 test -s "$home/stub-ready" || fail "consume busy: first turn did not hold"
+  for spool in "$home"/state/.supervision-host-spool.*; do [ ! -f "$spool" ] || break; done
+  append_status "$home" 'queued branch wake'
+  wait_until 250 spool_ends_with "$spool" S || fail "consume busy: no verified handoff"
+  : > "$home/pause-consume"
+  printf 'continue\n' > "$home/stub-release"
+  wait_until 250 test -e "$home/consume-ready" || fail "consume busy: consumption was not intercepted"
+  emit_and_expect_sweeps "$home" 1 'consume busy'
+  printf 'continue\n' > "$home/consume-release"
+  wait_until 250 test -s "$home/engine-call.2" || fail "consume busy: second turn did not begin"
+  emit_and_expect_sweeps "$home" 2 'consume busy second turn'
+  [ "$(home_watchers "$home")" -eq 1 ] || fail "consume busy: expected one scheduler watcher"
+  stop_home_processes "$home"
+  pass "host: spool consumption commits busy before a close can end its continuing arm"
+}
+
+test_batched_heartbeat_retains_fleet_scope() {
+  local order home spool
+  for order in heartbeat-first signal-first; do
+    home=$(make_primary_home "heartbeat-batch-$order")
+    ln -s "$ROOT/.agents" "$home/.agents"
+    echo held > "$home/stub-mode"
+    mkfifo "$home/stub-release"
+    start_hook_session "$home"
+    turn_end "$home"
+    wait_until 150 watcher_live "$home" || fail "heartbeat batch: no initial watcher"
+    append_status "$home" 'first actionable wake'
+    wait_until 250 test -s "$home/stub-ready" || fail "heartbeat batch: first turn did not hold"
+    for spool in "$home"/state/.supervision-host-spool.*; do [ ! -f "$spool" ] || break; done
+    if [ "$order" = signal-first ]; then
+      append_status "$home" 'batched signal'
+      wait_until 250 spool_ends_with "$spool" S || fail "heartbeat batch: signal did not hand off"
+    fi
+    append_wake "$home/state" heartbeat heartbeat heartbeat || fail "heartbeat batch: heartbeat was not queued"
+    FM_HOME="$home" bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      fm_lock_acquire_wait "$2.lock"
+      successor=$(tail -n 1 "$2")
+      printf "C\theartbeat\n" >> "$2"
+      if [ "$3" = signal-first ]; then
+        IFS=$(printf "\t") read -r _ watcher _ <<< "$successor"
+        fm_recovery_marker_snapshot "$FM_HOME/state/.watcher-down"
+        printf "S\t%s\t%s\n" "$watcher" "${FM_RECOVERY_MARKER_TOKEN##*:}" >> "$2"
+      fi
+      fm_lock_release "$2.lock"
+    ' _ "$ROOT" "$spool" "$order"
+    if [ "$order" = heartbeat-first ]; then
+      append_status "$home" 'batched signal'
+      wait_until 250 spool_ends_with "$spool" S || fail "heartbeat batch: signal did not hand off"
+    fi
+    echo fleet > "$home/stub-mode"
+    printf 'continue\n' > "$home/stub-release"
+    wait_until 300 handled_at_least "$home" 2 || fail "heartbeat batch $order: fleet report was refused or the heartbeat was not handled: $(cat "$home/engine-report.log"; tail -8 "$home/state/.supervision-host.log"; cat "$home/hook.err"; cat "$spool" 2>/dev/null)"
+    assert_contains "$(cat "$home/engine-drain.2")" 'heartbeat' "heartbeat batch: the heartbeat row was excluded from the grant"
+    assert_grep '"task":"fleet"' "$home/state/branch-outcomes.jsonl" "heartbeat batch: fleet scope was not granted"
+    ! awk -F '\t' '$3 == "heartbeat" { found = 1 } END { exit !found }' "$home/state/.wake-queue" \
+      || fail "heartbeat batch: the successfully handled heartbeat remains unacknowledged"
+    ! hook_exited "$home" || fail "heartbeat batch: an eligible batch was handed to main"
+    [ "$(home_watchers "$home")" -eq 1 ] || fail "heartbeat batch: expected one scheduler watcher"
+    stop_home_processes "$home"
+  done
+  pass "host: every heartbeat in an accepted batch retains its row and fleet scope in either order"
+}
+
 if [ -n "${FM_TEST_CASES:-}" ]; then
   for test_case in $FM_TEST_CASES; do "$test_case"; done
   exit 0
@@ -3290,3 +3390,6 @@ test_superseded_host_leaves_the_owner_untouched
 test_spool_waits_for_the_latest_successor
 test_mixed_spool_routes_the_scheduled_close_to_main
 test_detached_reader_does_not_stop_scanning_during_cleanup
+
+test_spool_consumption_becomes_busy_before_the_next_close
+test_batched_heartbeat_retains_fleet_scope

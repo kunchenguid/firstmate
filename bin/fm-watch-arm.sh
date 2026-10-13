@@ -804,15 +804,18 @@ owned_child_finished() {
 continue_scanning() {  # <child-rc>
   local rc=$1 reasons ran
   [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out" || return 1
-  continuation_applies || return 1
+  [ -z "$CONT_SPOOL" ] || fm_lock_acquire_wait "$CONT_SPOOL.lock"
+  if ! continuation_applies; then
+    [ -z "$CONT_SPOOL" ] || fm_lock_release "$CONT_SPOOL.lock"
+    return 1
+  fi
   reasons=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$child_out" 2>/dev/null || true)
   ran=$(( $(date +%s) - cycle_started_at ))
   cycle_log_append "$rc" none "$(watch_output_reason_type "$child_out")" none
   if [ "$CONT_SPOOLING" -eq 1 ]; then
-    fm_lock_acquire_wait "$CONT_SPOOL.lock"
     printf '%s\n' "$reasons" | awk '{ printf "C\t%s\n", $0 }' >> "$CONT_SPOOL" 2>/dev/null || true
-    fm_lock_release "$CONT_SPOOL.lock"
   fi
+  [ -z "$CONT_SPOOL" ] || fm_lock_release "$CONT_SPOOL.lock"
   rm -f "$child_out" 2>/dev/null || true
   child=
   child_out=
