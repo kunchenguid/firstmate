@@ -318,6 +318,10 @@
 # ledger. It runs before the task branch it attributes runs by is deleted and
 # before state/<id>.meta is removed, and is best effort: a failure warns and
 # never blocks cleanup.
+# Just before Fix 1 and Fix 2, a ship or scout whose local copy this teardown
+# owns has its worker's resident memory and the machine's headroom appended to
+# the footprint log by bin/fm-host-headroom.sh record, which owns that log; it
+# is best effort and never blocks cleanup.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -3621,6 +3625,14 @@ else
   else
     BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
   fi
+fi
+
+# Footprint record (bin/fm-host-headroom.sh): the worker's resident memory and
+# the machine's headroom, read while the worker's processes still run, before
+# the reap below stops them. Best effort - it never blocks cleanup.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree && [ -d "$WT" ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-host-headroom.sh" record teardown "$ID" "$WT" >/dev/null 2>&1 || true
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped

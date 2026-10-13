@@ -198,6 +198,13 @@
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   capacity.
+#   Host headroom: at that same point a fresh ship or scout spawn also runs
+#   bin/fm-host-headroom.sh check, which owns the measurements, the
+#   config/host-headroom thresholds, and the verdict; a machine below them gets
+#   the same `deferred:` line and exit 75, and unreadable thresholds refuse with
+#   exit 1. FM_SPAWN_IGNORE_HEADROOM=1 skips the check for one spawn. A launched
+#   fresh spawn appends its footprint record through that helper's `record`.
+#   A relaunch and a --secondmate spawn are never gated or recorded.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -1634,7 +1641,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     pair_rc=0
     FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair_args[@]}" || pair_rc=$?
     if [ "$pair_rc" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
-      echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - its project is at capacity, so it stays queued" >&2
+      echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - its project is at capacity or this machine is short of headroom, so it stays queued" >&2
       [ "$rc" -ne 0 ] || rc=$FM_PROJECT_CAPACITY_DEFER_EXIT
     elif [ "$pair_rc" -ne 0 ]; then
       echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
@@ -3213,6 +3220,24 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   fi
   SPAWN_PROJECT_CAPACITY=$FM_PROJECT_CAPACITY
   SPAWN_PROJECT_CAPACITY_ANY=$FM_PROJECT_CAPACITY_ANY
+  # Host headroom admission (bin/fm-host-headroom.sh owns what is measured, the
+  # thresholds, and the verdict): a machine already short of memory or CPU
+  # defers a fresh worker here, at the same point and with the same exit status
+  # as a capacity deferral, so the task stays exactly as queued as it was.
+  if [ "${FM_SPAWN_IGNORE_HEADROOM:-0}" = 1 ]; then
+    echo "notice: FM_SPAWN_IGNORE_HEADROOM=1 - launching $ID without checking this machine's headroom" >&2
+  else
+    SPAWN_HEADROOM_RC=0
+    SPAWN_HEADROOM=$(FM_HOME=$FM_HOME FM_CONFIG_OVERRIDE=$CONFIG FM_STATE_OVERRIDE=$STATE \
+      "$SCRIPT_DIR/fm-host-headroom.sh" check) || SPAWN_HEADROOM_RC=$?
+    if [ "$SPAWN_HEADROOM_RC" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
+      echo "deferred: this machine is short of headroom for another worker (${SPAWN_HEADROOM#defer: }); task $ID was not launched and its backlog item stays queued - dispatch it again once running work frees memory or load, or set FM_SPAWN_IGNORE_HEADROOM=1 for this one spawn (docs/configuration.md \"Host headroom\")" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+    elif [ "$SPAWN_HEADROOM_RC" -ne 0 ]; then
+      echo "error: spawn refused: this machine's headroom could not be judged; fix config/host-headroom so its limits are known (docs/configuration.md \"Host headroom\")" >&2
+      exit 1
+    fi
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
@@ -5901,4 +5926,10 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
+# Footprint record (bin/fm-host-headroom.sh): the machine's headroom as this
+# worker starts. Best effort - it never fails a launched spawn.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  FM_HOME=$FM_HOME FM_CONFIG_OVERRIDE=$CONFIG FM_STATE_OVERRIDE=$STATE \
+    "$SCRIPT_DIR/fm-host-headroom.sh" record spawn "$ID" >/dev/null 2>&1 || true
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
