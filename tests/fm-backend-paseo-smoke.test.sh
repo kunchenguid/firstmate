@@ -20,6 +20,11 @@ fail() {
 }
 pass() { printf 'ok - %s\n' "$1"; }
 
+# Run from a Paseo tab or agent, these would steer create_task into the
+# caller's own workspace, which cleanup would then archive. The test always
+# uses its own throwaway workspace instead.
+unset PASEO_WORKSPACE_ID PASEO_AGENT_ID
+
 command -v jq >/dev/null 2>&1 || {
   echo "skip: jq not found (required by the paseo adapter)"
   exit 0
@@ -51,10 +56,21 @@ DAEMON_STATE=$(fm_backend_paseo_daemon_state)
 # be reclaimed without touching any real project in the captain's sidebar.
 PROJ_DIR=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/fm-paseo-smoke.XXXXXX")" && pwd)
 WS1=""
+CLEANED=""
 cleanup_all() {
-  local prj
+  local prj ws_cwd
+  [ -z "$CLEANED" ] || return 0
+  CLEANED=1
+  # Archive only the workspace create_task returned, and only while its cwd
+  # is still this test's own temp dir; anything else is left alone.
   [ -z "$WS1" ] || {
-    fm_backend_paseo_cli workspace archive "$WS1" >/dev/null 2>&1 || true
+    ws_cwd=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null |
+      jq -r --arg id "$WS1" '.[]? | select(.workspaceId == $id) | .cwd' 2>/dev/null | head -1)
+    if [ -n "$ws_cwd" ] && { [ "$ws_cwd" = "$PROJ_DIR" ] || [ "$ws_cwd" = "$(cd "$PROJ_DIR" 2>/dev/null && pwd -P)" ]; }; then
+      fm_backend_paseo_cli workspace archive "$WS1" >/dev/null 2>&1 || true
+    else
+      printf 'note: not archiving workspace %s (cwd %s is not the test dir)\n' "$WS1" "${ws_cwd:-unknown}" >&2
+    fi
   }
   # Paseo stores the project path normalized but not symlink-resolved, so
   # look it up by the logical path first and the physical one second.
