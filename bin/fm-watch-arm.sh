@@ -39,7 +39,8 @@
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. Once
+# reason unless Scheduling continuation below applies; on attached it stays
+# live across identity-matched successors. Once
 # attached, a stale beacon alone does not end the followed cycle: while that
 # holder is alive and the lock still names it under the same identity, the arm
 # keeps following it, as a started arm waits out a slow child, until the lock
@@ -89,13 +90,19 @@
 # Scheduling continuation: a successor the supervision host starts for main or
 # for an engine turn (bin/fm-supervision-host.sh start_arm) carries its host's
 # pid, a spool path, and the host's busy marker. While nobody is waiting on its
-# output - the host exited after leaving the cycle for main, or the host is
+# output - the host relinquished the cycle for main, or the host is
 # busy in a turn of its own - an actionable close of the cycle's watcher no
 # longer ends supervision with it: the close is already a durable queue row, so
 # this same arm starts its one fresh watcher as a handling successor and keeps
 # owning it. A busy host is handed each such close through the spool (reason
-# lines, then the restarted watcher and its recovery generation) for its next
-# wait to consume. It never starts a second watcher: the singleton lock still
+# lines prefixed C and a tab, then an S record with the verified replacement's
+# pid and recovery generation, also tab-separated) for its next wait to consume.
+# A trailing close makes the handoff incomplete until a new S record arrives.
+# Publication and the continuation decision share the spool lock with the
+# host's consumption and reader transitions (bin/fm-supervision-host.sh
+# take_spool and detach_successor). The identity-matched relinquished-arm
+# record distinguishes a host still cleaning up from an idle reader.
+# It never starts a second watcher: the singleton lock still
 # arbitrates, and a take-over stops the current child, which ends the arm as
 # before. The arm stops continuing, and exits with its close as any arm does,
 # when the home's session lock no longer names the session it started under,

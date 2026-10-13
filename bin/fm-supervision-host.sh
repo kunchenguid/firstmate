@@ -50,7 +50,7 @@
 #     (bin/fm-branch-dispatch.mjs offer) says the branch may take this close,
 #     so main-only classes (check triggers, decision-owned triggers, a scan
 #     that is unsafe or holds nothing for the branch) stay main's. That
-#     pass-through starts the successor watcher cycle and leaves it running
+#     pass-through leaves a verified successor watcher cycle running
 #     before the close is printed, so supervision continues when the session
 #     drops the handoff. It confirms no handling handoff, so the recovery
 #     marker still reads downtime and the re-arm owner delivers the close to
@@ -66,7 +66,8 @@
 # successor started reaches main exactly as the arm printed it, and that
 # successor cycle stays running.
 # A close the engine takes is handled in one order: it starts and verifies the
-# successor watcher cycle and confirms the handling handoff (the order
+# successor watcher cycle, or adopts the continuing arm's verified successor,
+# and confirms the handling handoff (the order
 # docs/watcher-continuity.md owns), computes the rows the branch may claim in
 # the turn's posture with the dispatch owner, publishes that grant
 # (bin/fm-wake-grant.sh), runs one bounded headless engine turn
@@ -568,7 +569,9 @@ spool_ready() {  # <spool-file>
 
 # Take the spool's hand-off: sets SPOOL_TEXT to the close lines, and
 # SPOOL_WATCHER and SPOOL_GENERATION to the last restart. Returns 1 when
-# nothing complete is waiting or the hand-off carries no close.
+# nothing complete is waiting or the hand-off carries no close. Confirm the
+# current watcher and become busy before clearing the batch under the arm's
+# continuation lock, so a close cannot mistake this consumer for an idle reader.
 take_spool() {  # <spool-file>
   local spool=${1:-} line rest tab=$'\t'
   SPOOL_TEXT=
@@ -1167,10 +1170,11 @@ turn_captain_seqs() {  # <turn>
   awk -F '\t' -v turn="$1" '$1 == turn && $3 == "captain" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
 }
 
-# Why an attended close stays with main exactly as the plain arm delivers it,
+# Why an attended batch stays with main exactly as the plain arm delivers it,
 # or nothing when the supervision session may take it. Sets ATTENDED_WHY, and
-# ATTENDED_OFFER to the offer's verdict and the scope it judged.
-attended_acceptor() {  # <first-reason-line>
+# ATTENDED_OFFER to the accepted scope; docs/supervision-host.md "Attended"
+# owns batch routing and heartbeat scope.
+attended_acceptor() {  # <reason-lines>
   local offer='' heartbeat_offer='' line
   ATTENDED_WHY=
   ATTENDED_OFFER=
