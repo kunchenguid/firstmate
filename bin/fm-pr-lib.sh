@@ -832,6 +832,7 @@ _fm_pr_poll_private_or_reject() {  # <label> <path> <device>
 # wake.
 fm_pr_poll_artifacts_content_valid() {
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash
+  # shellcheck disable=SC2034 # Read by the sourcing watcher (bin/fm-watch.sh) on rejection.
   FM_PR_POLL_REJECTION=
   fm_pr_task_id_valid "$id" || _fm_pr_poll_reject 'the task id is invalid' || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || _fm_pr_poll_reject 'the state directory is unavailable' || return 1
