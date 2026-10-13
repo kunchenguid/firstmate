@@ -16,8 +16,9 @@
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
-# poll skips unsupported URLs before scheduling reads and clears their legacy
-# error stamps without changing observation, timestamps or ownership evidence.
+# poll skips unsupported URLs without forge calls, unavailable output, wakes or
+# new error stamps, and clears their legacy errors without changing observation,
+# timestamps or ownership evidence.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
@@ -62,16 +63,16 @@
 # reordering. Terminal URLs settle separately before the forge budget starts
 # and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# attempted at most once per poll and its observation applied to every owner.
-# A final observation applies
+# unmeasured, rather than being mislabeled unavailable. Each distinct supported
+# URL is attempted at most once per poll and its observation applied to every owner.
+# A supported URL's final observation applies
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
 # next URL that still has a full observation reserve; only a genuine forge
 # failure or head change records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
-# A URL whose last good observation is merged or closed is final: it is
+# A supported URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
 # observation, with a stale error beside it cleared.
 # A genuine failure prints its unavailable line only when it starts an episode
