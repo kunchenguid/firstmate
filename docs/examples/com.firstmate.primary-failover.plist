@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template launchd job for bin/fm-primary-failover.sh check.
+  Copy to ~/Library/LaunchAgents/com.firstmate.primary-failover.plist, replace
+  every REPLACE_WITH_ value, then:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.firstmate.primary-failover.plist
+  Remove it with:
+    launchctl bootout gui/$(id -u)/com.firstmate.primary-failover
+  PATH must include the directories holding quota-axi, jq, herdr or tmux, and
+  the harnesses (claude, grok, opencode, pi). Add --dry-run to the arguments to
+  watch the plan in the log without acting.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.firstmate.primary-failover</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>REPLACE_WITH_FIRSTMATE_CODE_ROOT/bin/fm-primary-failover.sh</string>
+    <string>check</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FM_HOME</key>
+    <string>REPLACE_WITH_FIRSTMATE_HOME</string>
+    <key>PATH</key>
+    <string>REPLACE_WITH_HOME/.local/bin:REPLACE_WITH_HOME/.bun/bin:REPLACE_WITH_HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_FIRSTMATE_HOME/state/primary-failover.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_FIRSTMATE_HOME/state/primary-failover.launchd.log</string>
+</dict>
+</plist>
