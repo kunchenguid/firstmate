@@ -1165,6 +1165,63 @@ test_turn_ended_malformed_prior_hash_surfaced() {
   pass "a bare turn-end backed by a malformed prior hash surfaces"
 }
 
+# A Codex pane can be recovery-grade alive while its busy state remains
+# unverified. Its first stale sight must still wake for inspection, but a new
+# render after that handled wake must not restart the watcher every poll.
+test_unknown_alive_stale_is_bounded_after_its_first_alarm() {
+  local dir state fakebin out capture_file window key previous wakes pid
+  dir=$(make_case unknown-alive-stale-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-codexunknown"
+  printf 'unreadable long Codex turn\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/codexunknown.meta"
+  printf 'working: recovering source files\n' > "$state/codexunknown.status"
+  printf '%s' "$(seen_sig "$state/codexunknown.status")" > "$state/.seen-codexunknown_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf '%s' "$(hash_text 'unreadable long Codex turn')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  export FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_CURRENT_COMMAND=codex
+  export FM_PAUSE_RESURFACE_SECS=999
+
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the first unknown-but-alive stale sight did not surface"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the first unknown-but-alive alarm changed its wording"
+  [ -s "$state/.paused-resurfaced-$key" ] || fail "the first unknown-but-alive alarm did not record its bound"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first unknown-but-alive alarm"
+
+  # A successor sees a different rendered hash, exactly as a long Codex turn
+  # updates its viewport, but the same known-live, unclassifiable endpoint.
+  printf 'unreadable long Codex turn, later viewport\n' > "$capture_file"
+  previous=$(hash_text 'earlier unreadable Codex turn')
+  printf '%s' "$previous" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a bounded unknown-but-alive successor exited"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the bounded unknown-but-alive successor stop"
+  [ ! -s "$out" ] || fail "a bounded unknown-but-alive successor printed a stale wake: $(cat "$out")"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "a bounded unknown-but-alive successor queued $wakes repeat wakes"
+
+  # Expiring the bound restores the original first-sight alarm without changing
+  # its wake type or wording.
+  set_mtime "$(( $(date +%s) - 1000 ))" "$state/.paused-resurfaced-$key"
+  printf 'unreadable long Codex turn, another later viewport\n' > "$capture_file"
+  previous=$(hash_text 'yet another unreadable Codex turn')
+  printf '%s' "$previous" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "an expired unknown-but-alive bound did not re-surface"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the expired unknown-but-alive bound changed wake wording: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE FM_FAKE_TMUX_WINDOW FM_FAKE_TMUX_CAPTURE FM_FAKE_TMUX_CURRENT_COMMAND FM_PAUSE_RESURFACE_SECS
+  pass "an unknown-but-alive pane alarms once per bounded pause-resurface window"
+}
+
 test_turn_ended_trailing_newline_prior_hash_surfaced() {
   local dir state fakebin out drain_out capture_file window key pid
   dir=$(make_case turn-ended-newline-hash); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4067,7 +4124,7 @@ test_open_captain_call_bounds_stale_churn() {
 
     # The pane churns while the SAME call stands. Every one of these alarmed.
     hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
-      || fail "[$name] watcher exited during pane churn instead of supervising through it"
+      || fail "[$name] watcher exited during pane churn instead of supervising through it: $(cat "$out")"
     wakes=$(hold_stale_wakes "$state")
     [ "$wakes" -eq 0 ] \
       || fail "[$name] pane churn re-alarmed held work $wakes time(s) inside the re-surface window"
@@ -6636,6 +6693,7 @@ test_turn_ended_churn_resets_wedge_state_before_stale_poll
 test_turn_ended_churn_existing_marker_absorbed
 test_turn_ended_still_pane_surfaced
 test_turn_ended_malformed_prior_hash_surfaced
+test_unknown_alive_stale_is_bounded_after_its_first_alarm
 test_turn_ended_trailing_newline_prior_hash_surfaced
 test_secondmate_turn_ended_churning_pane_surfaced
 test_turn_ended_colliding_window_key_surfaced
