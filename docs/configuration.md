@@ -2120,7 +2120,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - Its seat frees only when startup is confirmed and the agent later dies, or when that exact endpoint is proven destroyed; nothing is ever stopped to free a seat.
 - Supervisor recovery reclaims only the exact generation it probed, inside that mate's single lifecycle episode, so a stale death reading can never free a newer replacement.
 - Ambiguous liveness, a transport failure, or a timeout keeps the seat counted, including during forced cleanup.
-- New tmux dispatches record their socket identity; liveness recovery and cleanup use that owning socket, and older tracked generations without that identity remain counted and cannot authorize recovery.
+- New tmux dispatches record their socket identity; liveness recovery and seat-release evidence use that owning socket, and older tracked generations without that identity remain counted and cannot authorize recovery.
 - Remote retirement releases a dispatched generation only with host destruction evidence matching its generation, home, backend, and target.
 - The startup wait accepts fractional `FM_CONTROL_LAUNCH_WAIT` and `FM_CONTROL_POLL` values, matching the control plane.
 - A v1 seat matching a task's model and generation keeps its validated endpoint route on import; missing route evidence leaves the imported seat counted and uncertain.
