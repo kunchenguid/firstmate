@@ -464,12 +464,17 @@ start_arm() {  # <predecessor-arm-pid or empty> [--restart]; sets the started pi
   local predecessor=$1 out pid
   shift
   out=$(mktemp "$STATE/.supervision-host-arm.XXXXXX") || return 1
+  # An arm left for main outlives this host, and Claude tears the hook's
+  # process group down after the exit-2 rewake, so it gets a group of its own
+  # (the shape start_handling_successor in bin/fm-claude-stop-autoarm.sh uses).
+  [ "${ARM_OWN_GROUP:-0}" -ne 1 ] || set -m 2>/dev/null || true
   if [ -n "$predecessor" ]; then
-    FM_WATCH_PREDECESSOR_ARM_PID=$predecessor FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 &
+    FM_WATCH_PREDECESSOR_ARM_PID=$predecessor FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 &
+    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
   fi
   pid=$!
+  [ "${ARM_OWN_GROUP:-0}" -ne 1 ] || set +m 2>/dev/null || true
   record_process arm "$pid"
   STARTED_ARM_PID=$pid
   STARTED_ARM_OUT=$out
@@ -703,7 +708,7 @@ detach_successor() {
 # downtime (autoarm_commit in bin/fm-claude-stop-autoarm.sh). A failed start
 # returns 1; the caller still prints the close unchanged.
 leave_successor_for_main() {
-  if ! start_successor "$CLOSED_ARM_PID"; then
+  if ! ARM_OWN_GROUP=1 start_successor "$CLOSED_ARM_PID"; then
     log_line "pass-through	successor-unverified	$(printf '%s\n' "$REASON" | head -n 1)"
     return 1
   fi
@@ -1116,7 +1121,7 @@ while :; do
 
   # A turn that could outlive the boundary would outlive the hook registration.
   turn_crosses_boundary && boundary_exit
-  if ! start_successor "$CLOSED_ARM_PID"; then
+  if ! ARM_OWN_GROUP=1 start_successor "$CLOSED_ARM_PID"; then
     exit_to_main "the successor watcher cycle could not be verified before handling; this wake is yours"
   fi
   if [ -n "$SUCCESSOR_GENERATION" ]; then

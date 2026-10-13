@@ -153,6 +153,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/firstmate-self-repo/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -362,6 +366,10 @@
     },
     {
       "path": "docs/fm-test-portable-shards.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/forgejo-tea-integration.md",
       "audience": "maintainer-verification"
     },
     {
