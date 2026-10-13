@@ -39,7 +39,7 @@ run_merge() { # <home> <id>
 
 test_descendant_landings_and_retry() {
   local name=sequence home="$TMP_ROOT/sequence/home" project="$TMP_ROOT/sequence/project" id=task-sequence
-  local first second out rows
+  local first second out rows orig_head current
   make_case "$name"
   first=$(git -C "$project" rev-parse "fm/$id")
   out=$(run_merge "$home" "$id" 2>&1) || fail "first local landing failed: $out"
@@ -48,7 +48,9 @@ test_descendant_landings_and_retry() {
     'select(.head==$head and .source==$source)' "$home/state/$id.merge-receipts.jsonl" >/dev/null \
     || fail 'first landing did not record its exact source and head'
 
+  orig_head=$(git -C "$project" rev-parse ORIG_HEAD)
   out=$(run_merge "$home" "$id" 2>&1) || fail "identical local retry failed: $out"
+  assert_equals "$orig_head" "$(git -C "$project" rev-parse ORIG_HEAD)" 'identical retry replayed Git and changed ORIG_HEAD'
   rows=$(wc -l < "$home/state/$id.merge-receipts.jsonl" | tr -d ' ')
   assert_equals 1 "$rows" 'identical retry duplicated its receipt'
 
@@ -60,15 +62,17 @@ test_descendant_landings_and_retry() {
   assert_equals 2 "$rows" 'descendant landing did not preserve both receipts'
   sed -n '1p' "$home/state/$id.merge-receipts.jsonl" | jq -e --arg head "$first" '.head==$head' >/dev/null \
     || fail 'descendant landing rewrote first-landing evidence'
-  FM_HOME="$home" bash -c '. "$1"; fm_merge_receipt_current "$2" "$3"' \
-    _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$id" g-one | jq -e --arg head "$second" '.head==$head' >/dev/null \
+  current=$(FM_HOME="$home" bash -c '. "$1"; fm_merge_receipt_current "$2" "$3"' \
+    _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$id" g-one) \
+    || fail 'compatible local continuation receipts remained ambiguous'
+  printf '%s\n' "$current" | jq -e --arg head "$second" '.head==$head' >/dev/null \
     || fail 'current receipt did not resolve to the newest same-target landing'
   pass 'local merge records first and descendant landings and deduplicates identical retries'
 }
 
 test_landed_effect_reconciliation() {
   local name=reconcile home="$TMP_ROOT/reconcile/home" project="$TMP_ROOT/reconcile/project" id=task-reconcile
-  local candidate before out
+  local candidate before out orig_head
   make_case "$name"
   run_merge "$home" "$id" >/dev/null 2>&1 || fail 'reconciliation first landing failed'
   jq -c 'del(.source)' "$home/state/$id.merge-receipts.jsonl" > "$home/state/$id.merge-receipts.jsonl.tmp"
@@ -77,8 +81,10 @@ test_landed_effect_reconciliation() {
   candidate=$(git -C "$project" rev-parse "fm/$id")
   git -C "$project" merge --ff-only "$candidate" >/dev/null || fail 'could not seed landed-unreceipted effect'
   before=$(git -C "$project" rev-parse main)
+  orig_head=$(git -C "$project" rev-parse ORIG_HEAD)
   out=$(run_merge "$home" "$id" 2>&1) || fail "landed effect did not reconcile: $out"
   assert_equals "$before" "$(git -C "$project" rev-parse main)" 'reconciliation changed an already landed target'
+  assert_equals "$orig_head" "$(git -C "$project" rev-parse ORIG_HEAD)" 'reconciliation replayed Git and changed ORIG_HEAD'
   jq -se --arg head "$candidate" '[.[] | select(.head==$head)] | length==1' \
     "$home/state/$id.merge-receipts.jsonl" >/dev/null || fail 'reconciliation did not record the read-back effect once'
   pass 'local merge reconciles a landed descendant only after exact target and source readback'
@@ -100,6 +106,10 @@ test_identity_and_lineage_changes_refuse_before_effect() {
   [ "$status" -ne 0 ] || fail 'changed source identity was accepted'
   assert_contains "$out" 'incompatible local merge receipt identity' 'changed source refusal lost its reason'
   assert_equals "$before" "$(git -C "$project" rev-parse main)" 'changed source mutated the target before refusal'
+  FM_HOME="$home" bash -c '. "$1"; fm_merge_receipt_current "$2" "$3" >/dev/null' \
+    _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$id" g-one 2>/dev/null
+  status=$?
+  [ "$status" -ne 0 ] || fail 'changed source identity passed the current delivery selector'
 
   sed -i '$d' "$home/state/$id.merge-receipts.jsonl"
   jq -cn --arg id "$id" --arg head "$first" \

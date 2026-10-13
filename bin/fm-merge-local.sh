@@ -123,6 +123,7 @@ target_url="local:$PROJ#$DEFAULT"
 fm_merge_receipt_local_admit "$ID" "$MERGE_EXPECTED_SPAWN_GEN" "$target_url" \
   "$PROJ" "$source_ref" "$source_head" || exit 1
 
+before_head=$(git -C "$PROJ" rev-parse "$DEFAULT")
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 hold_status=0
 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -138,9 +139,11 @@ case "$hold_status" in
     exit 1
     ;;
 esac
-merge_status=0
-git -C "$PROJ" merge --ff-only "$source_head" >/dev/null || merge_status=$?
-[ "$merge_status" -eq 0 ] || exit "$merge_status"
+if [ "$before_head" != "$source_head" ]; then
+  merge_status=0
+  git -C "$PROJ" merge --ff-only "$source_head" >/dev/null || merge_status=$?
+  [ "$merge_status" -eq 0 ] || exit "$merge_status"
+fi
 after=$(git -C "$PROJ" rev-parse "$DEFAULT")
 [ "$after" = "$source_head" ] &&
   [ "$(git -C "$PROJ" rev-parse --verify "$source_ref^{commit}")" = "$source_head" ] || {

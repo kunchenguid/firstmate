@@ -77,4 +77,19 @@ FM_HOME="$HOME_DIR" bash -c \
 assert_absent "$HOME_DIR/state/$CURRENT.merge-receipts.jsonl" \
   'idempotent archived receipt replay recreated active state'
 
+AMBIGUOUS=ambiguous-pr
+mkdir -p "$HOME_DIR/data/$AMBIGUOUS"
+FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" add "$AMBIGUOUS" 'Ambiguous PR receipt' \
+  --kind ship --body 'Ambiguous PR receipt fixture.' --start >/dev/null \
+  || fail 'ambiguous PR task fixture could not be created'
+printf '%s\n' \
+  '{"schema":"fm-merge-receipt.v1","task_id":"ambiguous-pr","execution_generation":"generation-pr","url":"https://codebase.example.invalid/merge_requests/3","head":"1111111111111111111111111111111111111111"}' \
+  '{"schema":"fm-merge-receipt.v1","task_id":"ambiguous-pr","execution_generation":"generation-pr","url":"https://codebase.example.invalid/merge_requests/3","head":"2222222222222222222222222222222222222222"}' \
+  > "$HOME_DIR/state/$AMBIGUOUS.merge-receipts.jsonl"
+if FM_HOME="$HOME_DIR" bash -c \
+  '. "$1"; fm_merge_receipt_current "$2" "$3" >/dev/null' \
+  _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$AMBIGUOUS" generation-pr 2>/dev/null; then
+  fail 'multiple PR heads passed the local-continuation selector'
+fi
+
 pass 'merge receipts: completed evidence leaves active state and remains generation-readable without duplicate recreation'
