@@ -1243,6 +1243,9 @@ await fire("before_agent_start", {
   type: "before_agent_start", messageType: "user", prompt: unsolicitedPrompt,
 }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
+const legacyPromptContract = "Legacy Pi user prompt remains supported.";
+await fire("before_agent_start", { prompt: legacyPromptContract }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: legacyPromptContract } });
 await fire("agent_start", {}, mainCtx);
 await fire("agent_end", {}, mainCtx);
 const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
@@ -1299,7 +1302,7 @@ for (let index = 0; index < requestedPrompts.length; index += 1) {
 const mirroredCaptainText = globalThis.__fmSessions[0].ops
   .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
   .map((op) => op.message.content);
-for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
+for (const content of [unsolicitedPrompt, legacyPromptContract, ...requestedPrompts]) {
   const copies = mirroredCaptainText.filter((text) => text === `[captain] ${content}`).length;
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }

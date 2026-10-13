@@ -2541,7 +2541,7 @@ ${context.command}
   pi.on?.("before_agent_start", async (event, ctx) => {
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
-    if (event.messageType !== "user") return;
+    if (event.messageType === "custom") return;
     const promptGeneration = generation;
     if (!(await enqueueDelivery(() => actingAsOwner(promptGeneration)))) return;
     if (promptGeneration !== generation || !currentMainSession || !collectCurrentMainDialog()) return;
