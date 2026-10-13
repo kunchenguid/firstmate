@@ -39,8 +39,8 @@
 #   3. confirm fm-lock.sh reports the lock free or stale, not held;
 #   4. type the new harness command into the same pane and wait for the new
 #      session to claim the lock (its first prompt runs bin/fm-session-start.sh).
-# A grok folder-trust dialog is answered with Enter, the documented route in
-# .agents/skills/harness-adapters/references/harness/grok.md; pre-trusting the
+# A grok or pi folder-trust dialog is answered with Enter (at most 3 times), the
+# documented route in .agents/skills/harness-adapters/references/harness/{grok,pi}.md; pre-trusting the
 # home avoids that. `status` reports whether each candidate is ready.
 #
 # Failover order comes from config/primary-failover-order (default
@@ -164,9 +164,17 @@ resolve_host() {  # <holder-pid> [forced-host] [forced-pane]
         PANE_SOCK=${PANE_SOCK%%,*}
       fi
     fi
+  elif [ -n "$PANE" ] && [ -n "$pid" ]; then
+    # forced pane: still take the server socket from the holder's own env
+    case "$HOST" in
+      herdr) PANE_SOCK=$(pid_env "$pid" HERDR_SOCKET_PATH) ;;
+      tmux) PANE_SOCK=$(pid_env "$pid" TMUX); PANE_SOCK=${PANE_SOCK%%,*} ;;
+    esac
   fi
   [ -n "$PANE" ] || PANE=$(st_get pane)
   [ -n "$HOST" ] || HOST=$(st_get host)
+  # no live holder (relaunch after the primary died): reuse the recorded socket
+  [ -n "$PANE_SOCK" ] || [ "$HOST" != "$(st_get host)" ] || PANE_SOCK=$(st_get sock)
   [ -n "$PANE" ] && [ -n "$HOST" ]
 }
 
@@ -299,7 +307,8 @@ wait_gone() {  # <pid> <seconds>
 
 # Move the primary from holder pid $1 (harness $2) to harness $3.
 relaunch() {  # <old-pid|""> <old-harness> <new-harness> <reason>
-  local old=$1 oldh=$2 new=$3 reason=$4 waited=0 tries=0 tail_text
+  local old=$1 oldh=$2 new=$3 reason=$4 waited=0 tries=0 tail_text trust_re='' answered=0
+  case "$new" in grok) trust_re='[Tt]rust' ;; pi) trust_re='Trust project folder' ;; esac
   if [ -n "$old" ]; then
     if pane_busy; then
       log "old $oldh pid $old is mid-turn; waiting up to ${BUSY_WAIT}s"
@@ -335,9 +344,11 @@ relaunch() {  # <old-pid|""> <old-harness> <new-harness> <reason>
       log "new $new session holds the lock (pid $LOCK_PID)"
       return 0
     fi
-    if [ "$new" = grok ]; then
+    if [ -n "$trust_re" ] && [ "$answered" -lt 3 ]; then
       tail_text=$(pane_tail 20)
-      case "$tail_text" in *[Tt]rust*) log "grok folder-trust dialog: answering Enter"; pane_key Enter; sleep 3 ;; esac
+      if printf '%s' "$tail_text" | grep -Eq "$trust_re"; then
+        log "$new folder-trust dialog: answering Enter"; pane_key Enter; answered=$((answered + 1)); sleep 3
+      fi
     fi
     sleep 2; waited=$((waited + 2))
   done
@@ -359,7 +370,7 @@ do_move() {  # <new-harness> <reason> <mode-after> ; uses globals DRY FORCE_HOST
   relaunch "$oldpid" "$oldh" "$newh" "$reason"
   rc=$?
   if [ "$rc" -eq 0 ] || [ "$rc" -eq 4 ]; then
-    st_set "mode=$mode" "primary=$newh" "since=$(now)" "pane=$PANE" "host=$HOST" "exhaust_count=0" "resume_count=0" "claude_resets_at=${CL_RESETS:-}" "last_rc=$rc"
+    st_set "mode=$mode" "primary=$newh" "since=$(now)" "pane=$PANE" "host=$HOST" "sock=$PANE_SOCK" "exhaust_count=0" "resume_count=0" "claude_resets_at=${CL_RESETS:-}" "last_rc=$rc"
   fi
   return "$rc"
 }

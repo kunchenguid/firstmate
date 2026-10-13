@@ -37,6 +37,28 @@ for line in sys.stdin:
 PY
 chmod +x "$FAKEBIN/claude"
 cp "$FAKEBIN/claude" "$FAKEBIN/grok"
+# pi shows its project-trust dialog first and only claims the lock after Enter.
+# The lock lib recognizes pi by a `pi` path component of the interpreter, so run
+# the fake through a python symlink that lives in a directory named pi.
+mkdir -p "$FAKE_DIR/pi"
+ln -s "$(python3 -c 'import sys; print(sys.executable)')" "$FAKE_DIR/pi/python3"
+cat >"$FAKEBIN/pi" <<SH
+#!/usr/bin/env bash
+exec "$FAKE_DIR/pi/python3" "$FAKEBIN/pi.py" "\$@"
+SH
+chmod +x "$FAKEBIN/pi"
+cat >"$FAKEBIN/pi.py" <<'PY'
+import os, sys
+d, home = os.environ["FAKE_DIR"], os.environ["FM_HOME"]
+print("Trust project folder?", flush=True)
+sys.stdin.readline()
+open(f"{d}/argv.pi", "w").write("\n".join(sys.argv[1:]))
+open(f"{home}/state/.lock", "w").write(str(os.getpid()) + "\n")
+for line in sys.stdin:
+    if line.strip() == "/quit":
+        break
+PY
+chmod +x "$FAKEBIN/pi.py"
 cat >"$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 cat "$FAKE_DIR/quota.json"
@@ -71,6 +93,7 @@ run() {  # <args...>: acting run with the fake world on PATH
 # tmux needs the private socket; point the script at it through a wrapper.
 cat >"$FAKEBIN/tmux" <<SH
 #!/usr/bin/env bash
+echo "\$*" >>"$FAKE_DIR/tmux.args"
 exec $(command -v tmux) -S "$SOCK" "\$@"
 SH
 chmod +x "$FAKEBIN/tmux"
@@ -176,3 +199,25 @@ out=$(run check); rc=$?
 expect_code 0 "$rc" "banner failover exit: $out"
 assert_present "$FAKE_DIR/argv.grok" "pane banner alone triggered failover"
 pass "pane limit banner triggers failover when quota still looks healthy"
+
+# --- forced pane keeps the holder's socket; relaunch with no holder reuses it ---
+tmx send-keys -t "$PANE" "/exit" Enter
+wait_for 10 bash -c "! kill -0 $(lock_pid) 2>/dev/null" || fail "primary did not exit"
+rm -f "$FAKE_DIR/banner.claude" "$FAKE_DIR/argv.pi" "$FAKE_DIR/tmux.args"
+start_fake claude
+set_quota 90 95
+out=$(run failover --to pi); rc=$?
+expect_code 0 "$rc" "pi failover exit: $out"
+assert_contains "$out" "pi folder-trust dialog: answering Enter" "pi trust dialog answered"
+assert_present "$FAKE_DIR/argv.pi" "pi launched and claimed the lock"
+assert_contains "$(cat "$HOME_DIR/state/primary-failover.state")" "sock=$SOCK" "state records the tmux socket"
+pass "pi folder-trust dialog is answered and the socket is recorded"
+
+tmx send-keys -t "$PANE" "/quit" Enter
+wait_for 10 bash -c "! kill -0 $(lock_pid) 2>/dev/null" || fail "pi did not exit"
+: >"$FAKE_DIR/tmux.args"
+out=$(FM_HOME="$HOME_DIR" FAKE_DIR="$FAKE_DIR" PATH="$FAKEBIN:$PATH" FM_PF_TMUX_BIN=tmux FM_PF_START_WAIT=20 \
+  bash "$BIN" switch-back 2>&1); rc=$?
+expect_code 0 "$rc" "holderless switch-back exit: $out"
+assert_contains "$(cat "$FAKE_DIR/tmux.args")" "-S $SOCK" "holderless relaunch targets the recorded tmux server"
+pass "relaunch with no live holder reuses the recorded tmux socket"
