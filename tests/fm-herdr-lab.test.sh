@@ -110,6 +110,23 @@ test_refuses_unsafe_names() {
   pass "fm-herdr-lab: names fail closed and require the lab prefix"
 }
 
+test_provision_ignores_path_sleep_shim() {
+  local name="fm-lab-sleep-shim-$$" marker="$TMP_ROOT/sleep-shim-called"
+  cat > "$FAKEBIN/sleep" <<SH
+#!/usr/bin/env bash
+: > '$marker'
+exit 97
+SH
+  chmod +x "$FAKEBIN/sleep"
+  rm -f "$marker"
+  FM_FAKE_HERDR_SERVER_DELAY=1 run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 \
+    || fail "provision failed with a sleep shim earlier on PATH"
+  assert_absent "$marker" "provision polling invoked the PATH sleep shim"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after shim provision failed"
+  rm -f "$FAKEBIN/sleep"
+  pass "fm-herdr-lab: bounded polling ignores a sleep shim on PATH"
+}
+
 test_provision_run_and_guarded_teardown() {
   local name='' line_count status=0 stop_line delete_line
   name="fm-lab-behavior-$$"
@@ -253,19 +270,8 @@ test_failed_delete_retains_tripwire() {
 
 test_timed_out_provision_cancels_late_launch() {
   local name="fm-lab-late-launch-$$" status=0
-  cat > "$FAKEBIN/sleep" <<'SH'
-#!/usr/bin/env bash
-if [ "${FM_FAKE_HERDR_FAST_POLL:-}" = 1 ]; then
-  while [ -n "${FM_FAKE_HERDR_WAIT_MARKER:-}" ] && [ ! -f "$FM_FAKE_HERDR_WAIT_MARKER" ]; do
-    "$FM_FAKE_HERDR_REAL_SLEEP" 0.01
-  done
-  exit 0
-fi
-exec "$FM_FAKE_HERDR_REAL_SLEEP" "$@"
-SH
-  chmod +x "$FAKEBIN/sleep"
   : > "$FAKE_LOG"
-  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=30 \
+  FM_HERDR_LAB_PROVISION_MAX_ATTEMPTS=10 FM_FAKE_HERDR_SERVER_DELAY=30 \
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "timed-out provision must fail"
   assert_present "$TRIPWIRES/$name.fleet-state.json" \
@@ -535,6 +541,7 @@ test_viewer_launcher_refuses_unsafe_arguments() {
 }
 
 test_refuses_unsafe_names
+test_provision_ignores_path_sleep_shim
 test_provision_run_and_guarded_teardown
 test_run_scopes_session_before_double_dash
 test_missing_tripwire_blocks_destruction

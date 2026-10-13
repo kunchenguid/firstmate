@@ -221,7 +221,30 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# Bounded polling must use the system sleep: a sleep shim earlier on PATH (such
+# as the speak guard) must never be invoked by the spawn's internal waits.
+test_spawn_polling_ignores_a_path_sleep_shim() {
+  local rec id out status marker
+  id=settle-sleep-shim-z5
+  rec=$(make_primary_case settle-sleep-shim "$id" 3)
+  read_settle_record "$rec"
+  marker="$HOME_DIR/sleep-shim-called"
+  cat > "$FAKEBIN_DIR/sleep" <<SH
+#!/usr/bin/env bash
+: > '$marker'
+exit 97
+SH
+  chmod +x "$FAKEBIN_DIR/sleep"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed with a sleep shim on PATH"$'\n'"$out"
+  assert_absent "$marker" "spawn polling invoked the PATH sleep shim"
+  pass "spawn bounded polling ignores a sleep shim on PATH"
+}
+
 test_single_stale_first_read_is_not_accepted
+test_spawn_polling_ignores_a_path_sleep_shim
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline

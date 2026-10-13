@@ -318,7 +318,7 @@ fm_herdr_lab_viewer_start() { # <session>
         return 0
       fi
     fi
-    sleep 0.2
+    /bin/sleep 0.2
     waited=$((waited + 1))
   done
   fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"
@@ -343,7 +343,7 @@ fm_herdr_lab_viewer_stop() { # <session>
   done
   waited=0
   while fm_herdr_lab_viewer_owned_alive "$name" && [ "$waited" -lt 50 ]; do
-    sleep 0.1
+    /bin/sleep 0.1
     waited=$((waited + 1))
   done
   for role in viewer launcher; do
@@ -359,7 +359,7 @@ fm_herdr_lab_viewer_stop() { # <session>
       rm -f "$record" "$log"
       return 0
     fi
-    sleep 0.2
+    /bin/sleep 0.2
     waited=$((waited + 1))
   done
   fm_herdr_lab_error "lab viewer for '$name' did not detach within $timeout seconds (last reason: ${reason:-<unreadable>})"
@@ -382,7 +382,7 @@ fm_herdr_lab_cancel_viewer_launcher() { # <pid>
   if kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt "$max_attempts" ]; do
-      sleep 0.1
+      /bin/sleep 0.1
       attempt=$((attempt + 1))
     done
     if kill -0 "$pid" 2>/dev/null; then
@@ -397,7 +397,7 @@ fm_herdr_lab_cancel_provision() { # <pid>
   if kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 10 ]; do
-      sleep 0.1
+      /bin/sleep 0.1
       attempt=$((attempt + 1))
     done
     if kill -0 "$pid" 2>/dev/null; then
@@ -437,8 +437,8 @@ fm_herdr_lab_provision() { # <session>
   fm_herdr_lab_raw "$name" server >/dev/null 2>&1 &
   server_pid=$!
   attempt=0
-  max_attempts=300
-  timeout_seconds=60
+  max_attempts=${FM_HERDR_LAB_PROVISION_MAX_ATTEMPTS:-300}
+  timeout_seconds=$((max_attempts / 5))
   while [ "$attempt" -lt "$max_attempts" ]; do
     running=$(fm_herdr_lab_cli "$name" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null) || running=false
     if [ "$running" = true ]; then
@@ -448,7 +448,7 @@ fm_herdr_lab_provision() { # <session>
       }
       return 0
     fi
-    sleep 0.2
+    /bin/sleep 0.2
     attempt=$((attempt + 1))
   done
   fm_herdr_lab_cancel_provision "$server_pid"
@@ -513,7 +513,7 @@ fm_herdr_lab_teardown() { # <session>
     return
   fi
   fm_herdr_lab_stop "$name" >/dev/null 2>&1 || true
-  sleep 0.5
+  /bin/sleep 0.5
   fm_herdr_lab_refuse_if_default "$name" || return 1
   fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {

@@ -1393,7 +1393,7 @@ spawn_herdr_presentation_order_lock_acquire() {
       HERDR_PRESENTATION_ORDER_LOCK_HELD=1
       return 0
     fi
-    sleep 0.1
+    /bin/sleep 0.1
     attempt=$((attempt + 1))
   done
   return 1
@@ -4000,7 +4000,7 @@ spawn_assert_agent_worktree() {
     if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
       return 0
     fi
-    [ "$i" -ge 20 ] || sleep 0.5
+    [ "$i" -ge 20 ] || /bin/sleep 0.5
   done
   echo "error: task $ID's worker started in '${seen:-unknown}', not its recorded worktree '$WT'; refusing to continue outside the copy holding its work" >&2
   exit 1
@@ -4080,7 +4080,7 @@ kimi_wait_for_ready() {
     if [ -z "$pane" ]; then
       ready_captures=0
       i=$((i + 1))
-      [ "$i" -ge "$max" ] || sleep "$interval"
+      [ "$i" -ge "$max" ] || /bin/sleep "$interval"
       continue
     fi
     if kimi_trust_dialog_is_visible "$pane"; then
@@ -4118,7 +4118,7 @@ kimi_wait_for_ready() {
       fi
     fi
     i=$((i + 1))
-    [ "$i" -ge "$max" ] || sleep "$interval"
+    [ "$i" -ge "$max" ] || /bin/sleep "$interval"
   done
   if [ "$trust_still_visible" -eq 1 ]; then
     KIMI_READY_FAILURE_DETAIL="kimi trust dialog did not clear after selecting 'Trust this folder' on $trust_enters poll(s); saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option"
@@ -4148,7 +4148,7 @@ kimi_wait_for_delivery() {
     pane=$(kimi_capture)
     kimi_delivery_is_confirmed "$pane" && return 0
     i=$((i + 1))
-    [ "$i" -ge "$max" ] || sleep "$interval"
+    [ "$i" -ge "$max" ] || /bin/sleep "$interval"
   done
   return 1
 }
@@ -4188,7 +4188,7 @@ rovo_wait_for_ready() {
       return 0
     fi
     i=$((i + 1))
-    [ "$i" -ge "$max" ] || sleep "$interval"
+    [ "$i" -ge "$max" ] || /bin/sleep "$interval"
   done
   return 1
 }
@@ -4216,7 +4216,7 @@ rovo_wait_for_delivery() {
     pane=$(rovo_capture)
     rovo_delivery_is_confirmed "$pane" && return 0
     i=$((i + 1))
-    [ "$i" -ge "$max" ] || sleep "$interval"
+    [ "$i" -ge "$max" ] || /bin/sleep "$interval"
   done
   return 1
 }
@@ -4289,7 +4289,7 @@ agy_wait_for_working() {
       agy_pane_is_working "$pane" && return 0
     fi
     i=$((i + 1))
-    [ "$i" -ge "$max" ] || sleep "$interval"
+    [ "$i" -ge "$max" ] || /bin/sleep "$interval"
   done
   return 1
 }
@@ -4312,7 +4312,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   for _ in $(seq 1 10); do
     relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
-    sleep 0.5
+    /bin/sleep 0.5
   done
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
     if [ "$BACKEND" != herdr ]; then
@@ -4327,7 +4327,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     for _ in $(seq 1 10); do
       relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
       [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
-      sleep 0.5
+      /bin/sleep 0.5
     done
     if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and did not return to its recorded worktree '$WT' when told to; refusing to relaunch an agent outside the copy holding its work" >&2
@@ -4388,7 +4388,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       candidate=""
       [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
     fi
-    sleep 1
+    /bin/sleep 1
   done
   if [ -z "$WT" ]; then
     echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
@@ -5441,10 +5441,10 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
   exit 1
 fi
-sleep 0.3
+/bin/sleep 0.3
 SPAWN_LAUNCH_SENT=1
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
-sleep 0.3
+/bin/sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
