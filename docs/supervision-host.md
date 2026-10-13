@@ -110,6 +110,9 @@ So a close reaches main off Pi exactly when it would on Pi: a check trigger, a d
 On that main-only pass-through the host starts the successor watcher cycle and leaves it running, then prints the close unchanged.
 That successor, like one a turn hands back at its start (see [Away](#away)), runs in a process group of its own, so the harness tearing down the hook's group after the rewake does not stop it.
 The host leaves the watcher's recovery marker reading downtime, confirming no handling handoff, because the re-arm owner delivers a close to main only while that marker reads downtime.
+That successor's arm is the cycle's scheduling owner while nobody waits on it: after a close that is already a durable queue row, it starts its one replacement watcher as a handling successor instead of ending, so registered check sweeps carry on through repeated events while main's turn runs and across a held engine turn.
+While the host is busy in a turn, the arm hands it those closes through a spool that its next wait consumes; once the host has exited, the closes wait in the wake queue for main.
+The arm stops continuing when the session lock changes, the away daemon's flag exists, or a live idle host is waiting for the close.
 The session's next park without `--restart` requests a take-over to restore a single host-owned arm; the [host header](../bin/fm-supervision-host.sh) owns successor persistence and cleanup, and the [arm header](../bin/fm-watch-arm.sh) owns take-over eligibility and fallback.
 OpenCode and omp still launch the host with `--restart`, which takes precedence over recorded take-over and lacks its acknowledgement-preserving handover; changing that first-cycle path remains a follow-up.
 The host-off Claude Stop hook's detached handling successor is also unchanged; see [Claude handling successor](watcher-continuity.md#claude-handling-successor).

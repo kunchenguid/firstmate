@@ -1516,6 +1516,149 @@ test_pass_through_successor_survives_the_hook_process_group_teardown() {
   pass "host+hook: the successor a pass-through leaves for main survives the hook's process group teardown"
 }
 
+# --- scheduled checks keep running while main owns the turn -------------------
+#
+# The live gap (2026-10-13): a scheduled alert reached its check 16m54s late
+# because the successor cycle a main-only pass-through leaves for main closed on
+# the next event and nothing restarted it until main's turn ended. The arm that
+# owns that cycle now restarts its own watcher after a close nobody is waiting
+# on (bin/fm-watch-arm.sh, "Scheduling continuation"), so completed check
+# sweeps carry on while the events stay queued for main.
+
+# A registered check the real watcher sweeps. Every sweep appends its epoch to
+# <home>/sweeps, and it reports one event for each <home>/emit.<n> it finds.
+register_sweep_check() {  # <home>
+  local home=$1
+  cat > "$home/state/sweep.check.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$(date +%s)" >> "$home/sweeps"
+for f in "$home"/emit.*; do
+  [ -e "\$f" ] || continue
+  rm -f "\$f"
+  printf 'fixture-event-%s\n' "\${f##*.}"
+  exit 0
+done
+SH
+  chmod 700 "$home/state/sweep.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" sweep >/dev/null || fail "fixture: could not register the sweep check"
+}
+sweep_count() { if [ -f "$1/sweeps" ]; then wc -l < "$1/sweeps" | tr -d ' '; else echo 0; fi; }
+sweeps_reach() { [ "$(sweep_count "$1")" -ge "$2" ]; }
+event_consumed() { [ ! -e "$1/emit.$2" ]; }
+# The longest wait between two completed sweeps, from the <from>th sweep on.
+max_sweep_gap() {  # <home> <from>
+  awk -v from="$2" 'NR >= from { if (prev && $1 - prev > max) max = $1 - prev; prev = $1 } END { print max + 0 }' "$1/sweeps"
+}
+# The sweep cadence the fixture accepts between two completed sweeps: the
+# one-second interval, the restart throttle, and a restarted watcher's start.
+SWEEP_GAP_BOUND=15
+
+# Emit event <n> and require sweeps to carry on after the close it causes.
+emit_and_expect_sweeps() {  # <home> <n> <label>
+  local home=$1 n=$2 before
+  before=$(sweep_count "$home")
+  : > "$home/emit.$n"
+  wait_until 200 event_consumed "$home" "$n" || fail "$3: event $n was never swept"
+  wait_until 300 sweeps_reach "$home" $((before + 4)) \
+    || fail "$3: check sweeps stopped after event $n (sweeps $(sweep_count "$home"), were $before): the cycle that closed on it was not restarted"
+}
+
+# The watcher processes running from <home>'s bin. A command substitution
+# inside a watcher is a forked copy with the same command line, so a process
+# whose parent is itself a watcher is not counted.
+home_watchers() {  # <home>
+  ps -A -o pid= -o ppid= -o command= 2>/dev/null | awk -v w="$1/bin/fm-watch.sh" '
+    $3 ~ /(^|\/)bash$/ && $4 == w { ppid[$1] = $2; order[++n] = $1 }
+    END { for (i = 1; i <= n; i++) if (!(ppid[order[i]] in ppid)) c++; print c + 0 }'
+}
+
+test_scheduled_checks_continue_while_main_owns_repeated_closes() {
+  local home n saved left_arm drained
+  home=$(make_primary_home hook-sched-main-turn)
+  register_sweep_check "$home"
+  saved=$FM_CHECK_INTERVAL
+  export FM_CHECK_INTERVAL=1
+  start_hook_session "$home"
+  export FM_CHECK_INTERVAL=$saved
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "scheduled checks: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  wait_until 150 sweeps_reach "$home" 2 || fail "scheduled checks: the parked cycle never swept its check"
+  : > "$home/emit.1"
+  wait_until 250 hook_exited "$home" || fail "scheduled checks: the first event never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "scheduled checks (first close)"
+  assert_re '	pass-through	attended	main-only	check:' "$home/state/.supervision-host.log" "fixture: the first event was not a main-only pass-through"
+  # Main is now in its long turn and drains nothing. Three more events close
+  # the cycle in turn, each leaving earlier ones still queued for main.
+  for n in 2 3 4; do
+    emit_and_expect_sweeps "$home" "$n" "scheduled checks"
+  done
+  [ "$(max_sweep_gap "$home" 1)" -le "$SWEEP_GAP_BOUND" ] \
+    || fail "scheduled checks: sweeps were $(max_sweep_gap "$home" 1)s apart, past the ${SWEEP_GAP_BOUND}s bound: $(cat "$home/sweeps" | tr '\n' ' ')"
+  [ "$(home_watchers "$home")" -eq 1 ] || fail "scheduled checks: more than one watcher runs"
+  left_arm=$(parent_of "$(cat "$home/state/.watch.lock/pid")")
+  for n in 1 2 3 4; do
+    [ "$(grep -c "fixture-event-$n\$" "$home/state/.wake-queue")" -eq 1 ] \
+      || fail "scheduled checks: event $n is not queued exactly once for main:"$'\n'"$(cat "$home/state/.wake-queue")"
+  done
+  # The supported handoff: main's turn ends and the next park takes the cycle over.
+  turn_end "$home"
+  wait_until 250 hook_exited "$home" || fail "scheduled checks: the handoff never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "scheduled checks (handoff)"
+  assert_re "	take-over	arm=$left_arm\$" "$home/state/.supervision-host.log" "scheduled checks: the park did not take over the continuing arm"
+  main_drain "$home" > "$home/drain.out"
+  drained=$(cat "$home/drain.out")
+  assert_contains "$drained" 'fixture-event-4' "scheduled checks: the newest event must reach main's drain"
+  assert_contains "$MAIN_ACK" '--ack-through 4' "scheduled checks: main's acknowledgement must cover all four queued events"
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || fail "scheduled checks: main's acknowledgement failed: $MAIN_ACK"
+  drained=$(main_drain "$home")
+  [ "$(printf '%s\n' "$drained" | grep -c 'fixture-event-')" -eq 0 ] || fail "scheduled checks: an acknowledged event was delivered again:"$'\n'"$drained"
+  [ "$(grep -c 'fixture-event-[1-4]$' "$home/state/.wake-queue" 2>/dev/null)" -eq 0 ] || fail "scheduled checks: an acknowledged event is still queued"
+  ! kill -0 "$left_arm" 2>/dev/null || fail "scheduled checks: the taken-over arm still runs (pid $left_arm)"
+  emit_and_expect_sweeps "$home" 5 "scheduled checks (after the handoff)"
+  [ "$(home_watchers "$home")" -eq 1 ] || fail "scheduled checks: more than one watcher runs after the handoff"
+  stop_home_processes "$home"
+  pass "host+hook: check sweeps continue at cadence across repeated closes and a handoff while main owns the turn, and every event is delivered once"
+}
+
+test_scheduled_checks_continue_through_a_provider_wait() {
+  local home n saved drained
+  home=$(make_primary_home hook-sched-provider-wait)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo held > "$home/stub-mode"
+  mkfifo "$home/stub-release"
+  register_sweep_check "$home"
+  saved=$FM_CHECK_INTERVAL
+  export FM_CHECK_INTERVAL=1
+  start_hook_session "$home"
+  export FM_CHECK_INTERVAL=$saved
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "provider wait: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  wait_until 150 sweeps_reach "$home" 2 || fail "provider wait: the parked cycle never swept its check"
+  append_status "$home" 'first actionable wake'
+  wait_until 250 test -s "$home/stub-ready" || fail "provider wait: the engine did not reach its hold: $(cat "$home/state/.supervision-host.log")"
+  # The engine is waiting on its provider: three events close the cycle in turn.
+  for n in 1 2 3; do
+    emit_and_expect_sweeps "$home" "$n" "provider wait"
+    ! hook_exited "$home" || fail "provider wait: the host returned while the engine turn was held"
+  done
+  [ "$(max_sweep_gap "$home" 1)" -le "$SWEEP_GAP_BOUND" ] \
+    || fail "provider wait: sweeps were $(max_sweep_gap "$home" 1)s apart, past the ${SWEEP_GAP_BOUND}s bound"
+  [ "$(home_watchers "$home")" -eq 1 ] || fail "provider wait: more than one watcher runs"
+  printf 'continue\n' > "$home/stub-release"
+  wait_until 300 hook_exited "$home" || fail "provider wait: the held events never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "provider wait"
+  for n in 1 2 3; do
+    [ "$(grep -c "fixture-event-$n\$" "$home/state/.wake-queue")" -eq 1 ] \
+      || fail "provider wait: event $n is not queued exactly once for main:"$'\n'"$(cat "$home/state/.wake-queue")"
+  done
+  drained=$(main_drain "$home")
+  assert_contains "$drained" 'fixture-event-3' "provider wait: the newest event must reach main's drain"
+  stop_home_processes "$home"
+  pass "host+hook: check sweeps continue at cadence through a held engine turn, and the events that closed the cycle meanwhile are delivered once"
+}
+
 # The arm processes running from <home>'s bin, one "<pid> <ppid>" per line.
 # A command substitution inside an arm is a forked copy that shows the same
 # command line, so a process whose parent is itself an arm is not counted.
@@ -2993,6 +3136,8 @@ test_successor_left_at_the_turn_survives_the_hook_process_group_teardown
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
 test_pass_through_successor_survives_the_hook_process_group_teardown
+test_scheduled_checks_continue_while_main_owns_repeated_closes
+test_scheduled_checks_continue_through_a_provider_wait
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
 test_unrecorded_successor_is_stopped_rather_than_left_for_main

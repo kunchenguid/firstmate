@@ -1609,6 +1609,58 @@ SH
   printf '%s\n' "$dir"
 }
 
+# Scheduling continuation (header, "Scheduling continuation"): a continuing arm
+# restarts its own watcher after EVERY actionable close of the child it owns,
+# including a child that closes before its health was ever observed, instead of
+# ending supervision with it. The stand-in watcher closes with a check wake on
+# its first three runs without ever taking the singleton, then stays alive; the
+# host stand-in is alive and busy, so the arm hands each close to its spool.
+test_continuing_arm_restarts_after_every_actionable_close_even_before_health() {
+  local dir state bindir f reader polls rows
+  dir=$(make_case continuing-arm)
+  state="$dir/state"
+  bindir="$dir/bin"
+  mkdir -p "$bindir"
+  for f in "$ROOT"/bin/*; do
+    [ "$(basename "$f")" = fm-watch.sh ] || ln -s "$f" "$bindir/$(basename "$f")"
+  done
+  cat > "$bindir/fm-watch.sh" <<SH
+#!/usr/bin/env bash
+n=\$(( \$(cat "$dir/runs" 2>/dev/null || echo 0) + 1 ))
+printf '%s\\n' "\$n" > "$dir/runs"
+if [ "\$n" -le 3 ]; then
+  echo "check: stub: event-\$n"
+  exit 0
+fi
+exec sleep 20
+SH
+  chmod +x "$bindir/fm-watch.sh"
+  sleep 120 &
+  reader=$!
+  printf '%s\n' "$reader" > "$state/.lock"
+  : > "$dir/busy"
+  : > "$dir/spool"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=40 FM_WATCH_ARM_CONTINUE_MIN_CYCLE=0 \
+    FM_WATCH_ARM_CONTINUE_READER="$reader" FM_WATCH_ARM_CONTINUE_SPOOL="$dir/spool" FM_WATCH_ARM_CONTINUE_BUSY="$dir/busy" \
+    "$bindir/fm-watch-arm.sh" > "$dir/arm.out" 2>&1 &
+  ARM_PID=$!
+  polls=0
+  while [ "$polls" -lt 100 ] && [ "$(cat "$dir/runs" 2>/dev/null || echo 0)" -lt 4 ]; do
+    sleep 0.1
+    polls=$((polls + 1))
+  done
+  runs=$(cat "$dir/runs" 2>/dev/null || echo 0)
+  kill -0 "$ARM_PID" 2>/dev/null || { kill "$reader" 2>/dev/null; fail "the arm ended at the first actionable close instead of restarting its watcher: runs=$runs out=$(cat "$dir/arm.out")"; }
+  kill -TERM "$ARM_PID" 2>/dev/null; wait "$ARM_PID" 2>/dev/null; kill "$reader" 2>/dev/null
+  [ "$runs" -ge 4 ] || fail "the arm restarted its watcher only $runs time(s) for three actionable closes"
+  for f in 1 2 3; do
+    rows=$(grep -c "^C	check: stub: event-$f\$" "$dir/spool")
+    [ "$rows" -eq 1 ] || fail "close $f reached the spool $rows time(s), not once: $(cat "$dir/spool")"
+  done
+  [ "$(grep -c 'actionable-check' "$state/.watch-cycle-exits.log")" -ge 3 ] || fail "the cycle ledger did not record the three closes: $(cat "$state/.watch-cycle-exits.log")"
+  pass "watch-arm: a continuing arm restarts its one watcher after every actionable close, including one before health, and hands each close over once"
+}
+
 test_opencode_arm_plugin_decides_with_the_shared_predicate() {
   command -v node >/dev/null 2>&1 || { printf 'skip: node not found\n'; return 0; }
   local driver case_name dir state config out status
@@ -1743,4 +1795,5 @@ test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
+test_continuing_arm_restarts_after_every_actionable_close_even_before_health
 test_opencode_arm_plugin_decides_with_the_shared_predicate
