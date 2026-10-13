@@ -265,6 +265,15 @@ printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"s
   "${FM_TEST_GERRIT_REVISION:-5f07a68436929a527ddc7abadc8ef1abceae40ed}" \
   "${FM_TEST_GERRIT_URL:-https://gerrit.example/c/group/apps/console/+/4201}"
 SH
+  # glab-axi, reproducing the real CLI's mr view contract: a field table whose
+  # state value is the raw merge request state lowercased (`opened` is GitLab's
+  # native open state), and a non-zero exit with no stdout on any failure.
+  cat > "$fakebin/glab-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GLAB_AXI_LOG"
+[ "${FM_TEST_GLAB_AXI_FAIL:-0}" = 0 ] || exit 1
+printf 'title: fixture merge request\nstate: %s\nauthor: someone\n' "${FM_TEST_GLAB_AXI_STATE:-opened}"
+SH
   # no-mistakes, answering only `axi status` the way the real CLI does from a
   # worker copy: a run object, then its branch_sync block. By default the run's
   # result is the copy's own passed HEAD and custody is returned; a case
@@ -285,11 +294,12 @@ if [ -n "${FM_TEST_NM_NEXT_ACTION:-}" ]; then
   printf '  next_action:\n    code: %s\n    command: no-mistakes axi status\n' "$FM_TEST_NM_NEXT_ACTION"
 fi
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi"
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi" "$fakebin/glab-axi"
   chmod +x "$fakebin/no-mistakes"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/glab-axi.log"
   : > "$dir/gerrit-axi.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
@@ -2754,6 +2764,71 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+test_gitlab_glab_axi_fallback_reads_every_native_state() {
+  local dir noglab bindir entry name state rc rec expected
+  dir=$(make_case gitlab-axi-fallback)
+
+  # The whole search path is mirrored without glab, because a real glab
+  # anywhere on PATH would make the dispatcher's fallback prove nothing.
+  noglab="$dir/noglab"
+  mkdir -p "$noglab"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = glab ] && continue
+      [ -e "$noglab/$name" ] || ln -s "$entry" "$noglab/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$noglab" command -v glab >/dev/null 2>&1 \
+    || fail "the glab-free search path still resolved glab"
+
+  # GitLab's native spellings, as glab-axi lowercases them: `opened` is the
+  # open state (not the gh-twin's `open`), and `locked` is a readable
+  # non-merged state that keeps its own spelling the way the plain-glab
+  # twin passes it through.
+  for state in merged opened locked closed; do
+    case "$state" in
+      merged) expected='MERGED/true' ;;
+      opened) expected='OPEN/false' ;;
+      locked) expected='locked/false' ;;
+      closed) expected='CLOSED/false' ;;
+    esac
+    rc=0
+    rec=$(PATH="$noglab" FM_TEST_GLAB_AXI_STATE="$state" FM_TEST_GLAB_AXI_LOG="$dir/glab-axi.log" \
+      fm_pr_gitlab_read_record gitlab.example group/subgroup/project 7 \
+      && printf '%s/%s' "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED") || rc=$?
+    expect_code 0 "$rc" "gitlab-axi-fallback: the native state '$state' must read as a known state"
+    [ "$rec" = "$expected" ] \
+      || fail "gitlab-axi-fallback: state '$state' read as '$rec' instead of '$expected'"
+  done
+
+  # An unknown state stays unreadable rather than guessed, and a failed call
+  # reads as no record at all.
+  rc=0
+  rec=$(PATH="$noglab" FM_TEST_GLAB_AXI_STATE=not-a-state FM_TEST_GLAB_AXI_LOG="$dir/glab-axi.log" \
+    fm_pr_gitlab_read_record gitlab.example group/subgroup/project 7 \
+    && printf '%s/%s' "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED") || rc=$?
+  expect_code 1 "$rc" "gitlab-axi-fallback: an unknown state must be refused as unreadable"
+  rc=0
+  rec=$(PATH="$noglab" FM_TEST_GLAB_AXI_FAIL=1 FM_TEST_GLAB_AXI_LOG="$dir/glab-axi.log" \
+    fm_pr_gitlab_read_record gitlab.example group/subgroup/project 7 \
+    && printf '%s/%s' "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED") || rc=$?
+  expect_code 1 "$rc" "gitlab-axi-fallback: a failed glab-axi call must read as no record"
+
+  # The fallback is addressed by host with the project path, never by the
+  # merge request URL, mirroring how the real CLI resolves an instance.
+  grep -qF -- 'mr view 7 -R gitlab.example/group/subgroup/project' "$dir/glab-axi.log" \
+    || fail "gitlab-axi-fallback: glab-axi was not addressed by host and project path"
+  ! grep -qF -- 'https://gitlab.example' "$dir/glab-axi.log" \
+    || fail "gitlab-axi-fallback: glab-axi was addressed by URL"
+  pass "the glab-axi read fallback reads every native GitLab state"
+}
+
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"
@@ -4202,6 +4277,7 @@ test_parser_matrix
 test_github_enterprise_config_resolution
 test_github_enterprise_hosts
 test_gitlab_merge_watch
+test_gitlab_glab_axi_fallback_reads_every_native_state
 test_forgejo_merge_watch
 test_forgejo_login_list_shapes
 test_gerrit_merge_watch

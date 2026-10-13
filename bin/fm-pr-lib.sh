@@ -1157,8 +1157,11 @@ FIELDS
 # resolved from the record rather than the tool's configured default, and the
 # state is parsed from the tool's own field output with the same one-exact-
 # occurrence awk the gh-axi twin uses, so a changed output shape reads as an
-# unknown state instead of a guess. GitLab prints lowercase states; the case
-# pattern keeps the twin's uppercase spellings accepted too.
+# unknown state instead of a guess. GitLab's native spellings are lowercase -
+# its open state is `opened`, not the gh-twin's `open`, and `locked` is a
+# readable non-merged state - and the case pattern keeps the twin's uppercase
+# spellings accepted too; a native state passes through the way the plain-glab
+# twin passes it, so `locked` keeps its own spelling in reports.
 fm_pr_gitlab_read_record_with_glab_axi() {  # <host> <path> <number>
   local host=$1 path=$2 number=$3 output state
   FM_PR_RECORD_STATE=
@@ -1179,9 +1182,15 @@ fm_pr_gitlab_read_record_with_glab_axi() {  # <host> <path> <number>
       # shellcheck disable=SC2034
       FM_PR_RECORD_MERGED=true
       ;;
-    OPEN|open)
+    OPEN|open|opened)
       # shellcheck disable=SC2034
       FM_PR_RECORD_STATE=OPEN
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_MERGED=false
+      ;;
+    LOCKED|locked)
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_STATE=locked
       # shellcheck disable=SC2034
       FM_PR_RECORD_MERGED=false
       ;;

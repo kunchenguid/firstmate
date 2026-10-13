@@ -1608,6 +1608,14 @@ EOF
 
   FM_HOME="$home" "$BRIEF" forge-gitlab-a2 proj --mode direct-PR --forge gitlab >/dev/null \
     || fail "a gitlab direct-PR brief should scaffold"
+  brief=$(cat "$home/data/forge-gitlab-a2/brief.md")
+  assert_contains "$brief" \
+    'Use glab-axi for GitLab operations, gh-axi for GitHub operations, and chrome-devtools-axi for browser operations.' \
+    "the gitlab brief's tool rule did not name glab-axi alongside gh-axi"
+  assert_contains "$brief" 'Delivery contract: mode=direct-PR forge=gitlab' \
+    "the gitlab brief's delivery contract did not carry the forge token"
+  assert_not_contains "$brief" 'shape=' \
+    "the gitlab brief scaffolded a shape notice only gerrit owns"
   fill_brief_subsections "$home/data/forge-gitlab-a2/brief.md" "Open the merge request." "Ship it."
   out=$(run_spawn "$home" "$fakebin" forge-gitlab-a2 "$proj" claude --mode direct-PR --yolo on 2>&1)
   assert_not_contains "$out" "forge mismatch" "an agreeing gitlab brief was reported as drift"
