@@ -1216,21 +1216,42 @@ const mainCtx = {
     getEntries: () => entries,
   },
 };
+const automaticResult = {
+  role: "custom",
+  customType: "fm-branch-process",
+  content: "automatic result notification",
+  display: true,
+  timestamp: Date.now(),
+};
+await fire("before_agent_start", {
+  type: "before_agent_start",
+  messageType: "custom",
+  message: automaticResult,
+}, mainCtx);
 const operational = spawnSync(
   "bash",
   [`${realRoot}/bin/fm-operational-input.sh`, "encode", "watcher"],
   { encoding: "utf8", input: "operational watcher injection" },
 );
 if (operational.status !== 0) throw new Error(`could not create operational input: ${operational.stderr}`);
-await fire("before_agent_start", { prompt: operational.stdout }, mainCtx);
+await fire("before_agent_start", {
+  type: "before_agent_start", messageType: "user", prompt: operational.stdout,
+}, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: operational.stdout } });
 const unsolicitedPrompt = "Please keep responses concise while monitoring the fleet.";
-await fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
+await fire("before_agent_start", {
+  type: "before_agent_start", messageType: "user", prompt: unsolicitedPrompt,
+}, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
+const legacyPromptContract = "Legacy Pi user prompt remains supported.";
+await fire("before_agent_start", { prompt: legacyPromptContract }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: legacyPromptContract } });
 await fire("agent_start", {}, mainCtx);
 await fire("agent_end", {}, mainCtx);
 const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
-await fire("before_agent_start", { prompt: legacyOperational }, mainCtx);
+await fire("before_agent_start", {
+  type: "before_agent_start", messageType: "user", prompt: legacyOperational,
+}, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: legacyOperational } });
 await fire("agent_start", {}, mainCtx);
 const unsolicited = dispatch("signal: healthy resource result");
@@ -1258,7 +1279,9 @@ for (let index = 0; index < requestedPrompts.length; index += 1) {
   if (index < longRequests.length && content.length <= 4000) {
     throw new Error(`request fixture ${index} did not exceed the mirror bound`);
   }
-  await fire("before_agent_start", { prompt: content }, mainCtx);
+  await fire("before_agent_start", {
+    type: "before_agent_start", messageType: "user", prompt: content,
+  }, mainCtx);
   // Pi persists this only after every before_agent_start handler has returned.
   entries.push({ type: "message", message: { role: "user", content } });
   await fire("agent_start", {}, mainCtx);
@@ -1279,14 +1302,15 @@ for (let index = 0; index < requestedPrompts.length; index += 1) {
 const mirroredCaptainText = globalThis.__fmSessions[0].ops
   .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
   .map((op) => op.message.content);
-for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
+for (const content of [unsolicitedPrompt, legacyPromptContract, ...requestedPrompts]) {
   const copies = mirroredCaptainText.filter((text) => text === `[captain] ${content}`).length;
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }
 if (mirroredCaptainText.some((text) =>
-  text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
+  text.includes(automaticResult.content) || text.includes("operational watcher injection") ||
+  text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
 )) {
-  throw new Error("canonical current or legacy operational input entered captain mirror context");
+  throw new Error("custom, canonical current, or legacy operational input entered captain mirror context");
 }
 if ((globalThis.__fmPrompts ?? []).length !== 5) throw new Error("a handled fleet wake was rerun");
 let processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
@@ -6685,6 +6709,28 @@ test_bounded_outcome_history_in_installed_pi_session() {
   pass "installed Pi AgentSession bounds >1 MiB history, authenticates exact outcomes, and admits ordinary work"
 }
 
+test_prompt_event_contract_in_installed_pi_session() {
+  local home out sdk status
+  sdk="${FM_PI_PACKAGE_DIR:-$(npm root -g)/@earendil-works/pi-coding-agent}"
+  if [ ! -f "$sdk/dist/index.js" ]; then
+    printf 'skip: installed-Pi prompt-event regression requires installed Pi SDK\n'
+    return
+  fi
+  home="$TMP_ROOT/installed-pi-prompt-event-home"
+  mkdir -p "$home"
+  set +e
+  out=$(env -u FIRSTMATE_OP -u FM_TASK_ID FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    node "$ROOT/tests/fm-pi-branch-prompt-event-installed.mjs" "$ROOT" "$home" "$sdk" 2>&1)
+  status=$?
+  set -e
+  expect_code 0 "$status" "installed Pi AgentSession must distinguish custom notifications from user prompts: $out"
+  case "$out" in
+    *'"messageType":"custom"'*'"messageType":"user"'*'"networkCalls":0'*'"runtime":"installed AgentSession + DefaultResourceLoader"'*) ;;
+    *) fail "installed Pi prompt-event regression did not report both event variants and its network boundary: $out" ;;
+  esac
+  pass "installed Pi AgentSession keeps custom notifications out of user-prompt mirroring"
+}
+
 test_short_task_success_reaches_main_with_authenticated_body() {
   local repo home out status
   repo="$TMP_ROOT/short-result-root"
@@ -6823,6 +6869,12 @@ EOF
 }
 
 case "${FM_PI_BRANCH_TEST_CASE:-}" in
+  prompt-event-contract)
+    test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
+    test_stale_generation_boundaries_are_side_effect_free
+    test_prompt_event_contract_in_installed_pi_session
+    exit 0
+    ;;
   ida-routing)
     test_branch_dispatch_routes_only_identity_bound_ida_results
     exit 0
@@ -6891,6 +6943,7 @@ test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 test_exact_notification_coalescing_and_terminal_supersession
 test_bounded_outcome_history_keeps_unknown_older_work_live
 test_bounded_outcome_history_in_installed_pi_session
+test_prompt_event_contract_in_installed_pi_session
 test_continuation_archive_during_report_settlement
 test_native_compact_continuation_with_installed_session_manager
 test_retained_history_window_is_conservative_at_its_edges

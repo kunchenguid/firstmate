@@ -2541,11 +2541,12 @@ ${context.command}
   pi.on?.("before_agent_start", async (event, ctx) => {
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
+    if (event.messageType === "custom") return;
     const promptGeneration = generation;
     if (!(await enqueueDelivery(() => actingAsOwner(promptGeneration)))) return;
     if (promptGeneration !== generation || !currentMainSession || !collectCurrentMainDialog()) return;
 
-    // This event is Pi's authoritative complete current prompt. At this point
+    // This user event is Pi's authoritative complete current prompt. At this point
     // SessionManager still contains only the preceding dialog, so relying on
     // getEntries() here loses the captain request that the next wake may answer.
     // Stage it verbatim and remember the future persisted index for turn_end's

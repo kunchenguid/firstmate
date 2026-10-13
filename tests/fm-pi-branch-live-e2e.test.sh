@@ -68,6 +68,7 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
 cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$repo/.pi/extensions/lib/fm-feishu-native-channel.ts"
 mkdir -p "$repo/bin"
+cp "$ROOT/bin/fm-short-notification.mjs" "$repo/bin/fm-short-notification.mjs"
 cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
 cp "$ROOT/bin/fm-feishu-state.mjs" "$repo/bin/fm-feishu-state.mjs"
 cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
