@@ -1936,7 +1936,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif captain_call_stale_bound "$key" "$task"; then
     bounded=0
     throttled=0
-  elif unknown_alive_stale_bound "$win" "$task"; then
+  elif [ -z "$STALE_WAIT_DECLARATION" ] && unknown_alive_stale_bound "$win" "$task"; then
     bounded=0
     throttled=0
   elif [ -n "$STALE_WAIT_DECLARATION" ]; then
@@ -1971,24 +1971,47 @@ surface_nonterminal_stale() {  # <window> <hash>
 }
 
 # Bound repeat first-sight alarms only when the semantic busy reader cannot
-# classify the pane but the recovery-grade endpoint probe confirms its agent is
-# still alive. The first inconclusive sight remains actionable. Exact idle,
-# dead, missing, unreadable, and ambiguous endpoints retain their existing
-# paths, and an already-classified quiet pane still reaches wedge_timer_check.
+# classify the pane, the recovery-grade endpoint probe confirms its agent is
+# still alive, AND the pane shows progress evidence inside one
+# STALE_ESCALATE_SECS window: its own status log written within it, or its own
+# task worktree written within it (crew_worktree_written_since, the same probe,
+# prune list and depth the wedge timer's write deferral uses). An unknown-but-
+# alive pane with neither keeps surfacing on every new hash exactly as any
+# not-provably-working stale does, so a wedged pane that still animates is never
+# silenced by liveness alone. The first inconclusive sight remains actionable.
+# Exact idle, dead, missing, unreadable, and ambiguous endpoints retain their
+# existing paths, and an already-classified quiet pane still reaches
+# wedge_timer_check.
 unknown_alive_stale_bound() {  # <window> <task>
   local win=$1 task=$2 meta verdict agent_alive
+  [ -n "$task" ] || return 1
   meta="$STATE/$task.meta"
-  if [ -n "$task" ] && [ -f "$meta" ]; then
+  if [ -f "$meta" ]; then
     verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE")
   else
     verdict=$(fm_busy_classify "$(window_backend "$win")" "$win" "$(window_harness "$win")" \
-      "${task:-unknown}" "$STATE")
+      "$task" "$STATE")
   fi
   [ "${verdict%% *}" = unknown ] || return 1
   agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
   [ "$agent_alive" = alive ] || return 1
+  unknown_alive_progressing "$task" || return 1
   STALE_WAIT_DECLARATION="unknown-alive:$task:$(window_backend "$win"):$win:$verdict"
   stale_wait_throttled "$(window_key "$win")" "$STALE_WAIT_DECLARATION"
+}
+
+unknown_alive_progressing() {  # <task>
+  local task=$1 anchor cutoff stamp rc=1
+  [ "$(age_of "$STATE/$task.status")" -lt "$STALE_ESCALATE_SECS" ] && return 0
+  cutoff=$(( $(date +%s) - STALE_ESCALATE_SECS ))
+  stamp=$(TZ=UTC0 date -d "@$cutoff" +%Y%m%d%H%M.%S 2>/dev/null) \
+    || stamp=$(TZ=UTC0 date -r "$cutoff" +%Y%m%d%H%M.%S 2>/dev/null) \
+    || return 1
+  anchor=$(mktemp "$STATE/.unknown-alive-anchor.XXXXXX") || return 1
+  TZ=UTC0 touch -t "$stamp" "$anchor" \
+    && crew_worktree_written_since "$task" "$STATE" "$anchor" && rc=0
+  rm -f "$anchor"
+  return "$rc"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
