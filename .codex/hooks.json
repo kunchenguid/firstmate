@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-turnend-guard.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.codex/hooks.json\" ] || exit 0; jq -e \"any(.hooks.Stop[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-turnend-guard.sh\\\"))\" \"$root/.codex/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-turnend-guard.sh\"'",
+            "command": "bash -c 'fm_codex_stop() { payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || return 0; command -v jq >/dev/null 2>&1 || return 0; root=$(pwd -P) || return 0; [ -x \"$root/bin/fm-turnend-guard.sh\" ] || return 0; [ -f \"$root/AGENTS.md\" ] || return 0; [ -f \"$root/.codex/hooks.json\" ] || return 0; jq -e \"any(.hooks.Stop[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-turnend-guard.sh\\\"))\" \"$root/.codex/hooks.json\" >/dev/null 2>&1 || return 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-turnend-guard.sh\"; }; fm_codex_stop; code=$?; if [ \"$code\" -eq 0 ]; then printf \"{}\\n\"; fi; exit \"$code\"'",
             "timeout": 30
           }
         ]
