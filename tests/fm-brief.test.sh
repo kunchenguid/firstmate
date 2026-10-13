@@ -1542,6 +1542,60 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+# The Working posture section carries the four onboarding principles into every
+# future ship scaffold: bounded reversible decisions are made and noted, named
+# waits park without waiting-too-long alerts, phase changes keep the status
+# file fresh so firstmate stops peering into panes, and a pending captain
+# question freezes only the scope it targets. Rendered from one shared string,
+# so the scout copy is byte-identical and the secondmate charter never takes it.
+test_ship_scaffold_renders_all_four_working_posture_principles() {
+  local home brief posture scout_brief scout_posture
+  home="$TMP_ROOT/working-posture-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-posture-w1 alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh --mode direct-PR exited non-zero"
+  brief="$home/data/brief-posture-w1/brief.md"
+  assert_grep "# Working posture" "$brief" \
+    "ship brief emitted no Working posture section"
+  assert_grep "Act-and-note: for a bounded reversible step" "$brief" \
+    "ship brief lost the act-and-note principle"
+  # shellcheck disable=SC2016 # Literal status-line syntax must remain unexpanded.
+  assert_grep 'never write `blocked` and park' "$brief" \
+    "ship brief still defaults to block-first on a bounded reversible step"
+  assert_grep "Park-with-named-wait: when you must stop" "$brief" \
+    "ship brief lost the park-with-named-wait principle"
+  assert_grep "then STOP appending status until that event clears it" "$brief" \
+    "ship brief did not bind a parked wait to silence until the named event"
+  assert_grep "Status freshness: append exactly one" "$brief" \
+    "ship brief lost the status-freshness principle"
+  assert_grep "pane reads are not routine supervision" "$brief" \
+    "ship brief left pane-peering as routine supervision"
+  assert_grep "Lane-affecting decisions only: a pending captain question" "$brief" \
+    "ship brief lost the lane-affecting-decisions-only principle"
+  assert_grep "keep advancing other in-scope work" "$brief" \
+    "ship brief let a pending question freeze unrelated in-scope work"
+
+  # One shared string: the scout's Working posture must be byte-identical.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-posture-scout alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh --scout exited non-zero"
+  scout_brief="$home/data/brief-posture-scout/brief.md"
+  posture=$(awk '/^# Working posture/,/^$/' "$brief")
+  scout_posture=$(awk '/^# Working posture/,/^$/' "$scout_brief")
+  [ -n "$posture" ] || fail "ship brief emitted no Working posture section to compare"
+  [ "$posture" = "$scout_posture" ] \
+    || fail "ship and scout Working posture sections have drifted apart"
+
+  # A secondmate charter takes no crewmate rules, so the posture stays out.
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-posture-mate --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh --secondmate exited non-zero"
+  assert_no_grep "# Working posture" "$home/data/brief-posture-mate/brief.md" \
+    "secondmate charter must not inherit the crewmate Working posture"
+
+  pass "fm-brief.sh: ship scaffold renders all four Working posture principles"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1580,3 +1634,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_ship_scaffold_renders_all_four_working_posture_principles

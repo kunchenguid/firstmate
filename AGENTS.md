@@ -239,6 +239,9 @@ Load `ask-user-authority` and `validation-supervision` before deciding or answer
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
+Read `state/<id>.status` freshness as routine supervision and peer into a worker pane only as an exception, to diagnose a genuinely stuck or halting state; phase transitions and parked named waits carry the signal (`bin/fm-brief.sh`'s Working posture section owns the full contract and names which phases).
+Trust a worker's bounded reversible calls recorded as `note:` lines rather than re-opening them, and treat a pending one of your own decisions as freezing only the specific scope it targets; parallel in-scope work keeps moving.
+
 ### Validate
 
 Load `validation-supervision` when a ship starts or already has an active no-mistakes validation run, including a mid-run requirement change or finding.
@@ -391,7 +394,8 @@ If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if t
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
 
 Load `secondmate-provisioning` before creating or using a charter brief and preserve its idle-by-default and marked-return-channel contracts.
-Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.
+Status appends are sparse supervisor-actionable events - the phase changes and parked named waits the Working posture names - not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.
+The scaffold's Working posture section (act-and-note, park-with-named-wait, phase-status freshness, lane-affecting decisions only) is the worker-side standing contract; never override it in a brief except on an explicit captain instruction for that task.
 The scaffold is a safety contract, not a suggestion.
 
 ## 12. Self-update
