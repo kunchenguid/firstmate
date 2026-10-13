@@ -49,7 +49,11 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
+#                       one line per state/*.meta lane (id, kind, mode,
+#                       endpoint and its liveness, last status line, and
+#                       any of those fields its record is missing; the
+#                       raw record stays in state/<id>.meta), a bounded
+#                       tail of each orphan state/*.status,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read, each bounded and crash-
@@ -170,10 +174,12 @@
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
-# STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
-# tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
-# may be. Both bounds are safe because the section prints every task's full
-# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
+# STATUS LINES: a lane under way prints only its last status event (the line
+# bin/fm-classify-lib.sh reads past blanks and continuation prose), and an
+# orphan status log prints a tail bounded by FM_SESSION_START_STATUS_TAIL;
+# bin/fm-line-cap-lib.sh bounds how long each of those lines may be. These
+# bounds are safe because the digest names every task's full status log path
+# (once in the lane heading, per log for orphans), and AGENTS.md section 8 treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed through a native session-open
@@ -371,6 +377,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
@@ -867,10 +875,11 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
-a compact data/backlog.md listing, a bounded tail of every state/*.status,
-data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+Everything below is printed for this session start: one line per state/*.meta
+lane with its last state/*.status line, a compact data/backlog.md listing,
+a bounded tail of every orphan state/*.status, data/projects.md,
+data/secondmates.md, data/captain.md, data/captain-shared.md, and
+data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -879,8 +888,9 @@ Go to a source directly only when:
   - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
   - its contents looked unparseable or corrupt,
   - an individual full status log is needed for older wake-event history, or a
-    status line was capped and its tail matters (each task's full log path is
-    printed with its tail),
+    status line was capped and its tail matters (state/<id>.status),
+  - a lane's line does not carry the record field this turn needs
+    (state/<id>.meta),
   - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
@@ -896,14 +906,22 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
-subsection "Work under way (state/*.meta)"
+subsection "Work under way (one line per lane; raw record: state/<id>.meta, full status log: state/<id>.status)"
 META_FOUND=0
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
   id=$(basename "$meta" .meta)
-  printf '\n--- %s ---\n' "$id"
-  cat "$meta"
+  missing=''
+
+  kind=$(fm_meta_get "$meta" kind)
+  [ -n "$kind" ] || missing="${missing:+$missing, }kind"
+  mode=$(fm_meta_get "$meta" mode)
+  # A scout record carries no delivery mode by design, so only the other kinds
+  # can be missing one.
+  if [ -z "$mode" ] && [ "$kind" != scout ]; then
+    missing="${missing:+$missing, }mode"
+  fi
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
@@ -915,23 +933,29 @@ for meta in "$STATE"/*.meta; do
     # the bound firing and >=128 is a signal death. Every other nonzero status
     # is the probe's own verdict that the endpoint is gone.
     if [ "$endpoint_rc" -eq 0 ]; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      endpoint="alive (backend=$backend window=$window)"
     elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
-      printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
-        "$backend" "$window" "$ENDPOINT_TIMEOUT"
+      endpoint="error (backend=$backend window=$window - the endpoint read died or hit its ${ENDPOINT_TIMEOUT}s bound; the digest continued past it)"
     else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      endpoint="dead (backend=$backend window=$window)"
     fi
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    endpoint='unknown (no window recorded)'
+    missing="${missing:+$missing, }window"
   fi
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
-    print_status_tail "$status"
+    # A crewmate writes its own status lines, so their length is unbounded.
+    fm_cap_line_var "$(last_status_line "$status")"
+    last=${FM_LINE_CAP_LINE:-(empty status log)}
   else
-    printf 'status tail: (no status file yet: %s)\n' "$status"
+    last='(no status file yet)'
   fi
+
+  printf '%s | kind=%s mode=%s | endpoint: %s | last status: %s%s\n' \
+    "$id" "${kind:-?}" "${mode:--}" "$endpoint" "$last" \
+    "${missing:+ | record missing: $missing}"
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
