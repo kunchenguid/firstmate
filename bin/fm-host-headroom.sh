@@ -8,10 +8,17 @@
 # exhausts it takes all of them down at once, whichever projects the workers
 # belong to. bin/fm-spawn.sh runs `check` before a fresh ship or scout launch
 # with the new worker's kind, harness, model, and project, and defers the launch
-# when the machine's headroom, less the memory that worker is expected to use,
-# would fall below the thresholds. A mix of workers from different projects is
-# therefore admitted together until the machine budget is spent. A relaunch of
-# existing work and a --secondmate spawn are not gated. This file is the single
+# when the machine's headroom, less the memory every running worker still needs
+# to reach its expected footprint and less the memory the new worker is
+# expected to use, would fall below the thresholds. A worker launched seconds
+# ago has barely grown, so without that reservation a rapid fan-out would pass
+# every check and exhaust memory once its workers grow. bin/fm-spawn.sh holds
+# the machine-wide lock .host-headroom.lock in the root home's state directory
+# from check until the new task record is published, so concurrent spawns from
+# any home are judged one at a time, each seeing the workers admitted before
+# it. A mix of workers from different projects is therefore admitted together
+# until the machine budget is spent. A relaunch of existing work and a
+# --secondmate spawn are not gated. This file is the single
 # owner of what is measured, the threshold file format, the expected-footprint
 # rule, the verdict, and the footprint log; docs/configuration.md
 # "Host headroom" is the operator reference.
@@ -32,7 +39,9 @@
 #
 # Measurements. A value that cannot be measured is printed as `?` and judged by
 # no threshold, so a missing tool or an unfamiliar platform never blocks a spawn;
-# the line then says which values were unmeasured.
+# the line then says which values were unmeasured. check first samples every
+# running worker (see sample below), so the footprint log learns from workers
+# while they work at every spawn.
 #   macOS: total memory from `sysctl hw.memsize`; available percent from
 #   `sysctl kern.memorystatus_level`, the system-wide free percentage
 #   `memory_pressure` reports, falling back to free plus inactive plus
@@ -74,12 +83,20 @@
 # that one spawn; it is never read here.
 #
 # Expected footprint. A task's footprint is the largest worker resident memory
-# the log holds for it; readings under 32 MB are only a shell left in a
-# worktree whose agent has exited, so they count neither as a footprint nor as
-# a running worker. The expected footprint of a new worker is the 90th
-# percentile (nearest rank) of the footprints of the first of these groups that
-# holds at least 3 tasks: the same kind and harness, the same kind, every task.
-# With fewer observations it is default_worker_mb.
+# the log holds for it, and a task counts only once the log holds a mid-work
+# (event=sample) reading of it: a teardown reading is taken after the worker
+# handed off and its builds and tests exited, so it can raise a task's
+# footprint but never makes a task count on its own. Readings under 32 MB are
+# only a shell left in a worktree whose agent has exited, so they count neither
+# as a footprint nor as a running worker. The expected footprint of a new
+# worker is the 90th percentile (nearest rank) of the footprints of the first
+# of these groups that holds at least 3 such tasks: the same kind and harness,
+# the same kind, every task. With fewer observations it is default_worker_mb.
+#
+# Reservation. Every ship or scout record whose worktree still exists (the
+# workers sample sees) reserves its own expected footprint less its resident
+# memory now, or nothing when it already uses more; check and report subtract
+# that total from available memory before they judge or budget.
 #
 # Test seam: only while FM_TEST_SEAM=1, FM_HOST_HEADROOM_SAMPLE replaces every
 # measurement with its space-separated total_mb, avail_mb, avail_pct,
@@ -108,7 +125,7 @@
 # rather than only at cleanup.
 #
 # report runs sample, then summarizes: this machine's headroom and the budget
-# above the min_avail_pct floor; the workers running now; footprint median,
+# above the min_avail_pct floor after the running workers' reservation; the workers running now; footprint median,
 # 90th percentile, and largest by kind and harness and by project; how many
 # more workers of each kind and harness fit in the budget; the largest
 # concurrent worker count the thresholds imply; and, for every project cloned
@@ -338,8 +355,10 @@ task_footprints() {
       if (("kind" in f) && f["kind"] != "-") kind[t] = f["kind"]
       if (("harness" in f) && f["harness"] != "-") harness[t] = f["harness"]
       if (("project" in f) && f["project"] != "-") project[t] = f["project"]
-      if (f["worker_rss_mb"] ~ /^[0-9]+$/ && f["worker_rss_mb"] + 0 > peak[t] + 0) peak[t] = f["worker_rss_mb"] + 0 }
-    END { for (t in peak) if (peak[t] >= min)
+      if (f["worker_rss_mb"] !~ /^[0-9]+$/) next
+      if (f["worker_rss_mb"] + 0 > peak[t] + 0) peak[t] = f["worker_rss_mb"] + 0
+      if (f["event"] == "sample" && f["worker_rss_mb"] + 0 >= min) sampled[t] = 1 }
+    END { for (t in sampled)
       print peak[t], (t in kind ? kind[t] : "-"), (t in harness ? harness[t] : "-"), (t in project ? project[t] : "-") }
   ' "$FOOTPRINT_LOG" 2>/dev/null
 }
@@ -403,17 +422,18 @@ add_reason() { V_REASONS="${V_REASONS:+$V_REASONS; }$1"; }
 add_unmeasured() { V_UNMEASURED="${V_UNMEASURED:+$V_UNMEASURED, }$1"; }
 
 # Sets V_REASONS (breached thresholds, '; '-joined) and V_UNMEASURED for a new
-# worker expected to use <expected-mb>.
-judge() {  # <expected-mb>
-  local expected=$1 lpc floor left
+# worker expected to use <expected-mb> while running workers reserve
+# <reserved-mb>.
+judge() {  # <expected-mb> <reserved-mb>
+  local expected=$1 reserved=$2 lpc floor left
   V_REASONS='' V_UNMEASURED=''
   if [ -n "$T_MIN_AVAIL_PCT" ]; then
     if ! is_uint "$H_AVAIL_MB" || ! floor=$(floor_mb); then
       add_unmeasured "available memory"
     else
-      left=$((H_AVAIL_MB - expected))
+      left=$((H_AVAIL_MB - reserved - expected))
       if [ "$left" -lt "$floor" ]; then
-        add_reason "available memory $H_AVAIL_MB MB less this worker's expected $expected MB leaves $left MB, below min_avail_pct=$T_MIN_AVAIL_PCT ($floor MB)"
+        add_reason "available memory $H_AVAIL_MB MB less $reserved MB reserved for running workers and this worker's expected $expected MB leaves $left MB, below min_avail_pct=$T_MIN_AVAIL_PCT ($floor MB)"
       fi
     fi
   fi
@@ -454,17 +474,18 @@ cmd_check() {
     echo "error: host headroom thresholds are unreadable: $T_ERROR" >&2
     return 1
   fi
-  measure
+  cmd_sample
+  reserve_live
   [ -z "$kind" ] || kind=$(field "$kind")
   [ -z "$harness" ] || harness=$(field "$harness")
   expected_footprint "$kind" "$harness"
-  judge "$E_MB"
+  judge "$E_MB" "$S_RESERVED_MB"
   [ -z "$V_UNMEASURED" ] || tail=" (unmeasured, not judged: $V_UNMEASURED)"
   if [ -n "$V_REASONS" ]; then
-    printf 'defer: %s - %s; expected worker %s MB (%s)%s\n' "$V_REASONS" "$(numbers_text)" "$E_MB" "$E_BASIS" "$tail"
+    printf 'defer: %s - %s; expected worker %s MB (%s); %s running worker(s) reserve %s MB%s\n' "$V_REASONS" "$(numbers_text)" "$E_MB" "$E_BASIS" "$S_TRACKED" "$S_RESERVED_MB" "$tail"
     return "$FM_HOST_HEADROOM_DEFER_EXIT"
   fi
-  printf 'ok: %s; expected worker %s MB (%s)%s\n' "$(numbers_text)" "$E_MB" "$E_BASIS" "$tail"
+  printf 'ok: %s; expected worker %s MB (%s); %s running worker(s) reserve %s MB%s\n' "$(numbers_text)" "$E_MB" "$E_BASIS" "$S_TRACKED" "$S_RESERVED_MB" "$tail"
 }
 
 # --- footprint ----------------------------------------------------------------
@@ -554,17 +575,22 @@ live_workers() {
 }
 
 # Sets S_LIVE and S_LIVE_MB to the number of workers sampled with resident
-# memory and their total.
+# memory and their total, S_TRACKED to the number of worker records sampled,
+# and S_WORKERS to one "<kind> <harness> <rss-mb>" line per record.
 cmd_sample() {
-  local meta wt rss cwds id
-  S_LIVE=0 S_LIVE_MB=0
+  local meta wt rss cwds='' id live
+  S_LIVE=0 S_LIVE_MB=0 S_TRACKED=0 S_WORKERS=''
   measure
-  cwds=$(process_cwds) || cwds=''
+  live=$(live_workers)
+  [ -z "$live" ] || cwds=$(process_cwds) || cwds=''
   while IFS=$'\t' read -r meta wt; do
     [ -n "$meta" ] || continue
     id=${meta##*/}
     id=${id%.meta}
     rss=$(worktree_rss_mb "$wt" "$cwds") || rss=''
+    S_TRACKED=$((S_TRACKED + 1))
+    S_WORKERS="$S_WORKERS$(field "$(meta_value "$meta" kind)") $(field "$(meta_value "$meta" harness)") ${rss:-0}
+"
     if is_uint "$rss" && [ "$rss" -ge "$FM_HOST_HEADROOM_MIN_WORKER_MB" ]; then
       S_LIVE=$((S_LIVE + 1))
       S_LIVE_MB=$((S_LIVE_MB + rss))
@@ -572,9 +598,25 @@ cmd_sample() {
     append_footprint "$(footprint_line sample "$id" "$meta" "$rss")" ||
       echo "warning: could not append to $FOOTPRINT_LOG" >&2
   done <<EOF
-$(live_workers)
+$live
 EOF
   return 0
+}
+
+# Sets S_RESERVED_MB: what the workers cmd_sample saw still need to reach their
+# expected footprints. Requires load_thresholds and cmd_sample.
+reserve_live() {
+  local kind harness rss
+  S_RESERVED_MB=0
+  while read -r kind harness rss; do
+    [ -n "$kind" ] || continue
+    [ "$kind" != - ] || kind=''
+    [ "$harness" != - ] || harness=''
+    expected_footprint "$kind" "$harness"
+    [ "$rss" -ge "$E_MB" ] || S_RESERVED_MB=$((S_RESERVED_MB + E_MB - rss))
+  done <<EOF
+$S_WORKERS
+EOF
 }
 
 # --- report -------------------------------------------------------------------
@@ -605,11 +647,11 @@ cmd_report() {
     return 1
   fi
   cmd_sample
-  measure
+  reserve_live
   local rows budget='' floor total='' more key clone cap pools
   rows=$(task_footprints)
   expected_footprint '' ''
-  judge "$E_MB"
+  judge "$E_MB" "$S_RESERVED_MB"
   echo "Host headroom now: $(numbers_text)"
   if [ -n "$V_REASONS" ]; then
     echo "Verdict for one more worker: defer - $V_REASONS"
@@ -618,9 +660,9 @@ cmd_report() {
   fi
   echo "Thresholds ($T_FILE): min_avail_pct=$(show "$T_MIN_AVAIL_PCT") max_swap_used_mb=$(show "$T_MAX_SWAP_USED_MB") max_load_per_core=$(show "$T_MAX_LOAD_PER_CORE") defer_pressure=$(show "$T_DEFER_PRESSURE") default_worker_mb=$T_DEFAULT_WORKER_MB"
   if is_uint "$H_AVAIL_MB" && floor=$(floor_mb); then
-    budget=$((H_AVAIL_MB - floor))
+    budget=$((H_AVAIL_MB - floor - S_RESERVED_MB))
     [ "$budget" -ge 0 ] || budget=0
-    echo "Machine budget: $budget MB available above the $T_MIN_AVAIL_PCT% floor ($floor MB), shared by every project"
+    echo "Machine budget: $budget MB available above the $T_MIN_AVAIL_PCT% floor ($floor MB) after $S_RESERVED_MB MB reserved for $S_TRACKED running worker(s) to reach their expected footprint, shared by every project"
   else
     echo "Machine budget: unknown (available memory or min_avail_pct is not available)"
   fi
@@ -640,8 +682,8 @@ cmd_report() {
   fi
   if [ -n "$budget" ]; then
     more=$((budget / E_MB))
-    total=$((S_LIVE + more))
-    echo "Largest safe concurrent worker count implied: $total ($S_LIVE running + $more more at $E_MB MB each, $E_BASIS)"
+    total=$((S_TRACKED + more))
+    echo "Largest safe concurrent worker count implied: $total ($S_TRACKED running + $more more at $E_MB MB each, $E_BASIS)"
   else
     echo "Largest safe concurrent worker count implied: unknown"
   fi

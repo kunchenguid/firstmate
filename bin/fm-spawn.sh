@@ -203,7 +203,8 @@
 #   owns the measurements, the config/host-headroom thresholds, the worker's
 #   expected footprint, and the machine-wide verdict; a worker that does not fit
 #   gets the same `deferred:` line and exit 75, and unreadable thresholds refuse
-#   with exit 1. FM_SPAWN_IGNORE_HEADROOM=1 skips the check for one spawn. A launched
+#   with exit 1. The spawn holds the machine-wide headroom lock from that check
+#   until its task record is published, so the next spawn's check counts it. FM_SPAWN_IGNORE_HEADROOM=1 skips the check for one spawn. A launched
 #   fresh spawn appends its footprint record through that helper's `record`.
 #   A relaunch and a --secondmate spawn are never gated or recorded.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
@@ -1336,6 +1337,8 @@ SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+SPAWN_HEADROOM_LOCK=
+SPAWN_HEADROOM_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
@@ -1493,6 +1496,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
     fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
+  fi
+  if [ "$SPAWN_HEADROOM_LOCK_HELD" = 1 ]; then
+    SPAWN_HEADROOM_LOCK_HELD=0
+    fm_lock_release "$SPAWN_HEADROOM_LOCK" || true
   fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
@@ -3226,10 +3233,22 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   # memory budget shared by every project. A worker whose expected footprint
   # does not fit the machine's current headroom is deferred here, at the same
   # point and with the same exit status as a capacity deferral, so the task
-  # stays exactly as queued as it was.
+  # stays exactly as queued as it was. The machine-wide headroom lock is held
+  # from the check until this task's record is published, so a concurrent
+  # spawn from any home is judged after this worker counts as running.
   if [ "${FM_SPAWN_IGNORE_HEADROOM:-0}" = 1 ]; then
     echo "notice: FM_SPAWN_IGNORE_HEADROOM=1 - launching $ID without checking this machine's headroom" >&2
   else
+    SPAWN_HEADROOM_LOCK="$STATE/.host-headroom.lock"
+    if SPAWN_HEADROOM_ROOT=$(fm_firstmate_root_home "$FM_HOME" 2>/dev/null) &&
+      [ "$SPAWN_HEADROOM_ROOT" != "$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P)" ]; then
+      SPAWN_HEADROOM_LOCK="$SPAWN_HEADROOM_ROOT/state/.host-headroom.lock"
+    fi
+    if ! fm_lock_acquire_wait "$SPAWN_HEADROOM_LOCK"; then
+      echo "error: could not acquire this machine's host headroom lock $SPAWN_HEADROOM_LOCK" >&2
+      exit 1
+    fi
+    SPAWN_HEADROOM_LOCK_HELD=1
     SPAWN_HEADROOM_RC=0
     SPAWN_HEADROOM=$(FM_HOME=$FM_HOME FM_CONFIG_OVERRIDE=$CONFIG FM_STATE_OVERRIDE=$STATE \
       "$SCRIPT_DIR/fm-host-headroom.sh" check --kind "$KIND" --harness "$HARNESS" \
@@ -5435,6 +5454,10 @@ fi
 if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
   fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
+fi
+if [ "$SPAWN_HEADROOM_LOCK_HELD" = 1 ]; then
+  SPAWN_HEADROOM_LOCK_HELD=0
+  fm_lock_release "$SPAWN_HEADROOM_LOCK"
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
