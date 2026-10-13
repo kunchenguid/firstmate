@@ -386,14 +386,15 @@ assert_refusal_retained_task_state() {
 }
 
 # A fake glab answering the one call the landed-work proof makes: the merge
-# request's JSON view, reporting it merged at the given head.
-add_glab_mr_merged_for_head() {
-  local case_dir=$1 head=$2
+# request's JSON view, reporting the given state. The proof takes the head
+# from the forge's ref, never from this view.
+add_glab_mr_state() {
+  local case_dir=$1 state=$2
   cat > "$case_dir/fakebin/glab" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
   "mr view"*)
-    printf '{"state":"merged","sha":"$head"}\n'
+    printf '{"state":"$state"}\n'
     exit 0 ;;
 esac
 exit 1
@@ -998,15 +999,14 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
 }
 
 test_gitlab_mr_merged_lands_the_worktree() {
-  local case_dir rc pr_head
+  local case_dir rc
   case_dir=$(make_case gitlab-mr-merged)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   printf '%s\n' 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
     >> "$case_dir/state/task-x1.meta"
-  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/wt" push -q origin "HEAD:refs/merge-requests/7/head"
-  add_glab_mr_merged_for_head "$case_dir" "$pr_head"
+  add_glab_mr_state "$case_dir" merged
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1016,6 +1016,53 @@ test_gitlab_mr_merged_lands_the_worktree() {
   expect_code 0 "$rc" "gitlab-mr-merged: teardown should succeed when the merge request is merged"
   ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-merged: teardown printed a REFUSED line"
   pass "a merged GitLab merge request with its head ref lands the worktree"
+}
+
+test_gitlab_mr_open_refuses() {
+  local case_dir rc local_head
+  case_dir=$(make_case gitlab-mr-open)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf '%s\n' 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
+    >> "$case_dir/state/task-x1.meta"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # An open merge request's head ref always holds the worker's pushed HEAD, so
+  # the merged state is all that separates this in-flight task from a discard.
+  git -C "$case_dir/wt" push -q origin "HEAD:refs/merge-requests/7/head"
+  add_glab_mr_state "$case_dir" opened
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-open: teardown should refuse while the merge request is open"
+  grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-open: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" gitlab-mr-open "$local_head"
+  pass "an open GitLab merge request does not allow teardown though its head ref holds the work"
+}
+
+test_gitlab_mr_merged_with_later_local_commit_refuses() {
+  local case_dir rc local_head
+  case_dir=$(make_case gitlab-mr-stale-head)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf '%s\n' 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
+    >> "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/wt" push -q origin "HEAD:refs/merge-requests/7/head"
+  wt_commit_file "$case_dir" later.txt local-only "local follow-up"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_glab_mr_state "$case_dir" merged
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-mr-stale-head: teardown should refuse when HEAD moved past the merge request head"
+  grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-stale-head: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" gitlab-mr-stale-head "$local_head"
+  pass "merged GitLab merge request does not allow teardown after a later local commit"
 }
 
 test_teardown_closes_a_gitlab_task_with_its_mr_url_as_a_note() {
@@ -6280,6 +6327,8 @@ test_teardown_retains_v1_journal_when_workspace_query_ambiguous
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_gitlab_mr_merged_lands_the_worktree
+test_gitlab_mr_open_refuses
+test_gitlab_mr_merged_with_later_local_commit_refuses
 test_teardown_closes_a_gitlab_task_with_its_mr_url_as_a_note
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

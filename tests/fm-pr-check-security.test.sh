@@ -218,23 +218,19 @@ SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
   # With FM_TEST_GLAB_JSON=1 a `mr view ... -F json` call instead answers with
-  # the JSON view the arm and merge paths read, so those paths can be driven
-  # hermetically; the default keeps the field output every older case pins.
+  # the two fields of the merge request's JSON view that arming reads, its draft
+  # state and its head; the default keeps the field output every older case pins.
   cat > "$fakebin/glab" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
-[ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "${FM_TEST_GLAB_SLEEP:-0}"
+[ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 case " $* " in
-  *" -F json"*|*" --output json"*)
+  *" -F json"*)
     if [ "${FM_TEST_GLAB_JSON:-0}" = 1 ]; then
-      printf '{"state":"%s","work_in_progress":%s,"sha":"%s","detailed_merge_status":"%s","has_conflicts":false,"blocking_discussions_resolved":true,"head_pipeline":{"sha":"%s","status":"%s"}}\n' \
-        "${FM_TEST_GLAB_MR_STATE:-${FM_TEST_GLAB_STATE:-opened}}" \
+      printf '{"work_in_progress":%s,"sha":"%s"}\n' \
         "${FM_TEST_GLAB_MR_WIP:-false}" \
-        "${FM_TEST_GLAB_MR_SHA:-1111111111111111111111111111111111111111}" \
-        "${FM_TEST_GLAB_MR_DETAIL:-mergeable}" \
-        "${FM_TEST_GLAB_MR_SHA:-1111111111111111111111111111111111111111}" \
-        "${FM_TEST_GLAB_MR_PIPELINE:-success}"
+        "${FM_TEST_GLAB_MR_SHA:-1111111111111111111111111111111111111111}"
       exit 0
     fi
     ;;
