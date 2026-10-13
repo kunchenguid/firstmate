@@ -63,45 +63,24 @@ Treat `data/captain.md` as the captain preference record and `data/learnings.md`
 ## 3. Session start (run once at every session start)
 
 Run `bin/fm-session-start.sh` exactly once at session start.
-Its header is the single owner of composed commands, ordering, and digest contents.
-`bin/fm-supervision-instructions.sh` renders the emitted supervision block from `docs/supervision-protocols/`.
-Do not reimplement it by separately running its lock, bootstrap, initial wake-drain, or deferred-network components.
+Its header owns the composed commands, exact nine-stage order, digest contents, and truncation behavior; do not reimplement its lock, bootstrap, initial wake drain, or deferred network work.
 Run-tier harness surfaces run this command for you at session open while the rest only nudge it, so confirm the digest is present in this session and run it yourself when it is not; `docs/sessionstart-nudge.md` owns adapter tiers, source routing, and compatibility.
 
 Read the complete digest once and trust it as this turn's startup and recovery input.
-If the harness shows only a preview and persists the full output to a file, read that file before acting.
-Do not separately re-read the context, backlog, metadata, or bulk status inputs it just printed unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
-An `ABSENT` captain or learnings file means the firstmate repo's built-in defaults or no captured learnings; rebuild an absent or stale project registry from the clones before dispatch.
+Read a persisted full output when the harness shows only a preview.
+Do not re-read its context, backlog, metadata, or bulk status sources except for an absent, corrupt, omitted, capped, pending-network, or truncated source named by the digest, older history needed for the current action, or a targeted pre-write inspection.
+`ABSENT` captain or learnings means built-in defaults or no captured learnings; rebuild an absent or stale project registry from the clones before dispatch.
 
 If the session lock cannot be acquired and verified, report its exact diagnostic and remain read-only; another active session is only one possible cause.
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
 
-The digest itself makes no external-network call and never waits for one.
-Every network check a session start owes - GitHub auth and project clone refresh - runs off the digest's blocking path in a bounded worker owned by `bin/fm-startup-network.sh` and is reported in the digest's own `NETWORK CHECKS` section.
-The locked startup inactive-outcome scan joins that worker so a slow local current-state read cannot block the digest; its findings use the ordinary durable wake queue.
-When that section reports its checks still in progress it names exactly what is unconfirmed; treat none of those as passed until `bin/fm-startup-network.sh report` returns the finished result, while a failed or otherwise actionable result also arrives as a `check: startup-network` wake.
-
-1. **Lock** - acquires the per-home session lock first, before anything mutates shared state, then starts the deferred startup stage above.
-2. **Bootstrap** - detect-only checks (tool/version problems, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
-   When the lock could not be acquired, the worktree-tangle check uses read-only advisory wording without a checkout repair command.
-   Home-local stale Herdr projection cleanup, same-home backlog reconciliation, and fleet sync run only when this session actually holds the lock from step 1; network work runs in the deferred stage rather than in this section.
-3. **Wake queue** - when locked, drains and presents the durable wake queue without running the inactive-outcome scan inline, and prints the raw records prominently as this turn's first work queue; a clearly labeled status-event annotation may follow a valid `signal` record and includes every status line still unread at the presentation cursor, but never replaces the raw record or current-state reconciliation, and a lapsed watcher chain still surfaces here via the same guard alarm.
-   Presented records remain durable until the handling turn runs the generation-bound acknowledgement printed by the drain.
-   Every locked drain also prints a bounded fleet-wide `OPEN DECISIONS` section when durable decision records remain open on any task not structurally Done, archived Done, or parked, including when the queue itself is empty; those terminal or deliberately parked dispositions retire only their historical blocker from that action surface, and every emitted entry still requires reconciliation before continuing.
-   A main drain may also print a bounded, one-shot `STATUS OUTCOME BACKSTOP` when a task's newest captain-facing status event has no covering supervision-branch outcome; handle it as a recovered wake even when no queue row remains.
-   The same drain prints every still-unread `note:` line since the last presentation in an unbounded `UNREAD STATUS` section, so an answer buried under a later routine line is not dropped; those lines are not re-printed after that presentation.
-   It also prints a bounded `RECORD DIVERGENCE` section naming every captain call the status log reads as resolved while its backlog task is still held; nothing is closed for you, and `captain-hold-lifecycle` owns the reconciliation.
-   When the lock could not be acquired and verified, the queue is left untouched because no session mutation is authorized, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
-4. **Supervision operating instructions** - after the wake queue and before both digests, the digest emits exactly one operating block for the detected primary harness, followed by the read-once contract that governs them.
-   The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.
-5. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the de-duplicated compact backlog inventory owned by `bin/fm-session-start.sh`; one identity-complete summary for each canonical in-flight task with `state/<id>.meta` with an explicit full-metadata path for omitted fields or ambiguity; that selected execution's newest `state/<id>.status` event (labeled as wake-EVENT history, not current state, with the full log path printed for older history); preserved legacy mode records as inactive historical evidence when present; and a non-blocking task projection: cheap endpoint liveness for local tasks and validated durable provider state with an explicit freshness gap for remote tasks.
-   Neither projection is a full current-state read - when you need a task's actual current state, read it with `bin/fm-task-state.sh <id>`; the digest deliberately skips the deeper local-agent read and remote-provider readback so it stays fast and bounded.
-   The wake queue remains the owner of raw wake presentation, `OPEN DECISIONS`, `UNREAD STATUS`, and record divergence; the concise fleet inventory never licenses treating omitted metadata fields or older routine status events as already read. Read an individual source only when the startup disclosure or the current operation requires that detail.
-6. **Network checks** - after the fleet-state digest, the deferred stage's result, or an explicit statement of what it has not confirmed yet.
-   A read-only session runs no network checks at all and says so.
-7. **Context digest and next step** - last of the bulk sections, the full contents of `data/projects.md`, `data/captain.md`, and `data/learnings.md`, each clearly delimited, followed by the closing reminder.
-   A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
-   The closing reminder points back to the emitted supervision block and preserves only the lock and read-once reminders.
+The digest order is lock, bootstrap, wake queue, harness-specific supervision instructions, read-once contract, fleet state, network checks, context, then next step.
+Lock ownership gates every startup mutation; lock refusal leaves the queue and fleet untouched and permits only read-only diagnostics.
+The locked wake stage presents raw durable records before other startup context, plus any `OPEN DECISIONS`, `STATUS OUTCOME BACKSTOP`, `UNREAD STATUS`, or `RECORD DIVERGENCE` recovery input; section 8 owns how MAIN reconciles and acknowledges them.
+The emitted protocol in `docs/supervision-protocols/` owns the exact wait, continuity, and repair path for the detected primary harness; the startup script never starts supervision itself.
+Fleet state is a compact projection rather than a full current-state read, and its printed source paths are the on-demand recovery route.
+Network and inactive-outcome checks run off the blocking path under `bin/fm-startup-network.sh`; `IN PROGRESS` is unconfirmed until `bin/fm-startup-network.sh report` finishes, and actionable results also arrive as `check: startup-network` wakes.
+A read-only session runs no network checks.
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the essential launch tools are present and GitHub authentication is good.
