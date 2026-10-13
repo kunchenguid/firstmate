@@ -37,6 +37,9 @@ Everything files to a local destination by default; an external system such as a
       This is the *only* path to an external or public system such as an issue tracker, hosted project board, or ticketing system.
       A configured git host remote, a `.github`/`.gitlab` folder, or any other signal that a tracker probably exists is never by itself grounds to file anything there - never route externally on inference.
    2. **Otherwise - the local convention the project or user already has.** The discovered project memory file for project facts, operational gotchas, and standing decisions; an existing `TODO`/`BACKLOG`/`NOTES` file for undone next steps; a discovered user-level memory file for user preferences *when one happens to be accessible* - a bonus if reachable, never an assumption or a requirement.
+      Enforce cross-file deduplication: `data/captain.md` owns user preferences and federation policies; `data/learnings.md` owns technical telemetry and runtime gotchas (or user-level memory versus project memory in generic environments).
+      Never duplicate a policy or invariant across both.
+      Format all retained entries in telegraphic invariant syntax (`Action/Rule: [Fact] [Constraint/Path]`), stripping conversational connective filler.
       This is the only tier that writes findings into a tracked, shared file or outside the current directory, and only because the user already established that destination.
    3. **Fallback - `.stow-notes.md` in the current directory, for every finding-kind.** When no existing convention fits, don't improvise a location or invent an ad hoc filename.
       In a git worktree, first verify `.stow-notes.md` is not already tracked in the index; if it is tracked, do not write private findings there - report that the fallback is blocked until the user chooses a safe destination.
@@ -63,14 +66,19 @@ Everything files to a local destination by default; an external system such as a
    Then classify the finding against what is already there: new, duplicate, superseding an existing entry, or evidence that an existing entry is now obsolete.
    Write the considered replacement that classification implies - a duplicate folds into the entry that already carries it, a superseding finding rewrites the entry it supersedes, and an obsolete entry is refreshed, archived, or replaced in a way that preserves its fact in the same pass - rather than blindly appending a new entry or overwriting the file wholesale.
    Prefer a one-sentence rewrite of an existing entry over a second entry saying nearly the same thing.
+   Format all retained entries in telegraphic invariant syntax (`Action/Rule: [Fact] [Constraint/Path]`), stripping conversational connective filler.
    A superseded body worth keeping leaves through one of step 7's exits, so it stays recoverable instead of being lost silently in the rewrite.
    Mark each entry written into a memory file or `.stow-notes.md` per the tier contract below, but never add tier markers to an existing `TODO`/`BACKLOG`/`NOTES` file.
    File each undone next step with what it is waiting on, when it is genuinely blocked on something.
 
 7. **Curate every memory file this pass has open, not only the one a finding routes to.**
    Evaluate each dated entry against its tier clock per the tier contract below, refreshing what current evidence re-validates and archiving what stays stale.
+   Enforce cross-file deduplication: `data/captain.md` owns user preferences and federation policies; `data/learnings.md` owns technical telemetry and runtime gotchas (or user-level memory versus project memory in generic environments).
+   Never duplicate a policy or invariant across both.
    Archive what is no longer current, including completed chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Prefer one concise current rule, or a pointer to the authoritative source, over duplicate prose.
+   Introduce a proactive headroom target: aim to maintain at least 15% (or >= 1,500 tokens) of effective budget headroom.
+   When available headroom drops below this floor, execute telegram-style compression on verbose existing entries before admitting new non-essential learnings.
    Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live on-demand owner or a consolidation merge that preserves the fact.
    This is an accuracy discipline, not a length target - a stale entry misleads the next session; a current one earns its place.
    A `.stow-notes.md` note has exactly five exits: promotion into a shared, tracked file the user approves; folding into a discovered user-level memory file; archiving to the local, never-loaded archive file; a user-approved move into an on-demand-loaded home (a skill or scoped instruction file), executed through the user's own change process rather than by this skill; or deletion of a duplicate already preserved by a stronger owner - do not invent another.
