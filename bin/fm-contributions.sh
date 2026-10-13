@@ -49,9 +49,11 @@
 # 1..25). A configured value rides the generated check shim into watcher runs
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
-# a direct child) with a three-second margin. Every read is capped at five
-# seconds, and a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
+# a direct child) with a three-second margin. Each read uses at least five
+# seconds and otherwise shares the remaining poll budget across the forge
+# waves still due in this observation, up to the poll deadline. A read killed
+# at that bound or at the deadline is budget refusal, never a forge failure.
+# A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
@@ -214,17 +216,29 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
+forge_seconds_for_call() { # remaining poll seconds
+  local remaining=$1 waves=${FORGE_WAVES_REMAINING:-1} share
+  [ "$waves" -ge 1 ] || waves=1
+  share=$(( (remaining - 1) / waves ))
+  [ "$share" -ge 5 ] || share=5
+  [ "$share" -le "$remaining" ] || share=$remaining
+  printf '%s' "$share"
+}
+
 forge() {
-  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
+  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err} bound started elapsed
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  [ "$remaining" -le 5 ] || remaining=5
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+  bound=$(forge_seconds_for_call "$remaining")
+  started=$(/bin/date +%s)
+  fm_run_timed "$bound" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A kill at the read bound or the deadline is budget refusal too; only the
-  # forge's own nonzero exit is unavailable evidence.
-  if [ "$rc" -eq 124 ]; then
+  elapsed=$(( $(/bin/date +%s) - started ))
+  # A kill at the read bound or the deadline is budget refusal too; GNU timeout
+  # can leak the child's exit when the bound fires. Only a prompt forge error
+  # is unavailable evidence.
+  if fm_timed_out "$rc" || { [ "$rc" -ne 0 ] && [ "$elapsed" -ge "$bound" ]; }; then
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
   elif [ "$rc" -ne 0 ]; then
@@ -251,10 +265,15 @@ observe() { # canonical GitHub URL -> normalized JSON
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   BUDGET_EXHAUSTED=0
+  FORGE_WAVES_REMAINING=2
+  if [ "$kind" = pull ]; then
+    FORGE_WAVES_REMAINING=3
+  fi
   forge api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
+    FORGE_WAVES_REMAINING=2
     FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
     FORGE_ERR="$TMP/reviews.err" forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
@@ -269,6 +288,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     local repo_pid=$!
     wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
+    FORGE_WAVES_REMAINING=1
     forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
     after=$(jq -er .headRefOid "$TMP/after.json")
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
@@ -293,6 +313,7 @@ observe() { # canonical GitHub URL -> normalized JSON
                  author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
+    FORGE_WAVES_REMAINING=1
     FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
     FORGE_ERR="$TMP/issue-events.err" forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
