@@ -16,6 +16,8 @@
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
+# poll skips unsupported URLs before scheduling reads and clears their legacy
+# error stamps without changing observation, timestamps or ownership evidence.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
@@ -361,6 +363,19 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
   done
 }
 
+clear_unsupported_errors() {
+  local task url
+  while IFS=$'\t' read -r task url; do
+    fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
+    jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
+      $saved[0][] | select(.task == $task) | .records[] | select(.url == $url)
+      | .error=null' > "$TMP/row.json"
+    write_record "$task" "$TMP/row.json"
+  done < <(jq_lib -nr --slurpfile saved "$TMP/saved.json" '$saved[0][] | .task as $task | .records[]
+    | select((.url | supported_url | not) and .error != null)
+    | [$task,.url] | @tsv')
+}
+
 poll() {
   local task url old kind error observed
   local -a row
@@ -368,9 +383,11 @@ poll() {
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
+  clear_unsupported_errors
+  # Only supported URLs enter final settlement and the forge-read rotation.
   # One line per distinct URL: the URL, then every owning task.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0])
+    known($input[0];$saved[0]) | map(select(.url | supported_url))
     | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
     | .[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   : > "$TMP/live.tsv"
