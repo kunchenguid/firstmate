@@ -245,6 +245,24 @@ test_stdin_transports_and_output_shapes() {
   pass "both stdin transports classify correctly and Claude's deny keeps stdout empty"
 }
 
+test_monitor_of_parlay_channel_is_exempt() {
+  local cmd rc
+  for cmd in 'parlay listen --as firstmate' 'parlay monitor' 'echo hi' 'sleep 60; parlay listen' ''; do
+    rc=0
+    : > "$OUT"; : > "$ERR"
+    jq -cn --arg c "$cmd" '{tool_name:"Monitor",tool_input:{command:$c}}' \
+      | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+        "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+    case "$cmd" in
+      'parlay listen'*|'parlay monitor'*)
+        [ "$rc" -eq 0 ] || fail "Monitor of '$cmd' must allow, got exit $rc: $(cat "$ERR")" ;;
+      *)
+        [ "$rc" -eq 2 ] || fail "Monitor of '$cmd' must still deny, got exit $rc" ;;
+    esac
+  done
+  pass "a Monitor that only tails a Parlay channel is allowed while every other Monitor stays denied"
+}
+
 test_malformed_transport_fails_open() {
   local rc payload
   for payload in '{not-json' '' '{}' '{"tool_name":null}'; do
@@ -289,3 +307,4 @@ test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
+test_monitor_of_parlay_channel_is_exempt

@@ -51,6 +51,7 @@ Three exclusions keep the shape test from producing false positives.
 
 - A name beginning `mcp__` is never classified.
   An MCP server chooses its own tool names, a task or agent noun there is common, and it has no bearing on fleet dispatch.
+- A `Monitor` whose command starts with `parlay listen` or `parlay monitor` is allowed, because it only tails a Parlay channel and delegates nothing; every other `Monitor` stays denied.
 - `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `bashoutput`, and `killshell` are allowed.
   These observe or stop work that already exists rather than creating it, and denying them at this layer could strand already-running work with no way to inspect or end it.
   A Claude primary's optional local deny list may still remove them from the schema.

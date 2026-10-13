@@ -138,6 +138,14 @@ if [ "$TOOL_SET" -eq 0 ]; then
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
   TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
+  # A Monitor that only tails a Parlay channel delegates nothing: it is the
+  # documented self-enrollment (parlay listen --help), so it is not a fleet bypass.
+  if [ "$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]')" = "monitor" ]; then
+    MON_CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_input.command // empty)' 2>/dev/null) || MON_CMD=""
+    case "$MON_CMD" in
+      "parlay listen"*|"parlay monitor"*) exit 0 ;;
+    esac
+  fi
 fi
 
 [ -n "$TOOL" ] || exit 0
