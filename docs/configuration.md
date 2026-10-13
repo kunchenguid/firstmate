@@ -1125,25 +1125,29 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 
 ## Host headroom (config/host-headroom)
 
-Every Firstmate home and worker on a machine shares its memory, so a fan-out that exhausts it takes all of them down at once.
-Before a fresh ship or scout launch, `bin/fm-spawn.sh` checks this machine's available memory, swap in use, load per core, and, on macOS, the kernel memory-pressure level, and defers the launch when any of them is past its threshold.
-A deferral works exactly like a project-capacity deferral: nothing is launched or recorded, the backlog item stays queued, the spawn prints one `deferred:` line naming every measured value and breached threshold, and it exits 75 so Firstmate dispatches the item again once running work frees headroom.
+Every Firstmate home and worker on a machine shares its memory, so a fan-out that exhausts it takes all of them down at once, whichever projects the workers belong to.
+Firstmate therefore treats the machine's memory as one budget shared by every project rather than as a per-project cap.
+Before a fresh ship or scout launch, `bin/fm-spawn.sh` checks this machine's available memory, swap in use, load per core, and, on macOS, the kernel memory-pressure level, and defers the launch when the new worker's expected footprint would take available memory below the floor or any other threshold is already past.
+The expected footprint comes from what earlier workers of the same kind and harness actually used, falling back to the same kind, then every worker, then a conservative default while there is too little data, so a mix of workers from different projects is admitted together until the machine budget is spent.
+A deferral works exactly like a project-capacity deferral: nothing is launched or recorded, the backlog item stays queued, the spawn prints one `deferred:` line naming every measured value, the expected footprint, and each breached threshold, and it exits 75 so Firstmate dispatches the item again once running work frees headroom.
 A relaunch of existing work and a secondmate launch are not gated.
-The optional local, gitignored `config/host-headroom` in the machine's root Firstmate home overrides the defaults, one `key=value` per line, with `off` disabling a threshold:
+The optional local, gitignored `config/host-headroom` in the machine's root Firstmate home overrides the defaults, one `key=value` per line, with `off` disabling any threshold except the default footprint:
 
 ```text
 min_avail_pct=20
 max_swap_used_mb=16384
 max_load_per_core=1.5
 defer_pressure=critical
+default_worker_mb=1536
 ```
 
-These defaults suit a 48 GB Mac running a large fleet, where macOS routinely sits at the warn pressure level with several GB of swap in use, so only the critical level, available memory below a fifth, or swap well past that defers.
+These defaults suit a 48 GB Mac running a large fleet, where macOS routinely sits at the warn pressure level with several GB of swap in use, so only the critical level, a worker that would leave less than a fifth of memory available, or swap well past that defers.
 A value the machine cannot measure is reported and not judged, so a missing tool never blocks a spawn, while a malformed or unreadable file refuses every fresh spawn until it is fixed.
 `FM_SPAWN_IGNORE_HEADROOM=1` in the spawn's environment skips the check for that one spawn.
-Each fresh launch, each cleanup, and each report appends the worker's resident memory and the machine's headroom to `state/host-footprint.log`, and `bin/fm-host-headroom.sh report` summarizes typical per-worker memory and the largest concurrent worker count the thresholds imply, which is the evidence for choosing a project's capacity or a worktree pool size.
+Each fresh launch, each cleanup, and each report appends every worker's project, kind, harness, model, and resident memory, with the machine's headroom, to the root home's `state/host-footprint.log`.
+`bin/fm-host-headroom.sh report` summarizes typical and 90th-percentile memory by kind and harness and by project, the machine budget, how many more workers of each kind fit, the largest concurrent worker count the thresholds imply, and which project worktree pools would bind before that machine budget does.
 `bin/fm-host-headroom.sh check` prints the current verdict on its own.
-[`bin/fm-host-headroom.sh`](../bin/fm-host-headroom.sh) owns the measurements, the file format, the verdict, and the log.
+[`bin/fm-host-headroom.sh`](../bin/fm-host-headroom.sh) owns the measurements, the file format, the expected-footprint rule, the verdict, and the log.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

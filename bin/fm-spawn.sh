@@ -199,10 +199,11 @@
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   capacity.
 #   Host headroom: at that same point a fresh ship or scout spawn also runs
-#   bin/fm-host-headroom.sh check, which owns the measurements, the
-#   config/host-headroom thresholds, and the verdict; a machine below them gets
-#   the same `deferred:` line and exit 75, and unreadable thresholds refuse with
-#   exit 1. FM_SPAWN_IGNORE_HEADROOM=1 skips the check for one spawn. A launched
+#   bin/fm-host-headroom.sh check with the worker's kind and harness, which
+#   owns the measurements, the config/host-headroom thresholds, the worker's
+#   expected footprint, and the machine-wide verdict; a worker that does not fit
+#   gets the same `deferred:` line and exit 75, and unreadable thresholds refuse
+#   with exit 1. FM_SPAWN_IGNORE_HEADROOM=1 skips the check for one spawn. A launched
 #   fresh spawn appends its footprint record through that helper's `record`.
 #   A relaunch and a --secondmate spawn are never gated or recorded.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
@@ -3221,15 +3222,18 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   SPAWN_PROJECT_CAPACITY=$FM_PROJECT_CAPACITY
   SPAWN_PROJECT_CAPACITY_ANY=$FM_PROJECT_CAPACITY_ANY
   # Host headroom admission (bin/fm-host-headroom.sh owns what is measured, the
-  # thresholds, and the verdict): a machine already short of memory or CPU
-  # defers a fresh worker here, at the same point and with the same exit status
-  # as a capacity deferral, so the task stays exactly as queued as it was.
+  # thresholds, the expected footprint, and the verdict): one machine-wide
+  # memory budget shared by every project. A worker whose expected footprint
+  # does not fit the machine's current headroom is deferred here, at the same
+  # point and with the same exit status as a capacity deferral, so the task
+  # stays exactly as queued as it was.
   if [ "${FM_SPAWN_IGNORE_HEADROOM:-0}" = 1 ]; then
     echo "notice: FM_SPAWN_IGNORE_HEADROOM=1 - launching $ID without checking this machine's headroom" >&2
   else
     SPAWN_HEADROOM_RC=0
     SPAWN_HEADROOM=$(FM_HOME=$FM_HOME FM_CONFIG_OVERRIDE=$CONFIG FM_STATE_OVERRIDE=$STATE \
-      "$SCRIPT_DIR/fm-host-headroom.sh" check) || SPAWN_HEADROOM_RC=$?
+      "$SCRIPT_DIR/fm-host-headroom.sh" check --kind "$KIND" --harness "$HARNESS" \
+      --model "$MODEL" --project "$(basename "$PROJ_ABS")") || SPAWN_HEADROOM_RC=$?
     if [ "$SPAWN_HEADROOM_RC" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
       echo "deferred: this machine is short of headroom for another worker (${SPAWN_HEADROOM#defer: }); task $ID was not launched and its backlog item stays queued - dispatch it again once running work frees memory or load, or set FM_SPAWN_IGNORE_HEADROOM=1 for this one spawn (docs/configuration.md \"Host headroom\")" >&2
       exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
