@@ -3,7 +3,7 @@ name: bearings
 description: >-
   Generate a "pick up where I left off" fleet digest from firstmate's live fleet state.
   Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
-  Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
+  Plain /bearings is chat-only by default, /bearings flow adds the deeper flow analysis in chat, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
   Also use on a contributions check wake or when filing work linked to an upstream issue.
   Also load this skill's board-wake handling when a procevent lavish wake's source id matches the canonical source id of the stable bearings board path.
 user-invocable: true
@@ -14,8 +14,9 @@ metadata:
 # bearings
 
 Generate a complete current snapshot from the fleet's current state, so the captain can resume in one read after a break, a night, or a context reset.
-Plain `/bearings` returns only the concise four-section chat digest.
-Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
+Plain `/bearings` returns only the concise six-part chat digest.
+Only `/bearings flow` adds the deeper flow analysis after that digest, in chat only.
+Only `/bearings file` writes the dated markdown report artifact and then returns the concise six-part chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
 A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, durable per-target reconcile-notify requests when the captured state needs them, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
 During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
@@ -23,11 +24,12 @@ Board answers are acted on later under the normal authority rules; this skill's 
 
 ## Invocation modes
 
-- Plain `/bearings` gathers a fresh bounded snapshot and renders the four-section chat digest without creating, deleting, reading, or replacing `data/status-report-<YYYY-MM-DD>.md`.
-- `/bearings file` gathers a fresh bounded snapshot, replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, and renders the four-section chat digest with a link or path to that report.
-- `/bearings lavish` gathers a fresh bounded snapshot, rebuilds and arms the interactive fleet board (the "Lavish board mode" section below), and renders the four-section chat digest with the board's URL inside it.
-- Treat `file` and `lavish` only as explicit invocation options in the slash command.
-- Do not treat natural-language requests such as "write a report", "save this", "persist it", "make a file", or "make a board" as file or lavish mode unless the invocation explicitly includes the standalone option.
+- Plain `/bearings` gathers a fresh bounded snapshot and renders the six-part chat digest without creating, deleting, reading, or replacing `data/status-report-<YYYY-MM-DD>.md`.
+- `/bearings flow` gathers the same fresh bounded snapshot, renders the six-part chat digest, and appends the flow analysis the chat-response contract defines; it writes no artifact and composes with the other options, where the flow analysis stays in chat and never enters the report or board payload.
+- `/bearings file` gathers a fresh bounded snapshot, replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, and renders the six-part chat digest with a link or path to that report.
+- `/bearings lavish` gathers a fresh bounded snapshot, rebuilds and arms the interactive fleet board (the "Lavish board mode" section below), and renders the six-part chat digest with the board's URL inside it.
+- Treat `flow`, `file`, and `lavish` only as explicit invocation options in the slash command.
+- Do not treat natural-language requests such as "write a report", "save this", "persist it", "make a file", "make a board", or "go deeper" as flow, file, or lavish mode unless the invocation explicitly includes the standalone option.
 - When the captain asks to include PRs, pass the snapshot command's live-PR opt-in.
 - `/bearings include PRs` remains chat-only and makes the live-PR opt-in.
 - `/bearings file include PRs` and `/bearings lavish include PRs` compose the same way.
@@ -71,13 +73,13 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    A home is still asked at most once per four-hour window, while a skipped or failed later delivery leaves the request durable for another supervision pass.
    Never edit another home's backlog or metadata from here, and never expect or wait on a reply.
 
-3. **Compose the four-section chat digest from the fresh snapshot.**
+3. **Compose the six-part chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
-   The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
+   The chat response uses the six complete parts in the chat-response contract below, in the same order, each always present.
    Plain mode stops here and writes no report artifact.
 
 4. **In explicit file mode only, compose and replace the detailed report file.**
-   The report uses the same four complete sections as the chat, in the same order, and adds the detail the chat omits.
+   The report keeps the four data sections named below, which the chat-response contract maps to the six chat parts, in the same order, and adds the detail the chat omits.
    Never read an earlier `data/status-report-*.md` to decide what to omit, include, describe as changed, or call current.
    Write the full report to `data/status-report-<YYYY-MM-DD>.md` using today's date.
    If today's file already exists, delete it first, then create a new file from scratch.
@@ -88,7 +90,7 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
    - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
    - **Charted Next** - queued or gated work, including deferred or aged captain-hold safety gates and any main-inventory integrity warning, with each item's blocker, date, age, or integrity reason.
-   After writing the file, return the concise four-section chat digest and include the report path or link without adding a fifth section.
+   After writing the file, return the concise six-part chat digest and include the report path or link without adding a seventh part.
    For a richer review surface, offer `/bearings lavish` when the report has enough structure to deserve one, but only after the required digest is ready.
 
 ## Lavish board mode
@@ -145,38 +147,78 @@ Only the exact answer value `merge` authorizes a merge; an answer carrying a fre
 ## Chat-response contract
 
 This skill is the one owner of the `/bearings` chat-response format; the snapshot and classifier own the data that feeds it, and no other file restates this contract.
-Every `/bearings` chat response renders EXACTLY these four sections, in THIS order, and nothing else structural (there is no At Anchor section):
+Every `/bearings` chat response renders EXACTLY these six parts, in THIS order, and nothing else structural (there is no At Anchor section).
+The `CONSTRAINT:` and `Recently landed:` lines belong to Outcome and are not parts of their own.
 
-1. **Captain's Call** - ONLY unsuppressed items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
-   Deferred or aged holds follow the presentation safety rule above instead.
-   Include `contributions.captain` rows in this section, deduplicating any row already represented by its live captain hold or merge call.
+1. **Outcome** - the current milestone and what remains of it, taken from the home's records; say `UNKNOWN` when no record names a milestone.
+   Directly under it, two lines:
+   - `CONSTRAINT:` the single step now limiting that outcome, chosen by the home's configured ranking rule (its critical-blocker step), if any, never re-implemented here; mark it MEASURED when a structured field or timestamp shows it and HYPOTHESIS otherwise.
+     With no ranking rule, or no unambiguous limiting step, write `CONSTRAINT: UNKNOWN`, never a guess.
+   - `Recently landed:` the bounded current recent-completions baseline: merged PRs, completed scouts, and finished local-only merges across the main fleet and every registered secondmate home.
+     Name only the state the snapshot records: landed does not mean installed, released, or live-checked.
+     Empty-state: "No recent completions are in the current baseline."
+2. **Active** - real workers alive now: one line per `in_flight` row whose state shows a live worker (`working`, or `blocked` at a prompt, which the line says), with its current state and next expected result when the record carries one.
+   Only these rows count as active work.
+   A row whose state is `unknown`, `done`, or `delivery_blocked`, and direct work with no worker, is never Active; it renders under Waiting with its state.
+   Empty-state: "Nothing is underway."
+3. **Waiting** - queued or gated work, plus underway rows that are not progressing, each with what it waits on and its unblock condition: a blocker, a date, or `UNKNOWN`.
+   Action-free fleet-integrity warnings render here too.
+   A blocker id that the snapshot lists nowhere among `in_flight`, `gates`, `decisions_open`, or `landed` is `UNKNOWN`: render "blocker UNKNOWN (id not in snapshot)" and never present it as a live blocker, because the snapshot cannot tell a removed task from a finished or bounded-out one.
+   Show a waiting age only from a structured date such as `filed`; otherwise leave the age out or write `UNKNOWN`.
+   Empty-state: "Nothing is queued."
+4. **Held** - one collapsed line: the count of captain holds the snapshot buckets `blocked`, `dated`, or `aged`, with that split, and where the hold records keep their reasons.
+   Never list held rows unless asked, and never count a held task as Active or Waiting.
+   Say how many of them name a blocker that is `UNKNOWN` under the Waiting rule.
+   Empty-state: "Nothing is held."
+5. **Needs Me** - ONLY unsuppressed items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
+   A hold the snapshot buckets `blocked`, `dated`, or `aged` is never here; it belongs to Held.
+   The snapshot carries no field that separates a live hold the captain can act on now from a parked one, so never decide that from hold-reason or body prose; list live holds by the ranking rule when one exists, and otherwise in snapshot order.
+   Include `contributions.captain` rows in this part, deduplicating any row already represented by its live captain hold or merge call.
    Show the other contribution actors only as counts beside the checked/known coverage, and disclose `captain_omitted`, `unmeasured_homes`, stale verdicts and checks with no verdict when nonzero.
    Empty-state: "Nothing needs your action right now" is allowed only when `contributions.proven_clear` is true and the existing decision set is empty.
-   When the section is empty but coverage is incomplete, say that no decision is recorded and give the checked/known count; a missing coverage field is also unverified.
-2. **Recently Landed** - the bounded current recent-completions baseline: merged PRs, completed scouts, and finished local-only merges across the main fleet and every registered secondmate home.
-   Empty-state: "No recent completions are in the current baseline."
-3. **Underway** - live work progressing on its own, one line of current state per direct report.
-   Empty-state: "Nothing is underway."
-4. **Charted Next** - queued or gated work waiting on the fleet or a date, deferred or aged captain-hold safety gates, plus action-free fleet-integrity warnings.
-   Empty-state: "Nothing is queued."
+   When the part is empty but coverage is incomplete, say that no decision is recorded and give the checked/known count; a missing coverage field is also unverified.
+6. **Next** - one line naming the single action that most moves the CONSTRAINT, ordered by the home's configured ranking rule, which stays the only owner of ranking logic.
+   It names the action and its owner and never performs it.
+   With no ranking rule or an UNKNOWN constraint, write `Next: UNKNOWN`.
 
 Rules that keep the contract unambiguous:
 
-- Every section ALWAYS renders, even when empty, with its short empty-state sentence; never omit a section.
+- Every part ALWAYS renders, even when empty, with its short empty-state sentence; never omit a part.
+- A missing timestamp, dependency, or unverified state renders as `UNKNOWN`; never infer an age, a dependency, or a completion from prose, status tails, or chat history.
 - Every chat digest and file-mode report is a complete current snapshot, never a delta against a prior report.
-- Recently Landed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
-- A captain hold appears in exactly one decision bucket: an unsuppressed live hold is in Captain's Call, while a blocked, dated, or aged hold is in Charted Next; `--all-decisions` moves the latter into Captain's Call and removes its gate.
-- Underway independently reports active work, so an actively worked captain-held task may appear there plus its one decision bucket.
-- A secondmate home can contribute to more than one section at once. Each active child is an Underway row regardless of the home-level `bearings_state`, while that same home's live captain hold is Captain's Call and its queued or external holds stay Charted Next. Do not hide active children because the home also has an open captain hold.
-- The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
-- A secondmate's own home-level row is not an Underway unit: `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
+- Recently landed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
+- A captain hold appears in exactly one decision bucket: an unsuppressed live hold is in Needs Me, while a blocked, dated, or aged hold is in Held; `--all-decisions` moves the latter into Needs Me and removes its gate.
+- Active independently reports active work, so an actively worked captain-held task may appear there plus its one decision bucket.
+- A secondmate home can contribute to more than one part at once.
+  Each active child is an Active row regardless of the home-level `bearings_state`, while that same home's live captain hold is Needs Me and its queued or external holds stay in Waiting or Held.
+  Do not hide active children because the home also has an open captain hold.
+- The strict boundary keeps action-free items OUT of Needs Me: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to another part.
+- A secondmate's own home-level row is not an Active unit: `externally_held` belongs in Waiting, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
+- The `(main-inventory)` and `(return-catchup)` gates, an unavailable secondmate home, and an inventory-mismatch repair notice are action-free and render under Waiting, never in Needs Me.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown` or its `invalidity` reports an inventory mismatch.
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
 - The chat follows `AGENTS.md` section 9 and carries one scannable line per item.
 - Detailed decisions, plans, full gate reasons, and evidence stay out of chat; file mode puts them in the report, while lavish mode puts only its payload-backed interactive detail on the board.
-- In file mode, include the report path or link inside the four-section digest without adding another heading.
-- In lavish mode, include the board URL inside the four-section digest the same way.
+- In file mode, include the report path or link inside the six-part digest without adding another heading.
+- In lavish mode, include the board URL inside the six-part digest the same way.
+
+### Data sections behind the six parts
+
+The report file and the board payload stay keyed to the snapshot's four data sections, so the board template and payload contract are unchanged.
+The six chat parts map onto them: Needs Me renders from Captain's Call, Active and the non-progressing underway rows of Waiting from Underway, Waiting and Held from Charted Next, and Recently landed from Recently Landed.
+The Outcome milestone, CONSTRAINT, and Next lines are chat-only composition from the same snapshot and add no payload field.
+
+### Flow analysis (`/bearings flow` only)
+
+After the six parts, `flow` appends only what the snapshot's structured fields support, each item `UNKNOWN` where they do not:
+
+- **Age** - per item, time from its structured `filed` date, or a dated `until` gate, to the snapshot's `generated` time.
+- **Critical path** - the steps to the milestone in order, each with its owner and whether the bottleneck is MEASURED or a HYPOTHESIS.
+- **Unplanned work** - items filed after the milestone's plan, with what they pushed aside, only when a filed date shows it.
+- **Conflicts** - duplicate questions, two items on the same file or device, and dependency chains ending in an `UNKNOWN` blocker.
+- **Neglected** - held and queued items by age, oldest first, each with its resume condition.
+- **Capacity** - live workers per tool and the per-project cap, only where the snapshot carries them; never a recommendation to spawn because a slot is free.
 
 ## Tone and content rules
 
