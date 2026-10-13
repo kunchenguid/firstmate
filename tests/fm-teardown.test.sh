@@ -1832,6 +1832,7 @@ SH
 test_forced_secondmate_child_scout_nested_clone_returns_clean() {
   local case_dir home child_wt rc
   case_dir=$(make_case secondmate-child-nested-clean)
+  configure_stoppable_child_tmux "$case_dir"
   write_meta "$case_dir" local-only secondmate
   home="$case_dir/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -1882,6 +1883,7 @@ SH
 test_forced_secondmate_dirty_child_return_warns_and_completes() {
   local case_dir home child_wt rc
   case_dir=$(make_case secondmate-child-dirty-return)
+  configure_stoppable_child_tmux "$case_dir"
   write_meta "$case_dir" local-only secondmate
   home="$case_dir/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -3606,7 +3608,7 @@ case "\$1" in
   kill-window)
     target=\${3//=/}
     case "\$target" in
-      firstmate:fm-child-a|firstmate:fm-child-b|firstmate:fm-nested-sm)
+      firstmate:fm-child-a|firstmate:fm-child-b|firstmate:fm-nested-sm|firstmate:fm-child-scout)
         : > "$case_dir/\${target#*:}.stopped"
         ;;
     esac

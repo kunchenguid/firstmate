@@ -1215,7 +1215,7 @@ remote_outbox_cleanup() {
 }
 
 remote_secondmate_teardown() {
-  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp
+  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp release_rc
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
   kind=$(fm_meta_get "$META" kind)
@@ -1280,10 +1280,10 @@ remote_secondmate_teardown() {
   local TEARDOWN_REMOTE_RETIREMENT
   TEARDOWN_REMOTE_RETIREMENT=$(umask 077; mktemp "$STATE/.seat-retirement-$ID.XXXXXX") || return 1
   printf '%s\n' "$out" | sed -n 's/^seat_retirement=//p' > "$TEARDOWN_REMOTE_RETIREMENT"
-  rc=0
-  teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || rc=$?
+  release_rc=0
+  teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || release_rc=$?
   rm -f "$TEARDOWN_REMOTE_RETIREMENT"
-  [ "$rc" -eq 0 ] || return "$rc"
+  [ "$release_rc" -eq 0 ] || return "$release_rc"
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
