@@ -19,8 +19,9 @@
 // queued while main is streaming joins the running run without ever raising
 // before_agent_start, so waiting on that event stalls every later close.
 // Consumption is tracked only so a replacement can replay a follow-up Pi had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
+// not consumed. An idle main consumes at a prompt-bearing before_agent_start;
+// a streaming main consumes at the user message_start carrying the exact wake
+// text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
 //
@@ -649,8 +650,7 @@ export default function (pi: ExtensionAPI) {
     return generationIsLive(owner);
   }
 
-  // Pi consumed a main follow-up: an idle main at before_agent_start, a
-  // streaming main at the user message_start that joins the running run.
+  // Apply the delivery-versus-consumption boundary documented above.
   function consumeWake(owner: SessionGeneration, text: string): void {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
@@ -1200,6 +1200,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("before_agent_start", (event) => {
+    if (!("prompt" in event)) return;
     consumeWake(generation, event.prompt);
   });
   pi.on?.("message_start", (event) => {

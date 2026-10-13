@@ -161,7 +161,7 @@ fm_backend_tmux_window_inventory() {  # <session-target>
 # Empty, omitted, and malformed targets return nonzero before invoking tmux so
 # tmux can never interpret an empty target as the caller's current window.
 #
-# A close that did not succeed is resolved, never assumed: `kill-window` fails
+# By default, a close that did not succeed is resolved: `kill-window` fails
 # for the ordinary already-exited window exactly as it does for a window that
 # is still there, so its status alone cannot tell a benign cleanup from a
 # stranded endpoint. The re-read below settles which one happened, under the
@@ -169,13 +169,16 @@ fm_backend_tmux_window_inventory() {  # <session-target>
 # never a prefix, which would read a neighbor as this window's survivor).
 # Only a read that actually happened can settle it, so the same classification
 # fm_backend_tmux_agent_state uses applies here: a window still present is the
-# kill failing to do its job, a definitively absent session or server is the
+# kill failing to do its job, an absent recorded session or server is the
 # silent success, and an inventory that could not be read refuses rather than
 # calling a window it never saw closed. An already-gone window, and a whole
 # server that is already gone, stay silent successes. Verified against real
 # tmux 3.7c: killing a live window, re-killing the same gone window, and
 # killing into a dead session all return 0 here
 # (docs/verification/runtime-backends.md "Endpoint close").
+# With --require-ack, a failed kill-window refuses even if the old target is
+# absent: rename, move or socket uncertainty can leave its worker spending.
+# fm_backend_kill_confirmed uses this stricter boundary for launch rollback.
 fm_backend_tmux_kill() {  # <target>
   local target=${1:-} session window windows inventory_status
   case "$target" in
@@ -189,6 +192,7 @@ fm_backend_tmux_kill() {  # <target>
     :*|*:|*:*:*) return 1 ;;
   esac
   tmux kill-window -t "=$session:=$window" 2>/dev/null && return 0
+  [ "${2:-}" != --require-ack ] || return 1
   windows=$(fm_backend_tmux_window_inventory "=$session")
   inventory_status=$?
   if [ "$inventory_status" -eq 2 ]; then

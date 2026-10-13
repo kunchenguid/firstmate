@@ -1059,10 +1059,16 @@ const operational = spawnSync(
   { encoding: "utf8", input: "operational watcher injection" },
 );
 if (operational.status !== 0) throw new Error(`could not create operational input: ${operational.stderr}`);
+// Pi's BeforeAgentStartCustomEvent starts a run with a custom message and
+// no prompt. It must neither throw nor enter the user-dialog mirror.
+const customText = "Give me a fresh mini system-resource report from this custom message.";
+const customMessage = { role: "custom", customType: "fixture-custom-start", content: customText, display: true };
+await fire("before_agent_start", { type: "before_agent_start", messageType: "custom", message: customMessage }, mainCtx);
+entries.push({ type: "message", message: customMessage });
 await fire("before_agent_start", { prompt: operational.stdout }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: operational.stdout } });
 const unsolicitedPrompt = "Please keep responses concise while monitoring the fleet.";
-await fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
+await fire("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: unsolicitedPrompt }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
 await fire("agent_start", {}, mainCtx);
 await fire("agent_end", {}, mainCtx);
@@ -1121,9 +1127,9 @@ for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }
 if (mirroredCaptainText.some((text) =>
-  text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
+  text.includes(customText) || text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
 )) {
-  throw new Error("canonical current or legacy operational input entered captain mirror context");
+  throw new Error("custom or operational input entered captain mirror context");
 }
 if ((globalThis.__fmPrompts ?? []).length !== 5) throw new Error("a handled fleet wake was rerun");
 let processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");

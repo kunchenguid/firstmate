@@ -29,6 +29,7 @@
 # is fleet work and so waits for the gate rather than holding it), then what
 # the away session handled, then cost. The health snapshot is taken BEFORE the
 # daemon shutdown so the shutdown itself cannot read as a gap.
+# The live-task cost count uses bin/fm-afk-spend-count.sh's admission snapshot.
 #
 # THE GATE. `blocked:` is the crewmate protocol's firstmate-actionable verb. A
 # live task's open blocked event must be remediated and closed with
@@ -691,8 +692,7 @@ EOF
   fi
 
   # 7. cost.
-  live=0
-  for meta in "$STATE"/*.meta; do [ -f "$meta" ] && live=$((live + 1)); done
+  live=$("$SCRIPT_DIR/fm-afk-spend-count.sh" "$STATE") || live=unknown
   printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s captain); %s task(s) live at return.\n' \
     "$((routine + captain))" "$routine" "$captain" "$live"
 }

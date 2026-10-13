@@ -354,12 +354,12 @@ Only a genuine store fault keeps that backstop skipped.
 ## How the branch knows what the captain said
 
 Main's captain and assistant text is mirrored into the branch as read-only `fm-main-mirror` messages.
-The mirror never carries tool calls, tool results, operational injections, or the branch's own merged notes.
+The mirror never carries tool calls, tool results, custom messages, operational injections, or the branch's own merged notes.
 
 Mirroring happens at two points:
 
 - The idle path mirrors at main's turn end.
-- At `before_agent_start`, Pi's authoritative prompt is staged verbatim before SessionManager persists that user entry.
+- At a prompt-bearing `before_agent_start`, Pi's authoritative user prompt is staged verbatim before SessionManager persists that user entry.
   The complete current captain message therefore precedes any branch wake accepted after that boundary.
   The later persisted copy is suppressed, and older dialog entries remain bounded.
 
@@ -607,9 +607,11 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 | Script | Gate while away |
 | --- | --- |
 | `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red` and `--allow-missing` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
-| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
+| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; its [spend-cap admission gate](../bin/fm-spawn.sh) binds both actors. |
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
+
+[`bin/fm-afk-spend-count.sh`](../bin/fm-afk-spend-count.sh) owns the shared count's classification, declared-wait idle proof, current-state gates and conservative backend limits; [`tests/fm-afk-spend-cap.test.sh`](../tests/fm-afk-spend-cap.test.sh) exercises it through the production backend and delivery classifiers.
 
 The merge-authority record and the outcome row's summary are the audit trail.
 The return brief renders the words verbatim beside that account.
