@@ -11,13 +11,15 @@
 # already excludes blocked/deferred/in-progress), whose title is already In
 # flight in this home's backlog, whose roster pane is known blocked, or that a
 # matching state/<task-id>.meta proves is under way in any home.
-# CLASSIFY: captain-class beads (label captain) are surfaced as captain
-# decision lines in the plan, never dispatched; ship and scout classes pair
-# with an accountable assignee.
+# CLASSIFY: captain-class beads (label captain) and beads whose labels require
+# a different model (label model:X) are surfaced as captain decision lines in
+# the plan, never dispatched; ship and scout classes pair with an accountable
+# assignee.
 # ASSIGN: prefer an idle registered roster pane, then a registered secondmate
 # whose scope names the bead's domain (data/secondmates.md), then at most one
-# fresh crewmate spawn per run - and only when bin/fm-quota-choose.sh agrees a
-# codex or claude window still has measured headroom. Project and machine
+# fresh crewmate spawn per run. Every dispatched worker runs on omp with the
+# default model f2-stage-gateway/marutai/MAI-Pro; codex and claude credits are
+# never spent without an explicit captain decision. Project and machine
 # capacity come from config/project-capacity through bin/fm-project-capacity-lib.sh.
 # RECURSE: when a bead's board deps name an open blocker, the blocker is the
 # actionable item, never the waiter.
@@ -27,7 +29,9 @@
 # state/.propel-plan.json (mode 0600) and the durable wake notes under
 # --emit-wakes. Unknown data anywhere makes the verdict `unknown` and emits no
 # dispatch at all - never a guessed assignment, never a spawn that pretends a
-# capacity gate is an external wait.
+# capacity gate is an external wait. The dispatcher never spawns: --emit-wakes
+# prints one gated `propel: dispatch <bead> -> <assignee>` line per fresh
+# dispatching action so firstmate dispatches it.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)}"
@@ -105,7 +109,7 @@ if [ -z "$HOME_BEADS_DIR" ]; then
     || die_unknown 'bd ready against the shared board did not return an issue array'
 fi
 
-# --- Evidence: backlog, roster, quota, pane-free ----------------------------
+# --- Evidence: backlog, roster, pane-free -----------------------------------
 BACKLOG_TITLES=$(cd "$FM_HOME" && "$FM_ROOT/bin/fm-tasks-axi.sh" list --state in_flight 2>/dev/null \
   && "$FM_ROOT/bin/fm-tasks-axi.sh" list --state queued 2>/dev/null) || BACKLOG_TITLES=
 ROSTER_JSON=
@@ -114,8 +118,6 @@ ROSTER_JSON=
 if [ -z "$ROSTER_JSON" ] || ! printf '%s' "$ROSTER_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
   ROSTER_JSON='{"peers":[],"sources":{"herdr":"unknown","beads":"unknown","peers":"unknown"}}'
 fi
-QUOTA_SNAPSHOT=$(quota-axi 2>/dev/null) || die_unknown 'quota-axi default TOON is unavailable'
-HARNESS_PICK=$(printf '%s\n' "$QUOTA_SNAPSHOT" | "$FM_ROOT/bin/fm-quota-choose.sh" --candidate codex --candidate claude 2>/dev/null) || HARNESS_PICK=
 
 SECONDMATE_SCOPES=
 [ -f "$FM_HOME/data/secondmates.md" ] \
@@ -125,7 +127,7 @@ SECONDMATE_SCOPES=
 # bin/fm-propel-policy-lib.py owns the classification, masking, and pairing
 # rules; this script owns the tool reads, the plan publication, and the wakes.
 PLAN_JSON=$(READY_JSON=$READY_JSON OPEN_JSON=$OPEN_JSON DEFERRED_JSON=$DEFERRED_JSON \
-  BACKLOG_TITLES=$BACKLOG_TITLES ROSTER_JSON=$ROSTER_JSON HARNESS_PICK=$HARNESS_PICK \
+  BACKLOG_TITLES=$BACKLOG_TITLES ROSTER_JSON=$ROSTER_JSON \
   SECONDMATE_SCOPES=$SECONDMATE_SCOPES ONLY_TASKS=$ONLY_TASKS BOARD=$BOARD STATE=$STATE \
   python3 "$SCRIPT_DIR/fm-propel-policy-lib.py" 2>&1) || die_unknown "policy pass failed: $PLAN_JSON"
 umask 077
@@ -140,36 +142,35 @@ else
   die_unknown "unexpected plan shape: ${PLAN_JSON:0:160}"
 fi
 
-VERDICT=$(printf '%s' "$PLAN_JSON" | jq -r '
-  if ([.actions[]? | select(.kind != "skip" and .kind != "route-blocker")] | length) == 0
-  then "idle - no dispatch warranted" else "actionable" end')
-printf 'propel %s\n' "$VERDICT"
-printf '%s' "$PLAN_JSON" | jq -r '.actions[] |
-  "  \(.bead)\t\(.kind)\t\(.assignee // .reason // .decision // .blocker // .until // "-")"'
+if [ "$EMIT_WAKES" -eq 0 ]; then
+  VERDICT=$(printf '%s' "$PLAN_JSON" | jq -r '
+    if ([.actions[]? | select(.kind != "skip" and .kind != "route-blocker")] | length) == 0
+    then "idle - no dispatch warranted" else "actionable" end')
+  printf 'propel %s\n' "$VERDICT"
+  printf '%s' "$PLAN_JSON" | jq -r '.actions[] |
+    "  \(.bead)\t\(.kind)\t\(.assignee // .reason // .decision // .blocker // .until // "-")\(if .harness then "\tharness\t" + .harness else "" end)"'
+  exit 0
+fi
 
-# Waking once per fresh surface: the plan print above is the dry-run surface;
-# --emit-wakes publishes to stdout for the watcher check, keeping the output
-# sparse so repeated polls print nothing at all.
-[ "$EMIT_WAKES" -eq 1 ] || exit 0
+# Wake mode: print one line per fresh surface, gated by state/.propel-wake-gates,
+# so an idle plan - and any repeat of an already published surface - prints
+# nothing at all and the watcher stays silent.
+emit_wakes() { # <kind> <jq-expr>
+  printf '%s' "$PLAN_JSON" | jq -r "$2" | \
+  while read -r wake_line; do
+    wake_key=$(printf '%s' "$wake_line" | cksum | awk '{print $1}')
+    gate_file="$STATE/.propel-wake-gates/$1-$wake_key"
+    if [ ! -e "$gate_file" ]; then
+      printf '%s\n' "$wake_line"
+      : > "$gate_file" 2>/dev/null || true
+    fi
+  done
+}
 
-printf '%s' "$PLAN_JSON" | jq -r '
-  .actions[] | select(.kind == "captain") | "propel: captain decision \(.bead): \(.decision)"' | \
-while read -r wake_line; do
-  wake_key=$(printf '%s' "$wake_line" | cksum | awk '{print $1}')
-  gate_file="$STATE/.propel-wake-gates/$wake_key"
-  if [ ! -e "$gate_file" ]; then
-    printf '%s\n' "$wake_line"
-    : > "$gate_file" 2>/dev/null || true
-  fi
-done
-printf '%s' "$PLAN_JSON" | jq -r '
-  .time_gates[] | "propel: gate \(.bead) clears at \(.until) - \(.title)"' | \
-while read -r wake_line; do
-  wake_key=$(printf '%s' "$wake_line" | cksum | awk '{print $1}')
-  gate_file="$STATE/.propel-wake-gates/$wake_key"
-  if [ ! -e "$gate_file" ]; then
-    printf '%s\n' "$wake_line"
-    : > "$gate_file" 2>/dev/null || true
-  fi
-done
+emit_wakes captain '.actions[] | select(.kind == "captain") |
+  "propel: captain decision \(.bead): \(.decision)"'
+emit_wakes dispatch '.actions[] | select(.kind != "skip" and .kind != "route-blocker" and .kind != "captain" and .kind != "time-gate") |
+  "propel: dispatch \(.bead) -> \(.assignee) (harness omp, model f2-stage-gateway/marutai/MAI-Pro)"'
+emit_wakes gate '.time_gates[] |
+  "propel: gate \(.bead) clears at \(.until) - \(.title)"'
 exit 0
