@@ -157,6 +157,26 @@ fm_inherit_sha256() {
   printf '%s\n' "$digest"
 }
 
+# Snapshot presence separately from bytes; links are replaced without writing
+# through them, including dangling links. Nonregular artifacts retain the
+# existing copy/remove failure path rather than being read as files.
+fm_config_destination_fingerprint() {
+  local present digest kind
+  present=$(fm_config_source_present "$1") || return 1
+  if [ "$present" = 0 ]; then
+    printf 'absent\n'
+  elif [ -f "$1" ]; then
+    digest=$(fm_inherit_sha256 "$1") || return 1
+    kind="file"
+    [ ! -L "$1" ] || kind="link"
+    printf '%s:%s\n' "$kind" "$digest"
+  elif [ -L "$1" ]; then
+    printf 'link\n'
+  else
+    printf 'nonregular\n'
+  fi
+}
+
 copy_inheritable_file() {
   local src=$1 dest=$2 dest_parent tmp
   if [ -e "$dest" ] && [ ! -f "$dest" ] && [ ! -L "$dest" ]; then
@@ -214,7 +234,9 @@ destination_allows_inherited_item() {
 # absence on both sides is a no-op. When FM_CONFIG_INHERIT_REPORT points at a writable
 # file, one tab-separated line per item is appended there:
 #   <item> <status> <reason>
-# Status is pushed, unchanged, skipped, or error. Skipped items are warnings and
+# Pushed versus unchanged comes from destination presence and SHA-256 before
+# and after this call, including link replacement and absence mirroring.
+# Inspection failures report error. Skipped items are warnings and
 # do not affect the exit code. Returns non-zero only when a real propagation
 # error, such as copy or remove failure, occurs.
 record_inheritable_config_result() {
@@ -554,6 +576,7 @@ propagate_secondmate_inheritance() {
 
 propagate_inheritable_config() {
   local src_config=$1 dest_config=$2 item src dest source_present reason rc
+  local before after
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
@@ -622,17 +645,31 @@ propagate_inheritable_config() {
         record_inheritable_config_result "$item" skipped "$reason"
         continue
       fi
+      if ! before=$(fm_config_destination_fingerprint "$dest"); then
+        reason="cannot inspect destination before propagation"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
       if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
-        if copy_inheritable_file "$src" "$dest"; then
-          record_inheritable_config_result "$item" pushed ""
-        else
+        if ! copy_inheritable_file "$src" "$dest"; then
           reason="failed to copy"
           warn_inheritable_config_error "$item" "$dest" "$reason"
           record_inheritable_config_result "$item" error "$reason"
           rc=1
+          continue
         fi
-      else
+      fi
+      if ! after=$(fm_config_destination_fingerprint "$dest"); then
+        reason="cannot inspect destination after propagation"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+      elif [ "$before" = "$after" ]; then
         record_inheritable_config_result "$item" unchanged ""
+      else
+        record_inheritable_config_result "$item" pushed ""
       fi
     elif [ "$source_present" = 1 ]; then
       reason="primary source is not a regular file"
@@ -646,9 +683,25 @@ propagate_inheritable_config() {
         record_inheritable_config_result "$item" skipped "$reason"
         continue
       fi
+      if ! before=$(fm_config_destination_fingerprint "$dest"); then
+        reason="cannot inspect destination before propagation"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
       # Primary has no value for this item: mirror the absence downstream.
       if rm -f "$dest" 2>/dev/null; then
-        record_inheritable_config_result "$item" pushed "mirrored primary absence"
+        if ! after=$(fm_config_destination_fingerprint "$dest"); then
+          reason="cannot inspect destination after propagation"
+          warn_inheritable_config_error "$item" "$dest" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+        elif [ "$before" = "$after" ]; then
+          record_inheritable_config_result "$item" unchanged ""
+        else
+          record_inheritable_config_result "$item" pushed "mirrored primary absence"
+        fi
       else
         reason="failed to remove"
         warn_inheritable_config_error "$item" "$dest" "$reason"
@@ -656,7 +709,14 @@ propagate_inheritable_config() {
         rc=1
       fi
     else
-      record_inheritable_config_result "$item" unchanged ""
+      if ! after=$(fm_config_destination_fingerprint "$dest"); then
+        reason="cannot inspect destination after propagation"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+      else
+        record_inheritable_config_result "$item" unchanged ""
+      fi
     fi
   done
   return "$rc"
