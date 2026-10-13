@@ -40,13 +40,9 @@ This is why `$no-mistakes` reaches a Codex worker instead of being consumed by t
 
 ## Primary integration
 
-The primary integration was verified on 2026-07-08 with codex-cli 0.142.1.
-The firstmate primary's `.codex/hooks.json` registers a Stop hook that pipes Codex's payload to `../../../bin/fm-turnend-guard.sh`.
-Codex Stop hooks preserve exit status 2 and stderr to block, and expose `stop_hook_active` for the same one-block loop safety used by the guard's default mode.
+[`turnend-guard.md`](../../../../../docs/turnend-guard.md#harness-integrations) owns the primary Stop wrapper's scoping, response streams, and bounded continuation; [runtime backend verification](../../../../../docs/verification/runtime-backends.md#stop-response-parsing) owns the current parser evidence.
 
-The Stop payload includes `cwd`, but the tracked hook does not use it to choose the guard executable.
-Codex runs the Stop command with process PWD set to the hook-loaded project root, while no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
-The tracked hook anchors to `pwd -P`, verifies that root is Firstmate-shaped and hook-bearing, and then invokes the guard with the original payload.
+Verified on 2026-07-08 with codex-cli 0.142.1: Codex runs the Stop command with process PWD set to the hook-loaded project root, while no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 
 Codex's primary watcher protocol is `../../../bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `../../../bin/fm-watch-arm.sh`.
 Codex cannot reason while a foreground tool call is running, so the checkpoint is deliberately foreground and bounded to return control regularly for user messages and queued notifications.
