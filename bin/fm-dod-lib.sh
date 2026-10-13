@@ -118,6 +118,10 @@
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
 
+# The read-only gate-ref probe named in the worker's driving text, resolved from
+# this library's own directory so a worker in a project copy gets a usable path.
+FM_DOD_GATE_REF_PROBE="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-gate-ref-probe.sh"
+
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
   local state=$1 task_id=$2 root=$3
   cat <<'EOF'
@@ -367,6 +371,11 @@ The \`--intent\` string you pass must be self-sufficient: that string plus the c
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+
+Before you start or restart a run on a branch that a crashed, aborted, or recovered run has touched, run \`$FM_DOD_GATE_REF_PROBE\` from this copy.
+\`no-mistakes axi sync --check\` reporting \`custody_returned\` with next action \`run_pipeline\` does not prove the gate will take your push: its relation compares your head with the run's own record, never with the gate's branch ref that the push is judged against.
+Exit 0 means go ahead; exit 10 or 11 means that push would be rejected as non-fast-forward.
+On exit 10 or 11, do not run, retry, force, delete a ref in the gate, or rebuild the work under a new branch name on your own: append \`needs-decision [at=<epoch>] [key=gate-ref-stale]: <the probe's verdict line>\` and stop.
 
 $drive_block
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.

@@ -21,6 +21,12 @@ Custody recovery settles branch ownership, not content: the worker must replace 
 Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
+A worker whose run cannot start because its gate ref is stale reports `needs-decision` with key `gate-ref-stale`, carrying the verdict line of `bin/fm-gate-ref-probe.sh`, whose header owns the verdicts and exit codes.
+`axi sync --check` reading `custody_returned` with `run_pipeline` does not rule that out, and once custody is stamped no supported no-mistakes command moves the ref.
+Never force the push, delete or rewrite the gate ref, or hand-edit the shared gate repository, and never tell a worker to; the ref is tool-owned state every lane on the project shares.
+Exit 10 means the gate ref carries nothing the worker's head lacks, so the work is safe and the choice is between a fresh branch name for it (a clean create, at the cost of a new ship branch and one more validation) and waiting for a no-mistakes release that moves the ref itself.
+Exit 11 means the gate ref holds work the worker's head lacks: have the worker recover custody first, and treat anything left as the captain's call.
+
 An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
