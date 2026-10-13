@@ -30,10 +30,19 @@ state_dir = os.environ["STATE"]
 work_underway = {os.path.splitext(n)[0] for n in os.listdir(state_dir) if n.endswith(".meta")} \
     if os.path.isdir(state_dir) else set()
 
-free_panes = [p["name"] for p in roster.get("peers", [])
-              if p.get("resolution") == "matched" and p.get("activity") == "idle"
-              and p.get("work_evidence") != "blocked"
-              and not p.get("report", {}).get("open_keys")]
+# New roster schema: agents have `kind`, `posture` (parked > blocked > working
+# > idle-stale > idle), `activity`, `open_keys` (already deterministic).
+# Old schema: `resolution`, `work_evidence`, `report.open_keys`. Both join the
+# same way - free for dispatch iff herdr sees the tab live, the peer has no
+# unresolved decision, and nothing is hiding in the free-text keys.
+agents = roster.get("agents") or roster.get("peers") or []
+free_panes = [
+    a["name"] for a in agents
+    if a.get("kind", "peer") == "peer"
+    and a.get("posture", a.get("work_evidence", "unknown")) not in ("parked", "blocked")
+    and a.get("activity") == "idle"
+    and not (a.get("open_keys") or a.get("report", {}).get("open_keys"))
+]
 capacity_full = (roster.get("sources") or {}).get("herdr") == "ok" and not free_panes
 secondmate_scopes = {s.strip() for s in os.environ["SECONDMATE_SCOPES"].splitlines() if s.strip()}
 
