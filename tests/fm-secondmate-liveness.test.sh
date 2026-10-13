@@ -1043,6 +1043,7 @@ test_recovery_refuses_unknown_or_changed_tracked_routes() {
       mv "$file.new" "$file"
     done
     if [ "$route" = changed ]; then
+      # shellcheck disable=SC2016 # pooled_recover expands this program in its child shell.
       out=$(pooled_recover 'for file in "$STATE/fleet-seats/holders/"*.json; do jq '\''(.incarnations[] | select(.generation == "g1") | .route.socket_path) = "relative/socket"'\'' "$file" > "$file.new"; mv "$file.new" "$file"; done')
       assert_contains "$out" '1|skipped|' "changed socket authorized a stale verdict"
     else
