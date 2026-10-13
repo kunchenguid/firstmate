@@ -103,7 +103,10 @@ Compact progress describes the outcome gap; it does not grant effects. Each oper
 
 An attempted or uncertain operation is never replayed from compact progress. The operation owner must prove completion by exact readback or retain the uncertainty. This applies to provider submissions, merge effects, inbox delivery, and cleanup attempts.
 
-Merge and cleanup receipts are operation-specific records, not replacement goal stores. A merge receipt binds the task generation, URL, and candidate head. A cleanup receipt binds the task generation, endpoint/copy identity, phase, and preservation result. Neither contains or updates the goal, acceptance method, current state, remaining gap, or next step.
+Merge and cleanup receipts are operation-specific records, not replacement goal stores.
+A merge receipt binds the task generation, URL, and candidate head; a later local landing in the same execution additionally binds the canonical source and exact target and must descend from every prior landing recorded for that identity.
+A cleanup receipt binds the task generation, endpoint/copy identity, phase, and preservation result.
+Neither contains or updates the goal, acceptance method, current state, remaining gap, or next step.
 
 ## Acceptance, archive, and cleanup
 

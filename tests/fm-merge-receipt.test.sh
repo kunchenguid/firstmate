@@ -77,4 +77,55 @@ FM_HOME="$HOME_DIR" bash -c \
 assert_absent "$HOME_DIR/state/$CURRENT.merge-receipts.jsonl" \
   'idempotent archived receipt replay recreated active state'
 
+AMBIGUOUS=ambiguous-pr
+mkdir -p "$HOME_DIR/data/$AMBIGUOUS"
+FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" add "$AMBIGUOUS" 'Ambiguous PR receipt' \
+  --kind ship --body 'Ambiguous PR receipt fixture.' --start >/dev/null \
+  || fail 'ambiguous PR task fixture could not be created'
+printf '%s\n' \
+  '{"schema":"fm-merge-receipt.v1","task_id":"ambiguous-pr","execution_generation":"generation-pr","url":"https://codebase.example.invalid/merge_requests/3","head":"1111111111111111111111111111111111111111"}' \
+  '{"schema":"fm-merge-receipt.v1","task_id":"ambiguous-pr","execution_generation":"generation-pr","url":"https://codebase.example.invalid/merge_requests/3","head":"2222222222222222222222222222222222222222"}' \
+  > "$HOME_DIR/state/$AMBIGUOUS.merge-receipts.jsonl"
+if FM_HOME="$HOME_DIR" bash -c \
+  '. "$1"; fm_merge_receipt_current "$2" "$3" >/dev/null' \
+  _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$AMBIGUOUS" generation-pr 2>/dev/null; then
+  fail 'multiple PR heads passed the local-continuation selector'
+fi
+
+HISTORICAL_LOCAL=historical-local
+HISTORICAL_REPO="$TMP_ROOT/historical-project"
+mkdir -p "$HOME_DIR/data/$HISTORICAL_LOCAL"
+fm_git_init_commit "$HISTORICAL_REPO"
+git -C "$HISTORICAL_REPO" checkout -qb "fm/$HISTORICAL_LOCAL"
+printf 'first local landing\n' >> "$HISTORICAL_REPO/README.md"
+git -C "$HISTORICAL_REPO" add README.md
+git -C "$HISTORICAL_REPO" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+  commit -qm first-local
+historical_head=$(git -C "$HISTORICAL_REPO" rev-parse HEAD)
+printf 'continued local landing\n' >> "$HISTORICAL_REPO/README.md"
+git -C "$HISTORICAL_REPO" add README.md
+git -C "$HISTORICAL_REPO" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+  commit -qm continued-local
+continued_head=$(git -C "$HISTORICAL_REPO" rev-parse HEAD)
+historical_url="local:$HISTORICAL_REPO#main"
+jq -cn --arg id "$HISTORICAL_LOCAL" --arg url "$historical_url" --arg head "$historical_head" \
+  '{schema:"fm-task-lifecycle.v2",task_id:$id,owner_receipts:{merge:[{
+    execution_generation:"generation-local",facts:{url:$url,head:$head}}]}}' \
+  > "$HOME_DIR/data/$HISTORICAL_LOCAL/lifecycle.json"
+FM_HOME="$HOME_DIR" bash -c \
+  '. "$1"; fm_merge_receipt_record_local "$2" "$3" "$4" "$5" "$6" "$7"' \
+  _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$HISTORICAL_LOCAL" generation-local \
+  "$historical_url" "$HISTORICAL_REPO" "refs/heads/fm/$HISTORICAL_LOCAL" "$continued_head" \
+  || fail 'historical first landing blocked a valid local continuation receipt'
+jq -e --arg previous "$historical_head" --arg head "$continued_head" \
+  '.previous_head==$previous and .head==$head' \
+  "$HOME_DIR/state/$HISTORICAL_LOCAL.merge-receipts.jsonl" >/dev/null \
+  || fail 'local continuation did not link to the retained historical first landing'
+current_local=$(FM_HOME="$HOME_DIR" bash -c \
+  '. "$1"; fm_merge_receipt_current "$2" "$3"' \
+  _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$HISTORICAL_LOCAL" generation-local) \
+  || fail 'historical-first local continuation remained ambiguous'
+printf '%s\n' "$current_local" | jq -e --arg head "$continued_head" '.head==$head' >/dev/null \
+  || fail 'historical-first local continuation did not select the newest receipt'
+
 pass 'merge receipts: completed evidence leaves active state and remains generation-readable without duplicate recreation'
