@@ -28,15 +28,35 @@ fm_startup_result_path() { # <state> <generation>
   printf '%s\n' "$result"
 }
 
+fm_startup_wake_receipted() { # <state> <generation>
+  local root="$1/.startup-network-wake-receipts" receipt="$1/.startup-network-wake-receipts/$2"
+  fm_startup_generation_valid "$2" || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] \
+    && [ "$(cat "$receipt")" = "$2" ]
+}
+
 fm_startup_result_settled() { # <state> <generation>
   local state=$1 generation=$2 result settled
   result=$(fm_startup_result_path "$state" "$generation") || return 1
+  if [ -f "$state/.startup-network.delivered" ] && [ ! -L "$state/.startup-network.delivered" ] \
+    && [ "$(cat "$state/.startup-network.delivered")" = "$generation" ]; then
+    return 0
+  fi
+  fm_startup_wake_receipted "$state" "$generation" && return 0
   [ -f "$result/settled" ] && [ ! -L "$result/settled" ] || return 1
   settled=$(cat "$result/settled") || return 1
   case "$settled" in
-    "clean:$generation"|"inline:$generation"|"queued:$generation") return 0 ;;
+    "clean:$generation"|"inline:$generation") return 0 ;;
   esac
   return 1
+}
+
+# Bootstrap owns the explicit no-action transport record. Unknown nonempty
+# output and failed runs require delivery; this layer does not classify causes.
+fm_startup_report_requires_wake() { # <report> <state>
+  [ "$2" = 'done' ] || return 0
+  [ -s "$1" ] || return 1
+  awk 'NF && $0 !~ /^BOOTSTRAP_INFO:/ { found=1; exit } END { exit !found }' "$1"
 }
 
 fm_startup_supervision_pending() { # <state>

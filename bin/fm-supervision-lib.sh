@@ -38,10 +38,12 @@ fm_sup_stat_mtime() {
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata),
-#                         or a registered custom check
+#                         a registered custom check, or startup work/handling
+#                         (bin/fm-startup-network.sh owns its delivery contract)
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
+#   FM_SUP_STARTUP_PENDING true/false - startup work or unhandled startup rows
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
@@ -51,6 +53,16 @@ fm_supervision_status() {
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
+  FM_SUP_STARTUP_PENDING=false
+  # Load the startup state owner only when startup evidence exists. Ordinary
+  # homes pay no process/state inspection cost for this additional obligation.
+  if [ -f "$state/.startup-network.status" ] \
+    || { [ -s "$state/.wake-queue" ] && awk -F '\t' \
+      '$3 == "check" && $4 ~ /^startup-network(:|$)/ { found=1; exit } END { exit !found }' "$state/.wake-queue"; }; then
+    # shellcheck source=bin/fm-startup-network-lib.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/fm-startup-network-lib.sh"
+    fm_startup_supervision_pending "$state" && FM_SUP_STARTUP_PENDING=true
+  fi
 
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
@@ -78,6 +90,7 @@ fm_supervision_status() {
     || [ "$FM_SUP_CHECKS" -gt 0 ]; then
     FM_SUP_NEEDED=true
   fi
+  [ "$FM_SUP_STARTUP_PENDING" != true ] || FM_SUP_NEEDED=true
 
   beat="$state/.last-watcher-beat"
   if [ -e "$beat" ]; then
