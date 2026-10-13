@@ -1183,6 +1183,7 @@ unknown_alive_stale_case() {  # <evidence: status|worktree|none>
     mkdir -p "$dir/wt/src"
     printf 'worktree=%s\n' "$dir/wt" >> "$state/codexunknown.meta"
     : > "$dir/wt/src/old.c"; set_mtime "$old" "$dir/wt/src/old.c"
+    [ "$evidence" != worktree ] || printf 'recovered\n' > "$dir/wt/src/recovered.c"
   fi
   printf '%s' "$(seen_sig "$state/codexunknown.status")" > "$state/.seen-codexunknown_status"
   key=$(printf '%s' "$window" | tr ':/. ' '____')
@@ -1196,11 +1197,15 @@ unknown_alive_stale_case() {  # <evidence: status|worktree|none>
   pid=$!
   wait_for_exit "$pid" 100 || fail "[$evidence] the first unknown-but-alive stale sight did not surface"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "[$evidence] the first unknown-but-alive alarm changed its wording"
+  if [ "$evidence" = none ]; then
+    [ ! -e "$state/.paused-resurfaced-$key" ] || fail "[none] an alarm without progress evidence recorded a repeat bound"
+  else
+    [ -s "$state/.paused-resurfaced-$key" ] || fail "[$evidence] the first alarm with progress evidence did not record its bound"
+  fi
   ack_stopped_cycle "$state" || fail "[$evidence] could not acknowledge the first unknown-but-alive alarm"
 
   # A successor sees a different rendered hash, exactly as a long Codex turn
   # updates its viewport, but the same known-live, unclassifiable endpoint.
-  [ "$evidence" != worktree ] || printf 'recovered\n' > "$dir/wt/src/recovered.c"
   printf 'unreadable long Codex turn, later viewport\n' > "$capture_file"
   previous=$(hash_text 'earlier unreadable Codex turn')
   printf '%s' "$previous" > "$state/.hash-$key"
