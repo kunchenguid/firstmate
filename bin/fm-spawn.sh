@@ -2435,6 +2435,88 @@ case "$ARG3" in
   ;;
 esac
 
+# config/secondmate-harness may carry optional model/effort tokens alongside the
+# harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
+# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
+# the harness itself came from the secondmate config fallback chain. Resolving
+# here on every spawn makes the pin durable across respawns. Precedence: explicit
+# --model/--effort flags still win over the file's tokens.
+if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
+  if [ "$MODEL_SET" -eq 0 ]; then
+    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+    [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
+  fi
+  if [ "$EFFORT_SET" -eq 0 ]; then
+    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+    if [ -n "$SM_EFFORT" ]; then
+      case "$SM_EFFORT" in
+      low | medium | high | xhigh | max | ultra) EFFORT=$SM_EFFORT ;;
+      *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2 ;;
+      esac
+    fi
+  fi
+fi
+# Jev Pattern 9: pre-flight quota verdict (opt-in via config/quota-prober).
+# When config/quota-prober is absent, pre-flight quota probing is skipped (the
+# default). A present file opts in unless it contains "off" or "0".
+# Test seam: with FM_TEST_SEAM=1, FM_TEST_QUOTA_PROBER=1 forces opt-in and
+# FM_TEST_DISABLE_JEV_PROBER=1 disables.
+# Divert candidates are configured by the captain in config/quota-divert-lanes.
+# Only exhausted refuses. Healthy, unmetered, unknown and a prober that returned
+# no verdict launch as requested. Nothing diverts unless candidates are configured
+# and the target is proven healthy in quota-axi.
+_quota_prober_optin=0
+if [ "${FM_TEST_SEAM:-0}" = 1 ] && [ "${FM_TEST_QUOTA_PROBER:-0}" = 1 ]; then
+  _quota_prober_optin=1
+elif [ -f "$CONFIG/quota-prober" ]; then
+  _val=$(tr -d '[:space:]' < "$CONFIG/quota-prober" 2>/dev/null | tr '[:upper:]' '[:lower:]') || _val=""
+  case "$_val" in
+  off|0) _quota_prober_optin=0 ;;
+  *) _quota_prober_optin=1 ;;
+  esac
+fi
+if [ "${FM_TEST_SEAM:-0}" = 1 ] && [ "${FM_TEST_DISABLE_JEV_PROBER:-0}" = 1 ]; then
+  _quota_prober_optin=0
+fi
+
+if [ "$_quota_prober_optin" = 1 ] && [ -x "$SCRIPT_DIR/fm-jev-quota-prober.sh" ]; then
+  _pre_divert_harness=$HARNESS
+  _jev_rc=0
+  _divert_args=()
+  if [ -f "$CONFIG/quota-divert-lanes" ]; then
+    _divert_args=(--divert-config "$CONFIG/quota-divert-lanes" --auto-divert)
+  fi
+  _jev_out=$("$SCRIPT_DIR/fm-jev-quota-prober.sh" --harness "$HARNESS" ${MODEL:+--model "$MODEL"} ${_divert_args[@]+"${_divert_args[@]}"}) || _jev_rc=$?
+  read -r _jev_verdict _jev_harness _jev_model <<< "$_jev_out" || :
+  case "${_jev_verdict:-}" in
+  healthy | unmetered | unknown) ;;
+  diverted)
+    _jev_check=$("$SCRIPT_DIR/fm-jev-quota-prober.sh" --harness "$_jev_harness" --model "$_jev_model") || :
+    if [ "$_jev_check" != "healthy $_jev_harness $_jev_model" ]; then
+      echo "error: jev-quota-prober divert target $_jev_harness:$_jev_model is not healthy in quota-axi (${_jev_check:-no verdict}); not launching" >&2
+      exit 1
+    fi
+    echo "jev-quota-prober: diverted $HARNESS${MODEL:+:$MODEL} to quota-axi-healthy lane $_jev_harness:$_jev_model" >&2
+    HARNESS=$_jev_harness
+    MODEL=$_jev_model
+    if [ "$HARNESS" != "$_pre_divert_harness" ] || [ "$RAW_LAUNCH" = 1 ]; then
+      LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+        echo "error: no launch template for diverted harness '$HARNESS'" >&2
+        exit 1
+      }
+      RAW_LAUNCH=0
+    fi
+    ;;
+  exhausted)
+    echo "error: jev-quota-prober refused $HARNESS${MODEL:+:$MODEL} (verdict: exhausted); not launching" >&2
+    exit 1
+    ;;
+  *)
+    echo "jev-quota-prober: prober returned no verdict for $HARNESS:${MODEL:--} (exit $_jev_rc); quota guard absent for this launch, launching as requested" >&2
+    ;;
+  esac
+fi
+
 # muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
@@ -2536,27 +2618,6 @@ agy)
   ;;
 esac
 
-# config/secondmate-harness may carry optional model/effort tokens alongside the
-# harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
-# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
-# the harness itself came from the secondmate config fallback chain. Resolving
-# here on every spawn makes the pin durable across respawns. Precedence: explicit
-# --model/--effort flags still win over the file's tokens.
-if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
-  if [ "$MODEL_SET" -eq 0 ]; then
-    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
-    [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
-  fi
-  if [ "$EFFORT_SET" -eq 0 ]; then
-    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
-    if [ -n "$SM_EFFORT" ]; then
-      case "$SM_EFFORT" in
-      low | medium | high | xhigh | max | ultra) EFFORT=$SM_EFFORT ;;
-      *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2 ;;
-      esac
-    fi
-  fi
-fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then

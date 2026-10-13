@@ -31,3 +31,4 @@ Each family ships as a pair plus its tests.
 Copy the smallest existing pair, keep the wrapper under ten lines, and keep every threshold in the engine with a comment naming the resource it bounds.
 Add the family's behavioral test alongside it and run it through `bin/fm-test-run.sh`.
 A family that needs a host-specific source (a fleet registry, a pool manager, a quota service, or a product's hook store) belongs to the operator's own layer, not this framework.
+The quota-axi pre-flight prober `bin/fm-jev-quota-prober.sh` is not a guard: it gates spawn lanes with its own verdicts and exit codes, which its script header owns.

@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [pre-flight quota prober](#pre-flight-quota-prober-configquota-prober-configquota-divert-lanes), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -944,6 +944,33 @@ Names present in the registry produce no report; unknown or unverified names do 
 Each relaunch installs a fresh worker extension with the home's current list, so the replacement performs the same check.
 
 [`bin/fm-exclude-tools-lib.sh`](../bin/fm-exclude-tools-lib.sh) implements parsing and pre-launch validation for this contract; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the launch-flag mechanics.
+
+## Pre-flight quota prober (config/quota-prober, config/quota-divert-lanes)
+
+The pre-flight quota prober inspects quota runway via `quota-axi` before launching a worker and refuses spawns onto exhausted lanes.
+The prober is opt-in and off by default.
+
+### Opt in (config/quota-prober)
+
+An absent `config/quota-prober` file skips quota checking (the default).
+A present readable regular file opts in, unless it contains `off` or `0`.
+When opted in, `bin/fm-spawn.sh` runs `bin/fm-jev-quota-prober.sh` for the requested harness and model.
+A lane with runway (`healthy`), an unmeasured lane (`unmetered`), or a lane where quota information is unavailable (`unknown`) launches as requested.
+A lane that `quota-axi` reports as exhausted refuses launch with an error.
+
+### Divert lanes (config/quota-divert-lanes)
+
+When an exhausted lane is refused, Firstmate does not divert to an alternate lane unless candidate divert lanes are explicitly configured.
+`config/quota-divert-lanes` is an optional file listing fallback candidate lanes in priority order, one per line:
+
+```text
+# Candidate fallback lanes
+pi opencode-go/glm-5.3-flash
+```
+
+Each line specifies a `<harness> <model>` or `<harness>:<model>`.
+When present, `bin/fm-spawn.sh` probes candidates in order and diverts only to a lane `quota-axi` confirms is fresh and healthy.
+If no configured divert lane is healthy, the spawn is refused.
 
 ## Worker account pin (config/claude-account, config/pi-account)
 
