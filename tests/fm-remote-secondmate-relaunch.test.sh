@@ -617,9 +617,9 @@ host_journal() {  # <operation> <phase> [rollback]
 assert_equals "unknown false" "$(host_disposition op1)" "an absent receipt was not unknown"
 host_receipt op2 relaunch received
 assert_equals "unknown false" "$(host_disposition op1)" "a foreign receipt answered for another operation"
-assert_equals "prelaunch false" "$(host_disposition op2)" "an episode that never reached control was not a prelaunch refusal"
+assert_equals "unknown false" "$(host_disposition op2)" "an unresolved received episode was not unknown"
 host_journal op2 failed:checkpoint instructions-restored
-assert_equals "prelaunch false" "$(host_disposition op2)" "a refusal before the stop was not prelaunch"
+assert_equals "unknown false" "$(host_disposition op2)" "a received episode without an existing binding freed its candidate"
 host_journal op2 failed:exited prior-record-kept
 printf 'exit_result=stopped\n' >> "$HOST_HOME/state/parent-route/ios.control-relaunch"
 assert_equals "cancelled true" "$(host_disposition op2)" "a stopped predecessor with an unsubmitted candidate was not cancelled"
@@ -675,7 +675,7 @@ assert_equals "cancelled true" "$(host_disposition replacement.journal)" "the jo
 host_receipt foreign.journal relaunch received another-generation
 host_journal foreign.journal exited
 printf 'exit_result=already-stopped\n' >> "$HOST_HOME/state/parent-route/ios.control-relaunch"
-assert_equals "prelaunch false" "$(host_disposition foreign.journal)" "the journal used another generation's predecessor evidence"
+assert_equals "unknown false" "$(host_disposition foreign.journal)" "the journal used another generation's predecessor evidence"
 pass "existing host receipts re-probe their actual generation and preserve its terminal outcome"
 # A busy episode may be running this very token: unknown, never a refusal.
 bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" ios 0 && : > "$3" && exec sleep 600' \
@@ -699,7 +699,7 @@ printf 'other\n' > "$HOST_HOME/.fm-secondmate-home"
 OUT=$(host_control relaunch ios claude pool-model-a medium --operation op9 --previous op3); RC=$?
 [ "$RC" -ne 0 ] || fail "a relaunch into a foreign home succeeded"
 DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
-assert_equals "op9 prelaunch" "$(printf '%s\n' "$DISP" | jq -r '.operation + " " + .disposition')" \
+assert_equals "op9 unknown" "$(printf '%s\n' "$DISP" | jq -r '.operation + " " + .disposition')" \
   "a home validation refusal was not bound to its operation"
 printf 'ios\n' > "$HOST_HOME/.fm-secondmate-home"
 pass "a pooled host refuses unaccounted relaunches and binds its refusals to the operation"
@@ -788,8 +788,10 @@ assert_present "$HOST_HOME/state/parent-route/ios.seat-operation.history1" "succ
 OUT=$(host_control relaunch ios claude pool-model-a medium --operation history1); RC=$?
 [ "$RC" -ne 0 ] || fail "an old refused token launched again"
 DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
-assert_equals prelaunch "$(printf '%s\n' "$DISP" | jq -r .disposition)" "an old receipt did not preserve its refused outcome"
+assert_equals unknown "$(printf '%s\n' "$DISP" | jq -r .disposition)" "an unbound refusal released an existing supervisor's candidate"
 assert_contains "$OUT" "already handled" "a delayed token was treated as fresh"
+host_receipt verified.refusal launch prelaunch
+assert_equals "prelaunch false" "$(host_disposition verified.refusal)" "a durable verified refusal did not preserve its prelaunch outcome"
 host_receipt tombstone relaunch dead-after-start
 assert_equals "dead-after-start false" "$(host_disposition tombstone)" "a terminal receipt did not replay its recorded outcome"
 pass "host receipts survive successive operations and delayed retries never dispatch again"
@@ -838,7 +840,7 @@ OUT=$(host_control relaunch ios claude pool-model-a medium --operation hostfence
   <<< "$(host_parent_record hostfence host-old)"); RC=$?
 expect_code 6 "$RC" "tracked host generation mismatch: $OUT"
 DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
-assert_equals 'prelaunch false' "$(printf '%s\n' "$DISP" | jq -r '.disposition + " " + (.old_stopped | tostring)')" "the host mismatch authorized a predecessor stop"
+assert_equals 'unknown false' "$(printf '%s\n' "$DISP" | jq -r '.disposition + " " + (.old_stopped | tostring)')" "the host mismatch authorized a predecessor stop"
 perl -ni -e 'print unless /^spawn_gen=/' "$HOST_HOME/state/parent-route/ios.meta"
 OUT=$(host_control relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
 expect_code 6 "$RC" "missing host generation binding: $OUT"
