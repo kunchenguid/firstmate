@@ -871,6 +871,29 @@ test_relaunch_keeps_the_recorded_pool_account() {
   pass "fm-control relaunch: a pool task keeps its recorded account, refuses once it is undeclared, and switches only on --account"
 }
 
+# A raw Claude launch command records its basename (claude-next), and a direct
+# fm-spawn --relaunch must still read that task's recorded pool account rather
+# than falling back to the pool's first line.
+test_spawn_relaunch_keeps_a_raw_claude_command_pool_account() {
+  local dir out rc id=rl-acct-raw
+  dir=$(new_case acct-raw "$id")
+  add_ship_task "$dir" "$id" claude-next
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/work" "$dir/mon"
+  : > "$dir/work/.credentials.json"
+  : > "$dir/mon/.credentials.json"
+  printf '%s\n' "$dir/work" "$dir/mon" > "$dir/home/config/claude-account"
+  printf 'account=%s\n' "$dir/mon" >> "$dir/home/state/$id.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "a direct relaunch of a raw claude-* task should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/mon" ] \
+    || fail "a raw claude-* relaunch should keep the recorded account, got '$(meta_field "$dir" "$id" account)'"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/mon'" \
+    "a raw claude-* relaunch should launch on the recorded account, not the pool's first line"
+  pass "fm-spawn --relaunch: a raw claude-* task keeps its recorded pool account"
+}
+
 test_pi_exclude_tools_follow_the_relaunch() {
   local dir out rc id=rl-pi-excl
   dir=$(new_case pi-exclude "$id")
@@ -2606,6 +2629,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_relaunch_keeps_the_recorded_pool_account
+test_spawn_relaunch_keeps_a_raw_claude_command_pool_account
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
