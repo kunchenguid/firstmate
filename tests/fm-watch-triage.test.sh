@@ -6647,9 +6647,11 @@ test_paused_bg_job_without_until_stays_silent_after_the_job_ends() {
 
 test_paused_bg_job_until_timeout_rechecks_after_the_job_ends() {
   local dir state until_epoch now
-  until_epoch=$(( $(date +%s) + 15 ))
+  # The first absorb round may take four poll cycles of up to 30 s each on a
+  # loaded runner, and it must finish before until passes.
+  until_epoch=$(( $(date +%s) + 4 * 30 ))
   dir=$(bg_job_paused_case bg-job-until \
-    "paused [key=nightly-build] [at=$(date +%s)]: nightly build (background job, 15s timeout); resume when it ends, until $(iso_utc_at "$until_epoch")")
+    "paused [key=nightly-build] [at=$(date +%s)]: nightly build (background job, 120s timeout); resume when it ends, until $(iso_utc_at "$until_epoch")")
   state="$dir/state"
   parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked absorb \
     || fail "a worker paused on its running background job woke before the job's timeout"
