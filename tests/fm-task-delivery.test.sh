@@ -308,7 +308,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod contract
+  local home meta out sendroot payload mode id brief_dod delivered_dod contract domain_count
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -355,6 +355,13 @@ STUB
       "$mode: promoted worker did not receive the Captain's intent subsection"
     assert_grep "## Firstmate spec" "$payload" \
       "$mode: promoted worker did not receive the Firstmate spec subsection"
+    domain_count=$(grep -c '^# Domain evidence bars$' "$home/data/$id/brief.md")
+    [ "$domain_count" = 1 ] \
+      || fail "$mode: promoted relaunch brief must retain exactly one domain evidence block"
+    assert_no_grep "# Domain evidence bars" "$payload" \
+      "$mode: promotion repeated the domain evidence block already carried from scout instructions"
+    assert_grep "Everything else in your original instructions carries over unchanged" "$payload" \
+      "$mode: promotion did not preserve the original domain evidence contract by carryover"
 
     # Both the delivered prompt and persisted relaunch brief are public outputs.
     for contract in "$payload" "$home/data/$id/brief.md"; do

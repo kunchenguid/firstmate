@@ -545,6 +545,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/working-with-firstmate.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/zellij-backend.md",
       "audience": "operator-current"
     },
