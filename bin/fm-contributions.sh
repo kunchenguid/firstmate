@@ -51,7 +51,12 @@
 # default 30, read from the poll's environment because the watcher runs it as
 # a direct child) with a three-second margin. Every read is capped at five
 # seconds, and a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
+# refusal, never a forge failure. A transient forge failure - a 5xx response
+# or a transport-class error such as a reset connection - is retried in place
+# at most twice with a small backoff, each attempt still capped at five
+# seconds and still inside the poll deadline; a deadline-killed read is never
+# retried, and a genuine failure still standing when the attempts or the
+# budget run out is what records an error. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
@@ -214,23 +219,60 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
+# Initial attempt plus at most two retries, and a backoff small enough to
+# stay inside a five-second read bound.
+FORGE_TRANSIENT_ATTEMPTS=3
+FORGE_TRANSIENT_BACKOFF=0.2
+
+# Only a 5xx response or a transport-class failure is transient. A missing or
+# empty stderr is no evidence, and a bound kill (124/137) is the budget's own
+# refusal, so neither is retried.
+forge_transient_error() { # exit-status stderr-file
+  local rc=$1 err=$2
+  [ "$rc" -ne 0 ] || return 1
+  fm_timed_out "$rc" && return 1
+  [ -s "$err" ] || return 1
+  grep -Eqi 'HTTP[[:space:]]*5[0-9][0-9]' "$err" && return 0
+  grep -Eqi 'connection (reset|refused|closed)|broken pipe|timed out|timeout|TLS|EOF|network is unreachable|temporary failure in name resolution|no such host' "$err" && return 0
+  return 1
+}
+
 forge() {
-  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
-  remaining=$((DEADLINE - $(date +%s)))
-  # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  [ "$remaining" -le 5 ] || remaining=5
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$forge_err" || rc=$?
-  # A kill at the read bound or the deadline is budget refusal too; only the
-  # forge's own nonzero exit is unavailable evidence.
-  if [ "$rc" -eq 124 ]; then
-    BUDGET_EXHAUSTED=1
-    : > "$TMP/budget-exhausted"
-  elif [ "$rc" -ne 0 ]; then
-    : > "$TMP/forge-unavailable"
-  fi
-  return "$rc"
+  local remaining rc=0 attempt=1 forge_err=${FORGE_ERR:-$TMP/forge.err} out
+  # A unique capture file per invocation: parallel wave reads run in separate
+  # subshells and must never share one staging file.
+  out=$(mktemp "$TMP/forge.XXXXXX")
+  while :; do
+    remaining=$((DEADLINE - $(date +%s)))
+    # The budget, not the forge, refused a read that never started. An attempt
+    # that already ran is left as the hard failure it was.
+    if [ "$remaining" -le 0 ]; then
+      BUDGET_EXHAUSTED=1
+      : > "$TMP/budget-exhausted"
+      return 1
+    fi
+    [ "$remaining" -le 5 ] || remaining=5
+    rc=0
+    fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      gh "$@" > "$out" 2> "$forge_err" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      cat "$out"
+      return 0
+    fi
+    # A kill at the read bound or the deadline is budget refusal too; only the
+    # forge's own nonzero exit is unavailable evidence.
+    if fm_timed_out "$rc"; then
+      BUDGET_EXHAUSTED=1
+      : > "$TMP/budget-exhausted"
+      return "$rc"
+    fi
+    if [ "$attempt" -ge "$FORGE_TRANSIENT_ATTEMPTS" ] || ! forge_transient_error "$rc" "$forge_err"; then
+      : > "$TMP/forge-unavailable"
+      return "$rc"
+    fi
+    attempt=$((attempt + 1))
+    sleep "$FORGE_TRANSIENT_BACKOFF" 2>/dev/null || true
+  done
 }
 
 wait_forges() { # background forge pids from one independent read wave
