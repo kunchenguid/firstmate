@@ -26,6 +26,8 @@ set -u
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
 
+FM_TEST_REAL_PS=$(command -v ps)
+export FM_TEST_REAL_PS
 TMP_ROOT=$(fm_test_tmproot fm-startup-network-tests)
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
@@ -81,10 +83,10 @@ if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then
   case "$*" in
     *comm=*) printf '/usr/local/bin/claude\n' ;;
     *args=*) printf 'claude\n' ;;
-    *ppid=*) /bin/ps -o ppid= -p "$pid" ;;
+    *ppid=*) "$FM_TEST_REAL_PS" -o ppid= -p "$pid" ;;
   esac
 else
-  /bin/ps "$@"
+  "$FM_TEST_REAL_PS" "$@"
 fi
 SH
   chmod +x "$root/bin/ps"
@@ -276,7 +278,7 @@ EOF
   pass "fm-startup-network: a claimant crash after publication still surfaces the result"
 }
 
-test_a_report_publication_failure_is_failed_and_still_wakes() {
+test_a_report_publication_failure_retains_findings_until_recovery() {
   local rec home root log claimant output state
   rec=$(new_world report-publication-failure)
   IFS='|' read -r home root log <<EOF
@@ -294,21 +296,23 @@ EOF
   [ "$state" = failed ] || fail "a report-publication failure was published as $state"
 
   output=$(run_stage "$home" "$root" report)
-  assert_contains "$output" "NETWORK_CHECKS: could not publish the deferred check report" \
-    "report did not surface the report-publication failure: $output"
+  assert_contains "$output" "completed findings retained" \
+    "report did not surface the retained publication failure: $output"
+  assert_contains "$output" "unpublishable result" "report lost the completed findings"
   output=$(run_stage "$home" "$root" harvest --pid "$claimant")
   assert_contains "$output" "NETWORK_CHECKS: could not publish the deferred check report" \
     "harvest did not surface the report-publication failure: $output"
   assert_absent "$home/state/.startup-network.delivered" \
     "harvest acknowledged a result whose report was not published"
-  wait_for_startup_network_wake "$home" || fail "the report-publication failure suppressed the wake"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
-    "the report-publication failure did not reach the wake queue"
+  [ ! -s "$home/state/.wake-queue" ] || fail "an unpublished report queued a wake"
 
   kill "$claimant" 2>/dev/null || true
   wait "$claimant" 2>/dev/null || true
   chmod 700 "$home/state/.startup-network.report"
-  pass "fm-startup-network: a report-publication failure is failed, diagnosed, and still wakes"
+  rmdir "$home/state/.startup-network.report"
+  run_stage "$home" "$root" recover || fail "retained findings did not recover"
+  assert_grep $'check\tstartup-network' "$home/state/.wake-queue" "recovered report did not wake"
+  pass "fm-startup-network: publication failure retains findings and wakes only after recovery"
 }
 
 # A clean success is not captain-facing progress (AGENTS.md section 8): it must
@@ -599,7 +603,7 @@ EOF
     run_stage "$home" "$root" start --locked 1 --harvest-pid $$
   generation_one=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
 
-  next_owner=$(/bin/ps -o ppid= -p $$ | tr -d ' ')
+  next_owner=$("$FM_TEST_REAL_PS" -o ppid= -p $$ | tr -d ' ')
   printf '%s\n' "$next_owner" > "$home/state/.lock"
   FM_FAKE_HARNESS_PID_OVERRIDE="$next_owner" FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=1 \
     run_stage "$home" "$root" start --locked 1 --harvest-pid $$
@@ -625,7 +629,7 @@ EOF
   done
   [ -s "$log" ] || fail "the mutating sweep never started"
 
-  next_owner=$(/bin/ps -o ppid= -p $$ | tr -d ' ')
+  next_owner=$("$FM_TEST_REAL_PS" -o ppid= -p $$ | tr -d ' ')
   started=$(date +%s)
   rc=0
   out=$(PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
@@ -817,15 +821,8 @@ EOF
   [ "$rc" -ne 0 ] || fail "the worker reported success without ever taking the publish lock"
   [ "$took" -le 6 ] || fail "the worker took ${took}s to give up on a 2s budget"
   [ ! -f "$log" ] || fail "the sweeps ran even though the worker could not register itself"
-  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = failed ] \
-    || fail "a worker that gave up on the lock did not record a failed stage"
-  report=$(run_stage "$home" "$root" report)
-  assert_contains "$report" "still held by pid $holder" \
-    "the failed record did not name the process holding the lock: $report"
-  assert_contains "$report" "fm-startup-network.sh run --locked 0" \
-    "the failed record did not say how to rerun the stage"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
-    "a worker that gave up on the lock did not surface to the agent"
+  assert_absent "$home/state/.startup-network.status" "an unreserved caller wrote shared results without ownership"
+  assert_no_grep $'check\tstartup-network' "$home/state/.wake-queue" "an unreserved caller queued findings"
   kill "$holder" 2>/dev/null || true
   await_pid_exit "$holder" 50 || fail "could not release the first lock holder"
 
@@ -846,24 +843,48 @@ EOF
   holder=$(hold_publish_lock "$home")
   await_pid_exit "$worker" 100 \
     || fail "the worker was still alive 10s after its sweep finished against a held publish lock (2s delivery budget)"
-  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = failed ] \
-    || fail "a worker that could not publish did not record a failed stage"
   report=$(run_stage "$home" "$root" report)
-  assert_contains "$report" "PROBE_RAN" \
-    "the sweep output was discarded when publication found the lock held: $report"
-  assert_contains "$report" "still held by pid $holder" \
-    "the unpublished result did not name the process holding the lock"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
-    "a result that could not be published under the lock did not surface to the agent"
+  assert_contains "$report" "PROBE_RAN" "publication contention discarded the completed report"
+  assert_contains "$report" "completed findings retained" "retention was not disclosed"
+  assert_no_grep $'check\tstartup-network' "$home/state/.wake-queue" "publication contention produced an unowned wake"
   kill "$holder" 2>/dev/null || true
+  await_pid_exit "$holder" 50 || fail "could not release the publication lock"
+  run_stage "$home" "$root" recover || fail "the completed report did not recover after contention"
+  assert_grep $'check\tstartup-network' "$home/state/.wake-queue" "retained result did not wake after recovery"
   pass "fm-startup-network: a held publish lock ends the worker inside its budget with a failed-rerun record"
 }
 
+test_failed_publication_keeps_a_recoverable_completed_result() {
+  local rec home root log rc generation report
+  rec=$(new_world retained-publication-failure)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  mkdir "$home/state/.startup-network.report"
+  rc=0
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='RETAINED_RESULT' \
+    run_stage "$home" "$root" run --locked 0 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a directory publication target reported success"
+  generation=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+  report=$(run_stage "$home" "$root" report --generation "$generation")
+  assert_contains "$report" RETAINED_RESULT "publication failure discarded the completed findings"
+  assert_no_grep $'check\tstartup-network' "$home/state/.wake-queue" "unpublished findings queued a wake"
+  rmdir "$home/state/.startup-network.report"
+  run_stage "$home" "$root" recover || fail "completed findings could not be recovered"
+  assert_grep RETAINED_RESULT "$home/state/.startup-network.report" "recovery did not publish retained findings"
+  assert_grep $'check\tstartup-network' "$home/state/.wake-queue" "published retained findings did not wake"
+  run_stage "$home" "$root" recover || fail "settled recovery was not idempotent"
+  [ "$(awk -F '\t' '$3 == "check" && $4 ~ /^startup-network/ { n++ } END { print n+0 }' "$home/state/.wake-queue")" -eq 1 ] \
+    || fail "recovery appended the same completed generation twice"
+  pass "fm-startup-network: failed publication retains completed findings for idempotent recovery"
+}
+
+test_failed_publication_keeps_a_recoverable_completed_result
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
 test_a_claimant_crash_after_publish_still_queues_the_wake
-test_a_report_publication_failure_is_failed_and_still_wakes
+test_a_report_publication_failure_retains_findings_until_recovery
 test_a_successful_result_never_queues_a_wake
 test_an_actionable_successful_result_still_queues_a_wake
 test_deferred_invalid_secondmate_markers_queue_durable_findings
