@@ -100,8 +100,7 @@
 # before. The arm stops continuing, and exits with its close as any arm does,
 # when the home's session lock no longer names the session it started under,
 # when the away daemon's flag exists, or when a live host is idle and waiting
-# for the close. FM_WATCH_ARM_CONTINUE_MIN_CYCLE (default 2) is the shortest
-# time a child may run before its replacement starts.
+# for the close. A fixed two-second minimum cycle bounds restart frequency.
 #
 # A copy of this script living under a disposable no-mistakes validation
 # checkout (a path containing /.no-mistakes/worktrees/) refuses every mode
@@ -165,13 +164,13 @@ ARM_PID=${BASHPID:-$$}
 CONT_READER=${FM_WATCH_ARM_CONTINUE_READER:-}
 CONT_SPOOL=${FM_WATCH_ARM_CONTINUE_SPOOL:-}
 CONT_BUSY=${FM_WATCH_ARM_CONTINUE_BUSY:-}
-CONT_MIN_CYCLE=${FM_WATCH_ARM_CONTINUE_MIN_CYCLE:-2}
-unset FM_WATCH_ARM_CONTINUE_READER FM_WATCH_ARM_CONTINUE_SPOOL FM_WATCH_ARM_CONTINUE_BUSY FM_WATCH_ARM_CONTINUE_MIN_CYCLE
-case "$CONT_MIN_CYCLE" in ''|*[!0-9]*) CONT_MIN_CYCLE=2 ;; esac
+CONT_MIN_CYCLE=2
+unset FM_WATCH_ARM_CONTINUE_READER FM_WATCH_ARM_CONTINUE_SPOOL FM_WATCH_ARM_CONTINUE_BUSY
 CONT_READER_IDENTITY=
 CONT_LOCK_PID=
 CONT_SPOOLING=0
 RESTARTED=0
+READY_REPORTED=0
 if [ -n "$CONT_READER" ]; then
   # Continuation needs the host and the session it serves pinned now, while
   # both are alive; a reader or lock that cannot be pinned means no continuation.
@@ -516,7 +515,7 @@ continuation_applies() {
   [ ! -e "$STATE/.afk" ] || return 1
   lock_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null | tr -cd '0-9')
   { [ "$lock_pid" = "$CONT_LOCK_PID" ] && fm_pid_alive "$lock_pid"; } || return 1
-  if cont_reader_alive; then
+  if cont_reader_alive && [ "$(cat "$STATE/.supervision-host-left" 2>/dev/null)" != "$ARM_PID"$'\t'"$(fm_pid_identity "$ARM_PID" 2>/dev/null)" ]; then
     { [ -n "$CONT_SPOOL" ] && [ -n "$CONT_BUSY" ] && [ -e "$CONT_BUSY" ]; } || return 1
     CONT_SPOOLING=1
   else
@@ -810,7 +809,9 @@ continue_scanning() {  # <child-rc>
   ran=$(( $(date +%s) - cycle_started_at ))
   cycle_log_append "$rc" none "$(watch_output_reason_type "$child_out")" none
   if [ "$CONT_SPOOLING" -eq 1 ]; then
+    fm_lock_acquire_wait "$CONT_SPOOL.lock"
     printf '%s\n' "$reasons" | awk '{ printf "C\t%s\n", $0 }' >> "$CONT_SPOOL" 2>/dev/null || true
+    fm_lock_release "$CONT_SPOOL.lock"
   fi
   rm -f "$child_out" 2>/dev/null || true
   child=
@@ -850,13 +851,17 @@ while :; do
         # successor goes to the spool, not to this arm's output.
         RESTARTED=0
         if [ "$CONT_SPOOLING" -eq 1 ]; then
+          fm_lock_acquire_wait "$CONT_SPOOL.lock"
           printf 'S\t%s\t%s\n' "$child" "$handling_generation" >> "$CONT_SPOOL" 2>/dev/null || true
+          fm_lock_release "$CONT_SPOOL.lock"
         fi
-      elif [ -n "$handling_generation" ]; then
+      fi
+      if [ "$READY_REPORTED" -eq 0 ] && [ -n "$handling_generation" ]; then
         echo "watcher: started pid=$child (beacon fresh) recovery-generation=$handling_generation"
-      else
+      elif [ "$READY_REPORTED" -eq 0 ]; then
         echo "watcher: started pid=$child (beacon fresh)"
       fi
+      READY_REPORTED=1
       wait "$child"
       rc=$?
       if continue_scanning "$rc"; then

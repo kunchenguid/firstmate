@@ -3096,6 +3096,119 @@ test_superseded_host_leaves_the_owner_untouched() {
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
 
+
+spool_ends_with() {
+  local spool=$1 prefix=$2
+  [ "$(tail -n 1 "$spool" 2>/dev/null | cut -f1)" = "$prefix" ]
+}
+
+test_spool_waits_for_the_latest_successor() {
+  local home spool arm saved
+  home=$(make_primary_home spool-latest-successor)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo held > "$home/stub-mode"
+  mkfifo "$home/stub-release"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "spool: no initial watcher"
+  append_status "$home" 'first actionable wake'
+  wait_until 250 test -s "$home/stub-ready" || fail "spool: engine did not hold: $(cat "$home/state/.supervision-host.log")"
+  for spool in "$home"/state/.supervision-host-spool.*; do [ ! -f "$spool" ] || break; done
+  append_status "$home" 'close one'
+  wait_until 250 spool_ends_with "$spool" S || fail "spool: first successor never confirmed"
+  append_status "$home" 'close two'
+  wait_until 250 spool_ends_with "$spool" C || fail "spool: second close never published"
+  arm=$(awk -F '\t' '$1 == "arm" { print $2 }' "$home/state/.supervision-host" | tail -1)
+  kill -STOP "$arm"
+  echo handle > "$home/stub-mode"
+  printf 'continue\n' > "$home/stub-release"
+  sleep 3
+  saved=$(engine_calls "$home")
+  kill -CONT "$arm"
+  [ "$saved" -eq 1 ] || fail "spool: consumed an incomplete C1,S1,C2 handoff"
+  wait_until 300 handled_at_least "$home" 2 || fail "spool: complete handoff was never handled"
+  wait_until 200 watcher_live "$home" || fail "spool: scheduling stopped after handling"
+  ! hook_exited "$home" || fail "spool: stale generation handed the batch to main"
+  [ "$(home_watchers "$home")" -eq 1 ] || fail "fixture: expected exactly one scheduler watcher"
+  stop_home_processes "$home"
+  pass "host: an incomplete C1,S1,C2 batch waits for its current successor"
+}
+
+test_mixed_spool_routes_the_scheduled_close_to_main() {
+  local home saved spool arm
+  home=$(make_primary_home mixed-spool)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo held > "$home/stub-mode"
+  mkfifo "$home/stub-release"
+  register_sweep_check "$home"
+  saved=$FM_CHECK_INTERVAL
+  export FM_CHECK_INTERVAL=1
+  start_hook_session "$home"
+  export FM_CHECK_INTERVAL=$saved
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "mixed spool: no initial watcher"
+  append_status "$home" 'first actionable wake'
+  wait_until 250 test -s "$home/stub-ready" || fail "mixed spool: engine did not hold: $(cat "$home/state/.supervision-host.log")"
+  for spool in "$home"/state/.supervision-host-spool.*; do [ ! -f "$spool" ] || break; done
+  append_status "$home" 'branch eligible batched signal'
+  wait_until 250 spool_ends_with "$spool" S || fail "mixed spool: signal successor never confirmed"
+  emit_and_expect_sweeps "$home" 1 'mixed spool'
+  echo handle > "$home/stub-mode"
+  printf 'continue\n' > "$home/stub-release"
+  wait_until 300 hook_exited "$home" || fail "mixed spool: scheduled close never reached main"
+  assert_rewoke_main "$home" 'mixed spool'
+  assert_contains "$(main_drain "$home")" 'fixture-event-1' "mixed spool: scheduled close was lost"
+  [ ! -e "$home/engine-call.2" ] || fail "mixed spool: branch took the main-only batch"
+  [ "$(home_watchers "$home")" -eq 1 ] || fail "fixture: expected exactly one scheduler watcher"
+  arm=$(cut -f1 "$home/state/.supervision-host-left")
+  kill -TERM "$arm"
+  wait_until 200 sh -c '! kill -0 "$1" 2>/dev/null' _ "$arm" || fail "detached arm did not stop"
+  stop_home_processes "$home"
+  pass "host: a signal followed by a scheduled close hands the complete batch to main"
+}
+
+test_detached_reader_does_not_stop_scanning_during_cleanup() {
+  local home saved real_rm arm
+  home=$(make_primary_home detached-cleanup)
+  register_sweep_check "$home"
+  mkfifo "$home/cleanup-release"
+  real_rm=$(command -v rm)
+  cat > "$home/fakebin/rm" <<SH
+#!/usr/bin/env bash
+"$real_rm" "\$@"
+for arg in "\$@"; do
+  if [ "\$arg" = "$home/state/.supervision-host-busy" ] && [ -s "$home/state/.supervision-host-left" ]; then
+    : > "$home/cleanup-ready"
+    read -r _ < "$home/cleanup-release"
+  fi
+done
+SH
+  chmod +x "$home/fakebin/rm"
+  saved=$FM_CHECK_INTERVAL
+  export FM_CHECK_INTERVAL=1
+  start_hook_session "$home"
+  export FM_CHECK_INTERVAL=$saved
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "cleanup: no initial watcher"
+  : > "$home/emit.1"
+  wait_until 250 test -e "$home/cleanup-ready" || fail "cleanup: host never detached"
+  emit_and_expect_sweeps "$home" 2 'cleanup'
+  ! hook_exited "$home" || fail "cleanup: fixture did not hold the host alive"
+  [ "$(home_watchers "$home")" -eq 1 ] || fail "fixture: expected exactly one scheduler watcher"
+  printf 'continue\n' > "$home/cleanup-release"
+  wait_until 200 hook_exited "$home" || fail "cleanup: host did not finish"
+  arm=$(cut -f1 "$home/state/.supervision-host-left")
+  kill -TERM "$arm"
+  wait_until 200 sh -c '! kill -0 "$1" 2>/dev/null' _ "$arm" || fail "detached arm did not stop"
+  stop_home_processes "$home"
+  pass "host: a detached arm continues scanning while its relinquished reader cleans up"
+}
+
+if [ -n "${FM_TEST_CASES:-}" ]; then
+  for test_case in $FM_TEST_CASES; do "$test_case"; done
+  exit 0
+fi
+
 test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
@@ -3173,3 +3286,7 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
 test_superseded_host_leaves_the_owner_untouched
+
+test_spool_waits_for_the_latest_successor
+test_mixed_spool_routes_the_scheduled_close_to_main
+test_detached_reader_does_not_stop_scanning_during_cleanup
