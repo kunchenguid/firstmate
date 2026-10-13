@@ -95,7 +95,7 @@ Verify accurate worker placement.
 ## Firstmate spec
 Use only the isolated lab.
 
-Delivery contract: mode=direct-PR
+Delivery contract: mode=no-mistakes
 Ship branch: fm/$id
 EOF
   git clone -q "$PROJ" "$TMP_ROOT/$id-worker"
@@ -110,7 +110,7 @@ spawn_task() {
   if [ "${1:-}" = --relaunch ]; then
     args+=("$@" --harness "sh -c 'echo fixture'")
   else
-    args+=("$PROJ" "sh -c 'echo fixture'" --backend herdr --mode direct-PR --yolo off "$@")
+    args+=("$PROJ" "sh -c 'echo fixture'" --backend herdr --mode no-mistakes --yolo off "$@")
   fi
   FM_SPAWN_NO_GUARD=1 FM_GATE_REFUSE_BYPASS=1 FM_ROOT_OVERRIDE="$CODE_ROOT" \
     "$CODE_ROOT/bin/fm-spawn.sh" "${args[@]}" \
@@ -200,7 +200,7 @@ DRIVER="$TMP_ROOT/in-pane.sh"
     printf 'export %s=%q\n' "$name" "${!name}"
   done
   # shellcheck disable=SC2016 # Expand the fixture variables in the pane driver.
-  printf 'FM_SPAWN_NO_GUARD=1 FM_GATE_REFUSE_BYPASS=1 FM_ROOT_OVERRIDE="$CODE_ROOT" "$CODE_ROOT/bin/fm-spawn.sh" in-pane "$PROJ" %q --backend herdr --mode direct-PR --yolo off > %q 2> %q\n' "sh -c 'echo fixture'" "$TMP_ROOT/in-pane.out" "$TMP_ROOT/in-pane.err"
+  printf 'FM_SPAWN_NO_GUARD=1 FM_GATE_REFUSE_BYPASS=1 FM_ROOT_OVERRIDE="$CODE_ROOT" "$CODE_ROOT/bin/fm-spawn.sh" in-pane "$PROJ" %q --backend herdr --mode no-mistakes --yolo off > %q 2> %q\n' "sh -c 'echo fixture'" "$TMP_ROOT/in-pane.out" "$TMP_ROOT/in-pane.err"
   printf 'printf "%%s\\n" "$?" > %q\n' "$TMP_ROOT/in-pane.rc"
 } > "$DRIVER"
 lab pane run "$HERDR_PANE_ID" "bash '$DRIVER'" >/dev/null
@@ -242,7 +242,7 @@ worktree=$FIXTURE_WT
 project=$PROJ
 harness=sh
 kind=ship
-mode=direct-PR
+mode=no-mistakes
 yolo=off
 branch=fm/legacy
 backend=herdr
