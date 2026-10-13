@@ -1247,6 +1247,45 @@ test_pi_seeded_secondmate_preapproves_project_trust() {
   pass "seeded Pi/pi-signed secondmate launches carry session --approve when advertised"
 }
 
+# The pi secondmate launch template must carry BOTH sides of the upstream-sync
+# merge resolution: the fork's Stage-2 fallback-chain router (-e __PIROUTER__,
+# first) and upstream's parent-home busy contract (-e __PIEXT__, last) around
+# the mate's two primary extensions, in that order, each pointing at a file
+# that exists when the launch executes. Dropping either side silently disables
+# that side's supervision on every pi secondmate.
+test_pi_secondmate_launch_loads_router_and_busy_extensions_in_order() {
+  local rec id sm out status launch router turnend watch busyext
+  id=profile-pi-secondmate-ext-order-z8h
+  rec=$(make_spawn_case profile-pi-secondmate-ext-order pi "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  # A real seeded secondmate home is a firstmate clone, so its tracked
+  # .pi/extensions already exist; mirror that here so the launch's primary
+  # extension paths resolve to real files.
+  mkdir -p "$sm/.pi/extensions"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" \
+    "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$sm/.pi/extensions/"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "pi secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  router="$ROOT/.pi/extensions/fm-opencode-go-chain-router.ts"
+  turnend="$sm/.pi/extensions/fm-primary-turnend-guard.ts"
+  watch="$sm/.pi/extensions/fm-primary-pi-watch.ts"
+  busyext="$HOME_DIR/state/$id.pi-ext.ts"
+  assert_present "$router" "the tracked Stage-2 router extension is missing"
+  assert_present "$turnend" "the seeded secondmate home lacks its turn-end extension"
+  assert_present "$watch" "the seeded secondmate home lacks its watch extension"
+  assert_present "$busyext" "pi secondmate spawn did not write the parent busy extension"
+  assert_contains "$launch" \
+    "-e '$router' -e '$turnend' -e '$watch' -e '$busyext'" \
+    "pi secondmate launch must load the router, turn-end guard, watch, and busy extension in that order"
+  pass "a pi secondmate launch loads the router plus the turn-end, watch, and busy extensions in order"
+}
+
 test_pi_worker_launch_omits_seeded_home_approve() {
   local rec id out status launch
   id=profile-pi-worker-no-approve-z8f
@@ -2505,6 +2544,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_pi_seeded_secondmate_preapproves_project_trust
+test_pi_secondmate_launch_loads_router_and_busy_extensions_in_order
 test_pi_worker_launch_omits_seeded_home_approve
 test_pi_approve_probe_omits_unsupported_flag
 test_pi_exclude_tools_reach_ship_and_scout_launches
