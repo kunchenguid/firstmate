@@ -34,7 +34,7 @@
 #
 # Exit codes: 0 the push can be accepted (absent or in-sync); 10 stale;
 # 11 holds-work; 2 the question could not be answered (no branch, no
-# no-mistakes remote, unreadable gate).
+# no-mistakes remote, unreadable gate, a failed history read).
 set -u
 
 wt=${1:-.}
@@ -74,7 +74,7 @@ fi
 if gitwt merge-base --is-ancestor "$head" "$tip" 2>/dev/null; then
   ahead=$(gitwt rev-list --count "$head..$tip" 2>/dev/null) || ahead='?'
   printf 'relation: gate-ahead\nunique_commits: %s\ngate_ref: holds-work\n' "$ahead"
-  printf 'verdict: the gate ref is %s commit(s) ahead of HEAD, so the push is rejected and those commits exist nowhere else; recover custody first and do not push\n' "$ahead"
+  printf 'verdict: the gate ref is %s commit(s) ahead of HEAD, so the push is rejected and HEAD does not carry those commits; recover custody first and do not push\n' "$ahead"
   exit 11
 fi
 
@@ -86,9 +86,10 @@ fi
 printf 'relation: diverged\nmerge_base: %s\n' "$base"
 
 # `git cherry` marks a commit `-` when the other side has a patch-equivalent one.
-unique=$(gitwt cherry "$head" "$tip" "$base" 2>/dev/null | grep -c '^+')
-total=$(gitwt rev-list --count "$base..$tip" 2>/dev/null) || total='?'
-merges=$(gitwt rev-list --merges --count "$base..$tip" 2>/dev/null) || merges='?'
+cherry=$(gitwt cherry "$head" "$tip" "$base" 2>/dev/null) || fail "could not patch-compare the gate ref with HEAD"
+unique=$(printf '%s\n' "$cherry" | grep -c '^+')
+total=$(gitwt rev-list --count "$base..$tip" 2>/dev/null) || fail "could not count the gate-only commits"
+merges=$(gitwt rev-list --merges --count "$base..$tip" 2>/dev/null) || fail "could not count the gate-only merge commits"
 printf 'gate_only_commits: %s\ngate_only_merges: %s\nunique_commits: %s\n' "$total" "$merges" "$unique"
 if [ "$unique" = 0 ]; then
   printf 'gate_ref: stale\n'

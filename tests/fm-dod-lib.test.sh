@@ -477,6 +477,9 @@ test_driving_text_routes_through_the_gate_ref_probe() {
     "driving text left the trigger to the worker's judgment of whether the branch was touched"
   assert_grep 'never before a flagless reattach' "$out" "driving text would probe an active run"
   assert_grep 'the recovery it offers comes first' "$out" "driving text lets the probe pre-empt an offered recovery"
+  assert_grep 'On exit 2, 10 or 11' "$out" "driving text left an unanswerable probe unrouted"
+  assert_grep 'key=gate-ref-stale]: exit=<code> gate_tip=<sha> head=<sha>: <verdict line>' "$out" \
+    "driving text did not make the decision carry the exit code and both refs"
   [ -x "$ROOT/bin/fm-gate-ref-probe.sh" ] || fail "the probe the driving text names is not executable"
   pass "driving text routes a recovered lane through the gate-ref probe"
 }

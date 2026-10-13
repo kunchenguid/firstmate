@@ -21,7 +21,7 @@ Custody recovery settles branch ownership, not content: the worker must replace 
 Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
-A worker whose run cannot start because its gate ref is stale reports `needs-decision` with key `gate-ref-stale`, carrying the verdict line of `bin/fm-gate-ref-probe.sh`, whose header owns the verdicts and exit codes.
+A worker whose run cannot start because its gate ref is stale reports `needs-decision` with key `gate-ref-stale`, carrying the exit code, `gate_tip`, `head` and verdict line of `bin/fm-gate-ref-probe.sh`, whose header owns the verdicts and exit codes.
 `axi sync --check` reading `custody_returned` with `run_pipeline` does not rule that out, and once custody is stamped no supported no-mistakes command moves the ref.
 Never force the push, delete or rewrite the gate ref, or hand-edit the shared gate repository, and never tell a worker to; the ref is tool-owned state every lane on the project shares.
 Exit 10 means no non-merge commit is unique to the gate ref, so the work is safe; check any merge commit the probe counts before treating the ref as disposable.
