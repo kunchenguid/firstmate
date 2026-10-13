@@ -218,23 +218,32 @@ test_stale_recorded_pr_head_loses_to_fetched_pull_head() {
 }
 
 test_gitlab_mr_meta_fetches_merge_request_head() {
-  local case_dir out stale_sha
-  case_dir=$(make_case gitlab-mr-head)
-  stale_and_pr_commits "$case_dir"
-  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
-  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/merge-requests/7/head"
-  write_task_meta "$case_dir" \
-    "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7" \
-    "pr_head=$stale_sha"
+  local case_dir out stale_sha label project_path
+  # A GitLab namespace may itself hold a segment named like another forge's
+  # pull-request path, and the merge request is still what the URL names.
+  while IFS='|' read -r label project_path; do
+    [ -n "$label" ] || continue
+    case_dir=$(make_case "$label")
+    stale_and_pr_commits "$case_dir"
+    stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+    git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/merge-requests/7/head"
+    write_task_meta "$case_dir" \
+      "pr=https://gitlab.example/$project_path/-/merge_requests/7" \
+      "pr_head=$stale_sha"
 
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+    out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
-  assert_contains "$out" '+pr-fixed' \
-    "gitlab-mr-head: diff must use the fetched merge request head"
-  assert_not_contains "$out" 'stale-local' \
-    "gitlab-mr-head: diff must not use the stale local or recorded content"
-  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
-    "gitlab-mr-head: fetch of refs/merge-requests/<iid>/head should succeed"
+    assert_contains "$out" '+pr-fixed' \
+      "$label: diff must use the fetched merge request head"
+    assert_not_contains "$out" 'stale-local' \
+      "$label: diff must not use the stale local or recorded content"
+    assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+      "$label: fetch of refs/merge-requests/<iid>/head should succeed"
+  done <<'ROWS'
+gitlab-mr-head|group/subgroup/project
+gitlab-mr-head-pull-segment|acme/pull/project
+gitlab-mr-head-pulls-segment|acme/pulls/project
+ROWS
   pass "fm-review-diff fetches refs/merge-requests/<iid>/head for a GitLab merge request"
 }
 

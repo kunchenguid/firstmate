@@ -93,13 +93,9 @@
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
 # a merge command that failed keeps its original error surfaced raw and first.
-# GitLab mirrors that default: a merge request is merged with --squash when
-# the caller passes none of --squash, --rebase, --merge, or --method, because
-# the fleet's recording and teardown machinery reasons on squash merges and an
-# unnamed method should not silently take the project's configured one. A
-# caller who wants a different method names it, and plain glab itself refuses
-# a spelling it does not accept rather than merging with a method nobody
-# verified.
+# GitLab adds no method flag at all: its merge method is the project's own
+# setting, which the merge API applies, and imposing squash there would override
+# that convention rather than mirror the GitHub default.
 #
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
@@ -1781,11 +1777,8 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     merge_status=0
     gitlab_merge_args=()
-    if ! caller_has_merge_method "$@"; then
-      gitlab_merge_args=(--squash)
-    fi
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then
-      gitlab_merge_args+=(--auto-merge=false)
+      gitlab_merge_args=(--auto-merge=false)
     fi
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?

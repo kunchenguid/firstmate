@@ -206,20 +206,10 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 # reported, so the absent tool stops the watch here instead of watching nothing.
 # The Gerrit poll also needs jq, because Gerrit's status has to be read out of a
 # structured record rather than off a rendered line: the tool's own table prints
-# a change's subject before its status, and a subject is free text. A GitLab
-# arm needs jq for the same reason it needs glab at all: the merge request's
-# head and draft state are read from its JSON, the only form plain glab exposes
-# them in, exactly as bin/fm-pr-merge.sh reads its pre-merge conditions.
-if [ "$PROVIDER" = gitlab ]; then
-  GITLAB_MISSING=
-  command -v glab >/dev/null 2>&1 || GITLAB_MISSING="glab"
-  if ! command -v jq >/dev/null 2>&1; then
-    GITLAB_MISSING="${GITLAB_MISSING:+$GITLAB_MISSING and }jq"
-  fi
-  if [ -n "$GITLAB_MISSING" ]; then
-    echo "error: watching a GitLab merge request requires $GITLAB_MISSING on PATH" >&2
-    exit 1
-  fi
+# a change's subject before its status, and a subject is free text.
+if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
+  echo "error: watching a GitLab merge request requires glab on PATH" >&2
+  exit 1
 fi
 if [ "$PROVIDER" = gerrit ]; then
   if ! command -v gerrit-axi >/dev/null 2>&1; then
@@ -256,7 +246,8 @@ fi
 # draft reading refuses, because an unreadable one must not block arming.
 # GitHub reads isDraft from gh's own field selector; GitLab reads
 # work_in_progress out of the same one JSON view of the merge request that the
-# head below is taken from, so one forge read serves both.
+# head below is taken from, so one forge read serves both. Both reads need jq
+# and are skipped without it, so a host with no jq arms with no draft check.
 GITLAB_JSON=
 if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   DRAFT_JSON=$(gh pr view "$URL" --json isDraft 2>/dev/null || true)
@@ -265,7 +256,7 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
     exit 1
   fi
 fi
-if [ "$PROVIDER" = gitlab ]; then
+if [ "$PROVIDER" = gitlab ] && command -v jq >/dev/null 2>&1; then
   GITLAB_JSON=$(GITLAB_HOST="$HOST" glab mr view "$NUMBER" -R "https://$HOST/$PROJECT_PATH" -F json 2>/dev/null || true)
   if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] \
     && [ "$(fm_pr_json_draft_state "$GITLAB_JSON" work_in_progress)" = true ]; then
@@ -278,8 +269,9 @@ fi
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field, and glab exposes it inside the merge
-# request's JSON, which is why a GitLab arm requires jq and reads that one view
-# once for the draft refusal above and the head here. tea's single-PR view
+# request's JSON, so a GitLab arm with jq on PATH reads that one view once for
+# the draft refusal above and the head here, and one without jq records no
+# pr_head. tea's single-PR view
 # ignores field selection entirely, so a Forgejo task records no pr_head here,
 # and neither does a Gerrit task: a Gerrit revision names one patch set, every
 # amend or rebase is a new patch set, and bin/fm-review-diff.sh has no Gerrit

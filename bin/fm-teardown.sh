@@ -66,9 +66,9 @@
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
 # A recorded GitLab merge-request pr= takes its own proof: the merged state is
-# read through fm_pr_gitlab_read_record (plain glab with a glab-axi fallback) and
-# its head fetched from refs/merge-requests/<iid>/head, the ref GitLab keeps for
-# every merge request including a merged one, with the same containment checks.
+# read through fm_pr_gitlab_read_record (plain glab) and its head fetched from
+# refs/merge-requests/<iid>/head, the ref GitLab keeps for every merge request
+# including a merged one, with the same containment checks.
 # A forge lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # A merge-tree option or execution error reports the content-landed proof as
@@ -1649,10 +1649,6 @@ pr_number_from_target() {
       n=${target##*/pull/}
       n=${n%%[!0-9]*}
       ;;
-    *"/-/merge_requests/"*)
-      n=${target##*/-/merge_requests/}
-      n=${n%%[!0-9]*}
-      ;;
     *"/pulls/"*)  # Forgejo addresses pulls as /pulls/<n> and serves refs/pull/<n>/head.
       n=${target##*/pulls/}
       n=${n%%[!0-9]*}
@@ -1666,23 +1662,12 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
-# The forge's ref for the PR a target names: refs/pull/<n>/head on GitHub,
-# refs/merge-requests/<iid>/head on GitLab. A bare number can only come from
-# the GitHub branch lookup, so it keeps the pull ref.
-pr_ref_for_target() {  # <target> <n>
-  case "$1" in
-    *"/-/merge_requests/"*) printf 'refs/merge-requests/%s/head' "$2" ;;
-    *) printf 'refs/pull/%s/head' "$2" ;;
-  esac
-}
-
 ensure_commit_object() {
-  local target=$1 commit=$2 n ref
+  local target=$1 commit=$2 n
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
-  ref=$(pr_ref_for_target "$target" "$n")
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "$ref" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -1735,11 +1720,12 @@ fetch_merge_request_head() {  # <iid>
 }
 
 # Is the recorded GitLab merge request merged with the worktree's local work
-# contained in its head? The state comes from fm_pr_gitlab_read_record and the
-# head from refs/merge-requests/<iid>/head, both addressed through the parsed
-# URL identity, never through a configured default host. Returns non-zero
-# when the merge request is not merged, the current work is not contained in
-# its head, or any read fails - the caller falls back to the content check.
+# contained in its head? The state comes from fm_pr_gitlab_read_record,
+# addressed through the parsed URL identity and never through a configured
+# default host, and the head from refs/merge-requests/<iid>/head on the
+# worktree's origin remote. Returns non-zero when the merge request is not
+# merged, the current work is not contained in its head, or any read fails -
+# the caller falls back to the content check.
 gitlab_mr_is_merged() {
   local head current landed=0
   fm_pr_url_parse "$PR_URL" || return 1
@@ -1747,7 +1733,6 @@ gitlab_mr_is_merged() {
   fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
   [ "$FM_PR_RECORD_MERGED" = true ] || return 1
   head=$(fetch_merge_request_head "$FM_PR_NUMBER") || return 1
-  ensure_commit_object "$PR_URL" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1

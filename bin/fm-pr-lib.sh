@@ -1106,7 +1106,7 @@ fm_pr_github_read_record() {  # <host> <owner> <repo> <number>
   fm_pr_github_read_record_with_gh_axi "$@"
 }
 
-fm_pr_gitlab_read_record_with_glab() {  # <host> <path> <number>
+fm_pr_gitlab_read_record() {  # <host> <path> <number>
   local host=$1 path=$2 number=$3 project_url json fields line
   local total=0 named=0 state='' merged=''
   FM_PR_RECORD_STATE=
@@ -1150,68 +1150,6 @@ FIELDS
   # Consumed by bin/fm-crew-state.sh passed_pr_detail.
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
-}
-
-# The glab-axi fallback for a host with no plain glab, mirroring the gh-axi
-# fallback above: -R carries the host with the project path, so the instance is
-# resolved from the record rather than the tool's configured default, and the
-# state is parsed from the tool's own field output with the same one-exact-
-# occurrence awk the gh-axi twin uses, so a changed output shape reads as an
-# unknown state instead of a guess. GitLab's native spellings are lowercase -
-# its open state is `opened`, not the gh-twin's `open`, and `locked` is a
-# readable non-merged state - and the case pattern keeps the twin's uppercase
-# spellings accepted too; a native state passes through the way the plain-glab
-# twin passes it, so `locked` keeps its own spelling in reports.
-fm_pr_gitlab_read_record_with_glab_axi() {  # <host> <path> <number>
-  local host=$1 path=$2 number=$3 output state
-  FM_PR_RECORD_STATE=
-  FM_PR_RECORD_MERGED=
-  if ! output=$(glab-axi mr view "$number" -R "$host/$path" 2>/dev/null); then
-    return 1
-  fi
-  if ! state=$(printf '%s\n' "$output" | awk '
-    $1 == "state:" { count++; value=$2 }
-    END { if (count == 1 && value != "") print value; else exit 1 }
-  '); then
-    return 1
-  fi
-  case "$state" in
-    MERGED|merged)
-      # shellcheck disable=SC2034
-      FM_PR_RECORD_STATE=MERGED
-      # shellcheck disable=SC2034
-      FM_PR_RECORD_MERGED=true
-      ;;
-    OPEN|open|opened)
-      # shellcheck disable=SC2034
-      FM_PR_RECORD_STATE=OPEN
-      # shellcheck disable=SC2034
-      FM_PR_RECORD_MERGED=false
-      ;;
-    LOCKED|locked)
-      # shellcheck disable=SC2034
-      FM_PR_RECORD_STATE=locked
-      # shellcheck disable=SC2034
-      FM_PR_RECORD_MERGED=false
-      ;;
-    CLOSED|closed)
-      # shellcheck disable=SC2034
-      FM_PR_RECORD_STATE=CLOSED
-      # shellcheck disable=SC2034
-      FM_PR_RECORD_MERGED=false
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-fm_pr_gitlab_read_record() {  # <host> <path> <number>
-  if command -v glab >/dev/null 2>&1 && fm_pr_gitlab_read_record_with_glab "$@"; then
-    return 0
-  fi
-  command -v glab-axi >/dev/null 2>&1 || return 1
-  fm_pr_gitlab_read_record_with_glab_axi "$@"
 }
 
 # tea addresses a repo by slug only and takes the host from a named login, so

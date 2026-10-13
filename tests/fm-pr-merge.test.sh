@@ -1973,7 +1973,7 @@ test_gitlab_url_resolves_and_merges() {
   assert_grep "GITLAB_HOST=$MR_HOST mr view 7 -R $MR_PROJECT_URL -F json" "$case_dir/glab.log" \
     "gitlab-merges: the pre-merge state was not read from the project URL"
   merge_line=$(glab_merge_line "$case_dir/glab.log")
-  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --squash" ] \
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
     || fail "gitlab-merges: unexpected merge invocation: '$merge_line'"
   assert_grep "successful pipeline at head $MR_HEAD" "$case_dir/stderr" \
     "gitlab-merges: the verified head was not reported"
@@ -2007,9 +2007,9 @@ test_gitlab_host_comes_from_the_url() {
   pass "fm-pr-merge takes the GitLab instance from the URL rather than assuming one"
 }
 
-test_gitlab_squash_is_the_default_method() {
-  local case_dir rc merge_line
-  case_dir=$(make_gitlab_case gitlab-squash-default)
+test_gitlab_imposes_no_merge_method() {
+  local case_dir rc merge_line flag
+  case_dir=$(make_gitlab_case gitlab-no-method)
 
   set +e
   run_pr_merge "$case_dir" task-x1 "$MR_URL" \
@@ -2017,25 +2017,14 @@ test_gitlab_squash_is_the_default_method() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "gitlab-squash-default: merge should succeed"
+  expect_code 0 "$rc" "gitlab-no-method: merge should succeed"
   merge_line=$(glab_merge_line "$case_dir/glab.log")
-  case "$merge_line" in
-    *" --squash") ;;
-    *) fail "gitlab-squash-default: an unnamed method did not default to squash: '$merge_line'" ;;
-  esac
-
-  # A caller that names a method gets exactly it: no squash is added beside it.
-  case_dir=$(make_gitlab_case gitlab-caller-method)
-  set +e
-  run_pr_merge "$case_dir" task-x1 "$MR_URL" -- --rebase \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-  expect_code 0 "$rc" "gitlab-caller-method: a named method should merge"
-  merge_line=$(glab_merge_line "$case_dir/glab.log")
-  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --rebase" ] \
-    || fail "gitlab-caller-method: the named method was not forwarded alone: '$merge_line'"
-  pass "fm-pr-merge defaults a GitLab merge to squash and forwards a named method alone"
+  for flag in --squash --rebase --merge --method; do
+    case "$merge_line" in
+      *"$flag"*) fail "gitlab-no-method: '$flag' was imposed on GitLab: '$merge_line'" ;;
+    esac
+  done
+  pass "fm-pr-merge imposes no merge method on GitLab, leaving the project's own one"
 }
 
 test_gitlab_extra_args_forwarded() {
@@ -2060,7 +2049,7 @@ test_gitlab_extra_args_forwarded() {
   set -e
   expect_code 0 "$rc" "gitlab-extra-args-attended: attended override should merge"
   merge_line=$(glab_merge_line "$case_dir/glab.log")
-  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --remove-source-branch --squash" ] \
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --remove-source-branch" ] \
     || fail "gitlab-extra-args-attended: extra glab flags were not forwarded: '$merge_line'"
   pass "fm-pr-merge refuses GitLab source-branch deletion unless --attended-override is passed"
 }
@@ -3000,7 +2989,7 @@ test_parses_pr_url_for_gh_axi
 test_github_still_forwards_sha_arg
 test_gitlab_url_resolves_and_merges
 test_gitlab_host_comes_from_the_url
-test_gitlab_squash_is_the_default_method
+test_gitlab_imposes_no_merge_method
 test_gitlab_extra_args_forwarded
 test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently

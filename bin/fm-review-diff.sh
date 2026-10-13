@@ -118,12 +118,12 @@ pr_number_from_target() {
   local target=$1 n
   case "$target" in
     '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
     *"/-/merge_requests/"*)
       n=${target##*/-/merge_requests/}
+      n=${n%%[!0-9]*}
+      ;;
+    *"/pull/"*)
+      n=${target##*/pull/}
       n=${n%%[!0-9]*}
       ;;
     *"/pulls/"*)  # Forgejo addresses pulls as /pulls/<n>.

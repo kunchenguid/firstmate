@@ -54,9 +54,9 @@ test_gitlab_com_origin_proposes_gitlab() {
       *) fail "a gitlab.com $label did not propose gitlab with its evidence: $out" ;;
     esac
   done <<'ROWS'
-https-origin|https://gitlab.com/research8881641/vibe-voice.git
-ssh-origin|ssh://git@gitlab.com/research8881641/my-research-team.git
-scp-like-origin|git@gitlab.com:research8881641/vibe-voice.git
+https-origin|https://gitlab.com/example-group/example-project.git
+ssh-origin|ssh://git@gitlab.com/example-group/example-project.git
+scp-like-origin|git@gitlab.com:example-group/example-project.git
 ROWS
   pass "a gitlab.com origin proposes forge=gitlab and names the evidence"
 }

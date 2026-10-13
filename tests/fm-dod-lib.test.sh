@@ -391,10 +391,8 @@ EOF
   pass "fenced and indented Captain lines are not authorized intent"
 }
 
-# The draft check the DoD hands a worker must be the gh-axi path that rule 3 of
-# every ship brief requires for GitHub operations, never raw gh (issue 5325).
 test_gitlab_dod_renders_glab_axi_and_carries_the_forge_token() {
-  local out
+  local out err forge mode
   out="$TMP_ROOT/dod-direct-gitlab.md"
   fm_dod_block direct-PR dod-gitlab-task fm/dod-gitlab-task gitlab > "$out" \
     || fail "gitlab direct-PR DoD refused"
@@ -417,10 +415,15 @@ test_gitlab_dod_renders_glab_axi_and_carries_the_forge_token() {
     || fail "gitlab no-mistakes DoD refused"
   assert_grep 'Delivery contract: mode=no-mistakes forge=gitlab' "$out" \
     "gitlab no-mistakes DoD dropped the forge token"
-  # The pipeline's own publish stays gh-axi-shaped on every non-gerrit forge.
+  # The pipeline's publish on a GitLab remote is a merge request, so its
+  # readback uses glab-axi exactly as the direct-PR one does.
   # shellcheck disable=SC2016
-  assert_grep '`gh-axi pr view <number>`' "$out" \
-    "no-mistakes readback lost its gh-axi wording"
+  assert_grep '`glab-axi mr view <iid> --full` must print `draft: no`' "$out" \
+    "gitlab no-mistakes readback did not use glab-axi"
+  # shellcheck disable=SC2016
+  assert_grep '`glab-axi mr update <iid> --ready`' "$out" \
+    "gitlab no-mistakes readback did not name the ready command"
+  assert_no_grep 'gh-axi pr' "$out" "gitlab no-mistakes readback still reads the draft state with gh-axi"
 
   out="$TMP_ROOT/dod-direct-gitlab-base.md"
   fm_dod_block direct-PR dod-gitlab-task fm/dod-gitlab-task gitlab feature/hub > "$out" \
@@ -432,9 +435,23 @@ test_gitlab_dod_renders_glab_axi_and_carries_the_forge_token() {
   if fm_dod_block local-only dod-gitlab-task fm/dod-gitlab-task gitlab >/dev/null 2>&1; then
     fail "local-only accepted a gitlab forge"
   fi
-  pass "gitlab DoD renders glab-axi publishing and carries the forge token"
+
+  # gitlab is the one forge binding that takes a base branch; every other one
+  # keeps refusing it in both publishing modes.
+  for forge in gerrit forgejo; do
+    for mode in direct-PR no-mistakes; do
+      if err=$(fm_dod_block "$mode" dod-gitlab-task fm/dod-gitlab-task "$forge" feature/hub 2>&1 >/dev/null); then
+        fail "$mode on forge=$forge accepted a base branch"
+      fi
+      assert_contains "$err" "a base branch is not supported on forge=$forge" \
+        "$mode on forge=$forge refused a base branch without its reason"
+    done
+  done
+  pass "gitlab DoD renders glab-axi publishing and readback, carries the forge token, and alone among forges takes a base branch"
 }
 
+# The draft check the DoD hands a worker must be the gh-axi path that rule 3 of
+# every ship brief requires for GitHub operations, never raw gh (issue 5325).
 test_pr_based_dod_draft_check_uses_gh_axi() {
   local mode out
   for mode in direct-PR no-mistakes; do

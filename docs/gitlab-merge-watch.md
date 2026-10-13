@@ -2,7 +2,7 @@
 
 Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
 The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
-The head-recording, `jq`-refusal, and squash-default evidence was collected on 2026-10-11.
+The head-recording evidence was collected on 2026-10-11.
 Every output is reproduced exactly.
 
 ## Versions
@@ -69,7 +69,7 @@ Two things about plain `glab` were established by running it, because assuming e
 
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-The poll keeps reading glab's own field output, because `jq` is not one of firstmate's common tools and the poll must stay silent-safe without it; arming and merging, which refuse loudly rather than silently on a missing tool, require `jq` and read that JSON (see the sections below).
+The poll keeps reading glab's own field output, because `jq` is not one of firstmate's common tools and the poll must stay silent-safe without it; merging, which refuses loudly rather than silently on a missing tool, requires `jq` and reads that JSON, and arming reads it only when `jq` is present (see the sections below).
 Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
@@ -195,18 +195,13 @@ $ PATH="$noglab" fm-pr-check.sh e6 https://github.com/kunchenguid/firstmate/pull
 armed: state/e6.check.sh
 ```
 
-Arming a merge request also reads its JSON, so a missing `jq` refuses the same way, before any forge call and with nothing recorded (2026-10-11):
-
-```
-$ PATH="$nojq" fm-pr-check.sh e1 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
-error: watching a GitLab merge request requires jq on PATH
-$ echo $?
-1
-```
+Arming needs no other tool.
+A missing `jq` does not refuse: the merge request's JSON, which the next section reads, is simply not read, so the watch arms as it does above with no draft check and no recorded `pr_head=`, exactly as the GitHub arm skips its own draft read without `jq`.
+`tests/fm-pr-check-security.test.sh` pins that degradation against fixtures; it has no live run in this record.
 
 ## Arming records the merge request head (2026-10-11)
 
-`bin/fm-pr-check.sh` reads one JSON view of the merge request at arming and uses it twice: a `work_in_progress` draft refuses exactly like the GitHub arm-time draft refusal, and `sha` is recorded as `pr_head=`.
+With `jq` on `PATH`, `bin/fm-pr-check.sh` reads one JSON view of the merge request at arming and uses it twice: a `work_in_progress` draft refuses exactly like the GitHub arm-time draft refusal, and `sha` is recorded as `pr_head=`.
 Arming the merged fixture merge request records its head, matching the live head the 2026-08-22 merge refusal below verified:
 
 ```
@@ -297,8 +292,7 @@ error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture
 ```
 
 The remaining refusal conditions, and the merge itself, are covered by `tests/fm-pr-merge.test.sh` against fixtures.
-Since 2026-10-11 a merge whose caller names no method merges with `--squash`, mirroring the GitHub default, because the fleet's recording and teardown machinery reasons on squash merges; a caller that wants another method names `--merge`, `--rebase`, or `--method`, and plain `glab` itself refuses a spelling it does not accept rather than merging with a method nobody verified.
-The squash default is pinned by the same test file; it was not exercised against a live merge request, for the same reason the merge itself was not.
+The merge adds no merge-method flag when the caller names none, because the project's own merge method applies; the same test file pins that.
 The conflict, unresolved-discussion, and running-pipeline conditions were additionally exercised against real merge requests on a private instance; those runs cannot be reproduced here, so their identifiers stay out of this record.
 The merge itself is not exercised against any live merge request, in either direction: `glab mr merge` has no dry run, so a live success path would mean merging someone's work to produce evidence.
 
@@ -312,7 +306,7 @@ It skips only that prompt; the conditions above are what authorize the merge.
 
 ## Why a recorded head is not the authority
 
-`bin/fm-pr-check.sh` records `pr_head=` for GitHub and GitLab alike: `gh` exposes the head commit as a selectable field, and the GitLab arm reads the merge request's JSON (see above).
+`bin/fm-pr-check.sh` records `pr_head=` for GitHub and GitLab alike: `gh` exposes the head commit as a selectable field, and the GitLab arm reads the merge request's JSON when `jq` is present (see above).
 It is optional by design, and the other consumers treat it that way: `bin/fm-teardown.sh` proves a merge request landed through the merged state read plus a fetch of `refs/merge-requests/<iid>/head`, the ref GitLab keeps for every merge request including a merged one, and `bin/fm-review-diff.sh` fetches that same ref by default with a recorded `pr_head=` only as its offline fallback.
 A Gerrit task records none, because a Gerrit revision names one patch set and every amend or rebase is a new one.
 
@@ -371,6 +365,9 @@ verified: https://gitlab.com/gh0stwin/firstmate-gitlab-port-fixture/-/merge_requ
 ✓ Pipeline succeeded.
 ✓ Merged!
 ```
+
+This pass was collected while `bin/fm-pr-merge.sh` still added `--squash` to a merge whose caller named no method, so the merge above was sent as a squash; that default has since been removed and the script now adds no merge-method flag.
+The landed-work proof below does not depend on the method: it reads the merged state and the containment of the local work in `refs/merge-requests/1/head`.
 
 The merge request reports `state=merged` with merge commit `dccd89d`, and the teardown landed-work proof accepted it through the merged-state read plus the `refs/merge-requests/1/head` fetch, syncing the project clone and completing the task:
 

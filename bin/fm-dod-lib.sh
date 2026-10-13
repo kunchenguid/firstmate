@@ -73,9 +73,9 @@
 # worker opens its own merge request with glab-axi instead of a GitHub pull
 # request with gh-axi, and on forgejo a direct-PR worker opens its pull request
 # with tea instead of gh-axi, while a no-mistakes run's pull request stays the
-# pipeline's own publish at its configured push target: that readback keeps
-# gh-axi for none and gitlab, and only forgejo's stays on tea, because its
-# pull request lives on the Forgejo forge. A forge composes with the two
+# pipeline's own publish at its configured push target: its draft readback uses
+# the CLI of the forge that pull request or merge request lives on, glab-axi on
+# gitlab, tea on forgejo, and gh-axi otherwise. A forge composes with the two
 # modes that publish and is refused on local-only, which publishes nothing. On
 # gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
@@ -249,11 +249,10 @@ fm_ship_branch_prefix() {  # <branch> <task-id>
 # bin/fm-spawn.sh takes it as --base-branch, refuses a brief whose Base branch
 # lines (fm_brief_base_branches) disagree, and records base_branch= in the task
 # metadata, and every later consumer reads that metadata field. It is
-# refused on local-only, whose landing fast-forwards local main, on a Gerrit
-# forge, whose publish path targets the change's own branch, and on an
-# external review tool, which never targets a pull request at all; a GitLab
-# merge request or a Forgejo pull request targets any branch, so a base branch
-# is ordinary there.
+# refused on local-only, whose landing fast-forwards local main, and on every
+# forge binding except gitlab: a Gerrit publish path targets the change's own
+# branch and an external review tool never targets a pull request, while a
+# GitLab merge request targets any branch, so a base branch is ordinary there.
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   local base=$1 mode=$2 forge=$3 caller=$4
   [ -n "$base" ] || return 0
@@ -266,7 +265,8 @@ fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
     return 1
   fi
   case "$forge" in
-    gerrit|external)
+    none|gitlab) ;;
+    *)
       echo "error: $caller: a base branch is not supported on forge=$forge" >&2
       return 1 ;;
   esac
@@ -570,12 +570,10 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
   # its own branches), so this split names every tool the worker reads. A
   # gitlab direct-PR worker publishes the merge request itself and a forgejo
   # direct-PR worker its pull request, so each gets its own forge CLI
-  # sentences; the no-mistakes readback below is scoped to the pipeline's own
-  # publish at its configured push target instead: none and gitlab keep the
-  # gh-axi sentence, and only forgejo, whose pull request lives on the
-  # Forgejo forge, overrides it with the tea sentence.
+  # sentences; the no-mistakes readback below reads the pipeline's own publish
+  # with that same forge's CLI, because the pull request or merge request the
+  # pipeline opened lives on that forge.
   [ "$forge" = none ] || forge_token=" forge=$forge"
-  nm_draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
   # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backticked command snippets must reach the reading agent verbatim, not expand at render time.
   if [ "$forge" = gitlab ]; then
     if [ -n "$base" ]; then
@@ -583,6 +581,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
     fi
     publish_action='push your branch and open a merge request with `glab-axi` that is ready for review, not a draft'
     draft_check='Before you report done, read the merge request back from the forge and confirm it is not a draft (`glab-axi mr view <iid> --full` must print `draft: no`, where <iid> is the merge request number from your MR URL); if it is a draft, mark it ready with `glab-axi mr update <iid> --ready`.'
+    nm_draft_check='(`glab-axi mr view <iid> --full` must print `draft: no`, where <iid> is the merge request number from your MR URL); if it is a draft, mark it ready with `glab-axi mr update <iid> --ready`.'
   elif [ "$forge" = forgejo ]; then
     publish_action='push your branch and open a PR with `tea` that is ready for review, not a draft'
     draft_check="Before you report done, read the PR back from the forge and confirm it is not a draft (\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
@@ -590,6 +589,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
   else
     publish_action='push your branch and open a PR with `gh-axi` that is ready for review, not a draft'
     draft_check='Before you report done, read the PR back from the forge and confirm it is not a draft (`gh-axi pr view <number>` must print `draft: no`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with `gh-axi pr ready <number>`.'
+    nm_draft_check='(`gh-axi pr view <number>` must print `draft: no`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with `gh-axi pr ready <number>`.'
   fi
   case "$mode:$forge" in
     direct-PR:gerrit)

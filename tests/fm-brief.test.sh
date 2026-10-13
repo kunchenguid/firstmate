@@ -229,9 +229,9 @@ test_ship_modes_generate_clean_briefs() {
 # with no --forge renders the unchanged gh-axi wording. The forge is a ship
 # input only, and the closed set refuses anything else.
 # --forge gitlab names glab-axi alongside gh-axi in the forge-CLI rule and in
-# the direct-PR Definition of done's own open-a-merge-request line, while a
-# no-mistakes gitlab brief's draft readback stays on the pipeline's own
-# gh-axi publish.
+# the direct-PR Definition of done's own open-a-merge-request line, and a
+# no-mistakes gitlab brief's draft readback reads the pipeline's merge request
+# with glab-axi too.
 test_forge_selection_renders_correct_cli() {
   local home brief out rc
   home="$TMP_ROOT/forge-home"
@@ -298,14 +298,18 @@ test_forge_selection_renders_correct_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-gitlab-nm some-proj --mode no-mistakes --forge gitlab >/dev/null 2>&1 \
     || fail "--forge gitlab should scaffold a no-mistakes ship brief"
   brief="$home/data/brief-forge-gitlab-nm/brief.md"
-  # The pipeline's own publish stays gh-axi-shaped, so the no-mistakes draft
-  # readback keeps the gh-axi wording a gitlab direct-PR readback does not.
+  # The pipeline's publish on a GitLab remote is a merge request, so the
+  # no-mistakes draft readback reads and clears it with glab-axi.
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
-  assert_grep 'confirm it is not a draft (`gh-axi pr view <number>` must print `draft: no`' "$brief" \
-    "a no-mistakes --forge gitlab DOD must read the draft state back with the pipeline's gh-axi publish"
+  assert_grep 'confirm it is not a draft (`glab-axi mr view <iid> --full` must print `draft: no`' "$brief" \
+    "a no-mistakes --forge gitlab DOD must read the draft state back with glab-axi"
   # shellcheck disable=SC2016 # Backticks are literal generated brief text.
-  assert_no_grep 'glab-axi mr view' "$brief" \
-    "a no-mistakes --forge gitlab DOD must not send the pipeline's PR readback to glab-axi"
+  assert_grep 'mark it ready with `glab-axi mr update <iid> --ready`' "$brief" \
+    "a no-mistakes --forge gitlab DOD must clear a draft with glab-axi"
+  assert_no_grep 'gh-axi pr view' "$brief" \
+    "a no-mistakes --forge gitlab DOD must not read the merge request's draft state with gh-axi"
+  assert_no_grep 'gh-axi pr ready' "$brief" \
+    "a no-mistakes --forge gitlab DOD must not send the worker to gh-axi to clear a draft"
 
   while IFS='|' read -r label args expect; do
     [ -n "$label" ] || continue

@@ -1019,7 +1019,7 @@ test_gitlab_mr_merged_lands_the_worktree() {
 }
 
 test_teardown_closes_a_gitlab_task_with_its_mr_url_as_a_note() {
-  local case_dir out real_tasks_axi mr_url=https://gitlab.com/research8881641/vibe-voice/-/merge_requests/1
+  local case_dir out real_tasks_axi mr_url=https://gitlab.com/example-group/example-project/-/merge_requests/1
   case_dir=$(make_case tasks-axi-close-gitlab)
   write_meta "$case_dir" no-mistakes ship
   printf 'pr=%s\n' "$mr_url" >> "$case_dir/state/task-x1.meta"
