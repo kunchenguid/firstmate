@@ -2,7 +2,7 @@
 
 Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
 The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
-The head-recording evidence was collected on 2026-10-11.
+The head-recording evidence was collected on 2026-10-11, and the live end-to-end pass on 2026-10-13.
 Every output is reproduced exactly.
 
 ## Versions
@@ -48,10 +48,11 @@ GNU bash, version 5.2.15(1)-release (x86_64-pc-linux-gnu)
 
 ## The evidence project
 
-All live evidence here reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
+All live evidence here except the 2026-10-13 end-to-end pass reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
 It holds one deliberately merged merge request and one deliberately open one, so both outcomes can be shown against real data.
 Every command against it reads a public merge request and needs no credential, so a reader can rerun each one and see the same output.
 Its README asks that the open merge request be left open.
+The 2026-10-13 pass merges a merge request for real, so it uses its own throwaway fixture, named in its section.
 
 A non-default host appears below only as the placeholder `gitlab.example`, which resolves nowhere.
 That is deliberate: the host-agnostic property is a property of the stored record and the poll's URL reconstruction, so it is demonstrated by inspecting those rather than by reaching any private instance.
@@ -212,7 +213,7 @@ pr=https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
 pr_head=33762fcf6777c8d993220d25fb541e56c48081b9
 ```
 
-That arming refusal also ran live against a real draft merge request on 2026-10-13 (the section below), so both the unit pin and a real forge reading exist now.
+That arming refusal also ran live against a real draft merge request on 2026-10-13 (the "Live end to end" section at the end of this record), so both the unit pin and a real forge reading exist now.
 An unreadable draft state still does not refuse, matching how the head read is optional.
 
 ## Registration version
@@ -224,7 +225,7 @@ Arm a current watch with `bin/fm-pr-check.sh`.
 ## Merging a merge request
 
 `bin/fm-pr-merge.sh` now merges a GitLab merge request through the shared recording helper and GitLab's own live pre-merge guards.
-Every run below used a throwaway `FM_HOME`, so no live task record was touched, and a `glab` wrapper that refused any `merge` subcommand outright, so no merge could reach the forge even if a check were wrong.
+Every run in this section used a throwaway `FM_HOME`, so no live task record was touched, and a `glab` wrapper that refused any `merge` subcommand outright, so no merge could reach the forge even if a check were wrong.
 That wrapper is why the open fixture merge request could be used as evidence at all: it is `mergeable` with discussions resolved, so the pipeline conditions are the only thing between it and a real merge.
 
 Merging needs `glab` for the read and `jq` to parse it, and either one absent refuses before anything is recorded:
@@ -294,7 +295,8 @@ error: refusing to merge https://gitlab.com/KarotKris/gitlab-merge-watch-fixture
 The remaining refusal conditions, and the merge itself, are covered by `tests/fm-pr-merge.test.sh` against fixtures.
 The merge adds no merge-method flag when the caller names none, because the project's own merge method applies; the same test file pins that.
 The conflict, unresolved-discussion, and running-pipeline conditions were additionally exercised against real merge requests on a private instance; those runs cannot be reproduced here, so their identifiers stay out of this record.
-The merge itself is not exercised against any live merge request, in either direction: `glab mr merge` has no dry run, so a live success path would mean merging someone's work to produce evidence.
+The merge itself is not exercised against this fixture, in either direction: `glab mr merge` has no dry run, so a live success path here would mean merging the merge request the fixture keeps open.
+The one live merge in this record is the throwaway merge request of the 2026-10-13 pass below.
 
 ## Why the head is read live and bound to the merge
 

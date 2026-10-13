@@ -77,9 +77,10 @@
 #   approve, or merge such a review, so that rail always escalates
 #   (docs/external-review-forge.md the external design).
 #   The binding is EXPLICIT because a provider family must never be guessed;
-#   bin/fm-forge-detect.sh proposes gerrit from a protocol fact at project-add
-#   intake, forgejo has no such fact and is proposed from the captain's own
-#   account of the host, external is never detected or proposed because no
+#   bin/fm-forge-detect.sh proposes gerrit from a protocol fact and gitlab from
+#   a gitlab.com origin at project-add intake, forgejo and a self-hosted GitLab
+#   instance have no such fact and are proposed from the captain's own account
+#   of the host, external is never detected or proposed because no
 #   protocol fact identifies a snapshot-uploading review tool, and the captain's
 #   confirmation is what this record holds.
 #   A forge describes what a mode publishes, so it composes with no-mistakes and

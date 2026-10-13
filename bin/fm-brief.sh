@@ -73,12 +73,12 @@
 # script never infers a forge and never looks the binding up, and bin/fm-spawn.sh
 # refuses a brief whose forge disagrees with the registry. bin/fm-project-mode.sh's
 # header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`,
-# `gitlab`, `forgejo`, and `external` change in the Definition of done. On
-# `gitlab` this script also names glab-axi in the ship brief's forge-CLI rule,
-# on `forgejo` it names tea instead of gh-axi, and on `external` that rule
-# names no forge CLI, because the home's review tool is the only publishing
-# tool. A forge on --mode local-only is refused, because that mode publishes
-# nothing, and `external` also refuses no-mistakes.
+# `gitlab`, `forgejo`, and `external` change in the Definition of done. The
+# ship brief's forge-CLI rule names glab-axi beside gh-axi on `gitlab` and tea
+# instead of gh-axi on `forgejo`, while on `external` it names no forge CLI,
+# because the home's review tool is the only publishing tool. A forge on
+# --mode local-only is refused, because that mode publishes nothing, and
+# `external` also refuses no-mistakes.
 # --pr names who writes the pull request's title and body, defaults to auto, and
 # is the explicit task-side form of the registry's `pr=manual` token exactly as
 # --forge is of `forge=`: read from data/projects.md at intake and passed here,
