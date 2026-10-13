@@ -602,6 +602,20 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## MAI routing (config/mai-routing)
+
+The optional local, gitignored `config/mai-routing` presence flag opts this home into routing bounded mechanical classifications through self-hosted MAI-Pro on the F2 stage gateway rather than spending the primary thread on them.
+With the flag absent the only consumer, `bin/fm-ask-mai-wake.sh`, exits 2 and the primary thread handles wakes exactly as before.
+
+`bin/fm-ask-mai.sh` is the fail-closed one-shot call surface: fixed model `marutai/MAI-Pro` (never selectable by argument or environment), `temperature=0`, `reasoning_effort=low`, stdout carries only the answer, and every non-happy path - transport, HTTP error after bounded retry, empty or null content, or `finish_reason=length` - exits non-zero.
+Escalation is the caller's own thread, never another gateway model.
+
+Privacy tiers: content that must stay local is refused outright by `bin/fm-ask-mai-redacted.sh` - `data/captain*.md`, `data/learnings.md`, `data/*/brief.md`, and `.env` references, plus any line carrying an `@captain`, `@private`, or `@secret` marker.
+Material that may reach MAI-Pro only after redaction passes through that wrapper first: full PR URLs collapse to `#<number>`, `~/Git` and absolute home prefixes collapse to basenames, and any path containing a `state/` component collapses to its basename.
+
+`bin/fm-ask-mai-wake.sh <home> <wake-reason>` classifies one wake reason into `absorb`, `surface`, or `escalate`; an out-of-set or failed answer always resolves to `escalate`, so an MAI-Pro failure lands the wake back on the primary thread.
+The spend-or-judgment classifications in the design report's routing rubric stay on the primary thread: spend, dispatch, merge, persona, captain-facing text, and multi-artifact judgment.
+
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
 The optional local, gitignored `config/wedge-defer-parked-gate` presence flag opts this home into a default-off second form of wait evidence in the watcher's wedge timer.
