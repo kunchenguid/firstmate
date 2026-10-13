@@ -2142,6 +2142,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - A host refusal before launch releases only the new candidate and leaves the old agent's seat alone.
 - A confirmed start counts the model the host actually runs, reports any mismatch with the requested model, and survives a failed update of the primary's own record.
 - A lost reply or an unknown outcome keeps the candidate counted until the primary's watcher reads the host's outcome for that generation; a missing or mismatched receipt stays unknown and never permits the token to repeat lifecycle effects.
+- An unresolved received operation stays unknown after an adoption write fails; validation errors never replace an earlier operation's receipt with a prelaunch refusal.
 - While seat pools are configured, a host refuses a supervisor launch or relaunch that did not come through the primary's accounting.
 - The primary grants no pooled seat while any registered remote has a pending delivery or no complete confirmation of the current declaration.
 - Each delivery invalidates the remote's previous confirmation before it is sent and restores it only from a complete, matching answer, so a lost or late answer keeps admission refused rather than trusting stale counts.

@@ -133,8 +133,14 @@ EXPECT_GENERATION=
 SEAT_LIFECYCLE_ID=
 prelaunch_die() {
   if [ -n "$SEAT_OP" ]; then
-    seat_receipt_set phase=prelaunch 2>/dev/null || true
-    seat_emit prelaunch false false
+    if [ -e "$(receipt_path "$SEAT_LIFECYCLE_ID")" ] || [ -L "$(receipt_path "$SEAT_LIFECYCLE_ID")" ] \
+      || [ -e "$CONTROL_STATE/$SEAT_LIFECYCLE_ID.seat-reservation.$SEAT_OP" ] \
+      || [ -L "$CONTROL_STATE/$SEAT_LIFECYCLE_ID.seat-reservation.$SEAT_OP" ] \
+      || [ -e "$(meta_path "$SEAT_LIFECYCLE_ID")" ] || [ -L "$(meta_path "$SEAT_LIFECYCLE_ID")" ]; then
+      seat_emit unknown false false
+    else
+      seat_emit prelaunch false false
+    fi
   fi
   printf 'relaunch_failure=prelaunch\n' >&2
   die "$1"
@@ -326,7 +332,7 @@ seat_decide() {
       SEAT_DECIDED=cancelled
       seat_emit cancelled false "$old_stopped" "" "$backend" "$target"
       ;;
-    prelaunch|received)
+    prelaunch)
       if [ "$old_stopped" = true ]; then
         # The old agent stopped but the candidate was never submitted.
         SEAT_DECIDED=cancelled
@@ -334,6 +340,14 @@ seat_decide() {
       else
         SEAT_DECIDED=prelaunch
         seat_emit prelaunch false false
+      fi
+      ;;
+    received)
+      if [ "$old_stopped" = true ]; then
+        SEAT_DECIDED=cancelled
+        seat_emit cancelled false true
+      else
+        seat_emit unknown false false
       fi
       ;;
     existing|dispatched|started)
@@ -550,7 +564,8 @@ cmd_launch() {
         if [ -n "$SEAT_OP" ]; then
           seat_receipt_set phase=existing "actual_generation=$(fm_meta_get "$meta" spawn_gen)" \
             "route_backend=$REMOTE_ENDPOINT_BACKEND" "route_target=$REMOTE_ENDPOINT_TARGET" \
-            "actual_model=$(fm_meta_get "$meta" model)" 2>/dev/null || true
+            "actual_model=$(fm_meta_get "$meta" model)" \
+            || { seat_emit unknown false false; die "could not retain the existing generation binding"; }
           seat_decide "$id"
         fi
         print_route "$id"
@@ -628,8 +643,7 @@ cmd_relaunch() {
   fi
   if [ -n "$EXPECT_GENERATION" ] && [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" != "$EXPECT_GENERATION" ]; then
     if [ -n "$SEAT_OP" ]; then
-      seat_receipt_set phase=prelaunch || die "could not record the generation mismatch"
-      seat_emit prelaunch false false
+      seat_emit unknown false false
     fi
     echo "error: generation-mismatch: the host incarnation is not $EXPECT_GENERATION; nothing was changed" >&2
     exit 6
