@@ -562,13 +562,57 @@ cmd_record() {
   return 0
 }
 
-# Ship and scout records whose worktree still exists, in this machine's root
-# home and every local secondmate home under it, as "<meta-path><TAB><worktree>".
+# This home's state directory, then that of this machine's root home and every
+# local secondmate home its registries list, transitively. A registry entry or
+# home that cannot be read is skipped with a warning and every other home is
+# still listed, so one retired home never hides the workers of the rest.
+local_state_dirs() {
+  local root home reg line child i=0 known existing
+  local -a homes
+  root=$(fm_firstmate_root_home "$FM_HOME" 2>/dev/null) || {
+    echo "warning: the root Firstmate home could not be resolved, so only this home's workers are counted" >&2
+    root=$FM_HOME
+  }
+  homes=("$root")
+  printf '%s\n' "$STATE"
+  while [ "$i" -lt "${#homes[@]}" ]; do
+    home=${homes[$i]}
+    i=$((i + 1))
+    printf '%s\n' "$home/state"
+    reg="$home/data/secondmates.md"
+    [ -f "$reg" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in "- "*) ;; *) continue ;; esac
+      if ! secondmate_registry_parse_line "$line"; then
+        echo "warning: skipping a malformed local Firstmate registry entry in $reg; its workers are not counted" >&2
+        continue
+      fi
+      [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+      if ! child=$(CDPATH='' cd -- "$SECONDMATE_REGISTRY_HOME" 2>/dev/null && pwd -P); then
+        echo "warning: skipping unavailable local Firstmate home $SECONDMATE_REGISTRY_HOME; its workers are not counted" >&2
+        continue
+      fi
+      known=0
+      for existing in "${homes[@]}"; do
+        [ "$existing" != "$child" ] || known=1
+      done
+      [ "$known" = 1 ] || homes+=("$child")
+    done < "$reg"
+  done
+}
+
+# Ship and scout records whose worktree still exists, in every local_state_dirs
+# home, as "<meta-path><TAB><worktree>".
 live_workers() {
-  local dir meta kind wt
-  fm_local_firstmate_state_dirs "$STATE" ||
-    echo "warning: not every local Firstmate home could be read, so only the workers of ${FM_LOCAL_FIRSTMATE_STATES[*]} are counted: $FM_LOCAL_FIRSTMATE_ERROR" >&2
-  for dir in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
+  local dir meta kind wt seen='
+'
+  while IFS= read -r dir; do
+    dir=$(canon_dir "$dir") || continue
+    case "$seen" in *"
+$dir
+"*) continue ;; esac
+    seen="$seen$dir
+"
     for meta in "$dir"/*.meta; do
       [ -f "$meta" ] || continue
       kind=$(meta_value "$meta" kind)
@@ -577,7 +621,9 @@ live_workers() {
       [ -n "$wt" ] && [ -d "$wt" ] || continue
       printf '%s\t%s\n' "$meta" "$wt"
     done
-  done
+  done <<EOF
+$(local_state_dirs)
+EOF
 }
 
 # Sets S_LIVE and S_LIVE_MB to the number of workers sampled with resident

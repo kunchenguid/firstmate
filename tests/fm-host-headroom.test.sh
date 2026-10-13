@@ -216,24 +216,31 @@ test_startup_and_teardown_readings_never_lower_the_default() {
   pass "startup and teardown readings alone never lower the expected footprint below default_worker_mb"
 }
 
-# When one registered local home cannot be read, the workers of every home that
-# could be read, including the root home, still reserve their footprint.
+# When registered local homes are malformed or missing, only those are
+# skipped: the root home's workers and those of a live home registered after
+# them still reserve their footprint.
 test_unreadable_home_keeps_the_other_homes_workers() {
-  local root mate wt out rc=0
+  local root mate live wt out rc=0
   root=$(make_home reserve-root)
   mate=$(make_home reserve-root-mate)
+  live=$(make_home reserve-root-live)
   wt="$TMP_ROOT/reserve-root-wt"
   mkdir -p "$wt"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$root" > "$mate/.fm-secondmate-parent"
-  printf '%s\n' '- broken registry entry' > "$root/data/secondmates.md"
+  printf '%s\n' '- broken registry entry' \
+    "- sm-a - retired (home: $TMP_ROOT/reserve-root-gone; scope: x; projects: p; added 2026-01-01)" \
+    "- sm-b - live (home: $live; scope: x; projects: p; added 2026-01-01)" > "$root/data/secondmates.md"
   fm_write_meta "$root/state/root-ship.meta" kind=ship harness=claude "worktree=$wt"
+  fm_write_meta "$live/state/live-ship.meta" kind=ship harness=claude "worktree=$wt"
   out=$(headroom "$mate" "$HEALTHY" check --kind ship --harness claude) || rc=$?
   expect_code 0 "$rc" "a healthy machine was not ok: $out"
-  assert_contains "$out" "warning: not every local Firstmate home could be read" \
-    "the unreadable home was not reported"
-  assert_contains "$out" "; 1 running worker(s) reserve 1536 MB" \
-    "the root home's running worker reserved nothing when another home could not be read"
-  pass "a home that cannot be read never drops the workers of the homes that can"
+  assert_contains "$out" "warning: skipping a malformed local Firstmate registry entry" \
+    "the malformed registry entry was not reported"
+  assert_contains "$out" "warning: skipping unavailable local Firstmate home $TMP_ROOT/reserve-root-gone" \
+    "the missing home was not reported"
+  assert_contains "$out" "; 2 running worker(s) reserve 3072 MB" \
+    "a home that could not be read hid the workers of the root home or of a home registered after it"
+  pass "a home that cannot be read never hides the workers of the homes that can"
 }
 
 # A secondmate home judges the machine by its root home's thresholds and log.
