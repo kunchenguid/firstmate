@@ -84,9 +84,12 @@
 #
 # Expected footprint. A task's footprint is the largest worker resident memory
 # the log holds for it, and a task counts only once the log holds a mid-work
-# (event=sample) reading of it: a teardown reading is taken after the worker
-# handed off and its builds and tests exited, so it can raise a task's
-# footprint but never makes a task count on its own. Readings under 32 MB are
+# reading of it: an event=sample reading taken at least 600 seconds after the
+# task's event=spawn. A reading taken while the worker is still starting up, or
+# for a task the log holds no spawn of, is not mid-work, and a teardown reading
+# is taken after the worker handed off and its builds and tests exited, so
+# either can raise a task's footprint but never makes a task count on its own.
+# Readings under 32 MB are
 # only a shell left in a worktree whose agent has exited, so they count neither
 # as a footprint nor as a running worker. The expected footprint of a new
 # worker is the 90th percentile (nearest rank) of the footprints of the first
@@ -147,6 +150,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 
 FM_HOST_HEADROOM_DEFER_EXIT=75
 FM_HOST_HEADROOM_MIN_GROUP=3
+FM_HOST_HEADROOM_MIDWORK_SECS=600
 FM_HOST_HEADROOM_MIN_WORKER_MB=32
 FM_HOST_HEADROOM_TREEHOUSE_DEFAULT_TREES=16
 
@@ -348,16 +352,17 @@ load_thresholds() {
 # One line per task with a measured footprint: "<peak-mb> <kind> <harness> <project>".
 task_footprints() {
   [ -f "$FOOTPRINT_LOG" ] || return 0
-  awk -v min="$FM_HOST_HEADROOM_MIN_WORKER_MB" '
+  awk -v min="$FM_HOST_HEADROOM_MIN_WORKER_MB" -v midwork="$FM_HOST_HEADROOM_MIDWORK_SECS" '
     { split("", f); for (i = 2; i <= NF; i++) { p = index($i, "="); if (p) f[substr($i, 1, p - 1)] = substr($i, p + 1) } }
     !("task" in f) || f["task"] == "-" { next }
     { t = f["task"]
       if (("kind" in f) && f["kind"] != "-") kind[t] = f["kind"]
       if (("harness" in f) && f["harness"] != "-") harness[t] = f["harness"]
       if (("project" in f) && f["project"] != "-") project[t] = f["project"]
+      if (f["event"] == "spawn") spawned[t] = $1 + 0
       if (f["worker_rss_mb"] !~ /^[0-9]+$/) next
       if (f["worker_rss_mb"] + 0 > peak[t] + 0) peak[t] = f["worker_rss_mb"] + 0
-      if (f["event"] == "sample" && f["worker_rss_mb"] + 0 >= min) sampled[t] = 1 }
+      if (f["event"] == "sample" && f["worker_rss_mb"] + 0 >= min && (t in spawned) && $1 - spawned[t] >= midwork) sampled[t] = 1 }
     END { for (t in sampled)
       print peak[t], (t in kind ? kind[t] : "-"), (t in harness ? harness[t] : "-"), (t in project ? project[t] : "-") }
   ' "$FOOTPRINT_LOG" 2>/dev/null
@@ -371,19 +376,19 @@ stats() {
       print n, v[int((n + 1) / 2)], v[r], v[n] }'
 }
 
-# Sets E_MB and E_BASIS: the expected footprint of a new worker.
+# Sets E_MB and E_BASIS: the expected footprint of a new worker, from the
+# task_footprints rows in FP_ROWS.
 expected_footprint() {  # <kind> <harness>
-  local kind=$1 harness=$2 rows scope s
-  rows=$(task_footprints)
+  local kind=$1 harness=$2 scope s
   for scope in kind-harness kind all; do
     case "$scope" in
       kind-harness)
         [ -n "$kind" ] && [ -n "$harness" ] || continue
-        s=$(printf '%s\n' "$rows" | awk -v k="$kind" -v h="$harness" 'NF && $2 == k && $3 == h { print $1 }' | stats) ;;
+        s=$(printf '%s\n' "$FP_ROWS" | awk -v k="$kind" -v h="$harness" 'NF && $2 == k && $3 == h { print $1 }' | stats) ;;
       kind)
         [ -n "$kind" ] || continue
-        s=$(printf '%s\n' "$rows" | awk -v k="$kind" 'NF && $2 == k { print $1 }' | stats) ;;
-      all) s=$(printf '%s\n' "$rows" | awk 'NF { print $1 }' | stats) ;;
+        s=$(printf '%s\n' "$FP_ROWS" | awk -v k="$kind" 'NF && $2 == k { print $1 }' | stats) ;;
+      all) s=$(printf '%s\n' "$FP_ROWS" | awk 'NF { print $1 }' | stats) ;;
     esac
     # shellcheck disable=SC2086 # word-split the four stats fields.
     set -- $s
@@ -561,7 +566,8 @@ cmd_record() {
 # home and every local secondmate home under it, as "<meta-path><TAB><worktree>".
 live_workers() {
   local dir meta kind wt
-  fm_local_firstmate_state_dirs "$STATE" 2>/dev/null || FM_LOCAL_FIRSTMATE_STATES=("$STATE")
+  fm_local_firstmate_state_dirs "$STATE" ||
+    echo "warning: not every local Firstmate home could be read, so only the workers of ${FM_LOCAL_FIRSTMATE_STATES[*]} are counted: $FM_LOCAL_FIRSTMATE_ERROR" >&2
   for dir in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
     for meta in "$dir"/*.meta; do
       [ -f "$meta" ] || continue
@@ -603,10 +609,12 @@ EOF
   return 0
 }
 
-# Sets S_RESERVED_MB: what the workers cmd_sample saw still need to reach their
-# expected footprints. Requires load_thresholds and cmd_sample.
+# Sets FP_ROWS to task_footprints and S_RESERVED_MB to what the workers
+# cmd_sample saw still need to reach their expected footprints. Requires
+# load_thresholds and cmd_sample.
 reserve_live() {
   local kind harness rss
+  FP_ROWS=$(task_footprints)
   S_RESERVED_MB=0
   while read -r kind harness rss; do
     [ -n "$kind" ] || continue
@@ -648,8 +656,7 @@ cmd_report() {
   fi
   cmd_sample
   reserve_live
-  local rows budget='' floor total='' more key clone cap pools
-  rows=$(task_footprints)
+  local budget='' floor total='' more key clone cap pools
   expected_footprint '' ''
   judge "$E_MB" "$S_RESERVED_MB"
   echo "Host headroom now: $(numbers_text)"
@@ -667,17 +674,17 @@ cmd_report() {
     echo "Machine budget: unknown (available memory or min_avail_pct is not available)"
   fi
   echo "Workers running now with measured memory: $S_LIVE using $S_LIVE_MB MB"
-  if [ -z "$rows" ]; then
+  if [ -z "$FP_ROWS" ]; then
     echo "Per-worker memory: no worker samples yet in $FOOTPRINT_LOG; new workers are expected at default_worker_mb=$T_DEFAULT_WORKER_MB MB"
   else
     echo "Per-worker memory (largest seen per task) by kind and harness:"
-    for key in $(printf '%s\n' "$rows" | awk 'NF { print $2 "/" $3 }' | sort -u); do
-      printf '%s\n' "$rows" | awk -v k="${key%%/*}" -v h="${key#*/}" 'NF && $2 == k && $3 == h { print $1 }' |
+    for key in $(printf '%s\n' "$FP_ROWS" | awk 'NF { print $2 "/" $3 }' | sort -u); do
+      printf '%s\n' "$FP_ROWS" | awk -v k="${key%%/*}" -v h="${key#*/}" 'NF && $2 == k && $3 == h { print $1 }' |
         group_line "$key" "$budget"
     done
     echo "Per-worker memory by project:"
-    for key in $(printf '%s\n' "$rows" | awk 'NF { print $4 }' | sort -u); do
-      printf '%s\n' "$rows" | awk -v p="$key" 'NF && $4 == p { print $1 }' | group_line "$key" ''
+    for key in $(printf '%s\n' "$FP_ROWS" | awk 'NF { print $4 }' | sort -u); do
+      printf '%s\n' "$FP_ROWS" | awk -v p="$key" 'NF && $4 == p { print $1 }' | group_line "$key" ''
     done
   fi
   if [ -n "$budget" ]; then

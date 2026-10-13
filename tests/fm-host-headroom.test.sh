@@ -29,6 +29,13 @@ make_home() {  # <name>
   printf '%s\n' "$home"
 }
 
+# Footprint log spawn lines at epoch 1 for each task id, so a sample taken
+# 600 or more seconds later is a mid-work reading.
+spawned() {  # <task-id...>
+  local id
+  for id in "$@"; do printf '1 event=spawn task=%s\n' "$id"; done
+}
+
 # Run the helper in <home> with the FM_HOST_HEADROOM_SAMPLE given.
 headroom() {  # <home> <sample> <args...>
   local home=$1 sample=$2
@@ -123,15 +130,16 @@ test_configured_thresholds_apply() {
 test_expected_footprint_falls_back_by_group() {
   local home out
   home=$(make_home expected)
-  printf '%s\n' \
-    '1 event=sample task=s1 project=alpha kind=ship harness=claude model=- worker_rss_mb=500' \
-    '1 event=sample task=s2 project=beta kind=ship harness=claude model=- worker_rss_mb=400' \
-    '2 event=teardown task=s2 project=beta kind=ship harness=claude model=- worker_rss_mb=600' \
-    '1 event=sample task=s3 project=gamma kind=ship harness=claude model=- worker_rss_mb=700' \
-    '1 event=sample task=s4 project=alpha kind=ship harness=codex model=- worker_rss_mb=900' \
-    '1 event=sample task=c1 project=alpha kind=scout harness=codex model=- worker_rss_mb=3000' \
-    '1 event=spawn task=n1 project=alpha kind=ship harness=claude model=- worker_rss_mb=-' \
-    > "$home/state/host-footprint.log"
+  { spawned s1 s2 s3 s4 c1
+    printf '%s\n' \
+      '1000 event=sample task=s1 project=alpha kind=ship harness=claude model=- worker_rss_mb=500' \
+      '1000 event=sample task=s2 project=beta kind=ship harness=claude model=- worker_rss_mb=400' \
+      '2000 event=teardown task=s2 project=beta kind=ship harness=claude model=- worker_rss_mb=600' \
+      '1000 event=sample task=s3 project=gamma kind=ship harness=claude model=- worker_rss_mb=700' \
+      '1000 event=sample task=s4 project=alpha kind=ship harness=codex model=- worker_rss_mb=900' \
+      '1000 event=sample task=c1 project=alpha kind=scout harness=codex model=- worker_rss_mb=3000' \
+      '1 event=spawn task=n1 project=alpha kind=ship harness=claude model=- worker_rss_mb=-'
+  } > "$home/state/host-footprint.log"
   out=$(headroom "$home" "$HEALTHY" check --kind ship --harness claude --model opus --project delta)
   assert_contains "$out" "expected worker 700 MB (90th percentile of 3 ship claude workers)" \
     "a kind and harness with 3 measured tasks did not set the expected footprint"
@@ -149,14 +157,15 @@ test_expected_footprint_falls_back_by_group() {
 test_mixed_workers_share_one_budget() {
   local home out rc
   home=$(make_home budget)
-  printf '%s\n' \
-    '1 event=sample task=a project=alpha kind=ship harness=claude worker_rss_mb=500' \
-    '1 event=sample task=b project=beta kind=ship harness=claude worker_rss_mb=500' \
-    '1 event=sample task=c project=gamma kind=ship harness=claude worker_rss_mb=500' \
-    '1 event=sample task=d project=alpha kind=scout harness=codex worker_rss_mb=4000' \
-    '1 event=sample task=e project=beta kind=scout harness=codex worker_rss_mb=4000' \
-    '1 event=sample task=f project=gamma kind=scout harness=codex worker_rss_mb=4000' \
-    > "$home/state/host-footprint.log"
+  { spawned a b c d e f
+    printf '%s\n' \
+      '1000 event=sample task=a project=alpha kind=ship harness=claude worker_rss_mb=500' \
+      '1000 event=sample task=b project=beta kind=ship harness=claude worker_rss_mb=500' \
+      '1000 event=sample task=c project=gamma kind=ship harness=claude worker_rss_mb=500' \
+      '1000 event=sample task=d project=alpha kind=scout harness=codex worker_rss_mb=4000' \
+      '1000 event=sample task=e project=beta kind=scout harness=codex worker_rss_mb=4000' \
+      '1000 event=sample task=f project=gamma kind=scout harness=codex worker_rss_mb=4000'
+  } > "$home/state/host-footprint.log"
   rc=0
   out=$(headroom "$home" 'total_mb=10000 avail_mb=4000 swap_used_mb=0 load1=1 cores=18 pressure=normal' \
     check --kind ship --harness claude --project beta) || rc=$?
@@ -170,33 +179,61 @@ test_mixed_workers_share_one_budget() {
   pass "workers from any project share one machine budget and are admitted by their expected size"
 }
 
-# Readings taken only at cleanup, after the work finished, never lower the
-# expected footprint below default_worker_mb; mid-work samples of 3 tasks do.
-test_teardown_readings_never_lower_the_default() {
+# Readings taken at cleanup, after the work finished, or while a worker is
+# still starting up never lower the expected footprint below
+# default_worker_mb; mid-work samples of 3 tasks do.
+test_startup_and_teardown_readings_never_lower_the_default() {
   local home out
   home=$(make_home floor)
-  printf '%s\n' \
-    '1 event=teardown task=t1 project=alpha kind=ship harness=claude worker_rss_mb=300' \
-    '1 event=teardown task=t2 project=alpha kind=ship harness=claude worker_rss_mb=300' \
-    '1 event=teardown task=t3 project=alpha kind=ship harness=claude worker_rss_mb=300' \
-    '1 event=teardown task=t4 project=alpha kind=ship harness=claude worker_rss_mb=300' \
-    > "$home/state/host-footprint.log"
+  { spawned t1 t2 t3 t4
+    printf '%s\n' \
+      '5000 event=teardown task=t1 project=alpha kind=ship harness=claude worker_rss_mb=300' \
+      '5000 event=teardown task=t2 project=alpha kind=ship harness=claude worker_rss_mb=300' \
+      '5000 event=teardown task=t3 project=alpha kind=ship harness=claude worker_rss_mb=300' \
+      '5000 event=teardown task=t4 project=alpha kind=ship harness=claude worker_rss_mb=300' \
+      '100 event=sample task=t1 project=alpha kind=ship harness=claude worker_rss_mb=250' \
+      '100 event=sample task=t2 project=alpha kind=ship harness=claude worker_rss_mb=250' \
+      '100 event=sample task=t3 project=alpha kind=ship harness=claude worker_rss_mb=250' \
+      '5000 event=sample task=u1 project=alpha kind=ship harness=claude worker_rss_mb=250' \
+      '5000 event=sample task=u2 project=alpha kind=ship harness=claude worker_rss_mb=250' \
+      '5000 event=sample task=u3 project=alpha kind=ship harness=claude worker_rss_mb=250'
+  } > "$home/state/host-footprint.log"
   out=$(headroom "$home" "$HEALTHY" check --kind ship --harness claude)
   assert_contains "$out" "expected worker 1536 MB (default_worker_mb, fewer than 3 measured workers of kind ship)" \
-    "teardown-only readings lowered the expected footprint below default_worker_mb"
+    "teardown, startup, or spawn-less readings lowered the expected footprint below default_worker_mb"
   printf '%s\n' \
-    '2 event=sample task=t1 project=alpha kind=ship harness=claude worker_rss_mb=200' \
-    '2 event=sample task=t2 project=alpha kind=ship harness=claude worker_rss_mb=200' \
+    '2000 event=sample task=t1 project=alpha kind=ship harness=claude worker_rss_mb=200' \
+    '2000 event=sample task=t2 project=alpha kind=ship harness=claude worker_rss_mb=200' \
     >> "$home/state/host-footprint.log"
   out=$(headroom "$home" "$HEALTHY" check --kind ship --harness claude)
   assert_contains "$out" "expected worker 1536 MB (default_worker_mb" \
     "mid-work samples of fewer than 3 tasks lowered the expected footprint"
-  printf '%s\n' '2 event=sample task=t3 project=alpha kind=ship harness=claude worker_rss_mb=200' \
+  printf '%s\n' '2000 event=sample task=t3 project=alpha kind=ship harness=claude worker_rss_mb=200' \
     >> "$home/state/host-footprint.log"
   out=$(headroom "$home" "$HEALTHY" check --kind ship --harness claude)
   assert_contains "$out" "expected worker 300 MB (90th percentile of 3 ship claude workers)" \
     "mid-work samples of 3 tasks did not set the expected footprint from their largest readings"
-  pass "teardown readings alone never lower the expected footprint below default_worker_mb"
+  pass "startup and teardown readings alone never lower the expected footprint below default_worker_mb"
+}
+
+# When one registered local home cannot be read, the workers of every home that
+# could be read, including the root home, still reserve their footprint.
+test_unreadable_home_keeps_the_other_homes_workers() {
+  local root mate wt out rc=0
+  root=$(make_home reserve-root)
+  mate=$(make_home reserve-root-mate)
+  wt="$TMP_ROOT/reserve-root-wt"
+  mkdir -p "$wt"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$root" > "$mate/.fm-secondmate-parent"
+  printf '%s\n' '- broken registry entry' > "$root/data/secondmates.md"
+  fm_write_meta "$root/state/root-ship.meta" kind=ship harness=claude "worktree=$wt"
+  out=$(headroom "$mate" "$HEALTHY" check --kind ship --harness claude) || rc=$?
+  expect_code 0 "$rc" "a healthy machine was not ok: $out"
+  assert_contains "$out" "warning: not every local Firstmate home could be read" \
+    "the unreadable home was not reported"
+  assert_contains "$out" "; 1 running worker(s) reserve 1536 MB" \
+    "the root home's running worker reserved nothing when another home could not be read"
+  pass "a home that cannot be read never drops the workers of the homes that can"
 }
 
 # A secondmate home judges the machine by its root home's thresholds and log.
@@ -369,10 +406,11 @@ test_report_summarizes_the_machine_budget() {
   printf '%s\n' 'max_trees = 3' > "$home/projects/small-pool/treehouse.toml"
   printf '%s\n' \
     '100 event=spawn task=a project=alpha kind=ship harness=claude worker_rss_mb=-' \
-    '200 event=sample task=a project=alpha kind=ship harness=claude worker_rss_mb=600' \
-    '300 event=teardown task=a project=alpha kind=ship harness=claude worker_rss_mb=900' \
-    '300 event=sample task=b project=beta kind=ship harness=claude worker_rss_mb=400' \
-    '300 event=sample task=c project=alpha kind=scout harness=codex worker_rss_mb=1000' \
+    '100 event=spawn task=b' '100 event=spawn task=c' \
+    '800 event=sample task=a project=alpha kind=ship harness=claude worker_rss_mb=600' \
+    '900 event=teardown task=a project=alpha kind=ship harness=claude worker_rss_mb=900' \
+    '900 event=sample task=b project=beta kind=ship harness=claude worker_rss_mb=400' \
+    '900 event=sample task=c project=alpha kind=scout harness=codex worker_rss_mb=1000' \
     '300 event=teardown task=d project=beta kind=ship harness=claude worker_rss_mb=?' > "$home/state/host-footprint.log"
   out=$(headroom "$home" 'total_mb=50000 avail_mb=20000 swap_used_mb=0 load1=1 cores=10 pressure=normal' report)
   assert_contains "$out" "Machine budget: 10000 MB available above the 20% floor (10000 MB) after 0 MB reserved for 0 running worker(s) to reach their expected footprint, shared by every project" \
@@ -500,10 +538,12 @@ test_spawn_override_skips_the_check() {
 # A rapid sequential fan-out: every spawn sees the same available memory,
 # because a freshly launched worker has barely grown, yet the workers already
 # admitted reserve their expected footprint, so the fan-out stops at the budget.
-# 19660 MB available over a 9830 MB floor leaves 9830 MB, room for 6 workers of
-# 1536 MB.
+# Each worker runs a real process of about 48 MB in its worktree, so the samples
+# every check takes are real startup readings, which must not lower the
+# expected footprint. 19660 MB available over a 9830 MB floor leaves 9830 MB,
+# room for 6 workers of 1536 MB.
 test_spawn_fan_out_stops_at_the_budget() {
-  local case_dir home out rc i sample
+  local case_dir home out rc i sample pids=''
   case_dir=$(make_case spawn-fan-out fan-1)
   home="$case_dir/home"
   sample='total_mb=49152 avail_mb=19660 swap_used_mb=0 load1=1 cores=18 pressure=normal'
@@ -512,13 +552,25 @@ test_spawn_fan_out_stops_at_the_budget() {
     rc=0
     out=$(run_spawn "$case_dir" "$sample" "fan-$i") || rc=$?
     expect_code 0 "$rc" "fan-out worker $i of 6 that fits the budget was refused: $out"
+    ( cd "$case_dir/wt-fan-$i" && exec perl -e '$x = "a" x (48 << 20); sleep 600' ) &
+    pids="$pids $!"
   done
+  sleep 1
   write_brief "$home" fan-7
   rc=0
   out=$(run_spawn "$case_dir" "$sample" fan-7) || rc=$?
+  # shellcheck disable=SC2086 # word-split the worker pids.
+  kill $pids 2>/dev/null || :
+  # shellcheck disable=SC2086 # word-split the worker pids.
+  wait $pids 2>/dev/null || :
   expect_code "$DEFER_EXIT" "$rc" "a seventh fan-out worker beyond the budget was admitted: $out"
-  assert_contains "$out" "available memory 19660 MB less 9216 MB reserved for running workers and this worker's expected 1536 MB leaves 8908 MB, below min_avail_pct=20 (9830 MB)" \
+  assert_contains "$out" "MB reserved for running workers and this worker's expected 1536 MB leaves" \
     "the deferral did not count the reservation of the workers already admitted"
+  assert_contains "$out" "below min_avail_pct=20 (9830 MB)" "the deferral did not name the floor"
+  assert_contains "$out" "expected worker 1536 MB (default_worker_mb" \
+    "startup samples of the fan-out's own workers lowered the expected footprint"
+  grep -Eq " event=sample task=fan-1 .* worker_rss_mb=([4-9][0-9]|[0-9]{3,}) " "$home/state/host-footprint.log" ||
+    fail "the fan-out workers' real processes were not sampled"
   assert_absent "$home/state/fan-7.meta" "a deferred fan-out worker published a task record"
   assert_absent "$home/state/.host-headroom.lock" "a spawn left the machine-wide headroom lock behind"
   pass "a rapid sequential fan-out is stopped at the machine budget by the running workers' reservation"
@@ -541,7 +593,8 @@ test_default_threshold_edges
 test_configured_thresholds_apply
 test_expected_footprint_falls_back_by_group
 test_mixed_workers_share_one_budget
-test_teardown_readings_never_lower_the_default
+test_startup_and_teardown_readings_never_lower_the_default
+test_unreadable_home_keeps_the_other_homes_workers
 test_secondmate_home_reads_root_thresholds
 test_unreadable_thresholds_refuse
 test_darwin_measurement
