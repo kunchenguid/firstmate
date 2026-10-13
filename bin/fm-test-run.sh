@@ -349,7 +349,7 @@ family_for_basename() {
     fm-task-retire-historical.test.sh|fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
+    fm-check-unregister.test.sh|fm-merge-local.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
     fm-review-diff.test.sh|fm-teardown.test.sh)
       printf '%s\n' pr-forge
       ;;
@@ -647,6 +647,7 @@ tests/fm-jsonl-viewer.test.sh 682
 tests/fm-lint-workflows.test.sh 855
 tests/fm-live-gate.test.sh 6000
 tests/fm-merge-receipt.test.sh 420
+tests/fm-merge-local.test.sh 8000
 tests/fm-operational-input.test.sh 231
 tests/fm-pi-branch-extension.test.sh 22239
 tests/fm-pi-branch-live-e2e.test.sh 56

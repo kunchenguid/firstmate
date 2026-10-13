@@ -30,7 +30,8 @@ fm_merge_receipt_read_file() { # <path>
   }
   [ -s "$file" ] || { echo 'REFUSED: merge receipt history is empty' >&2; return 1; }
   jq -ce 'if .schema=="fm-merge-receipt.v1" and (.task_id|type)=="string" and
-    (.execution_generation|type)=="string" and (.url|type)=="string" and (.head|type)=="string"
+    (.execution_generation|type)=="string" and (.url|type)=="string" and (.head|type)=="string" and
+    ((has("source")|not) or (.source|type)=="string")
     then . else error("invalid merge receipt row") end' "$file"
 }
 
@@ -63,8 +64,8 @@ fm_merge_receipt_history() { # <task>
   fi
   printf '%s\n' "$rows" | jq -sc '
     reduce .[] as $row ([];
-      if any(.[]; [.task_id,.execution_generation,.url,.head] ==
-                   [$row.task_id,$row.execution_generation,$row.url,$row.head])
+      if any(.[]; [.task_id,.execution_generation,.url,.head,(.source // "")] ==
+                   [$row.task_id,$row.execution_generation,$row.url,$row.head,($row.source // "")])
       then . else . + [$row] end) | .[]'
 }
 
@@ -88,8 +89,8 @@ fm_merge_receipt_archive() { # <task>; move complete active history out of routi
     sed -n 'p' "$file"
   } | jq -sc '
     reduce .[] as $row ([];
-      if any(.[]; [.task_id,.execution_generation,.url,.head] ==
-                   [$row.task_id,$row.execution_generation,$row.url,$row.head])
+      if any(.[]; [.task_id,.execution_generation,.url,.head,(.source // "")] ==
+                   [$row.task_id,$row.execution_generation,$row.url,$row.head,($row.source // "")])
       then . else . + [$row] end) | .[]' > "$tmp" || {
     rm -f "$tmp"; return 1;
   }
@@ -129,6 +130,68 @@ fm_merge_receipt_record() { # <task> <generation> <url> <head>
   mv -f "$tmp" "$file"
 }
 
+fm_merge_receipt_local_admit() { # <task> <generation> <url> <project> <source> <candidate-head>
+  local id=$1 generation=$2 url=$3 project=$4 source=$5 candidate=$6 current conflicts receipt_head
+  fm_merge_receipt_validate_value generation "$generation" || return 1
+  fm_merge_receipt_validate_value url "$url" || return 1
+  fm_merge_receipt_validate_value source "$source" || return 1
+  fm_merge_receipt_validate_value head "$candidate" || return 1
+  current=$(fm_merge_receipt_history "$id") || return 1
+  conflicts=$(printf '%s\n' "$current" | jq -sc --arg generation "$generation" --arg url "$url" --arg source "$source" '
+    [.[] | select(.execution_generation==$generation) |
+      select(.url!=$url or (has("source") and .source!=$source))] | length') || return 1
+  [ "$conflicts" -eq 0 ] || {
+    echo 'REFUSED: incompatible local merge receipt identity for current execution' >&2
+    return 1
+  }
+  printf '%s\n' "$current" | jq -r --arg generation "$generation" --arg url "$url" '
+    . | select(.execution_generation==$generation and .url==$url) | .head' |
+    while IFS= read -r receipt_head; do
+      case ${#receipt_head} in 40|64) ;; *)
+        echo 'REFUSED: prior local merge receipt head is not an exact object id' >&2
+        return 1
+        ;;
+      esac
+      case "$receipt_head" in
+        ''|*[!0-9a-fA-F]*)
+          echo 'REFUSED: prior local merge receipt head is not an exact object id' >&2
+          return 1
+          ;;
+      esac
+      if ! git -C "$project" cat-file -e "$receipt_head^{commit}" 2>/dev/null ||
+        ! git -C "$project" merge-base --is-ancestor "$receipt_head" "$candidate"; then
+        echo 'REFUSED: local merge candidate does not continue every prior landing for current execution' >&2
+        return 1
+      fi
+    done
+}
+
+fm_merge_receipt_record_local() { # <task> <generation> <url> <project> <source> <head>
+  local id=$1 generation=$2 url=$3 project=$4 source=$5 head=$6 file state tmp current matches
+  fm_merge_receipt_local_admit "$id" "$generation" "$url" "$project" "$source" "$head" || return 1
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}
+  file=$(fm_merge_receipt_file "$id") || return 1
+  mkdir -p "$state" || return 1
+  current=$(fm_merge_receipt_history "$id") || return 1
+  matches=$(printf '%s\n' "$current" | jq -sc --arg generation "$generation" --arg url "$url" \
+    --arg source "$source" --arg head "$head" '
+    [.[] | select(.execution_generation==$generation and .url==$url and .head==$head and
+      ((.source // $source)==$source))] | length') || return 1
+  [ "$matches" -le 1 ] || { echo 'REFUSED: duplicate local merge receipt identity is ambiguous' >&2; return 1; }
+  [ "$matches" -eq 0 ] || return 0
+  tmp=$(umask 077; mktemp "$state/.${id}.merge-receipts.XXXXXX") || return 1
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || { rm -f "$tmp"; return 1; }
+    cp "$file" "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  jq -cn --arg id "$id" --arg generation "$generation" --arg url "$url" \
+    --arg source "$source" --arg head "$head" \
+    '{schema:"fm-merge-receipt.v1",task_id:$id,execution_generation:$generation,
+      url:$url,source:$source,head:$head}' >> "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$file"
+}
+
 fm_merge_receipt_current() { # <task> <generation> [url] [head]
   local id=$1 generation=$2 url=${3:-} head=${4:-} history
   history=$(fm_merge_receipt_history "$id") || return 1
@@ -137,5 +200,6 @@ fm_merge_receipt_current() { # <task> <generation> [url] [head]
       select(($url=="" or .url==$url) and ($head=="" or .head==$head))] |
     if length==1 then .[0]
     elif length==0 then error("missing current-generation merge receipt")
+    elif $head=="" and ([.[].url] | unique | length)==1 then .[-1]
     else error("ambiguous current-generation merge receipt") end'
 }
