@@ -55,13 +55,13 @@ fm_merge_receipt_history() { # <task>
   fi
   [ "$current_status" -ne 2 ] || return 1
   if [ "$current_status" -eq 0 ] && [ -f "$historical" ] && [ ! -L "$historical" ]; then
-    rows=$(printf '%s\n' "$rows"; jq -c --arg id "$id" '
+    rows=$(jq -c --arg id "$id" '
       if (.schema=="fm-task-lifecycle.v1" or .schema=="fm-task-lifecycle.v2") and .task_id==$id then
         [.owner_receipts.merge[]? |
           select((.execution_generation|type)=="string" and (.facts.url|type)=="string" and (.facts.head|type)=="string") |
           {schema:"fm-merge-receipt.v1",task_id:$id,execution_generation:.execution_generation,
            url:.facts.url,head:.facts.head,historical:true}][]
-      else error("invalid historical lifecycle record") end' "$historical") || return 1
+      else error("invalid historical lifecycle record") end' "$historical"; printf '%s\n' "$rows") || return 1
   fi
   printf '%s\n' "$rows" | jq -sc '
     reduce .[] as $row ([];
