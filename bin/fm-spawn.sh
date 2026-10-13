@@ -3856,7 +3856,7 @@ fi
 # answered, which is why bin/fm-control.sh relaunch runs the same gate before it
 # stops the agent it replaces.
 CONSULT_WAIVER=
-if ! fm_consult_gate_check "$DATA" "$ID" "$KIND" "$CONSULT_WAIVED_SET" "$CONSULT_WAIVED"; then
+if ! fm_consult_gate_check "$DATA" "$STATE" "$ID" "$KIND" "$CONSULT_WAIVED_SET" "$CONSULT_WAIVED"; then
   exit 1
 fi
 CONSULT_WAIVER=$FM_CONSULT_GATE_WAIVER_REASON

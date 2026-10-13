@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # fm-consult-gate-lib.sh - the dispatch-time ChatGPT consultation gate: a ship
 # or scout launch must carry a stored ChatGPT-generated prompt for the stage in
-# play, or an explicit recorded waiver, so the captain's consultation flow can
+# play, a worker task record that proves its stage prompt was delivered, or an
+# explicit recorded waiver, so the captain's consultation flow can
 # never be bypassed silently.
 #
 # Usage: . bin/fm-consult-gate-lib.sh
-#        fm_consult_gate_check <data-dir> <task-id> <kind> <waiver-set:0|1> <waiver-reason>
+#        fm_consult_gate_check <data-dir> <state-dir> <task-id> <kind> <waiver-set:0|1> <waiver-reason>
 #        fm_consult_gate_record_backlog <config-dir> <data-dir> <kind> <task-id> <reason>
 #
 # WHY. bin/fm-chatgpt-loop.sh records each ChatGPT answer under
@@ -50,18 +51,26 @@
 #     fm_consult_gate_record_backlog, which refuses the launch when this home's
 #     backlog contract applies and the note cannot be written.
 #   - The loop's own dispatch: bin/fm-chatgpt-loop.sh marks the spawn it makes
-#     with FM_CHATGPT_LOOP_DISPATCH_TASK=<loop task id>. A launch task with NO
-#     record of its own then satisfies the gate when that loop record sits at
-#     its <stage>-dispatch phase with that stage's prompt non-empty - the
-#     consultation the loop already ran and is about to hand over. The marker
+#     with FM_CHATGPT_LOOP_DISPATCH_TASK=<loop task id>. A FRESH launch task
+#     with NO record of its own then satisfies the gate when that loop record
+#     sits at its <stage>-dispatch phase with that stage's prompt non-empty -
+#     the consultation the loop already ran and is about to hand over. It
+#     proves the consultation exists, never that delivery happened. The marker
 #     alone proves nothing: without such a record the launch is still refused.
-#   - A loop-dispatched worker: a launch task with NO record of its own also
-#     satisfies the gate when this home holds a readable loop record whose
-#     worker_task is exactly that task id and whose phase is <stage>-worker,
-#     the phase the loop enters once dispatch delivered the stage prompt. This
-#     is what lets an ordinary relaunch recover a worker the loop already
-#     consulted without an ad-hoc waiver. No other phase proves delivery, and a
-#     record naming a different task proves nothing.
+#   - Delivered handoff: bin/fm-chatgpt-loop.sh writes consult_delivered=<stage>
+#     onto the dispatched worker's own task record (state/<task id>.meta) at
+#     the moment fm-send confirms the stage-prompt handoff, and never otherwise,
+#     clearing any earlier stage's value before the launch is attempted. A
+#     launch task with NO record of its own satisfies the gate when its own
+#     task record
+#     carries a consult_delivered= value naming a deliverable stage - audit or
+#     plan - which is what lets an ordinary relaunch recover a worker the loop
+#     already delivered to with no dispatch marker and no loop-record lookup.
+#     Nothing else establishes delivery: a *-dispatch or *-worker loop phase,
+#     the dispatch marker, a loop record naming the worker, or a value naming
+#     no delivered stage all say nothing about whether the prompt reached it,
+#     and a failed handoff leaves no field, so that worker's next launch is
+#     still refused.
 #
 # fm_consult_gate_check returns 0 to proceed and 1 to refuse, printing its full
 # diagnostic on stderr. On a proceeding launch, FM_CONSULT_GATE_WAIVER_REASON
@@ -161,29 +170,24 @@ fm_consult_gate_loop_dispatch_valid() {
   return 1
 }
 
-# fm_consult_gate_loop_worker_valid <data-dir> <worker-task-id>
-# True when this home holds a readable loop record that names <worker-task-id>
-# as the worker its dispatch delivered the stage prompt to, at the phase the
-# loop enters once that handoff ran. That record is the recoverable
-# consultation behind an ordinary relaunch of a loop-dispatched worker.
-fm_consult_gate_loop_worker_valid() {
-  local data=$1 worker=$2 file verdict phase recorded
-  for file in "$data"/*/chatgpt-loop.json; do
-    [ -e "$file" ] || [ -L "$file" ] || continue
-    verdict=$(fm_consult_gate_record_verdict "$file")
-    case "$verdict" in
-    ok\ *) ;;
-    *) continue ;;
+# fm_consult_gate_delivery_record_valid <state-dir> <task-id>
+# True when this task's own record (state/<id>.meta) carries a
+# consult_delivered=<stage> value naming a stage the loop can deliver (audit or
+# plan): the durable field bin/fm-chatgpt-loop.sh writes only after that
+# stage's prompt genuinely reached this worker, and clears before a later
+# handoff, so no earlier stage's value can stand in. Loop phases, dispatch
+# markers, and loop records never substitute for it.
+fm_consult_gate_delivery_record_valid() {
+  local meta="$1/$2.meta" line value=
+  [ -f "$meta" ] && [ -r "$meta" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+    consult_delivered=*) value=${line#consult_delivered=} ;;
     esac
-    phase=$(jq -r '.phase // ""' "$file" 2>/dev/null) || continue
-    case "$phase" in
-    audit-worker | plan-worker) ;;
-    *) continue ;;
-    esac
-    recorded=$(jq -r '.worker_task // ""' "$file" 2>/dev/null) || continue
-    [ "$recorded" = "$worker" ] || continue
-    return 0
-  done
+  done <"$meta" 2>/dev/null || return 1
+  case "$value" in
+  audit | plan) return 0 ;;
+  esac
   return 1
 }
 
@@ -204,11 +208,11 @@ fm_consult_gate_refuse() {
   } >&2
 }
 
-# fm_consult_gate_check <data-dir> <task-id> <kind> <waiver-set:0|1> <waiver-reason>
+# fm_consult_gate_check <data-dir> <state-dir> <task-id> <kind> <waiver-set:0|1> <waiver-reason>
 # Returns 0 to proceed, 1 to refuse with a diagnostic on stderr. See the header
 # for the full contract.
 fm_consult_gate_check() {
-  local data=$1 task=$2 kind=$3 waiver_set=$4 waiver_reason=$5
+  local data=$1 state=$2 task=$3 kind=$4 waiver_set=$5 waiver_reason=$6
   local record verdict detail stage_hint probe_out probe_rc
   FM_CONSULT_GATE_WAIVER_REASON=
 
@@ -252,10 +256,12 @@ fm_consult_gate_check() {
     fm_consult_gate_loop_dispatch_valid "$data" "$FM_CHATGPT_LOOP_DISPATCH_TASK"; then
     return 0
   fi
-  # A loop-dispatched worker recovered by an ordinary relaunch carries no marker
-  # and no record of its own; the loop record that delivered its stage prompt is
-  # the consultation that already ran.
-  if [ "$verdict" = missing ] && fm_consult_gate_loop_worker_valid "$data" "$task"; then
+  # A loop-dispatched worker recovered by an ordinary relaunch carries no
+  # marker and no record of its own; the consult_delivered= field on its OWN
+  # task record - written only when the stage-prompt handoff genuinely
+  # succeeded - is the delivery evidence behind this launch. No loop phase,
+  # marker, or loop record can stand in for it.
+  if [ "$verdict" = missing ] && fm_consult_gate_delivery_record_valid "$state" "$task"; then
     return 0
   fi
 

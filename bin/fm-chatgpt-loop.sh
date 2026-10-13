@@ -30,6 +30,15 @@
 # dispatch: a worker task with no record of its own satisfies the gate through
 # this loop record's dispatch-phase stage prompt, never through the marker alone
 # (bin/fm-consult-gate-lib.sh owns that rule).
+# The durable delivery record belongs to the same handoff: only after fm-send
+# confirms the stage prompt reached the worker does dispatch write
+# consult_delivered=<stage> onto the worker's own task record
+# (state/<worker task id>.meta), and that field - not any loop phase - is what
+# bin/fm-consult-gate-lib.sh reads as proof of delivery when the worker is
+# relaunched. A new dispatch attempt clears any earlier stage's value before
+# the spawn, so only the most recently delivered stage is ever recorded and a
+# spawn or handoff that fails leaves none, so the gate still refuses that
+# worker's next launch.
 # A failed spawn records last_error, leaves the phase at
 # <stage>-dispatch, and
 # exits nonzero; record-worker-failure likewise returns the phase to
@@ -132,6 +141,10 @@ SPAWN="${FM_CHATGPT_LOOP_SPAWN:-$LIBDIR/fm-spawn.sh}"
 CONSULT_BIN="${FM_CHATGPT_LOOP_CONSULT:-$LIBDIR/fm-chatgpt-consult.sh}"
 SEND="${FM_CHATGPT_LOOP_SEND:-$LIBDIR/fm-send.sh}"
 BRIDGE_PID_FILE="$STATE/chatgpt-loop-bridge.pid"
+# The per-task meta lock and its lock primitives are the same shared library
+# every other writer of state/<id>.meta takes them from.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$LIBDIR/fm-wake-lib.sh"
 
 usage() {
   printf 'usage: %s init --task ID --objective-file FILE [--context-file FILE] [--thread ID]\n' "$(basename "$0")" >&2
@@ -170,6 +183,69 @@ need_state() {
   file=$(loop_state_file "$1")
   [ -f "$file" ] || { printf 'fm-chatgpt-loop: no loop state for task %s (run init first)\n' "$1" >&2; return 1; }
   printf '%s\n' "$file"
+}
+
+# set_delivery_field <worker-task-id> <stage>: replace the consult_delivered=
+# field on the worker's OWN task record (state/<id>.meta) with <stage>, or
+# remove it when <stage> is empty, under the per-task meta lock every other
+# writer of that record takes. The record must already exist when a stage is
+# recorded - the successful spawn published it - and this never creates one;
+# the write is a temp-plus-rename in the same directory, so a reader sees
+# either the old record or the record carrying the new field, never a partial
+# file.
+set_delivery_field() {
+  local meta="$STATE/$1.meta" stage=$2 tmp line lock
+  if [ ! -f "$meta" ]; then
+    [ -n "$stage" ] || return 0
+    printf 'fm-chatgpt-loop: no task record at %s to record the delivered %s prompt on\n' "$meta" "$stage" >&2
+    return 1
+  fi
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock"
+  tmp=$(mktemp "$STATE/.$1.meta.delivery.XXXXXX") || {
+    fm_lock_release "$lock"
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+    consult_delivered=*) continue ;;
+    esac
+    printf '%s\n' "$line" >>"$tmp" || {
+      rm -f -- "$tmp"
+      fm_lock_release "$lock"
+      return 1
+    }
+  done <"$meta" || {
+    rm -f -- "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  }
+  if [ -n "$stage" ]; then
+    printf 'consult_delivered=%s\n' "$stage" >>"$tmp" || {
+      rm -f -- "$tmp"
+      fm_lock_release "$lock"
+      return 1
+    }
+  fi
+  if ! mv -f -- "$tmp" "$meta"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+}
+
+# record_delivery <worker-task-id> <stage>: record <stage> as the stage prompt
+# most recently delivered to the worker.
+record_delivery() {
+  set_delivery_field "$1" "$2"
+}
+
+# clear_delivery <worker-task-id>: drop any recorded delivery from the worker's
+# own task record, so no earlier stage can stand in for one that has not been
+# handed over.
+clear_delivery() {
+  set_delivery_field "$1" ""
 }
 
 require_phase() {
@@ -660,6 +736,15 @@ cmd_dispatch() {
     stage_prompt=$(read_field "$file" plan)
     phase_next=plan-worker
   fi
+  # This stage's launch supersedes any earlier stage's recorded delivery, so
+  # the field is cleared before the spawn is even attempted: a spawn that
+  # fails before the handoff cannot leave an earlier stage's value standing in
+  # for a prompt that never reached the worker.
+  if ! clear_delivery "$worker_task"; then
+    write_field "$file" last_error "worker $stage handoff to $worker_task not sent: its earlier delivery record could not be cleared" || return 1
+    printf 'fm-chatgpt-loop: could not clear the earlier delivery record on %s before the %s handoff; nothing launched, the prompt was not sent\n' "$worker_task" "$stage" >&2
+    return 1
+  fi
   if env -u CHATGPT_WEB_BRIDGE_URL -u FM_CHATGPT_LOOP_SPAWN -u FM_CHATGPT_LOOP_CONSULT -u FM_CHATGPT_LOOP_SEND \
     FM_CHATGPT_LOOP_DISPATCH_TASK="$task" "$SPAWN" "${spawn_args[@]}"; then
     rc=0
@@ -675,7 +760,8 @@ cmd_dispatch() {
   # before the handoff; record-findings resolves this worker's report.
   write_field "$file" worker_task "$worker_task" || return 1
   # Handoff: deliver the stored stage prompt to the spawned worker through the
-  # ordinary durable steering path, right after launch.
+  # ordinary durable steering path, right after launch. A failure below writes
+  # no field, leaving the consultation gate to refuse the worker's relaunch.
   if send_err=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SEND" "$worker_task" "$stage_prompt" 2>&1); then
     :
   else
@@ -684,6 +770,16 @@ cmd_dispatch() {
     write_field "$file" last_error "worker $stage prompt delivery failed: $send_err" || return 1
     printf 'fm-chatgpt-loop: spawned the %s worker for task %s, but the prompt handoff to %s failed: %s\n' "$stage" "$task" "$worker_task" "$send_err" >&2
     return "$rc"
+  fi
+  # The handoff genuinely succeeded: this is the one place delivery is
+  # recorded, on the worker's own task record. The worker exists, so the phase
+  # still advances when the record cannot be written - loudly, with the reason,
+  # rather than leaving a delivered prompt looking undeliverable.
+  if ! record_delivery "$worker_task" "$stage"; then
+    write_field "$file" phase "$phase_next" || return 1
+    write_field "$file" last_error "worker $stage prompt delivered to $worker_task, but its delivery record could not be written" || return 1
+    printf 'fm-chatgpt-loop: the %s prompt reached %s, but the delivery record on its task record could not be written; a relaunch of %s will be refused until that record exists\n' "$stage" "$worker_task" "$worker_task" >&2
+    return 1
   fi
   write_field "$file" phase "$phase_next" || return 1
   write_field "$file" last_error "" || return 1
@@ -778,9 +874,14 @@ cmd_next_round() {
     esac
   done
   [ -n "$task" ] || { printf 'fm-chatgpt-loop: next-round needs --task\n' >&2; usage; return 2; }
-  local file iter tmp
+  local file iter tmp worker
   file=$(need_state "$task") || return 1
   require_phase "$file" complete "$task" || return 1
+  worker=$(read_field "$file" worker_task)
+  if [ -n "$worker" ] && ! clear_delivery "$worker"; then
+    printf "fm-chatgpt-loop: could not clear the finished round's delivery record on %s; no state changed\n" "$worker" >&2
+    return 1
+  fi
   iter=$(jq -r '.iteration // 1' "$file")
   tmp=$(mktemp) || return 1
   jq --argjson i "$((iter + 1))" --arg u "$(now_iso)" \

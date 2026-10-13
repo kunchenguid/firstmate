@@ -9,7 +9,7 @@ This record carries the commands and observed output that re-establish the gate 
 
 | Field | Value |
 |---|---|
-| Verified | 2026-10-12 |
+| Verified | 2026-10-13 |
 | Platform | macOS arm64; shellcheck 0.11.0; tasks-axi 0.2.6; jq, curl, and python3 present |
 | Channel | stubbed loopback bridge (`fm_test_start_bridge_stub` in `tests/fixtures.sh`); the suite spends no live ChatGPT turn |
 
@@ -19,7 +19,7 @@ A ship or scout launch whose `data/<task-id>/chatgpt-loop.json` holds no non-emp
 The record's phase must also prove this round's consultation ran - `audit-dispatch`/`audit-worker` for the audit prompt, `plan-dispatch`/`plan-worker`/`complete` for the plan - so a record waiting at its consult phase or holding a prompt left by a finished round refuses (and `bin/fm-chatgpt-loop.sh next-round` clears those round-scoped fields as well).
 An empty, whitespace-only, or multi-line waiver reason is refused, and a reason that is accepted lands in `state/<id>.meta` as `consult_waived=` and in the task's backlog note before the launch proceeds.
 A channel the probe reports unavailable - `unreachable`, `unhealthy`, `misconfigured`, `unconfigured` - refuses the same way a missing prompt does, with the probe verdict naming the real cause, and a probe that cannot run refuses too: the explicit recorded waiver is the only way past the gate, so a down channel blocks no work silently and passes none silently either.
-`bin/fm-control.sh relaunch` applies the same refusal before it stops the agent it replaces, and the consultation loop's own dispatch passes through the record it already holds; a relaunch of a loop-dispatched worker with no record of its own also passes when the loop's record names that exact task in `worker_task` at `audit-worker` or `plan-worker`, the phase the loop enters once it delivered the prompt.
+`bin/fm-control.sh relaunch` applies the same refusal before it stops the agent it replaces, and the consultation loop's own dispatch passes through the record it already holds; a relaunch of a loop-dispatched worker with no record of its own also passes on the `consult_delivered=<stage>` field the loop wrote to that worker's own task record when its stage-prompt handoff confirmed, which names a delivered stage (`audit` or `plan`). The loop clears any earlier stage's value before a new dispatch attempt, so a successful audit handoff cannot satisfy a plan-stage relaunch and a later spawn or handoff that fails leaves no delivery evidence, leaving that worker's relaunch refused.
 
 ## Commands
 
@@ -30,7 +30,7 @@ bin/fm-lint.sh bin/fm-consult-gate-lib.sh bin/fm-spawn.sh bin/fm-control.sh bin/
 bin/fm-doc-audience-check.sh
 ```
 
-## Observed output (2026-10-12)
+## Observed output (2026-10-13)
 
 ```console
 $ bash tests/fm-consult-gate.test.sh
@@ -44,7 +44,9 @@ ok - fm-spawn: a listening-but-broken channel refuses with the cause named
 ok - fm-spawn: a finished round's prompt never satisfies the gate at the next round's consult phase
 ok - fm-spawn: the consultation loop's own dispatch satisfies the gate
 ok - fm-spawn: the loop marker alone never satisfies the gate
-ok - fm-spawn: a loop record naming the launched worker satisfies the gate
+ok - fm-spawn: a loop record's worker phase alone no longer satisfies the gate
+ok - fm-spawn: an ordinary relaunch passes on the worker's recorded delivery, with no waiver
+ok - fm-spawn: a delivery record must name a deliverable stage
 ok - fm-spawn: a loop record naming another worker or a pre-delivery phase still refuses
 ok - fm-spawn: the stage in play decides which stored prompt the gate requires
 # all fm-consult-gate tests passed
@@ -57,6 +59,15 @@ ok - fm-control relaunch: the consultation gate refuses before the running agent
 ok - fm-control relaunch: a task with a stored prompt relaunches normally
 ok - fm-control relaunch: an unavailable channel refuses before the agent is stopped
 ok - fm-control relaunch: an unrecordable waiver refuses before the agent is stopped
+```
+
+The loop half that writes and clears the durable field, from `tests/fm-chatgpt-loop.test.sh`:
+
+```console
+ok - a confirmed handoff records consult_delivered on the worker, and the gate passes on it
+ok - a failed handoff leaves no delivery record and the gate still refuses that worker
+ok - a failed later handoff clears the earlier delivery record, so the gate refuses its relaunch
+ok - a failed later spawn clears the earlier delivery record, so the gate refuses its relaunch
 ```
 
 The refusal the healthy-channel case asserts, as it actually prints:
@@ -77,7 +88,7 @@ $ bin/fm-lint.sh bin/fm-consult-gate-lib.sh bin/fm-spawn.sh bin/fm-control.sh bi
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 fm-lint.sh: full ShellCheck extended analysis enabled
 $ bin/fm-doc-audience-check.sh
-fm-doc-audience-check: ok surfaces=123 local_links=757
+fm-doc-audience-check: ok surfaces=123 local_links=758
 ```
 
 ## Limits

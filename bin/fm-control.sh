@@ -1165,7 +1165,7 @@ do_relaunch() {
   # it before a fresh launch; an unavailable channel refuses here like any other
   # missing prompt. Nothing is checkpointed, noted, or stopped until the gate
   # has answered, including its waiver recording.
-  if ! fm_consult_gate_check "$DATA" "$ID" "$KIND" "$CONSULT_WAIVED_SET" "$CONSULT_WAIVED"; then
+  if ! fm_consult_gate_check "$DATA" "$STATE" "$ID" "$KIND" "$CONSULT_WAIVED_SET" "$CONSULT_WAIVED"; then
     exit 1
   fi
   consult_waiver_reason=$FM_CONSULT_GATE_WAIVER_REASON

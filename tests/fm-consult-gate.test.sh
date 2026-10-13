@@ -284,24 +284,96 @@ test_loop_dispatch_marker_alone_proves_nothing() {
   pass "fm-spawn: the loop marker alone never satisfies the gate"
 }
 
-test_loop_worker_record_satisfies_the_gate() {
+test_loop_worker_record_without_a_delivery_record_refuses() {
   local dir id out status
   id=gate-loopworker-rl-c1
   dir=$(make_case gate-loopworker-rl "$id")
   fm_test_start_bridge_stub "$dir" healthy
-  # The loop dispatched this worker and advanced to audit-worker after handing
-  # over its audit prompt. The worker task has no record of its own and no
-  # dispatch marker at relaunch time, so the loop record naming it is the only
-  # recoverable proof that its consultation ran.
+  # The loop dispatched this worker and its record sits at audit-worker - the
+  # phase that used to stand in for "the prompt was handed over". The worker's
+  # own task record carries no consult_delivered= field, so no delivery is
+  # recoverable: the loop record's phase never proves the prompt reached the
+  # worker, and this launch refuses instead of passing on the inference.
   write_record "$dir" gate-loop-rl-task audit-worker "the delivered audit prompt" "" "$id"
 
   out=$(run_ship "$dir" "$id"); status=$?
-  expect_code 0 "$status" "a loop record naming the launched worker must pass the gate"$'\n'"$out"
-  assert_no_grep "consult_waived=" "$dir/home/state/$id.meta" \
-    "a recovered loop worker record must not record a waiver"
-  assert_present "$dir/launch.log" "the launch with its recovered record must launch"
+  expect_code 1 "$status" "a loop record at its worker phase with no delivery record must refuse"$'\n'"$out"
+  assert_contains "$out" "$dir/home/data/$id/chatgpt-loop.json" \
+    "the refusal must name the missing artifact"
+  assert_absent "$dir/home/state/$id.meta" "a refused launch must write no task record"
+  [ ! -s "$dir/launch.log" ] || fail "a refused launch must not launch a worker"
   fm_test_stop_bridge_stub
-  pass "fm-spawn: a loop record naming the launched worker satisfies the gate"
+  pass "fm-spawn: a loop record's worker phase alone no longer satisfies the gate"
+}
+
+# The proving case for durable delivery provenance: a worker the consultation
+# loop dispatched and handed its prompt to is recovered by an ORDINARY
+# relaunch - no dispatch marker, no delivery inference from any loop record -
+# purely through the consult_delivered= field on its own task record, with no
+# waiver recorded anywhere.
+test_ordinary_relaunch_of_a_delivered_worker_passes_without_a_waiver() {
+  local dir id out status
+  id=gate-relaunch-delivered-c1
+  dir=$(make_case gate-relaunch-delivered "$id")
+  fm_test_start_bridge_stub "$dir" healthy
+
+  # The loop's own fresh dispatch passes through its marker plus its
+  # dispatch-phase record: the worker has no consultation record of its own.
+  write_record "$dir" gate-relaunch-loop audit-dispatch "the stored audit prompt" ""
+  out=$(FM_CHATGPT_LOOP_DISPATCH_TASK=gate-relaunch-loop run_ship "$dir" "$id"); status=$?
+  expect_code 0 "$status" "the loop's own dispatch must pass the gate"$'\n'"$out"
+  assert_present "$dir/home/state/$id.meta" "the dispatch must publish the worker's task record"
+
+  # The handoff confirmed: consult_delivered=audit lands on the worker's own
+  # task record, exactly as bin/fm-chatgpt-loop.sh writes it after fm-send
+  # reports the stage prompt delivered.
+  printf 'consult_delivered=audit\n' >>"$dir/home/state/$id.meta"
+  # The loop recorded its worker and moved on; that loop record must not be
+  # what passes the relaunch below.
+  write_record "$dir" gate-relaunch-loop audit-worker "the stored audit prompt" "" "$id"
+
+  # Ordinary relaunch: no FM_CHATGPT_LOOP_DISPATCH_TASK marker exists here.
+  # The fake tmux server reports the recorded window present but shell-only,
+  # the ordinary "agent exited, endpoint still there" relaunch shape.
+  out=$(FM_FAKE_LIVENESS=1 FM_FAKE_WINDOW_LIST="fm-$id" run_case "$dir" "$id" --relaunch); status=$?
+  expect_code 0 "$status" "an ordinary relaunch of a delivered worker must proceed"$'\n'"$out"
+  assert_present "$dir/launch.log" "the relaunch must launch a replacement worker"
+  assert_no_grep "consult_waived=" "$dir/home/state/$id.meta" \
+    "a relaunch satisfied by the delivery record must record no waiver"
+  assert_grep "consult_delivered=audit" "$dir/home/state/$id.meta" \
+    "the delivery record must survive the relaunch for the next recovery"
+  fm_test_stop_bridge_stub
+  pass "fm-spawn: an ordinary relaunch passes on the worker's recorded delivery, with no waiver"
+}
+
+# A consult_delivered= value only carries delivery if it names a stage the loop
+# delivers. A value naming no stage - pending work, a blank, a typo - proves
+# nothing about a prompt reaching the worker, so the relaunch refuses.
+test_a_delivery_record_must_name_a_delivered_stage() {
+  local dir id out status
+  id=gate-delivery-stage-c1
+  dir=$(make_case gate-delivery-stage "$id")
+  fm_test_start_bridge_stub "$dir" healthy
+  write_record "$dir" gate-delivery-stage-loop audit-dispatch "the stored audit prompt" ""
+  out=$(FM_CHATGPT_LOOP_DISPATCH_TASK=gate-delivery-stage-loop run_ship "$dir" "$id"); status=$?
+  expect_code 0 "$status" "the loop's own dispatch must pass the gate"$'\n'"$out"
+  assert_present "$dir/home/state/$id.meta" "the dispatch must publish the worker's task record"
+
+  printf 'consult_delivered=pending\n' >>"$dir/home/state/$id.meta"
+  out=$(FM_FAKE_LIVENESS=1 FM_FAKE_WINDOW_LIST="fm-$id" run_case "$dir" "$id" --relaunch); status=$?
+  expect_code 1 "$status" "a delivery record naming no deliverable stage must refuse"$'\n'"$out"
+  assert_contains "$out" "$dir/home/data/$id/chatgpt-loop.json" \
+    "the refusal must name the missing artifact"
+  [ ! -s "$dir/launch.log" ] || fail "a refused relaunch must not launch a worker"
+
+  grep -v '^consult_delivered=' "$dir/home/state/$id.meta" >"$dir/home/state/$id.meta.tmp"
+  printf 'consult_delivered=\n' >>"$dir/home/state/$id.meta.tmp"
+  mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
+  out=$(FM_FAKE_LIVENESS=1 FM_FAKE_WINDOW_LIST="fm-$id" run_case "$dir" "$id" --relaunch); status=$?
+  expect_code 1 "$status" "a blank delivery record must refuse"$'\n'"$out"
+  [ ! -s "$dir/launch.log" ] || fail "a refused relaunch must not launch a worker"
+  fm_test_stop_bridge_stub
+  pass "fm-spawn: a delivery record must name a deliverable stage"
 }
 
 test_loop_worker_record_for_another_task_still_refuses() {
@@ -361,7 +433,9 @@ test_unhealthy_bridge_refuses_naming_the_cause
 test_a_finished_rounds_prompt_never_satisfies_the_gate
 test_loop_dispatch_record_satisfies_the_gate
 test_loop_dispatch_marker_alone_proves_nothing
-test_loop_worker_record_satisfies_the_gate
+test_loop_worker_record_without_a_delivery_record_refuses
+test_ordinary_relaunch_of_a_delivered_worker_passes_without_a_waiver
+test_a_delivery_record_must_name_a_delivered_stage
 test_loop_worker_record_for_another_task_still_refuses
 test_the_stage_in_play_decides_which_prompt_is_required
 
