@@ -426,7 +426,7 @@ ledger_scan() {
     fi
     jq -r "$MODEL_NORMALIZATION"'.incarnations[].model |= seat_model | . as $h | .incarnations[] | [$h.state_dir, $h.task, .generation, .lifecycle,
       (.model // "-"), .kind, .launch_phase, ((.owner_pid // "-") | tostring),
-      (.route.placement // "-"), (.previous_generation // "-")] | @tsv' "$f" >> "$TMPD/ledger" || return 1
+      (.route.placement // "-"), (.previous_generation // "-"), (.owner_pid_identity // "" | if . == "" then "-" else . end)] | @tsv' "$f" >> "$TMPD/ledger" || return 1
   done
 }
 
@@ -1464,11 +1464,12 @@ if [ "$CMD" = reconcile ]; then
     END { if (n) for (i = 0; i < n; i++) print rows[(tick + i) % n + 1] }
   ' "$TMPD/ledger" > "$TMPD/candidates"
   tried=0
-  while IFS=$'\t' read -r st task gen lifecycle _model kind phase owner placement _prev; do
+  while IFS=$'\t' read -r st task gen lifecycle _model kind phase owner placement _prev owner_identity; do
     [ "$tried" -lt "$LIMIT" ] || break
     # A home below the root reconciles only its own holders in the shared ledger.
     [ "$ROOT_SELF" -eq 1 ] || [ "$st" = "$CALLER_STATE" ] || continue
-    fm_pid_alive "$owner" && continue
+    [ "$owner_identity" != - ] || owner_identity=
+    holder_alive "$owner" "$owner_identity" && continue
     if [ "$lifecycle:$kind" = confirmed:secondmate ] && [ -f "$st/$task.meta" ] \
       && [ "$(meta_generation "$st/$task.meta")" = "$gen" ]; then
       continue
