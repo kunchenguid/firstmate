@@ -131,6 +131,8 @@ test_full_loop_happy_path() {
   bash "$LOOP" dispatch --stage audit --task happy -- mytask myproj --mode local-only --yolo off >/dev/null
   [ "$(loop_phase happy)" = "audit-worker" ] || fail "an audit dispatch must advance to audit-worker"
   assert_contains "$(cat "$dir/argv.txt")" "--effort low" "the audit stage must dispatch a low-thinking worker"
+  assert_contains "$(cat "$dir/env.txt")" "FM_CHATGPT_LOOP_DISPATCH_TASK=happy" \
+    "the loop's dispatch must mark the spawn with its loop task id, which is what bin/fm-consult-gate-lib.sh reads to satisfy the consultation gate for a worker task with no record of its own"
   assert_contains "$(cat "$dir/send.txt")" "target: mytask" "the audit prompt must be steered to the spawn's first positional task id"
   assert_contains "$(cat "$dir/send.txt")" "stubbed consultation answer" "the delivered audit prompt must be the ChatGPT-generated audit answer"
   grep -Eiq 'CHATGPT_WEB_BRIDGE_URL|codex-chatgpt-web|17841|17911|fm-chatgpt|127\.0\.0\.1' "$dir/send.txt" && fail "the delivered audit prompt must carry no bridge reference"
@@ -152,6 +154,40 @@ test_full_loop_happy_path() {
   [ "$(loop_phase happy)" = "complete" ] || fail "a recorded result must complete the task"
   [ "$(jq -r '.worker_result' "$HOME_DIR/data/happy/chatgpt-loop.json")" = "worker fixed both checks" ] || fail "the completion must keep the worker result"
   pass "objective to audit to worker to plan to worker to completion flows through every phase"
+}
+
+# next-round starts a fresh round, and a fresh round must hold no prompt: a
+# leftover audit prompt or plan is exactly what bin/fm-consult-gate-lib.sh's
+# dispatch gate could mistake for the new round's consultation.
+test_next_round_clears_the_finished_rounds_fields() {
+  local dir=$TMP_ROOT/nextround pid file field
+  mkdir -p "$dir"
+  new_task_files
+  make_spawn_stub "$dir"
+  pid=$(start_stub "$dir")
+  bash "$LOOP" init --task nextround --objective-file "$TMP_ROOT/objective.txt" --context-file "$TMP_ROOT/context.txt" >/dev/null
+  bash "$LOOP" consult --stage audit --task nextround >/dev/null
+  stop_stub "$pid"
+  bash "$LOOP" dispatch --stage audit --task nextround -- nrworker myproj --mode local-only --yolo off >/dev/null
+  printf 'worker found two flaky tests\n' > "$dir/findings.txt"
+  pid=$(start_stub "$dir")
+  bash "$LOOP" record-findings --task nextround --file "$dir/findings.txt" >/dev/null
+  bash "$LOOP" consult --stage plan --task nextround >/dev/null
+  stop_stub "$pid"
+  bash "$LOOP" dispatch --stage plan --task nextround -- nrworker myproj --mode local-only --yolo off >/dev/null
+  printf 'worker fixed both checks\n' > "$dir/result.txt"
+  bash "$LOOP" record-result --task nextround --file "$dir/result.txt" >/dev/null
+  [ "$(loop_phase nextround)" = complete ] || fail "the fixture must complete before next-round"
+
+  bash "$LOOP" next-round --task nextround >/dev/null
+  file="$HOME_DIR/data/nextround/chatgpt-loop.json"
+  for field in audit_prompt audit_result findings findings_source worker_task plan worker_result last_error; do
+    [ "$(jq -r --arg f "$field" '.[$f]' "$file")" = "" ] \
+      || fail "next-round must clear the finished round's $field so a stale prompt can never satisfy the dispatch gate"
+  done
+  [ "$(jq -r '.iteration' "$file")" = 2 ] || fail "next-round must still advance the iteration"
+  [ "$(loop_phase nextround)" = "audit-consult" ] || fail "next-round must still return to audit-consult"
+  pass "next-round clears the finished round's scoped fields, so a stale prompt never satisfies the gate"
 }
 
 test_plan_consult_carries_explicit_context() {
@@ -1044,6 +1080,7 @@ test_rejected_audit_consult_persists_nothing() {
 }
 
 test_full_loop_happy_path
+test_next_round_clears_the_finished_rounds_fields
 test_plan_consult_carries_explicit_context
 test_consult_failure_is_retryable
 test_worker_failure_recorded

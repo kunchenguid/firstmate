@@ -6,6 +6,7 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
+#                                         [--consult-waived <reason>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -86,6 +87,21 @@
 #              naming a harness or model that contradicts the task's deterministic
 #              project pin is refused before the running agent stops
 #              (docs/configuration.md "Crew dispatch profiles").
+#              A ship or scout relaunch also passes the dispatch-time consultation
+#              gate (bin/fm-consult-gate-lib.sh) HERE, before the checkpoint, the
+#              note, and the exit, because this transaction stops the running agent
+#              before it delegates the launch: a task whose stored ChatGPT
+#              consultation prompt for the stage in play is missing is refused with
+#              the record path and the bin/fm-chatgpt-loop.sh commands that create
+#              it, exactly as bin/fm-spawn.sh refuses a fresh launch. An
+#              unavailable channel refuses here too, with the probe verdict
+#              naming the cause. --consult-waived <reason> is an explicit
+#              exception this transaction records in the task's backlog note
+#              HERE, before the checkpoint and the exit, so a waiver the backlog
+#              cannot record refuses while the agent is still running, and then
+#              carries it through to bin/fm-spawn.sh, which records it in the
+#              task record, so nothing is ever waived without leaving its reason
+#              in the durable record.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -186,6 +202,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-project-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
+# shellcheck source=bin/fm-consult-gate-lib.sh
+. "$SCRIPT_DIR/fm-consult-gate-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -253,6 +271,8 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+CONSULT_WAIVED=
+CONSULT_WAIVED_SET=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -264,6 +284,7 @@ for control_arg in "$@"; do
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
+      consult_waived) CONSULT_WAIVED=$control_arg; CONSULT_WAIVED_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
@@ -288,6 +309,11 @@ for control_arg in "$@"; do
       NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
+    --consult-waived) control_want_value=consult_waived ;;
+    --consult-waived=*)
+      CONSULT_WAIVED=${control_arg#--consult-waived=}
+      CONSULT_WAIVED_SET=1
+      ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
@@ -297,8 +323,8 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$CONSULT_WAIVED_SET" = 0 ] \
+    || die "--harness, --model, --effort, --note, and --consult-waived apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -1102,7 +1128,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line consult_waiver_reason=''
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -1131,6 +1157,29 @@ do_relaunch() {
   else
     note_line="note=none"
   fi
+  # Consultation gate (bin/fm-consult-gate-lib.sh): the same refusal
+  # bin/fm-spawn.sh enforces on a fresh launch, run HERE because this
+  # transaction stops the running agent before it delegates the replacement.
+  # An operator's --consult-waived <reason> is recorded in the backlog note
+  # HERE, before the checkpoint and the stop, exactly as bin/fm-spawn.sh records
+  # it before a fresh launch; an unavailable channel refuses here like any other
+  # missing prompt. Nothing is checkpointed, noted, or stopped until the gate
+  # has answered, including its waiver recording.
+  if ! fm_consult_gate_check "$DATA" "$ID" "$KIND" "$CONSULT_WAIVED_SET" "$CONSULT_WAIVED"; then
+    exit 1
+  fi
+  consult_waiver_reason=$FM_CONSULT_GATE_WAIVER_REASON
+  if [ -n "$consult_waiver_reason" ]; then
+    if ! declare -F fm_backlog_transition_applies >/dev/null 2>&1; then
+      # shellcheck source=bin/fm-tasks-axi-lib.sh
+      . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+      # shellcheck source=bin/fm-backlog-transition-lib.sh
+      . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+    fi
+    if ! fm_consult_gate_record_backlog "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$DATA" "$KIND" "$ID" "$consult_waiver_reason"; then
+      die "task $ID's consultation waiver could not be recorded in its backlog note ($FM_CONSULT_GATE_RECORD_ERROR); refusing a relaunch whose bypass is not durably visible, before the running agent is stopped"
+    fi
+  fi
   safe_checkpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
@@ -1150,6 +1199,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ -z "$consult_waiver_reason" ] || spawn_args+=(--consult-waived "$consult_waiver_reason")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1

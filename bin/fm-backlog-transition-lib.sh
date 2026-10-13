@@ -549,6 +549,32 @@ fm_backlog_row_artifact_supported() {
   esac
 }
 
+# fm_backlog_row_body_decode <show-full-output>
+# Print the decoded body one `tasks-axi show <id> --full` rendering carries, or
+# return 1 when it cannot be decoded. Single owner of that decode, shared by
+# fm_backlog_retain below and bin/fm-consult-gate-lib.sh's waiver note, so a
+# body containing non-ASCII can never decode differently on two paths.
+# The leading quote selects a JSON-encoded bare string, which is exactly the
+# value an older JSON::PP rejects unless allow_nonref is asked for, so the
+# decoder requests it rather than inheriting the local default. It then writes
+# bytes, because printing the decoded characters to a stream with no :raw layer
+# emits a codepoint at or below U+00FF as one latin-1 byte and silently
+# corrupts the body this rewrites.
+fm_backlog_row_body_decode() {
+  printf '%s\n' "$1" | sed -n 's/^  body: //p' | head -1 |
+    LC_ALL=C perl -MJSON::PP -e '
+      local $/;
+      my $shown = <STDIN>;
+      $shown =~ s/\s+\z//;
+      exit 0 if $shown eq "" || $shown eq "-";
+      my $value = $shown =~ /\A"/
+        ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
+      binmode STDOUT, ":raw";
+      utf8::encode($value) if utf8::is_utf8($value);
+      print $value unless $value eq "-";
+    '
+}
+
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
 # of the task body (a line already present is left alone), preserve supported
@@ -596,27 +622,10 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
       return "$command_status"
     fi
-    # The leading quote selects a JSON-encoded bare string, which is exactly the
-    # value an older JSON::PP rejects unless allow_nonref is asked for, so the
-    # decoder below requests it rather than inheriting the local default. It then
-    # writes bytes, because printing the decoded characters to a stream with no
-    # :raw layer emits a codepoint at or below U+00FF as one latin-1 byte and
-    # silently corrupts the body this rewrites.
-    body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
-      | LC_ALL=C perl -MJSON::PP -e '
-        local $/;
-        my $shown = <STDIN>;
-        $shown =~ s/\s+\z//;
-        exit 0 if $shown eq "" || $shown eq "-";
-        my $value = $shown =~ /\A"/
-          ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value unless $value eq "-";
-      ') || {
+    if ! body=$(fm_backlog_row_body_decode "$out"); then
       FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
       return 1
-    }
+    fi
     line="Deliverable of the finished work: $deliverable"
     case $'\n'"$body"$'\n' in
       *$'\n'"$line"$'\n'*) ;;

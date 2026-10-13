@@ -28,6 +28,9 @@ command -v tasks-axi >/dev/null 2>&1 && HAVE_TASKS_AXI=1
 
 write_brief() {  # <home> <id>
   mkdir -p "$1/data/$2"
+  # The dispatch-time consultation gate reads this prompt before anything is
+  # created, so every fixture launch carries one (bin/fm-consult-gate-lib.sh).
+  fm_test_seed_consult_record "$1" "$2"
   cat > "$1/data/$2/brief.md" <<EOF
 # Task
 ## Captain's intent

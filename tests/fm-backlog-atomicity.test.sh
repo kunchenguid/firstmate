@@ -77,6 +77,7 @@ path = "data/backlog.md"
 EOF
   for id in "$@"; do
     mkdir -p "$home/data/$id"
+    fm_test_seed_consult_record "$home" "$id"
     cat > "$home/data/$id/brief.md" <<EOF
 # Task
 ## Captain's intent

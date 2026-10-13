@@ -1200,6 +1200,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("before_agent_start", (event) => {
+    // Pi 1.2 also fires this event for idle custom-message runs, which carry a
+    // starting message and no user prompt. A wake is always a user follow-up,
+    // so only a user run can consume one.
+    if ("messageType" in event && event.messageType !== "user") return;
     consumeWake(generation, event.prompt);
   });
   pi.on?.("message_start", (event) => {

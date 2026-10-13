@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--consult-waived <reason>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--consult-waived <reason>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -52,7 +52,23 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#   Every ship and scout launch, fresh or relaunch, first passes the dispatch-time
+#   consultation gate (bin/fm-consult-gate-lib.sh owns the rules): the task's
+#   data/<task-id>/chatgpt-loop.json must hold a non-empty ChatGPT-generated
+#   prompt for the stage in play, or the launch carries --consult-waived <reason>.
+#   The refusal lands before any local copy, endpoint, record, or backlog move
+#   exists, names the record path and the bin/fm-chatgpt-loop.sh init and consult
+#   commands that create the prompt, and mentions this waiver, so an exception is
+#   always possible and never silent: an empty, whitespace-only, or multi-line
+#   reason is refused, and a reason that is supplied is written to
+#   state/<id>.meta as consult_waived= and to the task's backlog note before the
+#   launch proceeds (a waiver that cannot be recorded refuses). A channel that
+#   reads unavailable - unreachable, unhealthy, misconfigured, or unconfigured -
+#   refuses the same way a missing prompt does, with the probe verdict naming the
+#   cause and the waiver command printed; the explicit waiver is the only way past
+#   the gate. A secondmate is not gated, and --consult-waived on one is refused
+#   rather than ignored.
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--consult-waived <reason>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -706,6 +722,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-project-profile-lib.sh
 . "$SCRIPT_DIR/fm-project-profile-lib.sh"
+# shellcheck source=bin/fm-consult-gate-lib.sh
+. "$SCRIPT_DIR/fm-consult-gate-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -732,6 +750,8 @@ BRANCH_PREFIX_SET=0
 BASE_BRANCH=
 BASE_BRANCH_SET=0
 TRACEPARENT_SET=0
+CONSULT_WAIVED=
+CONSULT_WAIVED_SET=0
 RELAUNCH=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
@@ -782,6 +802,10 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    consult-waived)
+      CONSULT_WAIVED=$a
+      CONSULT_WAIVED_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -847,6 +871,11 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --consult-waived) want_value=consult-waived ;;
+  --consult-waived=*)
+    CONSULT_WAIVED=${a#--consult-waived=}
+    CONSULT_WAIVED_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -902,6 +931,9 @@ case "$EFFORT" in
   exit 1
   ;;
 esac
+# A --consult-waived reason is validated by the gate that owns waivers
+# (bin/fm-consult-gate-lib.sh), which refuses an empty, whitespace-only, or
+# multi-line reason before anything is created or launched.
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
@@ -979,6 +1011,10 @@ else
     }
     [ "$KIND" != secondmate ] || [ "$BASE_BRANCH_SET" -eq 0 ] || {
       echo "error: --base-branch applies only to ship and scout spawns; a secondmate charter has no task base" >&2
+      exit 1
+    }
+    [ "$KIND" != secondmate ] || [ "$CONSULT_WAIVED_SET" -eq 0 ] || {
+      echo "error: --consult-waived applies only to ship and scout launches; a secondmate is never gated, so there is no consultation to waive" >&2
       exit 1
     }
   fi
@@ -1579,6 +1615,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
+  [ "$CONSULT_WAIVED_SET" -eq 0 ] || shared_args+=(--consult-waived "$CONSULT_WAIVED")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -3810,6 +3847,29 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   exit 1
 fi
 
+# Dispatch-time consultation gate (bin/fm-consult-gate-lib.sh owns the rules and
+# the refusal text). Every ship and scout launch - fresh or relaunch - must carry
+# its stored ChatGPT-generated prompt for the stage in play, or an explicit
+# recorded waiver. It runs after every other launch refusal has answered and
+# before any endpoint, local copy, or record exists, so a refused launch costs
+# nothing to unwind - and nothing is stopped or launched before the gate has
+# answered, which is why bin/fm-control.sh relaunch runs the same gate before it
+# stops the agent it replaces.
+CONSULT_WAIVER=
+if ! fm_consult_gate_check "$DATA" "$ID" "$KIND" "$CONSULT_WAIVED_SET" "$CONSULT_WAIVED"; then
+  exit 1
+fi
+CONSULT_WAIVER=$FM_CONSULT_GATE_WAIVER_REASON
+# The consultation loop marks its own dispatch with the loop task id above; it
+# was read by the gate and belongs to nothing this spawn launches next.
+unset FM_CHATGPT_LOOP_DISPATCH_TASK
+if [ -n "$CONSULT_WAIVER" ]; then
+  if ! fm_consult_gate_record_backlog "$CONFIG" "$DATA" "$KIND" "$ID" "$CONSULT_WAIVER"; then
+    echo "error: task $ID's consultation waiver could not be recorded in its backlog note ($FM_CONSULT_GATE_RECORD_ERROR); refusing a launch whose bypass is not durably visible" >&2
+    exit 1
+  fi
+fi
+
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
@@ -5211,7 +5271,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx consult_waived", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5265,6 +5325,9 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  # A consultation waiver rides the record it belongs to; an unwaived launch
+  # writes no consult_waived= line, so the record stays byte-identical.
+  [ -z "$CONSULT_WAIVER" ] || echo "consult_waived=$CONSULT_WAIVER"
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
   fi

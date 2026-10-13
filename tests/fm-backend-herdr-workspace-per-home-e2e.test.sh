@@ -53,6 +53,10 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# The consultation-gate fixture seeds the stored ChatGPT prompt this world's
+# launches need; this suite builds its own spawn world without tests/lib.sh.
+# shellcheck source=tests/consult-gate-fixture.sh
+. "$ROOT/tests/consult-gate-fixture.sh"
 
 # This suite runs against its own isolated lab session, so a Herdr pane
 # inherited from the terminal it was launched in must not follow spawn into it
@@ -91,6 +95,7 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
 printf 'off\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"
+fm_test_seed_consult_record "$PRIMARY_HOME" cm1
 cat > "$PRIMARY_HOME/data/cm1/brief.md" <<'EOF'
 # Task
 ## Captain's intent
@@ -106,6 +111,7 @@ printf 'off\n' > "$SM_HOME/config/herdr-presentation-spaces"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM_HOME/AGENTS.md"
 printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
+fm_test_seed_consult_record "$SM_HOME" cm2
 printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$SM_HOME/.gitignore"
 git -C "$SM_HOME" init -q -b main
 cat > "$SM_HOME/data/cm2/brief.md" <<'EOF'

@@ -17,10 +17,16 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. The dispatch-time consultation gate (bin/fm-consult-gate-lib.sh) refuses
+#      a relaunch whose stored ChatGPT prompt is missing, before the transaction
+#      stops the running agent, and a relaunch of a task with a record proceeds
+#      normally.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -42,6 +48,7 @@ TASK_TMPS=()
 
 relaunch_cleanup() {
   local d
+  fm_test_stop_bridge_stub
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
@@ -210,6 +217,9 @@ Exercise relaunch behavior for $id.
 ## Firstmate spec
 Preserve the task while replacing its agent process.
 EOF
+  # A relaunch task normally has its stored ChatGPT consultation prompt; a case
+  # that exercises the gate removes it again.
+  fm_test_seed_consult_record "$home" "$id"
   {
     echo "window=$ses:fm-$id"
     echo "endpoint_task_id=$id"
@@ -1187,6 +1197,7 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     fm_git_worktree "$dir/proj" "$dir/wt" "task-$id"
     FM_HOME="$home" "$BRIEF" "$id" firstmate --scout >/dev/null \
       || fail "$mode: could not scaffold the scout brief"
+    fm_test_seed_consult_record "$home" "$id"
     brief="$home/data/$id/brief.md"
     sed 's/{TASK}/Fix the promotion relaunch contract./; s/{FIRSTMATE_SPEC}/Preserve the current delivery mode./' \
       "$brief" > "$brief.filled"
@@ -2150,6 +2161,7 @@ add_herdr_ship_task() {  # <case-dir> <id> [session] [surviving-pane]
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
+  fm_test_seed_consult_record "$home" "$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
 ## Captain's intent
@@ -2517,8 +2529,109 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+# --- 7. the dispatch-time consultation gate ----------------------------------
+
+# The relaunch transaction stops the running agent before it delegates the
+# replacement, so its half of the gate has to answer first. A task with no
+# stored prompt on a verified-healthy channel is refused with the artifact and
+# the commands that create it, and the agent is still exactly where it was.
+test_relaunch_without_a_stored_prompt_refuses_before_stopping() {
+  local dir out rc
+  dir=$(new_case consultgate-nostore rl50)
+  add_ship_task "$dir" rl50 claude
+  rm -f "$dir/home/data/rl50/chatgpt-loop.json"
+  fm_test_start_bridge_stub "$dir" healthy
+
+  out=$(run_control "$dir" rl50 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a relaunch with no stored consultation prompt must refuse"$'\n'"$out"
+  assert_contains "$out" "$dir/home/data/rl50/chatgpt-loop.json" \
+    "the refusal must name the exact missing artifact"
+  assert_contains "$out" "bin/fm-chatgpt-loop.sh init --task rl50" \
+    "the refusal must print the command that creates it"
+  assert_contains "$out" "--consult-waived <reason>" "the refusal must mention the waiver"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a consultation-gate refusal must not stop the running agent"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "a consultation-gate refusal must send nothing to the endpoint"
+  fm_test_stop_bridge_stub
+  pass "fm-control relaunch: the consultation gate refuses before the running agent is stopped"
+}
+
+# The other half of the same rule: a task that carries its stored prompt is a
+# perfectly ordinary relaunch, with no waiver recorded anywhere.
+test_relaunch_with_a_stored_prompt_proceeds_normally() {
+  local dir out rc
+  dir=$(new_case consultgate-ok rl51)
+  add_ship_task "$dir" rl51 claude
+  fm_test_use_dead_bridge
+
+  out=$(run_control "$dir" rl51 relaunch --note "x"); rc=$?
+  expect_code 0 "$rc" "a relaunch whose stored prompt exists must proceed"$'\n'"$out"
+  assert_contains "$out" "relaunched rl51" "the relaunch should report its outcome"
+  assert_no_grep "consult_waived=" "$dir/home/state/rl51.meta" \
+    "a satisfied gate must leave the record free of a waiver line"
+  pass "fm-control relaunch: a task with a stored prompt relaunches normally"
+}
+
+# With no prompt and a channel that is verifiably down, the relaunch refuses
+# exactly like a healthy channel does, with the probe verdict naming the cause;
+# the explicit recorded waiver is the only way past the gate.
+test_relaunch_with_an_unavailable_channel_refuses_before_stopping() {
+  local dir out rc
+  dir=$(new_case consultgate-down rl52)
+  add_ship_task "$dir" rl52 claude
+  rm -f "$dir/home/data/rl52/chatgpt-loop.json"
+  fm_test_use_dead_bridge
+
+  out=$(run_control "$dir" rl52 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "an unavailable channel must refuse a relaunch with no stored prompt"$'\n'"$out"
+  assert_contains "$out" "$dir/home/data/rl52/chatgpt-loop.json" \
+    "the refusal must name the exact missing artifact"
+  assert_contains "$out" "the consultation channel is unavailable: unreachable" \
+    "the refusal must name the real cause from the probe verdict"
+  assert_contains "$out" "--consult-waived <reason>" "the refusal must mention the waiver"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an unavailable-channel refusal must not stop the running agent"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "an unavailable-channel refusal must send nothing to the endpoint"
+  pass "fm-control relaunch: an unavailable channel refuses before the agent is stopped"
+}
+
+# The waiver's recording half must answer before the stop too: an explicit
+# --consult-waived whose reason has nowhere to land in this home's backlog
+# refuses while the running agent is still exactly where it was.
+test_relaunch_with_an_unrecordable_waiver_refuses_before_stopping() {
+  local dir out rc
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
+    return 0
+  }
+  dir=$(new_case consultgate-unrecordable rl53)
+  add_ship_task "$dir" rl53 claude
+  # A live markdown backlog with no row for this task: the waiver note is
+  # applicable and cannot be written.
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$dir/home/data/backlog.md"
+
+  out=$(run_control "$dir" rl53 relaunch --note "x" --consult-waived "ops decision"); rc=$?
+  expect_code 1 "$rc" "a relaunch whose waiver cannot be recorded must refuse"$'\n'"$out"
+  assert_contains "$out" "backlog note" "the refusal must name the record that could not be written"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an unrecordable-waiver refusal must not stop the running agent"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "an unrecordable-waiver refusal must send nothing to the endpoint"
+  pass "fm-control relaunch: an unrecordable waiver refuses before the agent is stopped"
+}
+
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
+test_relaunch_without_a_stored_prompt_refuses_before_stopping
+test_relaunch_with_a_stored_prompt_proceeds_normally
+test_relaunch_with_an_unavailable_channel_refuses_before_stopping
+test_relaunch_with_an_unrecordable_waiver_refuses_before_stopping
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven

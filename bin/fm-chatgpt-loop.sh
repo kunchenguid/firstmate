@@ -25,7 +25,12 @@
 # explicit FM_HOME and state root, addressed at the plain task id that must
 # lead the args after --, and refuses before launching when that leading
 # token is absent or not a plain task id (never a token scanned from option
-# values). A failed spawn records last_error, leaves the phase at
+# values). The spawn itself carries FM_CHATGPT_LOOP_DISPATCH_TASK=<this loop's
+# task id> so bin/fm-spawn.sh's consultation gate recognizes it as the loop's own
+# dispatch: a worker task with no record of its own satisfies the gate through
+# this loop record's dispatch-phase stage prompt, never through the marker alone
+# (bin/fm-consult-gate-lib.sh owns that rule).
+# A failed spawn records last_error, leaves the phase at
 # <stage>-dispatch, and
 # exits nonzero; record-worker-failure likewise returns the phase to
 # <stage>-dispatch (never toward the next stage) so the same stage retries
@@ -44,7 +49,11 @@
 # the stage prompt to.
 # Phases: audit-consult -> audit-dispatch -> audit-worker -> plan-consult ->
 # plan-dispatch -> plan-worker -> complete. next-round increments iteration
-# and returns to audit-consult so further audit/plan cycles stay possible.
+# and returns to audit-consult so further audit/plan cycles stay possible, and
+# clears the finished round's scoped fields (audit_prompt, audit_result,
+# findings, findings_source, worker_task, plan, worker_result, last_error) so a
+# finished round's prompt can never pass bin/fm-consult-gate-lib.sh's dispatch
+# gate as the new round's consultation.
 # A wrong-phase call refuses with a nonzero exit and no state change.
 #
 # Findings feedback is part of stage completion, never a separate afterthought:
@@ -651,7 +660,8 @@ cmd_dispatch() {
     stage_prompt=$(read_field "$file" plan)
     phase_next=plan-worker
   fi
-  if env -u CHATGPT_WEB_BRIDGE_URL -u FM_CHATGPT_LOOP_SPAWN -u FM_CHATGPT_LOOP_CONSULT -u FM_CHATGPT_LOOP_SEND "$SPAWN" "${spawn_args[@]}"; then
+  if env -u CHATGPT_WEB_BRIDGE_URL -u FM_CHATGPT_LOOP_SPAWN -u FM_CHATGPT_LOOP_CONSULT -u FM_CHATGPT_LOOP_SEND \
+    FM_CHATGPT_LOOP_DISPATCH_TASK="$task" "$SPAWN" "${spawn_args[@]}"; then
     rc=0
   else
     rc=$?
@@ -773,7 +783,11 @@ cmd_next_round() {
   require_phase "$file" complete "$task" || return 1
   iter=$(jq -r '.iteration // 1' "$file")
   tmp=$(mktemp) || return 1
-  jq --argjson i "$((iter + 1))" --arg u "$(now_iso)" '.iteration = $i | .phase = "audit-consult" | .updated_at = $u' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+  jq --argjson i "$((iter + 1))" --arg u "$(now_iso)" \
+    '.iteration = $i | .phase = "audit-consult"
+     | .audit_prompt = "" | .audit_result = "" | .findings = "" | .findings_source = ""
+     | .worker_task = "" | .plan = "" | .worker_result = "" | .last_error = ""
+     | .updated_at = $u' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$file"
   printf 'task %s advanced to round %s\n' "$task" "$((iter + 1))"
 }

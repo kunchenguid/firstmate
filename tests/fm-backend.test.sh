@@ -46,6 +46,9 @@ SPAWN_HOME="$TMP_ROOT/user-home"
 mkdir -p "$SPAWN_HOME"
 
 write_spawn_brief() {  # <file> <id>
+  # The brief lives at <data>/<id>/brief.md; the dispatch-time consultation gate
+  # reads the task's stored prompt from that same data directory.
+  fm_test_seed_consult_record_at "$(dirname "$(dirname "$1")")" "$2"
   cat > "$1" <<EOF
 # Task
 ## Captain's intent

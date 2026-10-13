@@ -489,6 +489,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/consult-gate.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/devin.md",
       "audience": "maintainer-verification"
     },

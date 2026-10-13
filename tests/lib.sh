@@ -37,6 +37,10 @@ umask 022
 # header owns the invariant and the layers it deliberately leaves in force.
 # shellcheck source=tests/git-config-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
+# The consultation-gate fixture lives in its own file because suites with a
+# standalone spawn world source it directly without pulling in this library.
+# shellcheck source=tests/consult-gate-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/consult-gate-fixture.sh"
 
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate

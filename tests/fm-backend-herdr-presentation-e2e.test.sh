@@ -268,6 +268,10 @@ export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# The consultation-gate fixture seeds the stored ChatGPT prompt this world's
+# launches need; this suite builds its own spawn world without tests/lib.sh.
+# shellcheck source=tests/consult-gate-fixture.sh
+. "$ROOT/tests/consult-gate-fixture.sh"
 # This suite runs against its own isolated lab session, so a Herdr pane
 # inherited from the terminal it was launched in must not follow spawn into it
 # as a cross-session parent identity. Every projection below is anchored on the
@@ -403,6 +407,7 @@ make_project() {  # <dir>
 write_ship_brief() {  # <home> <id> [description]
   local home=$1 id=$2 description=${3:-Herdr presentation fixture $2}
   mkdir -p "$home/data/$id"
+  fm_test_seed_consult_record "$home" "$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
 ## Captain's intent

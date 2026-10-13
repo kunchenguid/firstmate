@@ -559,6 +559,7 @@ make_agy_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_agy_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  fm_test_seed_consult_record "$home" "$id"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent

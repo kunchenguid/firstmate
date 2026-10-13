@@ -91,6 +91,7 @@ test_orca_fresh_spawn_enters_the_worktree_it_created() {
   printf 'manual\n' > "$home/config/backlog-backend"
   fm_git_init_commit "$case_dir/project"
   mkdir -p "$home/data/$id"
+  fm_test_seed_consult_record "$home" "$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
 ## Captain's intent
@@ -129,6 +130,7 @@ test_orca_relaunch_is_refused_before_the_worktree_carveout_could_run() {
   printf 'manual\n' > "$home/config/backlog-backend"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
+  fm_test_seed_consult_record "$home" "$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
 ## Captain's intent

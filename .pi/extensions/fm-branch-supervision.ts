@@ -1676,6 +1676,10 @@ ${context.command}
     if (!(await enqueueDelivery(() => actingAsOwner(promptGeneration)))) return;
     if (promptGeneration !== generation || !currentMainSession || !collectCurrentMainDialog()) return;
 
+    // Pi 1.2 also fires this event for idle custom-message runs, which carry a
+    // starting message and no user prompt. Only a user run can stage the
+    // captain's request.
+    if ("messageType" in event && event.messageType !== "user") return;
     // This event is Pi's authoritative complete current prompt. At this point
     // SessionManager still contains only the preceding dialog, so relying on
     // getEntries() here loses the captain request that the next wake may answer.

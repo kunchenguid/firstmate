@@ -13,6 +13,9 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-trace-context-spawn)
 
 write_ship_brief() {  # <file> <id>
+  # The brief lives at <data>/<id>/brief.md; the dispatch-time consultation gate
+  # reads the task's stored prompt from that same data directory.
+  fm_test_seed_consult_record_at "$(dirname "$(dirname "$1")")" "$2"
   cat > "$1" <<EOF
 # Task
 ## Captain's intent

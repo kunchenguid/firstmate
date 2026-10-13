@@ -82,6 +82,7 @@ SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
 HOME_DIR="$SCRATCH/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/hsmoke"
+fm_test_seed_consult_record "$HOME_DIR" hsmoke
 cat > "$HOME_DIR/data/hsmoke/brief.md" <<'EOF'
 # Task
 ## Captain's intent

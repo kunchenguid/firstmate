@@ -51,6 +51,10 @@ export FM_GATE_REFUSE_BYPASS=1
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# The consultation-gate fixture seeds the stored ChatGPT prompt this world's
+# launches need; this suite builds its own spawn world without tests/lib.sh.
+# shellcheck source=tests/consult-gate-fixture.sh
+. "$ROOT/tests/consult-gate-fixture.sh"
 # This suite asserts that HERDR_ENV=1 alone selects the backend, and it runs
 # against its own isolated lab session. A Herdr pane inherited from the terminal
 # it was launched in must not follow spawn into that session as a cross-session
@@ -96,6 +100,7 @@ mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
 # Backend auto-detection is what is under test here, so opt out of the default-on
 # presentation projection and keep the assertions on the flat per-home workspace.
 printf 'off\n' > "$CONFIG/herdr-presentation-spaces"
+fm_test_seed_consult_record_at "$DATA" "$ID"
 cat > "$DATA/$ID/brief.md" <<'EOF'
 # Task
 ## Captain's intent

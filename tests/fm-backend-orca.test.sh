@@ -17,6 +17,7 @@ mkdir -p "$SPAWN_HOME"
 
 write_spawn_brief() {  # <data-dir> <id>
   local data=$1 id=$2
+  fm_test_seed_consult_record_at "$data" "$id"
   cat > "$data/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent

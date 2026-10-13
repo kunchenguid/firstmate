@@ -33,8 +33,16 @@ It only observes: installation, authentication, and repair of the bridge stay ou
 ## Intake report rule
 
 When the preferred flow for a task is this consultation channel - the captain asked for the consultation loop, or the plan for the task runs audit or plan consults - read the channel's health at intake, before dispatching.
-When the probe reports `unreachable`, `unhealthy`, or `misconfigured`, the preferred flow cannot run, so report that to the captain as an actionable item before continuing: what is wrong in plain words, and the ways forward - bring up the already-installed bridge (the loop's `bridge start` operates only an already-installed daemon; installation and authentication stay external) or proceed without consultations and say so.
+When the probe reports `unreachable`, `unhealthy`, or `misconfigured`, the preferred flow cannot run, so report that to the captain as an actionable item before continuing: what is wrong in plain words, and the ways forward - bring up the already-installed bridge (the loop's `bridge start` operates only an already-installed daemon; installation and authentication stay external) or proceed without consultations under an explicit recorded waiver and say so.
 Never continue as if nothing was missing: quietly substituting ordinary dispatch for the unavailable preferred flow is the trust break this rule exists to prevent.
+
+## Dispatch gate
+
+The rule above is a report obligation, not the enforcement: the launch itself refuses.
+`bin/fm-spawn.sh` will not start a ship or scout whose `data/<task-id>/chatgpt-loop.json` holds no non-empty prompt for the stage in play, and `bin/fm-control.sh relaunch` refuses the same way before it stops a running agent, both naming the record and the `bin/fm-chatgpt-loop.sh init` and `consult` commands that create it.
+So the sequence at intake is: probe the channel as above, and when it is healthy, get the consultation run before dispatch is attempted rather than deciding the consultation is redundant; when it reads `unreachable`, `unhealthy`, `misconfigured`, or `unconfigured`, the launch refuses just like a missing prompt, with the probe verdict naming the cause, and the waiver below is the only way past the gate - which is also the thing to report to the captain.
+`--consult-waived <reason>` is the explicit exception for a launch that must proceed anyway, and its reason is written to `state/<id>.meta` and the task's backlog note; an empty or multi-line reason is refused.
+[`bin/fm-consult-gate-lib.sh`](../../../bin/fm-consult-gate-lib.sh)'s header owns those rules, including how the consultation loop's own dispatch satisfies the gate, so this skill stays about what to tell the captain and when to run the consultation.
 
 ## Startup diagnostic
 

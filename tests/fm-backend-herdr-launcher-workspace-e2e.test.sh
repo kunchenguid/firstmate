@@ -41,6 +41,10 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# The consultation-gate fixture seeds the stored ChatGPT prompt this world's
+# launches need; this suite builds its own spawn world without tests/lib.sh.
+# shellcheck source=tests/consult-gate-fixture.sh
+. "$ROOT/tests/consult-gate-fixture.sh"
 
 # Every spawn below states its own launcher identity, so a pane inherited from
 # the terminal this suite was started in must not leak into any of them.
@@ -188,6 +192,9 @@ mkdir -p "$PRES_HOME/state" "$PRES_HOME/config"
 : > "$PRES_HOME/config/herdr-presentation-spaces"
 
 write_ship_brief() {  # <file> <id>
+  # The brief lives at <data>/<id>/brief.md; the gate reads the task's stored
+  # consultation prompt from that same data directory.
+  fm_test_seed_consult_record_at "$(dirname "$(dirname "$1")")" "$2"
   cat > "$1" <<EOF
 # Task
 ## Captain's intent

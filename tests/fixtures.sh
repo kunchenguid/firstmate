@@ -284,6 +284,95 @@ SH
   chmod +x "$fakebin/sleep"
 }
 
+# --- stub consultation channel ----------------------------------------------
+
+# Default loopback port for fm_test_start_bridge_stub; a suite may override it
+# before starting a stub so parallel suites never share one.
+FM_TEST_BRIDGE_STUB_PORT=${FM_TEST_BRIDGE_STUB_PORT:-17913}
+FM_TEST_BRIDGE_STUB_PID=
+
+# fm_test_start_bridge_stub <case-dir> [healthy|unhealthy]: serve the
+# openai-responses shape bin/fm-chatgpt-bridge-lib.sh's bounded health probe
+# posts its test turn to, and export CHATGPT_WEB_BRIDGE_URL at it so the
+# dispatched fm-spawn reads this stub as the channel. `unhealthy` answers
+# HTTP 500, which is how the probe reports a listening-but-broken bridge.
+# Every contact with the channel itself is appended to <case-dir>/hits (the
+# /ready path is this fixture's own readiness check and never counts), so a case
+# can prove a launch paid no probe at all.
+# Call it directly, never inside a command substitution: the pid must stay in
+# this shell for fm_test_stop_bridge_stub (and the suite's EXIT cleanup) to end
+# it. Exports CHATGPT_WEB_BRIDGE_URL; fm_test_use_dead_bridge points the same
+# variable at a loopback URL nothing answers on.
+fm_test_start_bridge_stub() { # <case-dir> [healthy|unhealthy]
+  local dir=$1 mode=${2:-healthy} port=$FM_TEST_BRIDGE_STUB_PORT up=0
+  cat > "$dir/stub.py" <<PY
+import http.server, json
+d = "$dir"
+port = $port
+mode = "$mode"
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        open(d + "/request.json", "wb").write(self.rfile.read(n))
+        open(d + "/hits", "a").write("post\\n")
+        if mode == "unhealthy":
+            body = json.dumps({"error": {"message": "stub failure"}}).encode()
+            self.send_response(500)
+        else:
+            body = json.dumps({"output": [{"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "ok"}]}]}).encode()
+            self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        # /ready is this fixture's own readiness check and never counts as a
+        # channel contact; only requests on the channel itself are recorded.
+        if self.path != "/ready":
+            open(d + "/hits", "a").write("get\\n")
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"ok")
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+  python3 "$dir/stub.py" >"$dir/stub.log" 2>&1 &
+  FM_TEST_BRIDGE_STUB_PID=$!
+  for _ in $(seq 1 50); do
+    if curl -s -m 1 "http://127.0.0.1:$port/ready" >/dev/null 2>&1; then
+      up=1
+      break
+    fi
+    kill -0 "$FM_TEST_BRIDGE_STUB_PID" 2>/dev/null ||
+      fail "the stub bridge exited at once: $(cat "$dir/stub.log" 2>/dev/null)"
+    sleep 0.1
+  done
+  [ "$up" = 1 ] ||
+    fail "the stub bridge never answered on port $port: $(cat "$dir/stub.log" 2>/dev/null)"
+  CHATGPT_WEB_BRIDGE_URL="http://127.0.0.1:$port/v1"
+  export CHATGPT_WEB_BRIDGE_URL
+}
+
+# fm_test_stop_bridge_stub: end the stub fm_test_start_bridge_stub started.
+fm_test_stop_bridge_stub() {
+  [ -n "$FM_TEST_BRIDGE_STUB_PID" ] || return 0
+  kill "$FM_TEST_BRIDGE_STUB_PID" 2>/dev/null || true
+  wait "$FM_TEST_BRIDGE_STUB_PID" 2>/dev/null || true
+  FM_TEST_BRIDGE_STUB_PID=
+}
+
+# fm_test_use_dead_bridge [port]: point the channel at a loopback URL nothing
+# answers on, so the health probe reports `unreachable` - this home configures
+# the channel, and it is down - which is the verified-unavailable branch.
+fm_test_use_dead_bridge() {
+  local port=${1:-17914}
+  CHATGPT_WEB_BRIDGE_URL="http://127.0.0.1:$port/v1"
+  export CHATGPT_WEB_BRIDGE_URL
+}
+
 # --- spawn-world ------------------------------------------------------------
 
 # fm_test_spawn_home <home> [harness]
@@ -299,6 +388,9 @@ fm_test_spawn_home() {
 }
 
 # fm_test_spawn_brief <home> <id> [captain-intent]
+# Also seeds the task's stored consultation prompt (consult-gate-fixture.sh's
+# fm_test_seed_consult_record, sourced through lib.sh), so a launch built from
+# this brief passes the dispatch-time consultation gate without probing the channel.
 fm_test_spawn_brief() {
   local home=$1 id=$2 intent=${3:-brief for $2}
   mkdir -p "$home/data/$id"
@@ -310,6 +402,7 @@ $intent
 ## Firstmate spec
 Exercise the spawn behavior under test.
 EOF
+  fm_test_seed_consult_record "$home" "$id"
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
@@ -337,6 +430,29 @@ make_spawn_fakebin() {
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
+  # Give every task this spawn launches its stored consultation prompt first, so
+  # the dispatch-time gate (bin/fm-consult-gate-lib.sh) reads its "record exists"
+  # case and never probes the channel. Batch pairs seed each id; a plain leading
+  # task id seeds itself, and flags-first call sites rely on fm_test_spawn_brief.
+  # FM_TEST_SEED_CONSULT=0 opts out for a case that must exercise the gate with
+  # no record present.
+  local seed_arg seed_id
+  if [ "${FM_TEST_SEED_CONSULT:-1}" != 0 ]; then
+    for seed_arg in "$@"; do
+      case "$seed_arg" in
+      --*) break ;;
+      esac
+      seed_id=${seed_arg%%=*}
+      case "$seed_id" in
+      */* | *' '*) continue ;;
+      esac
+      fm_test_seed_consult_record "$home" "$seed_id"
+      case "$seed_arg" in
+      *=*) ;;
+      *) break ;;
+      esac
+    done
+  fi
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so every spawn here runs against a throwaway
   # HOME; without it the suite would write the developer's real ~/.claude.json.
