@@ -977,6 +977,19 @@ test_bootstrap_inert_without_token() {
   pass "bootstrap is inert without a non-empty .env token (non-X users unaffected)"
 }
 
+test_bootstrap_preserves_nonrelay_watcher_tuning() {
+  local home out inherited
+  home="$TMP_ROOT/boot-nonrelay-watcher-tuning"; mkdir -p "$home/config"
+  printf 'export FM_PAUSE_RESURFACE_SECS=777\n' > "$home/config/watch.env"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_not_contains "$out" "FMX:" "a non-Relay watcher setting must not activate Relay"
+  assert_present "$home/config/watch.env" "bootstrap must preserve non-Relay watcher tuning"
+  # shellcheck source=/dev/null
+  inherited=$( . "$home/config/watch.env" && bash -c 'echo "${FM_PAUSE_RESURFACE_SECS:-}"' )
+  [ "$inherited" = 777 ] || fail "preserved watcher tuning did not retain its patience value"
+  pass "bootstrap preserves home-local watcher tuning without a Relay token"
+}
+
 test_poll_empty_text_is_silent() {
   local home fakebin out rc
   home="$TMP_ROOT/poll-empty-text"; mkdir -p "$home"
@@ -3284,5 +3297,6 @@ test_bootstrap_reports_missing_x_dependency
 test_bootstrap_does_not_announce_when_arm_fails
 test_bootstrap_does_not_follow_x_artifact_symlinks
 test_bootstrap_inert_without_token
+test_bootstrap_preserves_nonrelay_watcher_tuning
 test_bootstrap_opt_out_cleanup
 test_bootstrap_opt_out_reports_cleanup_failure
