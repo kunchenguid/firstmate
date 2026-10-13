@@ -879,6 +879,136 @@ EOF
   pass "fm-startup-network: failed publication retains completed findings for idempotent recovery"
 }
 
+# Each holder is a real process using the production lock interface, confined
+# to this disposable home. It stays live beyond the detached delivery bound.
+hold_startup_lock() { # <home> <lock-basename>
+  local lock="$1/state/$2" holder waited=0
+  FM_STATE_OVERRIDE="$1/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    exec sleep 120
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" >/dev/null 2>&1 </dev/null &
+  holder=$!
+  while [ "$(cat "$lock/pid" 2>/dev/null || true)" != "$holder" ] && [ "$waited" -lt 50 ]; do
+    sleep 0.1; waited=$((waited + 1))
+  done
+  [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$holder" ] || fail "fixture lock was not acquired: $lock"
+  printf '%s\n' "$holder"
+}
+
+test_existing_watcher_recovers_after_worker_deadline() {
+  local lock rec home root log worker holder watcher generation result report count waited
+  for lock in .startup-network.lock .wake-queue.lock .watcher-down.lock; do
+    rec=$(new_world "existing-watch-${lock#.}")
+    IFS='|' read -r home root log <<< "$rec"
+    fm_test_track_watcher_state "$home/state"
+    cat > "$root/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x "$root/bin/tmux"
+    # Reserve and start the real worker before blocking publication. Bootstrap
+    # is only the synthetic network dependency; delivery and locks are real.
+    FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=2 FM_FAKE_BOOTSTRAP_OUT='DELAYED_ACTIONABLE' \
+      FM_STARTUP_NETWORK_TIMEOUT=10 FM_SESSION_START_TIMEOUT=2 \
+      run_stage "$home" "$root" start --locked 0 --harvest-pid 999999999
+    await_worker_record "$home"
+    worker=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")
+    generation=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+    waited=0
+    while [ ! -s "$log" ] && [ "$waited" -lt 100 ]; do
+      sleep 0.1; waited=$((waited + 1))
+    done
+    [ -s "$log" ] || fail "the reserved worker never began its checks"
+    holder=$(hold_startup_lock "$home" "$lock")
+    await_pid_exit "$worker" 100 || fail "detached worker exceeded its bound with $lock held"
+    result="$home/state/.startup-network-results/$generation"
+    assert_grep 'DELAYED_ACTIONABLE' "$result/report" "the held $lock discarded completed findings"
+    [ -s "$result/timings" ] || fail "the held $lock discarded completed timings"
+    [ ! -s "$home/state/.wake-queue" ] || fail "the held $lock unexpectedly admitted a wake"
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" bash -c '
+      . "$1"
+      fm_supervision_needed "$2"
+    ' _ "$ROOT/bin/fm-supervision-lib.sh" "$home/state" \
+      || fail "startup-only retained completion lost supervision with $lock held"
+    PATH="$root/bin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_STATE_OVERRIDE="$home/state" \
+      FM_SESSION_START_TIMEOUT=2 FM_POLL=1 bash "$ROOT/bin/fm-watch.sh" \
+      > "$home/watch.out" 2> "$home/watch.err" &
+    watcher=$!
+    # The existing watcher must survive a refused bounded recovery cycle, then
+    # deliver without a second start or any manual recovery call.
+    sleep 3
+    kill -0 "$watcher" 2>/dev/null || fail "watcher exited before contention cleared: $(cat "$home/watch.err")"
+    kill "$holder" 2>/dev/null || true
+    await_pid_exit "$holder" 50 || fail "fixture holder did not exit"
+    wait_for_startup_network_wake "$home" 200 \
+      || fail "the existing watcher never recovered $lock: $(cat "$home/watch.out" "$home/watch.err")"
+    count=$(awk -F '\t' -v key="startup-network:$generation" '$3 == "check" && $4 == key { n++ } END { print n+0 }' "$home/state/.wake-queue")
+    [ "$count" -eq 1 ] || fail "watcher recovery created $count generation rows"
+    report=$(run_stage "$home" "$root" report --generation "$generation")
+    assert_contains "$report" DELAYED_ACTIONABLE "recovered wake lost its immutable report"
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    [ "$(wc -l < "$log" | tr -d ' ')" -eq 1 ] || fail "watcher recovery reran startup checks"
+  done
+  pass "fm-startup-network: existing watcher delivers after publication, queue and nested marker contention without another startup"
+}
+
+test_stale_completions_cannot_publish_or_block_fresh_checks() {
+  local rec home root log old fresh holder rc waited=0
+  rec=$(new_world stale-retained)
+  IFS='|' read -r home root log <<< "$rec"
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=2 FM_FAKE_BOOTSTRAP_OUT=OLD_RESULT \
+    FM_SESSION_START_TIMEOUT=2 run_stage "$home" "$root" start --locked 0 --harvest-pid 999999999
+  await_worker_record "$home"
+  old=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+  while [ ! -s "$log" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1; waited=$((waited + 1))
+  done
+  [ -s "$log" ] || fail "old checks never began"
+  holder=$(hold_startup_lock "$home" .startup-network.lock) || fail "old publication fixture did not acquire its lock"
+  sleep 5
+  [ -f "$home/state/.startup-network-results/$old/status" ] || fail "old completion was not retained"
+  kill "$holder" 2>/dev/null || true
+  await_pid_exit "$holder" 50 || fail "old fixture lock did not release"
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=3 FM_FAKE_BOOTSTRAP_OUT=FRESH_RESULT \
+    FM_SESSION_START_TIMEOUT=2 run_stage "$home" "$root" start --locked 0 --harvest-pid 999999999
+  fresh=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+  [ "$fresh" != "$old" ] || fail "retained stale completion blocked a fresh reservation"
+  run_stage "$home" "$root" recover --generation "$old" || fail "stale recovery did not settle as a no-op"
+  [ "$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")" = "$fresh" ] || fail "old completion replaced a running successor"
+  assert_no_grep "$old" "$home/state/.wake-queue" "old generation delivered against a running successor"
+  wait_for_startup_network_wake "$home" 100 || fail "fresh checks did not finish and deliver"
+  run_stage "$home" "$root" recover --generation "$old" || fail "completed-successor stale recovery failed"
+  assert_no_grep "$old" "$home/state/.wake-queue" "old generation delivered against a completed successor"
+  assert_grep FRESH_RESULT "$home/state/.startup-network.report" "old completion replaced a completed successor report"
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 2 ] || fail "fresh network checks did not execute"
+  rc=0
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "startup-network:../unsafe" unsafe' \
+    _ "$ROOT/bin/fm-wake-lib.sh" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "malformed generation was admitted"
+  pass "fm-startup-network: retained stale results cannot replace successors or prevent fresh checks"
+}
+
+test_report_refuses_a_missing_or_unsafe_explicit_generation() {
+  local rec home root log rc report generation
+  rec=$(new_world explicit-report-refusal)
+  IFS='|' read -r home root log <<< "$rec"
+  printf 'state=done\ngeneration=current\nreport_published=1\n' > "$home/state/.startup-network.status"
+  printf 'CURRENT_REPORT\n' > "$home/state/.startup-network.report"
+  for generation in missing ../unsafe; do
+    rc=0
+    report=$(run_stage "$home" "$root" report --generation "$generation") || rc=$?
+    [ "$rc" -ne 0 ] || fail "an unavailable explicit generation reported success"
+    assert_not_contains "$report" CURRENT_REPORT "an explicit generation was redirected to another report"
+  done
+  pass "fm-startup-network: explicit report generations refuse missing or unsafe artifacts"
+}
+
+test_report_refuses_a_missing_or_unsafe_explicit_generation
+test_existing_watcher_recovers_after_worker_deadline
+test_stale_completions_cannot_publish_or_block_fresh_checks
+
 test_failed_publication_keeps_a_recoverable_completed_result
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
