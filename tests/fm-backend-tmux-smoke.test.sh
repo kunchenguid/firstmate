@@ -169,5 +169,20 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- dotted task id: sanitized window name stays targetable ------------------
+# tmux reads `.` in a target as the window/pane separator, so fm-spawn names a
+# dotted task's window with the dot replaced; the raw dotted name is untargetable.
+DOTTED_ID="task-dotted.3"
+DOTTED_WINDOW="fm-${DOTTED_ID//./-}"
+fm_backend_tmux_create_task "$SESSION" "$DOTTED_WINDOW" "$ROOT" >/dev/null \
+  || fail "could not create a tmux window for a dotted task id"
+tmux list-panes -t "$SESSION:$DOTTED_WINDOW" >/dev/null 2>&1 \
+  || fail "sanitized window for a dotted task id is not targetable"
+if tmux list-panes -t "$SESSION:fm-$DOTTED_ID" >/dev/null 2>&1; then
+  fail "raw dotted window name unexpectedly targetable; the sanitization premise changed"
+fi
+fm_backend_tmux_kill "$SESSION:$DOTTED_WINDOW"
+pass "real tmux: a dotted task id's sanitized window is targetable and killable"
+
 cleanup_all
 trap - EXIT
