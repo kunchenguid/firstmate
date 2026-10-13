@@ -294,20 +294,6 @@ esac
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
   ambiguous) "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"; exit 255 ;;
-  # The remote retirement really runs, then reports what its forced secondmate
-  # teardown reports for a lost child slot: tests/fm-teardown.test.sh owns that
-  # remote-side exit 4.
-  retire-lost-slot)
-    rc=0
-    "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" || rc=$?
-    if [ "$rc" -eq 0 ] && [ "$command_name:$_command_action" = fm-remote-secondmate-control.sh:retire ]; then
-      printf 'warning: treehouse return left pool slot 3 (/remote/slot-3) dirty or unverified; the pool lost this slot. Remaining paths:\n' >&2
-      printf '  ?? left-behind-clone/\n' >&2
-      printf 'teardown ios finished its cleanup and removed its task record, but a returned pool slot did not come back clean\n' >&2
-      exit 4
-    fi
-    exit "$rc"
-    ;;
   *) exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
 esac
 SH
@@ -1807,6 +1793,15 @@ mkdir -p "$PARENT/state/ios.inbox/handled"
 printf 'pending remote steer\n' > "$PARENT/state/ios.inbox/001.msg"
 printf 'handled remote steer\n' > "$PARENT/state/ios.inbox/handled/002.msg"
 grep '^- ios ' "$PARENT/data/secondmates.md" > "$TMP_ROOT/remote-route.saved"
+mv "$REMOTE_ROOT/bin/fm-teardown.sh" "$REMOTE_ROOT/bin/fm-teardown-real.sh"
+cat > "$REMOTE_ROOT/bin/fm-teardown.sh" <<'SH'
+#!/usr/bin/env bash
+"$(dirname "$0")/fm-teardown-real.sh" "$@" || exit "$?"
+printf 'warning: treehouse return left pool slot 3 (/remote/slot-3) dirty or unverified; the pool lost this slot. Remaining paths:\n' >&2
+printf '  ?? left-behind-clone/\n' >&2
+exit 4
+SH
+chmod +x "$REMOTE_ROOT/bin/fm-teardown.sh"
 FM_FAKE_SSH_MODE=retire-lost-slot remote_env "$ROOT/bin/fm-teardown.sh" ios \
   > "$TMP_ROOT/teardown-serialized.out" 2> "$TMP_ROOT/teardown-serialized.err" &
 teardown_pid=$!
@@ -1831,6 +1826,7 @@ touch "$TMP_ROOT/handoff.release"
 wait "$handoff_holder_pid" || fail "handoff lock holder failed to release"
 teardown_rc=0
 wait "$teardown_pid" || teardown_rc=$?
+mv "$REMOTE_ROOT/bin/fm-teardown-real.sh" "$REMOTE_ROOT/bin/fm-teardown.sh"
 if [ "$teardown_rc" -ne 4 ]; then
   printf 'serialized retirement output:\n%s\n%s\n' "$(cat "$TMP_ROOT/teardown-serialized.out")" \
     "$(cat "$TMP_ROOT/teardown-serialized.err")" >&2
