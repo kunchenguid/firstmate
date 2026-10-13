@@ -108,6 +108,9 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+# A previously surfaced done delivery bounds idle redraw stale alarms to
+# PAUSE_RESURFACE_SECS in attended and away modes; new status generations and
+# worker incarnations, observed activity and open captain calls re-arm it.
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
@@ -1869,6 +1872,45 @@ stale_wait_record() {  # <window-key>
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
 }
 
+# A surfaced delivery is unchanged when only its idle display redraws.
+# Bound those redraws to the existing long re-surface cadence, independently
+# of pause tracking (which hash changes can clear). New status generations,
+# unsurfaced records, captain calls and authoritative activity remain eligible.
+TERMINAL_DELIVERY_DECLARATION=
+TERMINAL_DELIVERY_END=
+TERMINAL_DELIVERY_IDENT=
+terminal_delivery_stale_bound() {  # <window-key> <task>
+  local key=$1 task=$2 f="$STATE/$2.status" record rc throttle rest signature gen
+  TERMINAL_DELIVERY_DECLARATION=
+  [ "$(status_line_verb "$(last_status_line "$f")")" = 'done' ] || return 1
+  [ -z "$STALE_WAIT_DECLARATION" ] || return 1
+  task_captain_call_open "$task" && return 1
+  if crew_is_provably_working "$task"; then
+    rm -f "$STATE/.terminal-resurfaced-$key"
+    return 1
+  fi
+  signature=$(fm_wake_signal_sig "$f") || return 1
+  record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
+  rc=$?
+  case "$rc" in 0|1) ;; *) return 1 ;; esac
+  [ "$signature" = "$(fm_wake_signal_sig "$f")" ] || return 1
+  TERMINAL_DELIVERY_END=${record%%$'\t'*}
+  rest=${record#*$'\t'}
+  TERMINAL_DELIVERY_IDENT=${rest%%$'\t'*}
+  gen=$(fm_busy_current_gen "$STATE" "$task" || true)
+  TERMINAL_DELIVERY_DECLARATION="delivery:$gen:$signature:$TERMINAL_DELIVERY_END@$TERMINAL_DELIVERY_IDENT"
+  [ "$rc" -eq 1 ] || return 1
+  throttle="$STATE/.terminal-resurfaced-$key"
+  [ "$(cat "$throttle" 2>/dev/null || true)" = "$TERMINAL_DELIVERY_DECLARATION" ] \
+    && [ "$(age_of "$throttle")" -lt "$PAUSE_RESURFACE_SECS" ]
+}
+
+terminal_delivery_record() {  # <window-key> <task>
+  [ -n "$TERMINAL_DELIVERY_DECLARATION" ] || return 0
+  mark_surfaced "$STATE/$2.status" "$TERMINAL_DELIVERY_END" "$TERMINAL_DELIVERY_IDENT" || return 1
+  printf '%s' "$TERMINAL_DELIVERY_DECLARATION" > "$STATE/.terminal-resurfaced-$1"
+}
+
 # Bound a due stale alarm for an ordinary crew task held for the captain.
 # Backlog-only secondmate holds are outside this guard because the earlier gate
 # preserves their no-backlog-read hot path.
@@ -3085,6 +3127,9 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$busy_now" -eq 0 ]; then
+      rm -f "$STATE/.terminal-resurfaced-$key"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -3104,7 +3149,14 @@ EOF
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+            STALE_WAIT_DECLARATION=
+            if terminal_delivery_stale_bound "$key" "$task"; then
+              printf '%s' "$h" > "$sf"
+              triage_log "absorbed stale (unchanged surfaced delivery): $w"
+              continue
+            fi
             fm_wake_append stale "$w" "stale: $w" || exit 1
+            terminal_delivery_record "$key" "$task" || true
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
@@ -3125,6 +3177,7 @@ EOF
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+              rm -f "$STATE/.terminal-resurfaced-$key"
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               clear_write_tracking "$key"
@@ -3141,9 +3194,15 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif terminal_delivery_stale_bound "$key" "$task"; then
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (unchanged surfaced delivery): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
+              terminal_delivery_record "$key" "$task" || true
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"

@@ -6,6 +6,29 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Finished-delivery redraw bound
+
+Verified on 2026-10-13 UTC with GNU Bash 5.3.9 and the mocked tmux capture and crew-state fixtures in `tests/fm-watch-triage.test.sh`.
+These deterministic tests exercise the shared polling watcher in attended and away modes without launching a vendor harness or driving any real backend lifecycle.
+The bound consumes status presentation identity and the shared busy incarnation; backend capture, semantic busy detection, native push transitions and vendor classifiers retain their existing owners and verification below.
+Refresh the focused evidence with:
+
+```sh
+FM_TEST_ONLY=test_terminal_delivery_redraw_bound bash bin/fm-test-run.sh tests/fm-watch-triage.test.sh
+FM_TEST_ONLY=test_terminal_delivery_new_events_remain_actionable bash bin/fm-test-run.sh tests/fm-watch-triage.test.sh
+FM_TEST_ONLY=test_terminal_delivery_resumed_activity_rearms bash bin/fm-test-run.sh tests/fm-watch-triage.test.sh
+FM_TEST_ONLY=test_terminal_delivery_failed_append_keeps_first_delivery bash bin/fm-test-run.sh tests/fm-watch-triage.test.sh
+```
+
+Behavioral output:
+
+```text
+ok - a delivery surfaces once across four settled hashes, re-surfaces on cadence, and resets on a new generation in attended and away modes
+ok - a new delivery, decision, blocker or failure after done still surfaces
+ok - authoritative resumed activity clears the delivery bound and preserves the next first sight
+ok - a failed durable append cannot suppress the first delivery on retry
+```
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
