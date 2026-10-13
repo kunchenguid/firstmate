@@ -3995,7 +3995,7 @@ hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
-    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_FAKE_CREW_STATE="${FM_HOLD_CREW_STATE:-state: stopped · source: pane · bare shell}" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
@@ -4088,14 +4088,13 @@ test_open_captain_call_bounds_stale_churn() {
 
 
 # The other half of the same bound, and the one that decides whether widening the
-# wait was safe: the identical fixtures with NO hold must keep alarming on every
-# new hash, on both branches.
+# wait was safe: blockers and inconclusive worker lines with NO hold must keep
+# alarming on every new hash. Delivered work has its own redraw bound below.
 test_stale_churn_without_a_captain_call_still_alarms() {
   local spec name line dir state out capture round wakes
   command -v tasks-axi >/dev/null 2>&1 \
     || { echo "skip: tasks-axi not found (unheld stale alarm)"; return 0; }
   for spec in \
-    'unheld-delivery|done: PR https://example.invalid/pull/1 checks green' \
     'unheld-blocker|blocked: cannot reach the release host' \
     'unheld-worker-line|working: still tidying the branch'
   do
@@ -4114,7 +4113,112 @@ test_stale_churn_without_a_captain_call_still_alarms() {
       round=$((round + 1))
     done
   done
-  pass "a stale window with no open captain call keeps alarming on every new hash"
+  pass "an unheld blocker or inconclusive worker line keeps alarming on every new hash"
+}
+
+# Reproduce idle TUI redraws through the actual watcher, with no real endpoint.
+# The initial delivery still surfaces, three subsequent settled hashes do not,
+# and an elapsed cadence or a new status generation restores the alarm.
+test_terminal_delivery_redraw_bound() {
+  local mode dir state out capture throttle replacement
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (terminal delivery redraw bound)"; return 0; }
+  for mode in attended away; do
+    dir=$(make_hold_home "delivery-redraw-$mode" 'done: delivered result' nohold) \
+      || fail "[$mode] could not build the delivery fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    throttle="$state/.terminal-resurfaced-$(hold_key)"
+    [ "$mode" != away ] || touch "$state/.afk"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle tick 1' \
+      || fail "[$mode] first delivery did not surface"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail "[$mode] first delivery count was not one"
+    ack_stopped_cycle "$state" || fail "[$mode] could not acknowledge delivery"
+    hold_watch_churn "$dir" "$out" "$capture" 'idle redraw' 3 \
+      || fail "[$mode] unchanged delivery re-alarmed on a new hash"
+    [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "[$mode] redraw queued a stale wake"
+    [ -s "$throttle" ] || fail "[$mode] delivery left no cadence marker"
+    set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle tick after cadence' \
+      || fail "[$mode] elapsed cadence did not re-surface delivery"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail "[$mode] cadence wake count was not one"
+    ack_stopped_cycle "$state" || fail "[$mode] could not acknowledge cadence"
+
+    # Same-length replacement with a new inode must not inherit the old silence.
+    replacement="$state/replacement"
+    printf 'done: delivered result\n' > "$replacement"
+    mv "$replacement" "$state/held-merge.status"
+    printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle new generation' \
+      || fail "[$mode] new status generation inherited delivery silence"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail "[$mode] new generation count was not one"
+    ack_stopped_cycle "$state" || fail "[$mode] could not acknowledge generation"
+    "$ROOT/bin/fm-busy-event.sh" arm "$state" held-merge >/dev/null \
+      || fail "[$mode] could not arm a successor incarnation"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle successor incarnation' \
+      || fail "[$mode] successor inherited the previous delivery silence"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail "[$mode] successor count was not one"
+  done
+  pass "a delivery surfaces once across four settled hashes, re-surfaces on cadence, and resets on a new generation in attended and away modes"
+}
+
+test_terminal_delivery_new_events_remain_actionable() {
+  local event dir state out capture
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (terminal delivery redraw bound)"; return 0; }
+  for event in 'done: second delivery' 'needs-decision [key=new]: choose a release' \
+    'blocked [key=new]: release failed' 'failed: new validation failure'; do
+    dir=$(make_hold_home delivery-new-event 'done: delivered result' nohold) \
+      || fail "could not build the new-event fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle old delivery' || fail "old delivery did not surface"
+    ack_stopped_cycle "$state" || fail "could not acknowledge old delivery"
+    printf '%s\n' "$event" >> "$state/held-merge.status"
+    # Force the pane path, rather than letting the status signal mask its verdict.
+    printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle new event' || fail "$event was suppressed after done"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail "$event did not produce its own wake"
+  done
+  pass "a new delivery, decision, blocker or failure after done still surfaces"
+}
+
+test_terminal_delivery_resumed_activity_rearms() {
+  local dir state out capture
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (terminal delivery redraw bound)"; return 0; }
+  dir=$(make_hold_home delivery-resumed 'done: delivered result' nohold) || fail "could not build resumed fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle old result' || fail "initial result did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge result"
+  FM_HOLD_CREW_STATE='state: working · source: run-step · ci running' \
+    hold_watch_churn "$dir" "$out" "$capture" 'active run' 1 \
+    || fail "active validation was surfaced as a terminal stale"
+  [ ! -e "$state/.terminal-resurfaced-$(hold_key)" ] || fail "resumed validation retained the old delivery throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle after activity' \
+    || fail "a new quiet stretch inherited the old delivery silence"
+  [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail "a new quiet stretch did not wake once"
+  pass "authoritative resumed activity clears the delivery bound and preserves the next first sight"
+}
+
+test_terminal_delivery_failed_append_keeps_first_delivery() {
+  local dir state out capture rc
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (terminal delivery append failure)"; return 0; }
+  dir=$(make_hold_home delivery-append-failure 'done: delivered result' nohold) \
+    || fail "could not build append failure fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  mkdir "$state/.wake-queue"
+  printf 'idle first delivery\n' > "$capture"
+  hold_watch_launch "$dir" "$out" "$capture"
+  wait_for_exit "$HOLD_WATCH_PID" 100
+  rc=$?
+  [ "$rc" -ne 124 ] || { reap "$HOLD_WATCH_PID"; fail "unwritable queue did not stop watcher"; }
+  [ "$rc" -ne 0 ] || fail "unwritable queue returned success"
+  [ ! -e "$state/.terminal-resurfaced-$(hold_key)" ] || fail "failed append armed delivery suppression"
+  rmdir "$state/.wake-queue"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle retry delivery' \
+    || fail "failed append suppressed the first successful delivery"
+  [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail "retry did not produce one stale wake"
+  pass "a failed durable append cannot suppress the first delivery on retry"
 }
 
 
@@ -6712,6 +6816,10 @@ test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
+test_terminal_delivery_redraw_bound
+test_terminal_delivery_new_events_remain_actionable
+test_terminal_delivery_resumed_activity_rearms
+test_terminal_delivery_failed_append_keeps_first_delivery
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode

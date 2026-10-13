@@ -3448,6 +3448,12 @@ await waitFor(
   () => replacement.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
   "replacement-session replay",
 );
+// A custom run has no user prompt, even when its content matches a wake.
+// It must leave the user follow-up pending for the next replacement.
+replacement.handlers.get("before_agent_start")?.({
+  messageType: "custom",
+  message: { role: "custom", customType: "test-notice", content: replacement.prompts[0], display: false },
+}, {});
 if (replacement.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
   throw new Error(`replacement did not replay the unconsumed follow-up exactly once: ${replacement.prompts.join(" | ")}`);
 }
@@ -3530,7 +3536,7 @@ const pi = {
     prompts.push(message);
     if (streaming) return;
     beforeAgentStarts += 1;
-    handlers.get("before_agent_start")?.({ prompt: message }, {});
+    handlers.get("before_agent_start")?.({ messageType: "user", prompt: message }, {});
   },
   events: { on() {}, emit() {} },
 };
