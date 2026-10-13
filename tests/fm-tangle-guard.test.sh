@@ -167,6 +167,9 @@ test_spawn_isolation_abort() {
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake")
   # The assertions concern identity, not how long an unchanged cwd is polled.
   fm_test_fake_sleep_noop "$fakebin"
+  # The spawn's polling waits call /bin/sleep directly, so the shim above cannot
+  # shorten the worktree discovery deadline; shrink it through its own knobs.
+  export FM_SPAWN_WT_POLLS=3 FM_SPAWN_WT_POLL_INTERVAL=0.05
   # A genuine isolated linked worktree of the project, detached on the default.
   git -C "$proj" worktree add -q --detach "$TMP_ROOT/spawn-wt" >/dev/null 2>&1
   # The non-git case must BE non-git wherever this suite runs. A directory under
