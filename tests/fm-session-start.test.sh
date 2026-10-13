@@ -20,8 +20,9 @@
 #     FM_SESSION_START_STATUS_TAIL bounds the orphan-log tail, whose lines
 #     carry the same cap
 #   - startup backlog composition: done rows dropped, every in-flight/held/
-#     blocked row kept whole, the dispatchable queued listing bounded with an
-#     exact disclosed remainder
+#     blocked row kept, an over-long hold reason cut with the full-read
+#     pointer, the dispatchable queued listing bounded with an exact disclosed
+#     remainder
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
@@ -117,7 +118,8 @@ SH
 # queued, and the dispatchable ready set) and REFUSES anything the recovery
 # listing must never ask for: a body field, an unfiltered whole-backlog listing,
 # or done rows. FM_FAKE_TASKS_AXI_READY sizes the ready set so the queued bound
-# can be driven past its limit.
+# can be driven past its limit, and FM_FAKE_TASKS_AXI_HELD_REASON replaces the
+# held row's reason field so the reason bound can be driven past its own.
 make_fake_tasks_axi_compact() {
   local fakebin=$1
   cat > "$fakebin/tasks-axi" <<'SH'
@@ -126,6 +128,7 @@ set -u
 log=${FM_FAKE_TASKS_AXI_LOG:-}
 [ -n "$log" ] && printf '%s\n' "$*" >> "$log"
 ready_count=${FM_FAKE_TASKS_AXI_READY:-2}
+held_reason=${FM_FAKE_TASKS_AXI_HELD_REASON:-captain choice pending}
 require_file() {
   case "$*" in *'--file '*) return 0 ;; esac
   printf '%s\n' 'missing explicit backlog file' >&2
@@ -133,7 +136,7 @@ require_file() {
 }
 task_header() {
   printf 'count: %s\n' "$1"
-  printf 'tasks[%s]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:\n' "$1"
+  printf 'tasks[%s]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason,hold_until}:\n' "$1"
 }
 list_help() {
   printf 'help[1]:\n'
@@ -185,15 +188,15 @@ case "${1:-}" in
         ;;
       *'--state in_flight'*)
         task_header 1
-        printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending'
+        printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending,"-"'
         ;;
       *'--state held'*)
         task_header 1
-        printf '%s\n' '  held-queued,queued,ship,firstmate,Held queued work,none,captain,captain choice pending'
+        printf '  held-queued,queued,ship,firstmate,Held queued work,none,captain,%s,2026-11-01\n' "$held_reason"
         ;;
       *'--state queued'*'--blocked'*)
         task_header 1
-        printf '%s\n' '  blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"'
+        printf '%s\n' '  blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-","-"'
         ;;
       *)
         printf '%s\n' 'startup recovery must not request an unfiltered whole-backlog listing' >&2
@@ -2106,15 +2109,15 @@ EOF
   out=$(FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TASKS_AXI_READY=3 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to 20; task bodies omitted)" \
+  assert_contains "$out" "compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown; hold reasons bounded to 200 chars; ready queued bounded to 20; task bodies omitted)" \
     "compatible tasks-axi backend did not render the compact backlog listing"
-  assert_contains "$out" "tasks[1]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:" \
+  assert_contains "$out" "tasks[1]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason,hold_until}:" \
     "tasks-axi compact listing omitted the expected structured field header"
-  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending" \
+  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending,\"-\"" \
     "tasks-axi compact listing omitted in-flight identity, state, or hold metadata"
-  assert_contains "$out" "held-queued,queued,ship,firstmate,Held queued work,none,captain,captain choice pending" \
+  assert_contains "$out" "held-queued,queued,ship,firstmate,Held queued work,none,captain,captain choice pending,2026-11-01" \
     "tasks-axi compact listing omitted a held row or its hold metadata"
-  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
+  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-","-"' \
     "tasks-axi compact listing omitted blocked-by metadata"
   assert_contains "$out" "ready-3,queued,ship,firstmate,Ready item 3" \
     "tasks-axi compact listing omitted a dispatchable queued row inside the bound"
@@ -2134,11 +2137,11 @@ EOF
   # The fake refuses a body field, an unfiltered listing, and a done listing, so
   # a clean render already proves those were never asked for; pin the group
   # filters the listing is built from.
-  assert_grep "--state in_flight --fields blocked_by,hold_kind,hold_reason" "$log" \
+  assert_grep "--state in_flight --fields blocked_by,hold_kind,hold_reason,hold_until" "$log" \
     "session start did not ask tasks-axi for the in-flight group"
-  assert_grep "--state held --fields blocked_by,hold_kind,hold_reason" "$log" \
+  assert_grep "--state held --fields blocked_by,hold_kind,hold_reason,hold_until" "$log" \
     "session start did not ask tasks-axi for the held group"
-  assert_grep "--state queued --blocked --fields blocked_by,hold_kind,hold_reason" "$log" \
+  assert_grep "--state queued --blocked --fields blocked_by,hold_kind,hold_reason,hold_until" "$log" \
     "session start did not ask tasks-axi for the blocked queued group"
   assert_grep "ready --file $home/data/backlog.md" "$log" \
     "session start did not ask tasks-axi for the dispatchable queued set"
@@ -2170,15 +2173,129 @@ EOF
   assert_contains "$out" "(4 more queued - bin/fm-tasks-axi.sh ready)" \
     "the bounded queued listing did not disclose an exact remainder and how to see it"
 
-  # The bound is for dispatchable work only: held and blocked rows stay whole.
-  assert_contains "$out" "held-queued,queued,ship,firstmate,Held queued work,none,captain,captain choice pending" \
+  # The bound is for dispatchable work only: held and blocked rows are all kept.
+  assert_contains "$out" "held-queued,queued,ship,firstmate,Held queued work,none,captain,captain choice pending,2026-11-01" \
     "the queued bound swallowed a held row"
-  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
+  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-","-"' \
     "the queued bound swallowed a blocked row"
-  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending" \
+  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending,\"-\"" \
     "the queued bound swallowed an in-flight row"
 
   pass "the startup backlog bound cuts only dispatchable queued rows and discloses the remainder exactly"
+}
+
+# The reason bound cuts TEXT, never a row: a held row whose reason outgrows the
+# limit stays one line carrying its kind, its until date, and the command that
+# prints the rest, while every other row comes through as the tool printed it.
+test_backlog_hold_reason_bound_keeps_the_row_and_names_the_full_read() {
+  local rec root home fakebin out long row
+  rec=$(new_world backlog-hold-reason-bound)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_tasks_axi_compact "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  write_long_body_backlog "$home/data/backlog.md"
+  long=$(printf 'r%.0s' $(seq 1 1195))TAIL-
+
+  out=$(FM_FAKE_TASKS_AXI_HELD_REASON="$long" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  row=$(printf '%s\n' "$out" | grep -F '  held-queued,queued,' || true)
+  [ "$(printf '%s\n' "$row" | grep -c .)" -eq 1 ] \
+    || fail "a held row with an over-long reason did not print as exactly one line: $row"
+  assert_contains "$row" "held-queued,queued,ship,firstmate,Held queued work,none,captain,\"$(printf 'r%.0s' $(seq 1 200))\\n... (truncated, 1200 chars total - use show held-queued --full to see complete text)\",2026-11-01" \
+    "an over-long hold reason was not cut at the limit with the full-read pointer, or lost its kind or until date"
+  assert_not_contains "$out" "TAIL-" "the bounded hold reason still printed its tail"
+  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending,\"-\"" \
+    "the hold-reason bound changed an in-flight row with a short reason"
+  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-","-"' \
+    "the hold-reason bound dropped or changed a blocked row"
+
+  # The limit is a setting: raised past the reason, the same row prints whole.
+  out=$(FM_FAKE_TASKS_AXI_HELD_REASON="$long" FM_SESSION_START_HOLD_REASON_LIMIT=1200 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "held-queued,queued,ship,firstmate,Held queued work,none,captain,$long,2026-11-01" \
+    "a hold reason inside the configured limit was cut"
+
+  pass "an over-long hold reason is bounded to one line with its pointer while every row is kept"
+}
+
+test_backlog_hold_reason_bound_applies_to_manual_title_lines() {
+  local rec root home fakebin out long
+  rec=$(new_world backlog-hold-reason-bound-manual)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  write_long_body_backlog "$home/data/backlog.md"
+  long=$(printf 'r%.0s' $(seq 1 1195))TAIL-
+  printf -- '- [ ] long-held - Long held work (repo: firstmate) (kind: ship) (hold: %s) (hold-kind: captain) (hold-until: 2026-11-01)\n' \
+    "$long" >> "$home/data/backlog.md.queued"
+  # Insert the long-held row into Queued, ahead of the Done section.
+  awk -v add="$home/data/backlog.md.queued" '
+    /^## Done/ { while ((getline line < add) > 0) print line }
+    { print }
+  ' "$home/data/backlog.md" > "$home/data/backlog.md.new"
+  mv "$home/data/backlog.md.new" "$home/data/backlog.md"
+  rm -f "$home/data/backlog.md.queued"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "- [ ] long-held - Long held work (repo: firstmate) (kind: ship) (hold: \"$(printf 'r%.0s' $(seq 1 200))\\n... (truncated, 1200 chars total - use show long-held --full to see complete text)\") (hold-kind: captain) (hold-until: 2026-11-01)" \
+    "manual rendering did not bound an over-long hold reason while keeping its kind and until date"
+  assert_not_contains "$out" "TAIL-" "the manual listing still printed the tail of a bounded hold reason"
+  assert_contains "$out" "- [ ] held-queued - Held queued work (repo: firstmate) (kind: ship) (hold: captain choice pending) (hold-kind: captain)" \
+    "manual rendering changed a held title line with a short reason"
+  assert_contains "$out" "- [ ] compact-startup - Compact startup digest (repo: firstmate) (kind: ship) (since 2026-07-15) (hold: captain choice pending) (hold-kind: captain)" \
+    "manual rendering changed an in-flight title line with a short reason"
+  assert_contains "$out" "blocked-by: compact-startup - waits for implementation" \
+    "the hold-reason bound dropped a blocked title line"
+  assert_contains "$out" "(shown 1 in-flight, 3 held or blocked queued, 20 of 25 other queued title line(s); 1 done row(s) omitted)" \
+    "the hold-reason bound changed which title lines the manual listing kept"
+
+  pass "manual backlog rendering bounds an over-long hold reason and keeps every held title line"
+}
+
+# A plain reason that opens with a quoted word is not a quoted string, and a
+# hand-edited bullet may be followed by a tab; both still get the bound.
+test_backlog_hold_reason_bound_covers_quote_led_and_tab_bulleted_manual_lines() {
+  local rec root home fakebin out filler tab
+  rec=$(new_world backlog-hold-reason-bound-manual-quote)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  write_long_body_backlog "$home/data/backlog.md"
+  filler=$(printf 'x%.0s' $(seq 1 295))TAIL-
+  tab=$(printf '\t')
+  {
+    printf -- '- [ ] quote-lead - Quote led work (repo: firstmate) (kind: ship) (hold: "quoted" lead then %s) (hold-kind: captain) (hold-until: 2026-11-01)\n' "$filler"
+    printf -- '-\t[ ] tab-bullet - Tab bulleted work (repo: firstmate) (kind: ship) (hold: %s) (hold-kind: captain)\n' "$filler"
+  } > "$home/data/backlog.md.queued"
+  awk -v add="$home/data/backlog.md.queued" '
+    /^## Done/ { while ((getline line < add) > 0) print line }
+    { print }
+  ' "$home/data/backlog.md" > "$home/data/backlog.md.new"
+  mv "$home/data/backlog.md.new" "$home/data/backlog.md"
+  rm -f "$home/data/backlog.md.queued"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "- [ ] quote-lead - Quote led work (repo: firstmate) (kind: ship) (hold: \"\\\"quoted\\\" lead then $(printf 'x%.0s' $(seq 1 181))\\n... (truncated, 319 chars total - use show quote-lead --full to see complete text)\") (hold-kind: captain) (hold-until: 2026-11-01)" \
+    "manual rendering did not bound an over-long plain hold reason that starts with a double quote"
+  assert_contains "$out" "-${tab}[ ] tab-bullet - Tab bulleted work (repo: firstmate) (kind: ship) (hold: \"$(printf 'x%.0s' $(seq 1 200))\\n... (truncated, 300 chars total - use show tab-bullet --full to see complete text)\") (hold-kind: captain)" \
+    "manual rendering did not bound an over-long hold reason on a tab-bulleted title line"
+  assert_not_contains "$out" "TAIL-" "the manual listing still printed the tail of a bounded hold reason"
+  assert_contains "$out" "(shown 1 in-flight, 4 held or blocked queued, 20 of 25 other queued title line(s); 1 done row(s) omitted)" \
+    "the hold-reason bound changed which title lines the manual listing kept"
+
+  pass "manual backlog rendering bounds a quote-led plain reason and a tab-bulleted title line"
 }
 
 test_backlog_compact_manual_backend_skips_indented_bodies() {
@@ -2194,7 +2311,7 @@ EOF
 
   out=$(FM_SESSION_START_QUEUED_LIMIT=4 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact backlog listing (manual backend; done rows omitted; every in-flight, held, and blocked title line kept; other queued bounded to 4; indented task bodies omitted)" \
+  assert_contains "$out" "compact backlog listing (manual backend; done rows omitted; every in-flight, held, and blocked title line kept; hold reasons bounded to 200 chars; other queued bounded to 4; indented task bodies omitted)" \
     "manual backend did not use compact title-line rendering"
   assert_contains "$out" "## In flight" "manual compact rendering omitted the in-flight section heading"
   assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
@@ -3129,6 +3246,9 @@ test_non_pi_session_start_leaves_branch_state_untouched
 test_session_start_seeds_the_outcome_display_tail_while_away
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
+test_backlog_hold_reason_bound_keeps_the_row_and_names_the_full_read
+test_backlog_hold_reason_bound_applies_to_manual_title_lines
+test_backlog_hold_reason_bound_covers_quote_led_and_tab_bulleted_manual_lines
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
