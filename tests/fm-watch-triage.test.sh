@@ -5557,6 +5557,7 @@ test_secondmate_home_supervision_churn_is_not_write_evidence() {
   sig=$(seen_sig "$state/mate.status"); printf '%s' "$sig" > "$state/.seen-mate_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   set_mtime "$(( $(date +%s) - 4000 ))" "$state/mate.meta"
+  printf '%s\tfixture\n' "$(date +%s)" > "$state/mate.checkpoint-progress"
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
   set_mtime "$back" "$state/.stale-since-$key"
