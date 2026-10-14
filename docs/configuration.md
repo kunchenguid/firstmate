@@ -1305,10 +1305,11 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 - Firstmate's OpenCode ship, scout, secondmate, and relaunch commands pre-approve tool permissions and external-directory access, including steering inboxes outside the worktree and unrelated scratch paths such as `/tmp`; the grant is not a task-path allowlist or a worktree isolation boundary.
   This per-launch permission policy is retained with or without model and effort selections; `bin/fm-spawn.sh`'s `launch_template()` owns the exact configuration, and `tests/fm-spawn-dispatch-profile.test.sh` covers its generated launches.
 - OpenCode receives the effort as its default `build` agent's `variant`, keyed to the resolved model, inside the `OPENCODE_CONFIG_CONTENT` JSON its launch already writes (the per-model reasoning-effort field of the config schema, verified on opencode 1.18.32); with no model resolved, the effort is recorded in task metadata but omitted from the launch.
-- A Firstmate OpenCode launch with a model from a provider other than `opencode` or `opencode-go` gets its own session store, `firstmate-<12-hex home token>-<task id>.db`, inside OpenCode's data directory, so concurrent workers stop locking one shared `opencode.db`.
+- A Firstmate OpenCode launch with a model from a provider other than `opencode` gets its own session store, `firstmate-<12-hex home token>-<task id>.db`, inside OpenCode's data directory, so concurrent workers stop locking one shared `opencode.db`.
   A relaunch of the same task in the same home reopens that store.
-  Console-account launches (`opencode`, `opencode-go`) and launches with no model keep the shared store, because their account credentials live there.
-  `opencode_db_assignment` in `bin/fm-spawn.sh` owns the rule.
+  An `opencode-go/*` launch also gets that store when OpenCode's `auth.json` in its data directory carries an `opencode-go` entry, because that provider's key lives in the file rather than in the shared store, so the fresh store bills the Go key instead of the console account.
+  Without that entry, an `opencode-go` launch, an `opencode` console-account launch, and any launch with no model keep the shared store, because their account credentials live there.
+  `opencode_db_assignment` in `bin/fm-spawn.sh` owns the rule and checks key presence only, never the value.
 - Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 - If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 - Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.

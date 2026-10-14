@@ -5426,13 +5426,25 @@ fi
 # store and equal task ids in different homes never share one. Readers of
 # OpenCode sessions and usage read <opencode data dir>/opencode.db plus every
 # <opencode data dir>/firstmate-*.db; the stores are kept after teardown.
-# OpenCode console accounts (the opencode and opencode-go providers) keep their
-# access and refresh tokens inside the shared store, and a fresh store has no
-# account, so those launches, and a launch whose provider is unknown because
-# no model was given, keep the shared store rather than copying credentials.
+# The opencode console provider keeps its access and refresh tokens inside the
+# shared store, and a fresh store has no account, so an opencode/* launch keeps
+# the shared store rather than copying credentials, as does a launch whose
+# provider is unknown because no model was given. The opencode-go provider is
+# different: its key lives in the data dir's auth.json, not in the store, so a
+# fresh store still bills that key (verified live with an opencode-go model). A
+# Go model therefore gets its own store whenever that auth.json carries an
+# opencode-go entry, which keeps it off the console account the shared store
+# bills. Only key presence is tested; the value is never read.
+opencode_go_auth_present() {
+  local auth="${XDG_DATA_HOME:-${HOME:-}/.local/share}/opencode/auth.json"
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -f "$auth" ] || return 1
+  jq -e 'has("opencode-go")' "$auth" >/dev/null 2>&1
+}
 opencode_db_assignment() {  # <model>
   case "${1:-}" in
-    '' | default | opencode/* | opencode-go/*) return 0 ;;
+    '' | default | opencode/*) return 0 ;;
+    opencode-go/*) opencode_go_auth_present || return 0 ;;
   esac
   printf "OPENCODE_DB='firstmate-%s-%s.db' " "${LAUNCH_HOME_TOKEN:0:12}" "$ID"
 }
