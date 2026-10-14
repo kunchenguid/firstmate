@@ -6,7 +6,7 @@
 # the exposure verdicts that separate a tailnet-only layer from a public one,
 # the caller-identity evidence in the traffic layer, the log contracts that say
 # what each log is not authoritative for, the non-zero exit that makes it a
-# check, the host config that replaces the shipped inventory, and the
+# check, the session proxy log that names the real caller of a request, the host config that replaces the shipped inventory, and the
 # whole-run budget that bounds it.
 set -u
 
@@ -30,10 +30,12 @@ mkdir -p "$FAKEBIN"
 APP_PORT=47351
 GATEWAY_PORT=47352
 FRONT_PORT=47353
+SESSION_PORT=47354
+SESSION_LOG="$TMP_ROOT/state/session/session-proxy.jsonl"
 APP_LOG="$TMP_ROOT/state/app/server.out.log"
 GATEWAY_LOG="$TMP_ROOT/state/gateway/gateway.out.log"
 FRONT_LOG="$TMP_ROOT/state/front/proxy.err.log"
-mkdir -p "$TMP_ROOT/state/app" "$TMP_ROOT/state/gateway" "$TMP_ROOT/state/front"
+mkdir -p "$TMP_ROOT/state/app" "$TMP_ROOT/state/gateway" "$TMP_ROOT/state/front" "$TMP_ROOT/state/session"
 
 cat > "$APP_LOG" <<'LOG'
 2026-10-06T05:00:00.000Z ALLOW:localhost 200 GET /live/recent?limit=50 ip=127.0.0.1 ua=Python-urllib/3.9 1ms
@@ -55,6 +57,27 @@ write_config() {
   cat > "$TMP_ROOT/stack-doctor.conf" <<CONF
 app|beads-bridge|$APP_PORT|http://127.0.0.1:$APP_PORT/live/config|$TMP_ROOT/state/app|$APP_LOG
 gateway|mcpjungle|$GATEWAY_PORT|http://127.0.0.1:$GATEWAY_PORT/health|$TMP_ROOT/state/gateway|$GATEWAY_LOG|$FRONT_PORT|caddy
+CONF
+}
+
+# The session proxy records one request and one response line per exchange.
+# The fixture holds an attributed MCP call, then an unattributed health check,
+# and the session id it presents must never reach the report.
+write_session_log() {
+  cat > "$SESSION_LOG" <<'LOG'
+{"ts": "2026-10-06T04:00:00.000Z", "event": "request", "rid": "r1", "method": "POST", "path": "/v0/groups/chatgpt/mcp", "group": "chatgpt", "session": "SECRET-SESSION-ID-1", "rpc": "tools/call", "client": "198.51.100.7", "forwarded_for": "198.51.100.7", "tailscale_login": "", "tailscale_name": "", "user_agent": "openai-mcp/1.0", "auth_present": true}
+{"ts": "2026-10-06T04:00:00.050Z", "event": "response", "rid": "r1", "status": 200, "session": "SECRET-SESSION-ID-1", "verdict": "ok"}
+not json at all
+{"ts": "2026-10-06T04:30:00.000Z", "event": "request", "rid": "r2", "method": "GET", "path": "/health", "group": "", "session": "absent", "rpc": "", "client": "127.0.0.1", "forwarded_for": "127.0.0.1", "tailscale_login": "", "tailscale_name": "", "user_agent": "curl/8.7.1", "auth_present": false}
+{"ts": "2026-10-06T04:30:00.004Z", "event": "response", "rid": "r2", "status": 200, "session": "absent", "verdict": "ok"}
+LOG
+}
+
+write_config_with_session() {
+  write_session_log
+  cat > "$TMP_ROOT/stack-doctor.conf" <<CONF
+app|beads-bridge|$APP_PORT|http://127.0.0.1:$APP_PORT/live/config|$TMP_ROOT/state/app|$APP_LOG
+gateway|mcpjungle|$GATEWAY_PORT|http://127.0.0.1:$GATEWAY_PORT/health|$TMP_ROOT/state/gateway|$GATEWAY_LOG|$FRONT_PORT|caddy|$SESSION_PORT|$SESSION_LOG
 CONF
 }
 
@@ -93,7 +116,7 @@ if [ -n "$cwd" ]; then
   exit 0
 fi
 case "$port" in
-  "$FM_FIXTURE_PORT"|"$FM_FIXTURE_GATEWAY_PORT"|"$FM_FIXTURE_FRONT_PORT") ;;
+  "$FM_FIXTURE_PORT"|"$FM_FIXTURE_GATEWAY_PORT"|"$FM_FIXTURE_FRONT_PORT"|"$FM_FIXTURE_SESSION_PORT") ;;
   *) exit 1 ;;
 esac
 printf 'p%s\nn127.0.0.1:%s\n' "$pid" "$port"
@@ -175,7 +198,12 @@ log_gateway() {
   client="$1"
   target="$2"
   case "$target" in
-    /health) printf '[GIN] 2026/10/06 - 06:00:00 | 200 | 1.0ms | %s | GET "%s"\n' "$client" "$target" >> "$FM_FIXTURE_GATEWAY_LOG" ;;
+    /health)
+      printf '[GIN] 2026/10/06 - 06:00:00 | 200 | 1.0ms | %s | GET "%s"\n' "$client" "$target" >> "$FM_FIXTURE_GATEWAY_LOG"
+      # A real session proxy records this run's own probe too, which the
+      # doctor must not report as the newest real request.
+      [ -z "${FM_FIXTURE_SESSION_LOG:-}" ] || printf '{"ts": "2026-10-06T06:00:00.000Z", "event": "request", "rid": "r99", "method": "GET", "path": "/health", "group": "", "session": "absent", "rpc": "", "client": "127.0.0.1", "forwarded_for": "127.0.0.1", "tailscale_login": "", "user_agent": "doctor-own-probe"}\n' >> "$FM_FIXTURE_SESSION_LOG"
+      ;;
   esac
 }
 client=127.0.0.1
@@ -270,6 +298,8 @@ doctor() { # <args...>
     FM_FIXTURE_PORT="$APP_PORT" \
     FM_FIXTURE_GATEWAY_PORT="$GATEWAY_PORT" \
     FM_FIXTURE_FRONT_PORT="$FRONT_PORT" \
+    FM_FIXTURE_SESSION_PORT="$SESSION_PORT" \
+    FM_FIXTURE_SESSION_LOG="${FM_FIXTURE_SESSION_LOG:-}" \
     FM_FIXTURE_SOURCE_DIR="$TMP_ROOT/state/app" \
     FM_FIXTURE_FRONT_CONFIG="$TMP_ROOT/state/front/Caddyfile" \
     FM_FIXTURE_FRONT_LOG="$FRONT_LOG" \
@@ -464,6 +494,71 @@ test_a_budget_exhausted_run_says_so_instead_of_silently_skipping() {
   pass "a budget-exhausted run says so instead of silently skipping"
 }
 
+test_session_proxy_log_names_the_real_caller() {
+  write_config_with_session
+  local out
+  out=$(FM_FIXTURE_SESSION_LOG="$SESSION_LOG" doctor 2>&1) || true
+  assert_contains "$out" "session_proxy=yes session_proxy_port=$SESSION_PORT" "the session proxy must be reported as a layer with its port"
+  assert_contains "$out" "pid=4242" "the session proxy layer must print the pid holding its port"
+  assert_contains "$out" "session_proxy_newest log=$SESSION_LOG requests_read=2" \
+    "the newest request must come from the log as it stood before this run, counting only parseable requests"
+  assert_contains "$out" "rid=r2 method=GET path=/health" "the newest request must be the last one recorded before the run"
+  assert_not_contains "$out" "doctor-own-probe" "the run's own probe must never be reported as the newest request"
+  assert_contains "$out" "session_proxy_newest_mcp at=2026-10-06T04:00:00.000Z" "the newest MCP call must be reported apart from health checks"
+  assert_contains "$out" "rpc=tools/call" "the newest MCP call must print its JSON-RPC method"
+  assert_contains "$out" "group=chatgpt" "the newest MCP call must print the tool group it used"
+  assert_contains "$out" "client=198.51.100.7" "the real client address must be printed"
+  assert_contains "$out" "status=200 verdict=ok" "the response the proxy logged for the request must be printed"
+  assert_contains "$out" "session=presented" "a presented session id must be reported as presence only"
+  assert_not_contains "$out" "SECRET-SESSION-ID" "a session id must never be printed"
+  assert_contains "$out" "session_proxy_newest_attributed requests_with_caller_identity=1" \
+    "the newest request that carries a caller identity must be reported with its count"
+  assert_contains "$out" "a caller identity was recorded for it" "an identified caller must be stated as identified"
+  assert_contains "$out" "path=$SESSION_LOG status=present" "the logs layer must describe the session proxy log"
+  assert_contains "$out" "the real client from X-Forwarded-For" "the logs layer must say what the session proxy log is authoritative for"
+  pass "the session proxy log names the real caller"
+}
+
+test_a_session_proxy_log_without_identity_says_the_client_cannot_be_determined() {
+  write_config_with_session
+  grep -v 'openai-mcp' "$SESSION_LOG" > "$SESSION_LOG.tmp" && mv "$SESSION_LOG.tmp" "$SESSION_LOG"
+  local out
+  out=$(FM_FIXTURE_SESSION_LOG="$SESSION_LOG" doctor 2>&1) || true
+  assert_contains "$out" "requests_with_caller_identity=0" "a log with only loopback callers must report no identified request"
+  assert_contains "$out" "the real client cannot be determined" "an unidentified caller must be stated plainly, not left as a silent loopback"
+  assert_contains "$out" "requests_with_jsonrpc_method=0" "a log with no JSON-RPC request must say no MCP call was seen"
+  pass "a session proxy log without identity says the client cannot be determined"
+}
+
+test_a_missing_session_proxy_log_reports_absent() {
+  write_config_with_session
+  rm -f "$SESSION_LOG"
+  local out
+  out=$(doctor 2>&1) || true
+  assert_contains "$out" "session_proxy log=$SESSION_LOG status=absent" "a missing session proxy log must print its line"
+  assert_contains "$out" "the real client of the newest request cannot be determined from any log" "an absent log must say the client is unknown"
+  pass "a missing session proxy log reports absent"
+}
+
+test_an_unconfigured_session_proxy_is_reported_as_unknown() {
+  write_config
+  local out
+  out=$(doctor 2>&1) || true
+  assert_contains "$out" "session_proxy log=unknown" "a gateway with no session proxy log configured must print the unknown line"
+  pass "an unconfigured session proxy is reported as unknown"
+}
+
+test_a_down_session_proxy_fails_the_check() {
+  write_config_with_session
+  sed -i.bak "s/|$SESSION_PORT|/|$((SESSION_PORT + 10))|/" "$TMP_ROOT/stack-doctor.conf"
+  local out rc
+  out=$(FM_FIXTURE_SESSION_LOG="$SESSION_LOG" doctor 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a session proxy with nothing listening must make the command exit non-zero"
+  assert_contains "$out" "session_proxy=yes session_proxy_port=$((SESSION_PORT + 10)) session_proxy_listen=none pid=none" \
+    "a down session proxy must print that nothing holds its port"
+  pass "a down session proxy fails the check"
+}
+
 test_healthy_stack_answers_every_layer
 test_tailnet_route_completes_a_handshake_for_every_group
 test_tailnet_route_states_its_own_limits
@@ -479,6 +574,11 @@ test_config_replaces_the_shipped_inventory
 test_a_missing_tool_is_reported_as_evidence
 test_the_whole_run_budget_is_reported_and_bounds_the_run
 test_a_budget_exhausted_run_says_so_instead_of_silently_skipping
+test_session_proxy_log_names_the_real_caller
+test_a_session_proxy_log_without_identity_says_the_client_cannot_be_determined
+test_a_missing_session_proxy_log_reports_absent
+test_an_unconfigured_session_proxy_is_reported_as_unknown
+test_a_down_session_proxy_fails_the_check
 
 fm_test_reap_orphans
 fm_test_cleanup

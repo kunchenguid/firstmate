@@ -10,7 +10,7 @@
 # layer rather than one project:
 #
 #   app     |name|port|health-url|source-dir|log-path
-#   gateway |name|port|health-url|state-dir|log-path|front-port|front-name
+#   gateway |name|port|health-url|state-dir|log-path|front-port|front-name|session-port|session-log
 #
 # Every path is used exactly as written, so a relative log path resolves
 # against the caller's working directory.
@@ -35,7 +35,8 @@
 #   [app]     <name>     process, listen address, launchd label, working
 #                        directory, deployed revision, health probe
 #   [gateway] <name>     process, listen address, launchd label, health probe,
-#                        and the local reverse proxy fronting it
+#                        the local reverse proxy fronting it, and the session
+#                        proxy that logs the real caller ahead of it
 #   [group]   <name>     included servers, endpoint, then the real handshake
 #   [tailnet] <subject>  the same handshake again over the tailnet URL for every
 #                        group, the public funnel answer for the same path, and
@@ -44,7 +45,12 @@
 #                        each reaches, and whether each layer is reachable from
 #                        the tailnet, from the public internet, or neither
 #   [traffic] <subject>  the newest request each log recorded, where it came
-#                        from, and what the caller identity columns can prove
+#                        from, and what the caller identity columns can prove;
+#                        the session proxy log is read as it stood before this
+#                        run's own probes, so the newest request is a real
+#                        caller's and never the doctor's, and when no caller
+#                        identity was recorded the line says the real client
+#                        cannot be determined
 #   [logs]    <subject>  what each log is authoritative for, the shape of the
 #                        paths it records, and what it does not record
 #   [summary] doctor     layer count, down count, elapsed time, verdict
@@ -106,7 +112,7 @@ fi
 fm_sd_default_records() {
   cat <<EOF
 app|beads-bridge|3737|http://127.0.0.1:3737/live/config|$HOME/.local/share/beads-bridge/app|$HOME/.local/share/beads-bridge/server.out.log
-gateway|mcpjungle|8338|http://127.0.0.1:8338/health|$HOME/.local/share/mcpjungle|$HOME/.local/share/mcpjungle/gateway.out.log|8339|caddy
+gateway|mcpjungle|8338|http://127.0.0.1:8338/health|$HOME/.local/share/mcpjungle|$HOME/.local/share/mcpjungle/gateway.out.log|8339|caddy|8337|$HOME/.local/share/mcpjungle/session-proxy.jsonl
 EOF
 }
 
@@ -470,6 +476,32 @@ check_gateway() { # <name> <port> <health-url> <state-dir> <log-path> <front-por
   if [ -n "${6:-}" ]; then
     check_front "$name" "${7:-front}" "$6"
   fi
+  if [ -n "${9:-}" ]; then
+    check_session_proxy "$name" "$9" "${10:-}"
+  fi
+}
+
+# Report the session proxy that logs the real caller ahead of the gateway.
+# It sits between the front and the gateway, so when it is down every request
+# through the front fails while the gateway still answers directly.
+check_session_proxy() { # <gateway-name> <session-port> <session-log>
+  local gateway=$1 port=$2 log=${3:-}
+  local pid facts up
+  pid=$(fm_sd_port_pid "$port")
+  if [ -n "$pid" ]; then
+    facts=$(fm_sd_process_facts "$pid")
+    up=yes
+  else
+    facts='pid=none uptime=unknown state=no-listener'
+    up=no
+  fi
+  fm_sd_layer_note "$up"
+  # shellcheck disable=SC2086
+  fm_sd_emit gateway "$gateway" \
+    session_proxy=yes "session_proxy_port=$port" \
+    "session_proxy_listen=$( [ -n "$pid" ] && fm_sd_listen_addr "$port" || printf none )" $facts \
+    "session_proxy_launchd=$( [ -n "$pid" ] && fm_sd_launchd_label "$pid" || printf unknown )" \
+    "session_proxy_log=${log:-unknown}" "up=$FM_SD_LAST_UP"
 }
 
 # --- exposure layer --------------------------------------------------------
@@ -478,7 +510,7 @@ check_gateway() { # <name> <port> <health-url> <state-dir> <log-path> <front-por
 # This is what turns a serve mapping into "the tailnet reaches the gateway"
 # instead of a bare port number.
 fm_sd_layer_for_port() { # <port>
-  local port=$1 record kind name layer_port front
+  local port=$1 record kind name layer_port front session
   while IFS= read -r record; do
     kind=$(fm_sd_field "$record" 1)
     name=$(fm_sd_field "$record" 2)
@@ -492,6 +524,8 @@ fm_sd_layer_for_port() { # <port>
         front=$(fm_sd_field "$record" 7)
         if [ "$layer_port" = "$port" ]; then printf 'gateway:%s' "$name"; return 0; fi
         if [ -n "$front" ] && [ "$front" = "$port" ]; then printf 'gateway:%s-front' "$name"; return 0; fi
+        session=$(fm_sd_field "$record" 9)
+        if [ -n "$session" ] && [ "$session" = "$port" ]; then printf 'gateway:%s-session-proxy' "$name"; return 0; fi
         ;;
     esac
   done < <(fm_sd_resolved_records)
@@ -549,6 +583,87 @@ report_exposure() { # <serve-json>
 
 # --- traffic layer ---------------------------------------------------------
 
+# Report the newest request the session proxy recorded, and where it came from.
+# This is the one log that sees the real caller, because it reads the
+# X-Forwarded-For chain and the Tailscale identity headers the gateway's own
+# log never records.
+# Only the lines present when this run began are read (FM_SD_SESSION_LINES), so
+# the newest request is a real caller's rather than this run's own probe.
+# An unreadable or absent log is printed as unknown rather than counted as a
+# down layer, because missing evidence is not a failed service.
+# Session ids and header values are never printed: presented session ids as
+# presence only, and the identity headers as the tailnet login and name the
+# proxy already logged.
+report_session_traffic() { # <gateway-name> <session-log>
+  local gname=$1 log=${2:-} lines window newest attributed total attributed_count mcp_newest
+  if [ -z "$log" ]; then
+    fm_sd_emit traffic "$gname" session_proxy log=unknown \
+      'conclusion=no session proxy log is configured, so the real client of the newest request cannot be determined from any log'
+    return 0
+  fi
+  if [ ! -f "$log" ]; then
+    fm_sd_emit traffic "$gname" session_proxy "log=$log" status=absent \
+      'conclusion=the session proxy log does not exist, so the real client of the newest request cannot be determined from any log'
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    fm_sd_emit traffic "$gname" session_proxy "log=$log" status=unknown reason=jq-absent \
+      'conclusion=the session proxy log cannot be parsed without jq, so the real client of the newest request cannot be determined'
+    return 0
+  fi
+  lines=${FM_SD_SESSION_LINES:-0}
+  window=$(head -n "$lines" "$log" 2>/dev/null | tail -n 5000 | jq -R -c 'fromjson? | select(type == "object")' 2>/dev/null || true)
+  newest=$(printf '%s\n' "$window" | jq -c 'select(.event == "request")' 2>/dev/null | tail -1)
+  total=$(printf '%s\n' "$window" | jq -c 'select(.event == "request")' 2>/dev/null | wc -l | tr -d ' ')
+  attributed=$(printf '%s\n' "$window" | jq -c 'select(.event == "request" and ((.tailscale_login // "") != "" or ((.client // "127.0.0.1") | . != "127.0.0.1" and . != "::1")))' 2>/dev/null | tail -1)
+  mcp_newest=$(printf '%s\n' "$window" | jq -c 'select(.event == "request" and (.rpc // "") != "")' 2>/dev/null | tail -1)
+  attributed_count=$(printf '%s\n' "$window" | jq -c 'select(.event == "request" and ((.tailscale_login // "") != "" or ((.client // "127.0.0.1") | . != "127.0.0.1" and . != "::1")))' 2>/dev/null | wc -l | tr -d ' ')
+  if [ -z "$newest" ]; then
+    fm_sd_emit traffic "$gname" session_proxy "log=$log" status=empty "requests_read=0" \
+      'conclusion=the session proxy log held no request record when this run began, so the real client cannot be determined'
+    return 0
+  fi
+  fm_sd_layer_note yes
+  fm_sd_emit traffic "$gname" session_proxy_newest "log=$log" "requests_read=$total" \
+    "$(fm_sd_session_request_facts "$newest" "$window")"
+  if [ -n "$mcp_newest" ]; then
+    fm_sd_emit traffic "$gname" session_proxy_newest_mcp "$(fm_sd_session_request_facts "$mcp_newest" "$window")"
+  else
+    fm_sd_emit traffic "$gname" session_proxy_newest_mcp \
+      'requests_with_jsonrpc_method=0 conclusion=no request in the window carried a JSON-RPC method, so no MCP call was seen'
+  fi
+  if [ -n "$attributed" ]; then
+    fm_sd_emit traffic "$gname" session_proxy_newest_attributed "requests_with_caller_identity=$attributed_count" \
+      "$(fm_sd_session_request_facts "$attributed" "$window")" \
+      'conclusion=a request in this log carries a tailnet login or a non-loopback client, so a caller identity was recorded for it'
+  else
+    fm_sd_emit traffic "$gname" session_proxy_newest_attributed requests_with_caller_identity=0 \
+      'conclusion=no request in the window carries a tailnet login or a non-loopback client, so the real client cannot be determined'
+  fi
+}
+
+# Print the evidence tokens of one session-proxy request record, with the
+# response the proxy logged for the same request id.
+fm_sd_session_request_facts() { # <request-json> <window-json-lines>
+  printf '%s' "$1" | jq -r --argjson window "$(printf '%s\n' "$2" | jq -s -c '.' 2>/dev/null || printf '[]')" '
+    . as $r
+    | ($window | map(select(.event == "response" and .rid == $r.rid)) | last // {}) as $s
+    | [ "at=\($r.ts // "unknown")",
+        "rid=\($r.rid // "unknown")",
+        "method=\($r.method // "unknown")",
+        "path=\($r.path // "unknown")",
+        "group=\(if ($r.group // "") == "" then "none" else $r.group end)",
+        "rpc=\(if ($r.rpc // "") == "" then "none" else $r.rpc end)",
+        "client=\($r.client // "unknown")",
+        "forwarded_for=\($r.forwarded_for // "unknown")",
+        "tailscale_login=\(if ($r.tailscale_login // "") == "" then "none" else $r.tailscale_login end)",
+        "user_agent=\"\($r.user_agent // "unknown")\"",
+        "session=\(if ($r.session // "absent") == "absent" then "absent" else "presented" end)",
+        "status=\($s.status // "unknown")",
+        "verdict=\($s.verdict // "unknown")" ]
+    | join(" ")' 2>/dev/null || printf 'facts=unparseable'
+}
+
 # Report the newest request each log recorded, and prove what its caller column
 # can and cannot identify.
 #
@@ -556,8 +671,8 @@ report_exposure() { # <serve-json>
 # so the doctor measures rather than assumes: one request through the tailnet
 # front shows what the log records for a real tailnet caller, and one request
 # carrying a synthetic X-Forwarded-For shows which header the column follows.
-report_traffic() { # <gateway-name> <gateway-log> <gateway-port> <app-name> <app-log> <front-port> <serve-json>
-  local gname=$1 glog=$2 gport=$3 aname=$4 alog=$5 front_port=${6:-} json=$7
+report_traffic() { # <gateway-name> <gateway-log> <gateway-port> <app-name> <app-log> <front-port> <serve-json> <session-log>
+  local gname=$1 glog=$2 gport=$3 aname=$4 alog=$5 front_port=${6:-} json=$7 slog=${8:-}
   local last clients identity_lines
   last=$(fm_sd_log_last "$glog" '\| (GET|POST) ')
   clients=''
@@ -575,6 +690,7 @@ report_traffic() { # <gateway-name> <gateway-log> <gateway-port> <app-name> <app
     "last_request=\"$(fm_sd_one_line "$last" 140)\"" \
     "distinct_clients_last_200_lines=${clients:-unknown}" \
     "lines_recording_tailscale_user_header=$identity_lines"
+  report_session_traffic "$gname" "$slog"
   local host path target funnel front_url code logged port layer
   if [ -n "$json" ]; then
     while IFS='|' read -r host path target funnel; do
@@ -680,7 +796,8 @@ report_logs() {
         fm_sd_emit_log logs "$name" "$log" \
           'the MCP requests that reached this gateway: status, duration, path, and the client column the traffic layer measures' \
           'the real caller address behind a loopback proxying front, and upstream server-side effects, which live in the app log and in any front access log'
-        local front_port front_name front_pid front_label paths front_log
+        local front_port front_name front_pid front_label paths front_log session_log
+        session_log=$(fm_sd_field "$record" 10)
         front_port=$(fm_sd_field "$record" 7)
         front_name=$(fm_sd_field "$record" 8)
         if [ -n "$front_port" ]; then
@@ -694,6 +811,14 @@ report_logs() {
           fm_sd_emit_log logs "$name-front(${front_name:-front})" "${front_log:-unknown}" \
             'this front own startup, TLS and upstream-failure diagnostics, which are the only request records it keeps while no access log is configured' \
             'request volume, status codes, or caller identity: with no access log the front records no successful request at all, so its silence about a caller proves nothing'
+        fi
+        if [ -n "$session_log" ]; then
+          fm_sd_emit_log logs "$name-session-proxy" "$session_log" \
+            'every request that came through the front: the real client from X-Forwarded-For and Tailscale identity headers, whether a session id was presented, the JSON-RPC method, the response status, and the failure shape' \
+            'whether the gateway executed the tool call, upstream server-side effects, and any request that reached the gateway or the app by another route; the app log, not this one, shows the app side'
+        else
+          fm_sd_emit logs "$name-session-proxy" log=unknown \
+            'note=no session proxy log is configured, so no log names the real caller of a request'
         fi
         ;;
       *)
@@ -736,7 +861,18 @@ else
   fm_sd_layer_note unknown
 fi
 
-APP_NAME='' APP_LOG='' GATEWAY_NAME='' GATEWAY_LOG='' GATEWAY_PORT='' GATEWAY_FRONT_PORT=''
+APP_NAME='' APP_LOG='' GATEWAY_NAME='' GATEWAY_LOG='' GATEWAY_PORT='' GATEWAY_FRONT_PORT='' GATEWAY_SESSION_LOG=''
+# The session proxy log is measured before any probe below, so its newest
+# request is a real caller's rather than this run's own handshake.
+FM_SD_SESSION_LINES=0
+while IFS= read -r record; do
+  if [ "$(fm_sd_field "$record" 1)" = gateway ]; then
+    log=$(fm_sd_field "$record" 10)
+    if [ -n "$log" ] && [ -f "$log" ]; then
+      FM_SD_SESSION_LINES=$(wc -l < "$log" 2>/dev/null | tr -d ' ')
+    fi
+  fi
+done < <(fm_sd_resolved_records)
 while IFS= read -r record; do
   kind=$(fm_sd_field "$record" 1)
   name=$(fm_sd_field "$record" 2)
@@ -752,8 +888,10 @@ while IFS= read -r record; do
       check_gateway "$name" \
         "$(fm_sd_field "$record" 3)" "$(fm_sd_field "$record" 4)" "$(fm_sd_field "$record" 5)" \
         "$(fm_sd_field "$record" 6)" \
-        "$(fm_sd_field "$record" 7)" "$(fm_sd_field "$record" 8)" "$SERVE_JSON"
+        "$(fm_sd_field "$record" 7)" "$(fm_sd_field "$record" 8)" "$SERVE_JSON" \
+        "$(fm_sd_field "$record" 9)" "$(fm_sd_field "$record" 10)"
       GATEWAY_NAME=$name
+      GATEWAY_SESSION_LOG=$(fm_sd_field "$record" 10)
       GATEWAY_LOG=$(fm_sd_field "$record" 6)
       GATEWAY_PORT=$(fm_sd_field "$record" 3)
       GATEWAY_FRONT_PORT=$(fm_sd_field "$record" 7)
@@ -768,7 +906,7 @@ done < <(fm_sd_resolved_records)
 report_exposure "$SERVE_JSON"
 
 if [ -n "$GATEWAY_LOG" ] && [ -n "$APP_LOG" ]; then
-  report_traffic "$GATEWAY_NAME" "$GATEWAY_LOG" "$GATEWAY_PORT" "$APP_NAME" "$APP_LOG" "$GATEWAY_FRONT_PORT" "$SERVE_JSON"
+  report_traffic "$GATEWAY_NAME" "$GATEWAY_LOG" "$GATEWAY_PORT" "$APP_NAME" "$APP_LOG" "$GATEWAY_FRONT_PORT" "$SERVE_JSON" "$GATEWAY_SESSION_LOG"
 else
   fm_sd_emit traffic stack skipped \
     'reason=no app-and-gateway pair is configured, so this run has no gateway log and app log to correlate'
