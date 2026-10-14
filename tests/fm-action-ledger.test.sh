@@ -180,6 +180,41 @@ test_runbook_loop() {
   pass "the documented follow-through loop clears incidents only through start, result and acceptance"
 }
 
+# Inaccessible evidence is unknown: the witness is a withdrawn claim that a
+# receipt was absent when a permission-denied read had been hidden.
+test_inaccessible_evidence_is_unknown() {
+  local s root out
+  s=$(fresh_state evidence)
+  root="$TMP_ROOT/evidence/store"
+  mkdir -p "$root/open" "$root/locked"
+  : > "$root/open/receipt"
+  : > "$root/locked/receipt"
+  assert_equals "present" "$(bash "$ACTION" probe "$root/open/receipt")" "readable receipt is present"
+  assert_equals "absent" "$(bash "$ACTION" probe "$root/open/missing")" "a searched directory without the entry is absent"
+  chmod 000 "$root/locked"
+  out=$(bash "$ACTION" probe "$root/locked/receipt")
+  if [ -r "$root/locked/receipt" ]; then
+    chmod 755 "$root/locked"
+    pass "skip: runner can read through a mode 000 directory"
+    return 0
+  fi
+  assert_contains "$out" "unknown reason=permission-denied" "a permission-denied read is unknown, not absent"
+  assert_contains "$out" "fallback=" "unknown names a read-only fallback route"
+  assert_not_contains "$out" "absent" "unknown is never reported as absence"
+  admit_authorized "$s" a1 || { chmod 755 "$root/locked"; fail "admit"; }
+  if act "$s" accept t1 a1 --receipt r --evidence "$root/locked/receipt" 2>/dev/null; then
+    chmod 755 "$root/locked"
+    fail "inaccessible evidence must not be accepted as success"
+  fi
+  if act "$s" accept t1 a1 --receipt r --evidence "$root/open/missing" 2>/dev/null; then
+    chmod 755 "$root/locked"
+    fail "absent evidence must not be accepted as success"
+  fi
+  act "$s" accept t1 a1 --receipt r --evidence "$root/open/receipt" || { chmod 755 "$root/locked"; fail "present evidence is accepted"; }
+  chmod 755 "$root/locked"
+  pass "inaccessible evidence is unknown with a fallback and never counts as absence or success"
+}
+
 test_ready_but_unstarted
 test_handled_but_unexecuted
 test_start_and_refusal_satisfy_the_bound
@@ -188,3 +223,4 @@ test_gate_never_freezes_independent_work
 test_no_blanket_grant_and_counted_grant
 test_fold_is_read_only
 test_runbook_loop
+test_inaccessible_evidence_is_unknown

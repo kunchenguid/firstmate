@@ -172,3 +172,34 @@ fm_action_fold() {  # <state-dir> <task-id> <now-epoch>
 fm_action_incidents() {  # <state-dir> <task-id> <now-epoch>
   fm_action_fold "$@" | awk -F'\t' '$4 != "none"'
 }
+
+# Probe one evidence path without letting an access failure read as absence.
+# Prints exactly one line:
+#   present
+#   absent
+#   unknown reason=permission-denied blocked=<dir> fallback=<read-only route>
+# Absent is claimed only when every ancestor is searchable, so the missing entry
+# was actually looked for. An inaccessible path is unknown, never absence and
+# never success; the fallback names a read-only way to settle it.
+fm_action_probe_evidence() {  # <path>
+  local path=$1 dir
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if [ -r "$path" ]; then printf 'present\n'; return 0; fi
+    printf 'unknown reason=permission-denied blocked=%s fallback=ask the path owner to run: stat %s\n' "$path" "$path"
+    return 0
+  fi
+  dir=${path%/*}
+  [ -n "$dir" ] || dir=/
+  while [ "$dir" != / ] && [ -n "$dir" ]; do
+    if [ ! -d "$dir" ]; then
+      dir=${dir%/*}
+      continue
+    fi
+    if [ ! -x "$dir" ]; then
+      printf 'unknown reason=permission-denied blocked=%s fallback=ask the directory owner to run: stat %s\n' "$dir" "$path"
+      return 0
+    fi
+    break
+  done
+  printf 'absent\n'
+}

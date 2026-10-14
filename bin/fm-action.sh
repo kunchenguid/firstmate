@@ -14,7 +14,12 @@
 #   ack <task> ID [--at EPOCH]
 #   start <task> ID [--units N] [--at EPOCH]
 #   result <task> ID ok|refused|failed|answered [--reason TEXT] [--at EPOCH]
-#   accept <task> ID --receipt REF [--at EPOCH]
+#   accept <task> ID --receipt REF [--evidence PATH] [--at EPOCH]
+#       --evidence names the native receipt file; acceptance is recorded only
+#       when it is present, so inaccessible (unknown) or absent evidence refuses.
+#   probe PATH
+#       Print present, absent, or unknown with the blocked directory and a
+#       read-only fallback route; an access failure is never reported as absent.
 #   hold <task> ID --kind safe-boundary|resource-wait|running-job
 #         --until EPOCH --reason TEXT [--at EPOCH]
 #       A legitimate wait; it must carry a finite deadline.
@@ -52,6 +57,11 @@ epoch_valid() {  # <value>
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
 }
 
+if [ "${1:-}" = probe ]; then
+  [ $# -eq 2 ] || usage
+  fm_action_probe_evidence "$2"
+  exit 0
+fi
 [ $# -ge 2 ] || usage
 CMD=$1
 TASK=$2
@@ -59,7 +69,7 @@ shift 2
 fm_pr_task_id_valid "$TASK" || die "invalid task id: $TASK"
 
 ID='' CLASS='' OWNER='' OPERATION='' SOURCE='' DUE='' UNITS='' INBOX='' READY_WITH=''
-AT='' NOW='' REASON='' RECEIPT='' KIND='' UNTIL=''
+AT='' NOW='' REASON='' RECEIPT='' EVIDENCE='' KIND='' UNTIL=''
 POSITIONAL='' POSITIONAL2=''
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -76,6 +86,7 @@ while [ $# -gt 0 ]; do
     --now) NOW=${2:-}; shift 2 || usage ;;
     --reason) REASON=${2:-}; shift 2 || usage ;;
     --receipt) RECEIPT=${2:-}; shift 2 || usage ;;
+    --evidence) EVIDENCE=${2:-}; shift 2 || usage ;;
     --kind) KIND=${2:-}; shift 2 || usage ;;
     --until) UNTIL=${2:-}; shift 2 || usage ;;
     --*) die "unknown option: $1" ;;
@@ -151,6 +162,10 @@ case "$CMD" in
   accept)
     require_existing "$POSITIONAL"
     [ -n "$RECEIPT" ] || die "--receipt is required: acceptance needs a native receipt"
+    if [ -n "$EVIDENCE" ]; then
+      PROBE=$(fm_action_probe_evidence "$EVIDENCE")
+      [ "$PROBE" = present ] || die "acceptance evidence is not confirmed: $PROBE"
+    fi
     fm_action_append "$STATE" "$TASK" "$AT" "$POSITIONAL" accept "receipt=$(fm_action_clean "$RECEIPT")"
     ;;
   hold)
