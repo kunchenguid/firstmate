@@ -5,7 +5,7 @@
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin tip, refreshes a clean origin-less
-# pool from the local default branch of the clone the slot was cut from, or stops
+# pool from the branch checked out in the clone the slot was cut from, or stops
 # when a configured origin is unusable.
 set -u
 
@@ -287,7 +287,7 @@ test_originless_pool_refreshes_from_the_source_clone() {
     printf '# observed base: pool HEAD=%s source %s=%s pool base was %s\n' \
       "$(git -C "$POOL_DIR" rev-parse HEAD)" "$DEFAULT_BRANCH" "$advanced" "$INITIAL_SHA"
   fi
-  pass "an origin-less pooled worktree refreshes to the source clone's current local default branch"
+  pass "an origin-less pooled worktree refreshes to the source clone's current checked-out branch"
 }
 
 test_originless_base_branch_starts_from_that_local_branch() {
@@ -331,28 +331,47 @@ test_originless_missing_base_branch_refuses_pool() {
   pass "a base branch missing from the origin-less source clone refuses the spawn"
 }
 
-# With no origin there is no remote HEAD to ask, so an origin-less project whose
-# default branch is neither main nor master cannot be resolved. Refusing and
-# naming the remedy is the guard; silently launching from the slot's last commit
-# is the bug this path used to have.
-test_originless_unresolved_default_refuses_pool() {
-  local rec id out status before
+# With no origin there is no remote HEAD to ask, so the base is the branch the
+# source clone has checked out, whatever its name - not only main or master.
+test_originless_non_main_default_refreshes_from_that_branch() {
+  local rec id out status advanced
   id='pool-originless-trunk-r1'
   rec=$(make_originless_case originless-trunk "$id" trunk)
   read_case_record "$rec"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
-  advance_source_clone advanced-local.txt 'never reached' >/dev/null
+  advanced=$(advance_source_clone advanced-local.txt 'trunk moved ahead')
+  [ "$advanced" != "$INITIAL_SHA" ] || fail "fixture did not advance trunk past the pool base"
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "an unresolvable origin-less default branch should refuse the spawn"
-  assert_contains "$out" "could not determine the local default branch" \
-    "the refusal did not explain the unresolvable origin-less default branch"
+  expect_code 0 "$status" "an origin-less project on trunk should refresh from trunk"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$advanced" ] \
+    || fail "spawn did not refresh the origin-less pool to the source clone's trunk"
+  assert_grep 'trunk moved ahead' "$POOL_DIR/advanced-local.txt" \
+    "the refreshed origin-less copy is missing trunk's current content"
+  pass "an origin-less project whose default branch is neither main nor master refreshes from that branch"
+}
+
+# A source clone at a detached HEAD names no branch to start from, so the spawn
+# refuses and names the cause rather than launching from the slot's last commit.
+test_originless_detached_source_clone_refuses_pool() {
+  local rec id out status before
+  id='pool-originless-detached-r1'
+  rec=$(make_originless_case originless-detached "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  advance_source_clone advanced-local.txt 'never reached' >/dev/null
+  git -C "$PROJECT_DIR" checkout --quiet --detach
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a detached origin-less source clone should refuse the spawn"
+  assert_contains "$out" "could not resolve the checked-out branch of source clone" \
+    "the refusal did not explain the detached source clone"
   assert_contains "$out" "pass --base-branch" "the refusal did not name its remedy"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD after failing to resolve an origin-less default branch"
+    || fail "spawn moved HEAD after refusing a detached source clone"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
-  pass "an origin-less project with an unresolvable default branch refuses rather than launching stale"
+  pass "an origin-less project whose source clone is detached refuses rather than launching stale"
 }
 
 test_originless_dirty_pool_refuses_without_discarding_work() {
@@ -1292,7 +1311,8 @@ test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_refreshes_from_the_source_clone
 test_originless_base_branch_starts_from_that_local_branch
 test_originless_missing_base_branch_refuses_pool
-test_originless_unresolved_default_refuses_pool
+test_originless_non_main_default_refreshes_from_that_branch
+test_originless_detached_source_clone_refuses_pool
 test_originless_dirty_pool_refuses_without_discarding_work
 test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool
