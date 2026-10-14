@@ -1748,8 +1748,8 @@ SH
 # A watcher that dies of a signal every time it starts is not restarted without
 # bound: the fourth death in a row inside a minute ends the arm with the failure.
 test_continuing_arm_stops_replacing_a_watcher_that_keeps_dying() {
-  local dir state bindir f reader polls rc
-  dir=$(make_case continuing-arm-death-loop)
+  local dir state bindir f reader polls rc mode=${1:-consecutive}
+  dir=$(make_case "continuing-arm-death-loop-$mode")
   state="$dir/state"
   bindir="$dir/bin"
   mkdir -p "$bindir"
@@ -1767,6 +1767,15 @@ printf '%s\\n' "$dir" > "$state/.watch.lock/fm-home"
 printf '%s\\n' "$bindir/fm-watch.sh" > "$state/.watch.lock/watcher-path"
 fm_pid_identity "\$\$" > "$state/.watch.lock/pid-identity"
 date +%s > "$state/.last-watcher-beat"
+if [ "$mode" = alternating ]; then
+  if [ "\$n" -gt 8 ]; then
+    while :; do sleep 1; done
+  fi
+  if [ \$((n % 2)) -eq 0 ]; then
+    echo "check: stub: success-\$n"
+    exit 0
+  fi
+fi
 sleep 0.5
 kill -KILL "\$\$"
 SH
@@ -1782,9 +1791,22 @@ SH
   ARM_PID=$!
   polls=0
   while [ "$polls" -lt 300 ] && kill -0 "$ARM_PID" 2>/dev/null; do
+    [ "$mode" != alternating ] || [ "$(cat "$dir/runs" 2>/dev/null || echo 0)" -lt 9 ] || break
     sleep 0.1
     polls=$((polls + 1))
   done
+  if [ "$mode" = alternating ]; then
+    rc=0
+    kill -0 "$ARM_PID" 2>/dev/null || rc=1
+    kill -TERM "$ARM_PID" 2>/dev/null || true
+    wait "$ARM_PID" 2>/dev/null || true
+    kill "$reader" 2>/dev/null || true
+    [ "$rc" -eq 0 ] && [ "$(cat "$dir/runs")" -eq 9 ] \
+      || fail "successful closes did not reset consecutive deaths: $(cat "$dir/arm.out")"
+    [ "$(grep -c '^C' "$dir/spool")" -eq 4 ] || fail "successful closes were lost"
+    pass "watch-arm: successful closes reset the consecutive death limit"
+    return
+  fi
   if kill -0 "$ARM_PID" 2>/dev/null; then
     kill -TERM "$ARM_PID" 2>/dev/null
     kill "$reader" 2>/dev/null
@@ -1903,6 +1925,10 @@ EOF
   pass "watch-arm: the OpenCode arm plugin decides with the shared supervision predicate"
 }
 
+test_successful_closes_reset_the_death_limit() {
+  test_continuing_arm_stops_replacing_a_watcher_that_keeps_dying alternating
+}
+
 if [ -n "${FM_TEST_CASES:-}" ]; then
   for test_case in $FM_TEST_CASES; do "$test_case"; done
   exit 0
@@ -1941,4 +1967,5 @@ test_take_over_preserves_downtime_from_watcher_self_exit
 test_continuing_arm_restarts_after_every_actionable_close_even_before_health
 test_continuing_arm_replaces_a_watcher_killed_by_a_signal_but_not_one_it_was_asked_to_stop
 test_continuing_arm_stops_replacing_a_watcher_that_keeps_dying
+test_successful_closes_reset_the_death_limit
 test_opencode_arm_plugin_decides_with_the_shared_predicate

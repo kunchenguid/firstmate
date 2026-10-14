@@ -3255,6 +3255,33 @@ SH
 }
 
 
+test_successor_only_spool_is_consumed_without_an_engine_turn() {
+  local home spool watcher
+  home=$(make_primary_home successor-only)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo held > "$home/stub-mode"
+  mkfifo "$home/stub-release"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "no initial watcher"
+  append_status "$home" 'first actionable wake'
+  wait_until 250 test -s "$home/stub-ready" || fail "engine did not hold"
+  wait_until 150 watcher_live "$home" || fail "no successor watcher"
+  for spool in "$home"/state/.supervision-host-spool.*; do [ ! -f "$spool" ] || break; done
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -KILL "$watcher"
+  wait_until 250 spool_ends_with "$spool" S || fail "no replacement handoff"
+  [ "$(wc -l < "$spool")" -eq 1 ] || fail "fixture expected a successor-only batch"
+  printf 'continue\n' > "$home/stub-release"
+  wait_until 250 sh -c '[ -f "$1" ] && [ ! -s "$1" ]' _ "$spool" \
+    || fail "host did not consume successor-only readiness"
+  [ ! -e "$home/engine-call.2" ] || fail "readiness started an engine turn"
+  [ ! -e "$home/state/.supervision-host-busy" ] || fail "readiness made the host busy"
+  watcher_live "$home" || fail "readiness consumption stopped the watcher"
+  stop_home_processes "$home"
+  pass "host: successor-only readiness is consumed without another engine turn"
+}
+
 test_spool_consumption_becomes_busy_before_the_next_close() {
   local home saved spool real_rm
   home=$(make_primary_home consume-busy)
@@ -3442,4 +3469,5 @@ test_mixed_spool_routes_the_scheduled_close_to_main
 test_detached_reader_does_not_stop_scanning_during_cleanup
 
 test_spool_consumption_becomes_busy_before_the_next_close
+test_successor_only_spool_is_consumed_without_an_engine_turn
 test_batched_heartbeat_retains_fleet_scope

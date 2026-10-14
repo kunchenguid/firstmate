@@ -611,7 +611,34 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
   pass "checkpoint: the real host ends its park at the checkpoint bound as a quiet checkpoint"
 }
 
+test_killed_watcher_keeps_a_quiet_checkpoint_bounded() {
+  local home checkpoint watcher rc=0
+  home=$(make_sweep_home killed-in-checkpoint)
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 "$CHECKPOINT" --seconds 8 \
+    > "$home/out.txt" 2> "$home/err.txt" &
+  checkpoint=$!
+  wait_for_checkpoint_lock "$home" || fail "checkpoint never started its watcher"
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -KILL "$watcher"
+  if ! wait_until 150 pid_gone "$checkpoint"; then
+    kill -TERM "$checkpoint" 2>/dev/null || true
+    wait "$checkpoint" 2>/dev/null || true
+    fail "successor-only handoff kept the quiet checkpoint past its bound"
+  fi
+  wait "$checkpoint" || rc=$?
+  expect_code 124 "$rc" "a replacement alone must not be actionable"
+  [ "$(cat "$home/state/.watch.lock/pid")" != "$watcher" ] || fail "watcher was not replaced"
+  pid_live "$(left_arm_of "$home")" || fail "checkpoint did not leave its replacement running"
+  stop_sweep_home "$home"
+  pass "checkpoint: a quiet watcher replacement preserves the checkpoint bound"
+}
+
 trap 'stop_all_sweep_homes; fm_test_cleanup' EXIT
+if [ -n "${FM_TEST_CASES:-}" ]; then
+  for test_case in $FM_TEST_CASES; do "$test_case"; done
+  exit 0
+fi
+test_killed_watcher_keeps_a_quiet_checkpoint_bounded
 test_quiet_checkpoint_exits_124_cleanly
 test_check_sweeps_continue_between_checkpoints
 test_repeated_closes_while_the_model_reasons

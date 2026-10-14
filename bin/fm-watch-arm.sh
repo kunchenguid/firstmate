@@ -854,6 +854,7 @@ continue_scanning() {  # <child-rc>
     fi
     cycle_log_append "$rc" "$(cycle_signal_name "$rc")" signal-exit none
   else
+    CONT_DEATHS=0
     reasons=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$child_out" 2>/dev/null || true)
     cycle_log_append "$rc" none "$(watch_output_reason_type "$child_out")" none
   fi

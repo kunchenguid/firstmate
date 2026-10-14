@@ -594,7 +594,7 @@ take_spool() {  # <spool-file>
         ;;
     esac
   done < "$spool"
-  if [ -z "$SPOOL_TEXT" ] || ! fm_pid_alive "$SPOOL_WATCHER" \
+  if ! fm_pid_alive "$SPOOL_WATCHER" \
     || ! fm_watcher_lock_matches_pid "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$SPOOL_WATCHER" "$FM_HOME"; then
     fm_lock_release "$spool.lock"
     return 1
@@ -605,7 +605,7 @@ take_spool() {  # <spool-file>
       return 1
     fi
   fi
-  if ! printf '%s\n' "$HOST_PID" > "$BUSY_FILE"; then
+  if [ -n "$SPOOL_TEXT" ] && ! printf '%s\n' "$HOST_PID" > "$BUSY_FILE"; then
     fm_lock_release "$spool.lock"
     return 1
   fi
@@ -634,9 +634,10 @@ await_close() {
     # Probe the arm's exit twice a second between POLL-cadence checks, without
     # changing the outer identity refresh, readiness, or boundary cadence.
     i=$((POLL * 2))
-    while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID" && ! spool_ready "$ARM_SPOOL"; do
+    while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID"; do
       sleep 0.5
       i=$((i - 1))
+      spool_ready "$ARM_SPOOL" && break
     done
   done
   wait "$ARM_PID" 2>/dev/null || true

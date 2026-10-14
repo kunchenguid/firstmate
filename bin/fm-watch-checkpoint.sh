@@ -232,7 +232,7 @@ detach_arm() {  # [final]
   [ -n "$(sed -n '1p' "$STATE/.lock" 2>/dev/null | tr -cd '0-9')" ] || return 1
   grep -q '^watcher: started ' "$ARM_OUT" 2>/dev/null || return 1
   fm_lock_acquire_wait "$ARM_SPOOL.lock"
-  if [ -z "${1:-}" ] && spool_ready; then
+  if [ -z "${1:-}" ] && spool_ready && grep -q "^C$tab" "$ARM_SPOOL"; then
     fm_lock_release "$ARM_SPOOL.lock"
     return 2
   fi
@@ -285,7 +285,7 @@ take_spool() {
         ;;
     esac
   done < "$ARM_SPOOL"
-  if [ -z "$SPOOL_TEXT" ] || ! fm_pid_alive "$watcher" \
+  if ! fm_pid_alive "$watcher" \
     || ! fm_watcher_lock_matches_pid "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$watcher" "$FM_HOME" \
     || { [ -n "$generation" ] \
       && ! "$SCRIPT_DIR/fm-watch-arm.sh" --handling-delivered "$generation" --watcher-pid "$watcher" >/dev/null 2>&1; }; then
@@ -295,6 +295,7 @@ take_spool() {
   fi
   : > "$ARM_SPOOL"
   fm_lock_release "$ARM_SPOOL.lock"
+  [ -n "$SPOOL_TEXT" ]
 }
 
 # The arm a previous checkpoint left running, while it still answers to the
@@ -342,7 +343,13 @@ while :; do
   if [ $((SECONDS - START)) -ge "$SECONDS_ARG" ]; then
     detach_arm
     case $? in
-      2) continue ;;
+      2)
+        if take_spool; then
+          printf '%s\n' "$SPOOL_TEXT"
+          exit 0
+        fi
+        detach_arm final || retire_arm
+        ;;
       1)
         [ -z "$(sed -n '1p' "$STATE/.lock" 2>/dev/null | tr -cd '0-9')" ] \
           || echo "checkpoint: the watcher cycle could not be left running between checkpoints; scheduled checks wait for the next checkpoint" >&2
