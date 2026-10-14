@@ -93,10 +93,10 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
-#   OpenCode has no interactive effort flag, so its effort is written as the
-#   build agent's variant, keyed to the resolved model, inside the
-#   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
-#   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   OpenCode v2 removed --model from the interactive launch, so that axis is
+#   never passed there; the resolved model, permission grant, and supported
+#   effort variant are merged into the worktree's untracked
+#   .opencode/opencode.json by write_opencode_worktree_config.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -2213,7 +2213,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIEXCLUDE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2750,14 +2750,322 @@ relaunch_resume_args() {  # <harness> <backend> <target>
   printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
 }
 
+# opencode is deliberately absent from the list below. OpenCode v2 removed
+# `--model` from the interactive launch: `opencode --help` on 2.0.26 advertises
+# only --standalone --server --auto --continue/-c --session/-s --prompt, and any
+# launch carrying the flag dies immediately with "Unrecognized flag: --model in
+# command opencode" (exit 1, verified 2026-10-10). Because both the default and
+# the icms dispatch profiles resolve opencode/space-bunny-free, every dispatch
+# was emitting it. The model axis is not dropped with the flag: it rides the
+# worktree's own .opencode/opencode.json instead (write_opencode_worktree_config).
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
+}
+
+# OpenCode v2 dropped `--model` from the interactive launch, so the resolved
+# model rides the worktree's own config instead (verified 2026-10-10, opencode
+# 2.0.26, this host):
+#   * `opencode debug config` reports ~/.config/opencode/opencode.jsonc and the
+#     worktree's .opencode/opencode.json as SEPARATE merged sources, so a
+#     project config carrying only `model` does NOT shadow the captain's global
+#     provider block. Measured with the pin in place: local-llm/gemma-4 and
+#     local-llm/qwen3.8-27b-gguf stayed in `opencode models` exactly as in the
+#     unpinned baseline.
+#   * The `model` key is honored for real selection: a worktree pinned to
+#     opencode-go/space-bunny ran on opencode-go/space-bunny, while an unpinned
+#     run in a fresh directory ran on opencode-go/claude-haiku-5-5. Dropping the
+#     flag alone therefore does NOT keep the configured model.
+#   * OPENCODE_CONFIG_CONTENT is NOT honored for `model` in v2 (it does not even
+#     appear as a configuration source), so the launch's existing env overlay
+#     cannot carry the pin and the file route is the supported one.
+# A worktree config is git-excluded per-worktree launch scaffolding; an
+# existing untracked config is merged in place without changing its other keys.
+opencode_effort_variant() {  # <effort> <model>
+  local effort=$1 model=$2 provider
+  [ -n "$effort" ] && [ "$effort" != default ] || return 0
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  provider=$(printf '%s' "$model" | cut -d '/' -f1)
+  case "$provider:$effort" in
+  anthropic:high | anthropic:max | openai:low | openai:medium | openai:high | openai:xhigh)
+    printf '%s' "$effort"
+    ;;
+  esac
+}
+
+refuse_tracked_opencode_config() {  # <model>
+  local model=$1 target="$WT/.opencode/opencode.json"
+  if git -C "$WT" ls-files --error-unmatch .opencode/opencode.json >/dev/null 2>&1; then
+    if [ -n "$model" ] && [ "$model" != default ]; then
+      model=$(printf '%s' "$model" | cut -d '#' -f1)
+      printf 'fm-spawn: cannot select OpenCode model %s: tracked project config %s takes precedence and must not be modified\n' \
+        "$model" "$target" >&2
+    else
+      printf 'fm-spawn: cannot configure OpenCode launch: tracked project config %s must not be modified\n' \
+        "$target" >&2
+    fi
+    return 1
+  fi
+}
+
+write_opencode_worktree_config() {  # <model> <effort>
+  local model=$1 effort=$2 target default_model=0 target_existed=0 variant
+  [ -n "$effort" ] || effort=default
+  if [ -z "$model" ] || [ "$model" = default ]; then
+    default_model=1
+  fi
+  # The top-level config model is the provider/model pair; the effort variant
+  # is stored separately in the build agent configuration.
+  if [ "$default_model" -eq 0 ]; then
+    model=${model%%#*}
+    # Only a <provider>/<id> pair is a pin.
+    case "$model" in
+    */*) ;;
+    *) return 0 ;;
+    esac
+  fi
+  target="$WT/.opencode/opencode.json"
+  [ ! -e "$target" ] || target_existed=1
+  mkdir -p "$WT/.opencode"
+  variant=$(opencode_effort_variant "$effort" "$model")
+  perl - "$target" "$model" "$default_model" "$variant" <<'PERL' || return 1
+use strict;
+use warnings;
+use JSON::PP;
+use B ();
+
+my ($path, $model, $is_default, $variant) = @ARGV;
+my $marker_key = 'x-firstmate-model-pin';
+my $raw = '';
+my $file_exists = -e $path;
+my $file_mode = $file_exists ? ((stat($path))[2] & 07777) : undef;
+sub is_json_string {
+  return 0 if !defined($_[0]) || ref($_[0]);
+  my $flags = B::svref_2object(\$_[0])->FLAGS;
+  return ($flags & B::SVf_POK()) && !($flags & (B::SVf_IOK() | B::SVf_NOK()));
+}
+sub is_json_bool {
+  return ref($_[0]) eq 'JSON::PP::Boolean'
+    && ($_[0] eq JSON::PP::true || $_[0] eq JSON::PP::false);
+}
+sub validate_effort_marker {
+  my ($config, $marker, $path) = @_;
+  my $agent = $config->{agent};
+  my $build = ref($agent) eq 'HASH' ? $agent->{build} : undef;
+  for my $field (qw(Model Variant)) {
+    my $managed = "managedBuild$field";
+    my $present = "previousBuild${field}Present";
+    my $previous = "previousBuild$field";
+    if (exists $marker->{$managed}) {
+      is_json_string($marker->{$managed})
+        && exists($marker->{$present})
+        && is_json_bool($marker->{$present})
+        && ($marker->{$present}
+          ? exists($marker->{$previous}) && is_json_string($marker->{$previous})
+          : !exists($marker->{$previous}))
+        or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate effort marker\n";
+      my $build_field = lc($field);
+      ref($build) eq 'HASH'
+        && is_json_string($build->{$build_field})
+        && $build->{$build_field} eq $marker->{$managed}
+        or die "fm-spawn: cannot safely update OpenCode config $path: agent.build changed since Firstmate configured effort\n";
+    } elsif (exists($marker->{$present}) || exists($marker->{$previous})) {
+      die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate effort marker\n";
+    }
+  }
+}
+if ($file_exists) {
+  open my $input, '<:raw', $path or die "fm-spawn: cannot read OpenCode config $path: $!\n";
+  local $/;
+  $raw = <$input>;
+  close $input or die "fm-spawn: cannot close OpenCode config $path: $!\n";
+}
+
+my $config = {};
+if ($file_exists) {
+  eval { $config = JSON::PP->new->utf8->decode($raw); 1 }
+    or die "fm-spawn: cannot safely update OpenCode config $path: invalid JSON\n";
+  ref($config) eq 'HASH'
+    or die "fm-spawn: cannot safely update OpenCode config $path: top-level JSON value must be an object\n";
+}
+
+my $encoder = JSON::PP->new->utf8->canonical;
+my $has_model = exists $config->{model};
+my $legacy_owned = 0;
+if (!exists $config->{$marker_key} && $has_model && keys(%$config) == 1
+    && is_json_string($config->{model})
+    && $raw eq $encoder->encode({ model => $config->{model} }) . "\n") {
+  $legacy_owned = 1;
+  delete $config->{model};
+  $has_model = 0;
+}
+
+my $marker = exists($config->{$marker_key}) ? $config->{$marker_key} : {};
+ref($marker) eq 'HASH'
+  or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate pin marker\n";
+exists($config->{$marker_key}) && !keys(%$marker)
+  and die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate pin marker\n";
+if (exists $marker->{managedModel}) {
+  is_json_string($marker->{managedModel})
+    && exists($marker->{previousModelPresent})
+    && is_json_bool($marker->{previousModelPresent})
+    or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate pin marker\n";
+  if ($marker->{previousModelPresent}) {
+    exists($marker->{previousModel}) && is_json_string($marker->{previousModel})
+      or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate pin marker\n";
+  } elsif (exists $marker->{previousModel}) {
+    die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate pin marker\n";
+  }
+  is_json_string($config->{model}) && $config->{model} eq $marker->{managedModel}
+    or die "fm-spawn: cannot safely update OpenCode config $path: model changed since Firstmate pinned it\n";
+  if ($is_default) {
+    if ($marker->{previousModelPresent}) {
+      $config->{model} = $marker->{previousModel};
+    } else {
+      delete $config->{model};
+    }
+    delete $marker->{managedModel};
+    delete $marker->{previousModelPresent};
+    delete $marker->{previousModel};
+  } else {
+    $config->{model} = $model;
+    $marker->{managedModel} = $model;
+  }
+} elsif (!$is_default) {
+  if ($has_model && !is_json_string($config->{model})) {
+    die "fm-spawn: cannot safely update OpenCode config $path: existing model is not a string\n";
+  }
+  $marker->{managedModel} = $model;
+  $marker->{previousModelPresent} = $has_model ? JSON::PP::true : JSON::PP::false;
+  $marker->{previousModel} = $config->{model} if $has_model;
+  $config->{model} = $model;
+} elsif ($legacy_owned) {
+  delete $config->{model};
+}
+
+my $permission = $config->{permission};
+if (exists $marker->{managedPermissionWildcard}) {
+  is_json_string($marker->{managedPermissionWildcard})
+    && $marker->{managedPermissionWildcard} eq 'allow'
+    && exists($marker->{previousPermissionWildcardPresent})
+    && is_json_bool($marker->{previousPermissionWildcardPresent})
+    or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate permission marker\n";
+  if ($marker->{previousPermissionWildcardPresent}) {
+    exists($marker->{previousPermissionWildcard})
+      or die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate permission marker\n";
+  } elsif (exists $marker->{previousPermissionWildcard}) {
+    die "fm-spawn: cannot safely update OpenCode config $path: invalid Firstmate permission marker\n";
+  }
+  ref($permission) eq 'HASH' && is_json_string($permission->{'*'})
+    && $permission->{'*'} eq 'allow'
+    or die "fm-spawn: cannot safely update OpenCode config $path: permission changed since Firstmate configured it\n";
+} else {
+  if (!exists($config->{permission})) {
+    $permission = {};
+  } elsif (ref($permission) ne 'HASH') {
+    die "fm-spawn: cannot safely update OpenCode config $path: permission must be an object\n";
+  }
+  my $previous_present = exists $permission->{'*'};
+  $marker->{managedPermissionWildcard} = 'allow';
+  $marker->{previousPermissionWildcardPresent} = $previous_present ? JSON::PP::true : JSON::PP::false;
+  $marker->{previousPermissionWildcard} = $permission->{'*'} if $previous_present;
+  $permission->{'*'} = 'allow';
+  $config->{permission} = $permission;
+}
+validate_effort_marker($config, $marker, $path);
+if ($is_default && exists $marker->{managedBuildModel}) {
+  my $agent = $config->{agent};
+  my $build = $agent->{build};
+  if ($marker->{previousBuildModelPresent}) {
+    $build->{model} = $marker->{previousBuildModel};
+  } else {
+    delete $build->{model};
+  }
+  delete $marker->{managedBuildModel};
+  delete $marker->{previousBuildModelPresent};
+  delete $marker->{previousBuildModel};
+  delete $agent->{build} unless keys %$build;
+  delete $config->{agent} unless keys %$agent;
+}
+if (!$is_default && defined($variant) && length($variant)) {
+  my $agent = $config->{agent};
+  if (!exists($config->{agent})) {
+    $agent = {};
+  } elsif (ref($agent) ne 'HASH') {
+    die "fm-spawn: cannot safely update OpenCode config $path: agent must be an object\n";
+  }
+  my $build = $agent->{build};
+  if (!exists($agent->{build})) {
+    $build = {};
+  } elsif (ref($build) ne 'HASH') {
+    die "fm-spawn: cannot safely update OpenCode config $path: agent.build must be an object\n";
+  }
+  for my $key (qw(model variant)) {
+    exists($build->{$key}) && !is_json_string($build->{$key})
+      and die "fm-spawn: cannot safely update OpenCode config $path: agent.build.$key is not a string\n";
+  }
+  if (!exists($marker->{managedBuildModel})) {
+    $marker->{previousBuildModelPresent} = exists($build->{model}) ? JSON::PP::true : JSON::PP::false;
+    $marker->{previousBuildModel} = $build->{model} if exists $build->{model};
+  }
+  if (!exists($marker->{managedBuildVariant})) {
+    $marker->{previousBuildVariantPresent} = exists($build->{variant}) ? JSON::PP::true : JSON::PP::false;
+    $marker->{previousBuildVariant} = $build->{variant} if exists $build->{variant};
+  }
+  $build->{model} = $model;
+  $build->{variant} = $variant;
+  $agent->{build} = $build;
+  $config->{agent} = $agent;
+  $marker->{managedBuildModel} = $model;
+  $marker->{managedBuildVariant} = $variant;
+} elsif (!$is_default && (exists $marker->{managedBuildModel} || exists $marker->{managedBuildVariant})) {
+  my $agent = $config->{agent};
+  my $build = ref($agent) eq 'HASH' ? $agent->{build} : undef;
+  if (exists $marker->{managedBuildModel}) {
+    if ($marker->{previousBuildModelPresent}) {
+      $build->{model} = $marker->{previousBuildModel};
+    } else {
+      delete $build->{model};
+    }
+    delete $marker->{managedBuildModel};
+    delete $marker->{previousBuildModelPresent};
+    delete $marker->{previousBuildModel};
+  }
+  if (exists $marker->{managedBuildVariant}) {
+    if ($marker->{previousBuildVariantPresent}) {
+      $build->{variant} = $marker->{previousBuildVariant};
+    } else {
+      delete $build->{variant};
+    }
+    delete $marker->{managedBuildVariant};
+    delete $marker->{previousBuildVariantPresent};
+    delete $marker->{previousBuildVariant};
+  }
+  delete $agent->{build} unless keys %$build;
+  delete $config->{agent} unless keys %$agent;
+}
+
+$config->{$marker_key} = $marker;
+
+my $temporary = "$path.tmp.$$";
+open my $output, '>:raw', $temporary or die "fm-spawn: cannot write OpenCode config $temporary: $!\n";
+print {$output} JSON::PP->new->utf8->encode($config), "\n"
+  or die "fm-spawn: cannot write OpenCode config $temporary: $!\n";
+close $output or die "fm-spawn: cannot close OpenCode config $temporary: $!\n";
+if (defined $file_mode) {
+  chmod($file_mode, $temporary) == 1
+    or die "fm-spawn: cannot preserve OpenCode config permissions on $path: $!\n";
+}
+rename $temporary, $path or die "fm-spawn: cannot replace OpenCode config $path: $!\n";
+PERL
+  if [ "$target_existed" -eq 0 ]; then
+    exclude_path '.opencode/opencode.json'
+  fi
 }
 
 effort_flag_for_harness() {
@@ -2814,35 +3122,6 @@ effort_flag_for_harness() {
     case "$effort" in
     low | medium | high | xhigh | max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
     esac
-    ;;
-  opencode)
-    # opencode's interactive `opencode --prompt` launch has no effort flag
-    # (`opencode run --variant` is a different, non-interactive mode). Its
-    # config schema (opencode 1.18.32, `opencode debug config` / config.json)
-    # carries per-model reasoning effort as agent.<name>.variant, "Default model
-    # variant for this agent (applies only when using the agent's configured
-    # model)", so the effort rides the OPENCODE_CONFIG_CONTENT JSON the launch
-    # already writes: the default build agent is pinned to the resolved model
-    # and the effort named as its variant, which OpenCode resolves against that
-    # model's own variant list. Those lists are per-provider (anthropic/* expose
-    # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
-    # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
-    # permission-only launch and omits the variant (record-and-omit, as codex
-    # and grok do). Without a resolved model the variant has nothing to key to
-    # and is likewise omitted. The fragment lands inside the launch's
-    # single-quoted assignment, so a literal quote in the model id must close and
-    # reopen that quoting.
-    [ -n "$model" ] && [ "$model" != default ] || return 0
-    case "${model%%/*}:$effort" in
-    anthropic:high | anthropic:max) ;;
-    openai:low | openai:medium | openai:high | openai:xhigh) ;;
-    *) return 0 ;;
-    esac
-    local model_json
-    model_json=$(json_escape "$model")
-    model_json=${model_json//\'/\'\\\'\'}
-    printf ',"agent":{"build":{"model":"%s","variant":"%s"}}' "$model_json" "$effort"
     ;;
   muse)
     # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
@@ -4603,6 +4882,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
+case "$HARNESS" in
+opencode*) refuse_tracked_opencode_config "$MODEL" || exit 1 ;;
+esac
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
 fi
@@ -4895,18 +5177,37 @@ EOF
     ;;
   opencode*)
     mkdir -p "$WT/.opencode/plugins"
+    # OpenCode 2 plugin contract, verified 2026-09-30 against OpenCode 2.0.20
+    # by running real sessions. Three things changed and each one is load-bearing,
+    # so none of the v1 spellings survive:
+    #   - the module default-exports a definition with an id and setup(ctx); a
+    #     named export returning a hooks object is rejected at load, which is
+    #     exactly how every firstmate plugin failed after the 2.0.20 upgrade;
+    #   - the event subscription is the whole server's stream, so located events
+    #     must match this plugin instance's own location, while unlocated terminal
+    #     execution events are accepted only for an already-active session ID;
+    #     payloads are read from `data` rather than `properties`;
+    #   - OpenCode 2 delivers no `session.status` and no `session.idle` to a
+    #     plugin subscription at all (verified across repeated real sessions),
+    #     so the semantic source is re-derived onto the step events: a step
+    #     starting means busy, a step ending without asking for more tools means
+    #     the turn ended and the worker is idle.
+    # The contract helper is imported by absolute path from the firstmate
+    # checkout rather than inlined, so the event-shape rules stay owned in one
+    # place; a generated file in a task worktree cannot reach a relative import.
     cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state comes from OpenCode's session.status events: busy and retry
-// are active, idle is inactive. Scoping latches the first session that
-// reports activity (the worker's main session - a subagent child session can
-// only start while the main session is already busy) and ignores other
-// sessions' status until the latched session settles, so a child's idle can
-// never clear the worker's busy state. The session.idle touch stays the
-// watcher's wake NOTIFICATION, never current-state truth.
+// Semantic state comes from OpenCode's step events: a step starting is active
+// work, and a step ending without asking for further tools is the turn ending.
+// Active session IDs are tracked together: only the last ending session writes
+// idle. ID-bearing terminal execution events also close failed/interrupted
+// sessions; accepting an unlocated terminal event requires that ID to be active,
+// so another location's failure cannot clear this worker's busy state.
+// The turn-end touch stays the watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
 const notifyTurnEnd = $busy_notify_turnend;
+import { subscribeOwnEvents, turnEndedSessionID } from "$FM_ROOT/.opencode/plugins/lib/fm-opencode-contract.js";
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4914,40 +5215,48 @@ const busyEvent = (state, event) =>
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
   });
-export const FmBusyState = async () => {
-  let activeSession = null;
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.status") {
-        const sessionID = event.properties.sessionID;
-        const statusType = event.properties.status && event.properties.status.type;
-        if (statusType === "busy" || statusType === "retry") {
-          if (activeSession === null) activeSession = sessionID;
-          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
-          return;
-        }
-        if (statusType === "idle" && sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-status-idle");
-        }
+export default {
+  id: "firstmate.busy-state",
+  setup(ctx) {
+    const activeSessions = new Set();
+    return subscribeOwnEvents(ctx, async (event) => {
+      if (event.type === "session.step.started") {
+        const sessionID = event.data.sessionID;
+        activeSessions.add(sessionID);
+        await busyEvent("busy", "session-step-started");
         return;
       }
-      if (event.type === "session.idle") {
-        if (event.properties.sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-idle");
-        }
-        if (notifyTurnEnd) {
-          await new Promise((resolve) => {
-            execFile("touch", ["$TURNEND"], () => resolve());
-          });
-        }
+      const terminalExecution = [
+        "session.execution.succeeded",
+        "session.execution.failed",
+        "session.execution.interrupted",
+      ].includes(event.type) && typeof event.data?.sessionID === "string"
+        ? event.data.sessionID
+        : null;
+      const ended = turnEndedSessionID(event) ?? terminalExecution;
+      if (!ended) return;
+      if (activeSessions.delete(ended) && activeSessions.size === 0) {
+        await busyEvent("idle", "session-step-ended");
       }
-    },
-  };
+      if (notifyTurnEnd) {
+        await new Promise((resolve) => {
+          execFile("touch", ["$TURNEND"], () => resolve());
+        });
+      }
+    }, {
+      acceptUnlocated: (event) => [
+        "session.execution.succeeded",
+        "session.execution.failed",
+        "session.execution.interrupted",
+      ].includes(event?.type) && activeSessions.has(event.data?.sessionID),
+    });
+  },
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'
+    # opencode v2 has no --model on the interactive launch, so the resolved
+    # Model, permission, and effort settings land here.
+    write_opencode_worktree_config "$MODEL" "$EFFORT" || exit 1
     ;;
   pi | pi-signed)
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension

@@ -5,6 +5,7 @@ Audience: maintainer verification.
 This record supports current session-start, turn-end, watcher-continuity, supervision-host, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
+The OpenCode 1 measurements below do not establish the ported OpenCode 2 plugin behavior; [`tests/fm-opencode-plugin-v2-live.test.sh`](../../tests/fm-opencode-plugin-v2-live.test.sh) is the current live continuity and seatbelt entry point (`FM_OPENCODE_PLUGIN_V2_LIVE=1`).
 
 ## Native session-start delivery
 

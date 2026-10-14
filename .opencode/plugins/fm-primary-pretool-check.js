@@ -1,64 +1,39 @@
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
-import { spawn } from "node:child_process";
-
 // PreToolUse seatbelt for OpenCode: the arm mechanism itself lives entirely in
 // fm-primary-watch-arm.js (a plugin-owned child process, never a model tool
 // call), so the residual risk here is the AGENT shelling `bin/fm-watch-arm.sh`
-// wrong through its own bash tool - the anti-pattern bin/fm-arm-pretool-check.sh
-// guards against (see that script's header and docs/arm-pretool-check.md).
-// tool.execute.before can block by throwing (verified 2026-07-09 against
-// OpenCode 1.17.15: throwing here prevents the bash command from running and
-// surfaces the thrown message as the failed tool result).
+// wrong through its own shell tool - the anti-pattern
+// bin/fm-arm-pretool-check.sh guards against (see that script's header and
+// docs/arm-pretool-check.md).
+//
+// OpenCode 2 changed this hook's contract, so the shape below is re-derived
+// rather than transliterated, because a wrong port of a seatbelt leaves it
+// installed and inert. `execute.before` is registered on the tool domain and
+// receives ONE owned event instead of the v1 (input, output) pair: the tool name
+// is `event.tool` and the parsed arguments are `event.input`, so the v1
+// `output.args.command` is now `event.input.command`. The polled tool name
+// changed too - see SHELL_TOOL in lib/fm-opencode-contract.js. Throwing from
+// this callback blocks the call and surfaces the thrown message as the failed
+// tool result (verified 2026-09-30 against OpenCode 2.0.20: the denied call
+// produced session.tool.failed carrying the thrown text and never ran).
 
-function runProcess(command, args) {
-  return new Promise((resolvePromise) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", () => resolvePromise({ code: 0, stdout: "", stderr: "" }));
-    child.on("close", (code) => resolvePromise({ code: code ?? 0, stdout, stderr }));
-  });
-}
+import { SHELL_TOOL, resolvePluginRoot, runProcess } from "./lib/fm-opencode-contract.js";
 
-async function resolveRoot(anchor) {
-  if (!anchor) return "";
-  const result = await runProcess("git", ["-C", anchor, "rev-parse", "--show-toplevel"]);
-  const root = result.stdout.trim();
-  if (result.code === 0 && root) return root;
-  try {
-    return realpathSync(anchor);
-  } catch {
-    return resolve(anchor);
-  }
-}
+export default {
+  id: "firstmate.primary.pretool-check",
+  async setup(ctx) {
+    const root = await resolvePluginRoot(ctx);
+    if (!root) return;
 
-export const FmPrimaryPretoolCheck = async ({ directory, worktree }) => {
-  const root = worktree ? (() => {
-    try {
-      return realpathSync(worktree);
-    } catch {
-      return resolve(worktree);
-    }
-  })() : await resolveRoot(directory);
-
-  return {
-    "tool.execute.before": async (input, output) => {
-      if (!root || input?.tool !== "bash") return;
-      const command = output?.args?.command;
-      if (!command || typeof command !== "string") return;
+    await ctx.tool.hook("execute.before", async (event) => {
+      if (event?.tool !== SHELL_TOOL) return;
+      const command = event.input?.command;
+      if (typeof command !== "string" || !command) return;
 
       const result = await runProcess(`${root}/bin/fm-arm-pretool-check.sh`, ["--command", command]);
       if (result.code !== 2) return;
 
       const reason = result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt";
       throw new Error(reason);
-    },
-  };
+    });
+  },
 };

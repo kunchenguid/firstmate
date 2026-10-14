@@ -45,6 +45,11 @@ Each adapter:
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 A failed follow-up never cancels continuity restoration.
 
+### The OpenCode turn end
+
+[`.opencode/plugins/lib/fm-opencode-contract.js`](../.opencode/plugins/lib/fm-opencode-contract.js) owns OpenCode 2 turn-end detection, event-location filtering, root resolution, and the primary turn-end trigger's provider-failure limit.
+The spawn-generated busy-state adapter has separate terminal-execution handling; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns its active-session scoping invariant.
+
 ### Pi session replacement
 
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`:

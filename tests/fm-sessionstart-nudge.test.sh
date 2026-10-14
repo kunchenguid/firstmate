@@ -171,34 +171,41 @@ test_opencode_plugin_delivers_exact_nudge_once() {
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
-  out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
-    WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
+    WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module > "$root/plugin.out" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
+// The OpenCode 2 plugin contract: the module default-exports a definition whose
+// setup(ctx) subscribes to the server's event stream and delivers through
+// ctx.session.prompt. That subscription is the whole stream, so the host gives
+// the plugin an own-location to filter on, exactly as a real server would.
 const prompts = [];
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
-    },
-  },
-};
+const directory = process.env.WORKTREE;
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const hooks = await mod.FmPrimarySessionstartNudge({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+const definition = mod.default;
+if (!definition || typeof definition.setup !== "function") {
+  throw new Error("plugin module does not default-export an OpenCode 2 definition");
+}
+const events = [
+  { type: "session.created", data: { sessionID: "session-nudge-test" }, location: { directory } },
+  { type: "session.created", data: { sessionID: "session-nudge-test" }, location: { directory } },
+];
+await definition.setup({
+  location: { directory, project: { id: "t", directory, canonical: directory } },
+  event: {
+    subscribe: () => ({ async *[Symbol.asyncIterator]() { for (const e of events) yield e; } }),
+  },
+  session: { prompt: async (input) => { prompts.push(input.text); } },
 });
-const event = {
-  type: "session.created",
-  properties: { sessionID: "session-nudge-test", info: { id: "session-nudge-test" } },
-};
-await hooks.event({ event });
-await hooks.event({ event });
+// The subscription is asynchronous; give it room to drain both events.
+for (let tick = 0; tick < 100 && prompts.length < 1; tick += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
 if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.length}`);
 if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
 EOF
-  ) || status=$?
+  status=$?
+  out=$(cat "$root/plugin.out")
   expect_code 0 "$status" "OpenCode exact nudge delivery"
   [ -z "$out" ] || fail "OpenCode exact nudge delivery printed output: $out"
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"

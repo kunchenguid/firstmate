@@ -1,19 +1,20 @@
 # OpenCode
 
-Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4.
+Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4, and the model and config behavior re-verified on 2026-10-10 using 2.0.26.
 
 ## Operating facts
 
 | Fact | Value |
 |---|---|
-| Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
+| Busy state | The spawn-generated plugin reports semantic busy state; [`bin/fm-spawn.sh`](../../../../../bin/fm-spawn.sh) owns its step/execution tracking and session-scoping invariant. |
 | Exit command | `/exit`. |
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
 | Resume | Relaunch with `--continue` to resume the most recent session for the current directory, then send the next instruction after the TUI is ready because `--prompt` does not auto-submit alongside `--continue`. |
-| Model flag | `--model <provider/model>`. |
-| Effort flag | None for Firstmate's interactive `opencode --prompt` launch; `opencode run` has `--variant`, but that is not this path. The effort instead rides the launch's `OPENCODE_CONFIG_CONTENT` JSON as the `build` agent's `variant` keyed to the resolved model, the config schema's per-model reasoning-effort field verified on 1.18.32. It is emitted only when the resolved model's provider is known to expose that effort as a variant (`anthropic/*`: high, max; `openai/*`: low, medium, high, xhigh); with no model resolved, another provider, or an effort outside its family's list, the variant is omitted and the permission-only launch is unchanged. |
+| Model flag | None on the interactive launch; [`opencode-model-launch.md`](../../../../../docs/verification/opencode-model-launch.md) owns the measured v2 flag compatibility. |
+| Effort flag | None on the interactive launch; the supported config variants are `anthropic/*`: high, max, and `openai/*`: low, medium, high, xhigh. |
 | Model discovery | Run `opencode models [provider]` to list available provider/model identifiers. |
+| Model and launch settings | Firstmate merges its model, `permission["*"] = "allow"`, and supported `agent.build.model` / `agent.build.variant` effort settings into valid untracked `.opencode/opencode.json`, preserving unrelated keys and existing file permissions. The merge leaves the operator's global config intact; never hand-edit `~/.config/opencode/opencode.jsonc` to configure a Firstmate launch. `OPENCODE_CONFIG_CONTENT` is not used for these settings. The `x-firstmate-model-pin` marker records managed values and displaced settings. A `default` model launch clears Firstmate's top-level and build-agent model pins, restores any model values they displaced, and retains permission, the effort variant, and unrelated settings; with no displaced model, it removes the corresponding key. A selected-model launch with unsupported or omitted effort restores any build model and variant displaced by Firstmate's previous effort override. Malformed JSON, invalid marker data, or externally changed managed values refuse the launch. A config path tracked in the git index refuses every OpenCode launch, including `default` and locally deleted files, without modifying that path. [`write_opencode_worktree_config` in `bin/fm-spawn.sh`](../../../../../bin/fm-spawn.sh) owns the merge mechanics and legacy-pin recognition. |
 | Trust dialog | None. |
 | Marker | None; OpenCode publishes no identity marker, so `../../../bin/fm-harness.sh` identifies it from process ancestry. |
 
@@ -33,13 +34,14 @@ The live Herdr guard is `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 ../../../tests/fm-herdr-
 
 ## Primary integration
 
-The primary integration was verified on 2026-07-08 with OpenCode 1.17.6.
-`.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
-Throwing from `session.idle` does not block `opencode run`, so the primary adapter treats the event as passive and uses `client.session.promptAsync` to force one follow-up turn when `../../../bin/fm-turnend-guard.sh` returns 2.
+The primary integration was first verified on 2026-07-08 with OpenCode 1.17.6, and the plugin contract was re-verified on 2026-09-30 against OpenCode 2.0.20.
+The OpenCode 2 plugin contract is owned by [`.opencode/plugins/lib/fm-opencode-contract.js`](../../../../../.opencode/plugins/lib/fm-opencode-contract.js), including turn-end detection, event scoping, tool naming, and root resolution.
+`.opencode/plugins/fm-primary-turnend-guard.js` listens for that turn end.
+The turn end is passive and does not block `opencode run`, so the primary adapter uses `ctx.session.prompt` to force one follow-up turn when `../../../bin/fm-turnend-guard.sh` returns 2.
 The follow-up was verified in the interactive TUI.
 In a home with `config/supervision-host` and no `config/supervision-host-off` the watch-arm plugin spawns the supervision host instead of `../../../bin/fm-watch-arm.sh`, with Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md) owns the host.
 `opencode run` can exit before displaying a queued follow-up, so the adapter steps aside in headless mode.
 On native Windows, the operational-input adapter runs its Bash helper through `bash`; macOS and Linux invoke it directly.
 
-The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `client.session.promptAsync`, and coordinates with the guard before a blind-turn follow-up.
-The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from `tool.execute.before`.
+The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `ctx.session.prompt`, and coordinates with the guard before a blind-turn follow-up.
+The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from the `ctx.tool.hook("execute.before", ...)` callback, and matches the tool OpenCode 2 actually registers it as, `shell`, not `bash`.
