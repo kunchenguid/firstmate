@@ -111,6 +111,25 @@ A secondmate launched by the primary receives a narrowly scoped home override du
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
 
+### Agent names
+
+Agent naming is opt-in and OFF by default.
+A home opts in through the local `config/herdr-agent-names` file: `on`, or an empty file in the presence-based opt-in form, enables it; `off`, or no file at all, leaves it off.
+Values are read whole-file with whitespace stripped and case folded, and an unrecognized value warns naming it and falls back to off rather than failing a spawn.
+While naming is off, a spawn makes no extra Herdr call for it and every worker keeps its harness label.
+
+Once a home opts in, each worker's agent is renamed to `crew-<head>-<digest>` once its harness registers, so Herdr's agent panel separates workers from their supervisor and from each other instead of listing them all under the harness name.
+Herdr accepts a name of at most 32 characters that starts with a lowercase letter and holds only lowercase letters, digits, `-` and `_`, so the task id is lowercased, every other character is folded to `-`, and the result is cut to an 18-character readable `<head>`; `<digest>` is the eight-hex-digit `cksum` of the WHOLE task id, so two ids that share a head still name their panes apart.
+The name is presentation only: endpoint identity stays the recorded session, workspace, tab, and pane, the rename writes only the agent's `name` field and never the harness label the adapter branches on, and a rename Herdr refuses silently leaves that harness label in place rather than failing the spawn.
+
+The rename is attempted straight after the launch line and retried inside a bounded poll budget, because no agent exists to rename until about a second after that line runs.
+A rename Herdr never accepts inside the budget keeps the harness label silently.
+A harness Herdr ships no agent integration for registers no agent at all, so nothing is ever renamed for its panes; [`verification/rovo.md`](verification/rovo.md) records `rovo` as one such harness on the measured build.
+
+KNOWN LIMITATION: the rename succeeds on whatever registration the pane reports when Herdr accepts it.
+On a `--relaunch` into a pane that still carries a predecessor's lingering registration, the name can land on that record, and the replacement then keeps its bare harness label.
+Nothing detects or corrects that.
+
 ### Focus
 
 Workspace and tab creation use `--no-focus`.
@@ -838,6 +857,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
+- [Agent names](#agent-names) are opt-in, off by default, presentation-only, and best-effort; a rename Herdr never accepts leaves that worker under its harness name.
 
 ## Regression entry points
 

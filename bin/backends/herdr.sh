@@ -180,6 +180,33 @@ fm_backend_herdr_presentation_preference() {  # <config-dir>
   esac
 }
 
+# The config item a home writes to opt in to presentation-only agent naming.
+FM_BACKEND_HERDR_AGENT_NAMES_CONFIG="herdr-agent-names"
+
+# fm_backend_herdr_agent_names_enabled <config-dir>: the single owner of
+# config/herdr-agent-names parsing. Succeeds only when the home opted in to
+# fm_backend_herdr_name_agent_best_effort: "on", or an empty file in the
+# presence-based opt-in form. Naming defaults to off, so an absent file or
+# "off" fails, and an unrecognized value warns and falls back to off rather
+# than failing a spawn over a purely visual setting. Values are read with the
+# same whitespace-stripped, case-folded convention as
+# fm_backend_herdr_presentation_preference.
+fm_backend_herdr_agent_names_enabled() {  # <config-dir>
+  local config_dir=${1:-} file value
+  [ -n "$config_dir" ] || return 1
+  file="$config_dir/$FM_BACKEND_HERDR_AGENT_NAMES_CONFIG"
+  [ -f "$file" ] || return 1
+  value=$(tr -d '[:space:]' < "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]') || value=""
+  case "$value" in
+    ''|on) return 0 ;;
+    off) return 1 ;;
+    *)
+      echo "warning: $file: unrecognized value \"$value\"; herdr agent naming stays off (write \"on\" to name worker agents, \"off\" to keep their harness labels)" >&2
+      return 1
+      ;;
+  esac
+}
+
 # fm_backend_herdr_version_at_least <candidate> <floor>: numeric dotted-release
 # comparison. Return codes: 0 candidate >= floor, 1 candidate < floor, 2 the
 # candidate is unparseable. Any prerelease or build suffix is stripped first, so
@@ -2558,6 +2585,45 @@ EOF
     fi
   fi
   printf '%s %s' "$tab_id" "$pane_id"
+}
+
+# fm_backend_herdr_name_agent_best_effort: give the agent in <target> a
+# recognisable crew- display name, so Herdr's agent panel can tell this worker
+# apart from its supervisor and from every other worker instead of listing
+# them all under the harness name.
+#
+# The name is presentation only - endpoint identity stays the recorded
+# session/workspace/tab/pane, and a rename writes only .result.agent.name,
+# never the .result.agent.agent harness label the composer and control paths
+# branch on - so this always returns success: an unparseable target, a refused
+# rename, or an agent that never registers silently leaves the harness label
+# in place rather than failing the spawn.
+#
+# Known limitation: the loop's success condition is that Herdr accepted a
+# rename for this pane, which on a --relaunch into a pane still carrying a
+# predecessor's lingering registration can be that predecessor's record; the
+# replacement then keeps its bare harness label. Nothing here detects that.
+#
+# The name alphabet and the registration delay are verified facts owned by
+# docs/verification/runtime-backends.md "Herdr": a name must start with a
+# lowercase letter, hold only lowercase letters, digits, '-' and '_', and stay
+# within 32 characters, and no agent exists to rename until about a second
+# after its launch line runs. Hence crew-<head>-<digest>, within those 32
+# characters: the task id folded to that alphabet and cut to a readable
+# 18-character head, plus a checksum of the WHOLE id so two ids sharing a head
+# still name their panes apart, under a bounded settle retry.
+fm_backend_herdr_name_agent_best_effort() {  # <target> <task-id>
+  local target=$1 task_id=$2 name head digest attempt=0 max_attempts=${FM_BACKEND_HERDR_AGENT_NAME_POLLS:-8}
+  head=$(printf '%s' "$task_id" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-' | cut -c 1-18)
+  digest=$(printf '%s' "$task_id" | cksum | awk '{printf "%08x", $1}')
+  name=crew-$head-$digest
+  fm_backend_herdr_parse_target "$target" || return 0
+  while :; do
+    fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent rename "$FM_BACKEND_HERDR_PANE" "$name" >/dev/null 2>&1 && return 0
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || return 0
+    sleep 0.25
+  done
 }
 
 # fm_backend_herdr_projection_create_task: create one disposable presentation
