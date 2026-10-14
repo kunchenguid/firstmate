@@ -92,13 +92,45 @@ type CloseClassification = {
   message: string;
 };
 
-type PendingActionableClose = {
+export type PendingActionableClose = {
   version: 1;
   token: string;
   message: string;
   predecessorArmPid: string;
+  // Persisted origin: the omp session process and epoch at creation, so a
+  // replacement can expire handoffs from a predecessor that is long gone
+  // instead of replaying them forever (the Oct 10 case replayed 261 stale
+  // wakes across every ordinary restart). Optional identically on write and
+  // in-memory: absence reads as oldest on replay, never as expired.
+  originPid?: string;
+  originAt?: number;
   delivered?: true;
 };
+
+// One sink per module for handoff prune notes ("dropped N stale...", "dropped
+// N over the cap..."): writeReplacementHandoff and the expiry wrapper push
+// here from top level (where no generation exists yet), and the registered
+// default body binds the sink to the CURRENT generation's queue as soon as
+// it creates or activates one, so the note rides that generation's first
+// delivered wake rather than becoming a wake of its own. A production load
+// with no extension registered yet keeps notes here module-locally; a test
+// imports only the primitives, assigns its own sink, and observes directly.
+declare global {
+  // eslint-disable-next-line no-var
+  var __fmOmpWatchStaleNotes: { push(note: string): void; take(): string[] } | undefined;
+}
+function globalStaleNotes(): { push(note: string): void; take(): string[] } {
+  return (globalThis.__fmOmpWatchStaleNotes ??= {
+    push(note: string): void {
+      staleNotesBuffer.push(note);
+    },
+    take(): string[] {
+      return staleNotesBuffer.splice(0);
+    },
+  });
+}
+const staleNotesBuffer: string[] = [];
+export const __tests = { globalStaleNotes };
 
 type ReplacementActionableHandoff = {
   version: 2;
@@ -160,6 +192,14 @@ const hostReadyTimeoutMs = Math.max(armReadyTimeoutMs, 30000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_omp again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - omp session is shutting down";
+// A persisted replacement handoff that outlives its predecessor omp session
+// replays stale notifications on every ordinary restart (the Oct 10 case
+// replayed 261 of them, and only a forced kill cleared the file, because a
+// plain restart re-persists whatever replays). Cmp for age only against the
+// origin stamp; a missing stamp reads oldest, so a handoff predating this
+// bound expires as soon as its predecessor process is gone.
+const handoffMaxAgeMs = positiveInteger("FM_OMP_HANDOFF_MAX_AGE_MS", 60 * 60 * 1000);
+const handoffMaxPending = positiveInteger("FM_OMP_HANDOFF_MAX_PENDING", 50);
 
 let nextGenerationId = 0;
 let nextHandoffId = 0;
@@ -326,49 +366,101 @@ function createPendingActionable(message: string, predecessorArmPid: string): Pe
     token: `${process.pid}-${Date.now()}-${++replacementCoordinator.nextTokenId}`,
     message,
     predecessorArmPid,
+    originPid: String(process.pid),
+    originAt: Date.now(),
   };
 }
 
+// The creation origin of a handoff entry: the explicit stamps when present,
+// otherwise derived from the token's own "<pid>-<epoch-ms>-<seq>" head -
+// which means handoffs persisted by builds predating the stamps (the Oct 10
+// file's 261 entries included) still carry their predecessor's pid and age
+// readable at replay time.
+export function handoffEntryOrigin(item: PendingActionableClose): { pid: string; atMs: number } {
+  if (item.originPid !== undefined && item.originPid !== "" && item.originAt !== undefined) {
+    return { pid: item.originPid, atMs: item.originAt };
+  }
+  const match = item.token.match(/^([0-9]+)-([0-9]+)-[0-9]+$/);
+  return match ? { pid: match[1], atMs: Number(match[2]) } : { pid: "", atMs: 0 };
+}
+
+// Whether a persisted handoff entry is expired at <nowMs>: the predecessor
+// omp session that created it is gone AND the entry has passed the age
+// bound. A pid that is alive always keeps the entry - pid recycling keeps
+// an old handoff past expiry, never the reverse, which is exactly "never
+// drop a fresh pending wake from a live predecessor".
+export function handoffEntryExpired(item: PendingActionableClose, nowMs: number): boolean {
+  const origin = handoffEntryOrigin(item);
+  if (origin.pid === "" || pidAlive(origin.pid)) return false;
+  return nowMs - origin.atMs >= handoffMaxAgeMs;
+}
+
+// Whether <item> is a prune casualty when the persisted list exceeds the
+// bound: it falls outside the newest <max> entries by (age, token).
+export function handoffEntryDroppedByCap(item: PendingActionableClose, all: PendingActionableClose[], max: number): boolean {
+  const ordered = [...all].sort((a, b) => {
+    const aAt = handoffEntryOrigin(a).atMs;
+    const bAt = handoffEntryOrigin(b).atMs;
+    return aAt - bAt || a.token.localeCompare(b.token);
+  });
+  return ordered.indexOf(item) < ordered.length - max;
+}
+
 function validatePendingActionable(value: unknown): PendingActionableClose {
+  const item = value as Partial<PendingActionableClose> & { version?: unknown };
   if (
     typeof value !== "object" || value === null ||
-    (value as { version?: unknown }).version !== 1 ||
-    typeof (value as { token?: unknown }).token !== "string" ||
-    !/^[0-9]+-[0-9]+-[0-9]+$/.test((value as { token: string }).token) ||
-    typeof (value as { message?: unknown }).message !== "string" ||
-    (!actionableLine((value as { message: string }).message) &&
-      !/^supervision-host:/m.test((value as { message: string }).message)) ||
-    typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
-    !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
-    ((value as { delivered?: unknown }).delivered !== undefined &&
-      (value as { delivered?: unknown }).delivered !== true)
+    item.version !== 1 ||
+    typeof item.token !== "string" ||
+    !/^[0-9]+-[0-9]+-[0-9]+$/.test(item.token) ||
+    typeof item.message !== "string" ||
+    (!actionableLine(item.message) &&
+      !/^supervision-host:/m.test(item.message)) ||
+    typeof item.predecessorArmPid !== "string" ||
+    !/^[0-9]*$/.test(item.predecessorArmPid) ||
+    (item.originPid !== undefined && (typeof item.originPid !== "string" || !/^[0-9]+$/.test(item.originPid))) ||
+    (item.originAt !== undefined && (typeof item.originAt !== "number" || !Number.isFinite(item.originAt) || item.originAt <= 0)) ||
+    (item.delivered !== undefined && item.delivered !== true)
   ) {
     throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
   }
   return value as PendingActionableClose;
 }
 
-function validateReplacementHandoff(value: unknown): PendingActionableClose[] {
-  if (
-    typeof value !== "object" || value === null ||
-    (value as { version?: unknown }).version !== 2 ||
-    !Array.isArray((value as { pending?: unknown }).pending) ||
-    (value as { pending: unknown[] }).pending.length === 0
-  ) {
+function validateReplacementHandoff(value: unknown): { pending: PendingActionableClose[] } {
+  const raw = value as Partial<ReplacementActionableHandoff>;
+  if (typeof value !== "object" || value === null || raw.version !== 2 || !Array.isArray(raw.pending)) {
     throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
   }
-  const pending = (value as { pending: unknown[] }).pending.map(validatePendingActionable);
-  if (new Set(pending.map((item) => item.token)).size !== pending.length) {
-    throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
+  const pending = raw.pending.map(validatePendingActionable);
+  const tokens: Record<string, true> = {};
+  for (const item of pending) {
+    if (tokens[item.token]) throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
+    tokens[item.token] = true;
   }
-  return pending;
+  return { pending };
 }
 
-function writeReplacementHandoff(pending: PendingActionableClose[]): void {
-  replacementHandoff = [...pending];
+export function writeReplacementHandoff(pending: PendingActionableClose[]): void {
+  // Persist only the newest handoffMaxPending entries (by origin age, then
+  // token); a shutdown pile-up (the Oct 10 case) can never grow the file
+  // unbounded. A fresh pending wake is always newest, so the cap never
+  // drops the wake this shutdown just created.
+  const kept: PendingActionableClose[] = [];
+  let droppedCount = 0;
+  for (const item of pending) {
+    if (handoffEntryDroppedByCap(item, pending, handoffMaxPending)) droppedCount += 1;
+    else kept.push(item);
+  }
+  if (droppedCount > 0) {
+    globalStaleNotes().push(
+      `watcher: dropped ${droppedCount} replacement-session actionable wake(s) over the ${handoffMaxPending}-entry persistence bound; the newest pending wakes were kept`,
+    );
+  }
+  replacementHandoff = [...kept];
   mkdirSync(handoffDir, { recursive: true });
   const temporary = `${actionableHandoff}.tmp-${process.pid}-${++nextHandoffId}`;
-  const handoff: ReplacementActionableHandoff = { version: 2, pending };
+  const handoff: ReplacementActionableHandoff = { version: 2, pending: kept };
   try {
     writeFileSync(temporary, `${JSON.stringify(handoff)}\n`, { mode: 0o600 });
     renameSync(temporary, actionableHandoff);
@@ -381,17 +473,51 @@ function writeReplacementHandoff(pending: PendingActionableClose[]): void {
     throw error;
   }
 }
+// The replay side of writeReplacementHandoff: drop aged-out entries whose
+// predecessor session process is gone, delete or rewrite the persisted file
+// so an ordinary restart no longer re-persists them, then hand the survivors
+// to the ordinary load path. The durable wake queue (bin/fm-wake-drain.sh)
+// already replays every wake idempotently, so an entry is lost only when it
+// never reached ANY session - which this file's own persistence prevents.
+
+export function loadReplacementHandoffWithExpiry(load: () => PendingActionableClose[], note: (text: string) => void): PendingActionableClose[] {
+  let unexpired: PendingActionableClose[] = [];
+  try {
+    unexpired = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8"))).pending;
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return load();
+    throw error;
+  }
+  const nowMs = Date.now();
+  const agedOut = unexpired.filter((item) => handoffEntryExpired(item, nowMs));
+  if (agedOut.length === 0) return load();
+  const kept = unexpired.filter((item) => !handoffEntryExpired(item, nowMs));
+  if (kept.length === 0) {
+    replacementHandoff = null;
+    unlinkSync(actionableHandoff);
+  } else {
+    writeReplacementHandoff(kept);
+  }
+  const origin = handoffEntryOrigin(agedOut[0]);
+  note(`watcher: dropped ${agedOut.length} stale replacement-session actionable wake(s) (origin pid ${origin.pid} gone, older than ${Math.round(handoffMaxAgeMs / 60000)}m); the durable wake queue already replays these`);
+  return load();
+}
 
 function persistReplacementHandoff(pending: PendingActionableClose[]): void {
   if (pending.length === 0) return;
   writeReplacementHandoff(pending);
 }
 
-function loadReplacementHandoff(): PendingActionableClose[] {
+// The replay side of the handoff: the plain flat load, kept as the single
+// call shape the wrapper and every caller share. Expiry and pruning live in
+// loadReplacementHandoffWithExpiry, which activateOwnedWatch drives exactly
+// once per replay; everything else (merge, clear, persist) reads and writes
+// through it WITHOUT re-expiring, so only the owning session_start replays
+// lose entries and a mid-session merge never silently expires anything.
+export function loadReplacementHandoff(): PendingActionableClose[] {
+  let stored: PendingActionableClose[] = [];
   try {
-    const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
-    replacementHandoff = pending;
-    return [...pending];
+    stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8"))).pending;
   } catch (error) {
     if (nodeErrorCode(error) === "ENOENT") {
       replacementHandoff = null;
@@ -399,12 +525,14 @@ function loadReplacementHandoff(): PendingActionableClose[] {
     }
     throw error;
   }
+  replacementHandoff = stored;
+  return [...stored];
 }
 
 function mergeReplacementHandoff(pending: PendingActionableClose): void {
   let stored: PendingActionableClose[] = [];
   try {
-    stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+    stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8"))).pending;
   } catch (error) {
     if (nodeErrorCode(error) !== "ENOENT") throw error;
   }
@@ -414,7 +542,7 @@ function mergeReplacementHandoff(pending: PendingActionableClose): void {
 
 function clearReplacementHandoff(pending: PendingActionableClose): void {
   try {
-    const stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+    const stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8"))).pending;
     const remaining = stored.filter((item) => item.token !== pending.token);
     if (remaining.length === stored.length) return;
     if (remaining.length > 0) {
@@ -566,9 +694,13 @@ export default function (pi: ExtensionAPI) {
     pending?: PendingActionableClose,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
+    // Prune notes for this session ride its first delivered wake rather than
+    // becoming wakes of their own; up to two from one replay (stale-drop and
+    // cap) fit one line block.
+    const notesSuffix = globalStaleNotes().take().map((note) => `\n\n${note}`).join("");
     const content = encodeFirstmateOperationalInput(
       "watcher",
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+      `FIRSTMATE WATCHER WAKE: ${message}${notesSuffix}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
@@ -1075,7 +1207,7 @@ export default function (pi: ExtensionAPI) {
     let pending: PendingActionableClose[] = [];
     let loadFailure = "";
     try {
-      pending = loadReplacementHandoff();
+      pending = loadReplacementHandoffWithExpiry(loadReplacementHandoff, (note) => globalStaleNotes().push(note));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       loadFailure = `watcher: FAILED - omp extension could not load a replacement-session actionable wake\n${detail}`;

@@ -671,6 +671,65 @@ EOF
 
 # The omp owner stays file-gated: a home without config/supervision-host, or
 # one opted out by config/supervision-host-off, spawns the plain arm and never the host.
+
+# Fix 1a: a persisted replacement-session handoff carries its origin session
+# pid and time; at replay the extension drops (and logs once) an entry whose
+# predecessor process is gone AND which exceeds the age bound, while a fresh
+# pending wake survives no matter which pid wrote it. The drop is written
+# back, so an ordinary restart no longer re-persists the stale entry - which
+# is what made the Oct 10 file's 261 wakes replay on every restart until a
+# forced kill.
+test_watch_extension_expires_a_stale_replacement_handoff() {
+  local repo home log out status
+  repo="$TMP_ROOT/watch-stale/repo"; home="$TMP_ROOT/watch-stale/home"; log="$TMP_ROOT/watch-stale/arm.log"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/config"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-1\n' "$$"
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
+const home = process.env.FM_HOME;
+const handoffDir = `${home}/state/extensions/omp-primary-watch`;
+mkdirSync(handoffDir, { recursive: true });
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const now = Date.now();
+const legacyStale = { version: 1, token: `3999991-${now - 2 * 3600e3 - 1000}-1`, message: "signal: stale wake from a dead session", predecessorArmPid: "" };
+const persistedLogged = { version: 1, token: `${process.pid}-${now - 2000}-2`, message: "signal: a fresh wake from the live session", predecessorArmPid: "1234", originPid: String(process.pid), originAt: now - 2000 };
+writeFileSync(`${handoffDir}/session-replacement-actionable.json`, JSON.stringify({ version: 2, pending: [legacyStale, persistedLogged] }) + "\n");
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+await import(pathToFileURL(process.env.EXT).href).then((mod) => mod.default(pi));
+await handlers.get("session_start")({ type: "session_start" }, {});
+for (let i = 0; i < 80 && sent.length < 1; i += 1) await new Promise((r) => setTimeout(r, 100));
+if (sent.length !== 1) throw new Error(`expected exactly one replayed wake, saw ${sent.length}: ${JSON.stringify(sent.map((s) => s.m))}`);
+if (sent[0].m.includes("stale wake from a dead session")) throw new Error(`the dead predecessor's 2h-old wake must not replay: ${sent[0].m}`);
+if (!sent[0].m.includes("fresh wake from the live session")) throw new Error(`the live predecessor's fresh wake was lost: ${sent[0].m}`);
+if (!sent[0].m.includes("dropped 1 stale replacement-session actionable wake")) throw new Error(`the drop was not logged on the delivered wake: ${sent[0].m}`);
+const persisted = JSON.parse(readFileSync(`${handoffDir}/session-replacement-actionable.json`, "utf8")).pending;
+if (persisted.some((item) => item.token === legacyStale.token)) throw new Error("an ordinary restart re-persisted the dropped stale entry");
+await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension stale handoff expiry: $out"
+  [ -z "$out" ] || fail "omp watch extension stale handoff expiry test printed output: $out"
+  pass ".omp watch extension: a dead predecessor's aged-out wake is dropped and logged once; a live predecessor's fresh wake replays"
+}
+
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off() {
   local line label repo home log out status
   for line in - off; do
@@ -722,6 +781,57 @@ EOF
     [ -z "$out" ] || fail "omp watch extension gate test printed output ($label): $out"
   done
   pass ".omp watch extension: a home without config/supervision-host or with an off file keeps the plain arm"
+}
+
+# Fix 1b: the persisted handoff list is capped at the newest entries, so an
+# unconsumed-wake pile-up can never grow the file without bound; the intake
+# merge writes through the same capping call, so the pile-up is bounded
+# whether it arrives at session_start or mid-session while a replacement is
+# queuing.
+test_watch_extension_caps_the_persisted_handoff_list() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-cap/repo"; home="$TMP_ROOT/watch-cap/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/config"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-1\n' "$$"
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+const home = process.env.FM_HOME;
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.EXT).href);
+const entries = [];
+for (let i = 0; i < 5; i += 1) {
+  const token = `${process.pid}-${Date.now()}-${i + 1}`;
+  entries.push({ version: 1, token, message: `signal: wake ${i + 1}`, predecessorArmPid: "" });
+}
+const kept = entries.filter((item) => !mod.handoffEntryDroppedByCap(item, entries, 3));
+if (kept.length !== 3 || kept[0].token !== entries[2].token || kept[2].token !== entries[4].token) {
+  throw new Error(`cap selection is wrong: ${JSON.stringify(kept.map((k) => k.token))}`);
+}
+if (mod.handoffEntryDroppedByCap(entries[4], entries, 3)) throw new Error("the newest entry is never a cap casualty");
+// Aging ties at the same originAt resolve by token so a generation whose
+// out-of-order intakes land never flips which entry survives.
+const tied = [
+  { version: 1, token: `7-1000-2`, message: "signal: a", predecessorArmPid: "" },
+  { version: 1, token: `7-1000-1`, message: "signal: b", predecessorArmPid: "" },
+];
+if (mod.handoffEntryDroppedByCap(tied[0], tied, 1)) throw new Error("an out-of-order same-age entry slots before its lexically-smaller peer, so the kept set is stable");
+if (!mod.handoffEntryDroppedByCap(tied[1], tied, 1)) throw new Error("an out-of-order same-age entry's peer keeps the slot, never both and never the newer");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension handoff cap: $out"
+  [ -z "$out" ] || fail "omp watch extension handoff cap test printed output: $out"
+  pass ".omp watch extension: the persisted replacement handoff list drops exactly the oldest beyond the cap"
 }
 
 # A host cycle boundary can close with only a "supervision-host:" line; left
@@ -875,5 +985,7 @@ test_watch_extension_arms_and_delivers
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off
+test_watch_extension_expires_a_stale_replacement_handoff
+test_watch_extension_caps_the_persisted_handoff_list
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole
