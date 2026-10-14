@@ -582,7 +582,7 @@ test_pipeline_progress_clears_a_missed_checkpoint() {
   s="$dir/home/state"
   out=$(FM_TEST_PROVABLY=1 poll_at "$dir" $((W0 + 3700)))
   assert_equals "" "$out" "a provably running pipeline is progress, not a missed checkpoint"
-  assert_contains "$(cat "$s/t1.progress")" "run-step" "the observation is recorded with its source"
+  assert_contains "$(cat "$s/t1.checkpoint-progress")" "run-step" "the observation is recorded with its source"
   out=$(poll_at "$dir" $((W0 + 3800)))
   assert_equals "" "$out" "the noted progress renews the checkpoint"
   pass "an observed running pipeline renews the checkpoint instead of raising a false miss"
@@ -635,9 +635,9 @@ test_teardown_retires_progress_and_ladder_state() {
   s="$dir/home/state"
   poll_at "$dir" $((W0 + 3700)) > /dev/null
   act "$s" progress t1 --reason "seen working" --at $((W0 + 3710)) || fail "progress"
-  [ -f "$s/t1.progress" ] || fail "progress note missing"
+  [ -f "$s/t1.checkpoint-progress" ] || fail "progress note missing"
   bash -c '. "$1/bin/fm-action-lib.sh"; . "$1/bin/fm-wake-lib.sh"; fm_action_retire "$2" t1' _ "$ROOT" "$s" || fail "retire"
-  assert_absent "$s/t1.progress"
+  assert_absent "$s/t1.checkpoint-progress"
   assert_absent "$s/.t1.checkpoint-checked"
   assert_absent "$s/.t1.action-incident-checkpoint"
   pass "retirement removes the progress note, checkpoint throttle and ladder marker"
@@ -680,7 +680,7 @@ test_unclosed_blocker_is_a_record_lifecycle_incident() {
   dir=$(stalled_case stale-blocker)
   s="$dir/home/state"
   printf 'blocked [at=%s]: waiting on the GPU\nworking [at=%s]: GPU free, resumed\n' $((W0 + 10)) $((W0 + 20)) >> "$s/t1.status"
-  printf '%s\tfixture\n' $((W0 + 3000)) > "$s/t1.progress"
+  printf '%s\tfixture\n' $((W0 + 3000)) > "$s/t1.checkpoint-progress"
   out=$(poll_at "$dir" $((W0 + 3100)))
   assert_contains "$out" "open-decision-stale" "a blocker outlived by later work is reported as a lifecycle defect"
   assert_contains "$out" "resolved [at=<epoch>] [key=default]" "the report names the exact additive line that closes it"
@@ -692,7 +692,7 @@ test_unclosed_blocker_is_a_record_lifecycle_incident() {
   dir=$(stalled_case live-decision)
   s="$dir/home/state"
   printf 'needs-decision [at=%s]: pick A or B\nworking [at=%s]: independent work meanwhile\n' $((W0 + 10)) $((W0 + 20)) >> "$s/t1.status"
-  printf '%s\tfixture\n' $((W0 + 3000)) > "$s/t1.progress"
+  printf '%s\tfixture\n' $((W0 + 3000)) > "$s/t1.checkpoint-progress"
   assert_equals "" "$(poll_at "$dir" $((W0 + 3100)))" "a genuine open question with independent work is not a lifecycle defect"
   pass "an unclosed blocker is reported as a record-lifecycle defect without weakening the authoritative fold"
 }

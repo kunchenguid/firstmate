@@ -5045,7 +5045,7 @@ test_teardown_retires_action_artifacts() {
   FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check "action-followthrough:$2:task-x1:steer:acked-unexecuted" "check: retired task incident"; fm_wake_append check "action-followthrough:$2:task-x1:checkpoint:checkpoint-missed:triage" "check: retired triage"; fm_wake_append check unrelated "check: retain unrelated work"' _ "$ROOT" "$state" || fail "queue incidents"
   out=$(run_teardown "$dir" 2>&1) || fail "real teardown failed: $out"
   [ ! -e "$state/task-x1.actions" ] && [ ! -e "$state/task-x1.action-receipts" ] && [ ! -e "$state/.task-x1.action-incident-steer" ] || fail "teardown left action artifacts"
-  [ ! -e "$state/task-x1.progress" ] && [ ! -e "$state/.task-x1.checkpoint-checked" ] && [ ! -e "$state/.task-x1.action-incident-checkpoint" ] || fail "teardown left checkpoint artifacts"
+  [ ! -e "$state/task-x1.checkpoint-progress" ] && [ ! -e "$state/.task-x1.checkpoint-checked" ] && [ ! -e "$state/.task-x1.action-incident-checkpoint" ] || fail "teardown left checkpoint artifacts"
   assert_not_contains "$(cat "$state/.wake-queue")" "action-followthrough:" "teardown prunes retired incidents"
   assert_contains "$(cat "$state/.wake-queue")" unrelated "teardown preserves other tasks"
   before=$(cat "$state/.wake-queue")

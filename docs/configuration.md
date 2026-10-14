@@ -91,7 +91,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Per-task action ledgers under `state/<id>.actions` recording each next action's authority class, start, result, and acceptance (`bin/fm-action-lib.sh`, written by intake, native lifecycle owners, the watcher poll's observed starts and escalation triage, and `bin/fm-action.sh`).
-- Per-task progress notes `state/<id>.progress`, checkpoint throttles `state/.<id>.checkpoint-checked`, and escalation-ladder markers `state/.<id>.action-incident-*` (`bin/fm-action-lib.sh`, `bin/fm-watch.sh`), all retired with the task.
+- Per-task progress notes `state/<id>.checkpoint-progress`, checkpoint throttles `state/.<id>.checkpoint-checked`, and escalation-ladder markers `state/.<id>.action-incident-*` (`bin/fm-action-lib.sh`, `bin/fm-watch.sh`), all retired with the task.
 - Observer cadence records `state/.check-cadence-seen`, `state/.beat-gap-seen` and the append-only `state/.check-cadence-misses` and `state/.beat-gaps` (`bin/fm-action-lib.sh`), kept across task teardown.
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 

@@ -64,7 +64,7 @@
 # owner, last observed progress with its source, next checkpoint and verdict.
 # The last progress is the newest of ledger start/result/consume events, the
 # worker's own stamped status line, the worktree head commit time, an observed
-# note (state/<task>.progress, written by the watcher from a provably running
+# note (state/<task>.checkpoint-progress, written by the watcher from a provably running
 # pipeline), and the task record itself. A task the worker owns that passes its
 # checkpoint without progress is the `checkpoint-missed` incident; a task
 # waiting on firstmate or a declared wait is listed with its owner and never an
@@ -418,7 +418,7 @@ fm_action_observe() {  # <state-dir> <task-id> <now-epoch>
 # Watcher-observed progress that no file in the task's own record shows, such as
 # a provably running pipeline. One line: <epoch> <source>.
 fm_action_note_progress() {  # <state-dir> <task-id> <epoch> <source>
-  local f=$1/$2.progress tmp
+  local f=$1/$2.checkpoint-progress tmp
   tmp=$(mktemp "$1/.progress.XXXXXX") || return 1
   if ! { printf '%s\t%s\n' "$3" "$(fm_action_clean "$4")" > "$tmp" && mv "$tmp" "$f"; }; then
     rm -f "$tmp"
@@ -439,8 +439,12 @@ fm_action_task_progress() {  # <state-dir> <task-id>
   fi
   _fm_action_progress_pick "$(fm_action_status_epoch "$state" "$task")" status
   _fm_action_progress_pick "$(fm_action_head_epoch "$state" "$task")" head-commit
-  e=$(awk -F'\t' 'NF >= 2 { print $1 }' "$state/$task.progress" 2>/dev/null | tail -1 || true)
-  _fm_action_progress_pick "$e" "$(awk -F'\t' 'NR==1 { print $2 }' "$state/$task.progress" 2>/dev/null || true)"
+  # state/<id>.progress is the harness-activity marker bin/fm-busy-event.sh touches.
+  if declare -F fm_path_mtime >/dev/null 2>&1 && [ -f "$state/$task.progress" ]; then
+    _fm_action_progress_pick "$(fm_path_mtime "$state/$task.progress")" native-activity
+  fi
+  e=$(awk -F'\t' 'NF >= 2 { print $1 }' "$state/$task.checkpoint-progress" 2>/dev/null | tail -1 || true)
+  _fm_action_progress_pick "$e" "$(awk -F'\t' 'NR==1 { print $2 }' "$state/$task.checkpoint-progress" 2>/dev/null || true)"
   ledger=$(fm_action_ledger "$state" "$task")
   if [ -f "$ledger" ]; then
     e=$(awk -F'\t' '$1 == "v1" && ($4 == "start" || $4 == "result" || $4 == "consume") && $3 !~ /^triage-/ { if ($2 + 0 > m) m = $2 + 0 } END { if (m) print m }' "$ledger")
@@ -621,7 +625,7 @@ fm_action_retire() {
   case "$state" in */parent-route) queue_state=${state%/parent-route} ;; esac
   lock="$queue_state/.wake-queue.lock"
   fm_lock_acquire_wait "$lock" || return 1
-  rm -f "$state/$task.actions" "$state/$task.progress" "$state/.$task.checkpoint-checked" "$state/.$task.action-incident-"* || status=1
+  rm -f "$state/$task.actions" "$state/$task.checkpoint-progress" "$state/.$task.checkpoint-checked" "$state/.$task.action-incident-"* || status=1
   rm -rf "$state/$task.action-receipts" || status=1
   if [ "$status" -eq 0 ]; then
     fm_wake_queue_prune_task_locked "$queue_state" "$task" "$target" "$state" || status=1

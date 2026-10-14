@@ -4815,8 +4815,8 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   printf '1\n' > "$state/.count-$key"
   # No completed turn ever recorded for this task: age the spawn record itself.
   touch -t 200001010000 "$state/busy-stable.meta"
-  printf '%s\tfixture\n' "$(date +%s)" > "$state/busy-stable.progress"
-  touch -t 200001010000 "$state/busy-stable.progress"
+  printf '%s\tfixture\n' "$(date +%s)" > "$state/busy-stable.checkpoint-progress"
+  touch -t 200001010000 "$state/busy-stable.checkpoint-progress"
 
   # Phase A: past the bound, the stable-hash busy pane is absorbed but starts
   # the wedge timer (mirrors the existing provably-working-stale Phase A/B).
@@ -4858,6 +4858,8 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   sig=$(seen_sig "$state/busy-ticking.status"); printf '%s' "$sig" > "$state/.seen-busy-ticking_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/busy-ticking.meta"
+  printf '%s\tfixture\n' "$(date +%s)" > "$state/busy-ticking.checkpoint-progress"
+  touch -t 200001010000 "$state/busy-ticking.checkpoint-progress"
   # No pre-seeded .hash-<key>: with a real ticking elapsed footer, every poll
   # lands here (h != prev) - the reproduction's actual masking condition.
 
@@ -4942,6 +4944,8 @@ test_busy_pane_native_progress_resets_age() {
   # The worker has progressed without completing its long native turn.
   touch "$state/busy-reset.progress"
   touch -t 200001010000 "$state/busy-reset.meta"
+  printf '%s\tfixture\n' "$(date +%s)" > "$state/busy-reset.checkpoint-progress"
+  touch -t 200001010000 "$state/busy-reset.checkpoint-progress"
   touch -t 200001010000 "$state/busy-reset.turn-ended"
   prime_turnend_seen "$state/busy-reset.turn-ended"
 
@@ -5032,6 +5036,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   # No completed turn for hours (the single blocking poll call): age the spawn
   # record itself, exactly as the never-completed-a-turn fixtures above do.
   touch -t 200001010000 "$state/review-scout.meta"
+  printf '%s\tfixture\n' "$(date +%s)" > "$state/review-scout.checkpoint-progress"
+  touch -t 200001010000 "$state/review-scout.checkpoint-progress"
   # No pre-seeded .hash-<key>: a live harness footer ticks, so every poll lands
   # on the changed-hash branch - the review scout's real masking condition.
 
@@ -5137,6 +5143,8 @@ test_afk_busy_declared_pause_hands_off_plain_stale() {
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-review-scout_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/afk-review-scout.meta"
+  printf '%s\tfixture\n' "$(date +%s)" > "$state/afk-review-scout.checkpoint-progress"
+  touch -t 200001010000 "$state/afk-review-scout.checkpoint-progress"
   date '+%s' > "$state/.afk"
 
   # Phase A: past the bound, with the wedge threshold as low as it goes, the
@@ -5242,6 +5250,8 @@ SH
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-ticking-scout_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/afk-ticking-scout.meta"
+  printf '%s\tfixture\n' "$(date +%s)" > "$state/afk-ticking-scout.checkpoint-progress"
+  touch -t 200001010000 "$state/afk-ticking-scout.checkpoint-progress"
   date '+%s' > "$state/.afk"
   # An undeclared busy phase already ran the wedge timer and escalated twice
   # before the crew declared the wait.
