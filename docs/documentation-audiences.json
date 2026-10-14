@@ -557,6 +557,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": ".agents/skills/action-followthrough/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/agent-skill-trigger-index/SKILL.md",
       "audience": "agent-runtime"
     },
