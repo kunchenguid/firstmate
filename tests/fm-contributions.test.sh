@@ -438,6 +438,27 @@ test_held_unsupported_forge_is_not_captain_work() {
   pass 'held unsupported forge coverage remains unmeasured'
 }
 
+test_gerrit_change_is_unmeasured() {
+  local home out
+  home=$(new_home gerrit-change)
+  mkdir -p "$home/wt"
+  printf 'worktree=%s/wt\nkind=ship\npr=https://gerrit.example.com/c/team/apps/widget/+/12345\n' "$home" > "$home/state/delivery.meta"
+  chmod 600 "$home/state/delivery.meta"
+  printf '#!/bin/sh\nprintf "unexpected forge read: %%s\\n" "$*" >&2\nexit 1\n' > "$home/fakebin/gh"
+  chmod +x "$home/fakebin/gh"
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
+    and .contributions.unmeasured == 1 and .contributions.counts.fleet == 0
+    and .contributions.complete == false and .contributions.proven_clear == false' >/dev/null \
+    || fail 'a Gerrit change recorded as pr= was dropped from coverage instead of reported unmeasured'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2>&1) || fail "poll failed on a Gerrit change: $out"
+  [ -z "$out" ] || fail "poll tried to observe a Gerrit change: $out"
+  [ ! -e "$home/data/delivery/contributions.json" ] || fail 'poll recorded an observation for a Gerrit change'
+  printf 'worktree=%s/wt\nkind=ship\npr=https://gerrit.example.com/c/team/apps/widget/+/12345/2\n' "$home" > "$home/state/delivery.meta"
+  bearings "$home" | jq -e '.contributions.known == 0' >/dev/null \
+    || fail 'a Gerrit patch-set URL was counted as a canonical change'
+  pass 'a Gerrit change is known, unmeasured, and never observed'
+}
+
 test_shared_contribution_signal_wakes_once() {
   local home token pending wakes
   home=$(new_home shared-contribution-signal)
@@ -1183,7 +1204,7 @@ test_retire_is_idempotent_and_refuses_unknown_pairs() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_gerrit_change_is_unmeasured test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
