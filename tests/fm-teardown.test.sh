@@ -5051,8 +5051,38 @@ test_teardown_retires_action_artifacts() {
   pass "real teardown retires action artifacts and queue incidents without losing unrelated work"
 }
 
+test_teardown_retires_removed_parent_route_home() {
+  local dir home state out rc=0
+  dir=$(make_case removed-parent-route)
+  mkdir -p "$dir/controller"
+  home="$dir/secondmate-home"
+  state="$home/state/parent-route"
+  mkdir -p "$state" "$home/data/parent-route" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  write_meta "$dir" secondmate secondmate "$home"
+  printf 'home=%s\nharness=codex\n' "$home" >> "$dir/state/task-x1.meta"
+  mv "$dir/state/task-x1.meta" "$state/task-x1.meta"
+  FM_STATE_OVERRIDE="$state" bash "$ROOT/bin/fm-action.sh" admit task-x1 --id steer --class authorized \
+    --owner worker --operation "prepare remaining work" --source "firstmate:remote-retirement-test" --at 100 || fail "remote action admission"
+  mkdir -p "$state/task-x1.action-receipts"
+  printf 'native receipt\n' > "$state/task-x1.action-receipts/steer"
+  printf 'acked-unexecuted\n' > "$state/.task-x1.action-incident-steer"
+  FM_HOME="$dir/controller" FM_ROOT_OVERRIDE="$dir/controller" FM_STATE_OVERRIDE="$state" \
+    FM_DATA_OVERRIDE="$home/data/parent-route" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_TEARDOWN_GUARD_DONE=1 PATH="$dir/fakebin:$PATH" bash -c '
+      . "$1/bin/fm-nm-run-lib.sh"
+      fm_nm_bounded "$1" 10 bash "$1/bin/fm-teardown.sh" task-x1
+    ' _ "$ROOT" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  out=$(cat "$dir/stdout" "$dir/stderr")
+  expect_code 0 "$rc" "remote parent-route retirement must complete after removing its state: $out"
+  assert_absent "$home" "retirement must not recreate the removed parent-route home"
+  assert_absent "$state" "retirement must not recreate its removed control state"
+  pass "real teardown completes when parent-route state was removed with its home"
+}
+
 if [ "${1:-}" = action-retirement ]; then
   test_teardown_retires_action_artifacts
+  test_teardown_retires_removed_parent_route_home
   exit 0
 fi
 
@@ -5178,3 +5208,5 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 
 test_teardown_retires_action_artifacts
+
+test_teardown_retires_removed_parent_route_home
