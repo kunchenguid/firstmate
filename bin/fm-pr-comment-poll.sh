@@ -52,16 +52,21 @@
 # The marker state/<id>.pr-comment-seen holds the newest comment id observed on
 # the last fully parsed read, and is written by rename only after that read
 # parsed, so an error leaves it untouched and the missed window is re-read next
-# cycle. A sidecar whose state/<id>.meta is gone - the task was cleaned up - is
-# retired silently with its marker. A printed line becomes one ordinary
-# `check:` wake through the watcher's custom-check contract; firstmate steers
-# the named task's worker, which reads the comments itself.
+# cycle; the sidecar's identity is re-read before any wake or marker write, so
+# a PR retargeted by a concurrent arm mid-read leaves both untouched. A sidecar
+# whose state/<id>.meta is gone - the task was cleaned up - is retired silently
+# with its marker. A printed line becomes one ordinary `check:` wake through
+# the watcher's custom-check contract; firstmate steers the named task's
+# worker, which reads the comments itself.
 #
 # `check` stays silent on every error, exactly like bin/fm-pr-poll.sh: a failed
 # lookup must never be readable as either a wake or a clean no-wake.
 #
 # `disarm` removes one task's sidecar and marker, and retires the standing shim
-# through bin/fm-check-unregister.sh once no sidecar remains.
+# through bin/fm-check-unregister.sh once no sidecar remains. The standing shim
+# deliberately outlives the last sidecar - automatic retirement of a cleaned-up
+# task leaves it registered as one silent empty scan, ready for the next
+# Forgejo PR - and only `disarm` retires it.
 set -u
 export LC_ALL=C
 
@@ -184,15 +189,17 @@ fm_pr_comment_sidecar_write() {  # <id> <url> <host> <path> <number>
   fm_pr_private_file_valid "$dest" 600 "$device"
 }
 
-# The newest observed comment id, written by rename for one task. An existing
-# marker is never lowered, so a re-arm or a re-read of an older window cannot
-# un-see a comment.
-fm_pr_comment_seen_store() {  # <id> <seen>
-  local id=$1 seen=$2 dest tmp device
+# The newest observed comment id, written by rename for one task. A poll's
+# observation never lowers an existing marker, so a re-read of an older window
+# cannot un-see a comment; the replace mode is the arm path's one re-baseline
+# of a replacement PR, swapping the marker in a single rename.
+fm_pr_comment_seen_store() {  # <id> <seen> [replace]
+  local id=$1 seen=$2 replace=${3:-} dest tmp device
   dest="$STATE/$id$SEEN_SUFFIX"
   device=$(fm_pr_file_device "$STATE") || return 1
   fm_pr_regular_destination_on_device_or_absent "$dest" "$device" || return 1
-  if [ -f "$dest" ] && [ ! -L "$dest" ] && fm_pr_comment_seen_read "$id" >/dev/null \
+  if [ -z "$replace" ] && [ -f "$dest" ] && [ ! -L "$dest" ] \
+    && fm_pr_comment_seen_read "$id" >/dev/null \
     && [ "$(fm_pr_comment_seen_read "$id")" -ge "$seen" ]; then
     return 0
   fi
@@ -284,8 +291,7 @@ action_arm() {  # <task-id>
     case "$max" in
       ''|*[!0-9]*|0[0-9]*) fail "could not read the comments of $pr_url to baseline the seen marker" ;;
     esac
-    rm -f -- "$STATE/$id$SEEN_SUFFIX"
-    fm_pr_comment_seen_store "$id" "$max" \
+    fm_pr_comment_seen_store "$id" "$max" replace \
       || fail "could not write the seen marker for $id"
   fi
   fm_pr_comment_sidecar_write "$id" "$pr_url" "$pr_host" "$pr_path" "$pr_number" \
@@ -344,6 +350,8 @@ action_check() {
     case "$max" in
       ''|*[!0-9]*|0[0-9]*) continue ;;
     esac
+    fm_pr_comment_sidecar_parse "$side" || continue
+    [ "$FM_CMP_URL" = "$url" ] || continue
     wake=${line#* }
     if [ -n "$wake" ]; then
       n=$(awk -F, '{print NF}' <<EOF

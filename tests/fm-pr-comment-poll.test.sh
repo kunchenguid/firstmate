@@ -220,6 +220,49 @@ test_rearm_replacement_pr_rebaselines_the_marker() {
   [ -z "$out" ] || fail "the replacement PR's comment woke twice: got '$out'"
   pass "re-arming a replacement PR re-baselines the marker and wakes its new comments"
 }
+test_retarget_during_fetch_leaves_wake_and_marker_untouched() {
+  local dir out
+  dir=$(make_case retarget-mid-fetch)
+  write_task_meta "$dir"
+  comments_json 100 o '"/fm old"' > "$dir/base.lines"
+  jq -s . "$dir/base.lines" > "$dir/base.json" && rm -f "$dir/base.lines"
+  FM_TEST_PR_COMMENTS="$dir/base.json" run_arm "$dir" task-a >/dev/null \
+    || fail "arm failed"
+  [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 100 ] \
+    || fail "the first arm did not baseline the marker"
+  # The sweep's own fetch performs a concurrent replacement arm's writes: the
+  # sidecar is retargeted to pulls/8 with a fresh marker while the in-flight
+  # read still returns pulls/7's comments, including one new wake comment.
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '[\n  {\n    "name": "main",\n    "url": "https://forgejo.example"\n  }\n]\n'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+printf '%s\n' fm-pr-comment-poll-v1 forgejo \
+  "https://forgejo.example/o/r/pulls/8" forgejo.example o/r 8 \
+  > "$FM_HOME/state/task-a.pr-comment-poll"
+chmod 0600 "$FM_HOME/state/task-a.pr-comment-poll"
+printf '3\n' > "$FM_HOME/state/task-a.pr-comment-seen"
+cat "$FM_TEST_PR_COMMENTS"
+SH
+  chmod +x "$dir/fakebin/tea"
+  {
+    comments_json 100 o '"/fm old"'
+    comments_json 101 o '"/fm rework: narrower scope"'
+  } > "$dir/retarget.lines"
+  jq -s . "$dir/retarget.lines" > "$dir/retarget.json" && rm -f "$dir/retarget.lines"
+  out=$(FM_TEST_PR_COMMENTS="$dir/retarget.json" run_poll "$dir")
+  [ -z "$out" ] || fail "a read whose PR was retargeted mid-fetch woke: got '$out'"
+  [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 3 ] \
+    || fail "a read whose PR was retargeted mid-fetch moved the marker"
+  grep -q "^https://forgejo.example/o/r/pulls/8$" \
+    "$dir/home/state/task-a.pr-comment-poll" \
+    || fail "the test's mid-fetch retarget never happened"
+  pass "a PR retargeted by a concurrent arm mid-fetch leaves wake and marker untouched"
+}
+
 
 test_wake_once_on_new_captain_command_comment() {
   local dir out
@@ -367,6 +410,7 @@ test_arm_baselines_and_binds
 test_arm_refusals
 test_rearm_keeps_marker_and_disarm_retires
 test_rearm_replacement_pr_rebaselines_the_marker
+test_retarget_during_fetch_leaves_wake_and_marker_untouched
 test_wake_once_on_new_captain_command_comment
 test_ignored_commenters_and_bare_comments_advance_the_marker
 test_error_paths_stay_silent_and_keep_the_marker
