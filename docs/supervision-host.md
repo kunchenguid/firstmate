@@ -201,21 +201,17 @@ One example is a Cursor park superseded by the return turn's own end, which stop
 
 A captain outcome the attended engine records while the captain remains attended wakes main once, through the owner's ordinary wake path, with one `supervision-host: branch-outcome:` line naming its store rows.
 Main drains, and `bin/fm-wake-drain.sh` presents it in its `BRANCH OUTCOMES` section with the exact `bin/fm-branch-outcome.sh mark-processed --through <seq>` acknowledgement.
+Before acknowledging, main follows the ready-work handoff contract owned by `AGENTS.md` section 10.
 That presentation is what the Pi branch's visible entry is, so it advances the store's read cursor through the rows it presents.
 Every later drain, including the session-start digest, presents unprocessed captain outcomes again until main acknowledges them, so an ignored outcome costs no extra turn and is never lost.
-The drain's header owns the section's bounds; these rules keep it bounded and in order:
-
-- Captain outcomes come first and never wait behind routine ones.
-- Repeated captain outcomes for one task collapse to that task's newest, naming how many it carries, and one acknowledgement covers them.
-- The byte cap shows only the oldest contiguous run of captain outcomes, so the printed acknowledgement covers exactly the rows shown, and it counts the newer ones it holds back, which follow once the run is acknowledged.
-- Routine outcomes never open a main turn: the next drain lists the newest visible one once, for awareness and with nothing to acknowledge, and collapses older visible routine notes into a count; silent routine outcomes never appear.
+The header of `bin/fm-wake-drain.sh` owns captain-summary preservation, sequence ordering, acknowledgement bounds, the oversized-oldest exception, and routine-summary truncation and retrieval.
+Routine outcomes never open a main turn; the drain presents them for awareness with nothing to acknowledge.
 
 The section runs only for main on a home that runs the host and whose primary is not Pi, and never while the away record exists.
 The drain is the only presenter of these outcomes and the only owner of their read cursor, the away window's included: the return brief counts the window's outcomes and points at the section instead of listing them.
 On a Claude Code primary the Calm mod separately shows bounded, display-only supervision notes to the captain ([`calm.md`](calm.md#supervision-notes-on-claude-code)); it moves no outcome marker and adds nothing to main's context.
-A long away window no longer requires a drain per outcome: each task's captain outcomes collapse to one line, subject to the captain byte cap, and visible routine notes past the section's limit collapse into a count; after main acknowledges all captain outcomes no later drain shows anything from the window again.
+After main acknowledges all captain outcomes, no later drain shows anything from the away window again.
 A drain that cannot read or project the store (jq missing included), print the section, or advance its read cursor says so and marks nothing it has not shown as read, and it exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
-The section's budgets count bytes in any locale, so a multibyte summary is cut on a whole UTF-8 character boundary to fit them.
 An unprocessed captain outcome is never adopted as processed, including across an index repair or a switch to Pi; the absent-marker rule is owned by `bin/fm-branch-outcome.sh`.
 A home already switched to the host can re-present its unacknowledged outcomes after an upgrade or interrupted switch, so each captain line shows its recorded age and the section asks main to check current task state before acting.
 Main's reply to the captain covers only the outcomes still open, as if an already-settled one had never been listed.
@@ -283,6 +279,7 @@ The host stays parked across every close it handled itself and exits only when m
 Claude drops the exit 2 of a Stop hook it terminated at the hook timeout ([verification](verification/supervision.md#claude-drops-the-exit-2-of-a-hook-it-timed-out-2026-09-23)).
 Cursor's `stop` hook carries the same tracked 28,800-second registration.
 A plain watcher park rarely lasts that long, because heartbeat closes wake main.
+The watcher header in `bin/fm-watch.sh` owns heartbeat emission, including backlog-readiness checks.
 But a host absorbs its own wakes, so it ends its park itself before that registration.
 
 ### Setting the boundary
@@ -408,7 +405,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 
 | Test | What it covers |
 |---|---|
-| `tests/fm-supervision-host.test.sh` | Drives the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule and the drain's `BRANCH OUTCOMES` section. |
+| `tests/fm-supervision-host.test.sh` and `tests/fm-supervision-host-late.test.sh` | Together drive the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule and the drain's `BRANCH OUTCOMES` section. |
 | `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host. |
 | `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host. |
 | `tests/fm-pi-watch-extension.test.sh` | The OpenCode plugin's host mode against a stub host. |

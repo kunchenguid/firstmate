@@ -194,7 +194,8 @@ const PROCESSING_INSTRUCTION =
   "An abbreviated line is incomplete: read the full outcome before acting on, relaying, or acknowledging it, using that line's lookup --seqs command. " +
   "First sort the outcomes by that current state into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished. " +
   "Your reply to the captain covers only the still-open outcomes: give the captain a visible response where one is due, answer or escalate a decision, or act on a blocker or failure. " +
-  "Write that reply as if the settled outcomes had never been listed: leave them out entirely, without naming them, summarizing them, or saying they are settled, because checking them is all the processing they need. " +
+  "Write that reply as if the settled outcomes had never been listed: leave them out entirely, without naming them, summarizing them, or saying they are settled, because checking them is all the processing they need apart from any ready-work handoff. " +
+  "Before acknowledging any outcome, including one whose source task has settled, act on every ready-work handoff it contains: check each named unit and dispatch it in this turn, or record its not-ready reason and the condition that must change before retrying on its backlog note; an applicable recorded reason suppresses repeat handoffs. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };

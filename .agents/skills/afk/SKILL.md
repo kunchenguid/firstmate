@@ -59,7 +59,7 @@ Hold-for-return is the default and the only reach profile this release records: 
 - The away session acts on the captain's words.
   It reads them at the tail of every wake, decides by its own judgment whether the event in front of it is the moment they name, acts on them only through the guarded scripts under standing authority, never by analogy, holds with verdict captain on doubt, and opens every outcome summary for an action taken under the words with "per your away instructions:" (`bin/fm-branch-prompt.sh` "Postures" owns the execution rules).
   Destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say, and ask-user findings keep the `ask-user-authority` policy unless the words pre-answer the exact decision; anything else that needs the captain holds for their return.
-- On Pi, main is parked and the supervision branch handles every safe actionable wake under main's standing authority, through the same guarded scripts main would use: any pull request green at its live head may merge (which one the words meant is the branch's reading), queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it - dispatches within the spend cap, and a decision is answered with the captain's own pre-stated answer or under `ask-user-authority`.
+- On Pi, main is parked and the supervision branch handles every safe actionable wake under main's standing authority, through the same guarded scripts main would use: any pull request green at its live head may merge (which one the words meant is the branch's reading), queued work follows the ready-work check owned by `bin/fm-branch-prompt.sh`, and a decision is answered with the captain's own pre-stated answer or under `ask-user-authority`.
   Anything else holds for the return, a red merge never proceeds while away, local-only landing always waits for the captain, and only a wake the branch declines (including a broken branch or unsafe scan) or a watcher failure wakes main (`docs/pi-supervision-branch.md` "Postures").
 - On a non-Pi home that runs the supervision host, the host's engine is that branch under the same rules, and a wake it hands back reaches main through that harness's own wake path (`Stop hook feedback` on Claude, a `watcher` follow-up on Cursor, OpenCode, and omp, the arm's background-task-completed notification on Grok, the checkpoint's output on Codex) with a `supervision-host:` line: that is automatic supervision, never the captain's return, so handle it under the away posture ([supervision protocol](../../../docs/supervision-protocols/supervision-host.md)).
 - The session-start digest reports the posture under its AFK subsection, so a restart re-enters the posture from the record, not from memory.
@@ -186,7 +186,10 @@ Classify each wake this way, applying the steering-inbox exception before status
   If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
   This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
-- `heartbeat` -> self-handle.
+- `heartbeat` -> check backlog readiness through `bin/fm-ready-queue-lib.sh` before suppression or acknowledgement.
+  Ready work or unavailable readiness escalates through the durable buffer to the authorized supervisor for dispatch or blocker resolution, even when `FM_INJECT_SKIP` matches and no new status events exist.
+  A failed buffer write leaves the wake unacknowledged; a successful handoff follows the ordinary escalation delivery path.
+  Empty and captain-held queues self-handle.
   The daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for captain-relevant events still unread by the per-wake classifier.
 - An unknown wake reason escalates fail-safe.
   After that escalation is delivered, its exact distilled line is acknowledged and the same identity does not escalate again during that away session.
@@ -269,6 +272,5 @@ These properties must hold:
   a pane-gone guard, and a signal-trapped shutdown that flushes buffered
   escalations before exit.
 
-`FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds,
-overriding classification.
+`FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds after the heartbeat readiness check above.
 Use it sparingly.

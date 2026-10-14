@@ -43,10 +43,8 @@ For captain-held rechecks under quiet, see [architecture](../../../docs/architec
    mode from the record `enter` wrote.
    Keep `FM_AFK_MODE=quiet` on a quiet refresh: an `/afk` entry, even without new words, replaces a quiet record with an away record and starts hold-for-return.
 
-2. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, quiet mode is
-   active; I will batch routine updates and surface only decisions, failures,
-   credentials, or review-ready work - ordinary chat will not exit this, say
-   `/quiet off` when you want normal per-wake responses back."
+2. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, quiet mode is active; I will batch routine updates and surface work needing attention - ordinary chat will not exit this, say `/quiet off` when you want normal per-wake responses back."
+   The `afk` skill's Classification policy owns which wakes need attention.
 
 ## How to exit quiet mode
 
