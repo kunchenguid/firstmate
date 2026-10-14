@@ -153,12 +153,31 @@ Same-copy relaunch held: `bin/fm-control.sh relaunch --note` replaced the worker
 Exit held: `bin/fm-control.sh exit` stopped the worker, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
 No automatic quota failover was exercised or claimed; every handoff above was an explicit supervised relaunch.
 
+## PreToolUse hooks and delegation tools
+
+Antigravity CLI and Antigravity 2.0 discover project lifecycle hooks in `.agents/hooks.json`.
+When Antigravity runs as a primary session, its built-in in-process subagent tools (`invoke_subagent`, `define_subagent`, `send_message`, `manage_subagents`) bypass Treehouse worktrees, Herdr/tmux tabs, and Firstmate fleet supervision records.
+A tracked `PreToolUse` hook in `.agents/hooks.json` forwards tool calls to `bin/fm-subagent-pretool-check.sh`.
+The hook receives a JSON payload on stdin containing `toolCall.name`, matches delegation-shaped stems, and returns `{"decision":"deny","reason":"..."}` on stdout with exit 0.
+The primary scope check (`bin/fm-primary-scope-lib.sh`) keeps the hook inert in task worktrees, preserving crewmate delegation tools while enforcing the fleet boundary in primary homes.
+
+## Primary integration: Stop-hook park model
+
+Antigravity CLI (agy) runs as a verified Firstmate primary using its lifecycle hook system (`.agents/hooks.json`).
+At each turn boundary where the execution loop terminates with `terminationReason: "model_stop"`, the tracked `Stop` hook runs `bin/fm-turnend-guard-agy.sh`.
+While fleet supervision is active, the hook foregrounds `bin/fm-watch-arm.sh` and parks until an actionable wake arrives.
+When an actionable wake closes, the hook returns `{"decision": "continue", "reason": "..."}` on stdout with exit 0, causing Antigravity to immediately re-enter the loop with the wake injected as a system message.
+When supervision is inactive or the session is in away mode (`state/.afk`), it returns `{"decision": "allow"}` and allows the agent to stop cleanly.
+Consecutive hook-driven continuations are bounded by `FM_AGY_TURNEND_LOOP_CEILING` (default 180), and consecutive failed park attempts are bounded by `FM_AGY_TURNEND_BLOCK_BUDGET` (default 3) before failing open.
+Session lock integration in `bin/fm-session-lock-lib.sh` recognizes `agy` in contiguous process ancestry.
+Hermetic regression coverage lives in `tests/fm-agy-primary.test.sh`.
+
 ## What is still unproven
 
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
-No primary or secondmate behavior was built or tested, and none is claimed.
+Secondmate deployment using agy remains unverified.
 
 ## Refreshing this record
 
@@ -166,5 +185,6 @@ Run the portable suite and the live guard after any agy upgrade, because the pro
 
 ```
 bin/fm-test-run.sh tests/fm-agy-harness.test.sh
+bin/fm-test-run.sh tests/fm-agy-primary.test.sh
 FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
 ```

@@ -122,7 +122,17 @@ test_agy_claims_no_inherited_launcher_marker() {
   local fakebin out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-agent")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' 'bash'; exit 0 ;;
+  *"args="*) printf '%s\n' 'bash'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" AGENT=1 "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -367,8 +377,10 @@ $1
 EOF
 }
 
-run_agy_trust() {  # <home> <worktree> <project>
-  HOME="$1" "$TRUST" "$2" "$3" 2>&1
+run_agy_trust() {  # <home> <args...>
+  local home=$1
+  shift
+  HOME="$home" "$TRUST" "$@" 2>&1
 }
 
 test_agy_trust_registers_the_logical_and_resolved_worktree_paths() {
@@ -432,6 +444,32 @@ test_agy_trust_refuses_out_of_scope_paths() {
   after=$(cat "$store")
   [ "$before" = "$after" ] || fail "an unparseable store was rewritten"
   pass "fm-agy-trust.sh: refuses every out-of-scope path and never rewrites a broken store"
+}
+
+test_agy_trust_supports_secondmate_home() {
+  local rec store out rc sm_home sm_id="domain-1"
+  rec=$(make_agy_trust_case secondmate)
+  read_agy_trust_case "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  mkdir -p "$(dirname "$store")"
+  printf '%s\n' '{"trustedWorkspaces":[]}' > "$store"
+  sm_home="$CASE_DIR/sm-home"
+  mkdir -p "$sm_home/bin" "$sm_home/data" "$sm_home/state" "$sm_home/config" "$sm_home/projects"
+  touch "$sm_home/AGENTS.md"
+  printf '%s\n' "$sm_id" > "$sm_home/.fm-secondmate-home"
+
+  rc=0
+  out=$(run_agy_trust "$HOME_DIR" --secondmate-home "$sm_home" "$sm_id") || rc=$?
+  expect_code 0 "$rc" "valid secondmate home trust should succeed: $out"
+  assert_contains "$out" "trusted: $sm_home" "trust confirmation output missing"
+  assert_agy_trusted "$store" "$sm_home" "secondmate home was not recorded in settings.json"
+
+  rc=0
+  out=$(run_agy_trust "$HOME_DIR" --secondmate-home "$sm_home" "wrong-id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "secondmate home with wrong id must be refused"
+  assert_contains "$out" "is marked for secondmate" "wrong id refusal lacked reason"
+
+  pass "fm-agy-trust.sh: supports --secondmate-home with marker validation"
 }
 
 # The fake tmux renders an agy-shaped screen that advances through
@@ -852,10 +890,10 @@ test_agy_missing_binary_refuses_before_pane_creation() {
   pass "fm-spawn: a missing agy executable refuses before pane creation"
 }
 
-test_agy_secondmate_is_refused() {
+test_agy_secondmate_is_not_refused_by_adapter_gate() {
   local id rec out rc
   id="agy-secondmate-z6-$$"
-  rec=$(make_agy_spawn_case secondmate-refuse "$id")
+  rec=$(make_agy_spawn_case secondmate-gate "$id")
   read_agy_spawn_record "$rec"
   rc=0
   out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -863,28 +901,52 @@ test_agy_secondmate_is_refused() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
     "$SPAWN" "$id" --secondmate agy 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "an agy secondmate spawn should be refused"
-  assert_contains "$out" "agy is a verified crewmate/scout adapter only" \
-    "agy secondmate refusal lacked its concrete reason"
-  pass "fm-spawn: agy cannot be launched as a secondmate"
+  assert_not_contains "$out" "agy is a verified crewmate/scout adapter only" \
+    "agy was refused by the crewmate-only adapter gate"
+  pass "fm-spawn: agy is not blocked by the secondmate adapter gate"
 }
 
-test_agy_spawn_arms_no_busy_wiring() {
-  local id rec out rc statedir
-  id="agy-nowiring-z7-$$"
-  rec=$(make_agy_spawn_case nowiring "$id")
+test_agy_spawn_arms_busy_wiring() {
+  local id rec out rc statedir hooks_file stop_cmd preinv_cmd
+  id="agy-wiring-z7-$$"
+  rec=$(make_agy_spawn_case wiring "$id")
   read_agy_spawn_record "$rec"
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model gemini-3.8-flash-low)
   rc=$?
-  expect_code 0 "$rc" "agy spawn should succeed"
+  expect_code 0 "$rc" "agy spawn should succeed: $out"
   statedir="$HOME_DIR/state"
-  [ -e "$statedir/$id.busy-gen" ] && fail "agy spawn armed a busy generation nothing could clear" || true
-  for sidecar in "$statedir/$id.agy-"*; do
-    [ -e "$sidecar" ] || continue
-    fail "agy spawn left an adapter sidecar behind: $sidecar"
-  done
-  pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
+  [ -f "$statedir/$id.busy-gen" ] || fail "agy spawn did not arm busy generation"
+  hooks_file="$WT_DIR/.agents/hooks.json"
+  [ -f "$hooks_file" ] || fail "agy spawn did not write hooks.json"
+  jq -e '."fm-crew-busy".Stop' "$hooks_file" >/dev/null \
+    || fail "hooks.json lacks fm-crew-busy Stop hook"
+  jq -e '."fm-crew-busy".PreInvocation' "$hooks_file" >/dev/null \
+    || fail "hooks.json lacks fm-crew-busy PreInvocation hook"
+
+  stop_cmd=$(jq -r '."fm-crew-busy".Stop[0].command' "$hooks_file")
+  preinv_cmd=$(jq -r '."fm-crew-busy".PreInvocation[0].command' "$hooks_file")
+  [ -n "$stop_cmd" ] && [ "$stop_cmd" != "null" ] || fail "no Stop command in hooks.json"
+  [ -n "$preinv_cmd" ] && [ "$preinv_cmd" != "null" ] || fail "no PreInvocation command in hooks.json"
+
+  # Initial classification after spawn
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$statedir")
+  [ "$out" = "busy fm-spawn" ] || fail "initial classification must be busy fm-spawn, got '$out'"
+
+  # Fire Stop hook
+  out=$(eval "$stop_cmd")
+  [ -f "$statedir/$id.turn-ended" ] || fail "Stop hook did not touch turn-ended notification marker"
+  [ "$(printf '%s' "$out" | jq -r '.decision')" = "allow" ] || fail "Stop hook did not emit allow decision"
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$statedir")
+  [ "$out" = "idle agy-hook" ] || fail "busy classify after Stop hook must be 'idle agy-hook', got '$out'"
+
+  # Fire PreInvocation hook
+  out=$(eval "$preinv_cmd")
+  [ "$out" = "{}" ] || fail "PreInvocation hook did not emit empty object, got '$out'"
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$statedir")
+  [ "$out" = "busy agy-hook" ] || fail "busy classify after PreInvocation hook must be 'busy agy-hook', got '$out'"
+
+  pass "fm-spawn: agy arms semantic busy wiring and writes hooks.json"
 }
 
 test_agy_ancestry_detects_the_native_command_name
@@ -909,11 +971,12 @@ test_agy_zero_model_timeout_is_clamped_to_the_default_bound
 test_agy_trust_registers_the_logical_and_resolved_worktree_paths
 test_agy_trust_creates_a_missing_store
 test_agy_trust_refuses_out_of_scope_paths
+test_agy_trust_supports_secondmate_home
 test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog
 test_agy_dialog_despite_registration_is_answered_once
 test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
-test_agy_secondmate_is_refused
-test_agy_spawn_arms_no_busy_wiring
+test_agy_secondmate_is_not_refused_by_adapter_gate
+test_agy_spawn_arms_busy_wiring
