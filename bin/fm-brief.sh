@@ -119,10 +119,9 @@
 # --mode, --forge, --shape, and --pr are refused on scout and secondmate scaffolds: a
 # scout's deliverable is a report rather than a merge, and a charter is not a
 # delivery contract.
-# There is no --yolo flag here. A worker merges only with explicit captain
-# authorization in the task instructions or the captain's word in conversation;
-# yolo is firstmate's own merge authority, so it is a spawn-time and firstmate-
-# side input only (AGENTS.md section 7).
+# There is no --yolo flag here. Workers never merge; yolo is firstmate's
+# main-side merge posture and so is a spawn-time and firstmate-side input only
+# (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known wait expected to clear on its own, including
