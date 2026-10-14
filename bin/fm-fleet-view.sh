@@ -94,3 +94,18 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "## Secondmates",
   .secondmate_guidance.note
 '
+
+# Follow-through: owner, last observed progress, next checkpoint and verdict for
+# every live non-secondmate task, read from files by bin/fm-action.sh register.
+# A task with no register line (a secondmate) is not listed.
+now=$(date +%s)
+"$SCRIPT_DIR/fm-action.sh" register 2>/dev/null | awk -F'\t' -v now="$now" '
+  function age(e) { return (now - e >= 0 ? int((now - e) / 60) : 0) "m ago" }
+  NR == 1 {
+    print ""
+    print "## Follow-through"
+    print "| ID | Owner | State | Last progress | Source | Next checkpoint | Verdict |"
+    print "| --- | --- | --- | --- | --- | --- | --- |"
+  }
+  { printf "| %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, age($4), $5, ($6 > now ? "in " int(($6 - now) / 60) "m" : "due " age($6)), $7 }
+'

@@ -90,6 +90,9 @@ Each effective `FM_HOME` contains private operational directories.
 - One-shot Bearings reconcile requests under `state/reconcile-notify/`.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
+- Per-task action ledgers under `state/<id>.actions` recording each next action's authority class, start, result, and acceptance (`bin/fm-action-lib.sh`, written by intake, native lifecycle owners, the watcher poll's escalation triage, and `bin/fm-action.sh`).
+- Per-task progress notes `state/<id>.checkpoint-progress`, checkpoint throttles `state/.<id>.checkpoint-checked`, and escalation-ladder markers `state/.<id>.action-incident-*` (`bin/fm-action-lib.sh`, `bin/fm-watch.sh`), all retired with the task.
+- Observer cadence records `state/.check-cadence-seen`, `state/.beat-gap-seen` and the append-only `state/.check-cadence-misses` and `state/.beat-gaps` (`bin/fm-action-lib.sh`), kept across task teardown.
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
@@ -631,6 +634,16 @@ The bound is required rather than cosmetic because churn and pane staleness read
 
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
+
+## Action follow-through bounds
+
+`FM_ACTION_START_SECS` (default `300`) bounds how long an admitted action may sit without a start.
+`FM_ACTION_CHECKPOINT_SECS` (default `3600`) bounds how long a worker-owned task may go without progress evidence before a `checkpoint-missed` incident.
+`FM_CHECK_CADENCE_BOUND_SECS` (default `360`) is the longest accepted interval between two watcher check touches, and `FM_BEAT_GAP_BOUND_SECS` (default `120`) is the longest accepted gap between two watcher beacon touches before it is recorded as a stretch with no watcher.
+`FM_ACTION_TRIAGE_SECS` (default `600`) and `FM_ACTION_ESCALATE_SECS` (default `1800`) bound the escalation ladder stages, and `FM_ACTION_TRIAGE_OWNER` (default `firstmate`) names who owns the triage action.
+The time bounds are positive integer seconds with invalid values falling back to their defaults, except `FM_ACTION_START_SECS`, which also accepts zero.
+`FM_ACTION_TRIAGE_OWNER` is an owner name, not a time bound.
+The [`action-followthrough` skill](../.agents/skills/action-followthrough/SKILL.md) owns the operating loop.
 
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
