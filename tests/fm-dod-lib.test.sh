@@ -382,6 +382,20 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# The no-mistakes DoD must tell the worker a parked gate advances only on its
+# response and must never be left across turn-end; this reaches a promoted scout
+# too because fm-promote renders the same block.
+test_no_mistakes_dod_forbids_leaving_a_parked_gate() {
+  local out
+  out="$TMP_ROOT/dod-parked-gate.md"
+  fm_dod_block no-mistakes dod-parked-task > "$out"
+  assert_grep 'awaiting_agent: parked' "$out" \
+    "no-mistakes DoD did not name the parked-gate field the worker must respond to"
+  assert_grep 'never leave a parked gate across the end of your turn' "$out" \
+    "no-mistakes DoD did not forbid ending the turn with a gate parked on the worker"
+  pass "no-mistakes DoD forbids leaving a parked gate across turn-end"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -442,6 +456,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_no_mistakes_dod_forbids_leaving_a_parked_gate
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the
