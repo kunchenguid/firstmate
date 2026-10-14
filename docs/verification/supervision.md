@@ -267,6 +267,8 @@ ok - an observed running pipeline renews the checkpoint instead of raising a fal
 ok - an ordinary steer start comes from worker-originated evidence, never the acknowledgement
 ok - the ladder survives a watcher restart through its durable marker and ledger
 ok - retirement removes the progress note, checkpoint throttle and ladder marker
+ok - check cadence and observer liveness are separate, and a failed cadence acceptance is retained
+ok - an unclosed blocker is reported as a record-lifecycle defect without weakening the authoritative fold
 ```
 
 Deterministic entry points:

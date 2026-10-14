@@ -666,7 +666,7 @@ action_followthrough_incident() {  # <task> <action-state> <id> <incident> <owne
       reason="check: action-followthrough-escalate $task $id $incident owner-state=$ostate triage=$triage: authority decision needed - $next, or stop the task; unresolved since $mk_first" ;;
   esac
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  if [ ! -f "$action_state/$task.actions" ] && { [ "$id" != checkpoint ] || [ ! -f "$action_state/$task.meta" ]; }; then
+  if [ ! -f "$action_state/$task.actions" ] && { { [ "$id" != checkpoint ] && [ "$id" != open-decision ]; } || [ ! -f "$action_state/$task.meta" ]; }; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
@@ -716,6 +716,9 @@ action_followthrough_lines() {  # <task> <action-state> <now>
   fi
   if [ -n "$line" ]; then printf '%s\n' "$line"
   else printf 'checkpoint\tcheckpoint\tok\tnone\t0\t%s\t0\tprogress\n' "$task"; fi
+  line=$(fm_action_open_decision_incident "$action_state" "$task" "$now")
+  if [ -n "$line" ]; then printf '%s\n' "$line"
+  else printf 'open-decision\topen-decision\tok\tnone\t0\t%s\t0\tclosed\n' "$task"; fi
 }
 
 # Per-task follow-through poll: observe model-independent start evidence, then
@@ -3166,6 +3169,7 @@ EOF
     fi
   fi
 
+  fm_action_observer_record "$STATE" || true
   for action_ledger in "$STATE"/*.actions "$STATE/parent-route"/*.actions "$STATE"/*.meta; do
     [ -f "$action_ledger" ] || continue
     action_task=${action_ledger##*/}; action_task=${action_task%.*}

@@ -35,6 +35,10 @@
 #       and evidence. FM_ACTION_CHECKPOINT_SECS (3600) bounds the checkpoint.
 #       Only a task its worker owns can be MISSED; tasks waiting on firstmate
 #       or in a declared wait are listed with their owner and never missed here.
+#       The all-tasks form leads with an `observer` line: check cadence
+#       (FM_CHECK_CADENCE_BOUND_SECS, 360) and beat liveness reported
+#       separately; acceptance=FAILED keeps every over-bound interval the
+#       watcher poll recorded in state/.check-cadence-misses until cleared by hand.
 #   progress <task> --reason TEXT [--at EPOCH]
 #       A supervisor's inspected observation that the worker is genuinely
 #       progressing; renews the task's checkpoint with source supervisor:TEXT.
@@ -102,6 +106,7 @@ if [ "${1:-}" = register ]; then
     fm_pr_task_id_valid "$REG_TASK" || die "invalid task id: $REG_TASK"
     fm_action_register "$STATE" "$REG_TASK" "$REG_NOW"
   else
+    fm_action_observer "$STATE" "$REG_NOW"
     for REG_META in "$STATE"/*.meta; do
       [ -f "$REG_META" ] || continue
       REG_TASK=${REG_META##*/}; REG_TASK=${REG_TASK%.meta}

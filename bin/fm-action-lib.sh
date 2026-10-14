@@ -70,6 +70,20 @@
 # waiting on firstmate or a declared wait is listed with its owner and never an
 # incident here, because the existing decision and wait paths own those.
 #
+# OBSERVER. The same register also answers whether the observer itself is
+# alive and on cadence: fm_action_observer_record, called by the watcher poll
+# (no second timer), appends every interval between two `.last-check` touches
+# that exceeded FM_CHECK_CADENCE_BOUND_SECS to state/.check-cadence-misses, an
+# append-only log nothing resets, so a failed cadence acceptance stays visible
+# after the cadence recovers. Beat liveness (`.last-watcher-beat`) is reported
+# separately from check cadence. Neither diagnoses the scheduler's cause.
+#
+# STALE OPEN BLOCKER. A `blocked` record the fold holds open outranks later
+# events by design (fm_crew_state reports it), and a worker that resumed
+# without an additive `resolved` line leaves that record standing. That is a
+# record-lifecycle defect, reported as the `open-decision-stale` incident with
+# the exact additive line that closes it; the fold itself is never weakened.
+#
 # LADDER. A reported incident advances through bounded stages in the watcher,
 # each emitted once: 0 report, 1 triage (a ledger action `triage-<id>` owned by
 # the triage owner, ACKed by the wake acknowledgement and closed only by a
@@ -83,6 +97,8 @@ FM_ACTION_START_SECS_DEFAULT=300
 FM_ACTION_CHECKPOINT_SECS_DEFAULT=3600
 FM_ACTION_TRIAGE_SECS_DEFAULT=600
 FM_ACTION_ESCALATE_SECS_DEFAULT=1800
+FM_ACTION_CHECK_CADENCE_SECS_DEFAULT=360
+FM_ACTION_BEAT_GAP_SECS_DEFAULT=120
 
 fm_action_start_secs() {
   local s=${FM_ACTION_START_SECS:-$FM_ACTION_START_SECS_DEFAULT}
@@ -457,6 +473,7 @@ fm_action_register() {  # <state-dir> <task-id> <now-epoch>
   open=
   if declare -F status_open_decisions >/dev/null 2>&1; then
     open=$(status_open_decisions "$state/$task.status" "$kind" 2>/dev/null | awk -F'\t' 'NR == 1 && $2 != "" { print " open-decision=" $2 ":" $1 }' || true)
+    [ -z "$(fm_action_stale_open_blocker "$state" "$task")" ] || open="$open STALE-OPEN-BLOCKER"
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$task" "$owner" "$st" "$last" "$src" "$next" "$verdict" "status=${verb:-none} source=$src$open"
 }
@@ -464,10 +481,92 @@ fm_action_register() {  # <state-dir> <task-id> <now-epoch>
 # Fold-shaped incident line for a MISSED register verdict, else nothing.
 fm_action_checkpoint_incident() {  # <state-dir> <task-id> <now-epoch>
   local t owner st last src next verdict evidence
-  IFS=$'\t' read -r t owner st last src next verdict evidence < <(fm_action_register "$@")
+  IFS=$'\t' read -r t owner st last src next verdict evidence < <(fm_action_register "$@") || true
   [ "${verdict:-}" = MISSED ] || return 0
   printf 'checkpoint\tcheckpoint\t%s\tcheckpoint-missed\t%d\t%s\t%s\t%s\n' \
     "$st" "$(( $3 - last ))" "$owner" "$next" "no progress since $last ($evidence)"
+}
+
+# Lowest-numbered still-open `blocked` record of the task's own that a later
+# worker-stamped `working` line outlived: "<key>\t<opened-epoch>", else nothing.
+fm_action_stale_open_blocker() {  # <state-dir> <task-id>
+  local state=$1 task=$2 kind open key verb opened worked
+  declare -F status_open_decisions >/dev/null 2>&1 || return 0
+  kind=$(fm_action_meta "$state" "$task" kind)
+  open=$(status_open_decisions "$state/$task.status" "$kind" 2>/dev/null | awk -F'\t' '$2 == "blocked" { print $1; exit }') || return 0
+  [ -n "$open" ] || return 0
+  key=$open
+  verb=blocked
+  opened=$(awk -v v="$verb" '$1 == v { if (match($0, /\[at=[0-9]+\]/)) { e = substr($0, RSTART + 4, RLENGTH - 5) + 0; if (e > m) m = e } } END { if (m) print m }' "$state/$task.status" 2>/dev/null || true)
+  worked=$(awk '$1 == "working" { if (match($0, /\[at=[0-9]+\]/)) { e = substr($0, RSTART + 4, RLENGTH - 5) + 0; if (e > m) m = e } } END { if (m) print m }' "$state/$task.status" 2>/dev/null || true)
+  [ -n "$opened" ] && [ -n "$worked" ] && [ "$worked" -gt "$opened" ] || return 0
+  printf '%s\t%s\n' "$key" "$opened"
+}
+
+# Fold-shaped incident line for a stale open blocker, else nothing.
+fm_action_open_decision_incident() {  # <state-dir> <task-id> <now-epoch>
+  local key opened
+  [ -f "$1/$2.meta" ] || return 0
+  [ "$(fm_action_meta "$1" "$2" kind)" != secondmate ] || return 0
+  IFS=$'\t' read -r key opened < <(fm_action_stale_open_blocker "$1" "$2") || true
+  [ -n "${key:-}" ] || return 0
+  printf 'open-decision\topen-decision\topen\topen-decision-stale\t%d\t%s\t%s\t%s\n' "$(( $3 - opened ))" "$2" "$opened" \
+    "blocked record key=$key opened $opened was never closed; the owner appends: resolved [at=<epoch>] [key=$key]: <how it cleared> to $2.status"
+}
+
+# Observer cadence: record every over-bound interval between two check touches,
+# and every gap between two watcher beacon touches that shows no watcher ran in
+# between (a fresh beacon alone does not prove continuous ticking).
+fm_action_observer_record() {  # <state-dir>
+  local state=$1 m prev bound b bprev bgap
+  declare -F fm_path_mtime >/dev/null 2>&1 || return 0
+  b=$(fm_path_mtime "$state/.last-watcher-beat") || b=
+  case "$b" in ''|*[!0-9]*) ;; *)
+    bprev=$(cat "$state/.beat-gap-seen" 2>/dev/null || true)
+    if [ "$bprev" != "$b" ]; then
+      bgap=$(fm_action_bound FM_BEAT_GAP_BOUND_SECS "$FM_ACTION_BEAT_GAP_SECS_DEFAULT")
+      case "$bprev" in ''|*[!0-9]*) ;; *)
+        if [ $((b - bprev)) -gt "$bgap" ]; then
+          printf '%s\t%s\t%s\n' "$b" "$((b - bprev))" "$bgap" >> "$state/.beat-gaps" || return 1
+        fi ;;
+      esac
+      printf '%s\n' "$b" > "$state/.beat-gap-seen"
+    fi ;;
+  esac
+  m=$(fm_path_mtime "$state/.last-check") || return 0
+  case "$m" in ''|*[!0-9]*) return 0 ;; esac
+  prev=$(cat "$state/.check-cadence-seen" 2>/dev/null || true)
+  [ "$prev" != "$m" ] || return 0
+  bound=$(fm_action_bound FM_CHECK_CADENCE_BOUND_SECS "$FM_ACTION_CHECK_CADENCE_SECS_DEFAULT")
+  case "$prev" in ''|*[!0-9]*) ;; *)
+    if [ $((m - prev)) -gt "$bound" ]; then
+      printf '%s\t%s\t%s\n' "$m" "$((m - prev))" "$bound" >> "$state/.check-cadence-misses" || return 1
+    fi ;;
+  esac
+  printf '%s\n' "$m" > "$state/.check-cadence-seen"
+}
+
+# Register-shaped observer line: check cadence and beat liveness, separately.
+fm_action_observer() {  # <state-dir> <now-epoch>
+  local state=$1 now=$2 chk beat bound grace verdict=ok misses last_miss='' beat_state=ok gaps last_gap=''
+  declare -F fm_path_mtime >/dev/null 2>&1 || return 0
+  bound=$(fm_action_bound FM_CHECK_CADENCE_BOUND_SECS "$FM_ACTION_CHECK_CADENCE_SECS_DEFAULT")
+  grace=$(fm_action_bound FM_GUARD_GRACE 300)
+  chk=$(fm_path_mtime "$state/.last-check") || chk=0
+  beat=$(fm_path_mtime "$state/.last-watcher-beat") || beat=0
+  [ $((now - chk)) -le "$bound" ] || verdict=MISSED
+  [ $((now - beat)) -le "$grace" ] || { beat_state=STALE; verdict=MISSED; }
+  misses=0
+  [ ! -f "$state/.check-cadence-misses" ] || misses=$(wc -l < "$state/.check-cadence-misses")
+  misses=${misses//[!0-9]/}
+  [ "${misses:-0}" -eq 0 ] || last_miss=" last-miss=$(tail -1 "$state/.check-cadence-misses" | awk -F'\t' '{print $1 ":" $2 "s>" $3 "s"}')"
+  gaps=0
+  [ ! -f "$state/.beat-gaps" ] || gaps=$(wc -l < "$state/.beat-gaps")
+  gaps=${gaps//[!0-9]/}
+  [ "${gaps:-0}" -eq 0 ] || last_gap=" last-beat-gap=$(tail -1 "$state/.beat-gaps" | awk -F'\t' '{print $1 ":" $2 "s>" $3 "s"}')"
+  printf 'observer\twatcher\tobserver\t%s\tcheck-cadence\t%s\t%s\tcheck-age=%ss beat-age=%ss beat=%s acceptance=%s misses=%s%s beat-gaps=%s%s\n' \
+    "$chk" "$((chk + bound))" "$verdict" "$((now - chk))" "$((now - beat))" "$beat_state" \
+    "$([ "${misses:-0}" -eq 0 ] && echo clean || echo FAILED)" "${misses:-0}" "$last_miss" "${gaps:-0}" "${last_gap:-}"
 }
 
 # Ladder stage for an incident first reported at <first-epoch>:
@@ -509,6 +608,8 @@ fm_action_triage_verified() {  # <state-dir> <task-id> <triage-id> <now-epoch>
   incident=$(fm_action_field "$1" "$2" "$3" incident)
   if [ "$target" = checkpoint ]; then
     [ -z "$(fm_action_checkpoint_incident "$1" "$2" "$4")" ]
+  elif [ "$target" = open-decision ]; then
+    [ -z "$(fm_action_open_decision_incident "$1" "$2" "$4")" ]
   else
     ! fm_action_incidents "$1" "$2" "$4" | awk -F'\t' -v id="$target" -v inc="$incident" '$1 == id && $4 == inc { f = 1 } END { exit !f }'
   fi

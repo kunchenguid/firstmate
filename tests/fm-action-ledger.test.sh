@@ -643,6 +643,60 @@ test_teardown_retires_progress_and_ladder_state() {
   pass "retirement removes the progress note, checkpoint throttle and ladder marker"
 }
 
+test_observer_cadence_and_liveness_are_separate_and_retained() {
+  local dir s out
+  dir=$(stalled_case observer)
+  s="$dir/home/state"
+  record() { bash -c '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-action-lib.sh"; fm_action_observer_record "$2"' _ "$ROOT" "$s"; }
+  touch -d @1999990000 "$s/.last-check"; record || fail "first record"
+  touch -d @1999990300 "$s/.last-check"; record || fail "in-bound record"
+  assert_absent "$s/.check-cadence-misses"
+  touch -d @1999990714 "$s/.last-check"; record || fail "over-bound record"
+  assert_equals "1999990714	414	360" "$(cat "$s/.check-cadence-misses")" "an over-bound interval is retained with its length and bound"
+  touch -d @1999990720 "$s/.last-watcher-beat"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register --now 1999990800 | head -1)
+  assert_contains "$out" "check-age=86s" "check cadence is reported by its own age"
+  assert_contains "$out" "beat=ok" "beat liveness is reported separately"
+  assert_contains "$out" "acceptance=FAILED misses=1" "a recovered cadence does not reset the failed acceptance"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register --now 1999991500 | head -1)
+  assert_contains "$out" "MISSED" "a live gap is missed"
+  assert_contains "$out" "beat=STALE" "a stale observer is distinguished from a late check"
+  touch -d @1999991490 "$s/.last-watcher-beat"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register --now 1999991500 | head -1)
+  assert_contains "$out" "beat=ok" "a fresh beat with a late check is a cadence miss, not a dead observer"
+  assert_contains "$out" "MISSED" "the late check is still missed"
+  touch -d @1999991000 "$s/.last-watcher-beat"; record || fail "beat record"
+  touch -d @1999991010 "$s/.last-watcher-beat"; record || fail "beat record in bound"
+  assert_absent "$s/.beat-gaps"
+  touch -d @1999991400 "$s/.last-watcher-beat"; record || fail "beat gap record"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register --now 1999991405 | head -1)
+  assert_contains "$out" "beat=ok" "a fresh beacon is reported as fresh"
+  assert_contains "$out" "beat-gaps=1 last-beat-gap=1999991400:390s>120s" "a gap with no watcher between two beacons stays visible beside a fresh beacon"
+  pass "check cadence and observer liveness are separate, and a failed cadence acceptance is retained"
+}
+
+test_unclosed_blocker_is_a_record_lifecycle_incident() {
+  local dir s out tid
+  dir=$(stalled_case stale-blocker)
+  s="$dir/home/state"
+  printf 'blocked [at=%s]: waiting on the GPU\nworking [at=%s]: GPU free, resumed\n' $((W0 + 10)) $((W0 + 20)) >> "$s/t1.status"
+  printf '%s\tfixture\n' $((W0 + 3000)) > "$s/t1.progress"
+  out=$(poll_at "$dir" $((W0 + 3100)))
+  assert_contains "$out" "open-decision-stale" "a blocker outlived by later work is reported as a lifecycle defect"
+  assert_contains "$out" "resolved [at=<epoch>] [key=default]" "the report names the exact additive line that closes it"
+  assert_contains "$(cat "$s/t1.status")" "blocked [at=" "the authoritative record is not rewritten"
+  assert_equals "" "$(poll_at "$dir" $((W0 + 3200)))" "the unchanged defect is not repeated"
+  printf 'resolved [at=%s]: GPU free, blocker cleared\n' $((W0 + 3300)) >> "$s/t1.status"
+  assert_equals "" "$(poll_at "$dir" $((W0 + 3400)))" "the additive resolved line clears it"
+  assert_absent "$s/.t1.action-incident-open-decision"
+  dir=$(stalled_case live-decision)
+  s="$dir/home/state"
+  printf 'needs-decision [at=%s]: pick A or B\nworking [at=%s]: independent work meanwhile\n' $((W0 + 10)) $((W0 + 20)) >> "$s/t1.status"
+  printf '%s\tfixture\n' $((W0 + 3000)) > "$s/t1.progress"
+  assert_equals "" "$(poll_at "$dir" $((W0 + 3100)))" "a genuine open question with independent work is not a lifecycle defect"
+  pass "an unclosed blocker is reported as a record-lifecycle defect without weakening the authoritative fold"
+}
+
 test_ready_but_unstarted
 test_handled_but_unexecuted
 test_start_and_refusal_satisfy_the_bound
@@ -671,3 +725,5 @@ test_pipeline_progress_clears_a_missed_checkpoint
 test_ordinary_steer_start_is_observed_not_assumed
 test_restart_resumes_the_ladder_from_durable_records
 test_teardown_retires_progress_and_ladder_state
+test_observer_cadence_and_liveness_are_separate_and_retained
+test_unclosed_blocker_is_a_record_lifecycle_incident
