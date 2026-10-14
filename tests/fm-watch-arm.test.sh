@@ -1720,8 +1720,15 @@ SH
   kill -0 "$ARM_PID" 2>/dev/null || { kill "$reader" 2>/dev/null; fail "the arm ended when its watcher was killed instead of replacing it: runs=$runs out=$(cat "$dir/arm.out")"; }
   [ "$runs" -ge 3 ] || { kill "$ARM_PID" "$reader" 2>/dev/null; fail "the arm replaced a killed watcher only $runs time(s)"; }
   [ "$(grep -c 'signal-exit' "$state/.watch-cycle-exits.log")" -ge 2 ] || fail "the cycle ledger did not record the two killed watchers: $(cat "$state/.watch-cycle-exits.log")"
-  # A watcher the stop path ends with TERM is not replaced: the arm ends.
-  watcher=$(cat "$state/.watch.lock/pid")
+  # A watcher the stop path ends with TERM is not replaced: the arm ends. Wait
+  # for the third watcher to hold the lock, since the second one's pid is dead.
+  polls=0
+  watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null)
+  while [ "$polls" -lt 100 ] && { [ -z "$watcher" ] || ! kill -0 "$watcher" 2>/dev/null; }; do
+    sleep 0.1
+    polls=$((polls + 1))
+    watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null)
+  done
   kill -TERM "$watcher" 2>/dev/null
   polls=0
   while [ "$polls" -lt 200 ] && kill -0 "$ARM_PID" 2>/dev/null; do
