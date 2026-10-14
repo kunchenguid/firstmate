@@ -14,8 +14,8 @@
 # With several lines, pick runs quota-axi once:
 #   env -u CLAUDE_CONFIG_DIR QUOTA_AXI_CLAUDE_PROFILES=<path entries joined
 #   by ':'> quota-axi --provider claude --full --json
-# bounded to 60 seconds, and validates the
-# result with fm_quota_json_valid from bin/fm-quota-axi-lib.sh. Each declared
+# bounded to 60 seconds, and validates the result with fm_quota_json_valid
+# from bin/fm-quota-axi-lib.sh. Each declared
 # entry is then bound to at most one schema-6 claude lane through the lane's
 # --full accountLocator:
 #   ordinary  the lane whose keychainService is exactly the unsuffixed
