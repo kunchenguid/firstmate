@@ -1710,11 +1710,10 @@ backlog_done_args() {
   case "$KIND" in
     scout)
       data_relative=$(fm_backlog_data_relative "$DATA") || return 1
-      if [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
-        BACKLOG_DONE_ARGS=(--note "$FM_BACKLOG_UNVERIFIED_NOTE")
-      else
-        BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
-      fi
+      BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+      # The scout's report passed its own gate, so its link stays; the note
+      # beside it says the worktree behind it was never checked.
+      [ "$RETIRE_UNIDENTIFIED" != 1 ] || BACKLOG_DONE_ARGS+=(--note "$FM_BACKLOG_UNVERIFIED_NOTE")
       ;;
     *)
       if [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
@@ -3687,9 +3686,43 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
+# A retirement knows no worktree, but the pool slot may still carry this task's
+# durable claim (<pool>/<slot>/.fm-slot-owner, written by fm-spawn). That claim
+# is recorded evidence, never a guess: this reads it and drops only a claim that
+# names this exact task. The slot's checkout is not returned, reset, or written
+# to, so the success line states that the slot's checkout was left as it was.
+# Sets RETIRE_SLOT_NOTE to what actually happened.
+RETIRE_SLOT_NOTE=
+retire_release_claimed_slot() {
+  local status_json path released=0 unreadable=0
+  RETIRE_SLOT_NOTE="no durable pool-slot claim naming this task was found, so a pool slot may still be claimed"
+  [ -n "$PROJ" ] && [ -d "$PROJ" ] || return 0
+  status_json=$(cd "$PROJ" && treehouse status --json 2>/dev/null) || return 0
+  while IFS= read -r path; do
+    [ -n "$path" ] && [ -d "$path" ] || continue
+    fm_treehouse_slot_owner_state "$path" "$ID"
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      mine)
+        fm_treehouse_slot_owner_release "$path" "$ID"
+        fm_treehouse_slot_owner_state "$path" "$ID"
+        if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then unreadable=1; else released=$((released + 1)); fi
+        ;;
+      unsafe) unreadable=1 ;;
+    esac
+  done < <(printf '%s\n' "$status_json" | jq -r '.[]?.path? // empty' 2>/dev/null)
+  if [ "$released" -gt 0 ] && [ "$unreadable" = 0 ]; then
+    RETIRE_SLOT_NOTE="released the pool-slot claim that named this task; the slot's checkout was not returned or touched"
+  elif [ "$released" -gt 0 ]; then
+    RETIRE_SLOT_NOTE="released the pool-slot claim that named this task, but another slot claim could not be read, so a pool slot may still be claimed; no checkout was returned or touched"
+  elif [ "$unreadable" = 1 ]; then
+    RETIRE_SLOT_NOTE="a pool-slot claim could not be read, so a pool slot may still be claimed"
+  fi
+}
+
 if [ "$KIND" != secondmate ] && [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
   # No worktree is known, so no run or process is attributed to a directory.
   reap_task_worktree_processes tasktmp "$TASK_TMP"
+  retire_release_claimed_slot
 elif [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
@@ -3923,13 +3956,14 @@ if [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
       "Retired without a verified close: $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
       "The task record named no worktree, so landed work was NOT checked and no worktree was touched." \
       "The endpoint ${T:-none} was closed and the task record was released." \
+      "Pool slot: $RETIRE_SLOT_NOTE." \
       "Any worktree this task used was never identified here; reconcile it by hand if one survives." \
       > "$DATA/$ID/retired-unverified.txt" \
     || echo "warning: could not write $DATA/$ID/retired-unverified.txt; the backlog note still records that cleanup was not verified" >&2
 fi
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
-[ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
+[ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" $([ "$RETIRE_UNIDENTIFIED" != 1 ] || echo unverified) || true
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
@@ -4008,7 +4042,7 @@ if [ "$TEARDOWN_POOL_SLOT_LOST" = 1 ]; then
 elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
-  echo "RETIRED UNVERIFIED $ID: record released and endpoint ${T:-none} closed, but its worktree could not be identified, so landed work was NOT checked and no worktree was touched; this is not an ordinary clean close"
+  echo "RETIRED UNVERIFIED $ID: record released and endpoint ${T:-none} closed, but its worktree could not be identified, so landed work was NOT checked and no worktree was touched; $RETIRE_SLOT_NOTE; this is not an ordinary clean close"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
 else

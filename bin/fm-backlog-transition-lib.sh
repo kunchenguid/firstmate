@@ -883,6 +883,15 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
   printf '%s/%s.backlog-close\n' "$1" "$2"
 }
 
+# A completion --report link must be a plain relative path inside the data
+# directory: no traversal, no absolute path, no flag-looking value.
+fm_backlog_close_marker_report_ok() {  # <report-path>
+  local arg_value=$1
+  [ "${#arg_value}" -le 4096 ] \
+    && [ -n "${arg_value// /}" ] \
+    && case "$arg_value" in .|..|-*|/*|../*|*/../*|*/..) false ;; *) true ;; esac
+}
+
 fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
   local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
   local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
@@ -1039,14 +1048,17 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
                 }
             }
           ;;
-        --report)
-          arg_value=${args[1]}
-          [ "${#arg_value}" -le 4096 ] \
-            && [ -n "${arg_value// /}" ] \
-            && case "$arg_value" in .|..|-*|/*|../*|*/../*|*/..) false ;; *) true ;; esac
-          ;;
+        --report) fm_backlog_close_marker_report_ok "${args[1]}" ;;
         *) false ;;
       esac || { FM_BACKLOG_TRANSITION_ERROR="invalid pending-close arguments in $marker"; return 1; }
+      ;;
+    4)
+      # A scout retired without a verified close keeps its report link and adds
+      # the unverified note beside it.
+      { [ "${args[0]}" = --report ] && fm_backlog_close_marker_report_ok "${args[1]}" \
+          && [ "${args[2]}" = --note ] \
+          && [ "${args[3]}" = "${FM_BACKLOG_UNVERIFIED_NOTE// /%20}" ]; } \
+        || { FM_BACKLOG_TRANSITION_ERROR="invalid pending-close arguments in $marker"; return 1; }
       ;;
     *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close arguments in $marker"; return 1 ;;
   esac
@@ -1160,9 +1172,12 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ]; then
-    args[1]=${args[1]//%20/ }
-  fi
+  local arg_index
+  for arg_index in "${!args[@]}"; do
+    if [ "$arg_index" -gt 0 ] && [ "${args[$((arg_index - 1))]}" = --note ]; then
+      args[arg_index]=${args[arg_index]//%20/ }
+    fi
+  done
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if ! fm_backlog_record_present "$meta" "task record" "$state"; then
