@@ -253,6 +253,15 @@ if command -v jq >/dev/null 2>&1; then
 else
   printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
 fi
+# A Forgejo pull request also arms the captain-comment poll beside the merge
+# poll, so feedback left as a "/fm " comment on the PR wakes the owning crew
+# (bin/fm-pr-comment-poll.sh owns that contract). The merge watch this script
+# just published stays the delivery surface, so a comment-poll failure is a
+# warning, never a refusal of the PR recording itself.
+if [ "$PROVIDER" = forgejo ]; then
+  "$SCRIPT_DIR/fm-pr-comment-poll.sh" arm "$ID" >/dev/null \
+    || printf 'pr-comments: comment poll not armed; captain comments on %s will not wake\n' "$URL" >&2
+fi
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything
