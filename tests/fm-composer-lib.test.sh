@@ -773,9 +773,9 @@ test_matrix_opencode_leftbar_cwd_furniture() {
 
   # A composer holding only "/" - the first keystroke of a slash command -
   # must never read empty. Its single character trivially clears the position
-  # gate, so only the "~/"-prefix check keeps it typed text: a bare "/" start
-  # is not accepted as the cwd rail (every evidenced fleet pane renders "~/..."),
-  # on the row directly above the footer and on top of the short-cwd rail alike.
+  # gate, so only the path-start check keeps it typed text: a lone "/" with no
+  # name after it is not accepted as the cwd rail, on the row directly above
+  # the footer and on top of the short-cwd rail alike.
   # Styled profiles prove it real (pending); the unstyled profile keeps the
   # leftbar's existing unknown deferral - never empty either way.
   typed_row="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238m/${ESC}[0m"
@@ -794,15 +794,16 @@ test_matrix_opencode_leftbar_cwd_furniture() {
   assert_screen "opencode right-aligned non-path token stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
   diverge=$'transcript line\n  ┃                                                                                                                     deck-07-\n  ┃  Build · gpt-oss-120b Internal OVHcloud                                                                          failure-modes'
   assert_screen "opencode bare branch fragment without a path start stays typed" pending "$CAPS_TMUX" "$diverge" 1
-  # The topmost fragment's OWN bytes must carry the "~/" prefix: a typed lone
-  # "~" directly above a rail whose top fragment starts with "/" (an
-  # outside-$HOME cwd) must not be absorbed into a "~/" assembled across the
-  # typed-row boundary, which would read a real composer empty.
+  # The topmost fragment's OWN bytes decide the path start: a typed lone "~"
+  # directly above a rail whose top fragment is absolute (an outside-$HOME
+  # cwd) is not absorbed into the run, so the rail is furniture and the typed
+  # "~" row keeps the composer pending.
   diverge=$'transcript line\n  ┃  ~\n  ┃                                                            /Volumes/Data/worktree:fm/branch\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
   assert_screen "opencode typed lone tilde above outside-HOME rail stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
   assert_screen "opencode typed lone tilde above outside-HOME rail stays typed on herdr" pending "$CAPS_STYLED" "$diverge"
-  [ -z "$(_fm_composer_leftbar_cwd_start "$diverge" 1 3)" ] \
-    || fail "a typed lone '~' must not assemble '~/' across the typed-row boundary"
+  start=$(_fm_composer_leftbar_cwd_start "$diverge" 1 3)
+  [ "$start" = 2 ] \
+    || fail "a typed lone '~' must stay outside the absolute rail run, got '$start'"
 
   # The position gate measures the gap against the REGION's width (the widest
   # trimmed plain row across first..last), never against the gated row's own
@@ -859,6 +860,55 @@ test_matrix_opencode_leftbar_cwd_furniture() {
   typed="$(head -n 2 <<< "$composer")"$'\n'"${typed_row}"$'\n'"$(tail -n 3 <<< "$composer")"
   assert_screen "opencode lone slash typed above the short cwd rail stays pending on tmux" pending "$CAPS_TMUX" "$typed" 2
   pass "matrix: opencode 1.18.31's right-aligned cwd:branch furniture reads empty; left-edge text stays pending"
+}
+
+test_matrix_opencode_leftbar_abs_cwd_furniture() {
+  # Real OpenCode 1.18.31 worker pane captured read-only on 2026-10-14 through
+  # the tmux adapter's capture (308 columns, #{cursor_y} 62 = 14 in the 20-row
+  # tail), sanitized: transcript rows, model name, and path were rewritten
+  # with equal visible widths. The worker's cwd lies OUTSIDE $HOME, so the
+  # rail is absolute: "/srv/pool/.workspace/project-0a1b2c/" sits directly
+  # above the footer row and its tail continues at the footer row's right
+  # end. The busy fixture carries the "esc interrupt" status line below the
+  # composer floor; the idle twin blanks that and the spinner. The left-bar
+  # region ends at the floor row, so busy and idle read alike.
+  local busy idle composer start typed typed_row long_gap out rail_row footer_row
+  busy=$(<"$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-busy-wide-abs-cwd.ansi")
+  idle=$(<"$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-wide-abs-cwd.ansi")
+  assert_screen "opencode 1.18.31 busy wide absolute cwd rail on tmux" empty "$CAPS_TMUX" "$busy" 14
+  assert_screen "opencode 1.18.31 idle wide absolute cwd rail on tmux" empty "$CAPS_TMUX" "$idle" 14
+  composer=$(printf '%s\n' "$busy" | sed -n '14,17p')
+  assert_screen "opencode wide absolute cwd rail on herdr" empty "$CAPS_STYLED" "$composer"
+  assert_screen "opencode wide absolute cwd rail on cmux/orca" empty "$CAPS_PLAIN" "$composer"
+  start=$(_fm_composer_leftbar_cwd_start "$composer" 0 3)
+  [ "$start" = 2 ] || fail "the absolute rail must be recognised on the row above the footer, got '$start'"
+  rail_row=$(_fm_composer_screen_row 2 "$composer")
+  footer_row=$(_fm_composer_screen_row 3 "$composer")
+
+  # Negatives on the same wide geometry: each stays pending.
+  long_gap=$(printf '%0.s ' $(seq 1 260))
+  typed=$'transcript line\n  ┃'"$long_gap"$'/\n  ┃  Build · Example Model 1 Pro'
+  assert_screen "opencode right-aligned lone slash stays pending on tmux" pending "$CAPS_TMUX" "$typed" 1
+  [ -z "$(_fm_composer_leftbar_cwd_start "$typed" 1 2)" ] \
+    || fail "a right-aligned lone '/' must not be recognised as cwd furniture"
+  typed=$'transcript line\n  ┃'"$long_gap"$'///\n  ┃  Build · Example Model 1 Pro'
+  [ -z "$(_fm_composer_leftbar_cwd_start "$typed" 1 2)" ] \
+    || fail "a right-aligned slash-only token must not be recognised as cwd furniture"
+  typed_row="  ${ESC}[38;5;75m┃${ESC}[48;5;234m  ${ESC}[38;5;255m/exit${ESC}[0m"
+  typed=$(printf '%s\n' "$composer" | sed -n 1p)$'\n'"$typed_row"$'\n'"$footer_row"
+  assert_screen "opencode /exit at the left edge of a wide pane stays pending" pending "$CAPS_TMUX" "$typed" 1
+  typed_row="  ${ESC}[38;5;75m┃${ESC}[48;5;234m  ${ESC}[38;5;255m/srv/pool/notes.md${ESC}[0m"
+  typed=$(printf '%s\n' "$composer" | sed -n 1p)$'\n'"$typed_row"$'\n'"$footer_row"
+  assert_screen "opencode absolute path typed at the left edge stays pending" pending "$CAPS_TMUX" "$typed" 1
+  typed_row="  ${ESC}[38;5;75m┃${ESC}[48;5;234m  ${ESC}[38;5;255mReply with OK.${ESC}[0m"
+  typed="${typed_row}"$'\n'"$rail_row"$'\n'"$footer_row"
+  assert_screen "opencode typed text above the absolute rail stays pending on tmux" pending "$CAPS_TMUX" "$typed" 0
+  assert_screen "opencode typed text above the absolute rail stays pending on herdr" pending "$CAPS_STYLED" "$typed"
+  # Extraction scopes user content to the typed row, never the rail fragment.
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$typed")
+  [ "$out" = 'Reply with OK.' ] \
+    || fail "extraction must exclude the absolute rail fragment, got '$out'"
+  pass "matrix: opencode's absolute cwd rail on a wide pane reads empty busy and idle; typed text stays pending"
 }
 
 test_matrix_grok_titled_bottom_border() {
@@ -1191,6 +1241,7 @@ test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_opencode_leftbar_cwd_furniture
+test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
 test_matrix_kimi_bordered_shell_glyph_box

@@ -903,7 +903,30 @@ empty
 The same verdict held on deck-01 and deck-02 after the fix, and the byte-captured 20-row tail with its real `#{cursor_y}` is carried in `tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-cwd.ansi`.
 The same day, the idle pane `0:fm-anvil-backlog-docs-hygiene` (272x70, `#{cursor_y}` 64) showed that a cwd:branch shorter than the rail wraps BOTTOM-aligned: its two upper composer rows were blank rail, the single fragment `~/.treehouse/anvil-99d6f9/2/anvil:fm/` sat directly above the footer row, and the footer row's right end carried `anvil-backlog-docs-hygiene`; that read-only capture is `tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-short-cwd.ansi` and answers `empty` too.
 `test_matrix_opencode_leftbar_cwd_furniture` in `tests/fm-composer-lib.test.sh` asserts `empty` on both fixtures with the cursor anchored inside the furniture and on the cropped cursorless profiles, a left-edge typed line (prose and a path-shaped string alike) staying `pending`, and a right-aligned fragment that is not part of a `path[:branch]` staying typed.
-`_fm_composer_leftbar_cwd_start` in `bin/fm-composer-lib.sh` recognises the run structurally - contiguous single-token rows immediately above the footer row whose gap after the bar exceeds half the region's width (the widest trimmed plain row across the region), whose TOPMOST fragment itself begins with `~/` and whose fragments carry no whitespace - so a wrong call defers except the accepted residual: a lone whitespace-free `~/...` token typed so far right that its text starts beyond the region's midpoint in an otherwise empty composer; position, not shape alone, still decides. The `~/` prefix is checked on that top fragment's own bytes rather than on the concatenation, so a typed lone `~` directly above a rail whose top fragment starts with `/` cannot assemble a false `~/` across the typed-row boundary and read a real composer `empty`. A bare `/` start is deliberately not accepted, because a composer holding only `/` is the first keystroke of a slash command and must never read `empty`; a worker whose cwd lies outside `$HOME` keeps the old conservative `pending`. The footer row itself, tail fragment included, stays furniture through the existing last-row footer regex and is not read by the recognition.
+`_fm_composer_leftbar_cwd_start` in `bin/fm-composer-lib.sh` recognises the run structurally - contiguous single-token rows immediately above the footer row whose gap after the bar exceeds half the region's width (the widest trimmed plain row across the region), whose TOPMOST fragment itself begins with `~/` or is an absolute path with a name after its leading slash, and whose fragments carry no whitespace - so a wrong call defers except the accepted residual: a lone whitespace-free path token typed so far right that its text starts beyond the region's midpoint in an otherwise empty composer; position, not shape alone, still decides.
+The path start is checked on that top fragment's own bytes rather than on the concatenation, so a typed lone `~` directly above the rail stays an ordinary typed row.
+A lone `/` (or a slash-only token) is deliberately not accepted, because a composer holding only `/` is the first keystroke of a slash command and must never read `empty`; a typed slash command such as `/exit` starts at the left edge and fails the position gate.
+The footer row itself, tail fragment included, stays furniture through the existing last-row footer regex and is not read by the recognition.
+
+### 2026-10-14 OpenCode 1.18.31 absolute cwd rail on a wide tmux pane
+
+Verified on 2026-10-14 on Linux against OpenCode 1.18.31 tmux workers whose worktrees live under an absolute path outside `$HOME` (308-column panes), busy and idle alike.
+The rail's first fragment is an absolute path (`/...`) drawn right-aligned on the composer row above the Build footer, and the `~/`-only start rule read every such worker `pending`, skipping the doorbell and refusing `bin/fm-control.sh` exit and relaunch.
+Busy and idle read the same because the left-bar region ends at the composer's floor row and the `esc interrupt` status line below it is never examined.
+The sanitized 20-row busy capture (cursor row 14 in the tail) and its idle twin are `tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-busy-wide-abs-cwd.ansi` and `opencode-1.18.31-idle-wide-abs-cwd.ansi`; `test_matrix_opencode_leftbar_abs_cwd_furniture` asserts `empty` on both, `pending` for a right-aligned lone `/`, `/exit` and an absolute path typed at the left edge, and typed text above the rail, and that extraction excludes the rail fragment.
+The opt-in live check runs OpenCode in a wide pane under `/tmp` and asserts `empty` mid-turn and idle:
+
+```sh
+FM_OPENCODE_ABS_CWD_LIVE=1 bash tests/fm-opencode-abs-cwd-rail-live-e2e.test.sh
+```
+
+Observed output with the widening, and the mid-turn verdict with the `~/`-only rule:
+
+```text
+ok - opencode mid-turn absolute cwd rail on a 300-column pane reads empty
+ok - opencode idle absolute cwd rail on a 300-column pane reads empty
+not ok - mid-turn absolute cwd rail read 'pending', want empty
+```
 The cursorless backends still defer: on a cursorless read (Herdr and Zellij) a full-pane capture of this version answers `unknown` because the status rail below the composer floor row is contiguous non-blank content the selector refuses to outrank, which is the strict posture and not this defect; and very narrow panes where the cwd rail starts in the left half of the row defer the same way.
 
 ## Steering-inbox doorbell

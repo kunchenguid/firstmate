@@ -1333,7 +1333,8 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # which skipped the steering doorbell, the watcher's re-ring ladder, and
 # /exit typing for every such worker. The recognition is structural, never a
 # match on one machine's paths, and position-gated, so a wrong call defers
-# except the documented residual: a lone whitespace-free "~/..." token typed
+# except the documented residual: a lone whitespace-free "~/..." or absolute
+# "/<name>..." token typed
 # so far right that its text starts beyond the region's midpoint
 # (_fm_composer_leftbar_cwd_start).
 
@@ -1354,16 +1355,18 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 #     region), so real typed text - which starts at the left edge, inside
 #     the left half - is still typed text, and a path-shaped string a user
 #     typed there is typed text too (position, not shape alone, decides);
-#   - the run's TOPMOST fragment itself begins with "~/", so the fragments
-#     concatenate to a home-abbreviated path, optionally followed by
-#     ":<branch>" (each fragment is a single whitespace-free token).
-#     Checking the top fragment's own bytes keeps a typed lone "~" above the
-#     run from assembling a false "~/" across the typed-row boundary.
-#     A bare "/" start is deliberately NOT accepted: a
-#     composer holding only "/" is the first keystroke of a slash command
-#     and must never read empty, every evidenced fleet pane renders its
-#     cwd as "~/..." (the worktree pools live under $HOME), and a worker
-#     outside $HOME merely keeps the old conservative pending. The string's
+#   - the run's TOPMOST fragment itself begins with "~/" (a cwd under $HOME)
+#     or is an absolute path with at least one character that is neither "/"
+#     nor whitespace after its leading slash (a cwd outside $HOME, such as a
+#     worktree pool under /srv), so the fragments concatenate to a path,
+#     optionally followed by ":<branch>" (each fragment is a single
+#     whitespace-free token). Checking the top fragment's own bytes keeps a
+#     typed lone "~" above the run from assembling a false "~/" across the
+#     typed-row boundary. A lone "/" (or a run of slashes only) is
+#     deliberately NOT accepted: a composer holding only "/" is the first
+#     keystroke of a slash command and must never read empty. A typed slash
+#     command such as "/exit" starts at the left edge and fails the position
+#     gate above, so only a right-half token is at stake. The string's
 #     final fragment at the right end of the footer row is not read: that
 #     row is already furniture by the footer regex.
 # Anything else - a left-edge token, a multi-word row, a fragment that is
@@ -1371,7 +1374,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # ordinary verdict, so a wrong call defers (pending) unless the composer's
 # only content is a lone whitespace-free token that starts in the right
 # half of the region; that residual is accepted and pinned by test. A
-# fragment with no "~/" start (a bare tail
+# fragment with no path start (a bare tail
 # continuation, or a rail whose string is too long for the composer's
 # visible rows) fails the check by construction, deferring instead.
 # The tests operate on the plain row (fm_composer_strip_ansi), so the
@@ -1435,8 +1438,7 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
   [ -n "$top_frag" ] || return 1
   # The prefix is checked on the TOPMOST recognised fragment's own bytes, not
   # on the concatenation: a typed lone "~" directly above the run must not be
-  # absorbed into a "~/" assembled across the typed-row boundary (which would
-  # turn a real composer empty when the run's own top fragment starts with "/").
+  # absorbed into the run; it stays an ordinary typed row above it.
   # A shell case pattern cannot spell a literal "~/" without shellcheck
   # SC2088 (tilde does not expand in quotes), so the prefix is built once.
   local tilde tilde_slash
@@ -1444,6 +1446,7 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
   tilde_slash="$tilde/"
   case "$top_frag" in
     "$tilde_slash"*) printf '%s\n' "$start"; return 0 ;;
+    /*[!/]*) printf '%s\n' "$start"; return 0 ;;
   esac
   return 1
 }
