@@ -660,11 +660,18 @@ test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer() {
   printf -- '---\nname: firstmate-worker\n---\nproject facet\n' \
     > "$dir/wt/.polytoken/facets/firstmate-worker.md"
   printf 'polytoken' > "$dir/fake/becomes"
-  # The arm resolves the polytoken binary before its hook-layer refusal, so a
-  # stub must stand in on hosts without the real CLI; it is never launched.
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/polytoken"
+  # Profile validation precedes the hook-layer refusal, so the fixture must
+  # advertise its explicit pin without requiring a real Polytoken installation.
+  cat > "$dir/fakebin/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  'print models') printf '%s\n' 'zai/glm-5.3-flash' 'zai/glm-5.3-flash(low)' ;;
+  *) exit 1 ;;
+esac
+SH
   chmod +x "$dir/fakebin/polytoken"
-  out=$(run_control "$dir" rl45 relaunch --harness polytoken --note "switching runtime"); rc=$?
+  out=$(run_control "$dir" rl45 relaunch --harness polytoken \
+    --model zai/glm-5.3-flash --effort low --note "switching runtime"); rc=$?
   [ "$rc" -ne 0 ] || fail "a relaunch onto polytoken over a project hook layer must refuse"$'\n'"$out"
   assert_contains "$out" "not firstmate's to clobber" \
     "the refusal must come from the polytoken arm"$'\n'"$out"
