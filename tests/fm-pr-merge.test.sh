@@ -1973,7 +1973,7 @@ test_parses_pr_url_for_gh_axi() {
 }
 
 test_gitlab_url_resolves_and_merges() {
-  local case_dir rc
+  local case_dir rc merge_line
   case_dir=$(make_gitlab_case gitlab-merges)
 
   set +e
@@ -1987,6 +1987,11 @@ test_gitlab_url_resolves_and_merges() {
     "gitlab-merges: pr= was not recorded before merging"
   assert_grep "GITLAB_HOST=$MR_HOST api projects/group%2Fsubgroup%2Fproject/merge_requests/7 --hostname $MR_HOST --repo $MR_PROJECT_URL" "$case_dir/glab.log" \
     "gitlab-merges: the pre-merge state was not read from the project URL"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --auto-merge=false" ] \
+    || fail "gitlab-merges: unexpected merge invocation: '$merge_line'"
+  assert_grep "successful pipeline at head $MR_HEAD" "$case_dir/stderr" \
+    "gitlab-merges: the verified head was not reported"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "gitlab-merges: a merge request reached the GitHub CLI"
   pass "fm-pr-merge merges a GitLab merge request through glab instead of refusing it"
 }
@@ -2083,7 +2088,7 @@ test_gitlab_imposes_no_merge_method() {
 }
 
 test_gitlab_extra_args_forwarded() {
-  local case_dir rc
+  local case_dir rc merge_line
   case_dir=$(make_gitlab_case gitlab-extra-args)
 
   set +e
@@ -2103,6 +2108,9 @@ test_gitlab_extra_args_forwarded() {
   rc=$?
   set -e
   expect_code 0 "$rc" "gitlab-extra-args-attended: attended override should merge"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --remove-source-branch --auto-merge=false" ] \
+    || fail "gitlab-extra-args-attended: extra glab flags were not forwarded: '$merge_line'"
   pass "fm-pr-merge refuses GitLab source-branch deletion unless --attended-override is passed"
 }
 
