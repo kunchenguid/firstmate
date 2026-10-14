@@ -24,7 +24,9 @@ The `--inbox` field links a steering record, whose move to `handled/` counts as 
 
 - `start` is recorded by the code that natively begins the action, never by the request that asked for it.
 - `result` is `ok`, `refused` with a concrete reason, `failed` with a concrete reason, or `answered` for a gate.
-- `accept` needs a native receipt for the exact task, head and run; stale or inaccessible evidence is unknown, not success.
+- `accept` needs a native receipt for the exact task, head and run, and `--evidence` confirms the receipt file is present before acceptance is recorded.
+- Stale or inaccessible evidence is unknown, never absence and never success: `fm-action.sh probe <path>` prints `present`, `absent`, or `unknown` with the blocked directory and a read-only fallback route, and acceptance refuses on anything but `present`.
+  A user-level search that hid a permission-denied read once produced a false absence claim; report the read as unknown and take the fallback instead.
 - A legitimate wait is recorded with `hold` and a finite `--until`; there is no open-ended hold.
 
 ## Who acts
