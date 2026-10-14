@@ -300,6 +300,15 @@ fm_test_make_spawn_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse "$@"
+  # fm-spawn picks the opencode launch shape from `opencode --version`.
+  cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_OPENCODE_VERSION:-opencode v2.0.26}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/opencode"
   printf '%s\n' "$fakebin"
 }
 

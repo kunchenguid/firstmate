@@ -93,10 +93,15 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
-#   OpenCode has no interactive effort flag, so its effort is written as the
-#   build agent's variant, keyed to the resolved model, inside the
+#   OpenCode's launch shape follows the major version `opencode --version`
+#   reports. OpenCode 1.x takes --model, and its effort is written as the build
+#   agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
-#   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   verified on opencode 1.18.32); without a model the axis is recorded but
+#   omitted. OpenCode 2.x removed --model, so the resolved model rides a
+#   top-level "model" field in that JSON and the launch adds --standalone so the
+#   JSON is honored off the shared background service; its effort is recorded
+#   but omitted, because variant honor on the 2.x interactive path is unproved.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -2297,7 +2302,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__OPENCODEMODEL____EFFORTFLAG__}'\'' opencode __OPENCODEPREFIX____MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIEXCLUDE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2838,10 +2843,45 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  opencode)
+    [ "$OPENCODE_V2" -eq 1 ] && return 0
+    printf -- '--model %s ' "$(shell_quote "$model")"
+    ;;
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
+}
+
+# Prints the major version `opencode --version` reports; fails when it is not a
+# plain number.
+opencode_version_major() {
+  local ver major
+  ver=$(opencode --version 2>/dev/null) || return 1
+  major=${ver#*v}
+  major=${major%%.*}
+  case "$major" in
+  '' | *[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$major"
+}
+
+# A model id as JSON string content inside the launch's single-quoted
+# OPENCODE_CONFIG_CONTENT assignment, so a literal quote closes and reopens it.
+opencode_model_json_quoted() {
+  local model_json
+  model_json=$(json_escape "$1")
+  model_json=${model_json//\'/\'\\\'\'}
+  printf '%s' "$model_json"
+}
+
+# OpenCode 2.x has no --model flag; the resolved model is the config's
+# top-level "model" field instead.
+opencode_model_config_fragment() {
+  local model=$1
+  [ "$OPENCODE_V2" -eq 1 ] || return 0
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  printf ',"model":"%s"' "$(opencode_model_json_quoted "$model")"
 }
 
 effort_flag_for_harness() {
@@ -2916,17 +2956,16 @@ effort_flag_for_harness() {
     # and grok do). Without a resolved model the variant has nothing to key to
     # and is likewise omitted. The fragment lands inside the launch's
     # single-quoted assignment, so a literal quote in the model id must close and
-    # reopen that quoting.
+    # reopen that quoting. OpenCode 2.x ignores agent.build.model and its
+    # variant honor is unproved, so a 2.x launch records the effort and omits it.
+    [ "$OPENCODE_V2" -eq 0 ] || return 0
     [ -n "$model" ] && [ "$model" != default ] || return 0
     case "${model%%/*}:$effort" in
     anthropic:high | anthropic:max) ;;
     openai:low | openai:medium | openai:high | openai:xhigh) ;;
     *) return 0 ;;
     esac
-    local model_json
-    model_json=$(json_escape "$model")
-    model_json=${model_json//\'/\'\\\'\'}
-    printf ',"agent":{"build":{"model":"%s","variant":"%s"}}' "$model_json" "$effort"
+    printf ',"agent":{"build":{"model":"%s","variant":"%s"}}' "$(opencode_model_json_quoted "$model")" "$effort"
     ;;
   muse)
     # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
@@ -5510,12 +5549,26 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+OPENCODE_V2=0
+OPENCODEPREFIX=
+if [ "$HARNESS" = opencode ]; then
+  opencode_major=$(opencode_version_major) || {
+    echo "error: could not resolve the opencode major version from 'opencode --version'" >&2
+    exit 1
+  }
+  if [ "$opencode_major" -ge 2 ]; then
+    OPENCODE_V2=1
+    OPENCODEPREFIX='--standalone '
+  fi
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__OPENCODEMODEL__/$(opencode_model_config_fragment "$MODEL")}
+LAUNCH=${LAUNCH//__OPENCODEPREFIX__/$OPENCODEPREFIX}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.

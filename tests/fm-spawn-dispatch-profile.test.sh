@@ -826,13 +826,13 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   pass "cursor preserves the requested model when its live catalog is unreachable"
 }
 
-test_opencode_threads_model_and_effort_variant() {
+test_opencode_v1_threads_model_and_effort_variant() {
   local rec id out status launch
   id=profile-opencode-z7
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v1.18.32' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
   status=$?
   expect_code 0 "$status" "opencode spawn with model and effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
@@ -850,13 +850,13 @@ test_opencode_threads_model_and_effort_variant() {
   pass "opencode receives --model and the effort as its config's agent variant"
 }
 
-test_opencode_without_effort_keeps_launch_config_unchanged() {
+test_opencode_v1_without_effort_keeps_launch_config_unchanged() {
   local rec id out status launch
   id=profile-opencode-noeffort-z7b
   rec=$(make_spawn_case profile-opencode-noeffort opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v1.18.32' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
   status=$?
   expect_code 0 "$status" "opencode spawn without effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
@@ -865,16 +865,17 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
     "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch without effort must keep the permission-only config byte-identical"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
+  assert_not_contains "$launch" "--standalone" "opencode 1.x launch must not pass --standalone"
   pass "opencode without an effort keeps its launch config unchanged"
 }
 
-test_opencode_emits_variant_for_openai_family_effort() {
+test_opencode_v1_emits_variant_for_openai_family_effort() {
   local rec id out status launch
   id=profile-opencode-openai-z7c
   rec=$(make_spawn_case profile-opencode-openai opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model openai/gpt-5.6-sol --effort xhigh)
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v1.18.32' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model openai/gpt-5.6-sol --effort xhigh)
   status=$?
   expect_code 0 "$status" "opencode spawn with an openai model and effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
@@ -885,13 +886,13 @@ test_opencode_emits_variant_for_openai_family_effort() {
   pass "opencode emits the variant for an effort the openai family exposes"
 }
 
-test_opencode_omits_variant_when_model_family_lacks_effort() {
+test_opencode_v1_omits_variant_when_model_family_lacks_effort() {
   local rec id out status launch
   id=profile-opencode-omit-z7d
   rec=$(make_spawn_case profile-opencode-omit opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort medium)
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v1.18.32' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort medium)
   status=$?
   expect_code 0 "$status" "opencode spawn with an unsupported family effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
@@ -901,6 +902,59 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
     "opencode must keep the permission-only config when the model family lacks the effort"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
   pass "opencode omits the variant for an effort outside the model family's list"
+}
+
+test_opencode_v2_carries_model_in_config_with_standalone() {
+  local rec id out status launch
+  id=profile-opencode-v2-z7e
+  rec=$(make_spawn_case profile-opencode-v2 opencode "$id")
+  read_case_record "$rec"
+
+  # opencode 2.x removed --model; the resolved model is the config's top-level
+  # "model" field, honored off the shared service only under --standalone.
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.26' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "opencode 2.x spawn with model and effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --standalone --prompt" \
+    "opencode 2.x launch must carry the model in its config and pass --standalone"
+  assert_not_contains "$launch" "--model" "opencode 2.x launch must not pass the removed --model flag"
+  assert_not_contains "$launch" '"variant"' "opencode 2.x launch must record the effort but omit the unproved variant"
+  assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
+  pass "opencode 2.x carries the model in OPENCODE_CONFIG_CONTENT with --standalone"
+}
+
+test_opencode_v2_without_model_keeps_permission_only_config() {
+  local rec id out status launch
+  id=profile-opencode-v2-nomodel-z7f
+  rec=$(make_spawn_case profile-opencode-v2-nomodel opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.26' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "opencode 2.x spawn without a model should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --standalone --prompt" \
+    "opencode 2.x launch without a model must keep the permission-only config"
+  pass "opencode 2.x without a model keeps the permission-only config"
+}
+
+test_opencode_unresolvable_version_refuses_spawn() {
+  local rec id out status
+  id=profile-opencode-badver-z7g
+  rec=$(make_spawn_case profile-opencode-badver opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode dev' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 2>&1)
+  status=$?
+  expect_code 1 "$status" "opencode spawn with an unresolvable version should refuse"
+  assert_contains "$out" "could not resolve the opencode major version" \
+    "opencode version refusal did not name the cause"
+  [ ! -s "$LAUNCH_LOG" ] || fail "opencode spawn launched despite an unresolvable version"
+  pass "opencode spawn refuses rather than guessing the launch shape"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -2299,10 +2353,13 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
-test_opencode_threads_model_and_effort_variant
-test_opencode_without_effort_keeps_launch_config_unchanged
-test_opencode_emits_variant_for_openai_family_effort
-test_opencode_omits_variant_when_model_family_lacks_effort
+test_opencode_v1_threads_model_and_effort_variant
+test_opencode_v1_without_effort_keeps_launch_config_unchanged
+test_opencode_v1_emits_variant_for_openai_family_effort
+test_opencode_v1_omits_variant_when_model_family_lacks_effort
+test_opencode_v2_carries_model_in_config_with_standalone
+test_opencode_v2_without_model_keeps_permission_only_config
+test_opencode_unresolvable_version_refuses_spawn
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
