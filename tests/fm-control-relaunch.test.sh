@@ -2556,6 +2556,46 @@ test_action_relaunch_receipts_and_worker_commit() {
   pass "real relaunch accepts its native resulting generation and preserves results across worker commits"
 }
 
+test_admitted_exit_steer_binds_native_control() {
+  local kind dir s out rec body
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-task-inbox-lib.sh"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+  for kind in ship secondmate; do
+    dir=$(new_case "action-exit-$kind" action-exit)
+    add_ship_task "$dir" action-exit claude
+    s="$dir/home/state"
+    sed "s/^kind=ship$/kind=$kind/" "$s/action-exit.meta" > "$dir/task.meta"
+    mv "$dir/task.meta" "$s/action-exit.meta"
+    printf 'spawn_gen=exit-run\n' >> "$s/action-exit.meta"
+    out=$(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+      -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+      PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+      bash "$ROOT/bin/fm-send.sh" action-exit exit 2>&1) || fail "$kind steer delivery failed: $out"
+    rec="$s/action-exit.inbox/001.msg"
+    [ -f "$rec" ] || fail "$kind steer was not queued"
+    body=$(fm_task_inbox_body "$rec")
+    if [ "$kind" = secondmate ]; then
+      fm_message_from_firstmate "$body" || fail "secondmate inbox lost its transport marker"
+      [ -n "$(fm_pending_reply_extract_corr "$body")" ] || fail "secondmate inbox lost its correlation"
+    else
+      assert_equals exit "$body" "ship inbox preserves the requested operation"
+    fi
+    out=$(FM_ACTION_ID=steer-001 FM_ACTION_ATTEMPT=001.msg \
+      run_control "$dir" action-exit exit) || fail "$kind admitted exit refused: $out"
+    assert_equals zsh "$(cat "$dir/fake/command")" "$kind native exit stops the agent"
+    FM_STATE_OVERRIDE="$s" bash "$ROOT/bin/fm-action.sh" accept action-exit steer-001 \
+      --evidence "$s/action-exit.action-receipts/steer-001" || fail "$kind exit receipt refused"
+  done
+  pass "ship and secondmate exit steers bind their admitted identity to native control"
+}
+
+if [ "${1:-}" = action-exit ]; then
+  test_admitted_exit_steer_binds_native_control
+  exit 0
+fi
+
 if [ "${1:-}" = action-receipts ]; then
   test_action_relaunch_receipts_and_worker_commit
   exit 0
@@ -2640,3 +2680,4 @@ test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 
 test_action_relaunch_receipts_and_worker_commit
+test_admitted_exit_steer_binds_native_control
