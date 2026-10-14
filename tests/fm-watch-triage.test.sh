@@ -5399,6 +5399,145 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
 }
 
 # --- quiet pane, worktree still being written: deferred, never wedge-escalated -
+# --- a worker inside a blocking pipeline drive call is not a wedge ---
+# A worker driving `no-mistakes axi run|respond` blocks for up to an hour reading
+# no input, so its pane renders idle with an empty composer and an ended turn:
+# the exact picture of a wedge, escalated every FM_STALE_ESCALATE_SECS while it
+# worked correctly (52 triage entries for one pane on 26 September). The monitor
+# now reads the evidence itself: an active run plus a live drive process whose
+# working directory is the task's worktree. These fixtures spawn a REAL process
+# whose argv is `no-mistakes axi run`, because the verdict is a process-table read.
+start_fake_drive_call() {  # <dir> <cwd> [subcommand] -> pid on stdout
+  local dir=$1 cwd=$2 sub=${3:-run} pid
+  # `exec -a` makes ps report the drive-call argv without installing a binary.
+  (cd "$cwd" && exec -a "no-mistakes axi $sub" sleep 300) > /dev/null 2>&1 &
+  pid=$!
+  sleep 0.3
+  printf '%s' "$pid"
+}
+
+test_crew_blocking_call_evidence_classifier() {
+  local dir state fakebin wt other call verdict
+  dir=$(make_case classify-blocking-call); state="$dir/state"; fakebin="$dir/fakebin"
+  wt="$dir/wt"; other="$dir/other"
+  mkdir -p "$wt/sub" "$other"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # No recorded worktree, or one that is gone: the call cannot be attributed.
+  printf 'window=test:fm-a\nkind=ship\n' > "$state/a.meta"
+  verdict=$(crew_blocking_call_evidence a "$state"); [ "${verdict%%|*}" = unresolved ] \
+    || fail "a task with no worktree record did not report unresolved: $verdict"
+  printf 'window=test:fm-b\nkind=ship\nworktree=%s\n' "$dir/missing" > "$state/b.meta"
+  verdict=$(crew_blocking_call_evidence b "$state"); [ "${verdict%%|*}" = unresolved ] \
+    || fail "a torn-down worktree did not report unresolved: $verdict"
+
+  printf 'window=test:fm-c\nkind=ship\nworktree=%s\n' "$wt" > "$state/c.meta"
+  # Table read, no drive call anywhere near this worktree: the wedge shape.
+  verdict=$(crew_blocking_call_evidence c "$state") && fail "no drive call was reported as a blocking call"
+  [ "${verdict%%|*}" = none ] || fail "no drive call did not report none: $verdict"
+
+  # A drive call in a DIFFERENT directory is not this worker's.
+  call=$(start_fake_drive_call "$dir" "$other")
+  verdict=$(crew_blocking_call_evidence c "$state") && { kill "$call" 2>/dev/null; fail "another worker's drive call was attributed to this one"; }
+  [ "${verdict%%|*}" = none ] || { kill "$call" 2>/dev/null; fail "another directory's drive call did not report none: $verdict"; }
+  kill "$call" 2>/dev/null; wait "$call" 2>/dev/null
+
+  # A subcommand that does not block on the run is not a drive call.
+  call=$(start_fake_drive_call "$dir" "$wt" status)
+  verdict=$(crew_blocking_call_evidence c "$state") && { kill "$call" 2>/dev/null; fail "a non-drive no-mistakes command counted as a blocking call"; }
+  kill "$call" 2>/dev/null; wait "$call" 2>/dev/null
+
+  # The real thing, from a subdirectory of the worktree: blocking, age named.
+  call=$(start_fake_drive_call "$dir" "$wt/sub" respond)
+  verdict=$(crew_blocking_call_evidence c "$state") \
+    || { kill "$call" 2>/dev/null; fail "a live drive call with an active run was not reported blocking: $verdict"; }
+  case "$verdict" in blocking\|*"pid $call"*) ;; *) kill "$call" 2>/dev/null; fail "blocking verdict did not name the call: $verdict" ;; esac
+
+  # Same call, but the run is not recorded active: the monitor cannot resolve it.
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · review (awaiting_approval)'
+  verdict=$(crew_blocking_call_evidence c "$state") && { kill "$call" 2>/dev/null; fail "a drive call over a parked run counted as blocking"; }
+  [ "${verdict%%|*}" = unresolved ] || { kill "$call" 2>/dev/null; fail "a call with no active run did not report unresolved: $verdict"; }
+  FM_FAKE_CREW_STATE='state: working · source: pane · busy'
+  verdict=$(crew_blocking_call_evidence c "$state") && { kill "$call" 2>/dev/null; fail "a busy pane with no run-step counted as a blocking call"; }
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Past the bound a call stops being evidence: the ladder must speak again.
+  sleep 2
+  verdict=$(FM_BLOCKING_CALL_MAX_SECS=1 crew_blocking_call_evidence c "$state") \
+    && { kill "$call" 2>/dev/null; fail "a drive call past the bound still counted as blocking"; }
+  case "$verdict" in unresolved\|*"past the 1s bound"*) ;; *) kill "$call" 2>/dev/null; fail "over-bound call did not name the bound: $verdict" ;; esac
+  kill "$call" 2>/dev/null; wait "$call" 2>/dev/null
+
+  # etime parsing, including the day form.
+  [ "$(_fm_etime_secs 00:07)" = 7 ] && [ "$(_fm_etime_secs 02:03)" = 123 ] \
+    && [ "$(_fm_etime_secs 01:02:03)" = 3723 ] && [ "$(_fm_etime_secs 2-01:00:00)" = 176400 ] \
+    || fail "etime values were mis-parsed"
+  ! _fm_etime_secs garbage > /dev/null || fail "an unparseable etime was accepted"
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
+  pass "crew_blocking_call_evidence: only a live drive call in this worktree over an active run, inside the bound, is blocking"
+}
+
+test_wedge_escalation_deferred_inside_a_blocking_call() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back call
+  dir=$(make_case wedge-blocking-call); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-blocking"; wt="$dir/wt"
+  mkdir -p "$wt"
+  printf 'idle prompt, empty composer' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/blocking.meta"
+  printf 'working: validating\n' > "$state/blocking.status"
+  sig=$(seen_sig "$state/blocking.status"); printf '%s' "$sig" > "$state/.seen-blocking_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, empty composer")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Phase A: the worker is inside its drive call. Quiet, timer restarted, counter untouched.
+  call=$(start_fake_drive_call "$dir" "$wt")
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    kill "$call" 2>/dev/null; reap "$pid"; fail "watcher wedge-escalated a worker inside a blocking drive call: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { kill "$call" 2>/dev/null; reap "$pid"; fail "a blocking-call deferral printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { kill "$call" 2>/dev/null; reap "$pid"; fail "a blocking-call deferral enqueued a wake"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { kill "$call" 2>/dev/null; reap "$pid"; fail "a deferral advanced the wedge escalation counter"; }
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
+    || { kill "$call" 2>/dev/null; reap "$pid"; fail "a deferral did not restart the idle timer, so the next window cannot re-probe"; }
+  grep -F 'verified blocking call' "$state/.watch-triage.log" > /dev/null 2>&1 \
+    || { kill "$call" 2>/dev/null; reap "$pid"; fail "the deferral was not recorded in the triage log"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+  kill "$call" 2>/dev/null; wait "$call" 2>/dev/null
+
+  # Phase B: same fixture, run still active, but NO drive call is attached: the
+  # real wedge. It must escalate on the unchanged schedule and say what it saw.
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a worker with no drive call attached did not wedge-escalate"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the no-call escalation did not flag a possible wedge"
+  grep -F "no blocking call: no no-mistakes drive call is running" "$out" >/dev/null \
+    || fail "the no-call escalation did not say no blocking call was found: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the no-call escalation was not counted"
+  unset FM_FAKE_CREW_STATE
+  pass "a quiet pane inside a verified blocking drive call is deferred; with no call attached it escalates and names that"
+}
+
 # The live 2026-08-14 case: one crew produced eight consecutive possible-wedge
 # escalations in an afternoon, three of them demanding deep inspection, while it
 # was demonstrably writing source, then tests, then documentation. The detector's
@@ -6723,6 +6862,8 @@ test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
+test_crew_blocking_call_evidence_classifier
+test_wedge_escalation_deferred_inside_a_blocking_call
 test_write_deferral_resurfaces_on_the_bounded_cadence
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain

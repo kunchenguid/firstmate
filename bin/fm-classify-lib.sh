@@ -2659,6 +2659,126 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
   [ -n "$hit" ]
 }
 
+# Longest a worker's `no-mistakes axi run|respond` drive call may block before it
+# stops being evidence of work and reads as a stuck call. A drive call returns at
+# the next gate or outcome and one fix round is capped near thirty minutes with up
+# to three chained, so the default is ninety minutes. Past it the wedge ladder
+# speaks again, which is what keeps this evidence from being a way to go quiet
+# forever. A value that is not a positive integer falls back to the default.
+FM_BLOCKING_CALL_MAX_SECS=${FM_BLOCKING_CALL_MAX_SECS:-5400}
+FM_BLOCKING_CALL_PS_TIMEOUT=${FM_BLOCKING_CALL_PS_TIMEOUT:-10}
+
+# Seconds for a `ps` etime value ([[dd-]hh:]mm:ss); fails when it does not parse.
+_fm_etime_secs() {  # <etime>
+  local t=${1//[[:space:]]/} days=0 h=0 m s
+  case "$t" in *-*) days=${t%%-*}; t=${t#*-} ;; esac
+  case "$t" in
+    *:*:*) h=${t%%:*}; t=${t#*:}; m=${t%%:*}; s=${t#*:} ;;
+    *:*) m=${t%%:*}; s=${t#*:} ;;
+    *) return 1 ;;
+  esac
+  case "$days$h$m$s" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' $(( ((10#$days * 24 + 10#$h) * 60 + 10#$m) * 60 + 10#$s ))
+}
+
+# The working directory of <pid>, empty when it cannot be read: /proc where it
+# exists, lsof elsewhere.
+_fm_process_cwd() {  # <pid>
+  local cwd=''
+  if [ -d "/proc/$1" ]; then
+    cwd=$(readlink "/proc/$1/cwd" 2>/dev/null || true)
+  elif command -v lsof >/dev/null 2>&1; then
+    cwd=$(fm_run_timed "$FM_BLOCKING_CALL_PS_TIMEOUT" lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true)
+  fi
+  printf '%s' "$cwd"
+}
+
+# Evidence, read by the monitor itself with no cooperation from the worker, that
+# a quiet pane is a worker inside a blocking pipeline drive call rather than a
+# wedged one. A worker that drives its pipeline with `no-mistakes axi run` or
+# `respond` blocks for up to an hour reading no input, so its pane renders idle,
+# its composer is empty and its turn has ended: exactly the picture of a wedge.
+# Two facts the monitor can verify tell them apart:
+#   1. the run itself is active (fm-crew-state.sh reports state working from the
+#      run-step, never merely a busy pane), and
+#   2. a `no-mistakes axi run|respond` process is alive with its working directory
+#      inside this task's recorded worktree, younger than FM_BLOCKING_CALL_MAX_SECS.
+# A real wedge lacks the second fact: the run goes on in the daemon but nothing is
+# attached to it, so nobody will read its next gate.
+#
+# Prints one line, `<verdict>|<detail>`, and returns 0 only for `blocking`:
+#   blocking   - both facts hold; detail names the call and its age.
+#   none       - the process table was read and holds no such call for this
+#                worktree. This is the wedge shape.
+#   unresolved - the monitor could not tell (no worktree record, an unreadable
+#                process table or working directory, a call with no active run
+#                behind it, or a call older than the bound); detail says which,
+#                so the escalation can name the situation it failed to resolve.
+# Costs one process listing, plus one fm-crew-state.sh read (which may make a
+# bounded no-mistakes call) only when a candidate call exists, so callers take it
+# only in the branch about to escalate, never on an ordinary poll.
+crew_blocking_call_evidence() {  # <id> <state>
+  local id=$1 state=$2 wt kind line pid etime args rest a0 a1 a2 secs cwd real
+  local best_pid='' best_secs=-1 unreadable=0 listing crew cstate csrc
+  [ -n "$id" ] || { printf 'unresolved|no task to attribute a call to'; return 1; }
+  kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ "$kind" = secondmate ] || [ -z "$wt" ] || [ ! -d "$wt" ]; then
+    printf 'unresolved|no recorded worktree to attribute a drive call to'
+    return 1
+  fi
+  wt=$(cd -P "$wt" 2>/dev/null && pwd -P) \
+    || { printf 'unresolved|no recorded worktree to attribute a drive call to'; return 1; }
+  listing=$(fm_run_timed "$FM_BLOCKING_CALL_PS_TIMEOUT" ps -axo pid=,etime=,args= 2>/dev/null) || listing=''
+  if [ -z "$listing" ]; then
+    printf 'unresolved|the process table could not be read'
+    return 1
+  fi
+  while IFS= read -r line; do
+    read -r pid etime args <<< "$line"
+    [ -n "$args" ] || continue
+    a0=${args%% *}; rest=${args#"$a0"}; rest=${rest# }
+    a1=${rest%% *}; rest=${rest#"$a1"}; rest=${rest# }
+    a2=${rest%% *}
+    [ "${a0##*/}" = no-mistakes ] && [ "$a1" = axi ] || continue
+    case "$a2" in run|respond) ;; *) continue ;; esac
+    cwd=$(_fm_process_cwd "$pid")
+    if [ -z "$cwd" ]; then unreadable=1; continue; fi
+    real=$(cd -P "$cwd" 2>/dev/null && pwd -P) || real=$cwd
+    case "$real/" in "$wt"/*) ;; *) continue ;; esac
+    secs=$(_fm_etime_secs "$etime") || { unreadable=1; continue; }
+    if [ "$secs" -gt "$best_secs" ]; then best_secs=$secs; best_pid=$pid; fi
+  done <<< "$listing"
+  if [ -z "$best_pid" ]; then
+    if [ "$unreadable" -eq 1 ]; then
+      printf 'unresolved|a no-mistakes drive call exists but could not be tied to this worker (its directory or age was unreadable)'
+    else
+      printf "none|no no-mistakes drive call is running in this worker's worktree"
+    fi
+    return 1
+  fi
+  crew=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || crew=''
+  cstate=''; csrc=''
+  case "$crew" in
+    state:*)
+      cstate=${crew#state: }; cstate=${cstate%% *}
+      csrc=${crew#*source: }; csrc=${csrc%% *}
+      ;;
+  esac
+  if [ "$cstate" != working ] || [ "$csrc" != run-step ]; then
+    printf 'unresolved|a drive call (pid %s) is running but the pipeline run is not recorded active' "$best_pid"
+    return 1
+  fi
+  case "$FM_BLOCKING_CALL_MAX_SECS" in ''|*[!0-9]*|0) FM_BLOCKING_CALL_MAX_SECS=5400 ;; esac
+  if [ "$best_secs" -gt "$FM_BLOCKING_CALL_MAX_SECS" ]; then
+    printf 'unresolved|the drive call (pid %s) has blocked %ss, past the %ss bound for one call' \
+      "$best_pid" "$best_secs" "$FM_BLOCKING_CALL_MAX_SECS"
+    return 1
+  fi
+  printf 'blocking|inside a no-mistakes drive call (pid %s, blocked %ss) with the run active' "$best_pid" "$best_secs"
+  return 0
+}
+
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
 # working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
 # same space-separated file list the caller classified with the span read above.

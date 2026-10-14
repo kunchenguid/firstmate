@@ -53,6 +53,13 @@
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
 #                          that writes nothing keeps the unchanged schedule.
+#                          A pane whose worker is verifiably inside a blocking
+#                          `no-mistakes axi run|respond` call (an active run plus a
+#                          live drive process in its worktree, younger than
+#                          FM_BLOCKING_CALL_MAX_SECS) is deferred quietly
+#                          (wedge_defer_blocking_call); when that evidence does not
+#                          defer, the escalation reason says which situation it
+#                          found or could not resolve.
 #                          A pane whose recorded endpoint holds no agent at all is
 #                          not a wedge and is reported ONCE instead of escalating
 #                          on that cadence forever (wedge_dead_record); only the
@@ -1433,6 +1440,23 @@ clear_write_tracking() {  # <window-key>
   rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
 }
 
+# Defer ONE wedge escalation for a pane whose worker is verifiably inside a
+# blocking `no-mistakes axi run|respond` call (crew_blocking_call_evidence in
+# fm-classify-lib.sh owns the evidence and its bound). A DEFERRAL like the two
+# above it: the idle timer restarts so the next window re-reads the evidence, and
+# the escalation counter is left alone. Unlike them it re-surfaces nothing on a
+# cadence, because the evidence carries its own ceiling - a call blocked past
+# FM_BLOCKING_CALL_MAX_SECS, or one that returns and leaves the pane quiet, reads
+# as no evidence and escalates on the unchanged schedule - so a quiet absorb here
+# can never outlast one bounded call. Returns 0 when it deferred.
+wedge_defer_blocking_call() {  # <window> <since-file> <triage-label> <idle-age> <detail>
+  local win=$1 since_file=$2 label=$3 age=$4 detail=$5
+  clear_write_tracking "$(window_key "$win")"
+  date +%s > "$since_file"
+  triage_log "absorbed $label (verified blocking call, $detail, idle ${age}s): $win"
+  return 0
+}
+
 # The question the wedge timer never asked before it alarmed: is there still an
 # agent here to BE wedged? A wedge is something stuck that might recover, so
 # re-alarming it earns its cost; an agent that is gone never moves again, its pane
@@ -1520,7 +1544,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence call_ev call_ok call_note
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1538,6 +1562,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
         fi
+        # Read once per threshold and kept: when it is not a deferral, what it
+        # saw is part of the escalation below, so the supervisor learns which
+        # situation could not be resolved instead of re-deriving it by hand.
+        call_ev=$(crew_blocking_call_evidence "$task" "$STATE") && call_ok=1 || call_ok=0
+        if [ "$call_ok" -eq 1 ]; then
+          wedge_defer_blocking_call "$win" "$since_file" "$label" "$age" "${call_ev#*|}"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -1547,9 +1579,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        case "${call_ev%%|*}" in
+          none) call_note="no blocking call: ${call_ev#*|}" ;;
+          unresolved) call_note="could not tell whether it is a blocking call: ${call_ev#*|}" ;;
+          *) call_note='' ;;
+        esac
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n${call_note:+, $call_note})"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n${call_note:+, $call_note}, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
