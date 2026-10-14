@@ -71,7 +71,8 @@
 # merge, so a non-local-only ship task whose recorded pr= the forge reports open
 # also refuses: cleanup would close its backlog item and remove the record
 # bin/fm-pr-merge.sh needs to land it. A merged or closed PR proceeds to the
-# checks above, and an unreadable PR state is warned and left to them.
+# checks above; an unreadable PR state also refuses, since it does not show the
+# PR closed.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
@@ -3518,8 +3519,8 @@ fi
 
 # A pushed task branch passes the landed-work test below while its PR still
 # waits on the merge, and this cleanup removes the record bin/fm-pr-merge.sh
-# needs to land it. Refuse while the forge reports the recorded PR open; an
-# unreadable state is warned and left to that landed-work test.
+# needs to land it. Refuse unless the forge reports the recorded PR merged or
+# closed.
 if [ "$FORCE" != "--force" ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ] \
     && [ -n "$PR_URL" ] && [ "$CLEANUP_RECOVERY" != orca ]; then
   recorded_pr_open_rc=0
@@ -3531,7 +3532,9 @@ if [ "$FORCE" != "--force" ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ] 
       exit 1
       ;;
     2)
-      echo "warning: could not read the state of task $ID's PR $PR_URL; cleanup relies on the landed-work checks alone." >&2
+      echo "REFUSED: could not read the forge state of task $ID's PR $PR_URL; cleanup waits until the forge reports it merged or closed." >&2
+      echo "Retry once the forge is reachable, or use --force after the captain explicitly approves cleaning up without that state." >&2
+      exit 1
       ;;
   esac
 fi
