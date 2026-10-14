@@ -441,6 +441,41 @@ fm_send_resolve_target() { # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
+
+# A herdr endpoint whose recorded session:pane no longer answers may have
+# been moved to another workspace (the captain drags the task tab). Re-run
+# the same relocation proof the control plane owns: locate the pane under the
+# task's stable identity (exact tab label + herdr's own agent record), and
+# publish the fresh binding atomically into the task record before the data
+# plane proceeds. A no-op on every non-herdr backend and every reachable pane.
+if [ "$TARGET_BACKEND" = herdr ] && [ -n "$TARGET_META" ]; then
+  TARGET_ID=$(fm_send_id_from_meta "$TARGET_META")
+  if [ -n "$TARGET_ID" ]; then
+    RELOC_STATE=$(fm_backend_agent_state herdr "$T")
+    case "$RELOC_STATE" in
+      unreadable|missing|dead)
+        RELOCATED=$(fm_recorded_herdr_endpoint_relocate "$TARGET_META" "$TARGET_ID" "$STATE") && RELOC_RC=0 || RELOC_RC=$?
+        case "$RELOC_RC" in
+          0)
+            T=$RELOCATED
+            ;;
+          1)
+            # No re-binding was proven: proceed against the recorded target
+            # exactly as if relocation had never run - only an AMBIGUOUS
+            # match (which never reaches here) could mis-route a key.
+            echo "fm-send: recorded herdr endpoint reads '$RELOC_STATE'; relocation lookup found no exact pane under the task's stable identity, so the doorbell goes only to the recorded target" >&2
+            ;;
+          *)
+            # An ambiguous match must never mis-deliver: the DOORBELL is
+            # suppressed, but the durable steer lands anyway, which is what
+            # the inbox contract guarantees.
+            echo "fm-send: recorded herdr endpoint reads '$RELOC_STATE'; relocation lookup could not uniquely prove which live pane serves this task, so the doorbell is suppressed and the steer is delivered durably only" >&2
+            ;;
+        esac
+        ;;
+    esac
+  fi
+fi
 shift
 
 # Supervision lease guard: a steer is overlap territory between the two Pi

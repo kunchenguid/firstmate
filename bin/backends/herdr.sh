@@ -3888,7 +3888,78 @@ fm_backend_herdr_list_live() {  # <session>
   done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
 }
 
-# --- native event push: pane.agent_status_changed subscriber -----------------
+# fm_backend_herdr_endpoint_relocate: the own-its-own-endpoint re-resolution
+# a control-plane caller runs when a task's recorded session:pane reads
+# unreadable or missing and yet may have only MOVED - the captain drags a
+# herdr task tab into another workspace and the stored herdr_workspace_id /
+# window= goes stale, while the task's TAB LABEL (a spawn-owned,
+# non-authoritative correlator per docs/herdr-backend.md "Label collisions"
+# that nevertheless carries task identity with the pane) follows it. Locate
+# the task's tab across EVERY workspace in the session by exact label match
+# on fm_<id>, prove the located pane's herdr registration records that exact
+# task id (agent get -> .result.agent.task_id == <id>, so ownership stays
+# proven against herdr's own record rather than trusting the label alone),
+# and return one well-formed binding on a single line:
+#
+#   <pane_id>\t<tab_id>\t<workspace_id>   (TAB-separated, trailing tab fields
+#                                           empty on failure)
+#
+# Return codes:
+#   0 - one exact binding (caller MUST atomically republish the meta under
+#       its own lock before trusting it further)
+#   1 - no exact registration match (the pane was closed, renamed, or its
+#       registration reads unreadable: the caller MUST refuse, never guess)
+#   2 - >1 exact registration match, or a read failure: ambiguous; the caller
+#       MUST refuse (bi-modal ambiguity is never a relocation)
+#
+# Idempotent, read-only, and session-scoped exactly like
+# fm_backend_herdr_pane_agent_state: every read goes through
+# fm_backend_herdr_cli with the SESSION <session>, so a moved pane in a
+# different workspace answers because the workspace name is never an input.
+fm_backend_herdr_endpoint_relocate() {  # <session> <expected-label> <task-id>
+  local session=$1 expected_label=$2 id=$3 workspaces wsid tabs tab pane out
+  local found_pane="" found_tab="" found_ws="" duplicate=""
+  # A read failure, an unreadable workspace list, an unparsable answer, or
+  # any pane-level read failure is treated as "no relocation proof": rc=1.
+  # The caller proceeds against the RECORDED endpoint exactly as pre-relocate
+  # life-cycle verbs did. Only a POSITIVELY PROVEN >1 exact match is a
+  # refusal (rc=2), because that is the one shape that could mis-write a
+  # control-plane key into the wrong pane: the stubbed-outlive-server case
+  # ("the recorded endpoint classifies dead/missing yet is the pane this
+  # task owns") must keep its pre-relocate verdict verbatim.
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$workspaces" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  while IFS= read -r wsid; do
+    [ -n "$wsid" ] || continue
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || continue
+    while IFS= read -r tab; do
+      [ -n "$tab" ] || continue
+      pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab") || continue
+      [ -n "$pane" ] || continue
+      out=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>/dev/null) || continue
+      case "$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)" in
+        pane_not_found|agent_not_found) continue ;;
+        '') ;;
+        *) continue ;;
+      esac
+      # The herdr agent record is the authority the label only correlates
+      # to: a pane whose OWN registration names this task is its live
+      # endpoint; anything else is refused rather than attached to.
+      if printf '%s' "$out" | jq -e --arg want "$id" \
+        '((.result.agent.task_id // .result.agent.task.id // "") == $want)' >/dev/null 2>&1; then
+        if [ -n "$found_pane" ]; then
+          duplicate=1
+          break 2
+        fi
+        found_pane=$pane found_tab=$tab found_ws=$wsid
+      fi
+    done < <(printf '%s' "$tabs" | jq -r --arg want "$expected_label" \
+      '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null)
+  done < <(printf '%s' "$workspaces" | jq -r '.result.workspaces[]?.workspace_id' 2>/dev/null)
+  [ -z "$duplicate" ] || return 2
+  [ -n "$found_pane" ] || return 1
+  printf '%s\t%s\t%s\n' "$found_pane" "$found_tab" "$found_ws"
+}
 #
 # The push half of the immediate blocked-state escalation (AGENTS.md section 8,
 # docs/herdr-backend.md "Native pane.agent_status_changed push escalation").

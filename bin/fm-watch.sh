@@ -235,6 +235,12 @@ WATCH_HOME_EXISTED=0
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 
+# Control-plane helpers shared with bin/fm-control.sh and bin/fm-send.sh.
+# fm-control-lib.sh is where the pane-relocation hook lives; the backend
+# library beneath it is already present via fm-task-inbox-lib.sh.
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
+
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
@@ -1469,10 +1475,32 @@ clear_write_tracking() {  # <window-key>
 # display absorbs on every threshold either way.
 # Returns 0 when it has handled the window, 1 to escalate on the unchanged path.
 wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-hash> <task>
-  local win=$1 since_file=$2 label=$3 age=$4 hash=$5 task=$6 key marker agent_state detail reason gen id
+  local win=$1 since_file=$2 label=$3 age=$4 hash=$5 task=$6 key marker agent_state detail reason gen id resolved
   key=$(window_key "$win")
   marker="$STATE/.dead-reported-$key"
   agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
+  case "$(window_backend "$win")" in
+    herdr)
+      case "$agent_state" in
+        unreadable|missing|dead)
+          if resolved=$(fm_recorded_herdr_endpoint_relocate "$STATE/$task.meta" "$task" "$STATE" 2>/dev/null); then
+            # The registered endpoint survived a captain move: the meta now
+            # names the fresh binding, so every later watch iteration reads
+            # it directly from the meta; this call's answer already reflects
+            # the re-classified pane's first post-move read.
+            win=$resolved
+            agent_state=$(fm_backend_agent_state herdr "$win" 2>/dev/null) || agent_state=unreadable
+            # The wedge marker is keyed by window: a moved pane's old
+            # window-keyed marker must never bank this verdict for the
+            # fresh binding's own tracking.
+            key=$(window_key "$win")
+            marker="$STATE/.dead-reported-$key"
+            rm -f "$marker"
+          fi
+          ;;
+      esac
+      ;;
+  esac
   case "$agent_state" in
     dead) detail='the endpoint is still there with no agent running in it' ;;
     missing) detail='the recorded endpoint is gone' ;;
@@ -1499,7 +1527,6 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   clear_write_tracking "$key"
   wake "$reason"
 }
-
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or

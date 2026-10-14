@@ -43,6 +43,64 @@
 # its durable instruction. The relaunch-time exception is
 # fm_control_relaunch_resume_flag below: a reference the endpoint's runtime
 # bound as its status authority is returned to a replacement with that adapter.
+# A task's herdr endpoint ROUTING record (herdr_session/herdr_workspace_id/
+# herdr_tab_id/herdr_pane_id/window) follows its tab wherever a pane
+# relocation moved it; the file's "no state read, no backend command" purity
+# has one twin exception beside fm_control_endpoint_absence_verdict:
+# fm_recorded_herdr_endpoint_relocate, the control plane's single owner of
+# the move-aware re-resolution, runs META-LOCKED backend reads and publishes
+# the proven new binding atomically before its caller resumes. Watches
+# (fm-control.sh, fm-send.sh, fm-watch.sh) all come through it, so a moved
+# pane re-resolves the same way on every plane.
+fm_recorded_herdr_endpoint_relocate() {  # <meta> <id> <state-dir>  (requires: fm_meta_get, fm_meta_lock_path, herdr.sh's fm_backend_herdr_endpoint_relocate; fm_backlog_atomic_transition lazy-sourced below when absent)
+  local meta=$1 id=$2 state_dir=$3 session expected_label status binding pane tab ws lock tmp
+  session=$(fm_meta_get "$meta" herdr_session)
+  expected_label="fm-$id"
+  # The backend's own adapter may not be loaded yet when this is the first
+  # class of herdr behavior this call chain exercises: source lazily.
+  if ! declare -F fm_backend_herdr_endpoint_relocate >/dev/null 2>&1; then
+    fm_backend_source herdr >/dev/null 2>&1 || {
+      printf 'relocation-ambiguous'
+      return 2
+    }
+  fi
+  binding=$(fm_backend_herdr_endpoint_relocate "$session" "$expected_label" "$id") && status=0 || status=$?
+  case "$status" in
+    0) ;;
+    # 1 = no exact match: the recorded endpoint's unreadable/missing/dead
+    # state stands (the caller proceeds against the recorded binding).
+    1) printf 'relocated-not-found'; return 1 ;;
+    # Any other non-zero (2 = ambiguous, or a read failure) is a REFUSAL:
+    # only an ambiguous match could mis-route a lifecycle key.
+    *) printf 'relocation-ambiguous'; return 2 ;;
+  esac
+  if ! declare -F fm_backlog_atomic_transition >/dev/null 2>&1; then
+    . "${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/bin/fm-tasks-axi-lib.sh"
+    . "${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/bin/fm-backlog-transition-lib.sh"
+  fi
+  IFS=$'\t' read -r pane tab ws <<< "$binding"
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock"
+  tmp=$(mktemp "$state_dir/.$id.meta.relocate.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      window=* | herdr_session=* | herdr_workspace_id=* | herdr_tab_id=* | herdr_pane_id=*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; } ;;
+    esac
+  done < "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  {
+    printf 'herdr_session=%s\n' "$session"
+    printf 'herdr_workspace_id=%s\n' "$ws"
+    printf 'herdr_tab_id=%s\n' "$tab"
+    printf 'herdr_pane_id=%s\n' "$pane"
+    printf 'window=%s:%s\n' "$session" "$pane"
+  } >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$state_dir" \
+    || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  fm_lock_release "$lock"
+  printf '%s:%s' "$session" "$pane"
+}
 
 # The complete control-plane verb allowlist, one per line.
 fm_control_verbs() {

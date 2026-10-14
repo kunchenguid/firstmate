@@ -375,6 +375,43 @@ agent_state() {
   fm_backend_agent_state "$BACKEND" "$T"
 }
 
+# A herdr endpoint that reads unreadable, missing, or dead on ANY verb may
+# simply have been MOVED to another workspace (the captain drags the task
+# tab). Run the control plane's single-owner relocation proof, publish the
+# new binding under the task's own meta lock, and update the in-memory
+# target so the postcondition reads below see what the move left. Non-herdr
+# backends are no-ops: the stored address is their only address.
+relocate_herdr_endpoint() {
+  [ "$BACKEND" = herdr ] || return 0
+  local current
+  current=$(agent_state)
+  case "$current" in
+    unreadable|missing|dead) ;;
+    *) return 0 ;;
+  esac
+  local resolved rc=0
+  resolved=$(fm_recorded_herdr_endpoint_relocate "$META" "$ID" "$STATE") || rc=$?
+  case "$rc" in
+    0)
+      T=$resolved
+      # Only T is authoritative past this point: downstream reads (agent_
+      # state, do_interrupt, do_exit) all go through T. The task record's
+      # window= field was atomically republished by the helper above.
+      echo "relocated: task $ID's herdr endpoint moved; task record republished to $resolved" >&2
+      ;;
+    1)
+      # No re-binding was proven: the recorded endpoint's original state
+      # stands and the verb proceeds against the recorded binding, exactly
+      # as before this recovery existed.
+      ;;
+    *)
+      # An AMBIGUOUS re-binding (rc=2+) is a refusal: a lifecycle key must
+      # never land in a pane whose task identity is not proven unique.
+      die "task $ID's recorded herdr endpoint reads '$current'; relocation lookup could not uniquely prove which live pane (if any) serves this task under its stable identity, so refusing rather than steering an unattributed pane ($resolved)"
+      ;;
+  esac
+}
+
 busy_verdict() {
   fm_busy_classify_meta "$META" "$ID" "$STATE"
 }
@@ -635,6 +672,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
+  relocate_herdr_endpoint
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
   require_state_verified_backend exit
   state=$(agent_state)
@@ -1069,6 +1107,7 @@ record_note() {
 }
 
 do_relaunch() {
+  relocate_herdr_endpoint
   local exit_result state note_line
   local -a spawn_args
 
@@ -1157,6 +1196,7 @@ do_relaunch() {
 
 case "$VERB" in
   interrupt)
+    relocate_herdr_endpoint
     state=$(agent_state)
     case "$state" in
       alive) ;;
