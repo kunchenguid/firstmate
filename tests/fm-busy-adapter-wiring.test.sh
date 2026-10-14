@@ -749,7 +749,20 @@ case "\${1:-}" in
     esac
     ;;
   capture-pane) printf 'working\n' ;;
-  display-message) printf '0\n' ;;
+  display-message)
+    # Format-aware, because the agent-liveness probe reads the pane's tty and
+    # then asks the host process table about that tty, and tmux always takes the
+    # format as the final argument. A catch-all answer hands the probe a tty
+    # that is not this pane's, so unrelated host processes land in the pane's
+    # "foreground group", the pane reads shell-only, and the recovery verdict is
+    # dead - which outranks the armed busy record and escalates the very stall
+    # this test is holding back. /dev/null is a real tty device with no processes
+    # on it, so the read is honestly empty and the pane stays unproven.
+    case "\${!#}" in
+      '#{pane_tty}') printf '/dev/null\n' ;;
+      *) printf '0\n' ;;
+    esac
+    ;;
   *) exit 0 ;;
 esac
 SH
