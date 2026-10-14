@@ -101,6 +101,20 @@ run_arm() {  # <dir> <id> [key=val...]
 comments_json() {  # <id> <login> <body-json>
   printf '{"id":%s,"user":{"login":"%s"},"body":%s}\n' "$1" "$2" "$3"
 }
+write_comments() {  # <dest.json> [<id> <login> <body-json>]...
+  local dest=$1 records=()
+  shift
+  while [ "$#" -ge 3 ]; do
+    records+=("$(comments_json "$1" "$2" "$3")")
+    shift 3
+  done
+  if [ "${#records[@]}" -gt 0 ]; then
+    printf '%s\n' "${records[@]}" | jq -s . > "$dest"
+  else
+    printf '[]\n' > "$dest"
+  fi
+}
+
 
 test_usage() {
   local out rc=0
@@ -119,11 +133,9 @@ test_arm_baselines_and_binds() {
   local dir out rc=0
   dir=$(make_case arm-baseline)
   write_task_meta "$dir"
-  {
-    comments_json 11 someone '"lgtm"'
-    comments_json 12 o '"/fm rework: use a config flag instead"'
-  } > "$dir/comments.lines"
-  jq -s . "$dir/comments.lines" > "$dir/comments.json" && rm -f "$dir/comments.lines"
+  write_comments "$dir/comments.json" \
+    11 someone '"lgtm"' \
+    12 o '"/fm rework: use a config flag instead"'
   out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-a) || rc=$?
   expect_code 0 "$rc" "arm must succeed for a Forgejo PR"
   assert_contains "$out" "armed: state/task-a.pr-comment-poll" "arm names the sidecar it wrote"
@@ -187,8 +199,7 @@ test_rearm_replacement_pr_rebaselines_the_marker() {
   dir=$(make_case rearm-replacement-pr)
   url2=https://forgejo.example/o/r/pulls/8
   write_task_meta "$dir"
-  comments_json 100 o '"/fm old"' > "$dir/first.lines"
-  jq -s . "$dir/first.lines" > "$dir/first.json" && rm -f "$dir/first.lines"
+  write_comments "$dir/first.json" 100 o '"/fm old"'
   FM_TEST_PR_COMMENTS="$dir/first.json" run_arm "$dir" task-a >/dev/null \
     || fail "arm failed"
   [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 100 ] \
@@ -200,19 +211,16 @@ test_rearm_replacement_pr_rebaselines_the_marker() {
     "kind=ship" \
     "mode=no-mistakes" \
     "pr=$url2"
-  comments_json 3 o '"/fm rework: narrower scope"' > "$dir/second.lines"
-  jq -s . "$dir/second.lines" > "$dir/second.json" && rm -f "$dir/second.lines"
+  write_comments "$dir/second.json" 3 o '"/fm rework: narrower scope"'
   FM_TEST_PR_COMMENTS="$dir/second.json" run_arm "$dir" task-a >/dev/null \
     || fail "re-arm failed"
   [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 3 ] \
     || fail "re-arming a replacement PR kept the retired PR's marker"
   grep -q "^$url2$" "$dir/home/state/task-a.pr-comment-poll" \
     || fail "re-arm did not retarget the sidecar at the replacement PR"
-  {
-    comments_json 3 o '"/fm rework: narrower scope"'
-    comments_json 4 o '"/fm also drop the flag"'
-  } > "$dir/third.lines"
-  jq -s . "$dir/third.lines" > "$dir/third.json" && rm -f "$dir/third.lines"
+  write_comments "$dir/third.json" \
+    3 o '"/fm rework: narrower scope"' \
+    4 o '"/fm also drop the flag"'
   out=$(FM_TEST_PR_COMMENTS="$dir/third.json" run_poll "$dir")
   [ "$out" = "pr-comment: task task-a has new captain comment id(s) 4 on $url2" ] \
     || fail "a captain comment on the replacement PR did not wake: got '$out'"
@@ -224,8 +232,7 @@ test_retarget_during_fetch_leaves_wake_and_marker_untouched() {
   local dir out
   dir=$(make_case retarget-mid-fetch)
   write_task_meta "$dir"
-  comments_json 100 o '"/fm old"' > "$dir/base.lines"
-  jq -s . "$dir/base.lines" > "$dir/base.json" && rm -f "$dir/base.lines"
+  write_comments "$dir/base.json" 100 o '"/fm old"'
   FM_TEST_PR_COMMENTS="$dir/base.json" run_arm "$dir" task-a >/dev/null \
     || fail "arm failed"
   [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 100 ] \
@@ -248,11 +255,9 @@ printf '3\n' > "$FM_HOME/state/task-a.pr-comment-seen"
 cat "$FM_TEST_PR_COMMENTS"
 SH
   chmod +x "$dir/fakebin/tea"
-  {
-    comments_json 100 o '"/fm old"'
-    comments_json 101 o '"/fm rework: narrower scope"'
-  } > "$dir/retarget.lines"
-  jq -s . "$dir/retarget.lines" > "$dir/retarget.json" && rm -f "$dir/retarget.lines"
+  write_comments "$dir/retarget.json" \
+    100 o '"/fm old"' \
+    101 o '"/fm rework: narrower scope"'
   out=$(FM_TEST_PR_COMMENTS="$dir/retarget.json" run_poll "$dir")
   [ -z "$out" ] || fail "a read whose PR was retargeted mid-fetch woke: got '$out'"
   [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 3 ] \
@@ -268,18 +273,14 @@ test_wake_once_on_new_captain_command_comment() {
   local dir out
   dir=$(make_case wake-once)
   write_task_meta "$dir"
-  {
-    comments_json 11 someone '"lgtm"'
-    comments_json 12 o '"plain captain note"'
-  } > "$dir/comments.lines"
-  jq -s . "$dir/comments.lines" > "$dir/comments.json" && rm -f "$dir/comments.lines"
+  write_comments "$dir/comments.json" \
+    11 someone '"lgtm"' \
+    12 o '"plain captain note"'
   FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-a >/dev/null || fail "arm failed"
-  {
-    comments_json 11 someone '"lgtm"'
-    comments_json 12 o '"plain captain note"'
-    comments_json 13 o '"/fm rework: use a config flag instead"'
-  } > "$dir/comments.lines"
-  jq -s . "$dir/comments.lines" > "$dir/comments.json" && rm -f "$dir/comments.lines"
+  write_comments "$dir/comments.json" \
+    11 someone '"lgtm"' \
+    12 o '"plain captain note"' \
+    13 o '"/fm rework: use a config flag instead"'
   out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
   [ "$out" = "pr-comment: task task-a has new captain comment id(s) 13 on $URL" ] \
     || fail "a new owner /fm comment did not wake with exactly one line: got '$out'"
@@ -295,14 +296,12 @@ test_ignored_commenters_and_bare_comments_advance_the_marker() {
   local dir out
   dir=$(make_case ignored-comments)
   write_task_meta "$dir"
-  printf '[]\n' > "$dir/comments.json"
+  write_comments "$dir/comments.json"
   FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-a >/dev/null || fail "arm failed"
-  {
-    comments_json 21 other-user '"/fm do something"'
-    comments_json 22 o '"bare captain comment without the prefix"'
-    comments_json 23 o '"/fmship not the command prefix"'
-  } > "$dir/comments.lines"
-  jq -s . "$dir/comments.lines" > "$dir/comments.json" && rm -f "$dir/comments.lines"
+  write_comments "$dir/comments.json" \
+    21 other-user '"/fm do something"' \
+    22 o '"bare captain comment without the prefix"' \
+    23 o '"/fmship not the command prefix"'
   out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
   [ -z "$out" ] || fail "a non-captain or bare comment woke: got '$out'"
   [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 23 ] \
@@ -317,11 +316,9 @@ test_error_paths_stay_silent_and_keep_the_marker() {
   local dir out
   dir=$(make_case error-silent)
   write_task_meta "$dir"
-  {
-    comments_json 5 o '"/fm old"'
-    comments_json 6 o '"/fm new"'
-  } > "$dir/comments.lines"
-  jq -s . "$dir/comments.lines" > "$dir/comments.json" && rm -f "$dir/comments.lines"
+  write_comments "$dir/comments.json" \
+    5 o '"/fm old"' \
+    6 o '"/fm new"'
   FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-a >/dev/null || fail "arm failed"
   printf '5\n' > "$dir/home/state/task-a.pr-comment-seen"
   for variant in fail error-body bad-json; do
@@ -338,11 +335,9 @@ test_error_paths_stay_silent_and_keep_the_marker() {
   done
   # An ambiguous login is silent with a readable payload too, and the missed
   # window is re-read later.
-  {
-    comments_json 5 o '"/fm old"'
-    comments_json 6 o '"/fm new"'
-  } > "$dir/comments.lines"
-  jq -s . "$dir/comments.lines" > "$dir/comments.json" && rm -f "$dir/comments.lines"
+  write_comments "$dir/comments.json" \
+    5 o '"/fm old"' \
+    6 o '"/fm new"'
   out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" FM_TEST_TEA_SECOND_LOGIN=1 run_poll "$dir")
   [ -z "$out" ] || fail "an ambiguous login woke: got '$out'"
   [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 5 ] \
@@ -357,21 +352,28 @@ test_doctored_sidecar_and_retired_task() {
   dir=$(make_case doctored-retired)
   write_task_meta "$dir" task-a
   write_task_meta "$dir" task-b
-  printf '[]\n' > "$dir/comments.json"
+  write_comments "$dir/comments.json" 5 someone '"lgtm"'
   FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-a >/dev/null || fail "arm failed"
   FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-b >/dev/null || fail "arm failed"
-  # A sidecar whose URL is not reconstructible from its parts is ignored.
+  # A sidecar whose parts do not reconstruct its URL is ignored - the path
+  # says o/evil while the URL says o/r - even with a captain command waiting
+  # that a valid sidecar would wake on.
   printf '%s\n' fm-pr-comment-poll-v1 forgejo \
-    "https://forgejo.example/o/r/pulls/7" forgejo.example o/r 7 \
+    "https://forgejo.example/o/r/pulls/7" forgejo.example o/evil 7 \
     > "$dir/home/state/task-a.pr-comment-poll"
   chmod 0600 "$dir/home/state/task-a.pr-comment-poll"
   # A task whose metadata record is gone retires its sidecar silently.
   rm -f "$dir/home/state/task-b.meta"
+  write_comments "$dir/comments.json" \
+    5 someone '"lgtm"' \
+    9 o '"/fm rework: narrower scope"'
   out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
   [ -z "$out" ] || fail "a doctored sidecar or retired task woke: got '$out'"
   [ ! -e "$dir/home/state/task-b.pr-comment-poll" ] || fail "a retired task kept its sidecar"
   [ ! -e "$dir/home/state/task-b.pr-comment-seen" ] || fail "a retired task kept its marker"
   [ -e "$dir/home/state/task-a.pr-comment-poll" ] || fail "a live task lost its sidecar"
+  [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 5 ] \
+    || fail "a doctored sidecar advanced the seen marker"
   pass "a doctored sidecar is ignored and a cleaned-up task retires its poll"
 }
 
@@ -379,7 +381,7 @@ test_pr_check_arms_comment_poll_without_refusing() {
   local dir rc=0
   dir=$(make_case pr-check-hook)
   write_task_meta "$dir" task-a
-  printf '[]\n' > "$dir/comments.json"
+  write_comments "$dir/comments.json"
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_PR_COMMENTS="$dir/comments.json" \
     PATH="$dir/fakebin:$BASE_PATH" \
