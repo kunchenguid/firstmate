@@ -32,8 +32,8 @@
 #               anchors shape selection: the shape containing the cursor is the
 #               composer. Without it, the bottom-most shape wins.
 #   identity=1  a native agent identity/state probe exists (herdr `agent get`;
-#               the tmux pi foreground-process probe). Identity is what makes
-#               Pi's blank separated composer provable; with identity=0 that
+#               the tmux foreground-process probe). Identity is what makes
+#               the separated composer frame provable; with identity=0 that
 #               shape stays `unknown`.
 #   rows=<n>    the capture's bounded row count (informational).
 #
@@ -73,6 +73,13 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#                agy (Antigravity CLI) draws the same frame around its bare
+#                `>` prompt (verified live, agy 1.2.0, docs/verification/
+#                agy.md): the shape alone cannot tell the two apart, so the
+#                identity probe's answer decides whose frame it is, and a
+#                proven live agy lets the interior classify as agy's own
+#                composer - including the lone `>` prompt, which identity
+#                proves is agy's rather than a dead shell's.
 #                A separated pair that closes over a bare AGENT-GLYPH row is a
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
@@ -375,8 +382,9 @@ fm_composer_strip_ghost() {
 # outside its composer and the composer verdict is therefore always `unknown`.
 # agy's `esc to cancel` is part of the union for the same reason: an explicit
 # tmux agy endpoint reaches the submit core with no recorded harness, and its
-# bare `>` composer verdict is `unknown`, so the busy footer is the only
-# turn-started acknowledgement that path can read.
+# bare `>` composer defers while the turn spins up (a working agy never proves
+# its frame empty), so the busy footer is the only turn-started
+# acknowledgement that path can read.
 FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 # Devin 3000.11.1: the working composer and interrupt hint are independent
@@ -1939,15 +1947,27 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
   fi
 }
 
-# The pi separated-shape verdict: identity + structure conjunction (herdr's
+# The separated-shape verdict: identity + structure conjunction (herdr's
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done pi proves an empty composer. A blocked
-# pi is parked on an interactive prompt waiting for a human keystroke: its menu
-# is drawn above the separator pair, so the composer region looks free while the
+# live agent state, while only an idle/done agent proves an empty composer.
+# A blocked agent is parked on an interactive prompt waiting for a human
+# keystroke: its menu is drawn above the separator pair, so the composer
+# region looks free while the
 # keys would answer the prompt instead of composing (issue #2797). Structure
-# cannot disprove that, so a blocked pi defers rather than claiming empty.
+# cannot disprove that, so a blocked agent defers rather than claiming empty.
+#
+# The identity must NAME the agent, and the name decides whose frame the pair
+# is. pi's separated composer is blank between its rules; agy (Antigravity
+# CLI) draws the same frame around its bare `>` prompt (verified live, agy
+# 1.2.0, docs/verification/agy.md), so the shape alone can only ever ask the
+# question - it is the probe's answer that attributes it. With identity naming
+# a live agy, the pair is agy's own frame and the interior classifies as that
+# agent's composer, with the identity standing as the container proof that
+# lets the bare `>` read as agy's prompt rather than a dead shell. Any other
+# non-pi answer - a shell name, an unverified harness - proves nothing about
+# the frame and stays unknown.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -1964,15 +1984,38 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   agent=${identity%%$'\t'*}
   agent_status=${identity#*$'\t'}
-  if [ "$agent" != pi ] || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0
   fi
-  state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
-  if [ "$state" = pending ]; then
-    printf 'pending'
-    return 0
-  fi
+  case "$agent" in
+    pi)
+      state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
+      ;;
+    agy)
+      # agy's frame holds a real composer row, so classify the interior as
+      # ordinary container content: the proven live agy identity is the
+      # container proof, which is what lets agy's bare `>` prompt read empty
+      # instead of tripping the dead-shell rule.
+      state=$(_fm_composer_classify_rows "$screen" "$styled" 0 \
+        "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" "$((FM_COMPOSER_SCAN_PI_CLOSE - 1))")
+      ;;
+    *)
+      printf 'unknown'
+      return 0
+      ;;
+  esac
+  case "$state" in
+    pending|pending-unproven)
+      printf 'pending'
+      return 0
+      ;;
+    empty) ;;
+    *)
+      printf 'unknown'
+      return 0
+      ;;
+  esac
   case "$agent_status" in
     idle|done) printf 'empty' ;;
     *) printf 'unknown' ;;

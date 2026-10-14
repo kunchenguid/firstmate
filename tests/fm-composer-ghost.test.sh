@@ -47,7 +47,11 @@ make_fake_tmux() {  # <dir>
 set -u
 case "${1:-}" in
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '%s\n' "${FM_FAKE_CY:-0}"; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in
+      *cursor_y*) printf '%s\n' "${FM_FAKE_CY:-0}"; exit 0 ;;
+      *pane_tty*) printf '\n'; exit 0 ;;
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-fakepane}"; exit 0 ;;
+    esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     has_e=0
@@ -370,6 +374,165 @@ test_pi_identity_requires_readable_busy_state() (
   pass "fm_tmux_composer_identity: unknown busy state cannot become idle identity"
 )
 
+test_agy_identity_probe_names_agy() (
+  # The identity probe must READ the agent identity: an idle agy pane
+  # classifies as agy, never as the pi its separated frame resembles and never
+  # as an absent identity (fm-agy-idle-classify). Keep the mocks in this
+  # subshell so they cannot affect later tests.
+  local out arg_file
+  arg_file="$TMP_ROOT/agy-probe-busy-harness"
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  tmux() {
+    local arg
+    for arg in "$@"; do
+      case "$arg" in
+        *pane_tty*) printf '\n'; return 0 ;;
+        *pane_current_command*) printf 'agy\n'; return 0 ;;
+      esac
+    done
+    return 1
+  }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  fm_pane_busy_state() { printf '%s' "${2:-}" > "$arg_file"; printf 'idle'; }
+  out=$(fm_tmux_composer_identity fakepane) \
+    || fail "a live agy foreground process must produce an identity"
+  [ "$out" = "$(printf 'agy\tidle')" ] \
+    || fail "an idle agy composer must classify as agy, got '$out'"
+  [ "$(cat "$arg_file" 2>/dev/null)" = agy ] \
+    || fail "the identity's busy read must be scoped to agy, got '$(cat "$arg_file" 2>/dev/null)'"
+  # A real pane has a tty: the foreground-process scan must name agy on its
+  # own, with tmux's command-name fallback reporting only a wrapper shell.
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  tmux() {
+    local arg
+    for arg in "$@"; do
+      case "$arg" in
+        *pane_tty*) printf '/dev/pts/9\n'; return 0 ;;
+        *pane_current_command*) printf 'zsh\n'; return 0 ;;
+      esac
+    done
+    return 1
+  }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  ps() {
+    printf '%s\n' "  100   100   200 zsh" "  200   200   200 /usr/local/bin/agy"
+  }
+  out=$(fm_tmux_composer_identity fakepane) \
+    || fail "a foreground agy process on the pane tty must produce an identity"
+  [ "$out" = "$(printf 'agy\tidle')" ] \
+    || fail "the foreground scan must classify an idle agy pane as agy, got '$out'"
+  # An agy process outside the foreground process group is not the pane's agent.
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  ps() {
+    printf '%s\n' "  100   100   100 zsh" "  200   200   100 agy"
+  }
+  if out=$(fm_tmux_composer_identity fakepane); then
+    fail "a background agy process must produce no identity, got '$out'"
+  fi
+  unset -f ps
+  # The strict rule's honesty is untouched: a pane with no known agent
+  # foreground process gets no identity at all.
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  tmux() {
+    local arg
+    for arg in "$@"; do
+      case "$arg" in
+        *pane_tty*) printf '\n'; return 0 ;;
+        *pane_current_command*) printf 'zsh\n'; return 0 ;;
+      esac
+    done
+    return 1
+  }
+  if out=$(fm_tmux_composer_identity fakepane); then
+    fail "a shell pane must produce no identity, got '$out'"
+  fi
+  pass "fm_tmux_composer_identity: an idle agy pane classifies as agy; a shell pane gets none"
+)
+
+test_agy_idle_frame_classifies_through_live_identity() {
+  # End-to-end through the tmux adapter's own read: the idle agy frame (bare
+  # `>` between two full-width `─` rules, idle status row below - the live
+  # agy 1.2.0 capture in docs/verification/agy.md) with a live agy foreground
+  # process behind it proves an empty composer, so the control plane's exit
+  # composer guard no longer refuses a legitimate harness switch on an idle
+  # agy lane. The same frame with no known agent behind it keeps the
+  # dead-shell rule's `unknown`: identity is read, never guessed from shape.
+  local dir fb capture out
+  dir="$TMP_ROOT/agy-idle-frame"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf 'transcript\n────────────────────────\n>\n────────────────────────\n? for shortcuts                          Gemini 3.8 Flash · low\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 FM_FAKE_PANE_COMMAND=agy \
+    FM_TMUX_AGY_IDLE_SETTLE_SLEEP=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "an idle agy frame with a live agy process must read empty, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 FM_FAKE_PANE_COMMAND=zsh \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = unknown ] \
+    || fail "the same frame without a known live agent must stay unknown, got '$out'"
+  pass "fm_tmux_composer_state: an idle agy frame proves empty through the live agy identity only"
+}
+
+test_agy_empty_frame_waits_for_late_busy_footer() (
+  # agy draws its busy footer seconds after Enter: a turn still spinning up
+  # shows the cleared idle frame at first, and must defer once the footer lands
+  # inside the settle window rather than proving an empty composer. Pending
+  # text never waits on that window. Mocks stay in this subshell.
+  local dir fb capture out count_file
+  dir="$TMP_ROOT/agy-late-footer"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  count_file="$dir/busy-reads"
+  export FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 \
+    FM_FAKE_PANE_COMMAND=agy FM_TMUX_AGY_IDLE_SETTLE_SLEEP=0
+  printf 'transcript\n────────────────────────\n>\n────────────────────────\n? for shortcuts                          Gemini 3.8 Flash · low\n' > "$capture"
+  printf '0' > "$count_file"
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  fm_pane_busy_state() {
+    local n
+    n=$(($(cat "$count_file") + 1)); printf '%s' "$n" > "$count_file"
+    if [ "$n" -ge 3 ]; then printf 'busy'; else printf 'idle'; fi
+  }
+  out=$(PATH="$fb:$PATH" fm_tmux_composer_state fakepane)
+  [ "$out" = unknown ] \
+    || fail "an agy whose busy footer lands inside the settle window must not read empty, got '$out'"
+  [ "$(cat "$count_file")" = 3 ] \
+    || fail "the settle must stop re-reading once busy, got $(cat "$count_file") reads"
+  printf '0' > "$count_file"
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  fm_pane_busy_state() {
+    printf '%s' "$(($(cat "$count_file") + 1))" > "$count_file"; printf 'idle'
+  }
+  out=$(PATH="$fb:$PATH" FM_TMUX_AGY_IDLE_SETTLE_POLLS=4 fm_tmux_composer_state fakepane)
+  [ "$out" = empty ] \
+    || fail "an agy idle across the whole settle window must read empty, got '$out'"
+  [ "$(cat "$count_file")" = 5 ] \
+    || fail "idle must hold across every settle re-read, got $(cat "$count_file") reads"
+  printf '0' > "$count_file"
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  fm_pane_busy_state() {
+    printf '%s' "$(($(cat "$count_file") + 1))" > "$count_file"
+    printf 'transcript\n────────────────────────\n> typed meanwhile\n────────────────────────\n? for shortcuts                          Gemini 3.8 Flash · low\n' > "$capture"
+    printf 'idle'
+  }
+  out=$(PATH="$fb:$PATH" FM_TMUX_AGY_IDLE_SETTLE_POLLS=2 fm_tmux_composer_state fakepane)
+  [ "$out" = pending ] \
+    || fail "text landing during the settle window must not return the stale empty verdict, got '$out'"
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  fm_pane_busy_state() {
+    printf '%s' "$(($(cat "$count_file") + 1))" > "$count_file"; printf 'idle'
+  }
+  printf 'transcript\n────────────────────────\n> queued text\n────────────────────────\n? for shortcuts                          Gemini 3.8 Flash · low\n' > "$capture"
+  printf '0' > "$count_file"
+  out=$(PATH="$fb:$PATH" FM_TMUX_AGY_IDLE_SETTLE_SLEEP=30 fm_tmux_composer_state fakepane)
+  [ "$out" = pending ] \
+    || fail "an agy frame holding text must read pending, got '$out'"
+  [ "$(cat "$count_file")" = 1 ] \
+    || fail "a pending agy frame must not pay the idle settle, got $(cat "$count_file") busy reads"
+  pass "fm_tmux_composer_state: an agy empty verdict survives the late-footer settle; pending never waits"
+)
+
 test_bordered_busy_signatures_are_pending() {
   local dir fb capture out signature
   dir="$TMP_ROOT/bordered-busy-signatures"; mkdir -p "$dir"
@@ -601,7 +764,7 @@ test_absent_tmux_identity_keeps_enclosed_bare_verdict() {
   out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
     fm_tmux_composer_state "fakepane")
   [ "$out" = empty ] \
-    || fail "an enclosed Claude glyph must keep its bare empty verdict when the Pi-only probe is absent, got '$out'"
+    || fail "an enclosed Claude glyph must keep its bare empty verdict when the separated-frame probe is absent, got '$out'"
   pass "fm_tmux_composer_state: absent Pi identity preserves Claude's enclosed bare verdict"
 }
 
@@ -697,6 +860,9 @@ test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
 test_proven_box_bottom_border_cursor_classifies_content
 test_pi_identity_requires_readable_busy_state
+test_agy_identity_probe_names_agy
+test_agy_idle_frame_classifies_through_live_identity
+test_agy_empty_frame_waits_for_late_busy_footer
 test_bordered_busy_signatures_are_pending
 test_non_bordered_busy_footer_is_unknown_strict
 test_clipped_bordered_box_is_unknown

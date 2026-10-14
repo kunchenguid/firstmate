@@ -619,6 +619,57 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_agy_separated_frame_reads_agent_identity() {
+  # Real idle agy (Antigravity CLI 1.2.0, byte-level capture in
+  # docs/verification/agy.md): a bare `>` between two full-width `─` rules,
+  # with the idle status row below. The frame is shape-identical to pi's
+  # separated composer, so the shape alone can only ask for identity - it is
+  # the probe's answer that decides whose frame it is. Before the identity
+  # read learned agy, this pane classified `unknown` on every profile, so the
+  # control plane's exit composer guard refused a legitimate harness switch on
+  # an idle agy lane (fm-agy-idle-classify).
+  local screen typed blank agy_idle agy_working agy_blocked pi_idle none
+  screen=$'transcript\n────────────────────────\n>\n────────────────────────\n? for shortcuts                          Gemini 3.8 Flash · low'
+  typed=$'────────────────────────\n> push the branch now\n────────────────────────'
+  blank=$'────────────────────────\n\n────────────────────────'
+  agy_idle=$(printf 'agy\tidle'); agy_working=$(printf 'agy\tworking')
+  agy_blocked=$(printf 'agy\tblocked'); pi_idle=$(printf 'pi\tidle')
+  none=$(printf 'zsh\t')
+  # A proven live agy identity attributes the frame to agy, so the interior
+  # classifies as agy's own composer and the idle bare `>` proves empty.
+  assert_screen "agy idle frame with agy identity on herdr" empty "$CAPS_STYLED" "$screen" '' "$agy_idle"
+  assert_screen "agy idle frame with agy identity on tmux" empty "$CAPS_TMUX" "$screen" 2 "$agy_idle"
+  assert_screen "agy blank frame with agy identity" empty "$CAPS_STYLED" "$blank" '' "$agy_idle"
+  # Identity-capable but unfetched: the adapter is asked to probe lazily,
+  # exactly as for pi.
+  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")" = need-identity ] \
+    || fail "an agy frame on an identity-capable profile should request the lazy identity probe"
+  # Identity that cannot be read must not be guessed from shape: no identity
+  # capability, an absent probe answer, or a non-agent identity all keep the
+  # dead-shell rule's `unknown`.
+  assert_screen "agy frame without identity capability" unknown "$CAPS_PLAIN" "$screen"
+  assert_screen "agy frame on zellij" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "agy frame with absent identity" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "agy frame with absent identity on tmux" unknown "$CAPS_TMUX" "$screen" 2 probe-absent
+  assert_screen "agy frame with a shell identity" unknown "$CAPS_STYLED" "$screen" '' "$none"
+  assert_screen "agy frame with a shell identity on tmux" unknown "$CAPS_TMUX" "$screen" 2 "$none"
+  # A working or blocked agy defers on the bare prompt, the same posture pi
+  # takes on its blank region.
+  assert_screen "working agy defers on the bare prompt" unknown "$CAPS_STYLED" "$screen" '' "$agy_working"
+  assert_screen "blocked agy defers on the bare prompt" unknown "$CAPS_STYLED" "$screen" '' "$agy_blocked"
+  # Real unsubmitted text in the frame is pending in every live state.
+  assert_screen "agy typed in the frame" pending "$CAPS_STYLED" "$typed" '' "$agy_idle"
+  assert_screen "agy typed in the frame on tmux" pending "$CAPS_TMUX" "$typed" 1 "$agy_idle"
+  assert_screen "agy typed in the frame while working" pending "$CAPS_STYLED" "$typed" '' "$agy_working"
+  # DIVERGENCE: the same frame under a pi identity keeps pi's own rule, where
+  # any non-blank interior row is input, so the agy `>` reads pending. The two
+  # verdicts differ only by the NAMED identity, proving the shape alone
+  # carried neither.
+  assert_screen "the same frame under a pi identity is pi's" pending "$CAPS_STYLED" "$screen" '' "$pi_idle"
+  assert_screen "the same frame under a pi identity on tmux" pending "$CAPS_TMUX" "$screen" 2 "$pi_idle"
+  pass "matrix: agy's separated frame reads the agent identity, never the idle box shape"
+}
+
 test_matrix_pi_dollar_status_footer_is_empty() {
   # Pi's status row `$0.000 (sub) 5.4%/272k (auto)` at column 0 used to read
   # as a dead-shell prompt, so an idle separated composer classified unknown.
@@ -1032,6 +1083,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_agy_separated_frame_reads_agent_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border

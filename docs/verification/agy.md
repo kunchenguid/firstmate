@@ -135,14 +135,17 @@ Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
 agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh`, where the other crewmate-only adapters are also absent.
 
-## Composer: unknown by design
+## Composer: empty only through a proven agy identity
 
 Byte-level capture of the idle pane shows a bare unstyled `>` between two full-width `─` rules, with an unstyled `? for shortcuts` cell and a dim (`SGR 2`) model cell in the status row below.
-The shared classifier reads that bare `>` as `unknown` under the dead-shell rule, never `empty`.
-Steering still confirms delivery: the Herdr submit core leads with the native `idle`-to-`working` transition, which agy performs, and the delivery footer regex covers the tmux path.
+That frame is shape-identical to pi's separated composer, so the shared classifier can never attribute it from shape alone: it asks the backend's identity probe, and only a probe answer naming a live agy - herdr `agent get`, or the tmux foreground-process probe matching the anchored process name `agy` - proves the frame is agy's own composer, whose idle `>` then reads `empty`.
+On tmux the probe reads agy's status from its busy footer, which agy draws late after Enter (see below), so an `empty` verdict on an idle agy must see the footer stay absent across a settle window (`FM_TMUX_AGY_IDLE_SETTLE_POLLS` re-reads, about 5 s by default; pending and unknown frames never wait), and the frame is then re-captured so the verdict reflects the pane after the wait; a turn still spinning up flips to working as soon as its footer appears.
+A working or blocked agy defers, and an absent or non-agent probe answer keeps the dead-shell rule's `unknown`, so a pane whose agent died to a shell is never provable from its stale rules.
+The empty verdict is what lets `bin/fm-control.sh`'s exit composer guard type `/quit` on an idle agy lane; before the probe learned agy, the guard refused every harness switch away from an idle agy worker (task fm-agy-idle-classify).
+Steering still confirms delivery: the Herdr submit core leads with the native `idle`-to-`working` transition, which agy performs, and the delivery footer regex covers the tmux path, because a working agy never proves its frame empty.
 agy renders the busy footer late for that confirm loop - about 1.5 s after Enter for a short steer and 4-5 s for a realistic longer brief, measured live on `agy 1.2.1` (2026-09-12) against the shared budget's 3 x 0.4 s - so `bin/fm-send.sh` gives agy typed targets a longer default submit-confirm budget (20 retries, about 8 s at the default cadence); an explicit `FM_SEND_RETRIES` still wins and every other harness keeps the shared 3-retry default.
 `tests/fm-send-agy-confirm.test.sh` pins the raised default and `tests/fm-agy-harness.test.sh` pins the Herdr transition path.
-This is the cursor precedent, not a gap to patch in shared code.
+`tests/fm-composer-lib.test.sh` pins the identity-gated frame verdicts and `tests/fm-composer-ghost.test.sh` pins the tmux probe naming agy.
 
 ## Supervised task: spawn, steer, relaunch, and exit through the new path
 
