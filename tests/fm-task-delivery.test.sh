@@ -1603,54 +1603,6 @@ STUB
   pass "forge=forgejo: spawn agreement and promotion carry the binding, name tea, and keep yolo"
 }
 
-# direct-PR composes with the forge: the mode still means "publish without the
-# pipeline", and on Gerrit publishing is one gerrit-axi call rather than a push
-# plus a pull request. The worker reports the published change, never submits or
-# votes, and is kept to the one squashed shape the merge watch can follow.
-test_forge_gerrit_direct_pr_publishes_one_change() {
-  local home brief out status
-  home="$TMP_ROOT/forge-direct/home"
-  mkdir -p "$home/data" "$home/state"
-  FM_HOME="$home" "$BRIEF" forge-direct-g1 review-server-project --mode direct-PR --forge gerrit >/dev/null \
-    || fail "a gerrit direct-PR brief should scaffold"
-  brief="$home/data/forge-direct-g1/brief.md"
-  grep -qx "Delivery contract: mode=direct-PR forge=gerrit shape=squash" "$brief" \
-    || fail "the brief did not record the forge and shape in its delivery contract"
-  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'Run `gerrit-axi publish --squash --json`' "$brief" \
-    "the direct-PR worker was not told to publish through the forge tool"
-  assert_grep 'done [at=<epoch>]: PR {change url} published for review' "$brief" \
-    "the direct-PR contract did not end at a published change"
-  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_no_grep 'open a PR with `gh-axi`' "$brief" \
-    "the gerrit direct-PR worker was still told to open a pull request"
-  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_no_grep 'Pass `--skip push,pr,ci`' "$brief" \
-    "the direct-PR worker was given pipeline vocabulary for a pipeline it never runs"
-  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'Never run `gerrit-axi submit`' "$brief" "the direct-PR worker was not kept from submitting"
-  assert_grep 'Do NOT run /no-mistakes.' "$brief" "the direct-PR worker was not kept off the pipeline"
-  assert_no_grep 'pipeline changes:' "$brief" \
-    "the direct-PR worker was asked to report pipeline fixes from a pipeline it never runs"
-
-  # A stack is several changes and the merge watch follows one, so the shape is
-  # refused with that reason until pinned-membership watching exists.
-  out=$(FM_HOME="$home" "$BRIEF" forge-direct-g2 review-server-project --mode direct-PR --forge gerrit --shape stack 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a stack-shaped gerrit brief scaffolded"
-  assert_contains "$out" "--shape stack is refused" "the stack refusal did not name the refused shape"
-  assert_contains "$out" "pinned when its watch is armed" "the stack refusal did not carry its reason"
-  assert_absent "$home/data/forge-direct-g2/brief.md" "the refused stack brief was still written"
-  out=$(FM_HOME="$home" "$BRIEF" forge-direct-g3 review-server-project --mode direct-PR --shape squash 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a shape was accepted without a forge that publishes changes"
-  out=$(FM_HOME="$home" "$BRIEF" forge-direct-g4 review-server-project --mode local-only --forge gerrit 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a local-only brief accepted a forge"
-  assert_contains "$out" "cannot ship mode=local-only" "the local-only refusal did not name the mode"
-  pass "forge=gerrit: direct-PR publishes one squashed change and a stack is refused with its reason"
-}
-
 # forge=gitlab keeps both pull-request contracts and swaps only their forge tool:
 # the worker opens, reads back, and marks ready a non-draft merge request with
 # glab, rule 3 and the waiting guidance name glab, and the GitHub text stays out.

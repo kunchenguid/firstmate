@@ -288,8 +288,8 @@ test_forge_selection_renders_correct_cli() {
     assert_contains "$out" "$expect" "$label was refused without its reason"
     [ ! -e "$home/data/brief-forge-bad/brief.md" ] || fail "$label left a brief behind"
   done <<'ROWS'
-a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, forgejo, or external
-the removed github value|--mode direct-PR --forge github|expected none, gerrit, forgejo, or external
+a value outside the closed set|--mode direct-PR --forge bitbucket|expected none, gerrit, gitlab, forgejo, or external
+the removed github value|--mode direct-PR --forge github|expected none, gerrit, gitlab, forgejo, or external
 forgejo on local-only|--mode local-only --forge forgejo|cannot ship mode=local-only
 a shape on forgejo|--mode direct-PR --forge forgejo --shape squash|--shape applies only with --forge gerrit
 forgejo on a scout|--scout --forge forgejo|apply only to ship briefs
