@@ -737,7 +737,13 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unusable origin on the slot"
   assert_contains "$out" "could not fetch origin" \
     "the aborted spawn did not refuse on its unusable origin"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
+  # The merge keeps the fork's retained-lease contract: an abort that held the
+  # slot keeps a cleanup_recovery record so teardown can return the copy, but
+  # it must never leave a claim naming a task with no record.
+  if [ -e "$HOME_DIR/state/$id.meta" ]; then
+    assert_grep 'cleanup_recovery=treehouse' "$HOME_DIR/state/$id.meta" \
+      "the aborted spawn published a live task record instead of a lease-recovery record"
+  fi
   [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
     || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
