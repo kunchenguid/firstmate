@@ -2397,14 +2397,17 @@ fm_backend_herdr_pane_owns_session() {  # <session> <pane_id> <pid>
 #                 is running, or something that is not a bare shell is, so the
 #                 registration keeps its authority. An idle or blocked agent
 #                 is still a genuine, still-registered agent, not a restored
-#                 husk, so it is never a close-and-replace candidate.
+#                 husk, so it is never a close-and-replace candidate. An
+#                 unregistered pane (`agent_not_found`) whose process view
+#                 is `agent` also reads `live`, with no registered status.
 #   unknown     - anything else: an unparseable/unexpected response from
 #                 either call, a `pane get` success whose own echoed pane_id
 #                 does not round-trip (guards against misreading a herdr
 #                 response shape change as "the pane exists"), or a registered
 #                 agent whose process-level view is unreadable - the
 #                 registration alone is no longer trusted, and its absence is
-#                 not claimed either. The caller must fail safe toward refusal
+#                 not claimed either - or an unregistered pane whose process
+#                 view holds a non-shell, non-harness foreground process. The caller must fail safe toward refusal
 #                 here, never toward closing - this is the conservative
 #                 backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
