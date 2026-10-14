@@ -1369,6 +1369,10 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ] && [ -n "${SPAWN_ACTION_ID:-}" ]; then
+    fm_action_native_result "$STATE" "$ID" "$SPAWN_ACTION_ID" "$SPAWN_ACTION_HEAD" \
+      "$SPAWN_GEN" "$SPAWN_GEN" failed || echo "error: failed launch result could not be recorded for $ID" >&2
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -5749,6 +5753,12 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   exit 1
 fi
 sleep 0.3
+# shellcheck source=bin/fm-action-lib.sh
+. "$SCRIPT_DIR/fm-action-lib.sh"
+SPAWN_ACTION_ID="launch-$SPAWN_GEN"
+SPAWN_ACTION_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || SPAWN_ACTION_HEAD=
+fm_action_native_begin "$STATE" "$ID" "$SPAWN_ACTION_ID" launch "$SPAWN_ACTION_HEAD" \
+  "$SPAWN_GEN" "$SPAWN_GEN" || exit 1
 SPAWN_LAUNCH_SENT=1
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
@@ -5901,4 +5911,10 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
+SPAWN_ACTION_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || SPAWN_ACTION_HEAD=
+fm_action_native_result "$STATE" "$ID" "$SPAWN_ACTION_ID" "$SPAWN_ACTION_HEAD" \
+  "$SPAWN_GEN" "$SPAWN_GEN" ok || {
+    echo "error: worker launched but native launch result could not be recorded for $ID" >&2
+    exit 1
+  }
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

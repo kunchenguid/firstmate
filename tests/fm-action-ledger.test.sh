@@ -173,9 +173,9 @@ test_runbook_loop() {
   act "$s" start t1 a1 --at $((T0 + 410)) || fail "start"
   assert_equals "" "$(incident_kinds "$s" $((T0 + 420)))" "loop: the native start clears the incident"
   act "$s" result t1 a1 ok --at $((T0 + 900)) || fail "result"
-  act "$s" accept t1 a1 --receipt "run:42 head:abc" --at $((T0 + 950)) || fail "accept"
+  if act "$s" accept t1 a1 --at $((T0 + 950)) 2>/dev/null; then fail "unbound acceptance must refuse"; fi
   out=$(act "$s" show t1 --now $((T0 + 1000)))
-  assert_contains "$out" "accepted" "loop: acceptance is recorded with its receipt"
+  assert_contains "$out" "resulted" "a result alone cannot certify acceptance"
   if act "$s" accept t1 a1 --at "$T0" 2>/dev/null; then fail "acceptance without a native receipt must be refused"; fi
   pass "the documented follow-through loop clears incidents only through start, result and acceptance"
 }
@@ -202,17 +202,168 @@ test_inaccessible_evidence_is_unknown() {
   assert_contains "$out" "fallback=" "unknown names a read-only fallback route"
   assert_not_contains "$out" "absent" "unknown is never reported as absence"
   admit_authorized "$s" a1 || { chmod 755 "$root/locked"; fail "admit"; }
-  if act "$s" accept t1 a1 --receipt r --evidence "$root/locked/receipt" 2>/dev/null; then
+  if act "$s" accept t1 a1 --evidence "$root/locked/receipt" 2>/dev/null; then
     chmod 755 "$root/locked"
     fail "inaccessible evidence must not be accepted as success"
   fi
-  if act "$s" accept t1 a1 --receipt r --evidence "$root/open/missing" 2>/dev/null; then
+  if act "$s" accept t1 a1 --evidence "$root/open/missing" 2>/dev/null; then
     chmod 755 "$root/locked"
     fail "absent evidence must not be accepted as success"
   fi
-  act "$s" accept t1 a1 --receipt r --evidence "$root/open/receipt" || { chmod 755 "$root/locked"; fail "present evidence is accepted"; }
+  if act "$s" accept t1 a1 --evidence "$root/open/receipt" 2>/dev/null; then
+    chmod 755 "$root/locked"
+    fail "readability alone cannot certify acceptance"
+  fi
   chmod 755 "$root/locked"
   pass "inaccessible evidence is unknown with a fallback and never counts as absence or success"
+}
+
+native_case() {
+  local dir="$TMP_ROOT/$1"
+  mkdir -p "$dir/home/state" "$dir/fakebin"
+  fm_git_worktree "$dir/project" "$dir/wt" action-test
+  fm_write_meta "$dir/home/state/t1.meta" window=sess:fm-t1 endpoint_task_id=t1 \
+    kind=ship harness=claude "worktree=$dir/wt" "project=$dir/project" spawn_gen=run-1
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  display-message)
+    for arg in "$@"; do
+      case "$arg" in *pane_current_command*) printf 'zsh\n'; exit 0 ;; *cursor_y*) printf '1\n'; exit 0 ;; esac
+    done
+    printf 'fakepane\n' ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  list-windows) printf 'fm-t1\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tmux"
+  printf '%s' "$dir"
+}
+
+send_native() {
+  local dir=$1; shift
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_SEND_SETTLE=0 \
+    bash "$ROOT/bin/fm-send.sh" t1 "$@" > "$dir/send.out" 2> "$dir/send.err"
+}
+
+poll_native() {
+  local dir=$1 action_state=${2:-$1/home/state}
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" bash -c '
+    . "$1/bin/fm-watch.sh"
+    date() { printf "2000000000\n"; }
+    wake() { printf "%s\n" "$1"; }
+    action_followthrough_check t1 "$2"
+  ' _ "$ROOT" "$action_state"
+}
+
+test_native_intake_and_poll() {
+  local dir s out rec count
+  dir=$(native_case native-intake)
+  s="$dir/home/state"
+  send_native "$dir" "prepare the image" || fail "real send admission"
+  rec="$s/t1.inbox/001.msg"
+  out=$(poll_native "$dir") || fail "watcher action poll"
+  assert_contains "$out" "unacked-unstarted" "real send exposes ready-but-unstarted"
+  count=$(wc -l < "$s/.wake-queue")
+  assert_equals "" "$(poll_native "$dir")" "a restarted poll deduplicates the incident"
+  assert_equals "$count" "$(wc -l < "$s/.wake-queue")" "dedup survives a fresh watcher process"
+  mv "$rec" "$s/t1.inbox/handled/"
+  out=$(poll_native "$dir") || fail "handled poll"
+  assert_contains "$out" "acked-unexecuted" "handled real steer still requires execution"
+  : > "$s/.wake-queue"
+  assert_equals "" "$(poll_native "$dir")" "draining a wake does not repeat its incident"
+  act "$s" hold t1 steer-001 --kind safe-boundary --until 2000000100 --reason "finish the current independent operation" || fail "native hold"
+  assert_equals "" "$(poll_native "$dir")" "a legitimate hold suppresses the actual poll"
+  act "$s" start t1 steer-001 || fail "execution start"
+  assert_equals "" "$(poll_native "$dir")" "a healthy long run stays quiet through the actual poll"
+  send_native "$dir" "another authorized step" || fail "second send"
+  out=$(act "$s" incidents t1 --now "$(date +%s)")
+  assert_equals "" "$out" "admission inside its start window is quiet"
+  mkdir -p "$s/parent-route"
+  cp "$s/t1.meta" "$s/parent-route/t1.meta"
+  rec=$(bash -c '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_write_idempotent "$2" t1 "remote step"' _ "$ROOT" "$s/parent-route") || fail "remote inbox admission"
+  out=$(poll_native "$dir" "$s/parent-route") || fail "parent-route action poll"
+  assert_contains "$out" "unacked-unstarted" "remote parent-route ledger reaches existing watcher queue"
+  mv "$rec" "$s/parent-route/t1.inbox/handled/"
+  out=$(poll_native "$dir" "$s/parent-route") || fail "parent-route handled poll"
+  assert_contains "$out" "acked-unexecuted" "remote acknowledgement still requires execution"
+  assert_equals "" "$(poll_native "$dir" "$s/parent-route")" "remote incident dedup survives watcher restart"
+  pass "real send and watcher poll enforce follow-through with durable dedup and wait controls"
+}
+
+test_native_acceptance_identity() {
+  local dir s path good out field bad
+  dir=$(native_case native-evidence)
+  s="$dir/home/state"
+  send_native "$dir" exit || fail "native exit steer"
+  mv "$s/t1.inbox/001.msg" "$s/t1.inbox/handled/"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ACTION_ID=steer-001 FM_ACTION_ATTEMPT=001.msg \
+    bash "$ROOT/bin/fm-control.sh" t1 exit > "$dir/control.out" 2> "$dir/control.err" || fail "native control receipt"
+  path="$s/t1.action-receipts/steer-001"
+  [ -f "$path" ] || fail "native producer did not publish a receipt"
+  good=$(cat "$path")
+  if act "$s" accept t1 steer-001 2>/dev/null; then fail "accept without evidence"; fi
+  if act "$s" accept t1 steer-001 --evidence "$dir/missing" 2>/dev/null; then fail "missing evidence accepted"; fi
+  printf '%s\n' "$good" > "$dir/arbitrary"
+  if act "$s" accept t1 steer-001 --evidence "$dir/arbitrary" 2>/dev/null; then fail "arbitrary receipt path accepted"; fi
+  for field in 2 3 4 5 6 7 8; do
+    bad=wrong
+    [ "$field" != 7 ] || bad=failed
+    [ "$field" != 8 ] || bad=1
+    printf '%s\n' "$good" | awk -F'\t' -v OFS='\t' -v field="$field" -v bad="$bad" '{$field=bad; print}' > "$path"
+    if act "$s" accept t1 steer-001 --evidence "$path" 2>/dev/null; then fail "invalid native receipt field $field accepted"; fi
+  done
+  printf '%s\n' "$good" > "$path"
+  chmod 000 "$path"
+  if [ ! -r "$path" ] && act "$s" accept t1 steer-001 --evidence "$path" 2>/dev/null; then
+    chmod 600 "$path"; fail "unreadable receipt accepted"
+  fi
+  chmod 600 "$path"
+  act "$s" accept t1 steer-001 --evidence "$path" || fail "current exact successful native evidence refused"
+  out=$(act "$s" show t1)
+  assert_contains "$out" "accepted" "exact native operation is accepted"
+  printf 'spawn_gen=run-2\n' > "$dir/changed-meta"
+  awk -F= '$1!="spawn_gen"' "$s/t1.meta" >> "$dir/changed-meta"
+  mv "$dir/changed-meta" "$s/t1.meta"
+  if act "$s" accept t1 steer-001 --evidence "$path" 2>/dev/null; then fail "older incarnation receipt accepted"; fi
+  dir=$(native_case failed-native-evidence)
+  s="$dir/home/state"
+  send_native "$dir" interrupt || fail "native interrupt steer"
+  if PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ACTION_ID=steer-001 FM_ACTION_ATTEMPT=001.msg \
+    bash "$ROOT/bin/fm-control.sh" t1 interrupt > "$dir/control.out" 2> "$dir/control.err"; then
+    fail "interrupting a stopped agent must refuse"
+  fi
+  if act "$s" accept t1 steer-001 --evidence "$s/t1.action-receipts/steer-001" 2>/dev/null; then
+    fail "failed native operation must not certify acceptance"
+  fi
+  pass "native control receipts require exact current identity and successful evidence"
+}
+
+test_failed_gate_attempt_stays_pending() {
+  local s class outcome
+  for class in human-decision external-gate; do
+    s=$(fresh_state "failed-$class")
+    act "$s" admit t1 --id gate --class "$class" --owner owner --operation "answer?" --ready-with none --due $((T0+10)) --at "$T0" || fail "gate admission"
+    for outcome in failed refused ok; do
+      act "$s" result t1 gate "$outcome" --reason "query unavailable" --at $((T0+5)) || fail "gate attempt"
+      assert_equals "gate:gate-overdue" "$(incident_kinds "$s" $((T0+20)))" "$class $outcome must not answer a gate"
+    done
+    act "$s" result t1 gate answered --at $((T0+21)) || fail "gate answer"
+    assert_equals "" "$(incident_kinds "$s" $((T0+22)))" "explicit answer resolves $class"
+  done
+  pass "both gate classes stay pending until explicitly answered"
+}
+
+test_missing_relative_evidence_terminates() {
+  local dir out name
+  dir="$TMP_ROOT/relative"; mkdir -p "$dir"
+  for name in receipt.json missing/receipt.json; do
+    out=$(cd "$dir" && bash "$ACTION" probe "$name") || fail "relative probe failed"
+    assert_equals absent "$out" "missing relative ancestry terminates"
+    admit_authorized "$dir/state" "a-${name//\//-}" || fail "relative acceptance admission"
+    if (cd "$dir" && act "$dir/state" accept t1 "a-${name//\//-}" --evidence "$name" 2>/dev/null); then fail "relative missing evidence accepted"; fi
+  done
+  pass "relative probes and acceptance terminate on missing paths"
 }
 
 test_ready_but_unstarted
@@ -224,3 +375,8 @@ test_no_blanket_grant_and_counted_grant
 test_fold_is_read_only
 test_runbook_loop
 test_inaccessible_evidence_is_unknown
+
+test_failed_gate_attempt_stays_pending
+test_missing_relative_evidence_terminates
+test_native_intake_and_poll
+test_native_acceptance_identity

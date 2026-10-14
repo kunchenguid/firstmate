@@ -613,6 +613,29 @@ inbox_steer_check() {  # <window> <task>
   esac
 }
 
+action_followthrough_check() {
+  local task=$1 action_state=${2:-$STATE} id class phase incident age owner due operation marker key queued reason
+  while IFS=$'\t' read -r id class phase incident age owner due operation; do
+    [ -n "$id" ] || continue
+    marker="$action_state/.$task.action-incident-$id"
+    if [ "$incident" = none ]; then
+      rm -f "$marker" || return 1
+      continue
+    fi
+    [ "$(cat "$marker" 2>/dev/null || true)" != "$incident" ] || continue
+    key="action-followthrough:$action_state:$task:$id:$incident"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    queued=$(fm_wake_queued_keys_locked check) || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+    reason="check: action-followthrough $task $id $incident owner=$owner operation=$operation ledger=$action_state/$task.actions"
+    if ! printf '%s\n' "$queued" | awk -v key="$key" '$0==key {found=1} END {exit !found}'; then
+      fm_wake_append_locked check "$key" "$reason" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+    fi
+    printf '%s\n' "$incident" > "$marker" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    wake "$reason"
+  done < <(fm_action_fold "$action_state" "$task" "$(date +%s)")
+}
+
 # 0 (benign/absorb) if EVERY task in a no-verb "signal:" wake has positive work
 # evidence; 1 otherwise. Each task may satisfy the authoritative working proof,
 # or an eligible bare turn-end may use the opt-in pane-churn proof below.
@@ -3042,6 +3065,12 @@ EOF
       triage_log "absorbed benign $reason"
     fi
   fi
+
+  for action_ledger in "$STATE"/*.actions "$STATE/parent-route"/*.actions; do
+    [ -f "$action_ledger" ] || continue
+    action_task=${action_ledger##*/}; action_task=${action_task%.actions}
+    action_followthrough_check "$action_task" "${action_ledger%/*}" || exit 1
+  done
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
