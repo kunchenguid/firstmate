@@ -49,7 +49,7 @@
 # 1..25). A configured value rides the generated check shim into watcher runs
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
-# a direct child) with a three-second margin. Every read is capped at five
+# a direct child) with a three-second margin. Every read is capped at ten
 # seconds, and a read killed at that bound or at the deadline is budget
 # refusal, never a forge failure. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
@@ -61,13 +61,16 @@
 # and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# attempted at most once per poll and its observation applied to every owner.
-# A final observation applies
+# attempted once per poll and retried once when that attempt failed for a
+# reason other than the budget and budget time remains; its observation
+# applies to every owner. A final observation applies
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
 # next URL that still has a full observation reserve; only a genuine forge
 # failure or head change records an error.
-# API failure leaves error evidence; an expired or absent observation is not
+# API failure leaves error evidence: the generic unavailable reason plus the
+# failing read's first bounded stderr line, so the record names the failed
+# call. An expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
@@ -214,12 +217,19 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
+# Keep the first line of a failed read's stderr, bounded, for the record.
+note_forge_error() { # <stderr-file>
+  local first=
+  IFS= read -r first < "$1" 2>/dev/null || true
+  printf '%s' "${first//$'\r'/}" | cut -c1-200 > "$TMP/last-forge.err"
+}
+
 forge() {
   local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  [ "$remaining" -le 5 ] || remaining=5
+  [ "$remaining" -le 10 ] || remaining=10
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
   # A kill at the read bound or the deadline is budget refusal too; only the
@@ -229,6 +239,7 @@ forge() {
     : > "$TMP/budget-exhausted"
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
+    note_forge_error "$forge_err"
   fi
   return "$rc"
 }
@@ -246,6 +257,9 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
+  # Evidence belongs to one observation: clear it before any early return so
+  # a URL this observer cannot read never inherits another URL's stderr.
+  : > "$TMP/last-forge.err"
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
@@ -364,6 +378,9 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
 poll() {
   local task url old kind error observed
   local -a row
+  # A leading URL this observer cannot read returns before observe initializes
+  # this; the retry check below must still see a defined value.
+  BUDGET_EXHAUSTED=0
   acquire
   get_input
   read_saved
@@ -396,6 +413,14 @@ poll() {
     url=${row[0]}
     observed=0
     observe "$url" || observed=$?
+    # Retry once when the attempt failed for a reason other than the budget
+    # and budget time remains for another attempt; an attempt the budget cuts
+    # short stays unmeasured exactly like the first one.
+    if [ "$observed" -ne 0 ] && [ "$BUDGET_EXHAUSTED" -eq 0 ] \
+      && [ $((DEADLINE - $(date +%s))) -gt 0 ]; then
+      observed=0
+      observe "$url" || observed=$?
+    fi
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
@@ -422,6 +447,7 @@ poll() {
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
+        [ ! -s "$TMP/last-forge.err" ] || error="$error: $(<"$TMP/last-forge.err")"
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
