@@ -382,7 +382,9 @@
 #   refused for any other runner, for a home without config/claude-account,
 #   for an undeclared entry, and for a remote secondmate, whose own home owns
 #   its pin. A relaunch without --account keeps the Claude account recorded on
-#   the task while the file still declares it and refuses when it does not.
+#   the task while the file still declares it and refuses when it does not. A
+#   local secondmate respawn without --account keeps it the same way, but when
+#   the file no longer declares it the respawn re-resolves instead of refusing.
 #   bin/fm-worker-account-lib.sh owns parsing, pool selection, the relaunch
 #   rule, the check, and the shed list.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
@@ -2613,6 +2615,10 @@ WORKER_ACCOUNT_ENTRY=$ACCOUNT_ARG
 if [ "$RELAUNCH" -eq 1 ]; then
   WORKER_ACCOUNT_ENTRY=$(fm_worker_account_relaunch_entry "$HARNESS" "$CONFIG" \
     "$(fm_control_harness_family "$RELAUNCH_PRIOR_HARNESS")" "$RELAUNCH_PRIOR_ACCOUNT" "$ACCOUNT_ARG" "$ID") || exit 1
+elif [ "$KIND" = secondmate ] && [ -z "$ACCOUNT_ARG" ]; then
+  WORKER_ACCOUNT_ENTRY=$(fm_worker_account_relaunch_entry "$HARNESS" "$CONFIG" \
+    "$(fm_control_harness_family "$(fm_meta_get "$STATE/$ID.meta" harness)")" \
+    "$(fm_meta_get "$STATE/$ID.meta" account)" "" "$ID" 2>/dev/null) || WORKER_ACCOUNT_ENTRY=
 fi
 WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND" "$WORKER_ACCOUNT_ENTRY") || exit 1
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}

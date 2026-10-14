@@ -1010,6 +1010,7 @@ Every declared root must be a readable, searchable directory, but only the accou
 A relaunch keeps the account recorded on its task while the file still declares it.
 When the file no longer declares that account, the relaunch refuses before the running worker stops and names the account; restore the line, or relaunch with `--account <entry>` to move the task deliberately.
 A home whose file is gone relaunches unpinned, as before.
+A local secondmate respawn, such as the liveness sweep's recovery, keeps the recorded account the same way; when the file no longer declares it, the respawn uses the pool's first line instead of refusing.
 The Pi pin keeps one root, and its relaunch re-reads the current file.
 
 Firstmate chooses among declared accounts with [`bin/fm-claude-account.sh`](../bin/fm-claude-account.sh) `pick`, which reads `quota-axi` once and prints the evidence for every declared account before naming one; its header owns the lane matching, ranking, and exit codes.

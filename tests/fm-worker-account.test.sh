@@ -457,6 +457,56 @@ test_local_secondmate_reads_the_launching_home_pin() {
   pass "a local secondmate reads the launching home's pin and its own home's file is never inherited over"
 }
 
+# The liveness sweep respawns a local secondmate with a bare
+# `fm-spawn.sh <id> --secondmate`. That respawn keeps the pool account recorded
+# on the task while the file declares it, and re-resolves once it does not.
+test_local_secondmate_respawn_keeps_the_recorded_pool_account() {
+  local out rc id=acct-sm-pool sm
+  new_case secondmate-pool claude
+  signed_in_claude_root "$CASE/work"
+  signed_in_claude_root "$CASE/mon"
+  printf '%s\n' "$CASE/work" "$CASE/mon" > "$HOME_DIR/config/claude-account"
+  sm="$CASE/secondmate-home"
+  mkdir -p "$sm/bin" "$sm/data" "$sm/config"
+  git init -q -b main "$sm"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$sm/data/charter.md"
+  signed_in_claude_root "$CASE/ambient-claude"
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
+    fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" "$sm" --account "$CASE/mon" --secondmate); rc=$?
+  expect_code 0 "$rc" "a local secondmate spawn on the pool's second line should succeed: $out"
+  assert_grep "account=$CASE/mon" "$HOME_DIR/state/$id.meta" "the secondmate record should carry the selected account"
+
+  : > "$CASE/launch.log"
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
+    fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" --secondmate); rc=$?
+  expect_code 0 "$rc" "a respawn of the local secondmate should succeed: $out"
+  assert_contains "$out" "account=$CASE/mon" "the respawn should report the recorded account"
+  assert_grep "account=$CASE/mon" "$HOME_DIR/state/$id.meta" "the respawned record should keep the recorded account"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/mon" "$CASE/claude-worker" \
+    "the respawned secondmate should run on the recorded account, not the pool's first line"
+
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  : > "$CASE/launch.log"
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
+    fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" --secondmate); rc=$?
+  expect_code 0 "$rc" "a respawn whose recorded account is no longer declared should re-resolve: $out"
+  assert_grep "account=$CASE/work" "$HOME_DIR/state/$id.meta" "an undeclared recorded account should fall back to the first line"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" \
+    "a respawn off an undeclared account should run on the pool's first line"
+
+  rm "$HOME_DIR/config/claude-account"
+  : > "$CASE/launch.log"
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
+    fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" --secondmate); rc=$?
+  expect_code 0 "$rc" "a respawn in a home whose file is gone should launch unpinned: $out"
+  assert_no_grep "account=" "$HOME_DIR/state/$id.meta" "an unpinned respawn must drop the recorded account"
+  pass "a local secondmate respawn keeps its recorded pool account, and re-resolves once the file no longer declares it"
+}
+
 test_absent_pin_keeps_the_launch_unchanged
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
@@ -472,5 +522,6 @@ test_raw_claude_command_receives_the_pin
 test_raw_claude_account_override_refuses_under_a_pin
 test_raw_claude_account_override_is_kept_without_a_pin
 test_local_secondmate_reads_the_launching_home_pin
+test_local_secondmate_respawn_keeps_the_recorded_pool_account
 
 echo "# all fm-worker-account tests passed"
