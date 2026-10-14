@@ -1,4 +1,9 @@
 # Projection for fm-contributions.sh; its header owns the record contract.
+def supported_url:
+  type == "string" and test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$");
+# Preserve legacy ownership and saved-record compatibility, including lookalike
+# hosts accepted by the historical regex; supported_url alone gates observation.
+# tests/fm-contributions.test.sh covers fresh, retained and mixed saved ownership.
 def canonical_url:
   type == "string" and (test("^https://github.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$")
     or test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$"));
@@ -52,12 +57,12 @@ def projected($input; $saved; $now; $max_age):
     | ($record.observation // {}) as $o
     | (if $record.error == null and $record.observation != null and ($o.head | sha) then $o.head else null end) as $observed_head
     | (($record.checked_at // "") | try fromdateiso8601 catch null) as $checked
-    # A merged or closed observation is final; poll never re-reads it, so it never expires.
+    # On supported URLs, a merged or closed observation never needs another read.
     | ($record.error == null and ($o.state | IN("merged","closed"))) as $final
     | (($final or ($checked != null and ($now - $checked) >= 0 and ($now - $checked) <= $max_age))
        and (if $record.kind == "pr" then $observed_head != null
             else $record.error == null and $record.observation != null end)
-       and ($k.url | startswith("https://github.com/"))) as $fresh
+       and ($k.url | supported_url)) as $fresh
     | (($o.checks // []) | latest_checks) as $checks
     | [$checks[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
     | [$checks[] | select(.status != "completed")] as $pending
@@ -69,7 +74,7 @@ def projected($input; $saved; $now; $max_age):
     | ([$o.reviews[]? | select(.state != "COMMENTED")] | group_by(.user.login)
        | map(sort_by([.submitted_at,.id]) | last)
        | map(. + {freshness:(if $observed_head != null and .commit_id != $observed_head then "STALE" elif $fresh then "current" else "unverified" end)})) as $reviews
-    | (if ($k.url | startswith("https://github.com/") | not) then
+    | (if ($k.url | supported_url | not) then
          {actor:"unmeasured",reason:"unsupported forge; coverage is unmeasured"}
        elif $o.state == "merged" or $o.state == "closed" then
          if $fresh then {actor:"nobody",reason:("forge reports " + $o.state)}
