@@ -438,22 +438,19 @@ test_unsupported_poll_is_silent_and_clears_legacy_errors() {
       case "$task" in
         gitlab) url=https://gitlab.com/o/r/-/merge_requests/2 ;;
         selfhosted) url=https://git.example.org/group/subgroup/r/-/merge_requests/3 ;;
-        hyphenated) url=https://github-com/o/r/-/merge_requests/4 ;;
-        wildcard) url=https://githubXcom/o/r/-/merge_requests/5 ;;
+        hyphenated) url=https://github-com/o/r/pull/8 ;;
+        wildcard) url=https://githubXcom/o/r/issues/9 ;;
       esac
       printf -- '- [ ] %s - Filed %s (repo: sample) (kind: ship)\n' "$task" "$url" >> "$home/data/backlog.md"
       if [ "$mode" = legacy ]; then
         mkdir -p "$home/data/$task"
         jq -n --arg task "$task" --arg url "$url" --arg now "$NOW" '
-          {schema:"fm-contributions.v1",task:$task,records:[{url:$url,kind:"pr",
-            checked_at:$now,error:"forge observation unavailable or changed during read",
+          {schema:"fm-contributions.v1",task:$task,records:[{url:$url,
+            kind:(if ($url | contains("/issues/")) then "issue" else "pr" end),checked_at:$now,error:"forge observation unavailable or changed during read",
             observation:null,verdict:null,seen:[],pending:[],notified:[],provenance:"retained ownership"}]}' \
           > "$home/data/$task/contributions.json"
         jq '.records[].error=null' "$home/data/$task/contributions.json" > "$home/$task.expected.json"
       fi
-    done
-    for url in https://github-com/o/r/pull/8 https://githubXcom/o/r/issues/9; do
-      printf -- '- [ ] lookalike - Filed %s (repo: sample) (kind: ship)\n' "$url" >> "$home/data/backlog.md"
     done
     # Forgejo pulls are not accepted by the existing contribution ownership schema.
     printf -- '- [ ] forgejo - Filed https://codeberg.org/o/r/pulls/2 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
@@ -489,21 +486,42 @@ test_legacy_cleanup_preserves_supported_failure() {
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].observation=null
     | .records[0].error="forge observation unavailable or changed during read"
-    | .records += [(.records[0] | .url="https://gitlab.com/o/r/-/merge_requests/2")]'
+    | .records += [(.records[0] | .url="https://gitlab.com/o/r/-/merge_requests/2"),
+      (.records[0] | .url="https://github-com/o/r/pull/8"),
+      (.records[0] | .url="https://githubXcom/o/r/issues/9" | .kind="issue")]'
+  jq '[.records[] | select(.url != "https://github.com/o/r/pull/8") | .error=null]' \
+    "$home/data/delivery/contributions.json" > "$home/unsupported.expected.json"
   printf 'down\n' > "$home/forge/fault"
   out=$(with_home "$home" bash "$ROOT/bin/fm-contributions.sh" poll 2>&1) \
     || fail "mixed legacy-error poll failed: $out"
   [ -z "$out" ] || fail "an existing GitHub failure episode re-alerted: $out"
   grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'supported ownership was not retried'
-  jq -e '.records | length == 2
+  [ "$(wc -l < "$home/forge/calls")" -eq 1 ] || fail 'unsupported mixed records triggered forge reads'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'mixed legacy cleanup enqueued a wake'
+  jq -e --slurpfile expected "$home/unsupported.expected.json" '.records | length == 4
     and all(.[]; .observation == null)
     and any(.[]; .url == "https://github.com/o/r/pull/8" and .error != null)
-    and any(.[]; .url == "https://gitlab.com/o/r/-/merge_requests/2" and .error == null)' \
+    and ([.[] | select(.url != "https://github.com/o/r/pull/8")] | sort_by(.url))
+      == ($expected[0] | sort_by(.url))' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'unsupported cleanup erased supported failure or fabricated an observation'
-  bearings "$home" | jq -e '.contributions | .known == 2 and .checked == 0
-    and .unmeasured == 1 and .counts.fleet == 1 and .complete == false' >/dev/null \
+  bearings "$home" | jq -e '.contributions | .known == 4 and .checked == 0
+    and .unmeasured == 3 and .unreadable_records == 0
+    and .counts == {captain:0,fleet:1,maintainer:0,nobody:0} and .complete == false' >/dev/null \
     || fail 'mixed legacy cleanup confused supported failures with unmeasured coverage'
+  rm "$home/forge/fault"
+  out=$(with_home "$home" bash "$ROOT/bin/fm-contributions.sh" poll 2>&1) \
+    || fail "mixed saved-file recovery failed: $out"
+  [ -z "$out" ] || fail "mixed saved-file recovery printed an alert: $out"
+  [ ! -s "$home/state/.wake-queue" ] || fail 'mixed saved-file recovery enqueued a wake'
+  jq -e --slurpfile expected "$home/unsupported.expected.json" '
+    [.records[] | select(.url != "https://github.com/o/r/pull/8")] | sort_by(.url)
+    == ($expected[0] | sort_by(.url))' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'supported recovery changed retained unsupported evidence'
+  bearings "$home" | jq -e '.contributions | .known == 4 and .checked == 1
+    and .unmeasured == 3 and .unreadable_records == 0
+    and .counts == {captain:0,fleet:0,maintainer:1,nobody:0} and .complete == false' >/dev/null \
+    || fail 'real GitHub recovery lost mixed saved ownership'
   pass 'legacy cleanup preserves unsupported ownership and supported missing-evidence failure in the same file'
 }
 
