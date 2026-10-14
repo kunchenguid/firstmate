@@ -509,6 +509,96 @@ EOF
   pass "Pi actionable output waits for predecessor close before successor restoration"
 }
 
+# A successor can print readiness after its arm process has already exited when
+# a descendant retains the stdout pipe and emits the line. Readiness alone must
+# not let the original wake reach Pi while no arm child is alive: restoration
+# has to start a live successor inside its existing retry bound first.
+test_pi_dead_ready_successor_is_retried_before_delivery() {
+  local repo home plugin log stop release holder out status
+  repo="$TMP_ROOT/pi-dead-ready-successor-root"
+  home="$TMP_ROOT/pi-dead-ready-successor-home"
+  log="$TMP_ROOT/pi-dead-ready-successor.log"
+  stop="$TMP_ROOT/pi-dead-ready-successor.stop"
+  release="$TMP_ROOT/pi-dead-ready-successor.release"
+  holder="$TMP_ROOT/pi-dead-ready-successor-holder.sh"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$holder" <<'SH'
+#!/usr/bin/env bash
+parent=$1
+release=$2
+while kill -0 "$parent" 2>/dev/null; do sleep 0.01; done
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=dead-ready\n' "$parent"
+while [ ! -e "$release" ]; do sleep 0.02; done
+SH
+  chmod +x "$holder"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: wake before dead-ready successor\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  ("${FM_HOLDER:?}" "$$" "${FM_RELEASE_FILE:?}" >&1 2>/dev/null &)
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=live-successor\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RELEASE_FILE="$release" FM_HOLDER="$holder" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+let armsAtDelivery = 0;
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    armsAtDelivery = armRows().length;
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-dead-ready-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+let failure = "";
+if (!prompt.includes("signal: wake before dead-ready successor")) {
+  failure = `original wake was not delivered: ${prompt}`;
+} else if (armsAtDelivery < 3) {
+  failure = `wake reached Pi with no live successor; arms at delivery=${armsAtDelivery}: ${armRows().join(" | ")}`;
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (failure) throw new Error(failure);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi restoration must retry a dead-but-ready successor before delivering the wake: $out"
+  [ -z "$out" ] || fail "Pi dead-ready successor test printed output: $out"
+  pass "Pi restoration retries a dead-but-ready successor before delivering the wake"
+}
+
 test_pi_branch_offer_owns_actionable_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-offer-root"
@@ -5200,6 +5290,7 @@ test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_actionable_output_waits_for_predecessor_close
+test_pi_dead_ready_successor_is_retried_before_delivery
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check

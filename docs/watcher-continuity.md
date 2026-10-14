@@ -43,6 +43,7 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
+The actionable restoration path applies the same live-child check after readiness, so output retained by a dead child's descendant cannot satisfy successor verification.
 A failed follow-up never cancels continuity restoration.
 
 ### Pi session replacement
