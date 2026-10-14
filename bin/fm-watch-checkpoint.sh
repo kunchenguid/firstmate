@@ -17,9 +17,8 @@
 # wake; the boundary alone is the ordinary quiet checkpoint.
 #
 # Without the host (the plain checkpoint, below the host branch) the cycle runs
-# under bin/fm-watch-arm.sh's scheduling continuation and outlives the
-# checkpoint, so registered check sweeps run while the model reasons between
-# checkpoints; the PLAIN CHECKPOINT comment owns the ownership handoff.
+# under bin/fm-watch-arm.sh's scheduling continuation; the PLAIN CHECKPOINT
+# comment owns the conditions for leaving it running between checkpoints.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -178,14 +177,14 @@ fi
 # while the model reasons between checkpoints. The checkpoint is the arm's busy
 # reader for its whole run: closes reach it through the arm's spool, the first
 # one ends the checkpoint (exit 0), and the quiet bound ends it with exit 124.
-# Either way the checkpoint leaves the arm running by recording its pid and
+# Either outcome can leave the arm running by recording its pid and
 # identity in state/.supervision-host-left, the record bin/fm-supervision-host.sh
 # detach_successor writes, under the spool lock the arm's continuation decision
 # shares. The next checkpoint takes that arm over (--take-over), so one arm owns
 # the one watcher. The arm ends on its own conditions: the session lock names
 # another session, the away daemon's flag exists, or a take-over. A home with no
 # readable session lock pins nothing to continue under, so the bound stops the
-# cycle as it always did.
+# cycle as it always did. Failed ownership persistence also stops the arm.
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -221,8 +220,8 @@ spool_ready() {
 }
 
 # Leave the arm running for the next checkpoint. Returns 2 when a complete
-# hand-off is waiting in the spool and <final> is not given, which the caller
-# takes first, and 1 when the arm has nothing to continue under (no session lock
+# notification batch is waiting in the spool and <final> is not given, which
+# the caller takes first, and 1 when the arm has nothing to continue under (no session lock
 # to pin, or an arm that only attached to another holder's watcher) or could not
 # be recorded.
 detach_arm() {  # [final]
