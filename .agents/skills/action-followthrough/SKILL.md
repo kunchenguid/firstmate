@@ -59,7 +59,8 @@ This check requires producer events from the execution owner; it does not interc
 
 ## Verify
 
-Re-run `fm-action.sh show <task>` after acting and confirm the incident cleared because of a `start`, a `result`, or a bounded `hold`, not because of an acknowledgement.
+Re-run `fm-action.sh show <task>` after acting and check the response against the incident definitions in `bin/fm-action-lib.sh`.
+An acknowledgement alone never clears an execution incident; a returned validation call requires consumption, and a gate requires an explicit answer.
 `tests/fm-action-ledger.test.sh` exercises this loop end to end, including the negative controls for holds and healthy long runs.
 
 Branch wiring and live adoption are distinct.

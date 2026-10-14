@@ -43,9 +43,9 @@
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
 #
-# Sequence numbers are never reused within a task: allocation scans both the
-# inbox root and handled/, so a message is processed at most once per worker
-# lifetime even if every doorbell is duplicated. Concurrent writers serialize
+# Sequence allocation scans the inbox root, handled/, and retained admissions
+# in the action ledger, so deleting an admitted inbox record cannot reuse its
+# action identity. Concurrent writers serialize
 # on .seq.lock; the worst racing outcome is ordering, never loss.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
