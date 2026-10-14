@@ -31,6 +31,16 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
   local path=$1 argv0=${2:-} base
   base=${path##*/}
   base=${base#-}
+  # A shell integration may rename an idle shell to `<shell> (<tag>)` (Kiro
+  # CLI's makes every zsh read `zsh (kiro-cli-term)` in `ps -o comm=`), so a
+  # known shell name followed by one parenthesised suffix is still that shell.
+  # Only the shell list below is matched against the stripped stem, so an
+  # agent or unrelated name carrying a suffix never becomes a shell.
+  case "$base" in
+    *' ('*')') case "${base%% (*}" in
+      zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) base=${base%% (*} ;;
+    esac ;;
+  esac
   case "$base" in
     # muse is anchored rather than globbed like its neighbours: its installed
     # binary is muse-bin-<version> (the launcher execs it, so the version is the

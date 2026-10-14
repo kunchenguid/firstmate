@@ -258,6 +258,16 @@ wait_for_state "$SESSION:idle" dead \
   || fail "an idle shell pane must classify dead"
 pass "tmux liveness: an idle shell pane classifies dead"
 
+# --- a shell renamed by a shell integration is still dead -------------------
+# Kiro CLI's integration makes every idle zsh report `zsh (kiro-cli-term)`, and
+# reading that as `other` blocked relaunching panes whose agents had exited.
+# macOS `ps -o comm=` carries the argv[0] rename; Linux keeps `bash`.
+
+new_window kiro bash -c "exec -a 'zsh (kiro-cli-term)' bash --norc --noprofile"
+wait_for_state "$SESSION:kiro" dead \
+  || fail "a Kiro-renamed idle shell pane must classify dead"
+pass "tmux liveness: a Kiro-renamed idle shell pane classifies dead"
+
 # --- a harness-named BACKGROUND process must not fake an agent --------------
 # Scoping to the foreground process group is what prevents this false alive; a
 # descendant walk of the pane would report this pane as running an agent.
@@ -385,6 +395,16 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:cursor-exited")" != empty ] \
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
+
+# A shell renamed by a shell integration (Kiro CLI reports `zsh (kiro-cli-term)`)
+# is still a shell, but the suffix rule must stay anchored to real shell names.
+[ "$(fm_agent_process_classify_name 'zsh (kiro-cli-term)')" = shell ] \
+  || fail "a suffix-renamed zsh must classify as a shell"
+[ "$(fm_agent_process_classify_name 'notashell (kiro-cli-term)')" = other ] \
+  || fail "an unknown name with a parenthesised suffix must stay other"
+[ "$(fm_agent_process_classify_name 'claude (kiro-cli-term)')" = agent ] \
+  || fail "an agent name with a parenthesised suffix must never become a shell"
+pass "classifier: a suffix-renamed shell is a shell; other suffixed names keep their verdict"
 
 cleanup_all
 trap - EXIT
