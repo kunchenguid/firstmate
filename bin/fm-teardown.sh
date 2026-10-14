@@ -2022,7 +2022,7 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Push the branch, open the PR and leave it for captain merge, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi

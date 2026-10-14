@@ -338,6 +338,8 @@ test_kimi_launch_then_send_is_verified() {
     "kimi spawn did not export its Go temp directory into the pane"
   assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not mark the pane with its task id"
+  assert_grep "export FM_ADMIN_GUARD_BRIEF='$HOME_DIR/data/$id/brief.md' PATH='$task_tmp/bin':" "$CASE_DIR/tmux-calls.log" \
+    "kimi spawn did not put the admin-merge gh shim and task brief on the pane environment"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
