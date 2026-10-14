@@ -98,6 +98,7 @@ init_changed_fixture_repo() {
     fm-brief.test.sh \
     fm-ask-user-authority.test.sh \
     fm-documentation-audiences.test.sh \
+    fm-instruction-budget.test.sh \
     fm-test-isolation-proof.test.sh \
     fm-test-run.test.sh \
     fm-test-fixtures.test.sh \
@@ -169,6 +170,7 @@ init_changed_fixture_repo() {
   mkdir -p "$repo/.pi/extensions/lib"
   : >"$repo/.pi/extensions/lib/fm-operational-input.ts"
   : >"$repo/docs/fm-test-isolation-proof.md"
+  : >"$repo/AGENTS.md"
   : >"$repo/CONTRIBUTING.md"
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
@@ -290,6 +292,28 @@ test_changed_runner_surfaces_select_their_family() {
 
   rm -rf "$tmp"
   pass "runner and its documentation surfaces select their curated family, not just their contract owners"
+}
+
+test_agents_change_selects_instruction_budget() {
+  local tmp repo listed serial family
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-instruction-budget.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/AGENTS.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-instruction-budget.test.sh" \
+    "AGENTS.md changes select the instruction budget regression"
+
+  serial=$("$RUNNER" --list --lane portable-serial)
+  assert_contains "$serial" "tests/fm-instruction-budget.test.sh" \
+    "the instruction budget regression remains in the portable serial lane"
+  family=$("$RUNNER" --list --family pure-contract-unit)
+  assert_not_contains "$family" "tests/fm-instruction-budget.test.sh" \
+    "the instruction budget regression must not inherit family concurrency without proof"
+
+  rm -rf "$tmp"
+  pass "AGENTS.md changes select serial instruction budget coverage"
 }
 
 test_shell_line_ending_policy_selects_runner_contract() {
@@ -1832,6 +1856,7 @@ test_single_script_selection
 test_changed_file_selection_is_conservative
 test_task_marker_refuses_the_primary_checkout
 test_changed_runner_surfaces_select_their_family
+test_agents_change_selects_instruction_budget
 test_shell_line_ending_policy_selects_runner_contract
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
