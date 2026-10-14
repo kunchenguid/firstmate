@@ -326,10 +326,18 @@ fm_test_run_spawn() {
   # because bin/fm-spawn.sh prefixes the launch only when the value is non-empty,
   # so every launch-shape assertion in the suite keeps reading the same command.
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
+  # XDG_DATA_HOME is pinned for the same reason: an OpenCode launch reads
+  # <data dir>/opencode/auth.json to decide whether an opencode-go model gets
+  # its own session store, so a value inherited from the developer's shell would
+  # decide that assertion from their real credentials. The default sits under
+  # the throwaway HOME, which is where an unset XDG_DATA_HOME resolves anyway,
+  # so the default case is "no auth.json". A test that needs the set case opts
+  # in through FM_TEST_XDG_DATA_HOME.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    XDG_DATA_HOME="${FM_TEST_XDG_DATA_HOME:-$spawn_home/.local/share}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
