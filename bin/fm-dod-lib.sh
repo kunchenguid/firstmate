@@ -377,6 +377,20 @@ $drive_block
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
+Every fix round runs under a hard wall-clock cap (30 minutes by default), and an agent killed at it leaves nothing but what it had already committed: its uncommitted edits die with the run's disposable worktree.
+In 561 recorded fix rounds, all six cap deaths were a fixer stuck without output or a test fixer re-running the whole gate itself and queueing on a contended machine; none was driven by the size of the round.
+So treat a cap death as a signal to look at what the agent was stuck on, not as a reason to split the round or raise the cap; the step re-runs the gate after the fix anyway.
+Pass \`--instructions\` on every \`no-mistakes axi respond --action fix\`: commit each finding as soon as it is fixed, and verify only with the targeted check for that finding, never the full gate or a long suite.
+A run that fails with \`absolute wall-clock limit\` or \`timed out after 30m0s\` hit this cap: it is a budget failure, not a daemon failure, so rule 7's daemon checks do not apply.
+Recover it in this order: read \`branch_sync.next_action\` from \`no-mistakes axi status\`, and if it is \`recover_custody\` run the exact recover command it prints (\`no-mistakes axi sync --recover\`) and confirm \`custody_returned\`.
+A cap death often leaves nothing committed, so \`next_action\` may not be \`recover_custody\` and \`sync --recover\` may be a no-op; that is expected, not a broken recovery.
+Once the tree is clean and nothing needs recovering, \`git log\` carries whatever fix commits the round made, possibly none; start a new run with the same \`--intent\`.
+Hand-edit nothing before custody returns, because a head the pipeline did not record is refused as \`not a descendant of the pipeline's recorded head\`.
+If the same finding kills a second run and firstmate already decided its fix, you may hand-write exactly that decided fix after custody returns, commit it, and validate it with a new run.
+That is applying a decision, not making one: never invent your own fix to get past a gate, and never hand-write anything firstmate did not decide.
+Say so in a status line: append \`note [at=<epoch>]: hand-wrote decided fix for {finding} after two cap deaths\` before the new run.
+If the same finding kills a second run and no decided fix exists, append \`blocked\` rather than looping.
+
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.

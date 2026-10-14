@@ -468,6 +468,19 @@ test_no_mistakes_dod_wording() {
   assert_grep "write the substance of the referenced items into \`--intent\`" "$brief" \
     "no-mistakes DOD must tell the worker to resolve report, decision, and PR references into substance"
 
+  # A fix round killed at the cap loses its uncommitted edits, so the worker is
+  # told to commit per finding and how to recover a cap death without hand-editing.
+  assert_grep "commit each finding as soon as it is fixed" "$brief" \
+    "no-mistakes DOD must tell the worker to commit each fix as it lands"
+  assert_grep "absolute wall-clock limit" "$brief" \
+    "no-mistakes DOD must name the cap-death signature"
+  assert_grep "Hand-edit nothing before custody returns" "$brief" \
+    "no-mistakes DOD must forbid hand-editing before custody recovery"
+  assert_grep "\`sync --recover\` may be a no-op; that is expected, not a broken recovery" "$brief" \
+    "no-mistakes DOD must not assume a cap death left fix commits to recover"
+  assert_grep "That is applying a decision, not making one" "$brief" \
+    "no-mistakes DOD must limit a hand-written fix after a repeat cap death to the decided fix"
+
   # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
   # claim an enforcement the tool does not provide: this is instruction only.
   assert_grep "NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide." "$brief" \
