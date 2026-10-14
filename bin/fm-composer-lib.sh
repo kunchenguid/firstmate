@@ -1376,7 +1376,9 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # half of the region; that residual is accepted and pinned by test. A
 # fragment with no path start (a bare tail
 # continuation, or a rail whose string is too long for the composer's
-# visible rows) fails the check by construction, deferring instead.
+# visible rows) fails the check by construction, deferring instead; a
+# truncated rail whose topmost visible fragment happens to begin at a
+# "/<name>" wrap boundary is still furniture and is accepted.
 # The tests operate on the plain row (fm_composer_strip_ansi), so the
 # recognition is styling-independent and holds under any
 # FM_COMPOSER_GHOST_LUMA_MAX.

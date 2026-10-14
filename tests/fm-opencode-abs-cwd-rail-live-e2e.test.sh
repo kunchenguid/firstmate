@@ -81,15 +81,19 @@ tmux send-keys -t "$TARGET" Enter || fail "could not submit the prompt"
 wait_for 'esc interrupt' 120 || { capture >&2; fail "opencode never showed a running turn"; }
 # Non-vacuousness: the rail's first fragment, an absolute path start, must sit
 # alone on a composer row above the footer.
-capture | grep -Eq '┃ +/tmp/[^[:space:]]+ *$' \
+capture | grep -Eq '┃ +/[^/[:space:]][^[:space:]]* *$' \
   || { capture >&2; fail "the absolute cwd rail did not wrap into a composer row"; }
 verdict=$(fm_tmux_composer_state "$TARGET")
 [ "$verdict" = empty ] || { capture >&2; fail "mid-turn absolute cwd rail read '$verdict', want empty"; }
 pass "opencode mid-turn absolute cwd rail on a 300-column pane reads empty"
 
-wait_for '^ *DONE *$|DONE' 240 || { capture >&2; fail "the turn never finished"; }
+wait_for '^[^[:alnum:]]*DONE *$' 240 || { capture >&2; fail "the turn never finished"; }
 i=0
-while capture | grep -Fq 'esc interrupt' && [ "$i" -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
+while capture | grep -Fq 'esc interrupt'; do
+  [ "$i" -lt 120 ] || { capture >&2; fail "opencode still showed a running turn after the reply"; }
+  sleep 0.5
+  i=$((i + 1))
+done
 verdict=$(fm_tmux_composer_state "$TARGET")
 [ "$verdict" = empty ] || { capture >&2; fail "idle absolute cwd rail read '$verdict', want empty"; }
 pass "opencode idle absolute cwd rail on a 300-column pane reads empty"
