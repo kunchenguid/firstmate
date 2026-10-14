@@ -83,6 +83,9 @@ case "${1:-}" in
           ;;
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
           cat "$D/becomes" > "$D/command"
+          if [ -n "${FM_TEST_COMMIT_WT:-}" ]; then
+            git -C "$FM_TEST_COMMIT_WT" -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m "worker committed during launch" || exit 1
+          fi
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
       esac
@@ -2529,6 +2532,75 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+
+test_action_relaunch_receipts_and_worker_commit() {
+  local dir s out head next_run receipt
+  dir=$(new_case action-relaunch action-r1)
+  add_ship_task "$dir" action-r1 claude
+  s="$dir/home/state"
+  printf 'spawn_gen=old-run\n' >> "$s/action-r1.meta"
+  out=$(FM_ACTION_ID=transition-first run_control "$dir" action-r1 relaunch --note "continue the accepted work") || fail "native relaunch failed: $out"
+  receipt="$s/action-r1.action-receipts/transition-first"
+  next_run=$(meta_field "$dir" action-r1 spawn_gen)
+  assert_equals old-run "$(awk -F'\t' '{print $5}' "$receipt")" "relaunch retains admitted generation"
+  assert_equals "$next_run" "$(awk -F'\t' '{print $9}' "$receipt")" "relaunch receipt binds its resulting generation"
+  FM_STATE_OVERRIDE="$s" bash "$ROOT/bin/fm-action.sh" accept action-r1 transition-first --evidence "$receipt" || fail "successful relaunch receipt refused"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  out=$(FM_ACTION_ID=transition-second FM_TEST_COMMIT_WT="$dir/wt" run_control "$dir" action-r1 relaunch --note "continue after checkpoint") || fail "native launch must survive a worker commit: $out"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" != "$head" ] || fail "fixture worker did not commit during launch"
+  assert_equals "$head" "$(awk -F'\t' '{print $4}' "$s/action-r1.action-receipts/transition-second")" "control result retains admitted head"
+  next_run=$(meta_field "$dir" action-r1 spawn_gen)
+  assert_equals "$head" "$(awk -F'\t' '{print $4}' "$s/action-r1.action-receipts/launch-$next_run")" "spawn result retains admitted head"
+  if FM_STATE_OVERRIDE="$s" bash "$ROOT/bin/fm-action.sh" accept action-r1 transition-first --evidence "$receipt" 2>/dev/null; then fail "later run cannot certify an earlier relaunch"; fi
+  chmod u+w "$s/"*.git-hooks
+  pass "real relaunch accepts its native resulting generation and preserves results across worker commits"
+}
+
+test_admitted_exit_steer_binds_native_control() {
+  local kind dir s out rec body
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-task-inbox-lib.sh"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+  for kind in ship secondmate; do
+    dir=$(new_case "action-exit-$kind" action-exit)
+    add_ship_task "$dir" action-exit claude
+    s="$dir/home/state"
+    sed "s/^kind=ship$/kind=$kind/" "$s/action-exit.meta" > "$dir/task.meta"
+    mv "$dir/task.meta" "$s/action-exit.meta"
+    printf 'spawn_gen=exit-run\n' >> "$s/action-exit.meta"
+    out=$(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+      -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+      PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+      bash "$ROOT/bin/fm-send.sh" action-exit exit 2>&1) || fail "$kind steer delivery failed: $out"
+    rec="$s/action-exit.inbox/001.msg"
+    [ -f "$rec" ] || fail "$kind steer was not queued"
+    body=$(fm_task_inbox_body "$rec")
+    if [ "$kind" = secondmate ]; then
+      fm_message_from_firstmate "$body" || fail "secondmate inbox lost its transport marker"
+      [ -n "$(fm_pending_reply_extract_corr "$body")" ] || fail "secondmate inbox lost its correlation"
+    else
+      assert_equals exit "$body" "ship inbox preserves the requested operation"
+    fi
+    out=$(FM_ACTION_ID=steer-001 FM_ACTION_ATTEMPT=001.msg \
+      run_control "$dir" action-exit exit) || fail "$kind admitted exit refused: $out"
+    assert_equals zsh "$(cat "$dir/fake/command")" "$kind native exit stops the agent"
+    FM_STATE_OVERRIDE="$s" bash "$ROOT/bin/fm-action.sh" accept action-exit steer-001 \
+      --evidence "$s/action-exit.action-receipts/steer-001" || fail "$kind exit receipt refused"
+  done
+  pass "ship and secondmate exit steers bind their admitted identity to native control"
+}
+
+if [ "${1:-}" = action-exit ]; then
+  test_admitted_exit_steer_binds_native_control
+  exit 0
+fi
+
+if [ "${1:-}" = action-receipts ]; then
+  test_action_relaunch_receipts_and_worker_commit
+  exit 0
+fi
+
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
@@ -2606,3 +2678,6 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+
+test_action_relaunch_receipts_and_worker_commit
+test_admitted_exit_steer_binds_native_control

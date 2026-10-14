@@ -5028,6 +5028,64 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+
+test_teardown_retires_action_artifacts() {
+  local dir state out before
+  dir=$(make_case action-retirement)
+  write_meta "$dir" local-only ship
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash "$ROOT/bin/fm-action.sh" admit task-x1 --id steer --class authorized \
+    --owner worker --operation "prepare the remaining work" --source "firstmate:retirement-test" --at 100 || fail "action admission"
+  mkdir -p "$state/task-x1.action-receipts"
+  printf 'native receipt\n' > "$state/task-x1.action-receipts/steer"
+  printf 'acked-unexecuted\n' > "$state/.task-x1.action-incident-steer"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check "action-followthrough:$2:task-x1:steer:acked-unexecuted" "check: retired task incident"; fm_wake_append check unrelated "check: retain unrelated work"' _ "$ROOT" "$state" || fail "queue incidents"
+  out=$(run_teardown "$dir" 2>&1) || fail "real teardown failed: $out"
+  [ ! -e "$state/task-x1.actions" ] && [ ! -e "$state/task-x1.action-receipts" ] && [ ! -e "$state/.task-x1.action-incident-steer" ] || fail "teardown left action artifacts"
+  assert_not_contains "$(cat "$state/.wake-queue")" "action-followthrough:" "teardown prunes retired incidents"
+  assert_contains "$(cat "$state/.wake-queue")" unrelated "teardown preserves other tasks"
+  before=$(cat "$state/.wake-queue")
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-watch.sh"; wake() { printf "%s\n" "$1"; }; action_followthrough_check task-x1' _ "$ROOT") || fail "poll after retirement"
+  assert_equals "" "$out" "retired task cannot wake again"
+  assert_equals "$before" "$(cat "$state/.wake-queue")" "poll cannot recreate retired incidents"
+  pass "real teardown retires action artifacts and queue incidents without losing unrelated work"
+}
+
+test_teardown_retires_removed_parent_route_home() {
+  local dir home state out rc=0
+  dir=$(make_case removed-parent-route)
+  mkdir -p "$dir/controller"
+  home="$dir/secondmate-home"
+  state="$home/state/parent-route"
+  mkdir -p "$state" "$home/data/parent-route" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  write_meta "$dir" secondmate secondmate "$home"
+  printf 'home=%s\nharness=codex\n' "$home" >> "$dir/state/task-x1.meta"
+  mv "$dir/state/task-x1.meta" "$state/task-x1.meta"
+  FM_STATE_OVERRIDE="$state" bash "$ROOT/bin/fm-action.sh" admit task-x1 --id steer --class authorized \
+    --owner worker --operation "prepare remaining work" --source "firstmate:remote-retirement-test" --at 100 || fail "remote action admission"
+  mkdir -p "$state/task-x1.action-receipts"
+  printf 'native receipt\n' > "$state/task-x1.action-receipts/steer"
+  printf 'acked-unexecuted\n' > "$state/.task-x1.action-incident-steer"
+  FM_HOME="$dir/controller" FM_ROOT_OVERRIDE="$dir/controller" FM_STATE_OVERRIDE="$state" \
+    FM_DATA_OVERRIDE="$home/data/parent-route" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_TEARDOWN_GUARD_DONE=1 PATH="$dir/fakebin:$PATH" bash -c '
+      . "$1/bin/fm-nm-run-lib.sh"
+      fm_nm_bounded "$1" 10 bash "$1/bin/fm-teardown.sh" task-x1
+    ' _ "$ROOT" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  out=$(cat "$dir/stdout" "$dir/stderr")
+  expect_code 0 "$rc" "remote parent-route retirement must complete after removing its state: $out"
+  assert_absent "$home" "retirement must not recreate the removed parent-route home"
+  assert_absent "$state" "retirement must not recreate its removed control state"
+  pass "real teardown completes when parent-route state was removed with its home"
+}
+
+if [ "${1:-}" = action-retirement ]; then
+  test_teardown_retires_action_artifacts
+  test_teardown_retires_removed_parent_route_home
+  exit 0
+fi
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -5148,3 +5206,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+
+test_teardown_retires_action_artifacts
+
+test_teardown_retires_removed_parent_route_home

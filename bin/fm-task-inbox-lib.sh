@@ -43,9 +43,9 @@
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
 #
-# Sequence numbers are never reused within a task: allocation scans both the
-# inbox root and handled/, so a message is processed at most once per worker
-# lifetime even if every doorbell is duplicated. Concurrent writers serialize
+# Sequence allocation scans the inbox root, handled/, and retained admissions
+# in the action ledger, so deleting an admitted inbox record cannot reuse its
+# action identity. Concurrent writers serialize
 # on .seq.lock; the worst racing outcome is ordering, never loss.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
@@ -100,6 +100,9 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_TASK_INBOX_LIB_DIR/fm-wake-lib.sh"
 # shellcheck source=/dev/null
 . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
+
+# shellcheck source=bin/fm-action-lib.sh
+. "$_FM_TASK_INBOX_LIB_DIR/fm-action-lib.sh"
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
@@ -172,7 +175,12 @@ fm_task_inbox_seq_of() {  # <basename>
 # Next unused sequence, scanning the inbox root AND handled/ so an
 # acknowledged sequence is never reissued. Caller must hold .seq.lock.
 fm_task_inbox_next_seq() {  # <inbox-dir>
-  local dir=$1 max=0 d f n
+  local dir=$1 max=0 d f n task ledger
+  task=${dir##*/}; task=${task%.inbox}
+  ledger=$(fm_action_ledger "${dir%/*}" "$task")
+  if [ -f "$ledger" ]; then
+    max=$(awk -F'\t' '$4=="admit" {for(i=5;i<=NF;i++) if($i ~ /^inbox=[0-9]+[.]msg$/) {n=substr($i,7)+0; if(n>max) max=n}} END {print max+0}' "$ledger") || return 1
+  fi
   for d in "$dir" "$dir/handled"; do
     for f in "$d"/*.msg; do
       [ -e "$f" ] || continue
@@ -202,7 +210,8 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
 _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
-  local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0
+  local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0 task
+  task=${dir##*/}; task=${task%.inbox}
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
@@ -212,7 +221,7 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
     printf -- '--\n'
     printf '%s' "$text"
-  } > "$tmp" && mv "$tmp" "$rec" || status=1
+  } > "$tmp" && fm_action_admit_steer "${dir%/*}" "${task}" "$rec" "$text" "$delivery_mode" && mv "$tmp" "$rec" || status=1
   [ "$status" -eq 0 ] || { rm -f "$tmp"; return 1; }
   printf '%s' "$rec"
 }
