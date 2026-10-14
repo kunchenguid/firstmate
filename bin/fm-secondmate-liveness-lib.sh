@@ -304,38 +304,6 @@ fm_secondmate_liveness_begin() {
   fi
 }
 
-  if ! fm_secondmate_liveness_recent_attempts "$id" 0 >/dev/null; then
-    FM_SM_LIVE_STATUS=skipped
-    FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unreadable; endpoint left $FM_SM_LIVE_STATE"
-    FM_SM_LIVE_RC=1
-    return 1
-  fi
-  fm_sm_live_require_locks || return 1
-  relaunch_lock="$STATE/.secondmate-relaunch.lock"
-  wait_seconds=${timeout:-600}
-  if ! fm_lock_acquire_wait_bounded "$relaunch_lock" "$wait_seconds"; then
-    FM_SM_LIVE_STATUS=skipped
-    FM_SM_LIVE_REASON="another secondmate relaunch still owns the per-home relaunch lock after ${wait_seconds}s; endpoint left $FM_SM_LIVE_STATE"
-    FM_SM_LIVE_RC=1
-    return 1
-  fi
-  if ! fm_secondmate_liveness_ledger_add "$id" attempt; then
-    fm_lock_release "$relaunch_lock" || true
-    FM_SM_LIVE_STATUS=skipped
-    FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unwritable; endpoint left $FM_SM_LIVE_STATE"
-    FM_SM_LIVE_RC=1
-    return 1
-  fi
-  if [ "$FM_SM_LIVE_KILL" = 1 ]; then
-    local backend target window
-    backend=$(fm_backend_of_meta "$meta")
-    target=$(fm_backend_target_of_meta "$meta")
-    if [ -z "$target" ]; then
-      window=$(fm_meta_get "$meta" window)
-      target=$window
-    fi
-    [ -z "$target" ] || fm_backend_kill "$backend" "$target" 2>/dev/null || true
-  fi
 # Acts on a `relaunchable` probe verdict under the caller's liveness lock.
 # Local spawn calls begin only after memory admission and a fresh probe;
 # remote recovery calls begin here before spawning on the recorded host.
