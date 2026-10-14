@@ -251,14 +251,17 @@ test_error_paths_stay_silent_and_keep_the_marker() {
     [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 5 ] \
       || fail "an errored poll advanced the marker for $variant"
   done
-  # Ambiguous login is silent too, and the missed window is re-read later.
-  out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" FM_TEST_TEA_SECOND_LOGIN=1 run_poll "$dir")
-  [ -z "$out" ] || fail "an ambiguous login woke: got '$out'"
+  # An ambiguous login is silent with a readable payload too, and the missed
+  # window is re-read later.
   {
     comments_json 5 o '"/fm old"'
     comments_json 6 o '"/fm new"'
   } > "$dir/comments.lines"
   jq -s . "$dir/comments.lines" > "$dir/comments.json" && rm -f "$dir/comments.lines"
+  out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" FM_TEST_TEA_SECOND_LOGIN=1 run_poll "$dir")
+  [ -z "$out" ] || fail "an ambiguous login woke: got '$out'"
+  [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 5 ] \
+    || fail "an ambiguous login advanced the marker"
   out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
   assert_contains "$out" "id(s) 6" "the window missed to errors is re-read and wakes"
   pass "tea failures, error bodies, bad payloads, and ambiguous logins stay silent without advancing the marker"

@@ -30,12 +30,13 @@
 # recording itself.
 #
 # `check` scans every sidecar and, per task, reads
-# GET /repos/{owner}/{repo}/issues/<number>/comments?limit=50
+# GET /repos/{owner}/{repo}/issues/<number>/comments
 # through "tea api" on the host's one registered login, so the credential never
-# leaves tea; tea api exits 0 on an HTTP error with the error body as output,
-# so only a payload that is an array of records carrying a numeric id, a string
-# body, and a string user.login is classified. Comment bodies and authors are
-# data: they are read only by jq, never interpolated into shell source, and
+# leaves tea; the endpoint returns the issue's full comment list ascending by
+# id. tea api exits 0 on an HTTP error with the error body as output, so only a
+# payload that is an array of records carrying a numeric id, a string body,
+# and a string user.login is classified. Comment bodies and authors are data:
+# they are read only by jq, never interpolated into shell source, and
 # only numeric comment ids and the canonical URL ever reach output. A comment
 # wakes exactly one line when BOTH hold:
 #   - its author login equals the repository owner, the configured captain
@@ -77,7 +78,6 @@ SIDE_SUFFIX=.pr-comment-poll
 SEEN_SUFFIX=.pr-comment-seen
 SIDE_SCHEMA=fm-pr-comment-poll-v1
 WAKE_IDS_MAX=5
-COMMENTS_LIMIT=50
 
 usage() {
   cat <<'EOF'
@@ -139,7 +139,7 @@ fm_pr_comment_sidecar_parse() {  # <file>
 # request number is part of the validated identity, never of the shell source.
 fm_pr_comment_fetch() {  # <login> <path> <number>
   tea api --login "$1" --repo "$2" \
-    "/repos/{owner}/{repo}/issues/$3/comments?limit=$COMMENTS_LIMIT" 2>/dev/null
+    "/repos/{owner}/{repo}/issues/$3/comments" 2>/dev/null
 }
 
 # Classifies one fetched comments array. Prints "<max-id> <id[,id...]>" where
@@ -306,7 +306,7 @@ action_disarm() {  # <task-id>
 }
 
 action_check() {
-  local side id url host path owner seen line max wake n shown rest
+  local side id url host path owner login seen line max wake n shown rest
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 0
   for side in "$STATE"/*"$SIDE_SUFFIX"; do
     [ -e "$side" ] || continue
@@ -327,8 +327,9 @@ action_check() {
     path=$FM_CMP_PATH
     owner=${path%%/*}
     seen=$(fm_pr_comment_seen_read "$id") || seen=0
+    login=$(fm_pr_forgejo_login "$host") || continue
     line=$(fm_pr_comment_classify "$owner" "$seen" \
-      "$(fm_pr_comment_fetch "$(fm_pr_forgejo_login "$host" || true)" "$path" "$FM_CMP_NUMBER")") \
+      "$(fm_pr_comment_fetch "$login" "$path" "$FM_CMP_NUMBER")") \
       || continue
     max=${line%% *}
     case "$max" in
