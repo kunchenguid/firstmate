@@ -17,6 +17,10 @@
 #         --source S --event E
 #       Append one lifecycle event: validate the gen against the armed
 #       sidecar, advance seq under the lock, atomically replace the record.
+#       An event that repeats the record's current state keeps its ts, so ts
+#       is when the current state began (a busy record's ts is its turn start).
+#       A turn-opening event (user-prompt-submit, before-agent) always starts
+#       a new ts, even over a busy record left by an interrupted turn.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
 #       hook that outlives its incarnation fails closed here. The legacy
 #       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
@@ -144,11 +148,11 @@ lock_acquire() {
 }
 lock_release() { rmdir "$LOCK" 2>/dev/null || true; }
 
-write_record() {  # <gen> <seq>
+write_record() {  # <gen> <seq> [ts]
   local tmp
   tmp="$REC.tmp.$$"
   printf 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s\n' \
-    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$(date +%s)" > "$tmp" || return 1
+    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "${3:-$(date +%s)}" > "$tmp" || return 1
   mv -f "$tmp" "$REC"
 }
 
@@ -225,6 +229,7 @@ if [ "$CMD" = progress ]; then
   exit 0
 fi
 OLD_SEQ=0
+STATE_SINCE=
 if [ -f "$REC" ]; then
   old_line=$(head -n 1 "$REC" 2>/dev/null || true)
   case "$old_line" in
@@ -235,10 +240,20 @@ if [ -f "$REC" ]; then
         ''|*[!0-9]*) OLD_SEQ=0 ;;
         *) OLD_SEQ=$old_seq_field ;;
       esac
+      old_ts_field=${old_line##* ts=}
+      case "$EVENT:$old_line" in
+        user-prompt-submit:*|before-agent:*) ;;
+        *" state=$NEW_STATE "*)
+          case "$old_ts_field" in
+            ''|*[!0-9]*) ;;
+            *) STATE_SINCE=$old_ts_field ;;
+          esac
+          ;;
+      esac
       ;;
   esac
 fi
-write_record "$GEN" $((OLD_SEQ + 1)) || {
+write_record "$GEN" $((OLD_SEQ + 1)) "$STATE_SINCE" || {
   lock_release
   umask "$old_umask"
   echo "error: record write failed for $ID" >&2

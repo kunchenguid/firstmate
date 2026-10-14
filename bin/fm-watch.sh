@@ -60,10 +60,12 @@
 #                          verdict escalates unchanged.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
-#                          only up to BUSY_TURN_MAX_SECS with no completed turn
-#                          (state/<id>.turn-ended, or the spawn record before any
-#                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
+#                          only up to BUSY_TURN_MAX_SECS into its current turn
+#                          (when the trusted busy record turned busy) with no
+#                          completed turn (state/<id>.turn-ended, or the spawn
+#                          record before any turn completes). Past that bound,
+#                          a declared external wait or verified captain-held
+#                          transfer uses the long
 #                          pause recheck cadence; under daemon-backed afk an
 #                          external wait is instead handed to the daemon as this
 #                          plain reason once per declaration, while captain-held
@@ -1560,18 +1562,36 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
-# progress is at least BUSY_TURN_MAX_SECS old. Progress is actual observed model
-# or tool activity, never a timer or a busy footer. It does not emit a wake or
-# change semantic busy state. Before either marker exists, age the spawn record.
-# The caller checks busy state and routes a crossed bound through inspection.
+# busy_turn_over_age: 0 iff the current busy turn, the last completed turn, and
+# explicit native-harness progress are all at least BUSY_TURN_MAX_SECS old.
+# Progress is actual observed model or tool activity, never a timer or a busy
+# footer. The current turn's start is the ts of this incarnation's trusted busy
+# record (fm_busy_record_read), which repeated busy events within the turn do
+# not advance, so a turn opened after a long idle
+# gap is aged from its own start rather than from the previous turn's end; an
+# idle, malformed, stale-gen, or untrusted record supplies nothing. It does not
+# emit a wake or change semantic busy state. Before any marker exists, age the
+# spawn record. The caller checks busy state and routes a crossed bound through
+# inspection.
 busy_turn_over_age() {  # <task>
-  local task=$1 f progress
+  local task=$1 f progress age rec r_state r_source ts now
   f="$STATE/$task.turn-ended"
   [ -e "$f" ] || f="$STATE/$task.meta"
   progress="$STATE/$task.progress"
   if [ -f "$progress" ] && [ "$progress" -nt "$f" ]; then f="$progress"; fi
-  [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+  age=$(age_of "$f")
+  if rec=$(fm_busy_record_read "$STATE" "$task"); then
+    r_state=${rec%% *}
+    r_source=${rec#* }
+    r_source=${r_source%% *}
+    ts=${rec##* }
+    fm_epoch_seconds_to now
+    if [ "$r_state" = busy ] && [ "$ts" -le "$now" ] && [ $(( now - ts )) -lt "$age" ] \
+      && fm_busy_source_trusted "$(fm_meta_get "$STATE/$task.meta" harness)" "$r_source"; then
+      age=$(( now - ts ))
+    fi
+  fi
+  [ "$age" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
