@@ -1721,6 +1721,62 @@ e2e_tmux() {
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 
+# The hosted daemon runs in a terminal that is NOT the captain's: ambient
+# pane/herdr discovery env on the launch call names the HOST's pane, so the
+# generated daemon command must strip every discovery variable on both the
+# bound (resolve-at-start) and explicit (env pin) forms (Greptile P1).
+unit_daemon_cmd_strips_host_pane_env() {
+  local bound explicit
+  bound=$(bash -c '
+    . "$1" || exit 99
+    FM_HOME=/tmp/fm-cmd-check FM_SUPERVISOR_TARGET= FM_SUPERVISOR_BACKEND= \
+      fm_afk_launch_daemon_cmd "" UNAVAILABLE 1
+  ' _ "$LAUNCH" 2>/dev/null)
+  explicit=$(bash -c '
+    . "$1" || exit 99
+    FM_HOME=/tmp/fm-cmd-check fm_afk_launch_daemon_cmd "%1" tmux 0
+  ' _ "$LAUNCH" 2>/dev/null)
+  case "$bound" in
+    *"-u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND -u FM_SUPERVISOR_TARGET_SOURCE"*)
+      pass "daemon cmd: bound form strips ambient discovery env and inherited supervisor overrides" ;;
+    *) fail "daemon cmd: bound form leaks host env: $bound" ;;
+  esac
+  case "$explicit" in
+    *"-u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND -u FM_SUPERVISOR_TARGET_SOURCE "*"FM_SUPERVISOR_TARGET="*)
+      pass "daemon cmd: explicit form strips ambient env and re-pins the supervisor it resolved" ;;
+    *) fail "daemon cmd: explicit form wrong env handling: $explicit" ;;
+  esac
+}
+
+# A launch with NO resolvable captain is a degraded launch, not a refusal: the
+# daemon terminal must still be created (the daemon watches UNAVAILABLE and
+# re-arms when an operator session appears).
+unit_start_unavailable_launches_degraded_daemon() {
+  command -v tmux >/dev/null 2>&1 || { pass "skipped: real tmux unavailable"; return 0; }
+  local st out rc rec
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-unavail.XXXXXX")
+  mkdir -p "$st/state"
+  enter_posture "$st" || { fail "unavailable start: could not enter posture"; rm -rf "$st"; return 0; }
+  out=$(env -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
+        -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+        FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+        "$LAUNCH" start 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    pass "unavailable start: no resolvable captain still launches the daemon (degraded)"
+  else
+    fail "unavailable start: launch refused instead of degraded start (rc=$rc): $out"
+  fi
+  rec=$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $rec"
+  if [ -n "$rec" ] && tmux has-session -t "$rec" 2>/dev/null; then
+    pass "unavailable start: daemon hosted in a detached tmux session"
+  else
+    fail "unavailable start: no daemon terminal created ($rec)"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
+  rm -rf "$st" 2>/dev/null || true
+}
+
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_retired_two_step_entry_is_refused
@@ -1774,6 +1830,8 @@ unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
+unit_daemon_cmd_strips_host_pane_env
+unit_start_unavailable_launches_degraded_daemon
 e2e_herdr
 e2e_tmux
 

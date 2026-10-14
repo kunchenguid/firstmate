@@ -393,9 +393,29 @@ fm_afk_launch_entry_cmd() {
 # captain's process tree, so the daemon cannot detect the captain's harness
 # itself; the launcher names it here (bin/fm-supervise-daemon.sh
 # fm_daemon_primary_harness).
-fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend>
-  printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_DAEMON_PRIMARY_HARNESS=%q %q' \
-    "$FM_HOME" "$1" "$2" "$(fm_afk_launch_primary_harness)" "$(fm_afk_launch_entry_cmd)"
+fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend> [bound 0|1]
+  # A hosted daemon terminal's ambient env names the HOST, never the captain:
+  # the new pane's $TMUX_PANE is itself, a herdr workspace pane marks its own
+  # session, and a long-lived tmux server can hand the detached session an old
+  # FM_SUPERVISOR_* override that would arm a stale pane without the binding's
+  # same-session check. env -u strips every supervisor discovery and
+  # declaration variable so the daemon can only arm an explicit pass-through
+  # set right here or the verified session binding
+  # (kunchenguid/firstmate#1506).
+  if [ "${3:-0}" = 1 ]; then
+    # A bound captain identity must NOT be pinned through explicit
+    # FM_SUPERVISOR_* env: the daemon re-resolves and re-verifies the
+    # session record itself before every injection (a hard pin would
+    # smuggle a stale identity past that same-session check).
+    printf 'exec env -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND -u FM_SUPERVISOR_TARGET_SOURCE FM_HOME=%q FM_DAEMON_PRIMARY_HARNESS=%q %q' \
+      "$FM_HOME" "$(fm_afk_launch_primary_harness)" "$(fm_afk_launch_entry_cmd)"
+  else
+    # The explicit pin is assigned AFTER the -u strip so only the launcher's
+    # own resolved values - never an inherited server-environment override -
+    # reach the daemon.
+    printf 'exec env -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND -u FM_SUPERVISOR_TARGET_SOURCE FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_DAEMON_PRIMARY_HARNESS=%q %q' \
+      "$FM_HOME" "$1" "$2" "$(fm_afk_launch_primary_harness)" "$(fm_afk_launch_entry_cmd)"
+  fi
 }
 
 fm_afk_launch_record_write() {  # <backend> <target> <extra>
@@ -606,11 +626,13 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-supervisor-unavailable" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-resolve-retry" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-supervisor-unavailable .subsuper-resolve-retry .subsuper-unknown-acked; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -627,8 +649,8 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
 # (so the daemon can inject into the captain pane, which lives there). A
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
 # never touches the captain's active tab. Prints the record line on success.
-fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session out wsid pane cmd label recovered create_result
+fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend> [bound]
+  local captain_target=$1 captain_backend=$2 inherit_bound=${3:-0} session out wsid pane cmd label recovered create_result
   session=${captain_target%%:*}
   if [ -z "$session" ] || [ "$session" = "$captain_target" ]; then
     fm_afk_launch_log "cannot derive herdr session from captain target '$captain_target'"
@@ -659,7 +681,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     }
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
-  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend" "$inherit_bound")
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_afk_launch_close_terminal herdr "$session:$pane"
@@ -679,12 +701,12 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
 # Launch the daemon in a detached tmux session (never a split-window in the
 # captain's window). tmux pane ids are server-global, so the daemon reaches the
 # captain pane by its %id from this separate session.
-fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session cmd hash nonce
+fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend> [bound]
+  local captain_target=$1 captain_backend=$2 inherit_bound=${3:-0} session cmd hash nonce
   hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
-  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend" "$inherit_bound")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1
@@ -705,13 +727,30 @@ fm_afk_launch_start() {
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
-  # Capture the captain pane FIRST, before creating anything.
-  captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
-    return 1; }
-  captain_backend=$(discover_supervisor_backend) || {
-    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
-    return 1; }
+  # Capture the captain identity FIRST, before creating anything, through
+  # the single resolver: explicit env > this home's verified session-start
+  # binding > this terminal's own pane env (truthful HERE - the daemon's
+  # separate terminal would only see itself). UNAVAILABLE is a verdict, not
+  # a refusal: the daemon still launches and enters its degraded watch -
+  # buffering escalations, re-resolving on the inject-fail cadence, and
+  # re-arming the moment a real operator session appears - instead of
+  # arming the firstmate:0 constant (kunchenguid/firstmate#1506).
+  local captain_line captain_source
+  if captain_line=$(fm_supervisor_resolve "$FM_AFK_LAUNCH_STATE"); then
+    IFS=$'\t' read -r captain_backend captain_target captain_source <<< "$captain_line"
+  else
+    captain_backend=UNAVAILABLE
+    captain_target=
+    captain_source=UNAVAILABLE
+    fm_afk_launch_log "no captain supervisor session resolvable (no FM_SUPERVISOR_TARGET, no verified $FM_SUPERVISOR_SESSION_NAME record, no TMUX_PANE/HERDR_ENV); launching the daemon in UNAVAILABLE degraded mode - it buffers escalations and re-arms when an operator session appears"
+  fi
+  # A bound identity stays bound: the daemon re-reads and re-verifies the
+  # session record itself, so it must NOT be pinned via FM_SUPERVISOR_*
+  # env. Env-discovered or explicitly declared captains still need that
+  # pass-through - the daemon's separate terminal cannot rediscover them.
+  # UNAVAILABLE carries no identity to pin, so it launches bound-env too.
+  local inherit_bound=0
+  case "$captain_source" in BOUND\(*|UNAVAILABLE) inherit_bound=1 ;; esac
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
@@ -730,7 +769,7 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-supervisor-unavailable .subsuper-resolve-retry .subsuper-unknown-acked; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -754,10 +793,30 @@ fm_afk_launch_start() {
 
   if [ "$result" -eq 0 ]; then
     case "$captain_backend" in
-      herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
-      tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
+      herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend" "$inherit_bound"; result=$? ;;
+      tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend" "$inherit_bound"; result=$? ;;
+      tty)
+        # Captain is a bare terminal (no multiplexer): pane delivery is a
+        # device write, but the daemon still needs a host terminal
+        # somewhere - a detached tmux session is the verified primitive.
+        if command -v tmux >/dev/null 2>&1; then
+          fm_afk_launch_create_tmux "$captain_target" "$captain_backend" "$inherit_bound"; result=$?
+        else
+          fm_afk_launch_log "captain is on a bare terminal ($captain_target) and tmux is not installed to host a detached daemon terminal; run 'fm-afk-launch.sh start-native' inside the captain session instead"
+          result=1
+        fi ;;
+      UNAVAILABLE)
+        # No identity yet, still supervise: host the daemon in a detached
+        # tmux session exactly like a tty captain's - it watches degraded
+        # and re-arms when an operator session becomes resolvable.
+        if command -v tmux >/dev/null 2>&1; then
+          fm_afk_launch_create_tmux "$captain_target" "$captain_backend" "$inherit_bound"; result=$?
+        else
+          fm_afk_launch_log "no captain session resolvable and tmux is not installed to host a detached daemon terminal; run 'fm-afk-launch.sh start-native' inside the captain session instead"
+          result=1
+        fi ;;
       *)
-        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
+        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux, tty-via-tmux)"
         result=1
         ;;
     esac
@@ -787,7 +846,7 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-supervisor-unavailable .subsuper-resolve-retry .subsuper-unknown-acked; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
