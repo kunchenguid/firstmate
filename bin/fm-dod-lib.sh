@@ -496,7 +496,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
   if [ "$forge" = forgejo ]; then
     contract_forge=' forge=forgejo'
     forge_cli=tea
-    draft_check="(`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>` must show `draft` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as `WIP:`, so if it is a draft, remove that prefix with `tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'`."
+    draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
   fi
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"
@@ -559,7 +559,7 @@ Delivery contract: mode=direct-PR$contract_forge$contract_consent
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with `$forge_cli` that is ready for review, not a draft$pr_base.
+When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
 Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
