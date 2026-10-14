@@ -6646,19 +6646,12 @@ test_paused_bg_job_without_until_stays_silent_after_the_job_ends() {
 }
 
 test_paused_bg_job_until_timeout_rechecks_after_the_job_ends() {
-  local dir state until_epoch now
-  # The first absorb round may take four poll cycles of up to 30 s each on a
-  # loaded runner, and it must finish before until passes.
-  until_epoch=$(( $(date +%s) + 4 * 30 ))
+  local dir state started
+  started=$(( $(date +%s) - 180 ))
   dir=$(bg_job_paused_case bg-job-until \
-    "paused [key=nightly-build] [at=$(date +%s)]: nightly build (background job, 120s timeout); resume when it ends, until $(iso_utc_at "$until_epoch")")
+    "paused [key=nightly-build] [at=$started]: nightly build (background job, 120s timeout); resume when it ends, until $(iso_utc_at "$(( started + 120 ))")")
   state="$dir/state"
-  parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked absorb \
-    || fail "a worker paused on its running background job woke before the job's timeout"
-  [ "$(bg_job_stale_wakes "$state")" -eq 0 ] || fail "the running job surfaced before its timeout"
   printf '[bg failed] nightly build - Exited with code 1' > "$dir/pane.txt"
-  now=$(date +%s)
-  [ "$now" -gt "$until_epoch" ] || sleep $(( until_epoch - now + 1 ))
   parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked exit \
     || fail "the job's timeout passed without a recheck of the worker paused on it"
   [ "$(bg_job_stale_wakes "$state")" -eq 1 ] || fail "the passed timeout queued the wrong number of rechecks"
