@@ -2777,6 +2777,14 @@ test_retained_row_artifacts_survive_captain_answers() {
     || fail "could not release the approved merge"
   show=$(tasks_in "$home" show "$approved_id" --full) || fail "the approved merge disappeared"
   assert_not_contains "$show" "hold_kind: captain" "merge approval retained its captain hold kind"
+  # Teardown waits until the forge reports the recorded PR merged or closed.
+  cat > "$home/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
+esac
+SH
+  chmod +x "$home/fakebin/gh-axi"
   run_teardown "$home" "$approved_id" > "$home/approved-teardown.out" \
     2> "$home/approved-teardown.err" \
     || fail "approved merge cleanup failed: $(cat "$home/approved-teardown.err")"
@@ -3304,6 +3312,12 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
+  # Teardown waits until the forge reports the recorded change merged or closed.
+  cat > "$home/fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"changes":[{"change":12345,"status":"MERGED"}]}'
+SH
+  chmod +x "$home/fakebin/gerrit-axi"
 
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
     || fail "cleanup of a captain-held Gerrit task failed: $(cat "$home/teardown.err")"
@@ -3347,6 +3361,14 @@ test_merge_approval_releases_before_zero_done_retention() {
     "merge approval completed the zero-retention row before landing"
   assert_contains "$show" "Resolution mode: released" \
     "merge approval did not record the existing release mode"
+  # Teardown waits until the forge reports the recorded PR merged or closed.
+  cat > "$home/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
+esac
+SH
+  chmod +x "$home/fakebin/gh-axi"
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
     || fail "zero-retention cleanup failed: $(cat "$home/teardown.err")"
   assert_no_grep "$id" "$home/data/backlog.md" \
