@@ -3689,20 +3689,28 @@ fi
 # A retirement knows no worktree, but the pool slot may still carry this task's
 # durable claim (<pool>/<slot>/.fm-slot-owner, written by fm-spawn). That claim
 # is recorded evidence, never a guess: this reads it and drops only a claim that
-# names this exact task. The slot's checkout is not returned, reset, or written
-# to, so the success line states that the slot's checkout was left as it was.
+# names this exact task and this home. A claimed slot whose checkout is dirty
+# keeps its claim and is reported instead. The slot's checkout is never
+# returned, reset, or written to (its status is read without optional locks).
 # Sets RETIRE_SLOT_NOTE to what actually happened.
 RETIRE_SLOT_NOTE=
 retire_release_claimed_slot() {
-  local status_json path released=0 unreadable=0
+  local status_json path home_real owner_real slot_status released=0 unreadable=0 dirty=''
   RETIRE_SLOT_NOTE="no durable pool-slot claim naming this task was found, so a pool slot may still be claimed"
   [ -n "$PROJ" ] && [ -d "$PROJ" ] || return 0
   status_json=$(cd "$PROJ" && treehouse status --json 2>/dev/null) || return 0
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_real=$FM_HOME
   while IFS= read -r path; do
     [ -n "$path" ] && [ -d "$path" ] || continue
     fm_treehouse_slot_owner_state "$path" "$ID"
     case "$FM_TREEHOUSE_SLOT_OWNER" in
       mine)
+        owner_real=$(cd "$FM_TREEHOUSE_SLOT_OWNER_HOME" 2>/dev/null && pwd -P) || owner_real=$FM_TREEHOUSE_SLOT_OWNER_HOME
+        [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] && [ "$owner_real" = "$home_real" ] || continue
+        if ! slot_status=$(git --no-optional-locks -C "$path" status --porcelain 2>/dev/null) || [ -n "$slot_status" ]; then
+          dirty="$dirty${dirty:+, }$path"
+          continue
+        fi
         fm_treehouse_slot_owner_release "$path" "$ID"
         fm_treehouse_slot_owner_state "$path" "$ID"
         if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then unreadable=1; else released=$((released + 1)); fi
@@ -3710,7 +3718,11 @@ retire_release_claimed_slot() {
       unsafe) unreadable=1 ;;
     esac
   done < <(printf '%s\n' "$status_json" | jq -r '.[]?.path? // empty' 2>/dev/null)
-  if [ "$released" -gt 0 ] && [ "$unreadable" = 0 ]; then
+  if [ -n "$dirty" ]; then
+    RETIRE_SLOT_NOTE="the pool slot claimed by this task at $dirty is dirty or could not be read, so its claim and checkout were left untouched; look at it before the pool can reuse it"
+    [ "$released" = 0 ] || RETIRE_SLOT_NOTE="$RETIRE_SLOT_NOTE; released the clean pool-slot claim that named this task"
+    [ "$unreadable" = 0 ] || RETIRE_SLOT_NOTE="$RETIRE_SLOT_NOTE; another slot claim could not be read, so a pool slot may still be claimed"
+  elif [ "$released" -gt 0 ] && [ "$unreadable" = 0 ]; then
     RETIRE_SLOT_NOTE="released the pool-slot claim that named this task; the slot's checkout was not returned or touched"
   elif [ "$released" -gt 0 ]; then
     RETIRE_SLOT_NOTE="released the pool-slot claim that named this task, but another slot claim could not be read, so a pool slot may still be claimed; no checkout was returned or touched"
@@ -3947,20 +3959,6 @@ if [ -n "$LAUNCH_HOME_TOKEN" ]; then
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-# A retirement without a worktree identity leaves its own plain-language
-# record beside the task's other durable files, so it reads as what it was
-# long after the backlog row is archived.
-if [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
-  mkdir -p "$DATA/$ID" \
-    && printf '%s\n' \
-      "Retired without a verified close: $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
-      "The task record named no worktree, so landed work was NOT checked and no worktree was touched." \
-      "The endpoint ${T:-none} was closed and the task record was released." \
-      "Pool slot: $RETIRE_SLOT_NOTE." \
-      "Any worktree this task used was never identified here; reconcile it by hand if one survives." \
-      > "$DATA/$ID/retired-unverified.txt" \
-    || echo "warning: could not write $DATA/$ID/retired-unverified.txt; the backlog note still records that cleanup was not verified" >&2
-fi
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 LEDGER_CLOSE_ARGS=(cleaned_up "$ID")
@@ -4031,6 +4029,21 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+# A retirement without a worktree identity leaves its own plain-language
+# record beside the task's other durable files, so it reads as what it was
+# long after the backlog row is archived. It is written only once the record
+# is gone, so it never claims a release that did not happen.
+if [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
+  mkdir -p "$DATA/$ID" \
+    && printf '%s\n' \
+      "Retired without a verified close: $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
+      "The task record named no worktree, so landed work was NOT checked and no worktree was touched." \
+      "The endpoint ${T:-none} was closed and the task record was released." \
+      "Pool slot: $RETIRE_SLOT_NOTE." \
+      "Any worktree this task used was never identified here; reconcile it by hand if one survives." \
+      > "$DATA/$ID/retired-unverified.txt" \
+    || echo "warning: could not write $DATA/$ID/retired-unverified.txt; the backlog note still records that cleanup was not verified" >&2
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

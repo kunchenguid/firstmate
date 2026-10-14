@@ -833,13 +833,22 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+# A pool slot checkout with one committed file, so its status reads clean.
+make_clean_slot() {  # <slot-path>
+  mkdir -p "$1"
+  git init -q "$1"
+  : > "$1/sentinel"
+  git -C "$1" add sentinel
+  git -C "$1" -c user.email=t@t -c user.name=t commit -q -m slot
+}
+
 test_unidentified_retirement_slot_claim_and_ledger() {
   local case_dir slot_a slot_b out claim
   # (1) the claim names this task: it is dropped, the checkout is untouched.
   case_dir=$(make_case unidentified-slot-mine)
-  mkdir -p "$case_dir/project" "$case_dir/pool/a/repo" "$case_dir/pool/b/repo"
+  mkdir -p "$case_dir/project" "$case_dir/pool/b/repo"
   slot_a="$case_dir/pool/a/repo"; slot_b="$case_dir/pool/b/repo"
-  : > "$slot_a/sentinel"
+  make_clean_slot "$slot_a"
   printf 'task=tx-unid\nhome=%s\n' "$case_dir" > "$case_dir/pool/a/.fm-slot-owner"
   printf 'task=someone-else\nhome=%s\n' "$case_dir" > "$case_dir/pool/b/.fm-slot-owner"
   add_pool_status_treehouse "$case_dir" "$slot_a" "$slot_b"
@@ -847,7 +856,7 @@ test_unidentified_retirement_slot_claim_and_ledger() {
   write_unidentified_meta "$case_dir" tx-unid
   write_meta "$case_dir" no-mistakes ship
   : > "$case_dir/config/fleet-ledger"
-  out=$(run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1) \
+  out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1) \
     || fail "slot-mine: retirement failed: $out"
   assert_absent "$case_dir/pool/a/.fm-slot-owner" "slot-mine: the claim naming this task was left behind"
   assert_present "$case_dir/pool/b/.fm-slot-owner" "slot-mine: another task's claim was removed"
@@ -879,6 +888,44 @@ test_unidentified_retirement_slot_claim_and_ledger() {
     || fail "slot-absent: success line does not warn that a slot may still be claimed: $out"
   printf '%s' "$out" | grep -F "RETIRED UNVERIFIED tx-unid" >/dev/null \
     || fail "slot-absent: not reported as unverified: $out"
+
+  # (2b) a claim naming this task id but written by another home is not this task's.
+  case_dir=$(make_case unidentified-slot-other-home)
+  mkdir -p "$case_dir/project" "$case_dir/other-home"
+  slot_a="$case_dir/pool/a/repo"
+  make_clean_slot "$slot_a"
+  printf 'task=tx-unid\nhome=%s\n' "$case_dir/other-home" > "$case_dir/pool/a/.fm-slot-owner"
+  add_pool_status_treehouse "$case_dir" "$slot_a"
+  add_closing_herdr "$case_dir"
+  write_unidentified_meta "$case_dir" tx-unid
+  write_meta "$case_dir" no-mistakes ship
+  out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1) \
+    || fail "slot-other-home: retirement failed: $out"
+  assert_grep "home=$case_dir/other-home" "$case_dir/pool/a/.fm-slot-owner" "slot-other-home: another home's claim was removed"
+  printf '%s' "$out" | grep -F "a pool slot may still be claimed" >/dev/null \
+    || fail "slot-other-home: success line does not warn that a slot may still be claimed: $out"
+
+  # (2c) a dirty slot claimed by this task keeps its claim and checkout and is reported.
+  case_dir=$(make_case unidentified-slot-dirty)
+  mkdir -p "$case_dir/project"
+  slot_a="$case_dir/pool/a/repo"
+  make_clean_slot "$slot_a"
+  printf 'unlanded\n' > "$slot_a/sentinel"
+  : > "$slot_a/untracked"
+  printf 'task=tx-unid\nhome=%s\n' "$case_dir" > "$case_dir/pool/a/.fm-slot-owner"
+  add_pool_status_treehouse "$case_dir" "$slot_a"
+  add_closing_herdr "$case_dir"
+  write_unidentified_meta "$case_dir" tx-unid
+  write_meta "$case_dir" no-mistakes ship
+  out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1) \
+    || fail "slot-dirty: retirement failed: $out"
+  assert_grep "task=tx-unid" "$case_dir/pool/a/.fm-slot-owner" "slot-dirty: the dirty slot's claim was dropped"
+  assert_grep "unlanded" "$slot_a/sentinel" "slot-dirty: the dirty checkout was changed"
+  assert_present "$slot_a/untracked" "slot-dirty: an untracked file in the dirty slot was removed"
+  printf '%s' "$out" | grep -F "$slot_a is dirty" >/dev/null \
+    || fail "slot-dirty: success line does not name the dirty slot: $out"
+  assert_grep "$slot_a is dirty" "$case_dir/data/tx-unid/retired-unverified.txt" "slot-dirty: durable record omits the dirty slot"
+  assert_no_grep "return" "$case_dir/treehouse.log" "slot-dirty: a checkout was returned"
 
   # (3) an ordinary close of a record with a valid worktree writes no unverified ledger member.
   case_dir=$(make_case unidentified-ledger-ordinary)
