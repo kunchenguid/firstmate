@@ -67,6 +67,11 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# Commits that look unpushed first trigger a fetch of every configured remote, so
+# a tracking ref left stale or absent since the push does not refuse work already
+# on a remote. Each fetch is bounded by FM_TEARDOWN_FETCH_TIMEOUT seconds (default
+# 60) and never prompts for credentials; when one fails or times out and the
+# refusal still fires, the refusal says the remote could not be refreshed.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
@@ -1964,6 +1969,7 @@ teardown_note_dirty_return() {
 
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  TEARDOWN_REMOTE_REFRESH_FAILED=0
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2014,6 +2020,8 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && report_worktree_dirt "$dirty"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      [ "$TEARDOWN_REMOTE_REFRESH_FAILED" = 1 ] \
+        && echo "note: a remote could not be refreshed (possibly timed out; see FM_TEARDOWN_FETCH_TIMEOUT), so these commits may already be on it." >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
@@ -2031,6 +2039,8 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      [ "$TEARDOWN_REMOTE_REFRESH_FAILED" = 1 ] \
+        && echo "note: a remote could not be refreshed (possibly timed out; see FM_TEARDOWN_FETCH_TIMEOUT), so these commits may already be on it." >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
@@ -2046,15 +2056,16 @@ validate_worktree_teardown_safety() {
 # Returns non-zero when no remote was refreshed.
 refresh_remote_tracking_refs() {
   local remote refreshed=1 limit=${FM_TEARDOWN_FETCH_TIMEOUT:-60}
+  local -a fetch=(git -C "$WT" fetch --quiet --no-tags)
   case "$limit" in ''|*[!0-9]*) limit=60 ;; esac
+  command -v timeout >/dev/null 2>&1 && fetch=(timeout "$limit" "${fetch[@]}")
   while IFS= read -r remote; do
     [ -n "$remote" ] || continue
-    if command -v timeout >/dev/null 2>&1; then
-      timeout "$limit" git -C "$WT" fetch --quiet --no-tags "$remote" \
-        "+refs/heads/*:refs/remotes/$remote/*" >/dev/null 2>&1 && refreshed=0
+    if GIT_TERMINAL_PROMPT=0 "${fetch[@]}" "$remote" \
+      "+refs/heads/*:refs/remotes/$remote/*" >/dev/null 2>&1; then
+      refreshed=0
     else
-      git -C "$WT" fetch --quiet --no-tags "$remote" \
-        "+refs/heads/*:refs/remotes/$remote/*" >/dev/null 2>&1 && refreshed=0
+      TEARDOWN_REMOTE_REFRESH_FAILED=1
     fi
   done < <(git -C "$WT" remote 2>/dev/null)
   return "$refreshed"

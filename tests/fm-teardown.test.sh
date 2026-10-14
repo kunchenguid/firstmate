@@ -944,6 +944,8 @@ test_local_only_commits_still_refuse_after_refresh() {
   grep -q 'has work not on any remote and not landed' "$case_dir/stderr" \
     || fail "stale-genuine: refusal wording changed"
   grep -q 'local only' "$case_dir/stderr" || fail "stale-genuine: refusal did not list the local-only commit"
+  ! grep -q 'could not be refreshed' "$case_dir/stderr" \
+    || fail "stale-genuine: blamed a refresh failure when every remote was fetched"
   pass "genuinely local-only commits are still refused after the remotes are refreshed"
 }
 
@@ -971,6 +973,8 @@ test_unreachable_remote_refuses_rather_than_passing() {
   expect_code 1 "$rc" "stale-unreachable: an unreachable remote must not read as safe"
   grep -q 'has work not on any remote and not landed' "$case_dir/stderr" \
     || fail "stale-unreachable: refusal wording changed"
+  grep -q 'a remote could not be refreshed (possibly timed out; see FM_TEARDOWN_FETCH_TIMEOUT)' "$case_dir/stderr" \
+    || fail "stale-unreachable: refusal does not say the remote could not be refreshed"
   pass "a remote that cannot be fetched refuses instead of passing"
 }
 
