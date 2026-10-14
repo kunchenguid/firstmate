@@ -17,6 +17,11 @@
 # --base-branch; empty means the repository default. A named base is the branch
 # the worker starts from, never pushes to, and targets with its pull request, and
 # fm_base_branch_valid refuses it where no pull request carries the work.
+# The optional sixth argument is the task's recorded upstream consent for a
+# firstmate-repository contribution (bin/fm-role-lib.sh owns the boundary): a
+# captain-approved <host>/<owner>/<repo> publication scope for this one task,
+# rendered as an `upstream-consent=<scope>` suffix token on the Delivery
+# contract line so brief, spawn record, and worker instructions agree.
 # Callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
@@ -403,11 +408,18 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' forge_cli=gh-axi draft_check
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
+  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
+  if [ -n "$consent" ]; then
+    if [ "$mode" = local-only ]; then
+      echo "error: fm_dod_block: upstream consent authorizes a publication that local-only never performs; drop it" >&2
+      return 1
+    fi
+    contract_consent=" upstream-consent=$consent"
+  fi
   draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
   if [ "$forge" = forgejo ]; then
     contract_forge=' forge=forgejo'
@@ -424,7 +436,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>]
     direct-PR:gerrit)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=direct-PR forge=gerrit shape=squash
+Delivery contract: mode=direct-PR forge=gerrit shape=squash$contract_consent
 Ship branch: $branch
 This task ships **direct-PR** to a Gerrit review server: you publish the change yourself, without the no-mistakes pipeline.
 Gerrit has no pull requests, so there is nothing to open; publishing creates the change.
@@ -439,7 +451,7 @@ EOF
     no-mistakes:gerrit)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=no-mistakes forge=gerrit shape=squash
+Delivery contract: mode=no-mistakes forge=gerrit shape=squash$contract_consent
 Ship branch: $branch
 This project's review server is Gerrit: it has no pull requests and no forge CI the pipeline can watch, so **no-mistakes runs here as a review pass that ends at a ready branch**, and you then publish that branch as one change.
 Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
@@ -471,7 +483,7 @@ EOF
     direct-PR:*)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=direct-PR$contract_forge
+Delivery contract: mode=direct-PR$contract_forge$contract_consent
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
@@ -500,7 +512,7 @@ EOF
     no-mistakes:*)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=no-mistakes$contract_forge
+Delivery contract: mode=no-mistakes$contract_forge$contract_consent
 Ship branch: $branch
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.

@@ -1053,9 +1053,9 @@ EOF
 # cadence each registered mate's recorded endpoint is probed once; only a
 # recovery-grade `dead` or `missing` verdict relaunches, every relaunch
 # (success or failure) becomes exactly one durable `check` wake row, and every
-# other verdict lands only in the triage log. The tick finishes every mate
-# before it wakes once on the first outcome, so one dead mate never delays
-# another's recovery; the drain surfaces every queued row. A mate that keeps
+# other verdict lands only in the triage log. The tick finishes every mate's
+# bounded recovery before it wakes once on the first outcome; the drain
+# surfaces every queued row. A mate that keeps
 # dying is parked after SECONDMATE_LIVENESS_MAX_ATTEMPTS ledgered attempts
 # inside SECONDMATE_LIVENESS_WINDOW_SECS: the bound marker wakes once, further
 # probes stay silent, and a later live probe ledgers a `rearmed` row and clears
