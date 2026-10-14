@@ -79,9 +79,8 @@
 #              config/claude-account pool stays on the Claude account recorded
 #              on the task while the pool still declares it, and refuses here
 #              when it no longer does; a single-line pin is re-resolved as
-#              before. --account
-#              <entry> moves it to another declared line deliberately and is
-#              passed through to the launch owner.
+#              before. --account <entry> moves it to another declared line
+#              deliberately and is passed through to the launch owner.
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
