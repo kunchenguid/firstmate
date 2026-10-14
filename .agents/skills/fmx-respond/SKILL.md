@@ -151,7 +151,7 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
 
 1. **Gather live fleet state once.** Compose answers from what this instance genuinely knows right now:
    - `data/backlog.md` "## In flight" - the work currently moving.
-   - `state/*.status` - the latest status event of each in-flight job, for fresh phase detail.
+   - `bin/fm-crew-state.sh <id>` for each in-flight job - its current state (a `state/*.status` line is only a wake event: use it to see what changed, not where things stand).
    - `data/projects.md` - the active projects, for naming what you work on in plain terms.
    Translate every internal item into an outcome. Example: a backlog line `fix-login-k3 - repair OAuth redirect (repo: yourapp)` becomes "patching a sign-in redirect bug on one of the apps" - no id, no repo name unless it is already public.
 2. **Drain every pending mention.** For each `state/x-inbox/*.json` file:
@@ -231,7 +231,7 @@ A non-final dry-run follow-up increments `x_followups` and keeps the link while 
 ## Completion follow-up (posted on milestone and done wakes, not this turn)
 
 When an actionable request spawned a task and you linked it (step 2c), progress and the **outcome** are delivered later as follow-up replies, not in this turn.
-This skill is the sole owner of the completion-follow-up procedure below; AGENTS.md §13 declares the load trigger for Relay-linked milestone or terminal wakes, and AGENTS.md §8 reinforces the terminal final-follow-up step before teardown.
+This skill is the sole owner of the completion-follow-up procedure below; AGENTS.md §8 declares the load trigger for Relay-linked milestone or terminal wakes and requires the terminal final-follow-up step before teardown, and AGENTS.md §14 declares Relay activation.
 This skill's own responsibility during the mention-handling turn is linking the task in step 2c; the full completion path is:
 
 - Firstmate has **up to three** follow-ups per mention, within a 7-day window, chained in the same thread - it spends them only on genuine milestones the captain would want surfaced (e.g. investigation done and a build started, work shipped or ready, or the task failing), never on routine internal churn.
