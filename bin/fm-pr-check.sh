@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# A Forgejo pull request also arms the captain-comment poll beside the merge
+# poll; bin/fm-pr-comment-poll.sh owns that contract and its warning-only
+# failure posture.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
 # head is that named head and is already stored on the forge.
