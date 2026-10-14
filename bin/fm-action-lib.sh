@@ -276,9 +276,12 @@ fm_action_native_result() {
   dir="$state/$task.action-receipts"
   mkdir -p "$dir" || return 1
   tmp=$(mktemp "$dir/.receipt.XXXXXX") || return 1
-  printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  if ! { printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$task" "$id" "$head" "$run" "$attempt" "$outcome" "$at" "$result_run" > "$tmp" && \
-    mv "$tmp" "$dir/$id" || { rm -f "$tmp"; return 1; }
+    mv "$tmp" "$dir/$id"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
   fm_action_append "$state" "$task" "$at" "$id" result "outcome=$outcome" "reason=native:$outcome" native=1 "result_run=$result_run"
 }
 
