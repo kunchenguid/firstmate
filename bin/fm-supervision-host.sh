@@ -69,12 +69,18 @@
 # successor watcher cycle and confirms the handling handoff (the order
 # docs/watcher-continuity.md owns), computes the rows the branch may claim in
 # the turn's posture with the dispatch owner, publishes that grant
-# (bin/fm-wake-grant.sh), runs one bounded headless engine turn
+# (bin/fm-wake-grant.sh), and runs a bounded headless engine turn
 # (bin/fm-supervision-engine-lib.sh) with the generated branch prompt
 # (bin/fm-branch-prompt.sh), the dialog-mirror feed (bin/fm-host-mirror.sh)
-# at the head of an attended wake and the away tail instead when away,
-# releases the branch's leases and grant, and counts the wake handled only
-# when that turn exited cleanly, recorded a durable report
+# at the head of an attended wake and the away tail instead when away.
+# An away turn that exits 1 before recording a report gets one immediate retry
+# while the captain is still away and this host still owns supervision; the
+# failed attempt releases the branch's leases and grant, discards its engine
+# conversation, then recomputes and republishes the still-durable wake for a
+# fresh conversation. Every other failure hands back immediately. Health is
+# recorded once for the wake after that retry policy, not once per attempt.
+# The host counts the wake handled only when the accepted turn exited cleanly,
+# recorded a durable report
 # (bin/fm-branch-report.sh), and left none of its granted rows in the wake
 # queue. A handled wake with only routine outcomes never wakes
 # main, and neither does any handled wake while away: captain outcomes wait in
@@ -715,6 +721,21 @@ leave_successor_for_main() {
   detach_successor
 }
 
+# Start a new engine conversation for the current main session without
+# regenerating its system prompt. A same-wake retry uses the prompt generated
+# seconds earlier; an ordinary rotation renders a new one below.
+new_conversation() {
+  ENGINE_KEY=$(fm_supervision_host_main_key "$STATE") || ENGINE_KEY=
+  ENGINE_SESSION=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  case "$ENGINE_SESSION" in
+    ????????-????-????-????-????????????) ;;
+    *) ENGINE_SESSION=$(node -e 'process.stdout.write(require("node:crypto").randomUUID())' 2>/dev/null) || return 1 ;;
+  esac
+  ENGINE_MODE=new
+  ENGINE_TURNS=0
+  ENGINE_COST=0
+}
+
 # The engine conversation for this turn: the recorded one while it belongs to
 # this main session and has turns left, otherwise a new one. Sets ENGINE_SESSION
 # and ENGINE_MODE (new|resume).
@@ -737,15 +758,7 @@ choose_conversation() {
     ENGINE_KEY=$key
     return 0
   fi
-  ENGINE_SESSION=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]')
-  case "$ENGINE_SESSION" in
-    ????????-????-????-????-????????????) ;;
-    *) ENGINE_SESSION=$(node -e 'process.stdout.write(require("node:crypto").randomUUID())' 2>/dev/null) || return 1 ;;
-  esac
-  ENGINE_MODE=new
-  ENGINE_TURNS=0
-  ENGINE_COST=0
-  ENGINE_KEY=$key
+  new_conversation || return 1
   local tmp
   tmp=$(mktemp "$PROMPT_FILE.tmp.XXXXXX") || return 1
   if ! "$SCRIPT_DIR/fm-branch-prompt.sh" > "$tmp" 2>/dev/null \
@@ -837,14 +850,19 @@ health_record() {  # <engine-error 0|1> <reports>
 # turn starts (TURN_POSTURE). Returns 0 when the wake is handled (or held
 # nothing the branch may claim), 2 with ATTENDED_WHY set when the turn starts
 # attended and the supervision session may not take the close
-# (attended_acceptor, whose offer scan is the turn's scope), else sets HANDLE_WHY and returns 1; sets ENGINE_ERROR
-# when the turn failed on the engine itself. Runs in the host's own shell,
-# never a subshell, because it advances the host's grant and turn state.
+# (attended_acceptor, whose offer scan is the turn's scope), else sets
+# HANDLE_WHY and returns 1. Sets ENGINE_ATTEMPTED, ENGINE_ERROR,
+# ENGINE_EXIT_STATUS, and TURN_REPORTS for wake-level health and retry policy.
+# Runs in the host's own shell, never a subshell, because it advances the
+# host's grant and turn state.
 handle_wake() {  # <reason-lines>
   local reason=$1 first scope status corrupted rows tasks unscoped rc turn readback
   local receipts usage result errors unacked mirror
   LAST_TURN=
   ENGINE_ERROR=0
+  ENGINE_ATTEMPTED=0
+  ENGINE_EXIT_STATUS=0
+  TURN_REPORTS=0
   HEALTH_NOTE=
   TURN_POSTURE=attended
   ! fm_afk_contract_away_present "$STATE" || TURN_POSTURE=away
@@ -893,7 +911,14 @@ handle_wake() {  # <reason-lines>
     HANDLE_WHY="this session no longer owns supervision"
     return 1
   fi
-  if ! choose_conversation; then
+  if [ "${REUSE_PROMPT:-0}" -eq 1 ]; then
+    REUSE_PROMPT=0
+    if ! [ -s "$PROMPT_FILE" ] || ! new_conversation; then
+      "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
+      HANDLE_WHY="the branch prompt or engine conversation could not be prepared"
+      return 1
+    fi
+  elif ! choose_conversation; then
     "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
     HANDLE_WHY="the branch prompt or engine conversation could not be prepared"
     return 1
@@ -954,6 +979,7 @@ handle_wake() {  # <reason-lines>
   TURN_RESULT=$result
   TURN_ERRORS=$errors
   ENGINE_RUNNING=1
+  ENGINE_ATTEMPTED=1
   # Backgrounded and waited, so a signal to the host is handled at once
   # instead of after the whole turn; the cleanup stops the engine.
   (
@@ -981,13 +1007,14 @@ handle_wake() {  # <reason-lines>
   "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
   rm -f "$TURN_FILE"
   receipts=$(awk -F '\t' -v turn="$turn" '$1 == turn { n++ } END { print n + 0 }' "$RECEIPTS" 2>/dev/null)
+  TURN_REPORTS=${receipts:-0}
+  ENGINE_EXIT_STATUS=$rc
   usage=$(fm_supervision_engine_result "$FM_SUPERVISION_ENGINE" "$result" "${ENGINE_COST:-0}" 2>/dev/null || true)
   [ "$result" = /dev/null ] || rm -f "$result"
   TURN_RESULT=
   if [ "$rc" -ne 0 ] || [ -z "$usage" ] || [ "${usage#error=0}" = "$usage" ]; then
     ENGINE_ERROR=1
   fi
-  health_record "$ENGINE_ERROR" "${receipts:-0}"
   if [ "$ENGINE_ERROR" -eq 0 ] && [ "${receipts:-0}" -gt 0 ] && [ -z "$unacked" ]; then
     write_engine_record $((ENGINE_TURNS + 1)) "$(printf '%s\n' "$usage" | sed -n 's/.* conversation_cost=\([^ ]*\).*/\1/p')" \
       || rm -f "$ENGINE_RECORD"
@@ -1134,6 +1161,34 @@ while :; do
   # before its visible outcomes existed, so main relays them now, handled or not.
   handle_wake "$REASON"
   HANDLE_RC=$?
+  WAKE_ENGINE_ATTEMPTED=$ENGINE_ATTEMPTED
+  WAKE_ENGINE_ERROR=$ENGINE_ERROR
+  WAKE_REPORTS=$TURN_REPORTS
+  # Claude exit 1 is its generic transient failure. If the failed away turn
+  # recorded no action, retry this still-durable wake once in a fresh
+  # conversation before disturbing main. Timeouts, missing binaries, malformed
+  # results, and turns that reported anything still hand back immediately.
+  if [ "$HANDLE_RC" -ne 0 ] \
+    && [ "$TURN_POSTURE" = away ] \
+    && [ "$ENGINE_ATTEMPTED" -eq 1 ] \
+    && [ "$ENGINE_EXIT_STATUS" -eq 1 ] \
+    && [ "$TURN_REPORTS" -eq 0 ] \
+    && fm_afk_contract_away_present "$STATE" \
+    && host_still_owner; then
+    log_line "retry	turn=$LAST_TURN	rc=1	reports=0	$(printf '%s\n' "$REASON" | head -n 1)"
+    GRANT_ACTIVE=0
+    REUSE_PROMPT=1
+    handle_wake "$REASON"
+    HANDLE_RC=$?
+    if [ "$ENGINE_ATTEMPTED" -eq 1 ]; then
+      WAKE_ENGINE_ATTEMPTED=1
+      WAKE_ENGINE_ERROR=$ENGINE_ERROR
+      WAKE_REPORTS=$TURN_REPORTS
+    fi
+  fi
+  if [ "$WAKE_ENGINE_ATTEMPTED" -eq 1 ]; then
+    health_record "$WAKE_ENGINE_ERROR" "$WAKE_REPORTS"
+  fi
   if [ "$HANDLE_RC" -eq 2 ]; then
     log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
     # The successor this turn already started and confirmed stays up. Retiring

@@ -57,6 +57,7 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #               the turn reports verdict captain
 #   fail        exit nonzero at once, with no result and no report (an engine
 #               error the latch counts)
+#   fail-once   exit 1 without a report on the first call, then handle the wake
 #   hang        before anything else, start a descendant in a process group of
 #               its own, then block
 STUB="$TMP_ROOT/engine-stub"
@@ -83,6 +84,10 @@ if [ "$mode" = hang ]; then
   sleep "$FM_TEST_STUB_MAX_BLOCK_SECONDS"
   exit 0
 fi
+if [ "$mode" = fail-once ] && [ "$n" -eq 1 ]; then
+  exit 1
+fi
+[ "$mode" != fail-once ] || mode=handle
 drain=$("$FM_REPO/bin/fm-wake-drain.sh" 2>&1)
 printf '%s\n' "$drain" > "$FM_HOME/engine-drain.$n"
 ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
@@ -2107,6 +2112,35 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   pass "host: an away wake is handled on the engine through the branch contract and never reaches main"
 }
 
+test_exit_one_without_a_report_retries_once_before_handback() {
+  local home pid watcher
+  home=$(make_home away-exit-one-retry away)
+  echo fail-once > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "exit-one retry: the host never started a watcher cycle"
+  append_status "$home" 'transient engine failure'
+  wait_until 800 handled_at_least "$home" 1 \
+    || fail "exit-one retry: the same wake was not recovered: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log")"
+  [ "$(engine_calls "$home")" -eq 2 ] || fail "exit-one retry: the wake did not receive exactly two engine attempts"
+  assert_re '	failed	turn=.*	rc=1	reports=0	' "$home/state/.supervision-host.log" \
+    "exit-one retry: the first failed attempt was not recorded"
+  assert_re '	handled	turn=.*	rc=0	reports=1	' "$home/state/.supervision-host.log" \
+    "exit-one retry: the second attempt did not handle the wake"
+  assert_no_grep 'demo.status' "$home/state/.wake-queue" "exit-one retry: the recovered wake remained queued"
+  wait_until 50 sh -c 'grep -q "^errors=0$" "$1" 2>/dev/null' _ "$home/state/.supervision-host-health" \
+    || fail "exit-one retry: the recovered wake counted against the broken-session latch"
+  [ ! -s "$home/host.rc" ] || fail "exit-one retry: a recovered transient failure reached main"
+  watcher_live "$home" || fail "exit-one retry: the host did not stay parked on its successor"
+
+  pid=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -TERM "$pid"
+  wait_until 200 host_exited "$home" || fail "exit-one retry: the host did not stop on TERM"
+  expect_code 143 "$(cat "$home/host.rc")" "a TERMed host must exit 143"
+  wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" || fail "exit-one retry: a stopped host left its watcher running"
+  pass "host: one exit-1 engine turn without a report retries the same wake once before main is disturbed"
+}
+
 test_away_turn_without_a_report_hands_the_wake_to_main() {
   local home token
   home=$(make_home away-noreport away)
@@ -2953,6 +2987,7 @@ test_superseded_host_leaves_the_owner_untouched() {
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
 
+test_exit_one_without_a_report_retries_once_before_handback
 test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails

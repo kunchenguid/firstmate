@@ -163,10 +163,11 @@ On each actionable close the engine takes, the host runs these steps:
 
 1. It starts and verifies the successor watcher cycle and confirms the handling handoff, so the fleet stays supervised while the engine works.
 2. It computes the branch-claimable rows in the turn's posture and publishes the grant.
-3. It runs one bounded engine turn with the branch prompt and the wake message carrying, attended, the dialog mirror and, away, the record's read-back.
+3. It runs a bounded engine turn with the branch prompt and the wake message carrying, attended, the dialog mirror and, away, the record's read-back.
    The engine drains, handles, reports through `bin/fm-branch-report.sh`, and acknowledges, exactly as the Pi branch does.
 4. It releases the branch's leases and grant, whether or not the wake was handled.
-5. It parks on the successor only for a handled wake.
+5. If an away turn exited 1 without recording a report, the captain is still away, and the host still owns supervision, it repeats steps 2-4 once in a fresh conversation for the still-durable wake.
+6. It parks on the successor only for a handled wake.
    A main-only pass-through is not a park: the host exits after leaving that cycle running, as [Attended](#attended) describes.
 
 The host counts the wake handled only when all three hold:
@@ -243,19 +244,20 @@ So the owner's next arm starts from the same state as without the host, and the 
 - A missing engine or node.
 - A dialog mirror that cannot be read, on an attended wake.
 - A session latched after repeated engine errors, inside its cooldown; see [The broken-session latch](#the-broken-session-latch).
-- A turn that timed out or failed.
+- A turn that timed out or failed, after the one eligible exit-1 retry described in [One wake](#one-wake).
 - A turn that recorded no report.
 - A turn that reported but left any of its granted rows unacknowledged.
   Its line names those rows, which stay durable in the queue for main's drain.
 
-A turn that fails also starts the next wake on a fresh engine conversation.
+Each failed attempt starts any retry or later wake on a fresh engine conversation.
 When the captain returned during a failed turn that recorded visible outcomes, the handback carries those outcomes too, for main to relay; silent outcomes remain in the store without a handoff note.
 
 ### The broken-session latch
 
-The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#broken-branch-latch-and-recovery)), with an engine error in place of a provider error: a turn that exited nonzero, hit its bound, or ended without a complete successful result.
-Two consecutive engine errors latch the session: every wake reaches main for a five-minute cooldown, the attended close unchanged and the away close with a `supervision-host:` line, after which one wake probes the engine, and each probe that ends in another engine error doubles the cooldown up to one hour.
-A turn that records a report without an engine error clears the latch; a turn with a complete engine result but no report neither counts toward it nor clears it, while an engine error counts even if no report was recorded.
+The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#broken-branch-latch-and-recovery)), with an engine error in place of a provider error: an accepted wake whose final turn exited nonzero, hit its bound, or ended without a complete successful result.
+The eligible exit-1 retry in [One wake](#one-wake) is part of one wake, so a recovered transient attempt clears the streak and two failed attempts for that wake count as one engine error.
+Two consecutive engine-error wakes latch the session: every wake reaches main for a five-minute cooldown, the attended close unchanged and the away close with a `supervision-host:` line, after which one wake probes the engine, and each probe that ends in another engine error doubles the cooldown up to one hour.
+A wake whose accepted turn records a report without an engine error clears the latch; a complete engine result with no report neither counts toward it nor clears it, while an engine error counts even if no report was recorded.
 The first trip adds one `supervision-host:` line to the failing turn's handback; a recovery is only recorded in the host ledger, so a routine probe stays off main.
 The away return brief (`bin/fm-afk-return.sh`) reports engine errors in the window and any latch visible at return, using a lower bound for the window's error count because the host ledger is bounded.
 It names the trip time only when the ledger retains the initial-trip row: a failed-probe row cannot establish that time or prove the latch predated the window, and a paused latch with no initial-trip row is reported with "trip time unavailable" even if the ledger is missing.

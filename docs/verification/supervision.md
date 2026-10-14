@@ -666,14 +666,16 @@ tests/fm-turnend-guard.test.sh
 This pre-flip evidence supports [supervision-host.md](../supervision-host.md)'s Claude engine, away-wake path, and failure direction; its no-file baseline describes the earlier opt-in release, not the current Claude default.
 It was measured on 2026-09-23 on macOS 26.6.2 arm64 with Claude Code 2.1.281 as both primary and engine (model `sonnet`), Pi 0.87.0 workers on `openai-codex/gpt-5.6-sol`, and Herdr 0.9.0, in disposable lab homes on private tmux sockets and named Herdr lab sessions.
 
-The opt-in live guard refreshes the engine evidence:
+The opt-in live guard was most recently rerun on 2026-10-14 on Darwin 25.4.0 x64 with Claude Code 2.1.299 as the engine:
 
 ```text
 $ FM_SUPERVISION_HOST_LIVE_E2E=1 tests/fm-supervision-host-live-e2e.test.sh
-# first turn: handled	turn=host-66707-1790213279.1	rc=0	reports=1
-# second turn: handled	turn=host-66707-1790213279.2	rc=0	reports=1
-ok - supervision host live (2.1.281 (Claude Code)): a real engine handles and resumes away wakes under the branch contract without waking main
+# first turn: handled	turn=host-85341-1791966369.1	posture=away	rc=0
+# second turn: handled	turn=host-85341-1791966369.2	posture=away	rc=0
+ok - supervision host live (2.1.299 (Claude Code)): a real engine handles and resumes away wakes under the branch contract without waking main
 ```
+
+The deterministic host suite also injects an exit-1 engine attempt with no report, then proves the same durable away wake succeeds once in a fresh conversation without reaching main or advancing the broken-session latch.
 
 A real Claude primary with the host on supervised real Pi workers on a disposable repository through attended work and three away windows:
 
