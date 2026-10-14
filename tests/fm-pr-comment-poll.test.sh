@@ -167,6 +167,9 @@ test_rearm_keeps_marker_and_disarm_retires() {
   local dir out
   dir=$(make_case rearm-disarm)
   write_task_meta "$dir"
+  printf '%s\n' fm-pr-comment-poll-v1 forgejo \
+    "$URL" forgejo.example o/r 7 > "$dir/home/state/task-a.pr-comment-poll"
+  chmod 0600 "$dir/home/state/task-a.pr-comment-poll"
   printf '31\n' > "$dir/home/state/task-a.pr-comment-seen"
   run_arm "$dir" task-a >/dev/null || fail "re-arm failed"
   [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 31 ] \
@@ -177,6 +180,45 @@ test_rearm_keeps_marker_and_disarm_retires() {
   [ ! -e "$dir/home/state/pr-comments.check.sh" ] || fail "disarm kept the standing shim"
   [ ! -e "$dir/home/state/pr-comments.check-trust" ] || fail "disarm kept the trust binding"
   pass "re-arm keeps the seen marker; disarm retires sidecar, shim, and trust"
+}
+
+test_rearm_replacement_pr_rebaselines_the_marker() {
+  local dir url2 out
+  dir=$(make_case rearm-replacement-pr)
+  url2=https://forgejo.example/o/r/pulls/8
+  write_task_meta "$dir"
+  comments_json 100 o '"/fm old"' > "$dir/first.lines"
+  jq -s . "$dir/first.lines" > "$dir/first.json" && rm -f "$dir/first.lines"
+  FM_TEST_PR_COMMENTS="$dir/first.json" run_arm "$dir" task-a >/dev/null \
+    || fail "arm failed"
+  [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 100 ] \
+    || fail "the first arm did not baseline the marker"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=fm-task-a" \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=$url2"
+  comments_json 3 o '"/fm rework: narrower scope"' > "$dir/second.lines"
+  jq -s . "$dir/second.lines" > "$dir/second.json" && rm -f "$dir/second.lines"
+  FM_TEST_PR_COMMENTS="$dir/second.json" run_arm "$dir" task-a >/dev/null \
+    || fail "re-arm failed"
+  [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 3 ] \
+    || fail "re-arming a replacement PR kept the retired PR's marker"
+  grep -q "^$url2$" "$dir/home/state/task-a.pr-comment-poll" \
+    || fail "re-arm did not retarget the sidecar at the replacement PR"
+  {
+    comments_json 3 o '"/fm rework: narrower scope"'
+    comments_json 4 o '"/fm also drop the flag"'
+  } > "$dir/third.lines"
+  jq -s . "$dir/third.lines" > "$dir/third.json" && rm -f "$dir/third.lines"
+  out=$(FM_TEST_PR_COMMENTS="$dir/third.json" run_poll "$dir")
+  [ "$out" = "pr-comment: task task-a has new captain comment id(s) 4 on $url2" ] \
+    || fail "a captain comment on the replacement PR did not wake: got '$out'"
+  out=$(FM_TEST_PR_COMMENTS="$dir/third.json" run_poll "$dir")
+  [ -z "$out" ] || fail "the replacement PR's comment woke twice: got '$out'"
+  pass "re-arming a replacement PR re-baselines the marker and wakes its new comments"
 }
 
 test_wake_once_on_new_captain_command_comment() {
@@ -324,6 +366,7 @@ test_usage
 test_arm_baselines_and_binds
 test_arm_refusals
 test_rearm_keeps_marker_and_disarm_retires
+test_rearm_replacement_pr_rebaselines_the_marker
 test_wake_once_on_new_captain_command_comment
 test_ignored_commenters_and_bare_comments_advance_the_marker
 test_error_paths_stay_silent_and_keep_the_marker

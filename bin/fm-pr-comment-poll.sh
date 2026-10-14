@@ -22,7 +22,9 @@
 # URL that is not a Forgejo pull request, and resolves the tea login pinned to
 # the URL's host exactly as bin/fm-pr-poll.sh does. Arming baselines the seen
 # marker at the newest existing comment id, so history never wakes; a re-arm
-# over an existing sidecar keeps the recorded marker so no wake is lost. arm
+# for the same PR keeps the recorded marker so no wake is lost, while arming a
+# replacement PR re-baselines the marker, because one PR's comment ids say
+# nothing about another's. arm
 # also writes the one standing shim state/pr-comments.check.sh through the same
 # embedded-home contract as fm-mail-check.sh and binds its bytes with
 # bin/fm-check-register.sh. bin/fm-pr-check.sh arms this poll for every Forgejo
@@ -257,7 +259,7 @@ shim_write() {  # <content>
 }
 
 action_arm() {  # <task-id>
-  local id=$1 meta url login owner line max
+  local id=$1 meta url login owner line max pr_url pr_host pr_path pr_number
   fm_pr_task_id_valid "$id" || fail "invalid task id: $id"
   meta="$STATE/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || fail "task metadata is unavailable for $id"
@@ -267,19 +269,26 @@ action_arm() {  # <task-id>
     || fail "the recorded PR for $id is not a Forgejo pull request"
   login=$(fm_pr_forgejo_login "$FM_PR_HOST") \
     || fail "watching Forgejo PR comments at $FM_PR_HOST requires exactly one 'tea login' registered for that host (see 'tea login list')"
-  if [ ! -f "$STATE/$id$SIDE_SUFFIX" ]; then
-    owner=${FM_PR_PATH%%/*}
+  pr_url=$FM_PR_URL
+  pr_host=$FM_PR_HOST
+  pr_path=$FM_PR_PATH
+  pr_number=$FM_PR_NUMBER
+  if [ ! -f "$STATE/$id$SIDE_SUFFIX" ] \
+    || ! fm_pr_comment_sidecar_parse "$STATE/$id$SIDE_SUFFIX" \
+    || [ "$FM_CMP_URL" != "$pr_url" ]; then
+    owner=${pr_path%%/*}
     line=$(fm_pr_comment_classify "$owner" 0 \
-      "$(fm_pr_comment_fetch "$login" "$FM_PR_PATH" "$FM_PR_NUMBER")") \
-      || fail "could not read the comments of $FM_PR_URL to baseline the seen marker"
+      "$(fm_pr_comment_fetch "$login" "$pr_path" "$pr_number")") \
+      || fail "could not read the comments of $pr_url to baseline the seen marker"
     max=${line%% *}
     case "$max" in
-      ''|*[!0-9]*|0[0-9]*) fail "could not read the comments of $FM_PR_URL to baseline the seen marker" ;;
+      ''|*[!0-9]*|0[0-9]*) fail "could not read the comments of $pr_url to baseline the seen marker" ;;
     esac
+    rm -f -- "$STATE/$id$SEEN_SUFFIX"
     fm_pr_comment_seen_store "$id" "$max" \
       || fail "could not write the seen marker for $id"
   fi
-  fm_pr_comment_sidecar_write "$id" "$FM_PR_URL" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+  fm_pr_comment_sidecar_write "$id" "$pr_url" "$pr_host" "$pr_path" "$pr_number" \
     || fail "could not write the comment-poll sidecar for $id"
   shim_write "$(shim_content)" \
     || fail "could not write the standing check shim"
