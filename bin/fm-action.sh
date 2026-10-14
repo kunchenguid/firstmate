@@ -43,10 +43,8 @@
 #       A supervisor's inspected observation that the worker is genuinely
 #       progressing; renews the task's checkpoint with source supervisor:TEXT.
 #       It is evidence the supervisor saw, so name what was seen.
-#   An ordinary steer's start is recorded by the watcher poll as
-#   source=observed:status|head from worker-originated evidence, never from the
-#   inbox acknowledgement. A `triage-*` action opened by the escalation ladder
-#   accepts `result ... ok` only once its incident is gone.
+#   A `triage-*` action opened by the escalation ladder accepts
+#   `result ... ok` only once its incident is gone.
 #
 # Reads never write. Nothing here interrupts, restarts, answers a captain hold,
 # or closes a task; fm-watch routes incidents through its existing check queue.

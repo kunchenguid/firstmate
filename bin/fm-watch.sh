@@ -721,13 +721,11 @@ action_followthrough_lines() {  # <task> <action-state> <now>
   else printf 'open-decision\topen-decision\tok\tnone\t0\t%s\t0\tclosed\n' "$task"; fi
 }
 
-# Per-task follow-through poll: observe model-independent start evidence, then
-# route the incidents through the ladder. A cleared incident removes its marker,
+# Per-task follow-through poll: route the incidents through the ladder. A cleared incident removes its marker,
 # which also resets the ladder.
 action_followthrough_check() {
   local task=$1 action_state=${2:-$STATE} id class phase incident age owner due operation now
   now=$(date +%s)
-  fm_action_observe "$action_state" "$task" "$now" || return 1
   while IFS=$'\t' read -r id class phase incident age owner due operation; do
     [ -n "$id" ] || continue
     case "$id" in triage-*) continue ;; esac
@@ -737,6 +735,19 @@ action_followthrough_check() {
     fi
     action_followthrough_incident "$task" "$action_state" "$id" "$incident" "$owner" "$operation" "$now" || return 1
   done < <(action_followthrough_lines "$task" "$action_state" "$now")
+}
+
+action_followthrough_poll() {
+  local action_ledger action_task
+  fm_action_observer_record "$STATE" || true
+  for action_ledger in "$STATE"/*.actions "$STATE/parent-route"/*.actions "$STATE"/*.meta; do
+    [ -f "$action_ledger" ] || continue
+    action_task=${action_ledger##*/}; action_task=${action_task%.*}
+    case "$action_ledger" in
+      *.meta) [ ! -f "$STATE/$action_task.actions" ] || continue ;;
+    esac
+    action_followthrough_check "$action_task" "${action_ledger%/*}" || return 1
+  done
 }
 
 # 0 (benign/absorb) if EVERY task in a no-verb "signal:" wake has positive work
@@ -2742,6 +2753,8 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
+action_followthrough_poll || exit 1
+
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
@@ -2749,6 +2762,7 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
+  fm_action_observer_record "$STATE" || true
   wake "$reason"
 fi
 
@@ -2841,6 +2855,7 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+  action_followthrough_poll || exit 1
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -2993,6 +3008,7 @@ EOF
             retire_merged_pr_poll "$id"
             pr_poll_control_release || exit 1
             touch "$STATE/.last-check"
+            fm_action_observer_record "$STATE" || true
             triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
             continue
           fi
@@ -3019,6 +3035,7 @@ EOF
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
+          fm_action_observer_record "$STATE" || true
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
@@ -3028,6 +3045,7 @@ EOF
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
         touch "$STATE/.last-check"
+        fm_action_observer_record "$STATE" || true
         wake "$reason"
       fi
       pr_poll_control_release || exit 1
@@ -3036,9 +3054,11 @@ EOF
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
       touch "$STATE/.last-check"
+      fm_action_observer_record "$STATE" || true
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+    fm_action_observer_record "$STATE" || true
     if [ -n "$contribution_check_output" ]; then
       wake "$contribution_check_output"
     fi
@@ -3168,16 +3188,6 @@ EOF
       triage_log "absorbed benign $reason"
     fi
   fi
-
-  fm_action_observer_record "$STATE" || true
-  for action_ledger in "$STATE"/*.actions "$STATE/parent-route"/*.actions "$STATE"/*.meta; do
-    [ -f "$action_ledger" ] || continue
-    action_task=${action_ledger##*/}; action_task=${action_task%.*}
-    case "$action_ledger" in
-      *.meta) [ ! -f "$STATE/$action_task.actions" ] || continue ;;
-    esac
-    action_followthrough_check "$action_task" "${action_ledger%/*}" || exit 1
-  done
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct

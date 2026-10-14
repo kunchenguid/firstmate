@@ -588,32 +588,25 @@ test_pipeline_progress_clears_a_missed_checkpoint() {
   pass "an observed running pipeline renews the checkpoint instead of raising a false miss"
 }
 
-test_ordinary_steer_start_is_observed_not_assumed() {
+test_ordinary_steer_requires_action_specific_start() {
   local dir s out
-  dir=$(native_case observed-start)
+  dir=$(native_case explicit-start)
   s="$dir/home/state"
   send_native "$dir" "prepare the second image" || fail "real send"
   mv "$s/t1.inbox/001.msg" "$s/t1.inbox/handled/"
-  out=$(poll_at "$dir" 2000000000)
-  assert_contains "$out" "acked-unexecuted" "acknowledgement alone is not execution"
-  assert_not_contains "$(act "$s" show t1 --now 2000000000)" "started" "no start is recorded from the acknowledgement"
-  printf 'working [at=%s]: preparing the second image\n' 2000000100 >> "$s/t1.status"
-  assert_equals "" "$(poll_at "$dir" 2000000200)" "worker-originated progress satisfies the start bound"
-  assert_contains "$(act "$s" show t1 --now 2000000200)" "steer-001	authorized	started" "the start is recorded"
-  assert_contains "$(cat "$s/t1.actions")" "source=observed:status" "the start carries its observed evidence"
-  dir=$(native_case observed-head)
-  s="$dir/home/state"
-  send_native "$dir" "land the change" || fail "real send"
-  git -C "$dir/wt" -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m "worker change"
-  poll_at "$dir" 2000000000 > /dev/null
-  assert_contains "$(cat "$s/t1.actions")" "source=observed:head" "a moved worktree head is observed execution"
-  dir=$(native_case observed-lifecycle)
-  s="$dir/home/state"
-  send_native "$dir" exit || fail "real exit steer"
-  printf 'working [at=%s]: unrelated\n' 2000000100 >> "$s/t1.status"
-  poll_at "$dir" 2000000200 > /dev/null
-  assert_not_contains "$(cat "$s/t1.actions")" "observed:" "a lifecycle operation is never observed, only its native owner records it"
-  pass "an ordinary steer start comes from worker-originated evidence, never the acknowledgement"
+  printf 'working [at=%s]: finishing the first image\n' 2000000100 >> "$s/t1.status"
+  git -C "$dir/wt" -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m "first image"
+  send_native "$dir" "prepare the third image" || fail "second send"
+  out=$(poll_at "$dir" 2000000200)
+  assert_contains "$out" "steer-001 acked-unexecuted" "unrelated progress cannot start an acknowledged action"
+  assert_contains "$out" "steer-002 unacked-unstarted" "unrelated progress cannot start an unread action"
+  assert_not_contains "$(act "$s" show t1 --now 2000000200)" $'authorized\tstarted' "task progress cannot certify an action start"
+  assert_contains "$(act "$s" register t1 --now 2000000200)" "executing" "unrelated work remains task progress"
+  act "$s" start t1 steer-001 --at 2000000300 || fail "explicit start"
+  out=$(act "$s" show t1 --now 2000000400)
+  assert_contains "$out" $'steer-001\tauthorized\tstarted' "the owner starts only its identified action"
+  assert_contains "$out" $'steer-002\tauthorized\tqueued' "the sibling action remains unstarted"
+  pass "an ordinary steer requires its own execution start despite unrelated progress"
 }
 
 test_restart_resumes_the_ladder_from_durable_records() {
@@ -697,6 +690,66 @@ test_unclosed_blocker_is_a_record_lifecycle_incident() {
   pass "an unclosed blocker is reported as a record-lifecycle defect without weakening the authoritative fold"
 }
 
+test_keyed_blockers_keep_their_own_opening_times() {
+  local dir s out
+  dir=$(stalled_case keyed-blockers)
+  s="$dir/home/state"
+  printf 'blocked [key=A] [at=%s]: A\nworking [at=%s]: resumed\nblocked [key=B] [at=%s]: B\nresolved [key=B] [at=%s]: B cleared\n' "$((W0+10))" "$((W0+20))" "$((W0+30))" "$((W0+40))" >> "$s/t1.status"
+  out=$(poll_at "$dir" "$((W0+100))")
+  assert_contains "$out" "key=A opened $((W0+10))" "a resolved sibling cannot change A's opening time"
+  printf 'resolved [key=A] [at=%s]: clear\nblocked [at=%s] [key=fresh]: fresh\nblocked: [key=old] [at=%s] old\nworking [at=%s]: resumed\nblocked [at=%s] [key=other]: other\nworking [at=%s]: resumed\nblocked [at=%s] [key=fresh]: reopened\n' "$((W0+110))" "$((W0+200))" "$((W0+120))" "$((W0+130))" "$((W0+140))" "$((W0+150))" "$((W0+210))" >> "$s/t1.status"
+  out=$(act "$s" register t1 --now "$((W0+220))")
+  assert_contains "$out" "STALE-OPEN-BLOCKER" "a fresh open key cannot hide a stale sibling"
+  assert_contains "$out" "open-decision=blocked:other" "the register lists every open key"
+  out=$(poll_at "$dir" "$((W0+220))")
+  assert_equals "" "$out" "the same incident stage is not repeated"
+  out=$(FM_STATE_OVERRIDE="$s" bash -c '. "$1/bin/fm-classify-lib.sh"; . "$1/bin/fm-action-lib.sh"; fm_action_open_decision_incident "$2" t1 "$3"' _ "$ROOT" "$s" "$((W0+220))")
+  assert_contains "$out" "key=old opened $((W0+120))" "note-head keys use the canonical parser"
+  assert_contains "$out" "key=other opened $((W0+140))" "all stale keys are included"
+  assert_not_contains "$out" "key=fresh" "reopening a blocker resets its own opening time"
+  printf 'resolved [key=old] [at=%s]: clear\nresolved [key=other] [at=%s]: clear\n' "$((W0+230))" "$((W0+240))" >> "$s/t1.status"
+  assert_equals "" "$(poll_at "$dir" "$((W0+300))")" "resolving stale keys leaves the fresh blocker alone"
+  pass "keyed blockers retain their own opening times and all stale keys surface"
+}
+
+test_configured_waits_do_not_miss_checkpoints() {
+  local dir s out verb
+  dir=$(stalled_case configured-waits)
+  s="$dir/home/state"
+  for verb in waiting held; do
+    printf '%s [at=%s]: CI running\n' "$verb" "$W0" >> "$s/t1.status"
+    out=$(FM_CLASSIFY_PAUSED_VERB=waiting FM_CLASSIFY_CAPTAIN_HELD_VERB=held act "$s" register t1 --now "$((W0+99999))")
+    assert_contains "$out" "declared-wait" "configured $verb transfers ownership"
+    assert_not_contains "$out" "MISSED" "configured $verb cannot miss its checkpoint"
+    out=$(FM_CLASSIFY_PAUSED_VERB=waiting FM_CLASSIFY_CAPTAIN_HELD_VERB=held poll_at "$dir" "$((W0+99999))")
+    assert_equals "" "$out" "configured $verb cannot prompt checkpoint recovery"
+  done
+  pass "configured waits use the canonical classification through watcher reporting"
+}
+
+test_early_wakes_preserve_followthrough_and_observation() {
+  local dir s out now
+  dir=$(native_case early-check-wake)
+  s="$dir/home/state"
+  now=$(date +%s)
+  printf 'working [at=%s]: current work\n' "$now" > "$s/t1.status"
+  printf '#!/usr/bin/env bash\nprintf "check output\\n"\n' > "$s/untrusted.check.sh"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$s" FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    bash "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" || fail "real watcher check wake"
+  assert_contains "$(cat "$dir/watch.out")" "check:" "the check actually exited the watcher"
+  assert_equals "$(FM_STATE_OVERRIDE="$s" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_path_mtime "$2/.last-check"' _ "$ROOT" "$s")" "$(cat "$s/.check-cadence-seen")" "the check touch was recorded before exiting"
+  assert_equals "$(FM_STATE_OVERRIDE="$s" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_path_mtime "$2/.last-watcher-beat"' _ "$ROOT" "$s")" "$(cat "$s/.beat-gap-seen")" "the beacon was recorded before exiting"
+  [ -f "$s/.t1.checkpoint-checked" ] || fail "the notification bypassed followthrough"
+  dir=$(native_case early-action-wake)
+  s="$dir/home/state"
+  act "$s" admit t1 --id overdue --class authorized --source captain:fixture --owner worker --operation "second image" --at "$((now-301))" || fail "admit overdue action"
+  printf 'done [at=%s]: first image finished\n' "$now" > "$s/t1.status"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$s" FM_ACTION_START_SECS=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    bash "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" || fail "real watcher action wake"
+  assert_contains "$(cat "$dir/watch.out")" "action-followthrough" "a notification cannot bypass an overdue action"
+  pass "an early check wake preserves observer samples and task followthrough"
+}
+
 test_ready_but_unstarted
 test_handled_but_unexecuted
 test_start_and_refusal_satisfy_the_bound
@@ -722,8 +775,12 @@ test_triage_delivery_ack_and_verified_result
 test_refused_triage_escalates_immediately
 test_dead_and_idle_owner_are_classified_without_the_model
 test_pipeline_progress_clears_a_missed_checkpoint
-test_ordinary_steer_start_is_observed_not_assumed
+test_ordinary_steer_requires_action_specific_start
 test_restart_resumes_the_ladder_from_durable_records
 test_teardown_retires_progress_and_ladder_state
 test_observer_cadence_and_liveness_are_separate_and_retained
 test_unclosed_blocker_is_a_record_lifecycle_incident
+
+test_keyed_blockers_keep_their_own_opening_times
+test_configured_waits_do_not_miss_checkpoints
+test_early_wakes_preserve_followthrough_and_observation

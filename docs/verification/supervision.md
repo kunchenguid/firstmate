@@ -248,7 +248,7 @@ Codex also exposes no `StopFailure` hook, so an API-error turn end would need se
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
 Action follow-through structure was exercised on 2026-10-14 through the real callers: `fm-send.sh` admission, the watcher's `action_followthrough_check` poll with an injected clock and the watcher's own pane-staleness marker, the durable wake queue, the real `fm-wake-drain.sh` presentation and `--ack-through`, and `fm-action.sh`.
-Each new scenario failed against the previous tree (no register, no observed start, no ladder, no progress note) and passes on this one; a missed checkpoint is reported once, advances to a triage action and then to an authority escalation, and never repeats an unchanged report.
+Each new scenario failed against the previous tree (no register, no ladder, no progress note) and passes on this one; a missed checkpoint is reported once, advances to a triage action and then to an authority escalation, and never repeats an unchanged report.
 Native process state and pane staleness classify a dead or idle owner without reading pane text, so the classification holds when the model route is unavailable.
 
 ```sh
@@ -264,7 +264,7 @@ ok - a triage reaches its owner through the real queue with an acknowledgement a
 ok - a refused triage becomes an authority escalation at once
 ok - a dead or capacity-idle owner is classified from native process state and staleness, never from the model
 ok - an observed running pipeline renews the checkpoint instead of raising a false miss
-ok - an ordinary steer start comes from worker-originated evidence, never the acknowledgement
+ok - an ordinary steer requires its own execution start despite unrelated progress
 ok - the ladder survives a watcher restart through its durable marker and ledger
 ok - retirement removes the progress note, checkpoint throttle and ladder marker
 ok - check cadence and observer liveness are separate, and a failed cadence acceptance is retained

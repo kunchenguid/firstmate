@@ -26,7 +26,7 @@ The `--inbox` field links a steering record, whose move to `handled/` counts as 
 ## Evidence required
 
 - `start` is recorded by the code that natively begins the action, never by the request that asked for it.
-  For an ordinary steer with no native owner, the watcher poll records `source=observed:status` or `observed:head` only from worker-originated evidence that postdates the admit; the inbox acknowledgement is never that evidence, and lifecycle operations are never observed.
+  For an ordinary steer, its execution owner records `fm-action.sh start <task> <action-id>` when it begins that action.
 - `result` is `ok`, `refused` with a concrete reason, `failed` with a concrete reason, or `answered` for a gate.
 - `accept` requires the canonical native receipt matching the task, action, head, run and attempt bound at admission, with the resulting generation recorded by a native relaunch transition.
   Native results retain the admitted head even if the worker commits while the operation finishes; acceptance checks current evidence freshness separately.

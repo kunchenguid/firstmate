@@ -52,14 +52,6 @@
 # closes, answers, interrupts or restarts anything; routing an incident to its
 # owner is bin/fm-watch.sh's job, through its existing durable check queue.
 #
-# OBSERVED START. An ordinary steer has no native execution owner, so the
-# watcher poll calls fm_action_observe, the ONLY writer of a start it did not
-# witness itself: it records `start` with source=observed:<kind> when
-# model-independent worker-originated evidence postdates the admit - a status
-# line the worker stamped later, or a worktree head that moved. An inbox
-# acknowledgement is never such evidence. Native lifecycle operations
-# (exit|relaunch|interrupt) are never observed; only their owner records them.
-#
 # REGISTER. fm_action_register answers, for one live task and from files alone:
 # owner, last observed progress with its source, next checkpoint and verdict.
 # The last progress is the newest of ledger start/result/consume events, the
@@ -375,7 +367,9 @@ fm_action_status_epoch() {  # <state-dir> <task-id>
 }
 
 fm_action_status_verb() {  # <state-dir> <task-id>
-  awk 'NF { v = $1 } END { sub(/:$/, "", v); print v }' "$1/$2.status" 2>/dev/null || true
+  local line
+  line=$(awk 'NF { line = $0 } END { print line }' "$1/$2.status" 2>/dev/null || true)
+  status_line_verb "$line"
 }
 
 # Commit time of the worktree head, else empty.
@@ -384,35 +378,6 @@ fm_action_head_epoch() {  # <state-dir> <task-id>
   wt=$(fm_action_meta "$1" "$2" worktree)
   [ -n "$wt" ] || return 0
   git -C "$wt" log -1 --format=%ct 2>/dev/null || true
-}
-
-fm_action_lifecycle_operation() {  # <operation>
-  case "$1" in exit|relaunch|interrupt) return 0 ;; esac
-  return 1
-}
-
-# Record a start for queued/acked steered actions that model-independent
-# worker-originated evidence postdates. The one writer of an observed start.
-fm_action_observe() {  # <state-dir> <task-id> <now-epoch>
-  local state=$1 task=$2 now=$3 id class phase incident age owner due operation at0 source head status_at wt_head kind
-  [ -f "$(fm_action_ledger "$state" "$task")" ] || return 0
-  status_at=$(fm_action_status_epoch "$state" "$task")
-  wt_head=$(git -C "$(fm_action_meta "$state" "$task" worktree)" rev-parse HEAD 2>/dev/null) || wt_head=
-  while IFS=$'\t' read -r id class phase incident age owner due operation; do
-    [ "$class" = authorized ] || continue
-    case "$phase" in queued|acked) ;; *) continue ;; esac
-    source=$(fm_action_field "$state" "$task" "$id" source)
-    case "$source" in firstmate-steer:*) ;; *) continue ;; esac
-    ! fm_action_lifecycle_operation "$operation" || continue
-    at0=$((now - age))
-    head=$(fm_action_field "$state" "$task" "$id" head)
-    kind=
-    if [ -n "$status_at" ] && [ "$status_at" -gt "$at0" ]; then kind=status
-    elif [ -n "$head" ] && [ -n "$wt_head" ] && [ "$head" != "$wt_head" ]; then kind='head'
-    fi
-    [ -n "$kind" ] || continue
-    fm_action_append "$state" "$task" "$now" "$id" start "source=observed:$kind"
-  done < <(fm_action_fold "$state" "$task" "$now")
 }
 
 # Watcher-observed progress that no file in the task's own record shows, such as
@@ -467,8 +432,9 @@ fm_action_register() {  # <state-dir> <task-id> <now-epoch>
   verb=$(fm_action_status_verb "$state" "$task")
   case "$verb" in
     done|blocked|needs-decision|failed) owner=firstmate; st=waiting-firstmate ;;
-    paused|captain-held) owner=declared-wait; st=declared-wait ;;
-    *) owner=$task; st=executing ;;
+    *)
+      if status_is_paused_or_captain_held "$verb:"; then owner=declared-wait; st=declared-wait
+      else owner=$task; st=executing; fi ;;
   esac
   next=$((last + $(fm_action_bound FM_ACTION_CHECKPOINT_SECS "$FM_ACTION_CHECKPOINT_SECS_DEFAULT")))
   if [ "$st" = executing ] && [ "$now" -gt "$next" ]; then verdict=MISSED; fi
@@ -476,7 +442,7 @@ fm_action_register() {  # <state-dir> <task-id> <now-epoch>
   # so show it beside the latest verb instead of silently choosing between them.
   open=
   if declare -F status_open_decisions >/dev/null 2>&1; then
-    open=$(status_open_decisions "$state/$task.status" "$kind" 2>/dev/null | awk -F'\t' 'NR == 1 && $2 != "" { print " open-decision=" $2 ":" $1 }' || true)
+    open=$(status_open_decisions "$state/$task.status" "$kind" 2>/dev/null | awk -F'\t' '$2 != "" { printf " open-decision=%s:%s", $2, $1 }' || true)
     [ -z "$(fm_action_stale_open_blocker "$state" "$task")" ] || open="$open STALE-OPEN-BLOCKER"
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$task" "$owner" "$st" "$last" "$src" "$next" "$verdict" "status=${verb:-none} source=$src$open"
@@ -491,31 +457,43 @@ fm_action_checkpoint_incident() {  # <state-dir> <task-id> <now-epoch>
     "$st" "$(( $3 - last ))" "$owner" "$next" "no progress since $last ($evidence)"
 }
 
-# Lowest-numbered still-open `blocked` record of the task's own that a later
-# worker-stamped `working` line outlived: "<key>\t<opened-epoch>", else nothing.
 fm_action_stale_open_blocker() {  # <state-dir> <task-id>
-  local state=$1 task=$2 kind open key verb opened worked
+  local state=$1 task=$2 kind key verb note opened worked line record record_key record_verb epoch
   declare -F status_open_decisions >/dev/null 2>&1 || return 0
+  [ -f "$state/$task.status" ] || return 0
   kind=$(fm_action_meta "$state" "$task" kind)
-  open=$(status_open_decisions "$state/$task.status" "$kind" 2>/dev/null | awk -F'\t' '$2 == "blocked" { print $1; exit }') || return 0
-  [ -n "$open" ] || return 0
-  key=$open
-  verb=blocked
-  opened=$(awk -v v="$verb" '$1 == v { if (match($0, /\[at=[0-9]+\]/)) { e = substr($0, RSTART + 4, RLENGTH - 5) + 0; if (e > m) m = e } } END { if (m) print m }' "$state/$task.status" 2>/dev/null || true)
-  worked=$(awk '$1 == "working" { if (match($0, /\[at=[0-9]+\]/)) { e = substr($0, RSTART + 4, RLENGTH - 5) + 0; if (e > m) m = e } } END { if (m) print m }' "$state/$task.status" 2>/dev/null || true)
-  [ -n "$opened" ] && [ -n "$worked" ] && [ "$worked" -gt "$opened" ] || return 0
-  printf '%s\t%s\n' "$key" "$opened"
+  worked=
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$(status_line_verb "$line")" = working ] || continue
+    epoch=$(printf '%s\n' "$line" | awk 'match($0, /\[at=[0-9]+\]/) {print substr($0, RSTART + 4, RLENGTH - 5)}')
+    if [ -n "$epoch" ] && [ "$epoch" -gt "${worked:-0}" ]; then worked=$epoch; fi
+  done < "$state/$task.status"
+  [ -n "$worked" ] || return 0
+  while IFS=$'\t' read -r key verb note || [ -n "$key" ]; do
+    [ "$verb" = blocked ] || continue
+    opened=
+    while IFS= read -r line || [ -n "$line" ]; do
+      record=$(_fm_decision_fold_line '' "$line" "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" "$kind")
+      IFS=$'\t' read -r record_key record_verb note <<< "$record"
+      [ "$record_key" = "$key" ] && [ "$record_verb" = blocked ] || continue
+      opened=$(printf '%s\n' "$line" | awk 'match($0, /\[at=[0-9]+\]/) {print substr($0, RSTART + 4, RLENGTH - 5)}')
+    done < "$state/$task.status"
+    [ -n "$opened" ] && [ "$worked" -gt "$opened" ] || continue
+    printf '%s\t%s\n' "$key" "$opened"
+  done < <(status_open_decisions "$state/$task.status" "$kind")
 }
 
-# Fold-shaped incident line for a stale open blocker, else nothing.
 fm_action_open_decision_incident() {  # <state-dir> <task-id> <now-epoch>
-  local key opened
+  local key opened first='' evidence=''
   [ -f "$1/$2.meta" ] || return 0
   [ "$(fm_action_meta "$1" "$2" kind)" != secondmate ] || return 0
-  IFS=$'\t' read -r key opened < <(fm_action_stale_open_blocker "$1" "$2") || true
-  [ -n "${key:-}" ] || return 0
-  printf 'open-decision\topen-decision\topen\topen-decision-stale\t%d\t%s\t%s\t%s\n' "$(( $3 - opened ))" "$2" "$opened" \
-    "blocked record key=$key opened $opened was never closed; the owner appends: resolved [at=<epoch>] [key=$key]: <how it cleared> to $2.status"
+  while IFS=$'\t' read -r key opened; do
+    [ -n "$key" ] || continue
+    if [ -z "$first" ] || [ "$opened" -lt "$first" ]; then first=$opened; fi
+    evidence="${evidence}blocked record key=$key opened $opened was never closed; the owner appends: resolved [at=<epoch>] [key=$key]: <how it cleared> to $2.status; "
+  done < <(fm_action_stale_open_blocker "$1" "$2")
+  [ -n "$first" ] || return 0
+  printf 'open-decision\topen-decision\topen\topen-decision-stale\t%d\t%s\t%s\t%s\n' "$(( $3 - first ))" "$2" "$first" "$evidence"
 }
 
 # Observer cadence: record every over-bound interval between two check touches,
