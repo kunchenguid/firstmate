@@ -1312,6 +1312,76 @@ unit_native_entry_preserves_prepared_state() {
   rm -rf "$st"
 }
 
+# Restarting an unfinished window (state/.afk present, daemon dead) keeps a
+# terminal-failure marker and its held buffer for the return brief, on every
+# start entry; a fresh entry (no state/.afk) still clears the prior session's.
+seed_failed_window() {  # <home> <with-afk: 1|0>
+  mkdir -p "$1/state"
+  [ "$2" -eq 1 ] && printf 'away\n0\n' > "$1/state/.afk"
+  printf 'fm away-mode FAILED: reporting stopped\nBuffered items:\nitem\n' > "$1/state/.subsuper-inject-wedged"
+  printf 'done: PR https://x/y/pull/9\n' > "$1/state/.subsuper-escalations"
+  : > "$1/state/.subsuper-escalations.since"
+}
+
+failed_window_intact() {  # <home>
+  [ "$(head -1 "$1/state/.subsuper-inject-wedged" 2>/dev/null)" = 'fm away-mode FAILED: reporting stopped' ] \
+    && [ -s "$1/state/.subsuper-escalations" ] && [ -e "$1/state/.subsuper-escalations.since" ]
+}
+
+failed_window_cleared() {  # <home>
+  [ ! -e "$1/state/.subsuper-inject-wedged" ] && [ ! -e "$1/state/.subsuper-escalations" ] \
+    && [ ! -e "$1/state/.subsuper-escalations.since" ]
+}
+
+unit_restart_preserves_failed_window() {
+  local st entry with
+  for entry in start_main native launch_start; do
+    for with in 1 0; do
+      st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-restart.XXXXXX")
+      seed_failed_window "$st" "$with"
+      FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+        entry=$1; script=$2
+        . "$script"
+        case "$entry" in
+          start_main)
+            FM_AFK_DAEMON=/bin/true
+            fm_afk_start_main ;;
+          native)
+            fm_afk_launch_catchup_pending() { return 1; }
+            fm_afk_launch_daemon_allowed() { return 0; }
+            fm_afk_launch_record_require() { return 0; }
+            fm_afk_launch_reconcile() { return 0; }
+            fm_afk_launch_record_write() { return 0; }
+            fm_afk_launch_start_native ;;
+          launch_start)
+            fm_afk_launch_catchup_pending() { return 1; }
+            fm_afk_launch_daemon_allowed() { return 0; }
+            fm_afk_launch_record_require() { return 0; }
+            discover_supervisor_target() { echo %1; }
+            discover_supervisor_backend() { echo tmux; }
+            fm_afk_launch_reconcile() { return 0; }
+            fm_afk_launch_create_tmux() { return 0; }
+            fm_afk_launch_start ;;
+        esac
+      ' _ "$entry" "$([ "$entry" = start_main ] && echo "$START" || echo "$LAUNCH")" >/dev/null 2>&1
+      if [ "$with" -eq 1 ]; then
+        if failed_window_intact "$st"; then
+          pass "restart ($entry): an unfinished window's failure marker and buffer are preserved"
+        else
+          fail "restart ($entry): an unfinished window's failure marker or buffer was erased"
+        fi
+      else
+        if failed_window_cleared "$st"; then
+          pass "fresh entry ($entry): the prior session's failure marker and buffer are cleared"
+        else
+          fail "fresh entry ($entry): a prior session's failure marker or buffer leaked"
+        fi
+      fi
+      rm -rf "$st"
+    done
+  done
+}
+
 unit_close_failure_preserves_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX")
@@ -1760,6 +1830,7 @@ unit_supervision_host_quiet_fallback
 unit_supervision_host_quiet_after_afk
 unit_supervision_host_quiet_failed_start
 unit_native_entry_preserves_prepared_state
+unit_restart_preserves_failed_window
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed

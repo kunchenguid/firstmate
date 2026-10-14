@@ -78,7 +78,9 @@
 #                              non-visible terminal for the detected backend and
 #                              record it. Idempotent: an already-running daemon
 #                              just refreshes state/.afk; a recorded-but-dead
-#                              terminal is reconciled (closed by id) first.
+#                              terminal is reconciled (closed by id) first. A
+#                              restart with state/.afk already present keeps the
+#                              window's artifacts; only a fresh entry clears them.
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
@@ -737,6 +739,10 @@ fm_afk_launch_start() {
   done
   if ! fm_afk_launch_reconcile; then
     result=1
+  elif [ "$had_afk" -eq 1 ]; then
+    # Restarting an unfinished window, not a fresh entry: preserve its
+    # artifacts (including a terminal-failure marker) for the return brief.
+    result=0
   else
     if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       result=0
@@ -794,7 +800,12 @@ fm_afk_launch_start_native() {
   done
   fm_afk_launch_reconcile || result=1
   if [ "$result" -eq 0 ]; then
-    if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
+    # Restarting an unfinished window (state/.afk already existed) is not a
+    # fresh entry - preserve its artifacts, including a terminal-failure
+    # marker and its buffer, for the return brief.
+    if [ "$had_afk" -eq 1 ]; then
+      fm_afk_launch_flag_write || result=1
+    elif ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
       result=1
     elif ! fm_afk_launch_flag_write; then

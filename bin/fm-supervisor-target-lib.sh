@@ -76,3 +76,30 @@ discover_supervisor_backend() {
   printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
   return 1
 }
+
+# supervisor_pane_agent_state: whether the resolved supervisor pane currently
+# holds a live agent, through bin/fm-backend.sh's process-level
+# fm_backend_agent_state (the caller sources fm-backend.sh). Prints that
+# contract's verdict (alive, dead, missing, ambiguous, unreadable, unverified).
+# A bare tmux pane id such as $TMUX_PANE is classified by that exact pane once
+# tmux resolves it to itself, never through a re-derived window name (a numeric
+# or dotted name would parse as another window). A pane id that a successful
+# server-wide pane inventory omits reads missing.
+supervisor_pane_agent_state() {  # <backend> <target>
+  local backend=$1 target=$2 resolved panes
+  case "$backend:$target" in
+    tmux:%*)
+      resolved=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || resolved=
+      if [ "$resolved" = "$target" ]; then
+        fm_backend_source tmux || { printf 'unreadable'; return 0; }
+        fm_backend_tmux_pane_agent_state "$target"
+      elif panes=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null) \
+         && ! printf '%s\n' "$panes" | grep -Fqx -- "$target"; then
+        printf 'missing'
+      else
+        printf 'unreadable'
+      fi
+      return 0 ;;
+  esac
+  fm_backend_agent_state "$backend" "$target"
+}

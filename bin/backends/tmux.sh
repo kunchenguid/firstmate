@@ -320,8 +320,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
-  local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
+  local target=$1 session window windows inventory_status
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -343,7 +342,15 @@ fm_backend_tmux_agent_state() {  # <target>
     printf 'missing'
     return 0
   fi
+  fm_backend_tmux_pane_agent_state "$target"
+}
 
+# fm_backend_tmux_pane_agent_state: the foreground-process half of
+# fm_backend_tmux_agent_state, for a tmux target the caller has already proven
+# present (a verified session:window, or an exact pane id such as $TMUX_PANE).
+# Prints alive, dead, ambiguous, or unreadable.
+fm_backend_tmux_pane_agent_state() {  # <target>
+  local target=$1 comm foreground name pid fg_seen=0 fg_shell=0 fg_other=0 argv0s
   foreground=$(fm_backend_tmux_foreground_comms "$target")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
