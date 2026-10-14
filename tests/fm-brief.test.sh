@@ -436,37 +436,22 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode brief scaffold failed"
     brief="$home/data/$id/brief.md"
+    assert_no_grep "Firstmate performs the merge procedure" "$brief" \
+      "$mode brief must not promise a Firstmate merge procedure"
     assert_grep "Never merge a PR." "$brief" \
-      "$mode brief must reserve PR merges for firstmate"
-    assert_grep "Firstmate performs the merge procedure" "$brief" \
-      "$mode brief must assign the merge procedure to firstmate"
+      "$mode brief must reserve PR merges for the configured authority"
     assert_no_grep "You may merge" "$brief" \
       "$mode brief must not authorize worker PR merges"
-    assert_grep "Firstmate merges the PR" "$brief" \
-      "$mode brief must assign the merge to firstmate"
-    assert_grep "(i) verify in a disposable worktree that the branch merges without conflicts into the default branch" "$brief" \
-      "$mode brief must require the conflict-free merge check against the PR target"
-    assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of the default branch; this is not the actual PR merge; if there are new failures, stop before merging and report them without rollback" "$brief" \
-      "$mode brief must block merge on new integration failures without rollback"
-    assert_grep "(iii) Firstmate merges the PR; (iv) Firstmate end-to-end tests and recalculates the target feature on the actually landed the repository default branch tree; (v) if this end-to-end verification fails, Firstmate reverts to the state before the merge and reports the failure" "$brief" \
-      "$mode brief must assign merge and rollback only to firstmate after failed landed-tree end-to-end verification"
-    assert_grep "Firstmate end-to-end tests and recalculates the target feature on the actually landed the repository default branch tree" "$brief" \
-      "$mode brief must assign landed-tree verification to firstmate"
-    assert_no_grep "if any of the mandatory post-merge steps fails" "$brief" \
-      "$mode brief must not rollback on full-suite integration failure"
+    assert_no_grep "Firstmate merges the PR" "$brief" \
+      "$mode brief must not add a Firstmate merge mechanism"
+    assert_no_grep "Firstmate end-to-end tests and recalculates" "$brief" \
+      "$mode brief must not promise a Firstmate post-merge test procedure"
+    assert_no_grep "Firstmate reverts to the state before the merge" "$brief" \
+      "$mode brief must not grant rollback authority in worker instructions"
+    assert_grep "The configured merge authority decides whether to merge the PR" "$brief" \
+      "$mode brief must leave the merge decision to configured authority"
     assert_grep "You never merge a PR." "$brief" \
       "$mode brief must state workers never merge"
-    assert_grep "only failure of that post-merge verification triggers rollback" "$brief" \
-      "$mode brief must not roll back temporary-suite failures"
-    assert_no_grep "You may merge" "$brief" "$mode brief must not authorize worker merges"
-    # The worker's terminal report hands the PR to Firstmate; Firstmate owns
-    # the merge, post-merge verification, and any resulting rollback.
-    assert_no_grep "merge authorized; post-merge verification in progress" "$brief" \
-      "$mode brief must not describe worker-driven merges"
-    assert_grep "only failure of that post-merge verification triggers rollback" "$brief" \
-      "$mode brief must assign rollback to firstmate only after failed landed-tree verification"
-    assert_no_grep "merge-rolled-back" "$brief" \
-      "$mode brief must not describe worker-owned rollback reporting"
     assert_grep "Append \`done [at=<epoch>]: PR {url}" "$brief" \
       "$mode brief must tell workers to report the ready PR and stop"
   done
@@ -478,14 +463,14 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" --base-branch release/x >/dev/null 2>&1 \
       || fail "$mode base-branch brief scaffold failed"
     base_brief="$home/data/$id/brief.md"
-    assert_grep "(i) verify in a disposable worktree that the branch merges without conflicts into the branch this PR targets (its base branch \`release/x\`)" "$base_brief" \
-      "$mode brief must merge-check against the PR's base branch"
-    assert_grep "(ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of that same base branch; this is not the actual PR merge; if there are new failures, stop before merging and report them without rollback" "$base_brief" \
-      "$mode brief must block merge on new failures against the PR base without rollback"
-    assert_grep "Firstmate end-to-end tests and recalculates the target feature on the actually landed release/x tree" "$base_brief" \
-      "$mode brief must verify on its actual named landing branch"
-    assert_grep "You never merge a PR." "$base_brief" \
-      "$mode brief must not authorize workers to merge the named-base PR"
+    assert_no_grep "Firstmate performs the merge procedure" "$base_brief" \
+      "$mode brief must not render the removed Firstmate merge procedure"
+    assert_no_grep "verify in a disposable worktree" "$base_brief" \
+      "$mode brief must not add merge-procedure steps for named bases"
+    assert_no_grep "Firstmate end-to-end tests and recalculates" "$base_brief" \
+      "$mode brief must not promise an out-of-scope merge procedure for named bases"
+    assert_grep "Never merge a PR." "$base_brief" \
+      "$mode brief must retain the worker merge prohibition for named bases"
     assert_no_grep "You may merge" "$base_brief" \
       "$mode brief must not authorize workers to merge the named-base PR"
   done
@@ -509,7 +494,7 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
     fi
     assert_no_grep 'summary of options' "$brief" "$kind brief must not retain the underspecified decision template"
   done
-  pass "fm-brief.sh: worker merge authority, post-merge checks, rollback, and decision context render in all briefs"
+  pass "fm-brief.sh: worker merge prohibition and decision context render in all briefs"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {

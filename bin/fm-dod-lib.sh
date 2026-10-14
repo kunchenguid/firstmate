@@ -298,14 +298,12 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   case "$mode" in
     direct-PR)
       printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). Never merge a PR."
-      printf '%s\n' "Firstmate performs the merge procedure: (i) verify in a disposable worktree that the branch merges without conflicts into $merge_target; (ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of $baseline_target; this is not the actual PR merge; if there are new failures, stop before merging and report them without rollback; (iii) Firstmate merges the PR; (iv) Firstmate end-to-end tests and recalculates the target feature on the actually landed $landed_target tree; (v) if this end-to-end verification fails, Firstmate reverts to the state before the merge and reports the failure."
       ;;
     local-only)
       printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
       ;;
     no-mistakes)
       printf '%s\n' "1. Never push to $target. Never merge a PR."
-      printf '%s\n' "Firstmate performs the merge procedure: (i) verify in a disposable worktree that the branch merges without conflicts into $merge_target; (ii) run the full test suite on a temporary merged integration tree and confirm zero failures beyond the baseline of $baseline_target; this is not the actual PR merge; if there are new failures, stop before merging and report them without rollback; (iii) Firstmate merges the PR; (iv) Firstmate end-to-end tests and recalculates the target feature on the actually landed $landed_target tree; (v) if this end-to-end verification fails, Firstmate reverts to the state before the merge and reports the failure."
       ;;
     *)
       echo "error: fm_ship_rule_one: unknown delivery mode '$mode'" >&2
@@ -652,7 +650,7 @@ When it is implemented and committed, push your branch and open a PR with \`$for
 Before you report the PR, read it back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a report on one leaves the merge unasked.
 The configured merge authority decides whether to merge the PR; firstmate relays the outcome. You never merge a PR.
-Append \`done [at=<epoch>]: PR {url}\` after confirming the PR is ready for review, then stop. Firstmate performs the conflict check and full suite on a temporary merged integration tree before merging; new failures stop the merge without rollback. After Firstmate merges, Firstmate end-to-end tests and recalculates the target feature on the actually landed $landed_target tree; only failure of that post-merge verification triggers rollback.
+Append \`done [at=<epoch>]: PR {url}\` after confirming the PR is ready for review, then stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 Do NOT run /no-mistakes.
@@ -694,7 +692,7 @@ EOF
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a report on one leaves the merge unasked.
 The configured merge authority decides whether to merge the PR; firstmate relays the outcome. You never merge a PR.
-Append \`done [at=<epoch>]: PR {url} checks green\` after confirming the PR is ready for review, then stop. Firstmate performs the conflict check and full suite on a temporary merged integration tree before merging; new failures stop the merge without rollback. After Firstmate merges, Firstmate end-to-end tests and recalculates the target feature on the actually landed $landed_target tree; only failure of that post-merge verification triggers rollback.
+Append \`done [at=<epoch>]: PR {url} checks green\` after confirming the PR is ready for review, then stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 EOF
