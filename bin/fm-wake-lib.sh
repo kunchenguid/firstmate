@@ -105,7 +105,10 @@ fm_pid_identity() {
   # Pin TZ=UTC0 because lstart renders in local time: a supervision engine whose
   # launcher exports another TZ than the host's hooks would otherwise read the
   # host's grant owner as dead, discard the grant, and refuse its drain.
-  # bin/fm-extension.mjs's pidIdentity pins the same zone.
+  # bin/fm-extension.mjs's pidIdentity pins the same zone. On a /proc-less host
+  # outside UTC, an identity recorded before this pin may read as reused for one
+  # upgrade window; this is an accepted bounded upgrade-window residual that the
+  # restart /updatefirstmate performs after a successful update clears.
   out=$(COLUMNS=10000 LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
