@@ -50,6 +50,15 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' "${FM_FAKE_CLAUDE_HELP:---help}"
+  exit "${FM_FAKE_CLAUDE_HELP_STATUS:-0}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/claude"
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
@@ -111,6 +120,8 @@ run_spawn() {
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_LOG="${FM_TEST_PANE_LOG:-}" \
+    FM_FAKE_CLAUDE_HELP="${FM_TEST_CLAUDE_HELP:---help}" \
+    FM_FAKE_CLAUDE_HELP_STATUS="${FM_TEST_CLAUDE_HELP_STATUS:-0}" \
     FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -135,6 +146,51 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+test_claude_no_chrome_capability() {
+  local kind rec id out status launch sm
+  for kind in ship auto scout secondmate unsupported failed partial codex; do
+    id="no-chrome-$kind"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    FM_TEST_CLAUDE_HELP='  --no-chrome  Disable Claude in Chrome integration'
+    FM_TEST_CLAUDE_HELP_STATUS=0
+    case "$kind" in
+    auto) printf 'auto\n' > "$HOME_DIR/config/claude-permission-mode" ;;
+    unsupported) FM_TEST_CLAUDE_HELP='  --help' ;;
+    failed) FM_TEST_CLAUDE_HELP_STATUS=1 ;;
+    partial) FM_TEST_CLAUDE_HELP='  --no-chrome-extra  --no-chromebook' ;;
+    esac
+    case "$kind" in
+    scout)
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      ;;
+    secondmate)
+      sm="$CASE_DIR/secondmate-home"
+      make_seeded_secondmate_home "$sm" "$id"
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+      ;;
+    codex)
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+      ;;
+    *) out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR") ;;
+    esac
+    status=$?
+    expect_code 0 "$status" "$kind spawn should succeed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    case "$kind" in
+    unsupported | failed | partial | codex)
+      assert_not_contains "$launch" '--no-chrome' "$kind launch received an unsupported Chrome flag"
+      ;;
+    *) assert_contains "$launch" ' --no-chrome ' "$kind Claude launch did not disable Chrome integration" ;;
+    esac
+    if [ "$kind" = auto ]; then
+      assert_contains "$launch" '--permission-mode auto --no-chrome' "auto permission mode lost the Chrome flag"
+    fi
+  done
+  unset FM_TEST_CLAUDE_HELP FM_TEST_CLAUDE_HELP_STATUS
+  pass "Claude disables Chrome per launch only when help advertises the complete option"
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
@@ -2190,6 +2246,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+test_claude_no_chrome_capability
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
