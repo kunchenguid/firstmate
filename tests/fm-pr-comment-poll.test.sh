@@ -4,11 +4,13 @@
 #
 # Every surface is exercised through its executable interface with the Forgejo
 # API mocked by a fake tea CLI; no case contacts a real forge. The cases that
-# matter are the wake contract: a new owner "/fm " comment wakes exactly once,
-# a non-captain or bare captain comment never wakes but still advances the
-# seen marker, every error path stays silent with the marker untouched so the
-# missed window is re-read, and recording a Forgejo PR arms the comment poll
-# without ever refusing the PR recording itself.
+# matter are the wake contract: with the feature flag on and the author
+# allowlisted, a new "/fm " comment wakes exactly once, a non-allowlisted or
+# bare comment never wakes but still advances the seen marker, every error
+# path stays silent with the marker untouched so the missed window is re-read,
+# the default-off flag silences arming, scanning, and already-armed polls, and
+# recording a Forgejo PR arms the comment poll without ever refusing the PR
+# recording itself.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -73,6 +75,16 @@ SH
   printf '%s\n' "$dir"
 }
 
+# enable_wake <dir> [login...]: the default-off flag plus an allowlist of the
+# given logins (default: the repo owner 'o' and one trusted dev).
+enable_wake() {
+  local dir=$1
+  shift
+  [ "$#" -gt 0 ] || set -- o trusted-dev
+  : > "$dir/home/config/forgejo-pr-comment-wake"
+  printf '%s\n' "$@" > "$dir/home/config/forgejo-pr-comment-wake-users"
+}
+
 write_task_meta() {  # <dir> [id] [extra key=val...]
   local dir=$1 id=${2:-task-a}
   shift 2 || shift $#
@@ -132,6 +144,7 @@ test_usage() {
 test_arm_baselines_and_binds() {
   local dir out rc=0
   dir=$(make_case arm-baseline)
+  enable_wake "$dir"
   write_task_meta "$dir"
   write_comments "$dir/comments.json" \
     11 someone '"lgtm"' \
@@ -155,6 +168,7 @@ test_arm_baselines_and_binds() {
 test_arm_refusals() {
   local dir rc=0
   dir=$(make_case arm-refusals)
+  enable_wake "$dir"
   fm_write_meta "$dir/home/state/task-a.meta" \
     "window=fm-task-a" \
     "worktree=$dir/wt" \
@@ -178,6 +192,7 @@ test_arm_refusals() {
 test_rearm_keeps_marker_and_disarm_retires() {
   local dir out
   dir=$(make_case rearm-disarm)
+  enable_wake "$dir"
   write_task_meta "$dir"
   printf '%s\n' fm-pr-comment-poll-v1 forgejo \
     "$URL" forgejo.example o/r 7 > "$dir/home/state/task-a.pr-comment-poll"
@@ -197,6 +212,7 @@ test_rearm_keeps_marker_and_disarm_retires() {
 test_rearm_replacement_pr_rebaselines_the_marker() {
   local dir url2 out
   dir=$(make_case rearm-replacement-pr)
+  enable_wake "$dir"
   url2=https://forgejo.example/o/r/pulls/8
   write_task_meta "$dir"
   write_comments "$dir/first.json" 100 o '"/fm old"'
@@ -222,7 +238,7 @@ test_rearm_replacement_pr_rebaselines_the_marker() {
     3 o '"/fm rework: narrower scope"' \
     4 o '"/fm also drop the flag"'
   out=$(FM_TEST_PR_COMMENTS="$dir/third.json" run_poll "$dir")
-  [ "$out" = "pr-comment: task task-a has new captain comment id(s) 4 on $url2" ] \
+  [ "$out" = "pr-comment: task task-a has new command comment id(s) 4 on $url2" ] \
     || fail "a captain comment on the replacement PR did not wake: got '$out'"
   out=$(FM_TEST_PR_COMMENTS="$dir/third.json" run_poll "$dir")
   [ -z "$out" ] || fail "the replacement PR's comment woke twice: got '$out'"
@@ -231,6 +247,7 @@ test_rearm_replacement_pr_rebaselines_the_marker() {
 test_retarget_during_fetch_leaves_wake_and_marker_untouched() {
   local dir out
   dir=$(make_case retarget-mid-fetch)
+  enable_wake "$dir"
   write_task_meta "$dir"
   write_comments "$dir/base.json" 100 o '"/fm old"'
   FM_TEST_PR_COMMENTS="$dir/base.json" run_arm "$dir" task-a >/dev/null \
@@ -272,6 +289,7 @@ SH
 test_wake_once_on_new_captain_command_comment() {
   local dir out
   dir=$(make_case wake-once)
+  enable_wake "$dir"
   write_task_meta "$dir"
   write_comments "$dir/comments.json" \
     11 someone '"lgtm"' \
@@ -282,8 +300,8 @@ test_wake_once_on_new_captain_command_comment() {
     12 o '"plain captain note"' \
     13 o '"/fm rework: use a config flag instead"'
   out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
-  [ "$out" = "pr-comment: task task-a has new captain comment id(s) 13 on $URL" ] \
-    || fail "a new owner /fm comment did not wake with exactly one line: got '$out'"
+  [ "$out" = "pr-comment: task task-a has new command comment id(s) 13 on $URL" ] \
+    || fail "a new allowlisted /fm comment did not wake with exactly one line: got '$out'"
   [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 13 ] \
     || fail "a waking poll did not advance the seen marker"
   # Re-poll of the same window must not double-wake.
@@ -295,6 +313,7 @@ test_wake_once_on_new_captain_command_comment() {
 test_ignored_commenters_and_bare_comments_advance_the_marker() {
   local dir out
   dir=$(make_case ignored-comments)
+  enable_wake "$dir"
   write_task_meta "$dir"
   write_comments "$dir/comments.json"
   FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-a >/dev/null || fail "arm failed"
@@ -315,6 +334,7 @@ test_ignored_commenters_and_bare_comments_advance_the_marker() {
 test_error_paths_stay_silent_and_keep_the_marker() {
   local dir out
   dir=$(make_case error-silent)
+  enable_wake "$dir"
   write_task_meta "$dir"
   write_comments "$dir/comments.json" \
     5 o '"/fm old"' \
@@ -350,6 +370,7 @@ test_error_paths_stay_silent_and_keep_the_marker() {
 test_doctored_sidecar_and_retired_task() {
   local dir out
   dir=$(make_case doctored-retired)
+  enable_wake "$dir"
   write_task_meta "$dir" task-a
   write_task_meta "$dir" task-b
   write_comments "$dir/comments.json" 5 someone '"lgtm"'
@@ -377,11 +398,115 @@ test_doctored_sidecar_and_retired_task() {
   pass "a doctored sidecar is ignored and a cleaned-up task retires its poll"
 }
 
+test_arm_refuses_missing_or_invalid_allowlist() {
+  local dir rc=0
+  dir=$(make_case arm-allowlist)
+  write_task_meta "$dir"
+  : > "$dir/home/config/forgejo-pr-comment-wake"
+  run_arm "$dir" task-a >/dev/null 2> "$dir/err" && rc=1 || rc=0
+  expect_code 0 "$rc" "arm must refuse with no allowlist"
+  assert_contains "$(cat "$dir/err")" "forgejo-pr-comment-wake-users" \
+    "refusal names the allowlist"
+  [ ! -e "$dir/home/state/task-a.pr-comment-poll" ] \
+    || fail "arm with no allowlist still wrote a sidecar"
+  : > "$dir/home/config/forgejo-pr-comment-wake-users"
+  rc=0
+  run_arm "$dir" task-a >/dev/null 2> "$dir/err2" && rc=1 || rc=0
+  expect_code 0 "$rc" "arm must refuse an empty allowlist"
+  printf 'good-login\nnot a login\n' \
+    > "$dir/home/config/forgejo-pr-comment-wake-users"
+  rc=0
+  run_arm "$dir" task-a >/dev/null 2> "$dir/err3" && rc=1 || rc=0
+  expect_code 0 "$rc" "arm must refuse an allowlist line no login can hold"
+  [ ! -e "$dir/home/state/task-a.pr-comment-poll" ] \
+    || fail "arm over an invalid allowlist still wrote a sidecar"
+  pass "arm refuses missing, empty, and invalid allowlists without arming"
+}
+
+test_flag_gates_the_whole_feature() {
+  local dir out rc=0
+  dir=$(make_case flag-off)
+  write_task_meta "$dir"
+  write_comments "$dir/comments.json" 1 o '"/fm would wake if enabled"'
+  # With no flag, arm and check are silent no-ops that write nothing.
+  out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-a) || rc=$?
+  expect_code 0 "$rc" "arm without the flag must exit 0"
+  [ -z "$out" ] || fail "arm without the flag printed: '$out'"
+  [ ! -e "$dir/home/state/task-a.pr-comment-poll" ] \
+    || fail "arm without the flag wrote a sidecar"
+  [ ! -e "$dir/home/state/pr-comments.check.sh" ] \
+    || fail "arm without the flag wrote the standing shim"
+  # An armed poll whose flag was later removed stays silent, marker untouched.
+  enable_wake "$dir"
+  FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-a >/dev/null \
+    || fail "arm with the flag failed"
+  write_comments "$dir/comments.json" \
+    1 o '"/fm would wake if enabled"' \
+    2 o '"/fm newer"'
+  rm -f "$dir/home/config/forgejo-pr-comment-wake"
+  out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
+  [ -z "$out" ] || fail "a check with the flag removed woke: '$out'"
+  [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 1 ] \
+    || fail "a check with the flag removed advanced the marker"
+  pass "the default-off flag gates arming, scanning, and already-armed polls"
+}
+
+test_allowlist_decides_who_wakes_the_crew() {
+  local dir out
+  dir=$(make_case allowlist)
+  enable_wake "$dir" trusted-dev
+  write_task_meta "$dir"
+  write_comments "$dir/comments.json"
+  FM_TEST_PR_COMMENTS="$dir/comments.json" run_arm "$dir" task-a >/dev/null \
+    || fail "arm failed"
+  # The repository owner is not the captain identity by inference: not being
+  # in the allowlist, even their command comment never wakes.
+  write_comments "$dir/comments.json" \
+    30 o '"/fm owner is not allowlisted"'
+  out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
+  [ -z "$out" ] || fail "a non-allowlisted owner command comment woke: '$out'"
+  [ "$(cat "$dir/home/state/task-a.pr-comment-seen")" = 30 ] \
+    || fail "the non-allowlisted comment did not advance the marker"
+  # An allowlisted trusted dev's command comment wakes exactly once, and a
+  # later allowlist edit admitting the owner applies without re-arming.
+  write_comments "$dir/comments.json" \
+    30 o '"/fm owner is not allowlisted"' \
+    31 trusted-dev '"/fm rework: narrower scope"'
+  out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
+  [ "$out" = "pr-comment: task task-a has new command comment id(s) 31 on $URL" ] \
+    || fail "an allowlisted dev command comment did not wake: got '$out'"
+  out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
+  [ -z "$out" ] || fail "the dev command comment woke twice: '$out'"
+  printf 'o\ntrusted-dev\n' > "$dir/home/config/forgejo-pr-comment-wake-users"
+  write_comments "$dir/comments.json" \
+    30 o '"/fm owner is not allowlisted"' \
+    31 trusted-dev '"/fm rework: narrower scope"' \
+    32 o '"/fm now allowlisted"'
+  out=$(FM_TEST_PR_COMMENTS="$dir/comments.json" run_poll "$dir")
+  [ "$out" = "pr-comment: task task-a has new command comment id(s) 32 on $URL" ] \
+    || fail "a newly allowlisted login's command comment did not wake: '$out'"
+  pass "the allowlist alone decides who wakes, and edits apply without re-arming"
+}
+
 test_pr_check_arms_comment_poll_without_refusing() {
   local dir rc=0
   dir=$(make_case pr-check-hook)
   write_task_meta "$dir" task-a
   write_comments "$dir/comments.json"
+  # Without the flag, recording a Forgejo PR neither arms the comment poll
+  # nor warns: an unconfigured home behaves exactly as before the feature.
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_PR_COMMENTS="$dir/comments.json" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    "$PR_CHECK" task-a "$URL" > "$dir/out0" 2> "$dir/err0" || rc=$?
+  expect_code 0 "$rc" "recording a Forgejo PR must succeed with the flag off"
+  [ ! -e "$dir/home/state/task-a.pr-comment-poll" ] \
+    || fail "the flag-off recording armed the comment poll"
+  if grep -q "comment poll not armed" "$dir/err0"; then
+    fail "the flag-off recording warned about the comment poll"
+  fi
+  [ -f "$dir/home/state/task-a.check.sh" ] || fail "the merge poll was not armed"
+  enable_wake "$dir"
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_PR_COMMENTS="$dir/comments.json" \
     PATH="$dir/fakebin:$BASE_PATH" \
@@ -404,7 +529,7 @@ test_pr_check_arms_comment_poll_without_refusing() {
   expect_code 0 "$rc" "a comment-arm failure must not refuse the PR recording"
   assert_grep "comment poll not armed" "$dir/err2" "the warning names the un-armed comment poll"
   [ -f "$dir/home/state/task-a.check.sh" ] || fail "the merge poll was not armed"
-  pass "fm-pr-check arms the comment poll and only warns when arming fails"
+  pass "fm-pr-check arms the flagged comment poll, stays silent without the flag, and only warns when arming fails"
 }
 
 test_usage
@@ -418,4 +543,7 @@ test_ignored_commenters_and_bare_comments_advance_the_marker
 test_error_paths_stay_silent_and_keep_the_marker
 test_doctored_sidecar_and_retired_task
 test_pr_check_arms_comment_poll_without_refusing
+test_arm_refuses_missing_or_invalid_allowlist
+test_flag_gates_the_whole_feature
+test_allowlist_decides_who_wakes_the_crew
 

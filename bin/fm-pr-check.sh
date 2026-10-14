@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
-# A Forgejo pull request also arms the captain-comment poll beside the merge
-# poll; bin/fm-pr-comment-poll.sh owns that contract and its warning-only
-# failure posture.
+# A Forgejo pull request also arms the default-off command-comment poll beside
+# the merge poll; bin/fm-pr-comment-poll.sh owns that contract and its
+# warning-only failure posture.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
 # head is that named head and is already stored on the forge.
@@ -256,14 +256,15 @@ if command -v jq >/dev/null 2>&1; then
 else
   printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
 fi
-# A Forgejo pull request also arms the captain-comment poll beside the merge
-# poll, so feedback left as a "/fm " comment on the PR wakes the owning crew
-# (bin/fm-pr-comment-poll.sh owns that contract). The merge watch this script
-# just published stays the delivery surface, so a comment-poll failure is a
-# warning, never a refusal of the PR recording itself.
+# A Forgejo pull request also arms the default-off command-comment poll beside
+# the merge poll, so feedback left as a "/fm " comment on the PR by an
+# allowlisted login wakes the owning crew (bin/fm-pr-comment-poll.sh owns that
+# contract and its config/forgejo-pr-comment-wake flag). The merge watch this
+# script just published stays the delivery surface, so a comment-poll failure
+# is a warning, never a refusal of the PR recording itself.
 if [ "$PROVIDER" = forgejo ]; then
   "$SCRIPT_DIR/fm-pr-comment-poll.sh" arm "$ID" >/dev/null \
-    || printf 'pr-comments: comment poll not armed; captain comments on %s will not wake\n' "$URL" >&2
+    || printf 'pr-comments: comment poll not armed; "/fm " comments on %s will not wake\n' "$URL" >&2
 fi
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it

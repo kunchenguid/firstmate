@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# fm-pr-comment-poll.sh - standing watcher check that wakes firstmate when the
-# captain comments on a task's Forgejo pull request, so feedback left on the PR
-# reaches the owning crew as steer instructions.
+# fm-pr-comment-poll.sh - default-off standing watcher check that wakes
+# firstmate when an allowlisted login comments "/fm ..." on a task's Forgejo
+# pull request, so feedback left on the PR reaches the owning crew.
 #
 # Usage:
-#   fm-pr-comment-poll.sh check       scan every armed sidecar and wake on new captain comments
+#   fm-pr-comment-poll.sh check       scan every armed sidecar and wake on new qualifying comments
 #   fm-pr-comment-poll.sh arm <id>    arm the comment poll for one task's recorded Forgejo PR
 #   fm-pr-comment-poll.sh disarm <id> retire one task's comment poll
 #   fm-pr-comment-poll.sh --help      print this help
@@ -16,6 +16,18 @@
 # FM_CHECK_INTERVAL cadence, and comment feedback does not need sub-minute
 # latency. This check runs as one standing custom check, so the watcher's own
 # FM_CHECK_TIMEOUT bound (default 30s) bounds every scan.
+#
+# The whole feature is gated behind the presence flag
+# config/forgejo-pr-comment-wake (default off): with the flag absent, `arm`
+# exits 0 without touching any state and `check` exits 0 before scanning, so an
+# unconfigured home behaves exactly as before - no new observer, no new wake
+# class - and a home that removes the flag later silences every armed poll.
+# Who may trigger the crew is NOT inferred from the repository: only the
+# explicit allowlist config/forgejo-pr-comment-wake-users decides, one login
+# per non-empty non-comment line (the captain plus any trusted devs). A
+# missing, empty, or invalid allowlist means nobody can trigger; `arm` under a
+# present flag refuses loudly on such an allowlist rather than arming a poll
+# that could never legitimately wake.
 #
 # `arm` records one per-task sidecar state/<id>.pr-comment-poll (identity
 # lines, never shell source) from the task's own recorded pr= URL, refuses any
@@ -29,7 +41,7 @@
 # embedded-home contract as fm-mail-check.sh and binds its bytes with
 # bin/fm-check-register.sh. bin/fm-pr-check.sh arms this poll for every Forgejo
 # PR it records; an arm failure there is a warning, never a refusal of the PR
-# recording itself.
+# recording itself, while the flag-absent no-op is not a failure at all.
 #
 # `check` scans every sidecar and, per task, reads
 # GET /repos/{owner}/{repo}/issues/<number>/comments
@@ -41,19 +53,22 @@
 # they are read only by jq, never interpolated into shell source, and
 # only numeric comment ids and the canonical URL ever reach output. A comment
 # wakes exactly one line when BOTH hold:
-#   - its author login equals the repository owner, the configured captain
-#     identity for this forge, and
+#   - its author login is listed in config/forgejo-pr-comment-wake-users, the
+#     explicit configured allowlist, and
 #   - its body starts with the explicit command prefix "/fm" plus whitespace,
 #     e.g. "/fm rework: use a config flag instead".
-# Bare captain comments do NOT wake: the prefix is the documented way to say
-# "crew, act on this", and without it ordinary review chatter directed at
-# humans would spend a firstmate turn per comment. Ignored comments still
-# advance the seen marker, so a comment that did not wake never wakes later.
-# The marker state/<id>.pr-comment-seen holds the newest comment id observed on
-# the last fully parsed read, and is written by rename only after that read
-# parsed, so an error leaves it untouched and the missed window is re-read next
-# cycle; the sidecar's identity is re-read before any wake or marker write, so
-# a PR retargeted by a concurrent arm mid-read leaves both untouched. A sidecar
+# Bare comments do NOT wake, from anyone: the prefix is the documented way to
+# say "crew, act on this", and without it ordinary review chatter directed at
+# humans would spend a firstmate turn per comment. The allowlist is re-read on
+# every scan, so an edit applies without re-arming; an allowlist that turns
+# unreadable mid-flight skips that task silently, marker untouched, so the
+# window is re-read next cycle. Ignored comments still advance the seen marker,
+# so a comment that did not wake never wakes later. The marker state/<id>.pr-
+# comment-seen holds the newest comment id observed on the last fully parsed
+# read, and is written by rename only after that read parsed, so an error
+# leaves it untouched and the missed window is re-read next cycle; the
+# sidecar's identity is re-read before any wake or marker write, so a PR
+# retargeted by a concurrent arm mid-read leaves both untouched. A sidecar
 # whose state/<id>.meta is gone - the task was cleaned up - is retired silently
 # with its marker. A printed line becomes one ordinary `check:` wake through
 # the watcher's custom-check contract; firstmate steers the named task's
@@ -72,6 +87,9 @@ export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+FLAG_FILE="$CONFIG/forgejo-pr-comment-wake"
+USERS_FILE="$CONFIG/forgejo-pr-comment-wake-users"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
@@ -89,14 +107,15 @@ WAKE_IDS_MAX=5
 usage() {
   cat <<'EOF'
 Usage:
-  fm-pr-comment-poll.sh check       scan every armed sidecar and wake on new captain comments
+  fm-pr-comment-poll.sh check       scan every armed sidecar and wake on new qualifying comments
   fm-pr-comment-poll.sh arm <id>    arm the comment poll for one task's recorded Forgejo PR
   fm-pr-comment-poll.sh disarm <id> retire one task's comment poll
   fm-pr-comment-poll.sh --help      print this help
 
-A comment wakes only when its author is the repository owner (the configured
-captain identity) and its body starts with the "/fm " command prefix. See the
-script header for the full contract.
+A comment wakes only when its author login is allowlisted in
+config/forgejo-pr-comment-wake-users and its body starts with the "/fm "
+command prefix, and only while config/forgejo-pr-comment-wake is present.
+See the script header for the full contract.
 EOF
 }
 
@@ -149,25 +168,50 @@ fm_pr_comment_fetch() {  # <login> <path> <number>
     "/repos/{owner}/{repo}/issues/$3/comments" 2>/dev/null
 }
 
-# Classifies one fetched comments array. Prints "<max-id> <id[,id...]>" where
-# the second field is empty when no new qualifying comment woke, and returns 1
-# on any payload that is not an array of records carrying a numeric id, a
-# string body and a string user.login - an unreadable comment must never
-# advance the marker past itself.
-fm_pr_comment_classify() {  # <owner> <seen> <json>
-  printf '%s' "$3" | jq -r --arg owner "$1" --argjson seen "$2" '
+# Classifies one fetched comments array against the configured allowlist.
+# Prints "<max-id> <id[,id...]>" where the second field is empty when no new
+# qualifying comment woke, and returns 1 on any payload that is not an array
+# of records carrying a numeric id, a string body and a string user.login -
+# an unreadable comment must never advance the marker past itself.
+fm_pr_comment_classify() {  # <allowlist-csv> <seen> <json>
+  printf '%s' "$3" | jq -r --arg allow "$1" --argjson seen "$2" '
     if type == "array"
        and all(.[]; (.id | type) == "number"
                   and (.body | type) == "string"
                   and (.user.login | type) == "string")
     then
-      ([.[] | select(.user.login == $owner
-                     and (.body | test("^/fm[[:space:]]"))) | .id]) as $wake
+      ($allow | split(",")) as $ok
+      | ([.[] | . as $c
+          | select(($ok | index($c.user.login)) != null
+                   and ($c.body | test("^/fm[[:space:]]"))) | .id]) as $wake
       | (([.[] | .id] | max) // 0) as $max
       | "\($max) \($wake | map(select(. > $seen)) | sort | join(","))"
     else
       error("invalid comments payload")
     end' 2>/dev/null
+}
+
+# The one-shot allowlist, comma-joined for jq: one login per non-empty
+# non-comment line, and any line holding a character a login cannot hold is a
+# configuration error, never a silently skipped entry. No file, or no valid
+# entry, means nobody can trigger and returns 1.
+fm_pr_comment_allowlist() {
+  local line out=
+  [ -f "$USERS_FILE" ] && [ ! -L "$USERS_FILE" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+      *[!A-Za-z0-9_.-]*|'.'|'-'|'..'|'-'*|'.'*) return 1 ;;
+    esac
+    out="${out:+$out,}$line"
+  done < "$USERS_FILE"
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# The feature's default-off presence flag.
+fm_pr_comment_enabled() {
+  [ -f "$FLAG_FILE" ] && [ ! -L "$FLAG_FILE" ]
 }
 
 # The sidecar identity lines, written atomically for one task.
@@ -266,7 +310,10 @@ shim_write() {  # <content>
 }
 
 action_arm() {  # <task-id>
-  local id=$1 meta url login owner line max pr_url pr_host pr_path pr_number
+  local id=$1 meta url login allow line max pr_url pr_host pr_path pr_number
+  # Default off: with no flag, arm is a silent no-op so an unconfigured home
+  # never gains the observer.
+  fm_pr_comment_enabled || exit 0
   fm_pr_task_id_valid "$id" || fail "invalid task id: $id"
   meta="$STATE/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || fail "task metadata is unavailable for $id"
@@ -276,6 +323,8 @@ action_arm() {  # <task-id>
     || fail "the recorded PR for $id is not a Forgejo pull request"
   login=$(fm_pr_forgejo_login "$FM_PR_HOST") \
     || fail "watching Forgejo PR comments at $FM_PR_HOST requires exactly one 'tea login' registered for that host (see 'tea login list')"
+  allow=$(fm_pr_comment_allowlist) \
+    || fail "the comment poll requires logins in config/forgejo-pr-comment-wake-users (one per line; missing or empty means nobody can trigger)"
   pr_url=$FM_PR_URL
   pr_host=$FM_PR_HOST
   pr_path=$FM_PR_PATH
@@ -283,8 +332,7 @@ action_arm() {  # <task-id>
   if [ ! -f "$STATE/$id$SIDE_SUFFIX" ] \
     || ! fm_pr_comment_sidecar_parse "$STATE/$id$SIDE_SUFFIX" \
     || [ "$FM_CMP_URL" != "$pr_url" ]; then
-    owner=${pr_path%%/*}
-    line=$(fm_pr_comment_classify "$owner" 0 \
+    line=$(fm_pr_comment_classify "$allow" 0 \
       "$(fm_pr_comment_fetch "$login" "$pr_path" "$pr_number")") \
       || fail "could not read the comments of $pr_url to baseline the seen marker"
     max=${line%% *}
@@ -321,7 +369,10 @@ action_disarm() {  # <task-id>
 }
 
 action_check() {
-  local side id url host path owner login seen line max wake n shown rest
+  local side id url host path login allow seen line max wake n shown rest
+  # Default off: with no flag, check is a silent no-op so an unconfigured home
+  # never gains the wake class, even over sidecars armed before the flag went.
+  fm_pr_comment_enabled || exit 0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 0
   for side in "$STATE"/*"$SIDE_SUFFIX"; do
     [ -e "$side" ] || continue
@@ -340,10 +391,13 @@ action_check() {
     url=$FM_CMP_URL
     host=$FM_CMP_HOST
     path=$FM_CMP_PATH
-    owner=${path%%/*}
+    # The allowlist is re-read per scan, so edits apply without re-arming; an
+    # allowlist that turned unreadable skips this task with the marker
+    # untouched, so the window is re-read next cycle.
+    allow=$(fm_pr_comment_allowlist) || continue
     seen=$(fm_pr_comment_seen_read "$id") || seen=0
     login=$(fm_pr_forgejo_login "$host") || continue
-    line=$(fm_pr_comment_classify "$owner" "$seen" \
+    line=$(fm_pr_comment_classify "$allow" "$seen" \
       "$(fm_pr_comment_fetch "$login" "$path" "$FM_CMP_NUMBER")") \
       || continue
     max=${line%% *}
@@ -366,7 +420,7 @@ EOF
       if [ "$rest" -gt 0 ]; then
         shown="$shown and $rest more"
       fi
-      printf 'pr-comment: task %s has new captain comment id(s) %s on %s\n' "$id" "$shown" "$url"
+      printf 'pr-comment: task %s has new command comment id(s) %s on %s\n' "$id" "$shown" "$url"
     fi
     fm_pr_comment_seen_store "$id" "$max" || continue
   done
