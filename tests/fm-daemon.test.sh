@@ -811,13 +811,17 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     pane="$dir/pane.txt"
     action_log="$dir/actions.log"
     reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone)"
-    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=claude"
     case "$case_name" in
       working) status_line='working: building' ;;
       prior-terminal) status_line='done: already surfaced' ;;
       paused) status_line='paused: awaiting an external dependency' ;;
     esac
     printf '%s\n' "$status_line" > "$state/$task.status"
+    if [ "$case_name" = paused ]; then
+      "$ROOT/bin/fm-busy-event.sh" arm "$state" "$task" >/dev/null
+      "$ROOT/bin/fm-status-append.sh" "$state" "$task" "$status_line"
+    fi
     printf 'Working...\n' > "$pane"
     key=$(printf '%s' "$task" | tr ':/.' '___')
     echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
@@ -878,9 +882,11 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   state="$dir/state"; fakebin="$dir/fakebin"
   task=paused-wedge-w1; win="sess:fm-$task"; pane="$dir/pane.txt"
   key=$(printf '%s' "$task" | tr ':/.' '___')
-  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
-  printf 'working: dispatching the long audit\npaused: the audit engine is running to completion\n' \
-    > "$state/$task.status"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=claude"
+  printf 'working: dispatching the long audit\n' > "$state/$task.status"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$task" >/dev/null
+  "$ROOT/bin/fm-status-append.sh" "$state" "$task" \
+    'paused: the audit engine is running to completion'
   printf 'idle prompt $\n' > "$pane"
   case "$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")" in
     pause\|*) ;;
@@ -1278,7 +1284,7 @@ test_housekeeping_busy_declared_wait_matures_its_window() {
     state="$dir/state"; fakebin="$dir/fakebin"
     task="held-w12b-$case_name"; win="sess:fm-$task"; pane="$dir/pane.txt"
     case "$case_name" in
-      paused) printf 'paused: the audit engine is running to completion\n' > "$state/$task.status"
+      paused) printf 'working: starting the audit engine\n' > "$state/$task.status"
               digest="awaiting external" ;;
       captain-held) printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$state/$task.status"
               digest="awaiting the captain" ;;
@@ -1288,6 +1294,10 @@ test_housekeeping_busy_declared_wait_matures_its_window() {
     gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
     "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" busy --gen "$gen" \
       --source pi-ext --event agent-start
+    if [ "$case_name" = paused ]; then
+      "$ROOT/bin/fm-status-append.sh" "$state" "$task" \
+        'paused: the audit engine is running to completion'
+    fi
     key=$(printf '%s' "$task" | tr ':/.' '___')
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
       FM_STATE_OVERRIDE="$state" stale_window_is_busy "$win" "$state" \
@@ -1443,6 +1453,53 @@ test_housekeeping_stale_marker_transitions_to_pause() {
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "existing stale marker remained wedge-aged after pause"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a newly declared pause was escalated as a possible wedge"
   pass "housekeeping moves an existing stale marker to pause before wedge escalation"
+}
+
+test_unbound_busy_pause_preserves_daemon_wedge_detection() {
+  local dir state win key gen reason
+  dir=$(make_supercase stale-unbound-busy-pause)
+  state="$dir/state"; win="sess:fm-held-w14-busy"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$win" > "$state/held-w14-busy.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" held-w14-busy)
+  [ -n "$gen" ] || fail "could not arm the busy lifecycle"
+  printf 'paused: stale declaration from an older generation\n' > "$state/held-w14-busy.status"
+  key=$(printf '%s' "held-w14-busy" | tr ':/.' '___')
+  reason="stale: $win (idle 250s, possible wedge, escalation 3)"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "an unbound busy pause suppressed the daemon's wedge diagnostic"
+  [ ! -e "$state/.subsuper-paused-$key" ] \
+    || fail "an unbound busy pause entered long-cadence tracking"
+  : > "$state/.subsuper-escalations"
+  "$ROOT/bin/fm-status-append.sh" "$state" held-w14-busy \
+    'paused: current generation deliberately parked on an external wait'
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a current-generation busy pause was escalated as a wedge"
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "a current-generation busy pause missed long-cadence tracking"
+  : > "$state/.subsuper-escalations"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" held-w14-busy idle --gen "$gen" \
+    --source claude-hook --event stop
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a pause suppressed an already-issued wedge after its busy lifecycle advanced"
+  [ ! -e "$state/.subsuper-paused-$key" ] \
+    || fail "a pause stayed authoritative after its bound busy lifecycle advanced"
+  pass "only an unchanged current busy snapshot suppresses away-mode wedge detection"
+}
+
+test_unbound_pause_without_busy_record_preserves_daemon_wedge_detection() {
+  local dir state win reason
+  dir=$(make_supercase stale-unbound-native-busy-pause)
+  state="$dir/state"; win="sess:fm-held-w14-native"
+  printf 'window=%s\nkind=ship\nharness=muse\n' "$win" > "$state/held-w14-native.meta"
+  printf 'paused: declaration without a bound busy lifecycle\n' > "$state/held-w14-native.status"
+  reason="stale: $win (idle 250s, possible wedge, escalation 3)"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "an unbound pause without a busy record suppressed the daemon's wedge diagnostic"
+  pass "an enriched wedge requires a pause bound to an exact busy lifecycle snapshot"
 }
 
 # The quieting half for a captain hold. A finished task marked captain-held is idle by
@@ -3262,6 +3319,8 @@ test_housekeeping_declared_time_controls_pause_recheck
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
 test_housekeeping_stale_marker_transitions_to_pause
+test_unbound_pause_without_busy_record_preserves_daemon_wedge_detection
+test_unbound_busy_pause_preserves_daemon_wedge_detection
 test_housekeeping_captain_held_stale_marker_transitions_to_pause
 test_housekeeping_pause_marker_transitions_to_clear
 test_housekeeping_herdr_persistent_stale_resolves_meta

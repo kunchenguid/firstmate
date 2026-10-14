@@ -73,8 +73,11 @@ run_lifecycle() {
     printf 'resolved: [key=pick-one]  chose a\n'
     printf 'partial line without its newline'
   } >> "$HOME_DIR/state/$TASK.status"
+  # Startup includes a full fleet scan before the first signal pass. Keep the
+  # checkpoint bounded, but leave enough room for that public path on a loaded
+  # CI runner instead of racing it with a two-second wall-clock guess.
   out=$(in_home env FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 2>&1)
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 15 2>&1)
   case "$out" in *"checkpoint:"*|*"signal:"*) ;; *) fail "watcher checkpoint did not run: $out" ;; esac
   LEDGER_AFTER_POLL=$(cat "$HOME_DIR/state/fleet-ledger.jsonl" 2>/dev/null || true)
   printf ' finished\ndone: ready in branch\n' >> "$HOME_DIR/state/$TASK.status"
@@ -171,8 +174,11 @@ worker_status_command() {  # <state> <note> [<state-dir> [<config-dir>]]
     FM_CONFIG_OVERRIDE="${4:-$HOME_DIR/config}" \
     "$ROOT/bin/fm-brief.sh" "$TASK" sample --mode no-mistakes >/dev/null) \
     || fail "brief scaffold failed"
-  # shellcheck disable=SC2016 # Match literal backticks in the generated brief.
-  cmd=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$HOME_DIR/data/$TASK/brief.md" | head -1)
+  # The backtick-delimited command is the generated worker interface. Execute
+  # it below and assert its observable status and ledger effects.
+  # shellcheck disable=SC2016 # Match literal scaffold placeholders and backticks.
+  cmd=$(sed -n '/{one short line}/s/^[[:space:]]*`\([^`]*\)`.*/\1/p' \
+    "$HOME_DIR/data/$TASK/brief.md" | head -1)
   [ -n "$cmd" ] || fail "the brief carries no status command"
   cmd=${cmd//\{state\}/$1}
   cmd=${cmd//<epoch>/1790000000}

@@ -756,8 +756,8 @@ The Herdr adapter subscribes before reconciling current levels, buffers edges du
 The watcher maps the pane back to the task and skips these:
 
 - Secondmate endpoints.
-- Declared `paused:` waits, because the worker's declared wait already accounts for its quiet.
-  It is left to the watcher's own bounded pause cadence.
+- Declared `paused:` waits, because the worker's declaration already accounts for the immediate transition.
+  Polling still applies the watcher's ordinary rule: an idle pause takes the bounded pause cadence, while a busy pause does so only when bound to the exact current validated busy generation and sequence; an unbound or stale busy pause retains wedge detection.
 - Verified `captain-held` transfers.
   A captain-held transfer remains silent without rechecks while the away-posture record exists.
 
