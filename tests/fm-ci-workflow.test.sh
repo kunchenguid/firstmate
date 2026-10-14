@@ -29,11 +29,13 @@ command -v ruby >/dev/null 2>&1 \
   || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
 
 # Evaluate the subset of GitHub's expression language that ci.yml uses -
-# string literals, context lookups, always(), !, ==, !=, &&, ||, and
-# parentheses - against a simulated context hash, following the documented
-# operator precedence, the case-insensitive string comparison, and the
-# `a || b` fallback that returns the first truthy operand rather than a
-# boolean. Each ruby -e below prepends this so every resolver shares one
+# string literals, context lookups, the status functions, !, ==, !=, &&,
+# ||, and parentheses - against a simulated context hash, following the
+# documented operator precedence, the case-insensitive string comparison, and
+# the `a || b` fallback that returns the first truthy operand rather than a
+# boolean. The status functions read the simulated outcome of the needed jobs
+# from the context key "needs.status" (success, failure, or cancelled), which
+# defaults to success. Each ruby -e below prepends this so every resolver shares one
 # evaluator.
 # shellcheck disable=SC2016  # the ${{ }} below is Ruby text, not a shell expansion
 EXPRESSION_RUBY='
@@ -43,12 +45,16 @@ class Expression
     new(source, context).parse
   end
 
-  # A job or step `if` is a bare expression or one wrapped in ${{ }}, and an
-  # absent condition means the job runs.
+  STATUS_FUNCTIONS = %w[always() success() failure() cancelled()].freeze
+
+  # A job or step `if` is a bare expression or one wrapped in ${{ }}, an
+  # absent condition means the job runs, and a condition that calls no status
+  # function gets the implicit success() check GitHub documents.
   def self.condition(raw, context)
-    return true if raw.nil?
     source = raw.to_s.strip
     source = Regexp.last_match(1) if source =~ /\A\$\{\{(.*)\}\}\z/m
+    source = "success()" if source.empty?
+    source = "success() && (#{source})" unless new(source, context).status_check?
     truthy?(evaluate(source, context))
   end
 
@@ -69,6 +75,10 @@ class Expression
       else raise "unsupported expression syntax at: #{scanner.rest}"
       end
     end
+  end
+
+  def status_check?
+    @tokens.any? { |kind, value| kind == :name && STATUS_FUNCTIONS.include?(value) }
   end
 
   def parse
@@ -131,7 +141,10 @@ class Expression
     kind, value = @tokens.shift
     raise "expected an operand, got #{kind.inspect}" unless kind == :string || kind == :name
     return value if kind == :string
-    return true if value == "always()"
+    if STATUS_FUNCTIONS.include?(value)
+      status = @context.fetch("needs.status", "success")
+      return value == "always()" || value == "#{status}()"
+    end
     raise "unresolvable context reference: #{value}" unless @context.key?(value)
     @context.fetch(value)
   end
@@ -364,19 +377,36 @@ TABLE
   pass "the fork skip variables change nothing unless set, and each skips only its own run or job"
 }
 
+# Print true or false: whether one job's job-level `if` resolves true under
+# one simulated event, fork variable setting, and outcome of its needed jobs.
+job_runs_under() {  # <job> <event> <FM_CI_SKIP_PUSH> <FM_CI_SKIP_MACOS> <needs status>
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e '
+context = {
+  "github.event_name" => ARGV[2],
+  "vars.FM_CI_SKIP_PUSH" => ARGV[3],
+  "vars.FM_CI_SKIP_MACOS" => ARGV[4],
+  "needs.status" => ARGV[5],
+}
+puts Expression.condition(YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1])["if"], context)
+' "$CI_WORKFLOW" "$@"
+}
+
 # The aggregate must keep running after a failed lane so its timing summary
-# still lands, so the push skip is combined with always() rather than
-# replacing it.
+# still lands, while the push skip still removes it from a skipped push run.
 test_timing_aggregate_still_runs_after_a_failed_lane() {
-  local condition
-  condition=$(ruby -ryaml -e '
-puts YAML.load_file(ARGV[0]).fetch("jobs").fetch("tests-timing-aggregate").fetch("if")
-' "$CI_WORKFLOW") || fail "the aggregate job has no job-level if"
-  case $condition in
-    *'always()'*) ;;
-    *) fail "the aggregate job must keep always() in its condition, got: $condition" ;;
-  esac
-  pass "the timing aggregate keeps always() beside the push skip"
+  local event skip_push expected actual
+  while read -r event skip_push expected; do
+    [ "$skip_push" != - ] || skip_push=
+    actual=$(job_runs_under tests-timing-aggregate "$event" "$skip_push" '' failure) \
+      || fail "could not resolve the aggregate condition for $event FM_CI_SKIP_PUSH=$skip_push"
+    [ "$actual" = "$expected" ] \
+      || fail "after a failed lane, the aggregate on $event with FM_CI_SKIP_PUSH=$skip_push must resolve $expected, got $actual"
+  done <<'TABLE'
+pull_request - true
+push         - true
+push         1 false
+TABLE
+  pass "the timing aggregate still runs after a failed lane unless the push run is skipped"
 }
 
 test_ci_matrices_match_executable_partitions() {
