@@ -2801,6 +2801,7 @@ test_latch_trips_after_two_engine_errors_then_probes_and_recovers() {
   wait_until 250 handled_at_least "$home" 1 || fail "latch: the successful probe was not handled: $(cat "$home/host.out")"
   [ "$(engine_calls "$home")" -eq 5 ] || fail "the cooldown's end did not let the recovering wake probe the engine"
   host_exited "$home" && fail "an away recovery must not reach main: $(cat "$home/host.out")"
+  wait_until 250 grep -q '	recovered	after a successful probe' "$home/state/.supervision-host.log" || true
   assert_re '	recovered	after a successful probe' "$home/state/.supervision-host.log" "the ledger must record the recovery"
   assert_grep 'cooldown=0' "$home/state/.supervision-host-health" "a successful probe must clear the latch"
   assert_grep 'errors=0' "$home/state/.supervision-host-health" "a successful probe must clear the error streak"
