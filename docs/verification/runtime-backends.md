@@ -1969,6 +1969,23 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+### Orca environment source
+
+The environment source was verified on 2026-10-14 on macOS 15.6.1 with tmux 3.6a, Bash 5.3.20, Bash 3.2.57, and zsh 5.9.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-spawn-orca-worktree.test.sh
+PATH="<dir with bash -> /bin/bash>:$PATH" /bin/bash bin/fm-test-run.sh tests/fm-spawn-orca-worktree.test.sh
+```
+
+Both runs passed with `FM_TEST_SUMMARY total=1 failed=0`.
+
+The real-tmux case uses a private socket and synthetic values.
+Without `tmux -u`, tmux's non-UTF-8 client output sanitized a multiline UTF-8 value; with it, the value survived unchanged under absent and C locales through sh, Bash, and zsh.
+`show-environment -t =<session>` reported the automatically populated `SSH_AUTH_SOCK`, which the snapshot excludes because only allowlisted names are read.
+A name present only in the server-global environment, or only as text inside another value, was refused.
+The fake-Orca cases execute the real staged launch file under synthetic personal credentials and cover refusal before allocation, file privacy and deletion, deletion-failure refusal that keeps the interactive pane with and without errexit, reclaiming a launch file the pane never ran while the terminal stays open, reclaiming it when HUP, INT or TERM interrupts the spawn after the file is published but before the launch command is sent, during the consume wait, or between text delivery and Enter, a pane that wins the deadline unlink race, and the missing-source warning.
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.

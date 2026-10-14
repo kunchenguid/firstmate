@@ -328,8 +328,9 @@
 #   blank lines and lines beginning with # are ignored. Invalid input refuses
 #   before launch, as do path inspection errors such as inaccessible config
 #   directories. An empty file retains only the operational floor below.
-#   Names are read once per spawn; values are expanded in the destination pane,
-#   not copied from the invoking process or written into the launch text.
+#   Names are read once per spawn; unless the Orca source below applies, values
+#   are expanded in the destination pane, not copied from the invoking process
+#   or written into the launch text.
 #   Unset names stay unset and empty values stay empty.
 #   The fixed operational floor is HOME PATH USER LOGNAME SHELL TERM COLORTERM
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
@@ -348,6 +349,36 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+#   On backend=orca the destination is an Orca terminal whose environment comes
+#   from the Orca app and shell startup, not this home, so a nonempty allowlist
+#   without the source below prints a stderr warning and launches unchanged.
+# Orca environment source (config/launch-env-tmux-session):
+#   Optional local file containing one exact tmux session name (letters, digits,
+#   underscores or hyphens). Only fresh Orca spawns use it; other backends are
+#   unchanged. It requires config/launch-env-allowlist and refuses without one,
+#   so tmux's automatic update-environment names (SSH_AUTH_SOCK) never ride
+#   along. Before allocation, each allowlisted name is read from that session's
+#   local environment (tmux -u show-environment -t =<session> <name>), never
+#   tmux's server-global or the invoking process's environment; -u keeps values
+#   intact under absent or C locales. A missing name, unreadable session, or
+#   malformed selector refuses before the Orca worktree or terminal exists,
+#   while an explicit -NAME record deliberately leaves that name unset. Launch
+#   keeps env -i and the operational floor, replaces destination expansion of
+#   allowlisted names with the snapshotted values, and sets
+#   GIT_CONFIG_NOSYSTEM=1 so a system credential helper cannot answer for the
+#   worker. Values are shell-quoted only in the owner-only staged launch file,
+#   never terminal input, and the pane deletes that file as sourcing starts,
+#   before the worker executes; a deletion failure refuses the worker launch and
+#   keeps the interactive shell, even with errexit set (a Bash 3.2 or dash
+#   errexit pane still exits if spawn reclaims the file in the instant between
+#   the pane's existence check and its source). Spawn waits up to 30
+#   seconds for that deletion; if the pane never ran the command or could not
+#   delete the file, or HUP, INT or TERM interrupts spawn first, spawn removes
+#   it unless the pane already did, refuses the worker launch, and leaves the
+#   Orca terminal open.
+#   The selector is not inherited into secondmate homes. This is not a
+#   filesystem sandbox; project and harness sandbox
+#   settings still own access to personal credential files.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -1339,6 +1370,7 @@ CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
+SPAWN_STAGED_LAUNCH_FILE=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1365,6 +1397,19 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+# Non-forced unlink arbitration for a delivered Orca source-mode launch file:
+# the pane unlinks it before launching the worker and refuses when that unlink
+# fails, so exactly one side's unlink succeeds. Returns 0 when this spawn removed
+# it (the worker is refused), 1 when the pane already had, and 2 when the file
+# could not be removed.
+spawn_orca_reclaim_launch_file() {
+  rm -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null && return 0
+  if [ -e "$SPAWN_STAGED_LAUNCH_FILE" ] || [ -L "$SPAWN_STAGED_LAUNCH_FILE" ]; then
+    return 2
+  fi
+  return 1
 }
 
 spawn_abort_cleanup() {
@@ -1495,6 +1540,21 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  if [ "$status" -ne 0 ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" = 1 ] && [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; then
+    if [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
+      rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
+    else
+      # The open terminal may still source the delivered file, and no other
+      # owner is left to remove it once this spawn exits, so arbitrate exactly
+      # as the consume deadline does.
+      local reclaim_status=0
+      spawn_orca_reclaim_launch_file || reclaim_status=$?
+      case "$reclaim_status" in
+        0) kimi_spawn_fail "spawn ended before Orca terminal $T ran the launch command; removed the launch file and refused the worker launch" || true ;;
+        2) echo "warning: could not remove Orca launch file $SPAWN_STAGED_LAUNCH_FILE; remove it by hand" >&2 ;;
+      esac
+    fi
+  fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -1744,6 +1804,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
 fi
+ORCA_LAUNCH_ENV_ENABLED=0
+ORCA_LAUNCH_ENV_ARGS=
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
     echo "error: could not create parent state directory" >&2
@@ -1828,6 +1890,28 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
+    ORCA_LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-tmux-session") || exit 1
+    if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+      if [ "$LAUNCH_ENV_ENABLED" != 1 ]; then
+        echo "error: config/launch-env-tmux-session requires config/launch-env-allowlist; refusing Orca launch" >&2
+        exit 1
+      fi
+      if [ ! -f "$CONFIG/launch-env-tmux-session" ] || [ ! -r "$CONFIG/launch-env-tmux-session" ]; then
+        echo "error: config/launch-env-tmux-session must be a readable regular file" >&2
+        exit 1
+      fi
+      ORCA_LAUNCH_ENV_SESSION=$(cat "$CONFIG/launch-env-tmux-session") || exit 1
+      case "$ORCA_LAUNCH_ENV_SESSION" in
+        ''|*[!A-Za-z0-9_-]*)
+          echo "error: config/launch-env-tmux-session must contain one session name (letters, digits, underscores or hyphens)" >&2
+          exit 1
+          ;;
+      esac
+      ORCA_LAUNCH_ENV_ARGS=$(fm_backend_orca_launch_env_args \
+        "$ORCA_LAUNCH_ENV_SESSION" "$LAUNCH_ENV_NAMES") || exit 1
+    elif [ -n "$LAUNCH_ENV_NAMES" ]; then
+      echo "warning: backend=orca resolves config/launch-env-allowlist names from the Orca terminal's own environment, not this home's; set config/launch-env-tmux-session to take them from a scoped tmux session" >&2
+    fi
   fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
@@ -5705,6 +5789,10 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
+  # A configured Orca source replaces destination expansion of allowlisted
+  # names, so a name the source leaves unset cannot revive a personal pane value.
+  LAUNCH_ENV_FORWARD_NAMES=$LAUNCH_ENV_NAMES
+  [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || LAUNCH_ENV_FORWARD_NAMES=
   # COMPACT_ADVISER_DISABLE is the intentional declarative floor-membership
   # entry; the explicit COMPACT_ADVISER_DISABLE=1 assignment below is the
   # authoritative setter.
@@ -5713,13 +5801,21 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
     FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
-    $LAUNCH_ENV_NAMES; do
+    $LAUNCH_ENV_FORWARD_NAMES; do
+    if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+      case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
+        *$'\n'"$env_name"$'\n'*) continue ;;
+      esac
+    fi
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
     # shellcheck disable=SC2016
     printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
   done
+  if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $ORCA_LAUNCH_ENV_ARGS GIT_CONFIG_NOSYSTEM=1"
+  fi
   # COMPACT_ADVISER_DISABLE is retained by the floor loop above, which forwards
   # whatever the pane export set, and then pinned here to the one value Firstmate
   # launches on. The literal assignment comes last deliberately: `env` applies
@@ -5746,6 +5842,11 @@ if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
 fi
 LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
 LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+  # The sourcing shell already holds the open file; unlink the credentials
+  # before launching the worker, including on a later command failure.
+  LAUNCH="command rm -- $(shell_quote "$LAUNCH_FILE") || { echo 'error: cannot remove private launch file; refusing worker launch' >&2; return 1 2>/dev/null || exit 1; }; $LAUNCH"
+fi
 if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
   echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
   exit 1
@@ -5756,15 +5857,67 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
   exit 1
 fi
+SPAWN_STAGED_LAUNCH_FILE=$LAUNCH_FILE
+if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+  # Bash runs the EXIT trap for an untrapped fatal signal with status 0, which
+  # abort cleanup reads as success, so exit with the signal's status instead
+  # until the pane has consumed the published launch file.
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+fi
 sleep 0.3
+spawn_orca_launch_send_fail() {
+  rm -f -- "$LAUNCH_FILE" 2>/dev/null || true
+  kimi_spawn_fail "launch command could not be delivered to Orca terminal $T"
+  rovo_endpoint_cleanup
+  exit 1
+}
+# Orca source mode: the pane unlinks the credential-bearing file as it starts
+# sourcing it. A pane that accepted the text but never ran it, or ran it and
+# could not unlink it, would otherwise leave the file until teardown, so wait a
+# bounded time and reclaim it. The worker never started, but the interactive
+# pane stays open.
+spawn_orca_wait_launch_consumed() {
+  local i=0 max=${FM_ORCA_LAUNCH_CONSUME_POLLS:-150} reclaim_status=0
+  while [ -e "$LAUNCH_FILE" ]; do
+    i=$((i + 1))
+    if [ "$i" -gt "$max" ]; then
+      spawn_orca_reclaim_launch_file || reclaim_status=$?
+      [ "$reclaim_status" != 1 ] || return 0
+      kimi_spawn_fail "Orca terminal $T did not run the launch command or could not remove the launch file; refused the worker launch"
+      exit 1
+    fi
+    sleep 0.2
+  done
+}
 SPAWN_LAUNCH_SENT=1
-spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
+# errexit is on here: a failed send still exits, and Orca source mode first
+# removes the credential-bearing file the pane never received.
+LAUNCH_SOURCE_TEXT=". $(shell_quote "$LAUNCH_FILE")"
+if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+  # A refused source-mode launch fails the source command, and some shells exit
+  # under errexit on sourcing a file spawn already reclaimed even inside ||, so
+  # keep an errexit pane shell open in both cases.
+  LAUNCH_SOURCE_TEXT="if [ -e $(shell_quote "$LAUNCH_FILE") ]; then $LAUNCH_SOURCE_TEXT || true; else echo 'error: private launch file was already removed; refusing worker launch' >&2; fi"
+fi
+if ! spawn_send_literal "$T" "$LAUNCH_SOURCE_TEXT"; then
+  [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
+  exit 1
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+if ! spawn_send_key "$T" Enter; then
+  [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
+  exit 1
+fi
+if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+  spawn_orca_wait_launch_consumed
+  trap - HUP INT TERM
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
