@@ -217,6 +217,9 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
+    if [ "$mode" != "local-only" ]; then
+      assert_grep 'in place of `<HEAD>`' "$brief" "$id: brief must render the literal commit placeholder"
+    fi
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }

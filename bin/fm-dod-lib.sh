@@ -491,7 +491,7 @@ Delivery contract: mode=direct-PR$contract_forge$contract_consent
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-Before publication, record the current commit in place of `<HEAD>` and append \`publishing [key=publication-$id] [at=<epoch>]: branch=$branch commit=<HEAD> awaiting ready PR URL\` to the status file.
+Before publication, record the current commit in place of \`<HEAD>\` and append \`publishing [key=publication-$id] [at=<epoch>]: branch=$branch commit=<HEAD> awaiting ready PR URL\` to the status file.
 Push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
 If PR creation fails, append \`blocked [key=publication-$id] [at=<epoch>]: PR publication failed; preserve branch=$branch commit=<HEAD> and retry\` and do not report done.
 If a publication command's result is ambiguous, inspect the forge by branch and commit and reuse any existing PR instead of creating a duplicate.
@@ -531,7 +531,7 @@ EOF
       cat <<EOF
 
 After /no-mistakes reports a passing result, the validated commit remains in publication until a PR URL exists.
-If the result has no PR URL, record the current commit in place of `<HEAD>`, append \`publishing [key=publication-$id] [at=<epoch>]: branch=$branch commit=<HEAD> awaiting PR publication\`, and retry publication from that same branch and commit; do not append done or discard the copy.
+If the result has no PR URL, record the current commit in place of \`<HEAD>\`, append \`publishing [key=publication-$id] [at=<epoch>]: branch=$branch commit=<HEAD> awaiting PR publication\`, and retry publication from that same branch and commit; do not append done or discard the copy.
 If publication fails, append \`blocked [key=publication-$id] [at=<epoch>]: PR publication failed; preserve branch=$branch commit=<HEAD> and retry\`.
 Only after /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
