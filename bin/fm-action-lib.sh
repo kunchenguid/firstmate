@@ -304,6 +304,7 @@ fm_action_verify_receipt() {
 
 fm_action_retire() {
   local state=$1 task=$2 target=${3:-} queue_state=$1 lock status=0
+  [ -d "$state" ] || return 0
   case "$state" in */parent-route) queue_state=${state%/parent-route} ;; esac
   lock="$queue_state/.wake-queue.lock"
   fm_lock_acquire_wait "$lock" || return 1
