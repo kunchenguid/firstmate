@@ -105,10 +105,13 @@
 #                                   as a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  seconds a declared wait stays declared,
 #                                   idle or busy, before it re-surfaces as a
-#                                   recheck (default 14400, four hours); an
-#                                   `until` time cannot extend this bound, and a
+#                                   recheck (default 14400, four hours); a
 #                                   captain-held transfer is never rechecked
 #                                   while an away record exists
+#          FM_PAUSE_UNTIL_MAX_SECS  ceiling on how far a verified future
+#                                   `until` time extends that recheck past the
+#                                   cadence above (default 86400, one day;
+#                                   clamped up to FM_PAUSE_RESURFACE_SECS)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -1188,7 +1191,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
 #     the block below and escalate what it finds; that block owns its file set.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until until_max bounded_until pause_reason
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1267,6 +1270,10 @@ housekeeping() {  # <state>
   # authority, and the loop head above already drops the marker the moment that line
   # stops declaring the wait.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  # A verified future `until` extends its own recheck up to this ceiling rather
+  # than being capped at the flat cadence (fm-classify-lib.sh owns why).
+  until_max=${FM_PAUSE_UNTIL_MAX_SECS:-$FM_PAUSE_UNTIL_MAX_SECS_DEFAULT}
+  [ "$until_max" -ge "$pause_secs" ] 2>/dev/null || until_max=$pause_secs
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-paused-}"
@@ -1290,7 +1297,7 @@ housekeeping() {  # <state>
       continue
     fi
     if until=$(status_paused_until "$last"); then
-      if [ "$now" -lt "$until" ] && [ "$age" -lt "$pause_secs" ]; then
+      if [ "$now" -lt "$until" ] && [ "$age" -lt "$until_max" ]; then
         continue
       elif [ "$now" -lt "$until" ]; then
         bounded_until=1
@@ -1317,7 +1324,7 @@ housekeeping() {  # <state>
           fi
         elif [ -n "$last" ] && status_is_paused "$last"; then
           if [ "$bounded_until" -eq 1 ]; then
-            pause_reason="paused ${age}s (awaiting external, the declared time is beyond the recheck cadence; confirm the wait still holds): $win"
+            pause_reason="paused ${age}s (awaiting external, the declared time is beyond the recheck ceiling; confirm the wait still holds): $win"
           else
             pause_reason="paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
           fi
