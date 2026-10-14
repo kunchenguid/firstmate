@@ -2728,8 +2728,8 @@ test_idle_custom_before_agent_start_never_reads_prompt() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, sentToMain, mainUserMessages, defaultSessionCtx, home, realRoot }; })()`);
-const { fire, sentToMain, mainUserMessages, defaultSessionCtx, home, realRoot } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, sentToMain, mainUserMessages, defaultSessionCtx, home }; })()`);
+const { dispatch, fire, sentToMain, mainUserMessages, defaultSessionCtx, home } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 
 writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
@@ -2757,8 +2757,26 @@ await fire("before_agent_start", { messageType: "user", prompt: "captain asks: r
 await fire("agent_start", {}, defaultSessionCtx);
 await fire("agent_end", {}, defaultSessionCtx);
 await fire("agent_settled", {});
-if (mainUserMessages.length !== 0) {
-  throw new Error(`a user-run before_agent_start misrouted to main: ${JSON.stringify(mainUserMessages)}`);
+let mirroredDialog;
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  mirroredDialog = session.ops
+    .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+    .map((op) => op.message.content);
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const result = await report.execute(
+    "idle-custom-mirror",
+    { task: "branch-driver", verdict: "routine", summary: "mirror checked" },
+    undefined,
+    undefined,
+    {},
+  );
+  if (result.isError) throw new Error(`branch report failed: ${JSON.stringify(result)}`);
+};
+const offer = dispatch("signal: check prompt mirroring");
+if (!offer.accepted) throw new Error("branch refused the prompt-mirroring wake");
+await offer.settlement;
+if (mirroredDialog?.length !== 1 || mirroredDialog[0] !== "[captain] captain asks: run the tests") {
+  throw new Error(`expected only the ordinary user prompt in the branch mirror: ${JSON.stringify(mirroredDialog)}`);
 }
 process.exit(0);
 EOF
