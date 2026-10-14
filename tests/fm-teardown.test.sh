@@ -720,6 +720,115 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+# The real shape measured on a live home: a Herdr record carrying every
+# endpoint id and no worktree= line at all (or an empty one).
+write_unidentified_meta() {  # <case-dir> <id> [empty]
+  local case_dir=$1 id=$2 empty=${3:-}
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=lab:w1:p2" "endpoint_task_id=$id" "project=$case_dir/project" \
+    "harness=claude" "kind=ship" "backend=herdr" "herdr_session=lab" \
+    "herdr_workspace_id=w1" "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" \
+    "mode=no-mistakes" "spawn_gen=teardown-test-$id"
+  [ -z "$empty" ] || printf 'worktree=\n' >> "$case_dir/state/$id.meta"
+}
+
+# A herdr stub whose one pane is present until it is closed, then structurally
+# not found, and which logs every call.
+add_closing_herdr() {  # <case-dir>
+  cat > "$1/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$1/herdr.log"
+case " \$* " in
+  *" session list "*) echo '{"sessions":[{"name":"lab","running":true,"socket_path":"$1/herdr.sock"}]}' ;;
+  *" pane close "*) : > "$1/herdr.closed"; echo '{"result":{}}' ;;
+  *" pane get "*)
+    if [ -e "$1/herdr.closed" ]; then
+      echo '{"error":{"code":"pane_not_found"}}'
+    else
+      echo '{"result":{"pane":{"pane_id":"w1:p2"}}}'
+    fi ;;
+  *) echo '{"result":{}}' ;;
+esac
+exit 0
+SH
+  chmod +x "$1/fakebin/herdr"
+}
+
+run_teardown_id() {  # <case-dir> <id> [args...]
+  local case_dir=$1 id=$2; shift 2
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" "$id" "$@"
+}
+
+test_unidentified_worktree_retirement() {
+  local case_dir shape rc before after row_state
+  for shape in missing empty; do
+    case_dir=$(make_case "unidentified-$shape")
+    mkdir -p "$case_dir/project" "$case_dir/wt-bystander"
+    : > "$case_dir/wt-bystander/sentinel"
+    seed_backlog_in_flight "$case_dir"
+    sed -i 's/task-x1/tx-unid/' "$case_dir/data/backlog.md"
+    add_closing_herdr "$case_dir"
+    write_unidentified_meta "$case_dir" tx-unid "$([ "$shape" = empty ] && echo empty)"
+    write_meta "$case_dir" no-mistakes ship
+    before=$(find "$case_dir/state" -maxdepth 1 -name "*.meta" | wc -l)
+
+    # The ordinary path still refuses, with and without --force, and touches nothing.
+    for flag in "" --force; do
+      set +e
+      run_teardown_id "$case_dir" tx-unid $flag > "$case_dir/o.out" 2> "$case_dir/o.err"
+      rc=$?
+      set -e
+      [ "$rc" -ne 0 ] || fail "unidentified-$shape: ordinary teardown ${flag:-without force} unexpectedly succeeded"
+      assert_grep "ambiguous worktree identity" "$case_dir/o.err" "unidentified-$shape: refusal wording changed"
+      assert_present "$case_dir/state/tx-unid.meta" "unidentified-$shape: refused teardown removed the record"
+    done
+    # --force can never be combined with the retirement path.
+    set +e
+    run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree --force > /dev/null 2> "$case_dir/f.err"
+    rc=$?
+    set -e
+    expect_code 2 "$rc" "unidentified-$shape: --force with the retirement path must be an invalid request"
+    assert_present "$case_dir/state/tx-unid.meta" "unidentified-$shape: invalid request removed the record"
+
+    run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree > "$case_dir/r.out" 2> "$case_dir/r.err" \
+      || fail "unidentified-$shape: retirement failed: $(cat "$case_dir/r.err")"
+    assert_grep "RETIRED UNVERIFIED tx-unid" "$case_dir/r.out" "unidentified-$shape: success line does not say it is unverified"
+    assert_grep "landed work was NOT checked" "$case_dir/r.out" "unidentified-$shape: success line hides that nothing was checked"
+    assert_no_grep "teardown tx-unid complete" "$case_dir/r.out" "unidentified-$shape: reported an ordinary clean close"
+    assert_absent "$case_dir/state/tx-unid.meta" "unidentified-$shape: record not released"
+    assert_present "$case_dir/state/task-x1.meta" "unidentified-$shape: a valid record was disturbed"
+    after=$(find "$case_dir/state" -maxdepth 1 -name "*.meta" | wc -l)
+    [ "$after" = "$((before - 1))" ] || fail "unidentified-$shape: live record count $before -> $after, expected one fewer"
+    assert_present "$case_dir/wt-bystander/sentinel" "unidentified-$shape: a worktree was touched"
+    assert_grep "pane close" "$case_dir/herdr.log" "unidentified-$shape: endpoint was not closed"
+    assert_grep "landed work was NOT checked" "$case_dir/data/tx-unid/retired-unverified.txt" \
+      "unidentified-$shape: durable record does not say landed work was not checked"
+    row_state=$(tasks-axi show tx-unid --file "$case_dir/data/backlog.md" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)
+    [ "$row_state" = "done" ] \
+      || fail "unidentified-$shape: backlog item not closed"
+    assert_grep "cleanup NOT verified" "$case_dir/data/backlog.md" "unidentified-$shape: backlog note does not record the unverified cleanup"
+    assert_absent "$case_dir/state/tx-unid.backlog-close" "unidentified-$shape: pending close left behind"
+  done
+  pass "teardown: a record with no worktree identity retires only through --retire-unidentified-worktree, loudly unverified, touching no worktree"
+}
+
+test_unidentified_retirement_leaves_valid_records_alone() {
+  local case_dir rc
+  case_dir=$(make_case unidentified-valid-record)
+  write_meta "$case_dir" no-mistakes ship
+  set +e
+  run_teardown "$case_dir" --retire-unidentified-worktree > "$case_dir/o.out" 2> "$case_dir/o.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a record naming a worktree was retired without verification"
+  assert_grep "names a worktree" "$case_dir/o.err" "refusal does not explain that a worktree is named"
+  assert_present "$case_dir/state/task-x1.meta" "the refused retirement removed a valid record"
+  pass "teardown: --retire-unidentified-worktree refuses a record that names a worktree"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -5118,6 +5227,8 @@ test_teardown_skips_pipeline_spend_when_disabled
 test_teardown_records_unavailable_spend_for_a_gone_worktree
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_concludes_on_passed_with_override_after_abort
+test_unidentified_worktree_retirement
+test_unidentified_retirement_leaves_valid_records_alone
 test_parked_own_run_concludes_on_passed_with_skips_after_abort
 test_parked_run_advanced_past_unfetched_head_is_still_aborted
 test_parked_run_with_mismatched_ledger_head_is_never_aborted

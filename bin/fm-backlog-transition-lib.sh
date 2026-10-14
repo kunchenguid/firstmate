@@ -72,6 +72,11 @@ FM_BACKLOG_ROW_HOLD_KIND=
 # retained_incomplete | answered | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
+# The one completion note a retirement without a worktree identity records
+# (bin/fm-teardown.sh --retire-unidentified-worktree). The pending-close record
+# stores it with %20 for spaces, exactly as it stores "local main", and replay
+# restores it, so an interrupted retirement still lands the same honest note.
+FM_BACKLOG_UNVERIFIED_NOTE="cleanup NOT verified - worktree identity unknown so landed work was not checked"
 
 # Bounded execution is fm-timeout-lib.sh's alone; source it rather than
 # re-deriving a deadline here. It is stateless, so the memoisation reason this
@@ -977,7 +982,10 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          [ "${args[1]}" = "local%20main" ] \
+            || [ "${args[1]}" = "${FM_BACKLOG_UNVERIFIED_NOTE// /%20}" ]
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1075,8 +1083,9 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     shift
   fi
   for arg in "$@"; do
-    if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
-      serialized_args+=("local%20main")
+    if [ "$previous_arg" = --note ] \
+       && { [ "$arg" = "local main" ] || [ "$arg" = "$FM_BACKLOG_UNVERIFIED_NOTE" ]; }; then
+      serialized_args+=("${arg// /%20}")
     else
       serialized_args+=("$arg")
     fi
@@ -1152,7 +1161,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
-    args[1]="local main"
+    args[1]=${args[1]//%20/ }
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
