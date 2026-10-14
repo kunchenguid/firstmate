@@ -1,6 +1,6 @@
 # OpenCode
 
-Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4.
+Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4 and OpenCode 2 plugin load re-verified on 2026-10-13 using 2.0.28.
 
 ## Operating facts
 
@@ -33,13 +33,17 @@ The live Herdr guard is `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 ../../../tests/fm-herdr-
 
 ## Primary integration
 
-The primary integration was verified on 2026-07-08 with OpenCode 1.17.6.
-`.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
-Throwing from `session.idle` does not block `opencode run`, so the primary adapter treats the event as passive and uses `client.session.promptAsync` to force one follow-up turn when `../../../bin/fm-turnend-guard.sh` returns 2.
+The plugins use OpenCode 2's plugin API: each default-exports a definition carrying an `id` and `setup(ctx)`, subscribes to server events through `ctx.event.subscribe()`, delivers prompts through `ctx.session.prompt`, and registers tool interception through `ctx.tool.hook("execute.before", ...)`.
+OpenCode 2 carries each event's fields under `data`, so a session id is `event.data.sessionID`.
+Only plugin load was verified live against OpenCode 2.0.28; event delivery and prompt delivery are covered by the Node host suites, and [the supervision verification record](../../../../../docs/verification/supervision.md#opencode-2-plugin-contract-2026-10-13) owns that evidence.
+The primary integration was verified on 2026-07-08 with OpenCode 1.17.6 and the plugin entrypoint was re-verified on 2.0.28.
+`.opencode/plugins/fm-primary-turnend-guard.js` subscribes to `session.idle`.
+Throwing from `session.idle` does not block `opencode run`, so the primary adapter treats the event as passive and uses `ctx.session.prompt` to force one follow-up turn when `../../../bin/fm-turnend-guard.sh` returns 2.
 The follow-up was verified in the interactive TUI.
 In a home with `config/supervision-host` and no `config/supervision-host-off` the watch-arm plugin spawns the supervision host instead of `../../../bin/fm-watch-arm.sh`, with Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md) owns the host.
 `opencode run` can exit before displaying a queued follow-up, so the adapter steps aside in headless mode.
 On native Windows, the operational-input adapter runs its Bash helper through `bash`; macOS and Linux invoke it directly.
 
-The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `client.session.promptAsync`, and coordinates with the guard before a blind-turn follow-up.
-The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from `tool.execute.before`.
+The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `ctx.session.prompt`, and coordinates with the guard before a blind-turn follow-up.
+The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from `ctx.tool.hook("execute.before", ...)`.
+The busy-state plugin `fm-spawn` writes into an OpenCode worktree uses the same V2 shape and reads its status from `session.status` events.

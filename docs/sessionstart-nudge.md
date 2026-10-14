@@ -309,9 +309,9 @@ Whenever the digest is incomplete, this approved containment keeps the prefix an
 OpenCode is a nudge-tier harness.
 The `.opencode/plugins/fm-primary-sessionstart-nudge.js` plugin does three things:
 
-- It listens for `session.created`.
+- It subscribes to `session.created`.
 - It runs once per session id.
-- It calls `client.session.promptAsync` only when the wrapper prints a nudge.
+- It calls `ctx.session.prompt` only when the wrapper prints a nudge.
 
 Interactive TUI delivery is supported.
 Headless `opencode run` is intentionally fail-open, because the process can exit before the queued turn.

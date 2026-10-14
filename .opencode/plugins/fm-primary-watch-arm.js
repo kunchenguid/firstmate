@@ -266,12 +266,7 @@ function observeArmOutput(hostMode, stdout, stderr, settleReadiness) {
 
 async function sendPrompt(paths, client, sessionID, text) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
-  await client.session.promptAsync({
-    path: { id: sessionID },
-    body: {
-      parts: [{ type: "text", text: encoded }],
-    },
-  });
+  await client.session.prompt({ sessionID, text: encoded });
 }
 
 function confirmHandlingDelivery(paths, recovery) {
@@ -541,6 +536,36 @@ function armAttempt(status, armChild, includeArmChild) {
   return includeArmChild ? { status, armChild } : status;
 }
 
+async function eventDirectory(ctx, event) {
+  const directory = event.location?.directory ?? event.data?.location?.directory;
+  if (directory) return directory;
+  try {
+    const session = await ctx.session.get({ sessionID: event.data?.sessionID });
+    return session?.location?.directory ?? "";
+  } catch {
+    return "";
+  }
+}
+
+async function handleEvents(ctx, signal, handle) {
+  for (;;) {
+    try {
+      for await (const event of ctx.event.subscribe({ signal })) {
+        try {
+          await handle(event);
+        } catch (error) {
+          console.error(`fm-primary-watch-arm: event handling failed: ${error?.stack ?? error}`);
+        }
+      }
+      return;
+    } catch (error) {
+      if (signal.aborted) return;
+      console.error(`fm-primary-watch-arm: event stream failed, re-subscribing: ${error?.stack ?? error}`);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 1000));
+    }
+  }
+}
+
 async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false) {
   let launchResult = null;
   if (!launchInFlight) {
@@ -561,19 +586,35 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
   return armAttempt(await waitForArmReady(armChild), armChild, includeArmChild);
 }
 
-export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
-  const paths = effectivePaths(root);
-  globalThis[COORDINATOR_KEY] = {
-    ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),
-  };
+// OpenCode 2 loads a local plugin only from a default export carrying an `id`
+// plus `setup(ctx)`; `setup` subscribes to the server event stream with
+// ctx.event.subscribe() and returns the cleanup that aborts it. V2 event
+// payloads carry their fields under `data`, so an idle session's id is
+// event.data.sessionID, and wake prompts ride ctx.session.prompt. Only plugin
+// load was verified live against OpenCode 2.0.28 (2026-10-13); event delivery
+// and the prompt call are covered by tests/opencode-plugin-host.mjs. The
+// context is also the server client, so the `client`-named parameter threaded
+// below still holds the prompt API. The server is shared across locations, so
+// an idle from another location is ignored and the coordinator the turn-end
+// guard consults is keyed by this location's root.
+export default {
+  id: "fm-primary-watch-arm",
+  async setup(ctx) {
+    const root = await resolveRoot(ctx.location.directory);
+    const paths = effectivePaths(root);
+    (globalThis[COORDINATOR_KEY] ??= {})[root] = {
+      ensureArmed: (sessionID) => ensureArm(paths, sessionID, ctx),
+    };
 
-  return {
-    event: async ({ event }) => {
+    const controller = new AbortController();
+    void handleEvents(ctx, controller.signal, async (event) => {
       if (event.type !== "session.idle") return;
-      const sessionID = event.properties?.sessionID;
+      const sessionID = event.data?.sessionID;
       if (!sessionID) return;
-      void ensureArm(paths, sessionID, client);
-    },
-  };
+      if ((await resolveRoot(await eventDirectory(ctx, event))) !== root) return;
+      void ensureArm(paths, sessionID, ctx);
+    });
+
+    return () => controller.abort();
+  },
 };

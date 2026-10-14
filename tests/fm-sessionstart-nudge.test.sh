@@ -172,36 +172,31 @@ test_opencode_plugin_delivers_exact_nudge_once() {
     "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
+    HOST="$ROOT/tests/opencode-plugin-host.mjs" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
+const { startPlugin } = await import(pathToFileURL(process.env.HOST).href);
 const prompts = [];
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
-    },
-  },
-};
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const hooks = await mod.FmPrimarySessionstartNudge({
-  client,
+const plugin = await startPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  session: { prompt: async (input) => { prompts.push(input.text); } },
 });
-const event = {
+await plugin.emit({
   type: "session.created",
-  properties: { sessionID: "session-nudge-test", info: { id: "session-nudge-test" } },
-};
-await hooks.event({ event });
-await hooks.event({ event });
+  data: { sessionID: "session-nudge-foreign", location: { directory: "/fm-test/another-location" } },
+});
+if (prompts.length !== 0) throw new Error(`another location's session was nudged: ${prompts[0]}`);
+const event = { type: "session.created", data: { sessionID: "session-nudge-test" } };
+await plugin.emit(event);
+await plugin.emit(event);
 if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.length}`);
 if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
 EOF
   ) || status=$?
   expect_code 0 "$status" "OpenCode exact nudge delivery"
   [ -z "$out" ] || fail "OpenCode exact nudge delivery printed output: $out"
-  pass "OpenCode session.created delivers the exact wrapper nudge once per session"
+  pass "OpenCode session.created delivers the exact wrapper nudge once per session, only in its own location"
 }
 
 # --- run tier ----------------------------------------------------------------

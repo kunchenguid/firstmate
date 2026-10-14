@@ -1001,41 +1001,44 @@ EOF
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
 }
 
-test_opencode_plugin_anchors_guard_to_worktree() {
-  local plugin parent worktree_dir wrong_dir out status
+test_opencode_plugin_anchors_guard_to_its_location() {
+  local plugin location_dir wrong_dir out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
   [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
-  parent="$TMP_ROOT/opencode-plugin-parent"
-  git init -q "$parent"
-  worktree_dir="$parent/nested/opencode-plugin-worktree"
+  location_dir="$TMP_ROOT/opencode-plugin-location"
   wrong_dir="$TMP_ROOT/opencode-plugin-cwd/subdir"
-  mkdir -p "$worktree_dir/bin" "$wrong_dir"
-  cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
+  mkdir -p "$location_dir/bin" "$wrong_dir"
+  git init -q "$location_dir"
+  cat > "$location_dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'guard-fired\n' >&2
 exit 2
 EOF
-  chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
-  # Runtime module-format warnings are host noise; this assertion owns plugin output only.
-  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+  chmod +x "$location_dir/bin/fm-turnend-guard.sh"
+  # OpenCode 2 gives the plugin its own location directory and no separate
+  # worktree, so the plugin must resolve the guard from ctx.location.directory
+  # even when the process cwd is somewhere else. Runtime module-format warnings
+  # are host noise; this assertion owns plugin output only.
+  out=$(cd "$wrong_dir" && NODE_NO_WARNINGS=1 PLUGIN="$plugin" HOST="$ROOT/tests/opencode-plugin-host.mjs" LOCATION="$location_dir" node 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const { startPlugin } = await import(pathToFileURL(process.env.HOST).href);
 let promptBody = "";
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
-    },
-  },
-};
-const hooks = await mod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.DIRECTORY,
-  worktree: process.env.WORKTREE,
+const plugin = await startPlugin(process.env.PLUGIN, {
+  directory: process.env.LOCATION,
+  session: { prompt: async (input) => { promptBody = input.text; } },
 });
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+// The OpenCode 2 server is shared, so another location's idle reaches this
+// plugin too and must not draw a follow-up, and another root's watch-arm
+// coordinator must not answer for this location.
+globalThis.__firstmateOpenCodeWatchArm = { "/fm-test/another-location": { ensureArmed: async () => "armed" } };
+await plugin.emit({ type: "session.idle", location: { directory: "/fm-test/another-location" }, data: { sessionID: "session-foreign" } });
+if (promptBody !== "") {
+  console.error(`another location's idle drew a follow-up: ${promptBody}`);
+  process.exit(1);
+}
+await plugin.emit({ type: "session.idle", data: { sessionID: "session-test" } });
 if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
   console.error(`untyped operational prompt: ${promptBody}`);
   process.exit(1);
@@ -1055,9 +1058,9 @@ if (promptBody.includes("Resume supervision according to the session-start opera
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode plugin must run the guard from worktree even when directory is elsewhere"
-  [ -z "$out" ] || fail "OpenCode plugin worktree-root test printed output: $out"
-  pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
+  expect_code 0 "$status" "OpenCode plugin must run the guard from its own location even when the process cwd is elsewhere"
+  [ -z "$out" ] || fail "OpenCode plugin location-root test printed output: $out"
+  pass ".opencode primary plugin: guard path is anchored to the plugin location, not the process cwd"
 }
 
 test_pi_extension_injects_once_per_logical_agent_run() {
@@ -2243,7 +2246,7 @@ test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
-test_opencode_plugin_anchors_guard_to_worktree
+test_opencode_plugin_anchors_guard_to_its_location
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy

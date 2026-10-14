@@ -1614,7 +1614,7 @@ test_opencode_arm_plugin_decides_with_the_shared_predicate() {
   local driver case_name dir state config out status
   driver="$TMP_ROOT/arm-decision-driver.mjs"
   cat > "$driver" <<'EOF'
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
@@ -1662,11 +1662,10 @@ if (existsSync(`${state}/.afk`)) {
   expected = verdict;
 }
 
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const { startPlugin } = await import(pathToFileURL(process.env.HOST).href);
+await startPlugin(process.env.PLUGIN, { directory: process.env.WORKTREE });
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
-const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+const status = await globalThis.__firstmateOpenCodeWatchArm[realpathSync(process.env.WORKTREE)].ensureArmed("session-test");
 if (expected === "no-arm") {
   if (status !== "not-needed") {
     console.error(`expected a not-needed decline, got ${status}`);
@@ -1704,7 +1703,7 @@ EOF
       x-mode) : > "$config/x-mode.env" ;;
     esac
     out=$(FM_ROOT_OVERRIDE="$dir/repo" WORKTREE="$dir/repo" FM_HOME="$dir/home" \
-      FM_ARM_LOG="$dir/arm.log" NODE_NO_WARNINGS=1 \
+      FM_ARM_LOG="$dir/arm.log" NODE_NO_WARNINGS=1 HOST="$ROOT/tests/opencode-plugin-host.mjs" \
       PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" node "$driver" 2>&1)
     status=$?
     expect_code 0 "$status" "OpenCode arm plugin must decide with the shared predicate ($case_name): $out"
