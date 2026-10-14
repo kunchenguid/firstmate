@@ -1623,7 +1623,6 @@ test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
 
-
 test_extraction_refusal_diagnostics_are_opt_in_fixed_and_content_free() {
   local predicate screen out err rc dir
   dir=$(fm_test_tmproot fm-composer-extract-refusal)

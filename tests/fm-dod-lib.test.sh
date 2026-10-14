@@ -382,7 +382,6 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
-
 # Exercise receipt publication, done acceptance and actual guarded local landing
 # against isolated repositories. No backend/harness or live fleet is consulted.
 test_completion_receipt_gates() {
@@ -509,8 +508,6 @@ EOF
     || fail "legacy absent receipt refused"
   pass "durable completion evidence and the optional merge gate bind candidate, mode and incarnation and gate local landing"
 }
-
-
 
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.

@@ -50,7 +50,7 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text and its recovery (submit it with `--key Enter`, or clear it with the harness clear key where `bin/fm-control-lib.sh` names one), and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty while naming the same clear recovery, matching the fail-safe contract every other consumer that can overwrite composer input follows.
-`exit` also refuses, naming the dialog as `blocked on a prompt`, when the screen shows a recognised dialog outside the separately verified exact stop confirmation described above, whether the dialog was open before the exit command was typed or the submitting Enter opened it; it sends no Escape and chooses no option in that refusal path, so closing the dialog is left to the operator.
+`exit` also refuses, naming the dialog as `blocked on a prompt`, when the screen shows a recognised dialog that a further Enter would answer, whether the dialog was open before the exit command was typed or the submitting Enter opened it; it sends no Escape and chooses no option, so closing the dialog is left to the operator.
 A stopped agent whose pane still shows the dialog text is not refused.
 [`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
 

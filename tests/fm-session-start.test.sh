@@ -794,6 +794,7 @@ EOF
     || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
+  assert_contains "$out" "fm-role: user (default)" "digest did not report the home's firstmate-repository role"
 
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \

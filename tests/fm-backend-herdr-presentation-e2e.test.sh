@@ -1381,8 +1381,8 @@ teardown_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" > "$TMP_ROOT/bravo-wave-teardown
 pass "real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift"
 
 # Exact-resume presentation-lock contention refuses by default. Hold the
-# shared session lock from an unrelated process until the refused resume has
-# run, and assert the default resume hard-refuses without the opt-in flag.
+# shared session lock from an unrelated process past the bounded-retry window
+# and assert the default resume hard-refuses without the opt-in flag.
 LOCK_REFUSE_ID=lock-refuse-resume-r1
 mkdir -p "$HOME_DIR/data/$LOCK_REFUSE_ID"
 write_ship_brief "$HOME_DIR" "$LOCK_REFUSE_ID" 'Resume lock-refuse fixture.'
@@ -1397,14 +1397,14 @@ PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for resume lock-refuse"
 
 LOCK_REFUSE_READY="$TMP_ROOT/lock-refuse-ready"
-LOCK_REFUSE_RELEASE="$TMP_ROOT/lock-refuse-release"
+LOCK_REFUSE_HOLD_SECONDS=15
 LOCK_REFUSE_PATH=$(session_presentation_lock_path) \
   || fail "could not resolve session lock for resume lock-refuse"
-ROOT="$ROOT" READY="$LOCK_REFUSE_READY" RELEASE="$LOCK_REFUSE_RELEASE" LOCK="$LOCK_REFUSE_PATH" bash -c '
+ROOT="$ROOT" READY="$LOCK_REFUSE_READY" HOLD="$LOCK_REFUSE_HOLD_SECONDS" LOCK="$LOCK_REFUSE_PATH" bash -c '
   . "$ROOT/bin/fm-wake-lib.sh"
   fm_lock_try_acquire "$LOCK" || exit 1
   : > "$READY"
-  while [ ! -e "$RELEASE" ]; do sleep 0.1; done
+  sleep "$HOLD"
   fm_lock_release "$LOCK"
 ' &
 LOCK_REFUSE_HOLDER_PID=$!
@@ -1418,14 +1418,15 @@ if spawn_task "$LOCK_REFUSE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" \
 else
   LOCK_REFUSE_STATUS=$?
 fi
-# The holder keeps the lock until this release, so the resume always runs
-# inside contention however long its bounded retry takes.
-: > "$LOCK_REFUSE_RELEASE"
-wait "$LOCK_REFUSE_HOLDER_PID" || fail "resume lock-refuse lock holder failed"
-LOCK_REFUSE_HOLDER_PID=
 if [ "$LOCK_REFUSE_STATUS" -eq 0 ]; then
+  kill "$LOCK_REFUSE_HOLDER_PID" 2>/dev/null || true
+  wait "$LOCK_REFUSE_HOLDER_PID" 2>/dev/null || true
   fail "default resumed identity succeeded under session lock contention instead of refusing: $(cat "$TMP_ROOT/lock-refuse-resume.out")"
 fi
+wait "$LOCK_REFUSE_HOLDER_PID" || fail "resume lock-refuse lock holder failed"
+LOCK_REFUSE_HOLDER_PID=
+[ "$LOCK_REFUSE_STATUS" -ne 0 ] \
+  || fail "default resumed identity returned success under contention"
 grep -F "refusing a concurrent resume" "$TMP_ROOT/lock-refuse-resume.err" >/dev/null 2>&1 \
   || fail "default resume under contention did not refuse with the concurrent-resume message: $(cat "$TMP_ROOT/lock-refuse-resume.err")"
 # Fixture metadata and husk must be unchanged after the refused resume.
