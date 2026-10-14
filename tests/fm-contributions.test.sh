@@ -434,10 +434,12 @@ test_unsupported_poll_is_silent_and_clears_legacy_errors() {
     wrap_forge "$home"
     rm -f "$home/state/delivery.meta" "$home/data/delivery/contributions.json"
     printf '# Backlog\n\n## Queued\n' > "$home/data/backlog.md"
-    for task in gitlab selfhosted; do
+    for task in gitlab selfhosted hyphenated wildcard; do
       case "$task" in
         gitlab) url=https://gitlab.com/o/r/-/merge_requests/2 ;;
         selfhosted) url=https://git.example.org/group/subgroup/r/-/merge_requests/3 ;;
+        hyphenated) url=https://github-com/o/r/-/merge_requests/4 ;;
+        wildcard) url=https://githubXcom/o/r/-/merge_requests/5 ;;
       esac
       printf -- '- [ ] %s - Filed %s (repo: sample) (kind: ship)\n' "$task" "$url" >> "$home/data/backlog.md"
       if [ "$mode" = legacy ]; then
@@ -450,6 +452,9 @@ test_unsupported_poll_is_silent_and_clears_legacy_errors() {
         jq '.records[].error=null' "$home/data/$task/contributions.json" > "$home/$task.expected.json"
       fi
     done
+    for url in https://github-com/o/r/pull/8 https://githubXcom/o/r/issues/9; do
+      printf -- '- [ ] lookalike - Filed %s (repo: sample) (kind: ship)\n' "$url" >> "$home/data/backlog.md"
+    done
     # Forgejo pulls are not accepted by the existing contribution ownership schema.
     printf -- '- [ ] forgejo - Filed https://codeberg.org/o/r/pulls/2 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
     # Saved URLs retain ownership after their backlog links disappear.
@@ -459,7 +464,7 @@ test_unsupported_poll_is_silent_and_clears_legacy_errors() {
     [ -z "$out" ] || fail "unsupported poll printed an unavailable signal ($mode): $out"
     [ ! -s "$home/forge/calls" ] || fail "unsupported poll contacted the forge ($mode)"
     [ ! -s "$home/state/.wake-queue" ] || fail "unsupported poll enqueued a wake ($mode)"
-    for task in gitlab selfhosted; do
+    for task in gitlab selfhosted hyphenated wildcard; do
       if [ "$mode" = legacy ]; then
         jq -e --slurpfile expected "$home/$task.expected.json" '. == $expected[0]' \
           "$home/data/$task/contributions.json" >/dev/null \
@@ -468,8 +473,8 @@ test_unsupported_poll_is_silent_and_clears_legacy_errors() {
         [ ! -e "$home/data/$task/contributions.json" ] || fail 'unsupported poll fabricated a record'
       fi
     done
-    bearings "$home" | jq -e '.contributions | .known == 2 and .checked == 0
-      and .unmeasured == 2 and .unreadable_records == 0
+    bearings "$home" | jq -e '.contributions | .known == 4 and .checked == 0
+      and .unmeasured == 4 and .unreadable_records == 0
       and .counts == {captain:0,fleet:0,maintainer:0,nobody:0}
       and .complete == false and .proven_clear == false' >/dev/null \
       || fail "unsupported poll corrupted unmeasured coverage ($mode)"

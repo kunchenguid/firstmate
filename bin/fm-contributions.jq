@@ -1,6 +1,6 @@
 # Projection for fm-contributions.sh; its header owns the record contract.
 def supported_url:
-  type == "string" and test("^https://github.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$");
+  type == "string" and test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$");
 def canonical_url:
   type == "string" and (supported_url
     or test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$"));
