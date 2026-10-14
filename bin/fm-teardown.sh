@@ -45,8 +45,10 @@
 # names no worktree (missing or empty worktree=), which the ordinary path
 # refuses and --force cannot relax, so such a record would hold its live-lane
 # slot forever. It closes the endpoint and removes the record like any cleanup,
-# but verifies nothing: it never reads, moves, or deletes any worktree, never
-# guesses one from the project, window, or pool, and says so everywhere - the
+# but verifies nothing: it never moves, deletes, or writes inside any worktree,
+# never guesses one from the project, window, or pool layout (it drops only a
+# clean pool slot's durable claim naming this task and home; see
+# retire_release_claimed_slot), and says so everywhere - the
 # "RETIRED UNVERIFIED" success line, a completion note on the backlog item
 # (FM_BACKLOG_UNVERIFIED_NOTE, bin/fm-backlog-transition-lib.sh), and
 # data/<id>/retired-unverified.txt. It refuses a record that names a worktree,
