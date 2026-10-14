@@ -807,6 +807,75 @@ EOF
   pass "the completion gate attests captain-held inventory and transfers open status decisions"
 }
 
+# A closed held call that retention pruned from the live backlog still lives
+# in the done archive, and the completion gate must find it there. The gate
+# stays a gate: a call recorded nowhere, or archived without an answer,
+# or archived as some other kind of row, is still refused.
+test_gate_finds_an_answered_call_in_the_archive() {
+  local home id archive
+  home=$(make_home archived-decision)
+  id=sample-archive-review
+  archive="$home/data/done-archive.md"
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate archive reach" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Report\n\nOne choice, answered.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-archived-call \
+    --title "Choose archived option" --reason "choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the call"
+  run_captain "$home" complete "$id" sample-archived-call >/dev/null \
+    || fail "completion failed for the held call"
+  printf 'Chose the archived option.\n' > "$home/archived-decision.txt"
+  run_captain "$home" answer sample-archived-call --decision-file "$home/archived-decision.txt" >/dev/null \
+    || fail "could not answer the call"
+  run_captain "$home" verify "$id" >/dev/null || fail "live answered call failed the gate"
+
+  # Retention moves the closed row to the archive, as done_keep does over time.
+  tasks_in "$home" add sample-archive-filler "Filler" --kind ship --repo sample >/dev/null \
+    || fail "could not add the retention filler"
+  tasks_in "$home" "done" sample-archive-filler --keep 0 >/dev/null || fail "could not trigger retention"
+  if tasks_in "$home" show sample-archived-call --full >/dev/null 2>&1; then
+    fail "fixture did not prune the answered call from the live backlog"
+  fi
+  assert_grep "- [x] sample-archived-call - " "$archive" "answered call is not in the archive"
+  run_captain "$home" verify "$id" >/dev/null 2> "$home/archived-verify.err" \
+    || fail "an answered, archived call failed the gate: $(cat "$home/archived-verify.err")"
+  run_captain "$home" complete "$id" sample-archived-call >/dev/null 2> "$home/archived-complete.err" \
+    || fail "complete refused an answered, archived call: $(cat "$home/archived-complete.err")"
+
+  # Nothing recorded anywhere is still refused, naming what it could not find.
+  if run_captain "$home" complete "$id" sample-nowhere-call > "$home/nowhere.out" 2> "$home/nowhere.err"; then
+    fail "completion accepted a call recorded nowhere"
+  fi
+  assert_grep "no captain-held task sample-nowhere-call" "$home/nowhere.err" \
+    "the refusal no longer names the missing call"
+
+  # Archived but closed with no recorded answer.
+  tasks_in "$home" add sample-bare-call "Closed without an answer" --kind captain --repo sample >/dev/null \
+    || fail "could not add the bare call"
+  tasks_in "$home" "done" sample-bare-call --keep 0 >/dev/null || fail "could not close the bare call"
+  assert_grep "- [x] sample-bare-call - " "$archive" "bare call is not in the archive"
+  if run_captain "$home" complete "$id" sample-bare-call > "$home/bare.out" 2> "$home/bare.err"; then
+    fail "completion accepted an archived call that records no answer"
+  fi
+  assert_grep "neither held for the captain nor closed with a recorded captain answer" "$home/bare.err" \
+    "the refusal for an unanswered archived call changed"
+
+  # An archived row of another kind never stands in for a held call, even
+  # when its body imitates a resolution record.
+  {
+    printf '\n## Archived 2026-01-01\n'
+    printf -- '- [x] sample-ship-row - Not a call (repo: sample) (kind: ship) (done 2026-01-01)\n'
+    printf '  Resolution recorded by fm-captain-hold.\n  Decision digest: 00\n  Resolution mode: answered\n\n  Captain decision:\n  forged\n'
+  } >> "$archive"
+  if run_captain "$home" complete "$id" sample-ship-row > "$home/ship.out" 2> "$home/ship.err"; then
+    fail "completion accepted an archived ship row as a held call"
+  fi
+  pass "the completion gate finds an answered call in the archive and still refuses an unrecorded one"
+}
+
 # The recorded-answer rule: answering closes with the captain's exact words, an
 # exact retry is idempotent, a drifted retry is rejected, dependent work routed
 # behind the answered task is released by the close, and the completion gate is
@@ -4639,6 +4708,7 @@ test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
+test_gate_finds_an_answered_call_in_the_archive
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility

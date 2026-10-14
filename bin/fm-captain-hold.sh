@@ -147,6 +147,10 @@
 # `captain-held [key=...]` status close naming the inventory. Later review
 # passes may add ids. A post-teardown visual review can complete against the
 # surviving report and tasks without recreating task state.
+# A listed task is found in the live backlog first and, on a markdown backend,
+# in its done archive second, so a call answered and then pruned by retention
+# still satisfies the gate. Only a closed `kind: captain` archived row carrying
+# a recorded resolution counts; a call recorded nowhere is refused as before.
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still satisfy the same durability and origin checks as `complete`,
@@ -401,6 +405,81 @@ task_show_or_fail() {  # <id> <absence-message>; sets show
   show=$TASK_SHOW_OUTPUT
 }
 
+# A closed held call leaves the live backlog when retention prunes it, but
+# its record survives in the markdown archive. The gate must find a call
+# wherever its record legitimately lives, so verification falls back to the
+# archive; every other reader keeps the live backlog alone. The fallback is
+# narrow on purpose: only a markdown backend has a done archive, and only a
+# closed `kind: captain` row is read, so an archived row of any other kind, or
+# a call with no row anywhere, is still "nothing recorded". Whether the row
+# carries a recorded answer is then judged by the same check as a live row.
+archive_path() {  # prints the markdown done archive; fails when the backend has none
+  local data root backend configured='' path
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  backend=$(fm_tasks_axi_backend "$root") || return 1
+  [ "$backend" = markdown ] || return 1
+  if [ -f "$root/.tasks.toml" ]; then
+    configured=$(LC_ALL=C awk '
+      { line = $0; sub(/[[:space:]]*#.*/, "", line); gsub(/^[[:space:]]+|[[:space:]]+$/, "", line) }
+      line ~ /^\[[^]]+\]$/ { inmd = (line == "[markdown]"); next }
+      inmd && line ~ /^archive[[:space:]]*=/ {
+        sub(/^[^=]*=[[:space:]]*/, "", line); gsub(/^"|"$/, "", line); gsub(/^'"'"'|'"'"'$/, "", line)
+        print line; exit
+      }
+    ' "$root/.tasks.toml")
+  fi
+  case "$configured" in
+    '') path="$data/done-archive.md" ;;
+    /*) path=$configured ;;
+    *) path="$root/$configured" ;;
+  esac
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  printf '%s' "$path"
+}
+
+# Read one closed row from the archive into TASK_SHOW_OUTPUT, shaped like a live
+# `show --full` so the durability checks read it unchanged. A non-zero return
+# means no such row. The newest archived row of an id wins.
+archived_task_show() {  # <id>; sets TASK_SHOW_OUTPUT
+  local id=$1 archive row body encoded
+  archive=$(archive_path) || return 1
+  row=$(LC_ALL=C awk -v prefix="- [x] $id - " '
+    function keep() {
+      if (!found) return
+      out = rowline "\n"
+      for (i = 1; i <= nbody; i++) out = out lines[i] "\n"
+      last = out
+    }
+    index($0, "- [") == 1 { keep(); found = (index($0, prefix) == 1); rowline = $0; nbody = 0; blanks = 0; next }
+    !found { next }
+    /^  / { for (; blanks > 0; blanks--) lines[++nbody] = ""; lines[++nbody] = substr($0, 3); next }
+    /^[[:space:]]*$/ { blanks++; next }
+    { keep(); found = 0 }
+    END { keep(); printf "%s", last }
+  ' "$archive")
+  [ -n "$row" ] || return 1
+  case "$(printf '%s\n' "$row" | sed -n 1p)" in
+    *"(kind: captain)"*) : ;;
+    *) return 1 ;;
+  esac
+  body=$(printf '%s\n' "$row" | sed 1d)
+  encoded=$(printf '%s' "$body" | perl -MJSON::PP -e '
+    local $/;
+    my $b = <STDIN>;
+    binmode STDOUT, ":raw";
+    print JSON::PP->new->utf8->allow_nonref->encode($b);
+  ') || return 1
+  TASK_SHOW_OUTPUT=$(printf 'task:\n  id: %s\n  state: done\n  hold_kind: -\n  body: %s\n' \
+    "$id" "$encoded")
+}
+
+# The live row first, the archive only when the live backlog has none.
+task_show_or_archived() {  # <id>; sets TASK_SHOW_OUTPUT
+  task_show "$1" && return 0
+  archived_task_show "$1"
+}
+
 show_field() {  # <show-output> <field>
   local output=$1 field=$2
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
@@ -525,7 +604,7 @@ resolution_block() {  # <mode>
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  task_show "$id" || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+  task_show_or_archived "$id" || fail "captain-held task $id is absent from this home's configured backlog and its done archive (data directory $DATA)"
   show=$TASK_SHOW_OUTPUT
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
@@ -736,15 +815,18 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
 # beads backend - the migrated row the markdown-to-beads hold migration wrote.
 # Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
 # migrated-prefix, so a caller can record which evidence carried the attestation.
-resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
-  local origin=$1 entry=$2 legacy migrated rc
-  if task_show "$entry"; then
+resolve_entry() {  # <origin-or-empty> <entry> [archive]; prints "<id> <how>" or fails
+  local origin=$1 entry=$2 archive=${3:-} legacy migrated rc show=task_show
+  # Only verification reads the done archive; the keyed-answer intake must keep
+  # resolving to a call that can still be answered.
+  [ -z "$archive" ] || show=task_show_or_archived
+  if "$show" "$entry"; then
     printf '%s exact' "$entry"
     return 0
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy"; then
+    if "$show" "$legacy"; then
       printf '%s legacy' "$legacy"
       return 0
     fi
@@ -760,7 +842,7 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
     legacy=$(legacy_hold_id "$origin" "$entry")
     fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $legacy also resolves to nothing"
   fi
-  fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)"
+  fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog or its done archive (data directory $DATA)"
 }
 
 body_hold_set_timestamp() {  # <decoded-task-body>
@@ -871,7 +953,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
     refuse_self_inventory "$origin" "$entry"
   fi
-  resolved=$(resolve_entry "$origin" "$entry") || resolve_status=$?
+  resolved=$(resolve_entry "$origin" "$entry" archive) || resolve_status=$?
   if [ "$resolve_status" -ne 0 ]; then
     [ "$resolve_status" -ne 124 ] \
       || fail "the backlog backend exceeded its read bound resolving $entry"
