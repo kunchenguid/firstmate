@@ -2375,6 +2375,12 @@ fm_backend_herdr_pane_owns_session() {  # <session> <pane_id> <pid>
 #                 stability across a server restart"), and what a future
 #                 `resume_agents_on_restore = false` restore would produce too
 #                 (a plain shell, never an agent).
+#                 The pane process view must also hold no harness process: a
+#                 pane whose registration dropped while its harness keeps
+#                 running (a vendor auto-update can do this) reads `live`, and
+#                 one holding some other non-shell foreground process reads
+#                 `unknown`, never `no-agent`. An unreadable process view keeps
+#                 `no-agent`, as before.
 #   stale-agent - `agent get` reports a registered agent_status (working, idle,
 #                 done, or blocked) but fm_backend_herdr_pane_process_state
 #                 proves the pane is shell-only: the registered agent's process
@@ -2414,7 +2420,15 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
-    [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
+    if [ "$code" != "agent_not_found" ]; then
+      printf 'unknown'
+      return 0
+    fi
+    case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
+      agent) printf 'live' ;;
+      other) printf 'unknown' ;;
+      *) printf 'no-agent' ;;
+    esac
     return 0
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
