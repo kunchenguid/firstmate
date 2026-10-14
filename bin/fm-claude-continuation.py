@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only native-record proof for fm-session-lock-lib.sh; Linux procfs only.
+"""Native-record proof and process binding for fm-session-lock-lib.sh; Linux only.
 
 Internal interface: <state> <owner-pid> <model-pid> <recorded-id> <current-id>.
 Exit 0 proves the direct background handoff; every uncertainty exits 1 silently.
@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import tempfile
 
 
 def unique_object(pairs):
@@ -117,21 +118,34 @@ def prove(state, owner, model, recorded, current):
     if (read_regular(Path(state) / ".lock") != f"{owner}\n"
             or read_regular(Path(state) / ".lock-session") != f"{recorded}\n"):
         return False
-    domain = f"linux:{Path('/etc/machine-id').read_text().strip()}:{os.readlink('/proc/self/ns/pid')}"
-    source = native_record(config, owner, recorded, "interactive", owner_birth, owner_cwd, domain)
-    target = native_record(config, model, current, "bg", model_birth, model_cwd, domain)
-    if source.get("parkedJobId") != current[:8] or target.get("jobId") != current[:8]:
+    binding_path = Path(state) / ".lock-continuation"
+    identity = [owner, model, list(before_owner), list(before_model)]
+    binding = None
+    try:
+        saved = json.loads(read_regular(binding_path), object_pairs_hook=unique_object)
+        if saved["identity"] == identity:
+            binding = saved
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    source_id = binding["source"]["sessionId"] if binding else recorded
+    target_id = binding["target"]["sessionId"] if binding else current
+    if not re.fullmatch(uuid, source_id) or not re.fullmatch(uuid, target_id):
         return False
-    # The source UUID is pinned by both the lock sidecar and the live frontend's
-    # registry. Locate exactly one native transcript, never a caller-supplied path.
-    candidates = list((Path(config) / "projects").glob(f"*/{recorded}.jsonl"))
+    domain = f"linux:{Path('/etc/machine-id').read_text().strip()}:{os.readlink('/proc/self/ns/pid')}"
+    source = native_record(config, owner, source_id, "interactive", owner_birth, owner_cwd, domain)
+    target = native_record(config, model, current, "bg", model_birth, model_cwd, domain)
+    if binding and (source != binding["source"] or dict(target, sessionId=target_id) != binding["target"]):
+        return False
+    if source.get("parkedJobId") != target_id[:8] or target.get("jobId") != target_id[:8]:
+        return False
+    candidates = list((Path(config) / "projects").glob(f"*/{source_id}.jsonl"))
     if len(candidates) != 1:
         return False
     links = markers(candidates[0])
     if len(links) != 1:
         return False
     link = links[0]
-    if link.get("sessionId") != recorded or link.get("continuedInSessionId") != current:
+    if link.get("sessionId") != source_id or link.get("continuedInSessionId") != target_id:
         return False
     if not isinstance(link.get("timestamp"), str):
         return False
@@ -140,14 +154,27 @@ def prove(state, owner, model, recorded, current):
             or timestamp > datetime.datetime.now(datetime.timezone.utc)):
         return False
     # A moved successor is not an active direct handoff, including a cycle.
-    successor = candidates[0].with_name(f"{current}.jsonl")
-    if os.path.lexists(successor) and markers(successor):
-        return False
-    return (before_owner == process(owner) and before_model == process(model)
-            and source == native_record(config, owner, recorded, "interactive", owner_birth, owner_cwd, domain)
+    for sid in {target_id, current}:
+        successor = candidates[0].with_name(f"{sid}.jsonl")
+        if os.path.lexists(successor) and markers(successor):
+            return False
+    valid = (before_owner == process(owner) and before_model == process(model)
+            and source == native_record(config, owner, source_id, "interactive", owner_birth, owner_cwd, domain)
             and target == native_record(config, model, current, "bg", model_birth, model_cwd, domain)
             and read_regular(Path(state) / ".lock") == f"{owner}\n"
             and read_regular(Path(state) / ".lock-session") == f"{recorded}\n")
+    if not valid:
+        return False
+    if not binding:
+        fd, temporary = tempfile.mkstemp(prefix=".lock-continuation.", dir=state)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump(dict(identity=identity, source=source, target=target), stream)
+            os.replace(temporary, binding_path)
+        finally:
+            if os.path.lexists(temporary):
+                os.unlink(temporary)
+    return True
 
 
 if __name__ == "__main__":

@@ -212,8 +212,11 @@ fm_harness_pid_alive() {
 # this exact home's state and the same native Claude config root. Caller-supplied
 # config, transcript paths, child markers, pane identity, and daemon ancestry
 # carry no continuation authority. Symlinked, malformed, ambiguous, stale, or
-# moved/cyclic records fail closed. bin/fm-claude-continuation.py reads this proof
-# without mutation; missing Python or Linux procfs leaves the existing refusal.
+# moved/cyclic records fail closed. bin/fm-claude-continuation.py retains the
+# verified process identities and native records in state/.lock-continuation;
+# re-keying the same live model preserves ownership with the retained frontend,
+# process births, home/config and direct handoff revalidated on every proof.
+# Missing Python or Linux procfs leaves the existing refusal.
 # This proves one direct handoff, never arbitrary fork or transitive lineage.
 # Two genuinely different live sessions sharing one id is not a
 # supported state (Claude refuses to resume a running session under its id).

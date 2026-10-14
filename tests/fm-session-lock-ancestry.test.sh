@@ -932,9 +932,51 @@ PY2
   [ "$(phase_value "$dir" "$n" lock-after)" = "$frontend" ] || fail "continuation rewrote the live anchor"
   [ "$(phase_value "$dir" "$n" session-after)" = "$target" ] || fail "continuation confirmation did not record the new session"
   ! grep -q 'OWNED BY ANOTHER LIVE SESSION' "$dir/state/phase-$n/guard.out" || fail "continuation guard reported frontend foreign"
+  cp "$dir/state/.lock-continuation" "$dir/binding-initial"
+  local sidecar rekey=33333333-3333-4333-8333-333333333333 arms
+  for sidecar in "$source" "$target"; do
+    for scenario in stale-binding-owner stale-binding-model wrong-home wrong-config wrong-job wrong-model-id new-actor valid; do
+      cp "$dir/binding-initial" "$dir/state/.lock-continuation"
+      printf '%s\n' "$sidecar" > "$dir/state/.lock-session"
+      python3 - "$dir" "$spare" "$rekey" "$scenario" <<'PY2'
+import json,sys
+from pathlib import Path
+home=Path(sys.argv[1]); loop,sid,scenario=sys.argv[2:]
+p=home/'claude/sessions'/f'{loop}.json'
+y=json.loads((home/'native-initial/sessions'/p.name).read_text())
+y['sessionId']=sid
+if scenario=='wrong-job':y['jobId']='00000000'
+if scenario=='wrong-model-id':y['sessionId']='44444444-4444-4444-8444-444444444444'
+p.write_text(json.dumps(y))
+p=home/'state/.lock-continuation'; binding=json.loads(p.read_text())
+if scenario=='stale-binding-owner':binding['identity'][2][0]='1'
+if scenario=='stale-binding-model':binding['identity'][3][0]='1'
+if scenario=='wrong-home':binding['identity'][3][2]=str(home/'other')
+if scenario=='wrong-config':binding['identity'][3][3]=str(home/'other')
+p.write_text(json.dumps(binding))
+PY2
+      n=$((n + 1))
+      arms=$(arm_count "$dir")
+      env_script="export CLAUDE_CODE_SESSION_ID=$rekey; export CLAUDE_PID=\$\$"
+      [ "$scenario" != new-actor ] || env_script="export CLAUDE_CODE_SESSION_ID=$rekey; export CLAUDE_PID=$ptyhost"
+      fire_phase "$dir" "$n" "$env_script"
+      if [ "$scenario" = valid ]; then
+        expect_code 2 "$(phase_value "$dir" "$n" hook.rc)" "re-key with $sidecar sidecar did not re-arm"
+        expect_code 0 "$(phase_value "$dir" "$n" guard.rc)" "re-key guard failed"
+        ! grep -q 'OWNED BY ANOTHER LIVE SESSION' "$dir/state/phase-$n/guard.out" || fail "re-key guard lost ownership"
+        expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "re-key publication failed"
+        [ "$(phase_value "$dir" "$n" lock-after)" = "$frontend" ] || fail "re-key changed retained owner"
+        [ "$(phase_value "$dir" "$n" session-after)" = "$rekey" ] || fail "re-key did not publish new identity"
+        [ "$(arm_count "$dir")" = "$((arms + 2))" ] || fail "re-key did not arm supervision"
+      else
+        expect_phase_foreign "$dir" "$n" "$arms" "$frontend" "$scenario after re-key" "$sidecar"
+        [ "$(cat "$dir/state/.lock-session")" = "$sidecar" ] || fail "foreign re-key changed sidecar"
+      fi
+    done
+  done
   : > "$dir/state/stop-frontend"
   : > "$dir/state/stop-spare"
-  pass "session-lock e2e: a verified new-id continuation re-arms while its live frontend remains outside its ancestry"
+  pass "session-lock e2e: a verified continuation retains ownership across same-model re-key with initial and confirmed sidecars"
 }
 
 # A same-session confirmation must refresh a /clear re-key even while another
