@@ -150,10 +150,11 @@ This skill is the one owner of the `/bearings` chat-response format; the snapsho
 Every `/bearings` chat response renders EXACTLY these six parts, in THIS order, and nothing else structural (there is no At Anchor section).
 The `CONSTRAINT:` and `Recently landed:` lines belong to Outcome and are not parts of their own.
 
-1. **Outcome** - the current milestone and what remains of it, taken from the home's records; say `UNKNOWN` when no record names a milestone.
+1. **Outcome** - the current milestone and what remains of it, taken only from the home's own records; say `unknown` when no home record names a milestone.
    Directly under it, two lines:
-   - `CONSTRAINT:` the single step now limiting that outcome, chosen by the home's configured ranking rule (its critical-blocker step), if any, never re-implemented here; mark it MEASURED when a structured field or timestamp shows it and HYPOTHESIS otherwise.
-     With no ranking rule, or no unambiguous limiting step, write `CONSTRAINT: UNKNOWN`, never a guess.
+   - `CONSTRAINT:` the single step now limiting that outcome, chosen by the home's own ranking rule only when the home defines one (for example a captain ranking skill or a note in `data/captain.md`), never re-implemented here; mark it MEASURED when a structured field or timestamp shows it and HYPOTHESIS otherwise.
+     When the home defines no ranking rule, print exactly `CONSTRAINT: unknown (no ranking rule recorded)`.
+     When the rule names no unambiguous limiting step, write `CONSTRAINT: UNKNOWN`, never a guess.
    - `Recently landed:` the bounded current recent-completions baseline: merged PRs, completed scouts, and finished local-only merges across the main fleet and every registered secondmate home.
      Name only the state the snapshot records: landed does not mean installed, released, or live-checked.
      Empty-state: "No recent completions are in the current baseline."
@@ -177,9 +178,10 @@ The `CONSTRAINT:` and `Recently landed:` lines belong to Outcome and are not par
    Show the other contribution actors only as counts beside the checked/known coverage, and disclose `captain_omitted`, `unmeasured_homes`, stale verdicts and checks with no verdict when nonzero.
    Empty-state: "Nothing needs your action right now" is allowed only when `contributions.proven_clear` is true and the existing decision set is empty.
    When the part is empty but coverage is incomplete, say that no decision is recorded and give the checked/known count; a missing coverage field is also unverified.
-6. **Next** - one line naming the single action that most moves the CONSTRAINT, ordered by the home's configured ranking rule, which stays the only owner of ranking logic.
+6. **Next** - one line naming the single action that most moves the CONSTRAINT, ordered by the home's own ranking rule when the home defines one, which stays the only owner of ranking logic.
    It names the action and its owner and never performs it.
-   With no ranking rule or an UNKNOWN constraint, write `Next: UNKNOWN`.
+   When the home defines no ranking rule, print exactly `Next: unknown (no ranking rule recorded)`.
+   With an UNKNOWN constraint, write `Next: UNKNOWN`.
 
 Rules that keep the contract unambiguous:
 
