@@ -426,6 +426,105 @@ test_unsupported_forge_is_not_fleet_work() {
   pass 'unsupported forge coverage is disclosed without inventing fleet work'
 }
 
+test_unsupported_poll_is_silent_and_clears_legacy_errors() {
+  local home mode out url task
+  for mode in fresh legacy; do
+    home=$(new_home "unsupported-poll-$mode")
+    forge_home "$home"
+    wrap_forge "$home"
+    rm -f "$home/state/delivery.meta" "$home/data/delivery/contributions.json"
+    printf '# Backlog\n\n## Queued\n' > "$home/data/backlog.md"
+    for task in gitlab selfhosted hyphenated wildcard; do
+      case "$task" in
+        gitlab) url=https://gitlab.com/o/r/-/merge_requests/2 ;;
+        selfhosted) url=https://git.example.org/group/subgroup/r/-/merge_requests/3 ;;
+        hyphenated) url=https://github-com/o/r/pull/8 ;;
+        wildcard) url=https://githubXcom/o/r/issues/9 ;;
+      esac
+      printf -- '- [ ] %s - Filed %s (repo: sample) (kind: ship)\n' "$task" "$url" >> "$home/data/backlog.md"
+      if [ "$mode" = legacy ]; then
+        mkdir -p "$home/data/$task"
+        jq -n --arg task "$task" --arg url "$url" --arg now "$NOW" '
+          {schema:"fm-contributions.v1",task:$task,records:[{url:$url,
+            kind:(if ($url | contains("/issues/")) then "issue" else "pr" end),checked_at:$now,error:"forge observation unavailable or changed during read",
+            observation:null,verdict:null,seen:[],pending:[],notified:[],provenance:"retained ownership"}]}' \
+          > "$home/data/$task/contributions.json"
+        jq '.records[].error=null' "$home/data/$task/contributions.json" > "$home/$task.expected.json"
+      fi
+    done
+    # Forgejo pulls are not accepted by the existing contribution ownership schema.
+    printf -- '- [ ] forgejo - Filed https://codeberg.org/o/r/pulls/2 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+    # Saved URLs retain ownership after their backlog links disappear.
+    [ "$mode" != legacy ] || printf '# Backlog\n\n## Queued\n' > "$home/data/backlog.md"
+    out=$(with_home "$home" bash "$ROOT/bin/fm-contributions.sh" poll 2>&1) \
+      || fail "unsupported poll failed ($mode): $out"
+    [ -z "$out" ] || fail "unsupported poll printed an unavailable signal ($mode): $out"
+    [ ! -s "$home/forge/calls" ] || fail "unsupported poll contacted the forge ($mode)"
+    [ ! -s "$home/state/.wake-queue" ] || fail "unsupported poll enqueued a wake ($mode)"
+    for task in gitlab selfhosted hyphenated wildcard; do
+      if [ "$mode" = legacy ]; then
+        jq -e --slurpfile expected "$home/$task.expected.json" '. == $expected[0]' \
+          "$home/data/$task/contributions.json" >/dev/null \
+          || fail 'legacy cleanup changed evidence beyond its unsupported error'
+      else
+        [ ! -e "$home/data/$task/contributions.json" ] || fail 'unsupported poll fabricated a record'
+      fi
+    done
+    bearings "$home" | jq -e '.contributions | .known == 4 and .checked == 0
+      and .unmeasured == 4 and .unreadable_records == 0
+      and .counts == {captain:0,fleet:0,maintainer:0,nobody:0}
+      and .complete == false and .proven_clear == false' >/dev/null \
+      || fail "unsupported poll corrupted unmeasured coverage ($mode)"
+  done
+  pass 'unsupported ownership stays silent and unmeasured; legacy errors clear without fabricated evidence'
+}
+
+test_legacy_cleanup_preserves_supported_failure() {
+  local home out
+  home=$(new_home legacy-mixed-errors)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].observation=null
+    | .records[0].error="forge observation unavailable or changed during read"
+    | .records += [(.records[0] | .url="https://gitlab.com/o/r/-/merge_requests/2"),
+      (.records[0] | .url="https://github-com/o/r/pull/8"),
+      (.records[0] | .url="https://githubXcom/o/r/issues/9" | .kind="issue")]'
+  jq '[.records[] | select(.url != "https://github.com/o/r/pull/8") | .error=null]' \
+    "$home/data/delivery/contributions.json" > "$home/unsupported.expected.json"
+  printf 'down\n' > "$home/forge/fault"
+  out=$(with_home "$home" bash "$ROOT/bin/fm-contributions.sh" poll 2>&1) \
+    || fail "mixed legacy-error poll failed: $out"
+  [ -z "$out" ] || fail "an existing GitHub failure episode re-alerted: $out"
+  grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'supported ownership was not retried'
+  [ "$(wc -l < "$home/forge/calls")" -eq 1 ] || fail 'unsupported mixed records triggered forge reads'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'mixed legacy cleanup enqueued a wake'
+  jq -e --slurpfile expected "$home/unsupported.expected.json" '.records | length == 4
+    and all(.[]; .observation == null)
+    and any(.[]; .url == "https://github.com/o/r/pull/8" and .error != null)
+    and ([.[] | select(.url != "https://github.com/o/r/pull/8")] | sort_by(.url))
+      == ($expected[0] | sort_by(.url))' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'unsupported cleanup erased supported failure or fabricated an observation'
+  bearings "$home" | jq -e '.contributions | .known == 4 and .checked == 0
+    and .unmeasured == 3 and .unreadable_records == 0
+    and .counts == {captain:0,fleet:1,maintainer:0,nobody:0} and .complete == false' >/dev/null \
+    || fail 'mixed legacy cleanup confused supported failures with unmeasured coverage'
+  rm "$home/forge/fault"
+  out=$(with_home "$home" bash "$ROOT/bin/fm-contributions.sh" poll 2>&1) \
+    || fail "mixed saved-file recovery failed: $out"
+  [ -z "$out" ] || fail "mixed saved-file recovery printed an alert: $out"
+  [ ! -s "$home/state/.wake-queue" ] || fail 'mixed saved-file recovery enqueued a wake'
+  jq -e --slurpfile expected "$home/unsupported.expected.json" '
+    [.records[] | select(.url != "https://github.com/o/r/pull/8")] | sort_by(.url)
+    == ($expected[0] | sort_by(.url))' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'supported recovery changed retained unsupported evidence'
+  bearings "$home" | jq -e '.contributions | .known == 4 and .checked == 1
+    and .unmeasured == 3 and .unreadable_records == 0
+    and .counts == {captain:0,fleet:0,maintainer:1,nobody:0} and .complete == false' >/dev/null \
+    || fail 'real GitHub recovery lost mixed saved ownership'
+  pass 'legacy cleanup preserves unsupported ownership and supported missing-evidence failure in the same file'
+}
+
 test_held_unsupported_forge_is_not_captain_work() {
   local home
   home=$(new_home held-unsupported-forge)
@@ -468,6 +567,7 @@ test_shared_contribution_signal_wakes_once() {
 test_watcher_keeps_diagnostics_separate_from_contribution_wakes() {
   local home out rc wakes diagnostic
   home=$(new_home watcher-diagnostics)
+  printf -- '- [ ] unsupported - Filed https://gitlab.com/o/r/-/merge_requests/2 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   forge_home "$home"
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register delivery for diagnostic watcher wake'
@@ -1061,6 +1161,9 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
   jq -e --argjson error "$error" '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == $error' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a repeated read failure stopped recording its error'
   [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] || fail 'a failing open PR stopped being observed'
+  bearings "$home" | jq -e '.contributions | .known == 1 and .checked == 0
+    and .unmeasured == 0 and .counts.fleet == 1 and .complete == false' >/dev/null \
+    || fail 'a supported GitHub failure became unmeasured or successful coverage'
   : > "$home/forge/fault"
   out=$(poll_at 2026-09-16T11:00:00Z)
   [ -z "$out" ] || fail "a successful read printed: $out"
@@ -1183,7 +1286,7 @@ test_retire_is_idempotent_and_refuses_unknown_pairs() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
