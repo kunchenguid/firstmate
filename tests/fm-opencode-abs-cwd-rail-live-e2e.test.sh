@@ -87,7 +87,9 @@ verdict=$(fm_tmux_composer_state "$TARGET")
 [ "$verdict" = empty ] || { capture >&2; fail "mid-turn absolute cwd rail read '$verdict', want empty"; }
 pass "opencode mid-turn absolute cwd rail on a 300-column pane reads empty"
 
-wait_for '^[^[:alnum:]]*DONE *$' 240 || { capture >&2; fail "the turn never finished"; }
+# The reply row starts with DONE; the echoed prompt row starts with "Run". On a
+# wide pane the sidebar shares the reply's row, so text may follow DONE.
+wait_for '^[^[:alnum:]]*DONE([[:space:]]|$)' 240 || { capture >&2; fail "the turn never finished"; }
 i=0
 while capture | grep -Fq 'esc interrupt'; do
   [ "$i" -lt 120 ] || { capture >&2; fail "opencode still showed a running turn after the reply"; }
