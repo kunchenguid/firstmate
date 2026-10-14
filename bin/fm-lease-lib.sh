@@ -65,8 +65,9 @@
 #     home that never runs a branch is unchanged byte for byte.
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
 #     merging a PR, landing local-only work, spawning workers, answering a
-#     decision, retiring a secondmate - refuse the branch actor outright,
-#     lease or no lease, while the home is attended. While a confirmed,
+#     decision, releasing a review-ledger hold, retiring a secondmate - refuse
+#     the branch actor outright, lease or no lease, while the home is
+#     attended. While a confirmed,
 #     readable, live away record exists (bin/fm-afk-contract.sh validate and
 #     mode, never quiet mode's record, whose captain is present; docs/pi-
 #     supervision-branch.md "Postures"), main is parked and its STANDING authority
@@ -77,11 +78,11 @@
 #     captain's away words before invoking one. The
 #     relocation grants nothing beyond what main could do attended: it only
 #     changes which actor may reach the guarded script's own gate. An action
-#     that has no record-side gate of its own - landing local-only work or
-#     retiring a secondmate - is never relocated and keeps refusing the branch
-#     in both postures. An archived, absent, unconfirmed, or unreadable record
-#     is absence: the
-#     attended refusal, byte for byte. The record is validated immediately
+#     that has no record-side gate of its own - landing local-only work,
+#     releasing a review-ledger hold, or retiring a secondmate - is never
+#     relocated and keeps refusing the branch in both postures. An archived,
+#     absent, unconfirmed, or unreadable record is absence: the attended
+#     refusal, byte for byte. The record is validated immediately
 #     before the guarded script's first persistent side effect and the lock is
 #     not held across the operation, so a return's archive is never blocked by
 #     a long spawn; a spawn or answer that completes seconds after archive is
@@ -93,9 +94,9 @@
 #     backlog lease guard in this scope.
 #
 # Sourced by bin/fm-send.sh, bin/fm-control.sh, bin/fm-teardown.sh,
-# bin/fm-pr-merge.sh, bin/fm-merge-local.sh, bin/fm-spawn.sh, and
-# bin/fm-lease.sh. Callers must have $STATE resolved before calling. No side
-# effects on source. set -u / set -e safe.
+# bin/fm-pr-merge.sh, bin/fm-pr-review.sh, bin/fm-merge-local.sh,
+# bin/fm-spawn.sh, and bin/fm-lease.sh. Callers must have $STATE resolved
+# before calling. No side effects on source. set -u / set -e safe.
 
 # Distinct from usage errors (2), the gate refusal (3), and fm-send's
 # unconfirmed submit (3): recognizable as "the other supervision actor holds

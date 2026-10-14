@@ -420,6 +420,139 @@ SH
   pass 'unreported required checks remain pending instead of satisfying readiness'
 }
 
+# A forge whose `gh pr checks --required` prints the one message gh uses both
+# when the base requires no checks and when required checks have not reported
+# yet; the base branch's protection summary and rules read are what tell the two
+# apart. FM_TEST_BRANCH_JSON is the branch payload, FM_TEST_RULES_JSON the rules
+# payload, or with FM_TEST_RULES_PLAN_GATED=1 the rules read fails with GitHub's
+# plan-gated 403. FM_TEST_FILES_JSON overrides the changed-file page.
+write_required_set_fake_gh() { # fakebin
+  cat > "$1/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+case "${1:-} ${2:-}" in
+  "api user")
+    printf '%s\n' '{"login":"maintainer"}'
+    ;;
+  "api /repos/o/r/pulls/7")
+    printf '%s\n' '{"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"base":{"ref":"main"},"user":{"login":"author"},"requested_reviewers":[],"requested_teams":[]}'
+    ;;
+  "api /repos/o/r/pulls/7/files?per_page=100")
+    files='[{"filename":"tests/x.test.sh","status":"modified","additions":2,"deletions":0}]'
+    printf '[%s]\n' "${FM_TEST_FILES_JSON:-$files}"
+    ;;
+  "api /repos/o/r/issues/7/comments?per_page=100"|"api /repos/o/r/pulls/7/reviews?per_page=100")
+    printf '%s\n' '[[]]'
+    ;;
+  "api repos/o/r/branches/main")
+    cat "$FM_TEST_BRANCH_JSON"
+    ;;
+  "api --paginate")
+    [ "${3:-}" = repos/o/r/rules/branches/main ] || { printf 'unexpected gh call: %s\n' "$*" >&2; exit 91; }
+    if [ "${FM_TEST_RULES_PLAN_GATED:-0}" = 1 ]; then
+      printf '%s\n' 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)' >&2
+      exit 1
+    fi
+    cat "$FM_TEST_RULES_JSON"
+    ;;
+  "api graphql")
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}'
+    ;;
+  "pr checks")
+    printf "%s\n" "no required checks reported on the 'topic' branch" >&2
+    exit 1
+    ;;
+  "pr view")
+    case "$*" in
+      *statusCheckRollup*)
+        printf '%s\n' '{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","statusCheckRollup":[]}'
+        ;;
+      *) printf '%s\n' "$head" ;;
+    esac
+    ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 91 ;;
+esac
+SH
+  chmod +x "$1/gh"
+}
+
+UNPROTECTED_BRANCH='{"name":"main","protected":false}'
+VALIDATE_REQUIRED_BRANCH='{"name":"main","protected":true,"protection":{"enabled":true,"required_status_checks":{"enforcement_level":"non_admins","contexts":["validate"],"checks":[{"context":"validate","app_id":null}]}}}'
+
+test_live_collector_reads_an_empty_required_set_as_no_required_checks() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/empty-required-set-fake")
+  write_required_set_fake_gh "$fakebin"
+  printf '%s\n' "$UNPROTECTED_BRANCH" > "$TMP_ROOT/unprotected-branch.json"
+  printf '%s\n' "$VALIDATE_REQUIRED_BRANCH" > "$TMP_ROOT/validate-required-branch.json"
+
+  # An unprotected base whose plan cannot expose branch rules requires nothing.
+  out="$TMP_ROOT/empty-required-set.json"
+  PATH="$fakebin:$PATH" FM_TEST_BRANCH_JSON="$TMP_ROOT/unprotected-branch.json" FM_TEST_RULES_PLAN_GATED=1 \
+    "$SNAPSHOTTER" "$URL" "$out" || fail 'live collector refused a base branch that requires no checks'
+  [ "$(jq -c '.checks' "$out")" = '[]' ] \
+    || fail "a base branch that provably requires no checks gained a pending required check: $(jq -c '.checks' "$out")"
+
+  # The same message over a base that does require a check is that check not
+  # having reported yet, so it stays pending.
+  out="$TMP_ROOT/validate-required-set.json"
+  PATH="$fakebin:$PATH" FM_TEST_BRANCH_JSON="$TMP_ROOT/validate-required-branch.json" FM_TEST_RULES_PLAN_GATED=1 \
+    "$SNAPSHOTTER" "$URL" "$out" || fail 'live collector refused a base branch with an unreported required check'
+  [ "$(jq '[.checks[] | select(.status != "COMPLETED")] | length' "$out")" -eq 1 ] \
+    || fail 'a required check that has not reported was dropped from the snapshot'
+
+  # A ruleset requirement counts the same as classic protection.
+  printf '%s\n' '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"validate"}]}}]' \
+    > "$TMP_ROOT/validate-required-rules.json"
+  out="$TMP_ROOT/ruleset-required-set.json"
+  PATH="$fakebin:$PATH" FM_TEST_BRANCH_JSON="$TMP_ROOT/unprotected-branch.json" \
+    FM_TEST_RULES_JSON="$TMP_ROOT/validate-required-rules.json" \
+    "$SNAPSHOTTER" "$URL" "$out" || fail 'live collector refused a ruleset-required check that has not reported'
+  [ "$(jq '[.checks[] | select(.status != "COMPLETED")] | length' "$out")" -eq 1 ] \
+    || fail 'a ruleset-required check that has not reported was dropped from the snapshot'
+  pass 'the collector records no required checks only when the base branch provably requires none'
+}
+
+# The shape of a fully ready high-stakes pull request on a base with no branch
+# protection and plan-gated rules: every review gate passes on the live
+# snapshot, and only an unreadable required set keeps it from merging.
+test_ready_passes_a_complete_review_on_a_base_that_requires_no_checks() {
+  local fakebin live unreadable err status=0
+  fakebin=$(fm_fakebin "$TMP_ROOT/no-required-ready-fake")
+  write_required_set_fake_gh "$fakebin"
+  printf '%s\n' "$UNPROTECTED_BRANCH" > "$TMP_ROOT/no-required-ready-branch.json"
+  live="$TMP_ROOT/no-required-ready.json"
+  unreadable="$TMP_ROOT/no-required-unreadable.json"
+  err="$TMP_ROOT/no-required-ready.err"
+  PATH="$fakebin:$PATH" FM_TEST_FILES_JSON='[{"filename":"bin/fm-teardown.sh","status":"modified","additions":5,"deletions":1}]' \
+    FM_TEST_BRANCH_JSON="$TMP_ROOT/no-required-ready-branch.json" FM_TEST_RULES_PLAN_GATED=1 \
+    "$SNAPSHOTTER" "$URL" "$live" || fail 'live collector refused the ready fixture'
+  PATH="$fakebin:$PATH" FM_TEST_FILES_JSON='[{"filename":"bin/fm-teardown.sh","status":"modified","additions":5,"deletions":1}]' \
+    FM_TEST_BRANCH_JSON="$TMP_ROOT/absent-branch.json" FM_TEST_RULES_PLAN_GATED=1 \
+    "$SNAPSHOTTER" "$URL" "$unreadable" || fail 'live collector refused an unreadable required set'
+
+  rm -rf "$HOME_DIR/data/pr-review-ledger"
+  FM_TEST_NOW_EPOCH=8000 review init task-ready "$URL" --snapshot "$live" >/dev/null
+  FM_TEST_NOW_EPOCH=8600 review checkpoint "$URL" --snapshot "$live" >/dev/null
+  [ "$(jq -r '.generations[-1].risk.level' "$(ledger)")" = high ] || fail 'the ready fixture was not high stakes'
+  review attest "$URL" "$HEAD_A" no-mistakes claude-opus-5-5 'run configured-model' >/dev/null
+  bind_final_disposition "$HEAD_A" "$URL#issuecomment-218" "$live"
+  review ready "$URL" "$HEAD_A" >/dev/null 2>"$err" \
+    || fail "a complete review on a base that requires no checks was not ready: $(cat "$err")"
+
+  rm -rf "$HOME_DIR/data/pr-review-ledger"
+  FM_TEST_NOW_EPOCH=8000 review init task-ready "$URL" --snapshot "$unreadable" >/dev/null
+  FM_TEST_NOW_EPOCH=8600 review checkpoint "$URL" --snapshot "$unreadable" >/dev/null
+  review attest "$URL" "$HEAD_A" no-mistakes claude-opus-5-5 'run configured-model' >/dev/null
+  bind_final_disposition "$HEAD_A" "$URL#issuecomment-219" "$unreadable"
+  review ready "$URL" "$HEAD_A" >/dev/null 2>"$err" || status=$?
+  [ "$status" -ne 0 ] || fail 'an unreadable required set let the review pass as ready'
+  assert_grep 'a required check is not green on this head' "$err" \
+    'the unreadable required set did not block readiness as a pending required check'
+  pass 'a complete review is ready on a base that requires no checks, and an unreadable required set still blocks it'
+}
+
 test_imported_ledgers_keep_holds_and_null_dispositions_blocking() {
   local fixtures="$ROOT/tests/fixtures/pr-review-ledger" snap path err status
   snap="$TMP_ROOT/imported-ledger.json"; err="$TMP_ROOT/imported-ledger.err"
@@ -854,6 +987,8 @@ test_merge_decision_records_only_the_live_reviewed_head
 test_live_collector_includes_submitted_reviews_and_inline_threads
 test_bound_final_disposition_excludes_only_its_exact_post
 test_live_collector_keeps_unreported_required_checks_pending
+test_live_collector_reads_an_empty_required_set_as_no_required_checks
+test_ready_passes_a_complete_review_on_a_base_that_requires_no_checks
 test_imported_ledgers_keep_holds_and_null_dispositions_blocking
 test_human_hold_survives_head_change_until_evidenced_release
 test_merge_forwards_guarded_options_to_the_merge_parser

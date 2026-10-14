@@ -455,6 +455,12 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   assert_contains "$out" "FIRSTMATE SUPERVISION WAKE: signal: demo.status" "the wake prompt must carry the reason"
   assert_contains "$out" "finish with the bin/fm-branch-report.sh command." "the wake prompt must name the host's report surface"
   assert_contains "$out" "POSTURE: AWAY." "an away wake prompt must carry the posture tail"
+  assert_contains "$out" "MAIN's standing authority needs no words" \
+    "the away tail must name MAIN's standing authority"
+  assert_contains "$out" "initialize and arm a missing review ledger with bin/fm-pr-review.sh init <task> <url> and bin/fm-pr-review.sh arm" \
+    "the away tail must let the branch initialize and arm a missing review ledger"
+  assert_contains "$out" "bin/fm-pr-merge.sh refuses a GitHub merge without that handoff" \
+    "the away tail must name the merge wrapper as the only away GitHub merge path"
   assert_contains "$out" "    merge nothing" "the away tail must carry the record's read-back verbatim"
   pass "dispatch entry: the host reads branch eligibility, the offer rule, and the wake prompt from the Pi branch's own owner"
 }

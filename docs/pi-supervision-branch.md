@@ -252,11 +252,11 @@ The guards are wired into these scripts:
 | Scripts | Guard behavior |
 | --- | --- |
 | `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` | Overlap, lease-checked, with claim serialization retained through the mutation. |
-| `fm-pr-merge.sh`, `fm-merge-local.sh`, `fm-spawn.sh`, `fm-send.sh --resolve-key` for a decision key, and `fm-teardown.sh` for a second mate | Main-owned while attended; branch refused. |
+| `fm-pr-merge.sh`, `fm-merge-local.sh`, `fm-pr-review.sh release-hold`, `fm-spawn.sh`, `fm-send.sh --resolve-key` for a decision key, and `fm-teardown.sh` for a second mate | Main-owned while attended; branch refused. |
 
 A relaunch through `fm-control` stays branch-legal recovery in both postures.
 Under the away-posture record, the PR merge, a fresh spawn, and a decision answer relocate to the branch behind each script's own gate.
-Local-only landing and second-mate retirement never do ("Postures" below).
+Local-only landing, review hold release, and second-mate retirement never do ("Postures" below).
 
 ### Autonomy
 
@@ -607,10 +607,11 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 
 | Script | Gate while away |
 | --- | --- |
-| `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red` and `--allow-missing` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
+| `bin/fm-pr-merge.sh` | Merges a pull request green at its live head, synchronously, under the record lock, refuses `--allow-red` and `--allow-missing` while away, so the green gate is absolute in this posture, and refuses a GitHub merge that lacks `bin/fm-pr-review.sh merge`'s recorded ledger merge decision for the live head; which pull request the words meant is the branch's reading. |
 | `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
+| `bin/fm-pr-review.sh release-hold` | Never relocated; refuses the branch actor in every posture. |
 
 The merge-authority record and the outcome row's summary are the audit trail.
 The return brief renders the words verbatim beside that account.
@@ -654,14 +655,16 @@ At that moment the branch reports any refusal instead of concluding there is "no
 
 `tests/fm-branch-supervision.test.sh` covers:
 
-- Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
+- Prompt stability, including the landed-work cleanup instruction, the second-mate relay, signal-span, and stale-liveness rules, and MAIN's standing authority under the away posture.
 - Store append-only behavior, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
-- The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
+- The away relocation: only under a valid live record, never for local-only landing or a review hold release, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
 
 `tests/fm-afk-return.test.sh` covers the ordered cleanup-due section, its durable merge-marker requirement, and exclusion of both a done task without durable merge evidence and a persistent secondmate carrying that evidence.
 
 `tests/fm-pr-merge.test.sh` covers the branch actor merging a green task under the record, being refused on a red check, an unreported required check, or `--allow-red`/`--allow-missing` under it, and being refused at the partition while attended.
+It also covers an away GitHub merge refused without `bin/fm-pr-review.sh merge`'s recorded ledger merge decision for the live head, and that wrapper landing a high-stakes ledger that passes every gate while refusing one without the exact-model attestation.
+`tests/fm-pr-review.test.sh` covers the review snapshot recording no required checks only when the base branch provably requires none, so a complete review on such a base is ready while an unreadable required set still blocks it.
 
 `tests/fm-secondmate-safety.test.sh` covers the branch actor being refused second-mate retirement with the mate's record, home, route, and endpoint left intact.
 

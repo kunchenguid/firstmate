@@ -239,7 +239,7 @@ Never merge a red PR, or one with a required check that has not reported, under 
 Destructive, irreversible, and security-sensitive merges still escalate.
 Without a current explicit captain instruction that states the concrete merge, the green default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Load `ask-user-authority` and `validation-supervision` before deciding or answering any ask-user finding; the implementation worker never answers its own finding.
-For a GitHub task PR, use `bin/fm-pr-review.sh merge` when `.github/firstmate-review-policy.json` sets `require_reviewed_head_handoff` to `true`, and otherwise `bin/fm-pr-merge.sh`, which refuses while the review ledger records an unreleased hold; use `bin/fm-pr-merge.sh` directly for GitLab and `bin/fm-merge-local.sh` for approved local-only landing.
+For a GitHub task PR, use `bin/fm-pr-review.sh merge` when `.github/firstmate-review-policy.json` sets `require_reviewed_head_handoff` to `true` or while the away-posture record exists, and otherwise `bin/fm-pr-merge.sh`, which refuses while the review ledger records an unreleased hold; use `bin/fm-pr-merge.sh` directly for GitLab and `bin/fm-merge-local.sh` for approved local-only landing.
 These guarded paths record merge metadata and refuse an unproved merge instead of reporting it as landed; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 

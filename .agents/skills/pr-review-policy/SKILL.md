@@ -52,6 +52,7 @@ Repository-specific custody and testing rules remain additive.
 Post the final disposition and evidence on the PR, then bind that post to the current generation with `final-disposition` before merging.
 Use `bin/fm-pr-review.sh merge <task> <url> [fm-pr-merge args...]` when the repository policy opts into the reviewed-head handoff.
 For other GitHub PRs, use `bin/fm-pr-merge.sh <task> <url> [merge args...]`; it refuses while the review ledger records an unreleased hold on the current generation, until `release-hold` records the human decision.
+While the away-posture record exists, every GitHub merge goes through `bin/fm-pr-review.sh merge` whatever the policy setting, and `bin/fm-pr-merge.sh` refuses one that did not.
 `bin/fm-pr-review.sh merge` takes a fresh complete snapshot, starts a new generation if the head moved, refuses pending reviews, stale checks, missing dispositions, or missing high-stakes attestations, records the merge decision with the reviewed and immediately verified head, then hands the same URL to the guarded merge command.
 The guarded merge command binds the forge request to that head, so a push in the remaining interval fails instead of merging unreviewed code.
 

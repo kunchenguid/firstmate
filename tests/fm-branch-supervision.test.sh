@@ -69,6 +69,23 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"A second mate's status log is a relay channel for its child work"*"retiring a second mate is MAIN's alone"*"Report a second mate's signal wake from the status lines that wake newly presents"*"A second mate's stale wake is a liveness event: report it even when it presents no new status lines."*) ;;
     *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
   esac
+  # The 2026-10-13 away window: ready pull requests, missing exact-model gates,
+  # and in-scope ask-user findings all waited for the captain, because nothing
+  # named the authority MAIN uses attended without asking.
+  case "$out_a" in
+    *"MAIN's standing authority needs no words"*"Initialize a GitHub pull request's missing review ledger with \`bin/fm-pr-review.sh init <task> <url>\` and arm it with \`bin/fm-pr-review.sh arm\`"*"\`bin/fm-pr-review.sh merge <task> <url>\`"*"steer that worker to supply it, as routine steering"*"no init (if the repository is not already initialized, it stops and reports), the rebase step skipped, and no rebase or force-push"*"never a merge"*"Decide each ask-user finding under the ask-user-authority policy"*"a stop condition you wrote into your own earlier steer as your checkpoint, not a captain instruction"*"The words add to this set and never subtract from it."*) ;;
+    *) fail "branch prompt lost MAIN's standing authority under the away posture" ;;
+  esac
+  case "$out_a" in
+    *"every ask-user finding from a validation gate while attended (away, only a finding the ask-user-authority policy escalates)"*) ;;
+    *) fail "branch prompt still sends every away ask-user finding to the captain" ;;
+  esac
+  case "$out_a" in
+    *"The never-set is absolute for every actor in every posture: credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused whatever the words say."*) ;;
+    *) fail "branch prompt lost the never-set" ;;
+  esac
+  assert_not_contains "$out_a" "a worker the words say to steer is steered" \
+    "branch prompt still makes steering depend on the away words"
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
@@ -756,7 +773,7 @@ test_mutating_scripts_refuse_the_other_actors_lease() {
 }
 
 test_main_owned_actions_refuse_the_branch_actor() {
-  local home root out status
+  local home root out status url head
   home="$TMP_ROOT/partition-home"
   root="$TMP_ROOT/partition-root"
   mkdir -p "$home/state" "$root"
@@ -785,7 +802,38 @@ test_main_owned_actions_refuse_the_branch_actor() {
   status=$?
   [ "$status" -ne 6 ] || fail "main fm-merge-local hit the partition refusal"
   assert_contains "$out" "no meta for task task-x" "main fm-merge-local lost its ordinary error"
-  pass "PR merge, local landing, and new-task spawn refuse the branch actor and spare main"
+
+  # Releasing a review-ledger hold records the human decision behind it, so the
+  # branch is refused attended and under a live away record alike, the hold
+  # stays, and main still releases it.
+  mkdir -p "$home/data"
+  url=https://github.com/o/r/pull/1
+  head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  jq -n --arg url "$url" --arg head "$head" '{schema:"firstmate-pr-review-snapshot.v1",url:$url,head:$head,
+    collector_actor:"maintainer",pending_reviews:[],comments:[],checks:[],
+    files:[{filename:"tests/x.test.sh",status:"modified",additions:1,deletions:0}]}' > "$home/hold-snapshot.json"
+  FM_HOME="$home" "$ROOT/bin/fm-pr-review.sh" init task-x "$url" --snapshot "$home/hold-snapshot.json" >/dev/null \
+    || fail "review ledger init failed"
+  FM_HOME="$home" "$ROOT/bin/fm-pr-review.sh" hold "$url" "$head" "captain's word to land" >/dev/null \
+    || fail "review hold failed"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-review.sh" release-hold "$url" "$head" 'https://example.test/decision' 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "attended branch release-hold exited $status, not 6: $out"
+  assert_contains "$out" "review hold release (fm-pr-review release-hold) refused" "release-hold refusal lost its action label"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'land everything that is green' >/dev/null \
+    || fail "away entry failed"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-review.sh" release-hold "$url" "$head" 'https://example.test/decision' 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "away branch release-hold exited $status, not 6: $out"
+  assert_not_contains "$out" "main is parked" "release-hold was relocated to the branch under the away record"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "away archive failed"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-pr-review.sh" show "$url" | jq -r '.generations[-1].merge_decision.decision')" = hold ] \
+    || fail "a refused branch release-hold changed the hold"
+  FM_HOME="$home" "$ROOT/bin/fm-pr-review.sh" release-hold "$url" "$head" 'https://example.test/decision' >/dev/null \
+    || fail "main could not release the review hold"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-pr-review.sh" show "$url" | jq -r '.generations[-1].merge_decision')" = null ] \
+    || fail "main's release-hold did not clear the hold"
+  pass "PR merge, local landing, new-task spawn, and review hold release refuse the branch actor and spare main"
 }
 
 test_home_without_branch_is_untouched() {
@@ -1244,6 +1292,14 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
   status=$?
   [ "$status" -eq 6 ] || fail "branch forced teardown exited $status, not 6: $out"
   assert_contains "$out" "cannot discard work" "forced-teardown refusal lost its wording"
+  # Away authority never relocates a discard.
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'clean up anything stuck' >/dev/null \
+    || fail "away entry failed"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-teardown.sh" task-x --force 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "away branch forced teardown exited $status, not 6: $out"
+  assert_contains "$out" "cannot discard work" "away forced-teardown refusal lost its wording"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "away archive failed"
   # An ORDINARY branch teardown is not blocked by this guard (it fails later
   # on its ordinary no-task validation instead).
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-teardown.sh" task-x 2>&1)

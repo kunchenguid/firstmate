@@ -1001,6 +1001,115 @@ fm_pr_github_read_record() {  # <owner> <repo> <number>
   fm_pr_github_read_record_with_gh_axi "$@"
 }
 
+# One GitHub API path segment, such as a branch name that may hold a slash,
+# percent-encoded byte by byte.
+fm_pr_github_urlencode_path_segment() {  # <segment>
+  local LC_ALL=C input=$1 encoded='' char octet hex
+  while [ -n "$input" ]; do
+    char=${input%"${input#?}"}
+    input=${input#?}
+    case "$char" in
+      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
+      *)
+        printf -v octet '%d' "'$char"
+        [ "$octet" -ge 0 ] || octet=$((octet + 256))
+        printf -v hex '%02X' "$octet"
+        encoded=$encoded%$hex
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+}
+
+# Whether a failed branch-rules read (the gh stderr given) is GitHub's
+# plan-gated 403 ("Upgrade to GitHub Pro or make this repository public"),
+# which means the repository's plan cannot expose branch rules at all, on
+# GitHub or GitHub Enterprise Server - not that this script failed to read
+# them, and not that the token lacks a permission. Such a repository has no
+# active ruleset rule of any kind. Any other failure (auth, rate limit,
+# network, a 404, an unrelated 403) is not this and stays unreadable.
+fm_pr_github_branch_rules_unavailable_on_plan() {  # <gh-stderr>
+  case "$1" in
+    *"Upgrade to GitHub Pro or make this repository public"*) return 0 ;;
+  esac
+  return 1
+}
+
+# The required-check set of a GitHub base branch, read from classic branch
+# protection and active rulesets: FM_PR_GITHUB_REQUIRED becomes a JSON array of
+# {context, app_id} and FM_PR_GITHUB_REQUIRED_ERROR names every source that
+# could not be read. It returns nonzero when any source was unreadable, while
+# every requirement that was read stays in the set. An unprotected branch adds
+# nothing, and fm_pr_github_branch_rules_unavailable_on_plan owns the one rules
+# failure that also adds nothing. bin/fm-pr-merge.sh gates every merge on this
+# set, and bin/fm-pr-review-snapshot.sh uses it to tell a base that requires no
+# checks from required checks that have not reported yet.
+FM_PR_GITHUB_REQUIRED=
+FM_PR_GITHUB_REQUIRED_ERROR=
+fm_pr_github_read_required_contexts() {  # <owner> <repo> <base>
+  local owner=$1 repo=$2 base=$3 branch_path branch_json rules_json classic='' ruleset='' api_err api_err_text
+  FM_PR_GITHUB_REQUIRED='[]'
+  FM_PR_GITHUB_REQUIRED_ERROR=
+  branch_path=$(fm_pr_github_urlencode_path_segment "$base")
+
+  if ! branch_json=$(gh api "repos/$owner/$repo/branches/$branch_path" 2>/dev/null) \
+    || [ -z "$branch_json" ] \
+    || ! classic=$(printf '%s' "$branch_json" | jq -c '
+      if type != "object" or (.protected | type) != "boolean" then
+        error("branch payload is unreadable")
+      elif .protected == false then
+        empty
+      elif (.protection.required_status_checks | type) != "object" then
+        error("branch protection summary is unreadable")
+      else
+        .protection.required_status_checks
+        | ((.checks // []) | if type == "array" then .[] else error("invalid checks") end
+           | {context, app_id}),
+          ((.contexts // []) | if type == "array" then .[] else error("invalid contexts") end
+           | {context: ., app_id: null})
+        | if (.context | type) == "string" and (.context | length) > 0
+             and (.app_id == null or (.app_id | type) == "number")
+          then . else error("invalid required check") end
+        | if .app_id == -1 then .app_id = null else . end
+      end' 2>/dev/null); then
+    classic=''
+    FM_PR_GITHUB_REQUIRED_ERROR="the branch protection summary for base branch $base could not be read"
+  fi
+
+  if ! api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-required-rules.XXXXXX"); then
+    FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+  else
+    if ! rules_json=$(gh api --paginate "repos/$owner/$repo/rules/branches/$branch_path" 2>"$api_err"); then
+      api_err_text=$(cat "$api_err" 2>/dev/null)
+      if ! fm_pr_github_branch_rules_unavailable_on_plan "$api_err_text"; then
+        FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+      fi
+    elif [ -z "$rules_json" ] || ! ruleset=$(printf '%s' "$rules_json" | jq -c '
+        if type != "array" then error("rules payload is unreadable") else .[] end
+        | select(type != "object" or .type == "required_status_checks")
+        | if type == "object" and (.parameters.required_status_checks | type) == "array"
+          then .parameters.required_status_checks[] else error("invalid required check rule") end
+        | if type == "object" and (.context | type) == "string" and (.context | length) > 0
+             and (.integration_id == null or (.integration_id | type) == "number")
+          then {context, app_id: .integration_id} else error("invalid required check rule") end
+        | if .app_id == -1 then .app_id = null else . end' 2>/dev/null); then
+      ruleset=''
+      FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+    fi
+    rm -f "$api_err"
+  fi
+
+  # Consumed by bin/fm-pr-merge.sh and bin/fm-pr-review-snapshot.sh.
+  # shellcheck disable=SC2034
+  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n' "$classic" "$ruleset" | jq -sc '
+    unique_by([.context, .app_id]) | group_by(.context)
+    | map(if any(.[]; .app_id != null) then map(select(.app_id != null)) else . end) | add // []')
+  [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
+}
+
 fm_pr_gitlab_read_record() {  # <host> <path> <number>
   local host=$1 path=$2 number=$3 project_url json fields line
   local total=0 named=0 state='' merged=''

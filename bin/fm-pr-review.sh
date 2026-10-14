@@ -64,6 +64,8 @@ POLICY="$ROOT/.github/firstmate-review-policy.json"
 LEDGER_DIR=
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
 
 die() { printf 'fm-pr-review: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"; }
@@ -502,6 +504,10 @@ case "$cmd" in
     printf 'held: %s head=%s reason=%s\n' "$URL" "$HEAD" "$REASON"
     ;;
   release-hold)
+    # A hold records a human decision still owed, so releasing it stays MAIN's
+    # in every posture and is never relocated to the supervision branch
+    # (role partition: bin/fm-lease-lib.sh).
+    fm_lease_forbid_branch "review hold release (fm-pr-review release-hold)"
     [ "$#" -eq 3 ] || die 'release-hold requires URL, head, and evidence'
     parse_url "$1"; HEAD=$2; EVIDENCE=$3
     [ -n "$EVIDENCE" ] || die 'hold-release evidence must not be empty'

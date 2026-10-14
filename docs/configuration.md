@@ -634,7 +634,7 @@ Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](f
 
 The tracked policy file configures the GitHub PR review ledger without changing no-mistakes itself.
 It fixes the data-relative ledger directory, the first review checkpoint at roughly ten minutes, the bounded retry delays for explicitly pending reviews, conservative broad and low-stakes size thresholds, reviewer-check name markers, the configured high-stakes no-mistakes model, and the independent-agent review count.
-The optional `require_reviewed_head_handoff` boolean requires the reviewed-head handoff for GitHub merges only when set to `true`; an absent or `false` value leaves it optional, though a direct GitHub merge still refuses while the pull request's review ledger records an unreleased hold.
+The optional `require_reviewed_head_handoff` boolean requires the reviewed-head handoff for GitHub merges when set to `true`; an absent or `false` value leaves it optional while attended, though a direct GitHub merge still refuses while the pull request's review ledger records an unreleased hold, and while the away-posture record exists every GitHub merge requires the handoff whatever this setting says.
 `bin/fm-pr-risk.sh` owns the classification decision, while `bin/fm-pr-review.sh` owns the private data-relative ledger schema, the authenticated watcher shim, and the head-keyed post-merge Ready for QA gate.
 The agent-only [`pr-review-policy` skill](../.agents/skills/pr-review-policy/SKILL.md) owns the operating procedure and the preserved human gates.
 

@@ -4,10 +4,13 @@
 # pagination truncation, or unreadable surface refuses instead of producing a
 # partial snapshot. The output includes top-level comments, submitted reviews,
 # every inline review thread, requested reviewers, triggered reviewer checks,
-# and required checks bound to the exact head. Comments from the pull-request
-# author are excluded unless the authenticated collector is that author; the
-# ledger then excludes only its exact bound final-disposition post while
-# retaining genuine review feedback from the collector.
+# and required checks bound to the exact head. A base branch that provably
+# requires no checks records none, while a required check that has not reported,
+# or a required set that cannot be read, records one pending required check.
+# Comments from the pull-request author are excluded unless the authenticated
+# collector is that author; the ledger then excludes only its exact bound
+# final-disposition post while retaining genuine review feedback from the
+# collector.
 #
 # Usage: fm-pr-review-snapshot.sh <pr-url> <output.json>
 set -eu
@@ -49,9 +52,18 @@ gh pr checks "$URL" --required --json name,state,bucket,link > "$TMP/required.js
 if jq -e 'type == "array"' "$TMP/required.json" >/dev/null 2>&1; then
   : # Pending and failed checks deliberately return nonzero with complete JSON.
 elif grep -q "^no required checks reported on the '" "$TMP/checks.err"; then
-  printf '%s\n' \
-    '[{"name":"required checks have not reported","state":"PENDING","bucket":"pending","link":null}]' \
-    > "$TMP/required.json"
+  # gh prints this both when the base requires no checks and when required
+  # checks have not reported yet; only a readable, empty required set is the
+  # first, and anything else stays one pending required check.
+  BASE=$(jq -er '.base.ref | select(type == "string" and length > 0)' "$TMP/core.json" 2>/dev/null) || BASE=
+  if [ -n "$BASE" ] && fm_pr_github_read_required_contexts "$OWNER" "$REPO" "$BASE" \
+    && [ "$FM_PR_GITHUB_REQUIRED" = '[]' ]; then
+    printf '[]\n' > "$TMP/required.json"
+  else
+    printf '%s\n' \
+      '[{"name":"required checks have not reported","state":"PENDING","bucket":"pending","link":null}]' \
+      > "$TMP/required.json"
+  fi
 elif grep -q "^no checks reported on the '" "$TMP/checks.err"; then
   printf '[]\n' > "$TMP/required.json"
 else
