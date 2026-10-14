@@ -127,7 +127,7 @@ The [arm header](../bin/fm-watch-arm.sh), "Scheduling continuation", owns the ho
 ### Codex plain checkpoint
 
 A Codex home that does not run the host runs its checkpoint cycle under the same continuing arm, with the checkpoint as the reader.
-The checkpoint ends with the arm still running, recorded in `state/.supervision-host-left`, so registered check sweeps and restarts of the one watcher carry on while the model reasons.
+When the checkpoint can persist its owned arm under a live session lock, it ends with that arm still running, so registered check sweeps carry on while the model reasons.
 The next checkpoint takes that arm over, and the [checkpoint header](../bin/fm-watch-checkpoint.sh) owns the handoff and the cases that stop the arm instead.
 
 ## Actionable wake ordering

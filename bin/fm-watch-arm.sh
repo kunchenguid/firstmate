@@ -88,31 +88,36 @@
 # the stop.
 #
 # Scheduling continuation: a successor the supervision host starts for main or
-# for an engine turn (bin/fm-supervision-host.sh start_arm) carries its host's
-# pid, a spool path, and the host's busy marker. While nobody is waiting on its
-# output - the host relinquished the cycle for main, or the host is
-# busy in a turn of its own - an actionable close of the cycle's watcher no
+# for an engine turn (bin/fm-supervision-host.sh start_arm), or a plain Codex
+# checkpoint's arm (bin/fm-watch-checkpoint.sh start_arm), carries its reader's
+# pid, a spool path, and the reader's busy marker. While nobody is waiting on its
+# output - the reader relinquished the cycle for main, or the reader is
+# busy - an actionable close of the cycle's watcher no
 # longer ends supervision with it: the close is already a durable queue row, so
 # this same arm starts its one fresh watcher as a handling successor and keeps
-# owning it. A busy host is handed each such close through the spool (reason
+# owning it. A busy reader is handed each such close through the spool (reason
 # lines prefixed C and a tab, then an S record with the verified replacement's
 # pid and recovery generation, also tab-separated) for its next wait to consume.
 # A trailing close makes the handoff incomplete until a new S record arrives.
+# An S record without a C record is replacement readiness, not a notification;
+# readers verify and clear it under the spool lock without handling a wake.
 # Publication and the continuation decision share the spool lock with the
-# host's consumption and reader transitions (bin/fm-supervision-host.sh
-# take_spool and detach_successor). The identity-matched relinquished-arm
+# reader's consumption and transitions (the host's take_spool and
+# detach_successor, or the checkpoint's take_spool and detach_arm).
+# The identity-matched relinquished-arm
 # record distinguishes a host still cleaning up from an idle reader.
 # It never starts a second watcher: the singleton lock still
 # arbitrates, and a take-over stops the current child, which ends the arm as
 # before. The arm stops continuing, and exits with its close as any arm does,
-# when the home's session lock no longer names the session it started under,
-# when the away daemon's flag exists, or when a live host is idle and waiting
+# when the home's session lock no longer names a live session it started under,
+# when the away daemon's flag exists, or when a live reader is idle and waiting
 # for the close. A fixed two-second minimum cycle bounds restart frequency.
 # The same continuation replaces a watcher that died of a signal the stop path
 # never sends (SIGKILL, a crash), which closed with no reason: TERM, INT, and
 # HUP are how --stop, --take-over, and the harness end a cycle on purpose and
 # are never restarted, and the fourth death in a row within a minute of its
-# start ends the arm with the failure instead.
+# start ends the arm with the failure instead. A successful actionable close
+# resets that consecutive-death count.
 #
 # A copy of this script living under a disposable no-mistakes validation
 # checkout (a path containing /.no-mistakes/worktrees/) refuses every mode

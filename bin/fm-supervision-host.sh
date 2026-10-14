@@ -570,8 +570,9 @@ spool_ready() {  # <spool-file>
 # Take the spool's hand-off: sets SPOOL_TEXT to the close lines, and
 # SPOOL_WATCHER and SPOOL_GENERATION to the last restart. Returns 1 when
 # nothing complete is waiting or the hand-off carries no close. Confirm the
-# current watcher and become busy before clearing the batch under the arm's
-# continuation lock, so a close cannot mistake this consumer for an idle reader.
+# current watcher and, when close lines are present, become busy before clearing
+# the batch under the arm's continuation lock, so a close cannot mistake this
+# consumer for an idle reader handling a wake.
 take_spool() {  # <spool-file>
   local spool=${1:-} line rest tab=$'\t'
   SPOOL_TEXT=
