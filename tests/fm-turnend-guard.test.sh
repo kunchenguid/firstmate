@@ -1199,7 +1199,7 @@ import { pathToFileURL } from "node:url";
 
 const marker = `${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`;
 const version = `sha256:${createHash("sha256").update(readFileSync(process.env.PLUGIN)).digest("hex")}`;
-// The lock names this process's parent: a live strict ancestor, exactly where
+// The lock names the parent of this process: a live strict ancestor, exactly where
 // the real session sits above a nested `pi --help`.
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.ppid}\n`);
 
@@ -1237,7 +1237,7 @@ switch (process.env.MARKER_CASE) {
     // "reload" exercises the session_start write path without a startup digest.
     await handlers.get("session_start")?.({ type: "session_start", reason: "reload" }, {});
     const after = readFileSync(marker, "utf8");
-    if (after !== before) throw new Error(`nested load replaced the live session's marker: ${JSON.stringify(after)}`);
+    if (after !== before) throw new Error(`nested load replaced the marker of the live session: ${JSON.stringify(after)}`);
     break;
   }
   case "dead": {
