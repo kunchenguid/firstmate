@@ -43,7 +43,7 @@
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
-#   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
+#   local-only   implement on branch, stop and report "ready in branch <b> (local only, not pushed, not landed)" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.

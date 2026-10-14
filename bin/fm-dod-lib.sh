@@ -71,6 +71,13 @@
 # changes is refused until it can be watched by its membership pinned when its
 # watch is armed, because the merge poll watches one change. No contract here
 # lets a worker submit, vote on, or abandon a change.
+# What each mode's done states about where the work is: no-mistakes' first done
+# says it is committed locally and unpublished until the pipeline pushes, or on Gerrit until the worker publishes (ungated
+# handoff), its CI-ready done and direct-PR's done name a PR and are refused unless
+# the named head is reachable from a remote reference under refs/remotes (never a
+# configured-upstream or branch-moved test, which reads a never-pushed branch as safe), and local-only's
+# done says the branch is local, not pushed, not landed. local-only legitimately
+# ends locally, so it is checked against project heads, not demanded published.
 # The two PR-based blocks require a non-draft pull request before the done
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
@@ -471,7 +478,8 @@ This project's review server is Gerrit: it has no pull requests and no forge CI 
 Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
 Those three are the only steps that reach a forge, and skipping them is a supported outcome, not a degraded one.
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
+When you believe it is complete, append \`done [at=<epoch>]: committed on $branch, local and unpublished until you publish the change: {summary}\` to the status file and stop.
+That first \`done:\` says the work exists only on this machine's branch; it is not a shipped report.
 Firstmate will then instruct you to run /no-mistakes to validate.
 That first \`done:\` is the handoff that starts the pipeline; it is not a request to publish.
 
@@ -505,7 +513,7 @@ When it is implemented and committed, push your branch and open a PR with \`$for
 Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
-That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
+That \`done:\` is accepted only when this copy's HEAD - your latest commit - is reachable from a remote reference, which is the same question cleanup asks; an unpushed commit is refused, so push before you report. The check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -519,7 +527,8 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
+When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch (local only, not pushed, not landed)\` to the status file and stop.
+That line says where the work is: only on this machine's local branch \`$branch\`, unpublished and unlanded, so never read as shipped; keep that parenthetical in the report.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
@@ -529,7 +538,8 @@ EOF
 Delivery contract: mode=no-mistakes$contract_forge$contract_consent
 Ship branch: $branch
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
+When you believe it is complete, append \`done [at=<epoch>]: committed on $branch, local and unpublished until the pipeline pushes: {summary}\` to the status file and stop.
+That first \`done:\` says the work exists only on this machine's branch; it is not a shipped report.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
 ${nm_base}
@@ -540,7 +550,7 @@ EOF
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
-That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
+That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed and is reachable from a remote reference, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 EOF
       ;;

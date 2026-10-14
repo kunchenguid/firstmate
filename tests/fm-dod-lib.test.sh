@@ -141,6 +141,32 @@ test_standalone_local_only_needs_project_ref() {
   pass "standalone local-only done: requires the named head in the project clone"
 }
 
+test_never_pushed_branch_is_refused_and_each_mode_states_where_work_is() {
+  local repo wt rc block
+  repo="$TMP_ROOT/never-repo"
+  wt="$TMP_ROOT/never-wt"
+  fm_git_worktree "$repo" "$wt" fm/never
+  git -C "$wt" commit -q --allow-empty -m 'never pushed'
+  git -C "$wt" config branch.fm/never.remote origin
+  git -C "$wt" config branch.fm/never.merge refs/heads/fm/never
+  rc=0
+  accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/3" >/dev/null || rc=$?
+  [ "$rc" -eq 1 ] || fail "direct-PR done for a never-pushed branch was accepted"
+  rc=0
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/3 checks green" >/dev/null || rc=$?
+  [ "$rc" -eq 1 ] || fail "no-mistakes CI-ready done for a never-pushed branch was accepted"
+  block=$(fm_dod_block local-only t fm/t)
+  case "$block" in *"ready in branch fm/t (local only, not pushed, not landed)"*) ;; *) fail "local-only done does not say the work is local and unlanded" ;; esac
+  block=$(fm_dod_block no-mistakes t fm/t)
+  case "$block" in *"committed on fm/t, local and unpublished until the pipeline pushes"*) ;; *) fail "no-mistakes first done does not say the work is unpublished" ;; esac
+  block=$(fm_dod_block no-mistakes t fm/t gerrit)
+  case "$block" in *"committed on fm/t, local and unpublished until you publish the change"*) ;; *) fail "no-mistakes Gerrit first done does not name the worker as publisher" ;; esac
+  case "$block" in *"until the pipeline pushes"*) fail "no-mistakes Gerrit first done names the pipeline as publisher" ;; esac
+  block=$(fm_dod_block direct-PR t fm/t)
+  case "$block" in *"reachable from a remote reference"*) ;; *) fail "direct-PR done does not state the remote-reachability test" ;; esac
+  pass "never-pushed branch is refused and each mode's done states where the work is"
+}
+
 test_free_text_sha_is_not_the_named_head() {
   local repo wt old new reason rc
   repo="$TMP_ROOT/hex-repo"
@@ -429,6 +455,7 @@ test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
+test_never_pushed_branch_is_refused_and_each_mode_states_where_work_is
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
