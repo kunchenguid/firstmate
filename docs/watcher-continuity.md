@@ -428,6 +428,7 @@ It then simulates actionable and empty child closes against the actual Pi and Op
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 - Lets a Pi successor's descendant print readiness after the arm exits to prove restoration retries until a live successor exists before delivery.
 - Lets a verified Pi successor exit after delivery while a descendant holds its pipes to prove the exit alone schedules the bounded retry.
+- Delays a Pi arm's actionable line behind a descendant-held pipe until after its exit to prove that line still becomes the wake instead of a retry.
 
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, plus:
 
