@@ -1351,6 +1351,7 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_SLOT_CLAIM_REFUSED=0
 SPAWN_TREEHOUSE_LEASE=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
@@ -1511,6 +1512,7 @@ spawn_abort_cleanup() {
     fm_slot_record_owner "$SPAWN_TREEHOUSE_LEASE" "$STATE" "$STATE/$ID.meta" || lease_owner_rc=$?
   fi
   if [ -n "$SPAWN_TREEHOUSE_LEASE" ] && [ "$lease_owner_rc" = 1 ] &&
+    [ "$SPAWN_SLOT_CLAIM_REFUSED" != 1 ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     SPAWN_META_TMP="$STATE/.$ID.meta.treehouse-recovery.${BASHPID:-$$}"
     {
@@ -4771,6 +4773,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+      # The slot was never this task's, so the abort cleanup below must not
+      # retain it with a recovery record: teardown of such a record would
+      # return a copy this task never owned.
+      SPAWN_SLOT_CLAIM_REFUSED=1
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
       exit 1
     fi
