@@ -592,6 +592,69 @@ test_lock_stale_steal_single_winner_under_concurrency() {
   pass "concurrent stale-lock steal yields exactly one winner"
 }
 
+test_lock_stale_steal_wins_over_late_claimant_link() {
+  # A late claimant links the path the stealer just freed, and backs off only
+  # after the stealer's create has found that path occupied. The claimant must
+  # lose to the held steal mutex, and the stealer must still take the lock:
+  # otherwise both back off and a stale-lock stampede ends with no owner.
+  local dir state lockdir fakebin out rc dead
+  dir=$(make_case lock-stale-steal-late-link)
+  state=$(cd "$dir/state" && pwd -P)
+  lockdir="$state/.contend.lock"
+  fakebin="$dir/fakebin"
+  out="$dir/claimant"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  # The rmdir hook stages the interleaving in two phases. When the stealer
+  # frees the stale lock, the claimant links the freed path. When the stealer
+  # then discards an owner dir because that path is occupied, the claimant
+  # runs its claim and backs off to the held steal mutex.
+  cat > "$fakebin/rmdir" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_RMDIR_HOOKED:-}" ] || exec /bin/rmdir "$@"
+export FM_TEST_RMDIR_HOOKED=1
+last=
+for arg do last=$arg; done
+/bin/rmdir "$@" || exit
+if [ "$last" = "$FM_TEST_LOCK" ] && mkdir "$FM_TEST_HOOK/freed" 2>/dev/null; then
+  bash -c '
+    . "$1"
+    owner=$(fm_lock_owner_dir "$2") || exit 1
+    fm_lock_prepare_owner "$owner" || exit 1
+    ln -s "$owner" "$2" || exit 1
+    printf "%s\n" "$owner" > "$3/claimant-owner"
+  ' _ "$FM_TEST_LIB" "$FM_TEST_LOCK" "$FM_TEST_HOOK"
+elif [ -s "$FM_TEST_HOOK/claimant-owner" ] \
+  && [ "$last" != "$(cat "$FM_TEST_HOOK/claimant-owner")" ] \
+  && case "$last" in "$FM_TEST_LOCK".owner.*) true ;; *) false ;; esac \
+  && mkdir "$FM_TEST_HOOK/claimed" 2>/dev/null; then
+  bash -c '
+    . "$1"
+    if fm_lock_claim "$2" "$(cat "$3/claimant-owner")"; then
+      printf "won\n" > "$4"
+    else
+      printf "lost\n" > "$4"
+    fi
+  ' _ "$FM_TEST_LIB" "$FM_TEST_LOCK" "$FM_TEST_HOOK" "$FM_TEST_OUT"
+fi
+SH
+  chmod +x "$fakebin/rmdir"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LIB="$LIB" FM_TEST_LOCK="$lockdir" \
+    FM_TEST_HOOK="$dir" FM_TEST_OUT="$out" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2" || exit 1
+      [ "$(cat "$2/pid" 2>/dev/null)" = "${BASHPID:-$$}" ] || exit 2
+    ' _ "$LIB" "$lockdir" || rc=$?
+  [ -d "$dir/claimed" ] || fail "late claimant hook never fired after the stale lock was freed"
+  [ "$(cat "$out" 2>/dev/null || true)" = lost ] \
+    || fail "late claimant claimed the lock while the steal mutex was held"
+  [ "$rc" -eq 0 ] || fail "stealer lost to a late claimant that backed off (rc=$rc)"
+  pass "a stale-lock stealer still wins when a late claimant links the freed path"
+}
+
 test_lock_live_steal_mutex_is_not_reclaimed() {
   local dir state lockdir dead holder_file holder out i lockpid stealpid
   dir=$(make_case lock-live-stealer)
@@ -1560,6 +1623,7 @@ test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
+test_lock_stale_steal_wins_over_late_claimant_link
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
 test_lock_steal_reap_cannot_remove_successor

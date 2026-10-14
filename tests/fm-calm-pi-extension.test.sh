@@ -2813,8 +2813,10 @@ TS
   start_geometry_pi() {
     local session_arg=$1
     tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    # Without TMUX, Pi skips its async tmux extended-keys probe. On a loaded
+    # host that probe's warning can land between the rows this test measures.
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 44 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi $PI_TUI_MODE_ARGS --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+      "cd '$project' && env -u TMUX FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi $PI_TUI_MODE_ARGS --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
   }
 
   capture_geometry_viewport() {
@@ -2828,21 +2830,6 @@ TS
       capture_geometry_viewport "$file" || true
       grep -Fq "$text" "$file" 2>/dev/null && return 0
       sleep 0.05
-      attempt=$((attempt + 1))
-    done
-    return 1
-  }
-
-  wait_for_geometry_transition() {
-    local file=$1 transient_text=$2 final_text=$3 attempt=0 saw_transient=0
-    while [ "$attempt" -lt 600 ]; do
-      capture_geometry_viewport "$file" || true
-      if grep -Fq "$transient_text" "$file" 2>/dev/null; then
-        saw_transient=1
-      elif [ "$saw_transient" -eq 1 ] && grep -Fq "$final_text" "$file" 2>/dev/null; then
-        return 0
-      fi
-      sleep 0.01
       attempt=$((attempt + 1))
     done
     return 1
@@ -2894,10 +2881,12 @@ TS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  wait_for_geometry_transition \
+  # Pi's "Reloading ..." box stays up only as long as the reload, which can be
+  # shorter than one pane capture, so wait for the "Reloaded ..." status Pi
+  # leaves on screen once the reload and its transcript rebuild have finished.
+  wait_for_geometry_text \
     "$snapshot" \
-    "Reloading keybindings, extensions, skills, prompts, themes, and context files..." \
-    "CALM_GEOMETRY_FINAL" \
+    "Reloaded keybindings, extensions, skills, prompts, themes, and context files" \
     || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 

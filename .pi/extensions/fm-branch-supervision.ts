@@ -1670,6 +1670,9 @@ ${context.command}
   // synchronous read it replaces did. The generation is captured before that
   // await so a session replaced while it runs cannot be staged into.
   pi.on?.("before_agent_start", async (event, ctx) => {
+    // Only a user prompt starts the dialog this mirrors; an idle custom
+    // triggerTurn message carries no prompt.
+    if (!("prompt" in event)) return;
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
     const promptGeneration = generation;

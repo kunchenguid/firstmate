@@ -1161,6 +1161,25 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
   fm_lock_try_create "$lockdir"
 }
 
+# Create the freed lock while holding its steal mutex. A late claimant can link
+# the path this stealer just freed, but its claim then sees the held steal
+# mutex and backs off (fm_lock_claim), so that occupancy is transient: wait it
+# out instead of letting the stealer and the claimant both lose. The bound keeps
+# a stopped claimant from wedging the stealer; a real directory lock is not a
+# claimant that backs off, so it is never waited on.
+fm_lock_create_while_stealing() {  # <lockdir> <steal-owner>
+  local lockdir=$1 steal_owner=$2 tries=0
+  while ! fm_lock_try_create "$lockdir" "$steal_owner"; do
+    [ "$tries" -lt 50 ] || return 1
+    if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+      return 1
+    fi
+    fm_lock_points_to_owner "$lockdir.steal" "$steal_owner" || return 1
+    sleep 0.02
+    tries=$((tries + 1))
+  done
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -1247,7 +1266,7 @@ fm_lock_try_acquire() {
   fi
   fm_lock_remove_path "$lockdir" || true
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
+  if fm_lock_create_while_stealing "$lockdir" "$steal_owner"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
