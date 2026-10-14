@@ -652,8 +652,15 @@ That safely defers injection and eventually raises the wedge alarm.
 ### Away-mode injection
 
 A bare shell prompt is never an empty agent composer.
-Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
+Away-mode injection proceeds on an affirmative `empty` result, and `pending` always defers.
+An `unknown` result defers unless the daemon's second proof (`inject_unknown_second_proof` in `bin/fm-supervise-daemon.sh`) passes.
+That proof requires native identity `claude` in state idle or done, no blocking dialog, an empty prompt row from `fm_composer_claude_glyph_row_proof`, and a screen bottom unchanged for `FM_UNKNOWN_QUIET_SECS`, which defaults to 60.
+It exists because the shared classifier cannot prove a Claude composer whose top rule carries a window title, including every non-ASCII title.
+Only that send sets `FM_HERDR_COMPOSER_PREPROVED=1`, which lets the Claude payload proof read the titled composer through the same glyph-row reader.
+The payload proof still requires an empty composer before typing and the payload visible before Enter.
+Other backends have no native identity probe, so `unknown` always defers there.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
+A delivered digest logs `inject delivered` with the proof that admitted it.
 
 ### Operational input markers
 

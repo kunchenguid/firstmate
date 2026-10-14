@@ -726,6 +726,89 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   printf 'pending'; return 0
 }
 
+# fm_composer_claude_glyph_row_content: a SECOND, deliberately narrow reader of
+# a Claude composer, for the screens the shape selector above cannot prove.
+# Root cause it exists for: fm_composer_extract_selected_content (and the
+# classifier behind it) FAILS on a Claude composer whose top rule carries a
+# window title, and refuses non-ASCII titles (an em dash, an accent, an emoji)
+# on purpose (#1988), because its width proof measures the rule. The away
+# daemon then read every escalation's target as `unknown`, and the herdr
+# Claude payload proof, built on that same failing reader, refused to type.
+# This reader never measures a rule's width. It recognizes only this picture,
+# read from the plain screen: the LAST row that opens with an agent prompt
+# glyph directly under a row that opens with an 8-column `─` run (a plain or
+# titled top rule), followed by zero or more wrapped continuation rows (which
+# may themselves open with a glyph such as `→`) and
+# then a row of nothing but `─` at least 8 wide, with at most 3 non-blank
+# furniture rows below it and no other glyph or rule row among them. It prints
+# the prompt's content (glyph removed, Claude's SGR-2 dim ghost text stripped on
+# a styled capture but its muted-grey typed slash commands kept, the same
+# FM_COMPOSER_GHOST_LUMA_MAX=0 read fm_backend_herdr_composer_content uses,
+# each continuation row on its own line) and returns 1 on anything else,
+# including a blocking dialog. Only explicit opt-ins consult it: the away
+# daemon's unknown-verdict path (bin/fm-supervise-daemon.sh inject_msg) and the
+# herdr send that path arms with FM_HERDR_COMPOSER_PREPROVED=1.
+fm_composer_claude_glyph_row_content() {  # <caps> <screen> -> content; 1 = not recognized
+  local caps=$1 screen=$2 styled=0 kv plain row last=-1 close=-1 n i rest glyph content joined
+  local -a prows=() rrows=()
+  while IFS= read -r kv; do
+    [ "$kv" = styled=1 ] && styled=1
+  done <<EOF
+$caps
+EOF
+  fm_composer_blocking_dialog "$screen" >/dev/null && return 1
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  mapfile -t prows <<<"$plain"
+  mapfile -t rrows <<<"$screen"
+  n=${#prows[@]}
+  [ "$n" -eq "${#rrows[@]}" ] || return 1
+  for ((i = 1; i < n; i++)); do
+    row=${prows[i]}
+    fm_composer_normalize_trim_var row
+    fm_composer_leading_agent_glyph_var glyph "$row" || continue
+    row=${prows[i - 1]}
+    fm_composer_normalize_trim_var row
+    case "$row" in ────────*) last=$i ;; esac
+  done
+  [ "$last" -ge 1 ] || return 1
+  for ((i = last + 1; i < n; i++)); do
+    row=${prows[i]}
+    fm_composer_normalize_trim_var row
+    case "$row" in
+      ────────*) [ -z "${row//─/}" ] || return 1; close=$i; break ;;
+    esac
+  done
+  [ "$close" -gt "$last" ] || return 1
+  rest=0
+  for ((i = close + 1; i < n; i++)); do
+    row=${prows[i]}
+    fm_composer_normalize_trim_var row
+    [ -n "$row" ] || continue
+    rest=$((rest + 1))
+    fm_composer_leading_agent_glyph_var glyph "$row" && return 1
+    case "$row" in ────────*) return 1 ;; esac
+  done
+  [ "$rest" -le 3 ] || return 1
+  content=$(FM_COMPOSER_GHOST_LUMA_MAX=0 _fm_composer_row_content "${rrows[last]}" "$styled")
+  if fm_composer_leading_agent_glyph_var glyph "$content"; then content=${content#*"$glyph"}; fi
+  fm_composer_normalize_trim_var content
+  joined=$content
+  for ((i = last + 1; i < close; i++)); do
+    content=$(FM_COMPOSER_GHOST_LUMA_MAX=0 _fm_composer_row_content "${rrows[i]}" "$styled")
+    joined+=$'\n'$content
+  done
+  printf '%s' "$joined"
+}
+
+# fm_composer_claude_glyph_row_proof: the verdict over that reader. An
+# unrecognized picture is `unknown`; any text in the prompt is `pending`; only
+# an all-blank prompt is `empty`.
+fm_composer_claude_glyph_row_proof() {  # <caps> <screen> -> empty|pending|unknown
+  local content
+  content=$(fm_composer_claude_glyph_row_content "$1" "$2") || { printf 'unknown'; return 0; }
+  if [ -z "${content//[$' \t\r\n\v\f']/}" ]; then printf 'empty'; else printf 'pending'; fi
+}
+
 # --- The screen classifier ---------------------------------------------------
 #
 # fm_composer_classify_screen <caps> <screen> [cursor_row] [identity]

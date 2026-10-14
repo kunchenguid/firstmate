@@ -59,12 +59,18 @@ fm_afk_start_usage() {
 # lifecycle" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
+# The unknown-composer witness is evidence about THIS session's screen;
+# carrying it into the next session lets the second proof skip its quiet
+# window on the first cycle on the strength of a screen nobody has looked at
+# since, which is a stale proof, and a stale proof is the failure the
+# second proof exists to end.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
         "$state/.subsuper-inject-wedged" \
-        "$state/.subsuper-unknown-acked" 2>/dev/null
+        "$state/.subsuper-unknown-acked" \
+        "$state/.subsuper-unknown-witness" 2>/dev/null
 }
 
 daemon_lock_owner() {

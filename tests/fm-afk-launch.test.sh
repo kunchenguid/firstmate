@@ -255,7 +255,7 @@ unit_stop_archives_the_record_last() {
 }
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the four stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the five stale artifacts.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -265,6 +265,7 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.subsuper-unknown-acked"
+  printf '1784074271\tsig\n' > "$st/state/.subsuper-unknown-witness"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -273,8 +274,9 @@ unit_clear_stale() {
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
      && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
-     && [ ! -e "$st/state/.subsuper-unknown-acked" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, wedge marker, and unknown-wake acknowledgements"
+     && [ ! -e "$st/state/.subsuper-unknown-acked" ] \
+     && [ ! -e "$st/state/.subsuper-unknown-witness" ]; then
+    pass "clear-stale: removes escalations buffer, sidecar, wedge marker, unknown-wake acknowledgements, and the prior session's unknown-composer witness"
   else
     fail "clear-stale: stale artifacts survived"
   fi
@@ -595,13 +597,15 @@ unit_failed_start_rolls_back_state() {
   mkdir -p "$st/state"
   printf 'pending\n' > "$st/state/.subsuper-escalations"
   printf 'wedged\n' > "$st/state/.subsuper-inject-wedged"
+  printf 'witness\n' > "$st/state/.subsuper-unknown-witness"
   enter_posture "$st" || fail "failed start: could not enter fixture posture"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
     fail "failed start: unsupported backend unexpectedly succeeded"
   elif [ ! -e "$st/state/.afk" ] \
     && [ "$(cat "$st/state/.subsuper-escalations")" = pending ] \
-    && [ "$(cat "$st/state/.subsuper-inject-wedged")" = wedged ]; then
+    && [ "$(cat "$st/state/.subsuper-inject-wedged")" = wedged ] \
+    && [ "$(cat "$st/state/.subsuper-unknown-witness")" = witness ]; then
     pass "failed start: away flag and delivery artifacts roll back"
   else
     fail "failed start: left false away state or discarded delivery artifacts"

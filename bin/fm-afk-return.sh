@@ -258,12 +258,18 @@ print_blockers() {  # <file>
   done < "$file"
 }
 
+# The unknown-composer witness is evidence about THIS session's screen;
+# carrying it into the next session lets the second proof skip its quiet
+# window on the first cycle on the strength of a screen nobody has looked at
+# since, which is a stale proof, and a stale proof is the failure the
+# second proof exists to end.
 clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
     "$STATE/.subsuper-inject-wedged" \
-    "$STATE/.subsuper-unknown-acked"
+    "$STATE/.subsuper-unknown-acked" \
+    "$STATE/.subsuper-unknown-witness"
 }
 
 # The lifecycle retention reasons the gate kept, one per line, empty when the

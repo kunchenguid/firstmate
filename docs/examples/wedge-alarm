@@ -6,8 +6,9 @@
 # Directives:
 #   off              position-independent kill switch: disable every active
 #                    alert (the durable marker and tmux status-line flash remain)
-#   auto | default   platform default: macOS -> osascript; other platforms have
-#                    no built-in OS channel (configure a command: line instead)
+#   auto | default   platform default: macOS -> osascript; elsewhere a herdr
+#                    supervisor falls back to herdr, otherwise there is no
+#                    built-in channel (configure a command: line instead)
 #   osascript        macOS Notification Center banner (backend-independent)
 #   herdr            herdr UI notification (herdr notification show)
 #   command:<cmd>    run <cmd> via `sh -c`; the alarm summary is passed as $1 and

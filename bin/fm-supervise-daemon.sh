@@ -868,6 +868,10 @@ escalate_flush() {  # <state>
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$ESCALATE_EVENTS" "$msg")
   if inject_msg "$msg" "$state"; then
+    # The one positive line the log carries: without it silence and health read
+    # the same (the 2026-09 outage looked like "no news" for three days).
+    log "inject delivered: ${ESCALATE_EVENTS} event(s), $(_now) proof=${INJECT_PROOF:-composer-empty}"
+    rm -f "$state/.subsuper-unknown-witness"
     unknown_wake_acknowledge_flushed "$state" "$buf" \
       || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
@@ -1103,7 +1107,13 @@ wedge_alarm_notify() {  # <summary> <marker>
   for ch in "${channels[@]}"; do
     case "$ch" in auto|default) ch=$(wedge_alarm_platform_default) ;; esac
     case "$ch" in
-      '') log "wedge alarm: no OS-level alert channel on $(uname); durable marker $marker is the only signal - set config/wedge-alarm (e.g. a command: directive)" ;;
+      '') if [ "${FM_SUPERVISOR_BACKEND:-}" = herdr ] && command -v herdr >/dev/null 2>&1; then
+           # No OS channel: herdr's own notification is still a surface the
+           # captain sees, so the digest is not left in a marker alone.
+           wedge_alarm_emit herdr "$summary" || true
+         else
+           log "wedge alarm: no OS-level alert channel on $(uname); durable marker $marker is the only signal - set config/wedge-alarm (e.g. a command: directive)"
+         fi ;;
       osascript|herdr) wedge_alarm_emit "$ch" "$summary" || true ;;
       command:*) wedge_alarm_emit command "$summary" "${ch#command:}" || true ;;
       *) log "wedge alarm: unrecognized active-alert channel directive (redacted); marker still written" ;;
@@ -1122,7 +1132,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 preview
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
@@ -1157,7 +1167,8 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    preview=$(head -c 600 "$state/.subsuper-escalations" 2>/dev/null | tr '\n' ' ')
+    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered (${INJECT_LAST_FAILURE:-reason not recorded}). Waiting: ${preview} - full text: $marker" "$marker"
   fi
 }
 
@@ -1416,6 +1427,66 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
+# inject_unknown_second_proof: the composer shape selector could not prove the
+# supervisor composer empty or occupied. Away mode must not stay silent forever
+# on that, and must not type over a human or into a shell or dialog. Delivery
+# is allowed only when ALL of these hold, else INJECT_UNPROVEN_REASON says which
+# failed and the digest stays buffered for the content-carrying fallback:
+#   - the backend is herdr, whose native agent probe gives an identity that does
+#     not depend on the rendered screen (other backends have no such probe);
+#   - that probe reports a claude agent that is idle or done, which rules out a
+#     dead shell and a mid-turn agent;
+#   - no blocking dialog is on screen;
+#   - fm_composer_claude_glyph_row_proof, a reader that does not share the
+#     selector's width proof, reads the prompt row between its rules as empty
+#     (typed text reads pending, anything unrecognized reads unknown);
+#   - the bottom of the screen has not changed for FM_UNKNOWN_QUIET_SECS, so
+#     nobody is typing: a human mid-sentence changes the screen.
+# The send itself still runs the Claude-on-Herdr payload proof (empty before,
+# payload shown before Enter), so a wrong guess here types nothing. That proof's
+# own reader fails on the same titled composers (non-ASCII titles included),
+# which is the root cause of the outage, so inject_msg arms it with
+# FM_HERDR_COMPOSER_PREPROVED=1 to read them through the same glyph-row reader.
+UNKNOWN_QUIET_SECS_DEFAULT=60
+INJECT_PROOF=
+INJECT_UNPROVEN_REASON=
+inject_unknown_second_proof() {  # <state> <backend> <target>
+  local state=$1 backend=$2 target=$3 cap identity proof sig witness since now quiet
+  INJECT_UNPROVEN_REASON=
+  witness="$state/.subsuper-unknown-witness"
+  quiet=${FM_UNKNOWN_QUIET_SECS:-$UNKNOWN_QUIET_SECS_DEFAULT}
+  case "$quiet" in ''|*[!0-9]*) quiet=$UNKNOWN_QUIET_SECS_DEFAULT ;; esac
+  if [ "$backend" != herdr ]; then
+    INJECT_UNPROVEN_REASON="backend $backend has no native agent probe"; return 1
+  fi
+  if ! fm_backend_source herdr 2>/dev/null || ! fm_backend_herdr_parse_target "$target"; then
+    INJECT_UNPROVEN_REASON="herdr target $target unreadable"; return 1
+  fi
+  identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null)
+  case "$identity" in
+    claude$'\t'idle|claude$'\t'done) ;;
+    *) INJECT_UNPROVEN_REASON="native agent state is not an idle claude (${identity//$'\t'/ /})"; return 1 ;;
+  esac
+  cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ] \
+    || { INJECT_UNPROVEN_REASON="screen unreadable"; return 1; }
+  proof=$(fm_composer_claude_glyph_row_proof "$(printf 'styled=1')" "$cap")
+  if [ "$proof" != empty ]; then
+    INJECT_UNPROVEN_REASON="second reader says $proof"; rm -f "$witness"; return 1
+  fi
+  sig=$(printf '%s\n' "$cap" | fm_composer_strip_ansi | grep -v '^[[:space:]]*$' | tail -n 8 | cksum | cut -d' ' -f1)
+  now=$(_now)
+  since=
+  [ -r "$witness" ] && read -r since _ < <(awk -v s="$sig" '$2==s{print}' "$witness" 2>/dev/null)
+  if [ -z "$since" ]; then
+    printf '%s %s\n' "$now" "$sig" > "$witness" 2>/dev/null || true
+    INJECT_UNPROVEN_REASON="screen stability window started"; return 1
+  fi
+  if [ $((now - since)) -lt "$quiet" ]; then
+    INJECT_UNPROVEN_REASON="screen stable only $((now - since))s of ${quiet}s"; return 1
+  fi
+  return 0
+}
+
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded bytes errf err='' body
   state="${2:-$(_state_root)}"
@@ -1458,9 +1529,24 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
+  #      `pending` (real typed text) is an absolute refusal. `unknown` is "not
+  #      provable", which is not "occupied": it earns delivery only through a
+  #      second independent proof (inject_unknown_second_proof).
+  INJECT_PROOF='composer-empty'
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
-  if [ "$composer" != empty ]; then
-    INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+  if [ "$composer" = empty ]; then
+    rm -f "$state/.subsuper-unknown-witness"
+  elif [ "$composer" = unknown ] || [ -z "$composer" ]; then
+    if inject_unknown_second_proof "$state" "$backend" "$target"; then
+      INJECT_PROOF='second-proof'
+    else
+      INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=unknown) and no second proof: ${INJECT_UNPROVEN_REASON:-not recorded}"
+      log "inject $INJECT_LAST_FAILURE"
+      return 1
+    fi
+  else
+    rm -f "$state/.subsuper-unknown-witness"
+    INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=$composer: pending input is never typed over)"
     log "inject $INJECT_LAST_FAILURE"
     return 1
   fi
@@ -1491,7 +1577,12 @@ inject_msg() {  # <message> [state]
   bytes=$(LC_ALL=C; printf '%s' "${#msg}")
   errf=$(mktemp "$state/.subsuper-inject-err.XXXXXX" 2>/dev/null) || errf=
   INJECT_SUBMIT_ATTEMPTED=1
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}")
+  # FM_HERDR_COMPOSER_PREPROVED arms the herdr Claude payload proof's titled-
+  # composer reader for the second-proof send only; it is unset otherwise.
+  verdict=$(
+    if [ "$INJECT_PROOF" = second-proof ]; then export FM_HERDR_COMPOSER_PREPROVED=1; else unset FM_HERDR_COMPOSER_PREPROVED; fi
+    fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}"
+  )
   if [ -n "$errf" ]; then
     err=$(cat "$errf" 2>/dev/null)
     rm -f "$errf"

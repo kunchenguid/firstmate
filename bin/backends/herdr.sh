@@ -3264,7 +3264,9 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # A missing read, a shorter suffix, or a paste placeholder followed by a
 # literal remainder does not press Enter: the composer is cleared back to
 # empty and the verdict is send-failed, or unknown when the clear cannot be
-# verified. Other harnesses skip this proof. Verified hazard
+# verified. Other harnesses skip this proof. Every composer read here goes
+# through fm_backend_herdr_proof_content/_state, so the away daemon's
+# FM_HERDR_COMPOSER_PREPROVED=1 send can prove a titled composer. Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
 # `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
 # claude/codex popups, so the caller's <settle> before the first Enter matters
@@ -3401,6 +3403,36 @@ fm_backend_herdr_composer_content() {  # <target>
   FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap"
 }
 
+# fm_backend_herdr_proof_content / fm_backend_herdr_proof_state: the composer
+# reads the Claude payload proof and its Enter confirmation take. Root cause of
+# the 2026-09 away-mode silence: fm_backend_herdr_composer_content fails on a
+# Claude composer whose top rule carries a window title, including every
+# non-ASCII title (#1988), so the proof refused to type into a composer the
+# daemon had already proven empty another way. Only with the explicit opt-in
+# FM_HERDR_COMPOSER_PREPROVED=1, which the away daemon sets for its second-proof
+# send alone, does a failed or `unknown` read fall back to
+# fm_composer_claude_glyph_row_content (bin/fm-composer-lib.sh). Without it,
+# fm-send, exit and relaunch read exactly as before.
+fm_backend_herdr_proof_content() {  # <target>
+  local target=$1 out cap
+  if out=$(fm_backend_herdr_composer_content "$target"); then
+    printf '%s' "$out"; return 0
+  fi
+  [ "${FM_HERDR_COMPOSER_PREPROVED:-}" = 1 ] || return 1
+  cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ] || return 1
+  fm_composer_claude_glyph_row_content 'styled=1' "$cap"
+}
+
+fm_backend_herdr_proof_state() {  # <target>
+  local target=$1 verdict cap
+  verdict=$(fm_backend_herdr_composer_state "$target")
+  if [ "$verdict" = unknown ] && [ "${FM_HERDR_COMPOSER_PREPROVED:-}" = 1 ] \
+    && cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
+    verdict=$(fm_composer_claude_glyph_row_proof 'styled=1' "$cap")
+  fi
+  printf '%s' "$verdict"
+}
+
 # fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a
 # composer that was empty before the send, shows <text>.
 # Literal equality ignores whitespace, the same comparison zellij uses, so a
@@ -3444,7 +3476,7 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
   while [ "$i" -lt "$presses" ]; do
     fm_backend_herdr_send_key "$target" C-u || return 1
     i=$((i + 1))
-    [ "$(fm_backend_herdr_composer_state "$target")" = empty ] && return 0
+    [ "$(fm_backend_herdr_proof_state "$target")" = empty ] && return 0
   done
   return 1
 }
@@ -3460,14 +3492,14 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
-    content=$(fm_backend_herdr_composer_content "$target") \
+    content=$(fm_backend_herdr_proof_content "$target") \
       || { printf 'send-failed'; return 0; }
     [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
   fi
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   if [ "$proof" = 1 ]; then
-    if ! content=$(fm_backend_herdr_composer_content "$target") \
+    if ! content=$(fm_backend_herdr_proof_content "$target") \
       || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
       if fm_backend_herdr_composer_clear "$target" "$text"; then
         printf 'send-failed'
@@ -3509,7 +3541,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       # Native stayed idle. Composer empty is positive delivery (a landed
       # Claude turn that never flipped agent_status). Proven pending retries.
       # A picker that classifies pending must not receive that retry.
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_proof_state "$target")
       if fm_composer_blocking_dialog_noted >/dev/null; then
         printf 'unknown'
         return 0
@@ -3521,7 +3553,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       esac
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_proof_state "$target")
       if fm_composer_blocking_dialog_noted >/dev/null; then
         printf 'unknown'
         return 0

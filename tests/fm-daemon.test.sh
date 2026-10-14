@@ -3228,6 +3228,184 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+# --- unknown composer verdict: second proof, fallback, and the success line ----
+# The 2026-09 outage: a Claude composer whose top rule carried a window title
+# read `unknown`, and `unknown` was treated as "occupied" forever (2549 of 2551
+# deferrals), so no escalation was ever delivered. The herdr Claude payload
+# proof read the same titled composer through the same failing reader, so even
+# a daemon that trusted a second proof could not type. These drive the real
+# inject_msg/escalate_flush and the real fm_backend_herdr_send_text_submit;
+# only the `herdr` CLI is faked (a stateful binary on PATH that renders a
+# titled Claude screen and records what was typed and pressed), plus the
+# daemon's pane-exists and busy guards.
+make_unknown_herdr_fake() {  # <dir> -> echoes fakebin dir; state in <dir>/fake
+  local fb="$1/fakebin" fake="$1/fake"
+  mkdir -p "$fb" "$fake"
+  : > "$fake/typed"; : > "$fake/sent"; : > "$fake/keys"
+  printf 'echo' > "$fake/mode"
+  printf 'claude' > "$fake/agent"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+F=${FM_FAKE_HERDR:?}
+render() {
+  local typed title rule bottom nbsp=$'\xc2\xa0' i
+  typed=$(cat "$F/typed"); title=$(cat "$F/title")
+  if [ -f "$F/screen" ]; then cat "$F/screen"; return; fi
+  rule=$(printf '─%.0s' $(seq 70)); bottom=$(printf '─%.0s' $(seq 104))
+  printf 'recap: earlier work\n%s─── %s ─\n' "$rule" "$title"
+  if [ -z "$typed" ]; then
+    printf '❯%s\n' "$nbsp"
+  else
+    printf '❯ %s\n' "${typed:0:96}"
+    for ((i = 96; i < ${#typed}; i += 96)); do printf '  %s\n' "${typed:i:96}"; done
+  fi
+  printf '%s\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n' "$bottom"
+}
+case "$1 ${2:-}" in
+  'status --json') printf '{"server":{"running":true}}\n' ;;
+  'agent get')
+    agent=$(cat "$F/agent")
+    [ -n "$agent" ] || { printf '{"error":{"code":"agent_not_found"}}\n'; exit 1; }
+    printf '{"result":{"agent":{"agent":"%s","agent_status":"idle"}}}\n' "$agent" ;;
+  'pane read') render ;;
+  'pane send-text')
+    printf '%s\n' "$4" >> "$F/sent"
+    if [ "$(cat "$F/mode")" = echo ]; then printf '%s%s' "$(cat "$F/typed")" "$4" > "$F/typed"; fi ;;
+  'pane send-keys')
+    printf '%s\n' "$4" >> "$F/keys"
+    case "$4" in enter|ctrl+u) : > "$F/typed" ;; esac ;;
+  *) printf '{}\n' ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+unknown_case() {  # <name> -> prints case dir; afk entered, one escalation buffered
+  local dir state
+  dir=$(make_supercase "$1"); state="$dir/state"
+  afk_enter "$state"
+  escalate_add "$state" "needs-decision: pick A for the test lane"
+  printf '%s' "$dir"
+}
+
+# unknown_herdr_env: run in a subshell. The fake herdr owns every CLI call.
+unknown_herdr_env() {  # <case-dir> <window-title>
+  PATH="$(make_unknown_herdr_fake "$1"):$PATH"
+  export FM_FAKE_HERDR="$1/fake"
+  printf '%s' "$2" > "$FM_FAKE_HERDR/title"
+  fm_backend_source herdr || fail "herdr adapter did not load"
+  export FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
+  fm_backend_target_exists() { return 0; }
+  pane_is_busy() { return 1; }
+}
+
+uflush() {  # <case-dir> <state> <quiet-secs>
+  LOG="$1/daemon.log" FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p2 \
+    FM_UNKNOWN_QUIET_SECS=$3 FM_ESCALATE_BATCH_SECS=0 FM_INJECT_CONFIRM_SLEEP=0.01 \
+    FM_INJECT_CONFIRM_RETRIES=2 escalate_flush "$2"
+}
+
+age_unknown_witness() {  # <state>
+  sed -i "s/^[0-9]*/$(( $(date +%s) - 120 ))/" "$1/.subsuper-unknown-witness"
+}
+
+test_unknown_composer_delivers_after_second_proof_and_logs_it() {
+  local dir state title
+  for title in "Handoff update (3)" "Café handoff — update ✳"; do
+    dir=$(unknown_case "unknown-deliver"); state="$dir/state"
+    (
+      unknown_herdr_env "$dir" "$title"
+      [ "$(fm_backend_composer_state herdr default:w1:p2)" = unknown ] \
+        || fail "fixture no longer reproduces the outage: the shared classifier proves this titled composer ($title)"
+      uflush "$dir" "$state" 60 && fail "first unknown read must start the stability window, not deliver ($title)"
+      [ ! -s "$FM_FAKE_HERDR/sent" ] || fail "typed on the first unknown read ($title)"
+      age_unknown_witness "$state"
+      uflush "$dir" "$state" 60 || fail "an idle claude with an empty prompt row and a stable screen must be delivered to ($title): $(cat "$dir/daemon.log")"
+      [ "$(wc -l < "$FM_FAKE_HERDR/sent")" -eq 1 ] || fail "digest must be typed exactly once ($title): $(cat "$FM_FAKE_HERDR/sent")"
+      [ "$(grep -c '^enter$' "$FM_FAKE_HERDR/keys")" -eq 1 ] || fail "exactly one Enter expected ($title): $(cat "$FM_FAKE_HERDR/keys")"
+      delivered_digest "$FM_FAKE_HERDR/sent" | grep -q 'pick A for the test lane' || fail "digest never reached the supervisor ($title)"
+      grep -q 'inject delivered: 1 event(s).*proof=second-proof' "$dir/daemon.log" || fail "daemon log has no positive delivery line ($title): $(cat "$dir/daemon.log")"
+      [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after delivery ($title)"
+    ) || fail "unknown second-proof delivery failed for title: $title"
+  done
+  pass "inject_msg: an unknown titled composer (incl. non-ASCII title) is typed once and submitted through the real herdr send, and the daemon log records it"
+}
+
+test_unknown_composer_send_refuses_a_draft_or_an_unshown_payload() {
+  local dir out
+  dir="$TMP_ROOT/unknown-send-refusals"; mkdir -p "$dir"
+  (
+    unknown_herdr_env "$dir" "Café handoff — update ✳"
+    out=$(fm_backend_herdr_send_text_submit default:w1:p2 "digest text" 2 0.01 0.01)
+    [ "$out" = send-failed ] || fail "without the opt-in a titled composer must still refuse, got $out"
+    [ ! -s "$FM_FAKE_HERDR/sent" ] || fail "typed without the opt-in"
+    printf 'half a sentence' > "$FM_FAKE_HERDR/typed"
+    out=$(FM_HERDR_COMPOSER_PREPROVED=1 fm_backend_herdr_send_text_submit default:w1:p2 "digest text" 2 0.01 0.01)
+    [ "$out" = send-failed ] || fail "a draft must refuse the send, got $out"
+    [ ! -s "$FM_FAKE_HERDR/sent" ] || fail "typed into a draft"
+    [ "$(cat "$FM_FAKE_HERDR/typed")" = 'half a sentence' ] || fail "the draft was disturbed"
+    : > "$FM_FAKE_HERDR/typed"; printf 'drop' > "$FM_FAKE_HERDR/mode"
+    out=$(FM_HERDR_COMPOSER_PREPROVED=1 fm_backend_herdr_send_text_submit default:w1:p2 "digest text" 2 0.01 0.01)
+    [ "$out" = send-failed ] || fail "a payload that never appears must refuse Enter, got $out"
+    ! grep -q '^enter$' "$FM_FAKE_HERDR/keys" || fail "Enter pressed although the payload never appeared"
+    grep -q '^ctrl+u$' "$FM_FAKE_HERDR/keys" || fail "the refused payload was not cleared"
+  ) || fail "send refusal cases failed"
+  pass "herdr send: the titled-composer reader needs the opt-in, and still refuses a draft and an unshown payload"
+}
+
+test_unknown_composer_never_types_over_a_draft_dead_shell_dialog_or_moving_screen() {
+  local dir state
+  dir=$(unknown_case unknown-draft); state="$dir/state"
+  (
+    unknown_herdr_env "$dir" "Café handoff — update ✳"
+    printf 'half a sentence the captain was typing' > "$FM_FAKE_HERDR/typed"
+    uflush "$dir" "$state" 0 && fail "typed over a draft"
+    uflush "$dir" "$state" 0 && fail "typed over a draft on retry"
+    [ ! -s "$FM_FAKE_HERDR/sent" ] || fail "draft was typed into"
+    [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while deferring"
+  ) || fail "draft case failed"
+  dir=$(unknown_case unknown-shell); state="$dir/state"
+  (
+    unknown_herdr_env "$dir" "Handoff update (3)"
+    : > "$FM_FAKE_HERDR/agent"
+    uflush "$dir" "$state" 0 && fail "typed into a pane with no agent identity"
+    [ ! -s "$FM_FAKE_HERDR/sent" ] || fail "typed into a dead shell"
+  ) || fail "dead-shell case failed"
+  dir=$(unknown_case unknown-dialog); state="$dir/state"
+  (
+    unknown_herdr_env "$dir" "Handoff update (3)"
+    printf 'Background work is running\n❯ 1. Exit and stop tasks\n  2. Cancel\nEnter to confirm · Esc to cancel\n' > "$FM_FAKE_HERDR/screen"
+    uflush "$dir" "$state" 0 && fail "typed into a dialog"
+    [ ! -s "$FM_FAKE_HERDR/sent" ] || fail "dialog was typed into"
+  ) || fail "dialog case failed"
+  dir=$(unknown_case unknown-moving); state="$dir/state"
+  (
+    unknown_herdr_env "$dir" "Handoff update (3)"
+    uflush "$dir" "$state" 60 && fail "delivered on a first read"
+    age_unknown_witness "$state"
+    printf 'Handoff update (4)' > "$FM_FAKE_HERDR/title"
+    uflush "$dir" "$state" 60 && fail "delivered although the screen changed inside the window"
+    [ ! -s "$FM_FAKE_HERDR/sent" ] || fail "typed while the screen was moving"
+  ) || fail "moving-screen case failed"
+  pass "inject_msg: unknown never types over a draft, a shell, a dialog, or a moving screen"
+}
+
+test_undelivered_alarm_carries_the_digest_text() {
+  local dir state log
+  dir=$(make_wedge_case wedge-carries-content); state="$dir/state"; log="$dir/alert.log"
+  escalate_add "$state" "needs-decision: hand the test lane to the idle machine"
+  WEDGE_ALARM_LAST_EPOCH=0
+  INJECT_LAST_FAILURE="deferred: composer unknown"
+  FM_WEDGE_ALARM_LOG="$log" FM_STATE_OVERRIDE="$state" \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
+    inject_wedge_alarm "$state" 900
+  grep -F 'hand the test lane to the idle machine' "$log" >/dev/null \
+    || fail "the active alert names the failure but not the escalation: $(cat "$log" 2>/dev/null)"
+  pass "inject_wedge_alarm: the alert carries the undelivered escalation text, not just a marker path"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -3372,3 +3550,7 @@ test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+test_unknown_composer_delivers_after_second_proof_and_logs_it
+test_unknown_composer_send_refuses_a_draft_or_an_unshown_payload
+test_unknown_composer_never_types_over_a_draft_dead_shell_dialog_or_moving_screen
+test_undelivered_alarm_carries_the_digest_text
