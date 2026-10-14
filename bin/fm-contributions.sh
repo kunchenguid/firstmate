@@ -12,10 +12,12 @@
 #
 # snapshot is read-only and never contacts a forge. Its input is the canonical
 # fleet snapshot's backlog/tasks pair; --all adds rows for supervisor inspection.
-# Every URL explicitly linked by a structured backlog row or a task's pr= is
-# owned. Previously observed URLs remain in data/<task>/contributions.json after
+# URLs accepted by canonical_url in fm-contributions.jq and explicitly linked
+# by a structured backlog row or a task's pr= are owned.
+# Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
-# GitHub PRs and issues are supported; other forges remain visibly unmeasured.
+# Only canonical PR and issue URLs on the exact github.com host are supported;
+# other accepted URLs remain visibly unmeasured.
 # poll skips unsupported URLs without forge calls, unavailable output, wakes or
 # new error stamps, and clears their legacy errors without changing observation,
 # timestamps or ownership evidence.
