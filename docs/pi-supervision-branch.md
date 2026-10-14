@@ -2,7 +2,8 @@
 
 ![Multi-brain agent architecture: one agent, two branches of attention, events are commits](pi-supervision-branch-poster.svg)
 
-This document covers the supervision branch that runs fleet supervision beside the captain's chat on a Pi primary.
+This document describes the supervision branch that runs beside the captain's chat on Pi and pi-signed primaries, and records the configured PiG integration.
+PiG loads the Pi-compatible branch extension by configuration, but watcher restoration, wake delivery, background coverage, lifecycle recovery, branch processing, and direct TUI behavior remain unverified; the Pi operational guarantees below are not claims about PiG. See [supervision verification](verification/supervision.md#pig-primary-integration-partial-evidence-2026-10-13).
 Maintainers changing how wakes reach the branch, how its outcomes reach the captain, or how the attended and away postures differ need it.
 
 The poster is the visual of the idea.
@@ -25,12 +26,13 @@ This document stays the owner and the contract.
 
 ## Overview
 
-Fleet supervision on the Pi primary harness runs on a second conversation - the supervision branch - inside the same `pi` process as the captain's chat.
+On Pi, fleet supervision runs on a second conversation - the supervision branch - inside the same `pi` process as the captain's chat.
+PiG is configured to load the same branch extension in its primary session, but its live branch lifecycle and wake delivery are not verified.
 
 ### What the branch handles while attended
 
-Supervision is default-on.
-Once a Pi primary session owns this home's fleet lock, the branch handles two kinds of work:
+Supervision is default-on for Pi and pi-signed.
+Once a Pi or pi-signed primary session owns this home's fleet lock, the branch handles two kinds of work. PiG is configured for this path, but whether it receives or processes these events is unverified.
 
 - Eligible task-local rows from ordinary actionable wakes.
   A row is one queued wake entry.
@@ -64,7 +66,7 @@ This document records the shape it landed as, and the delivering PR cites the bo
 
 This in-process supervision branch is Pi-only by construction:
 
-- The branch lives in `.pi/extensions/fm-branch-supervision.ts`, which only a Pi primary ever loads.
+- The branch lives in `.pi/extensions/fm-branch-supervision.ts`, which Pi and pi-signed load; PiG's primary launch is configured to load it, but runtime behavior is unverified.
   No other harness gains branch supervision behavior.
 - In a home with no branch state, the bash-side additions remain inert (`tests/fm-branch-supervision.test.sh`).
   `bin/fm-lease-lib.sh` owns how a pre-existing lease is honored on any harness.
@@ -84,7 +86,7 @@ On a non-Pi home that runs the supervision host, the host runs the branch beside
 | [Branch system prompt](#branch-system-prompt) | `bin/fm-branch-prompt.sh` |
 | [Outcome store](#outcome-store) | `bin/fm-branch-outcome.sh` |
 | [Consistency](#consistency) | `bin/fm-lease-lib.sh`, with `bin/fm-lease.sh` as the command surface |
-| [Autonomy](#autonomy) | Default-on once a Pi primary session owns the fleet lock |
+| [Autonomy](#autonomy) | Default-on on Pi and pi-signed; PiG's configured integration is unverified |
 
 ### Wake dispatch
 
@@ -259,7 +261,7 @@ Local-only landing and second-mate retirement never do ("Postures" below).
 
 ### Autonomy
 
-Supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch").
+Supervision is default-on for every task once a Pi or pi-signed primary session owns the fleet lock (docs/configuration.md "Pi supervision branch"). PiG is configured for this branch, but its live wake and processing lifecycle remain unverified.
 No captain grant file is required.
 
 A fleet-wide heartbeat is separately eligible only when every row other than a check or decision-owned signal/stale row is a heartbeat row or a resolvable task-local row (see "Heartbeat routing" below).
@@ -282,7 +284,7 @@ A producer can still append a row in the instant between that final check and dr
 This accepted residual follows the confused-agent-grade boundary above rather than claiming adversarial queue isolation.
 
 A broken branch between its bounded recovery probes keeps today's wake-to-main behavior in both postures.
-The legacy `state/.afk` daemon flag means nothing on Pi, where the daemon is never launched.
+The legacy `state/.afk` daemon flag means nothing on Pi, where the daemon is never launched. PiG is configured to skip the away daemon and use the Pi branch route, but branch delivery and processing are unverified.
 
 ## Off-thread delivery
 
@@ -558,7 +560,7 @@ Three readers check it:
 - The branch reads it at the tail of every wake and immediately before every captain-outcome presentation.
 - The guarded scripts validate it through the record owner at every gate.
 
-On Pi the away daemon is never launched, so the watcher is the single owner of supervision in both postures.
+On Pi the away daemon is never launched, so the watcher is the single owner of supervision in both postures. PiG is configured to skip the daemon and route through the branch, but watcher ownership, wake delivery, and lifecycle recovery are unverified.
 A leftover `state/.afk` flag declines nothing.
 
 ### While the record exists

@@ -2963,6 +2963,22 @@ test_report_after_the_return_is_queued_for_main
 test_dispatch_entry_scopes_rows_and_renders_the_away_tail
 test_branch_outcomes_only_on_a_host_home_off_pi
 test_branch_outcomes_put_captain_first_and_collapse_routine_overflow
+test_pi_compatible_primaries_cannot_opt_into_the_supervision_host() {
+  local config harness out rc
+  config="$TMP_ROOT/pi-compatible-supervision-host"
+  mkdir -p "$config"
+  printf '%s\n' 'claude sonnet' > "$config/supervision-host"
+  for harness in pi pi-signed pig; do
+    out=$(FM_TEST_SEAM=1 FM_TEST_HARNESS="$harness" bash -c '. "$1"; fm_supervision_host_enabled "$2"' \
+      _ "$ROOT/bin/fm-supervision-engine-lib.sh" "$config" 2>&1)
+    rc=$?
+    [ "$rc" -eq 1 ] || fail "$harness: an explicit host config must not bypass the in-process Pi branch boundary (rc=$rc, out=$out)"
+  done
+  pass "Pi, pi-signed, and PiG cannot opt into the separate supervision host"
+}
+
+test_pi_compatible_primaries_cannot_opt_into_the_supervision_host
+
 test_branch_outcomes_collapse_repeated_captain_outcomes_per_task
 test_branch_outcomes_present_a_long_away_window_once
 test_branch_outcomes_budgets_count_bytes

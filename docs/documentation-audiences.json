@@ -229,6 +229,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/pig.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/rovo.md",
       "audience": "agent-runtime"
     },

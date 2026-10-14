@@ -15,7 +15,7 @@ These safety facts apply to both:
 - `state/.afk-contract` is the away posture, written in the same turn as `/afk` before any other work, because `/afk` is itself the go: no read-back gates entry or waits for a go; entry announces hold-for-return only, and the away session acts on those words by its own judgment through the guarded scripts under standing authority, holding for the return on doubt.
   A record carrying quiet mode (`bin/fm-afk-contract.sh mode`) is quiet mode's instead: the captain is present, it holds nothing for a return, and requested actions proceed under ordinary attended authority.
 - While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
-  The daemon is never launched on Pi, where the ordinary supervision session continues under the record with main parked: the branch takes every safe actionable wake it can, and only a declined wake (including a broken branch or unsafe scan) or a watcher failure wakes main.
+  The daemon is not launched on Pi, where the supervision branch handles away posture. PiG is configured for the same route, but watcher restoration, wake delivery, branch processing, and lifecycle recovery remain unverified; do not assume it receives or handles wakes.
   Away mode on a non-Pi home that runs the supervision host (by default on Claude; `docs/configuration.md` "Supervision host") works the same way with the supervision host as the branch; a wake it hands back arrives through that harness's own wake path and is never the captain's return.
 - A marked message while away or quiet mode is active is internal escalation and does not exit that mode.
 - A message beginning `/afk` refreshes away mode; a message beginning `/quiet` refreshes quiet mode.

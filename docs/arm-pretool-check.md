@@ -24,7 +24,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 - Stdin JSON at `.tool_input.command` for Claude and Codex.
 - Stdin JSON at `.toolInput.command` for Grok.
-- `--command <exact string>` for OpenCode, Pi, pi-signed, and omp.
+- `--command <exact string>` for OpenCode, Pi, pi-signed, PiG, and omp.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
 
@@ -154,7 +154,7 @@ Prose may improve without changing adapter behavior.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
-- Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
+- Pi, pi-signed, PiG, and omp return `{block: true}` only when the checker exits 2.
 
 ## Harness wiring
 

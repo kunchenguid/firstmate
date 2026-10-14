@@ -89,7 +89,7 @@ Load `session-start-recovery` when the digest reports unfinished checks, actiona
 ## 4. Harness and runtime dispatch
 
 - Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
-- The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `cursor`, and `omp`, plus `muse`, `gemini`, `rovo`, `agy`, and `devin` for crewmates and scouts only; never dispatch on an unverified adapter.
+- The verified worker harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `cursor`, and `omp`, plus `muse`, `gemini`, `rovo`, `agy`, and `devin` for crewmates and scouts only; PiG is primary-only and must never be used for worker dispatch.
 - If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 - Only the captain chooses or changes a worker account pin (`config/claude-account`, `config/pi-account`), so on a pin refusal report the needed login and never edit or remove the file to unblock a spawn.
 
@@ -125,7 +125,7 @@ For an ordinary direct report whose endpoint is dead or metadata has no window, 
 For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home.
 Each secondmate reconciles work already in its own home and then idles; recovery never authorizes it to invent work.
 
-If `state/.afk` is present, load `/afk` in away mode or `/quiet` in quiet mode (`bin/fm-wake-lib.sh`'s `fm_afk_mode`); where its daemon runs, let the daemon own supervision rather than arming another cycle, and on Pi keep the ordinary supervision session, which runs in both postures with main parked while the record exists.
+If `state/.afk` is present, load `/afk` in away mode or `/quiet` in quiet mode (`bin/fm-wake-lib.sh`'s `fm_afk_mode`); where its daemon runs, let the daemon own supervision rather than arming another cycle, and on Pi or PiG keep the ordinary supervision session, which runs in both postures with main parked while the record exists.
 Surface only captain-relevant decisions, review-ready PRs, failures, and credential needs; otherwise resume the emitted supervision protocol silently.
 A restart must be a non-event because durable state and live backend inventory, not conversation memory, are authoritative.
 
