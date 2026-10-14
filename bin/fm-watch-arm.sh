@@ -39,7 +39,8 @@
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. Once
+# reason unless Scheduling continuation below applies; on attached it stays
+# live across identity-matched successors. Once
 # attached, a stale beacon alone does not end the followed cycle: while that
 # holder is alive and the lock still names it under the same identity, the arm
 # keeps following it, as a started arm waits out a slow child, until the lock
@@ -85,6 +86,28 @@
 # as any watcher close does; prints "watcher: stopped pid=<N>" or
 # "watcher: none running" and exits 0, or exits 1 when the watcher outlived
 # the stop.
+#
+# Scheduling continuation: a successor the supervision host starts for main or
+# for an engine turn (bin/fm-supervision-host.sh start_arm) carries its host's
+# pid, a spool path, and the host's busy marker. While nobody is waiting on its
+# output - the host relinquished the cycle for main, or the host is
+# busy in a turn of its own - an actionable close of the cycle's watcher no
+# longer ends supervision with it: the close is already a durable queue row, so
+# this same arm starts its one fresh watcher as a handling successor and keeps
+# owning it. A busy host is handed each such close through the spool (reason
+# lines prefixed C and a tab, then an S record with the verified replacement's
+# pid and recovery generation, also tab-separated) for its next wait to consume.
+# A trailing close makes the handoff incomplete until a new S record arrives.
+# Publication and the continuation decision share the spool lock with the
+# host's consumption and reader transitions (bin/fm-supervision-host.sh
+# take_spool and detach_successor). The identity-matched relinquished-arm
+# record distinguishes a host still cleaning up from an idle reader.
+# It never starts a second watcher: the singleton lock still
+# arbitrates, and a take-over stops the current child, which ends the arm as
+# before. The arm stops continuing, and exits with its close as any arm does,
+# when the home's session lock no longer names the session it started under,
+# when the away daemon's flag exists, or when a live host is idle and waiting
+# for the close. A fixed two-second minimum cycle bounds restart frequency.
 #
 # A copy of this script living under a disposable no-mistakes validation
 # checkout (a path containing /.no-mistakes/worktrees/) refuses every mode
@@ -145,6 +168,25 @@ CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
+CONT_READER=${FM_WATCH_ARM_CONTINUE_READER:-}
+CONT_SPOOL=${FM_WATCH_ARM_CONTINUE_SPOOL:-}
+CONT_BUSY=${FM_WATCH_ARM_CONTINUE_BUSY:-}
+CONT_MIN_CYCLE=2
+unset FM_WATCH_ARM_CONTINUE_READER FM_WATCH_ARM_CONTINUE_SPOOL FM_WATCH_ARM_CONTINUE_BUSY
+CONT_READER_IDENTITY=
+CONT_LOCK_PID=
+CONT_SPOOLING=0
+RESTARTED=0
+READY_REPORTED=0
+if [ -n "$CONT_READER" ]; then
+  # Continuation needs the host and the session it serves pinned now, while
+  # both are alive; a reader or lock that cannot be pinned means no continuation.
+  CONT_READER_IDENTITY=$(fm_pid_identity "$CONT_READER" 2>/dev/null || true)
+  CONT_LOCK_PID=$(sed -n '1p' "$STATE/.lock" 2>/dev/null | tr -cd '0-9')
+  if [ -z "$CONT_READER_IDENTITY" ] || [ -z "$CONT_LOCK_PID" ]; then
+    CONT_READER=
+  fi
+fi
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
 
@@ -465,6 +507,29 @@ print_watch_output() {
   [ -s "$out" ] && cat "$out"
 }
 
+# True when the host this arm was started by is still the process it pinned.
+cont_reader_alive() {
+  fm_pid_alive "$CONT_READER" \
+    && [ "$(fm_pid_identity "$CONT_READER" 2>/dev/null || true)" = "$CONT_READER_IDENTITY" ]
+}
+
+# True when this arm should keep owning scanning after an actionable close of
+# its child (header, "Scheduling continuation"). Sets CONT_SPOOLING to 1 when a
+# busy host is still alive and must be handed the close through the spool.
+continuation_applies() {
+  local lock_pid
+  [ -n "$CONT_READER" ] || return 1
+  [ ! -e "$STATE/.afk" ] || return 1
+  lock_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null | tr -cd '0-9')
+  { [ "$lock_pid" = "$CONT_LOCK_PID" ] && fm_pid_alive "$lock_pid"; } || return 1
+  if cont_reader_alive && [ "$(cat "$STATE/.supervision-host-left" 2>/dev/null)" != "$ARM_PID"$'\t'"$(fm_pid_identity "$ARM_PID" 2>/dev/null)" ]; then
+    { [ -n "$CONT_SPOOL" ] && [ -n "$CONT_BUSY" ] && [ -e "$CONT_BUSY" ]; } || return 1
+    CONT_SPOOLING=1
+  else
+    CONT_SPOOLING=0
+  fi
+}
+
 handling_successor_generation() {
   [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] || return 0
   fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
@@ -627,6 +692,8 @@ fi
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
 child_out=
+deadline=0
+child_done=0
 cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
@@ -665,21 +732,24 @@ trap 'handle_arm_signal HUP 129' HUP
 trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
 
-child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
-  echo "watcher: FAILED - no live watcher with a fresh beacon"
-  exit 1
+start_owned_child() {
+  child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
+    echo "watcher: FAILED - no live watcher with a fresh beacon"
+    exit 1
+  }
+  # date(1) exposes whole seconds. Keep the configured confirmation budget from
+  # collapsing when startup begins just before the next second boundary.
+  deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+  if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
+  else
+    "$WATCH" >"$child_out" &
+  fi
+  child=$!
+  cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
+  child_done=0
 }
-# date(1) exposes whole seconds. Keep the configured confirmation budget from
-# collapsing when startup begins just before the next second boundary.
-deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
-if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
-  FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
-else
-  "$WATCH" >"$child_out" &
-fi
-child=$!
-cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
-child_done=0
+start_owned_child
 
 owned_child_finished() {
   local rc=$1 signal reason_type status
@@ -734,6 +804,34 @@ owned_child_finished() {
   return "$status"
 }
 
+# The child ended on its own with an actionable reason. When the continuation
+# applies, record its close, start its one replacement as a handling successor
+# of this arm, and return 0 so the verification below confirms it; otherwise
+# return 1 and leave the close to owned_child_finished.
+continue_scanning() {  # <child-rc>
+  local rc=$1 reasons ran
+  [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out" || return 1
+  [ -z "$CONT_SPOOL" ] || fm_lock_acquire_wait "$CONT_SPOOL.lock"
+  if ! continuation_applies; then
+    [ -z "$CONT_SPOOL" ] || fm_lock_release "$CONT_SPOOL.lock"
+    return 1
+  fi
+  reasons=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$child_out" 2>/dev/null || true)
+  ran=$(( $(date +%s) - cycle_started_at ))
+  cycle_log_append "$rc" none "$(watch_output_reason_type "$child_out")" none
+  if [ "$CONT_SPOOLING" -eq 1 ]; then
+    printf '%s\n' "$reasons" | awk '{ printf "C\t%s\n", $0 }' >> "$CONT_SPOOL" 2>/dev/null || true
+  fi
+  [ -z "$CONT_SPOOL" ] || fm_lock_release "$CONT_SPOOL.lock"
+  rm -f "$child_out" 2>/dev/null || true
+  child=
+  child_out=
+  [ "$ran" -ge "$CONT_MIN_CYCLE" ] || sleep $((CONT_MIN_CYCLE - ran))
+  FM_WATCH_PREDECESSOR_ARM_PID=$ARM_PID
+  RESTARTED=1
+  start_owned_child
+}
+
 # Verify the outcome: poll until this child is the confirmed healthy watcher, or
 # until some other watcher legitimately holds the singleton (a startup race), or
 # until the child gives up. Only then print the honest line.
@@ -758,17 +856,41 @@ while :; do
       fi
       cycle_mark_predecessor_successor "started:$child"
       [ "$TAKEN_OVER" -eq 0 ] || cycle_mark_predecessor_successor "started:$child" "$ARM_PID"
-      if [ -n "$handling_generation" ]; then
+      if [ "$RESTARTED" -eq 1 ]; then
+        # A continuation restart: the reader is gone or busy, so the verified
+        # successor goes to the spool, not to this arm's output.
+        RESTARTED=0
+        if [ "$CONT_SPOOLING" -eq 1 ]; then
+          fm_lock_acquire_wait "$CONT_SPOOL.lock"
+          printf 'S\t%s\t%s\n' "$child" "$handling_generation" >> "$CONT_SPOOL" 2>/dev/null || true
+          fm_lock_release "$CONT_SPOOL.lock"
+        fi
+      fi
+      if [ "$READY_REPORTED" -eq 0 ] && [ -n "$handling_generation" ]; then
         echo "watcher: started pid=$child (beacon fresh) recovery-generation=$handling_generation"
-      else
+      elif [ "$READY_REPORTED" -eq 0 ]; then
         echo "watcher: started pid=$child (beacon fresh)"
       fi
+      READY_REPORTED=1
       wait "$child"
       rc=$?
+      if continue_scanning "$rc"; then
+        continue
+      fi
       owned_child_finished "$rc"
       exit $?
     fi
     # Another watcher won the singleton; our child stood down.
+    if [ "$RESTARTED" -eq 1 ]; then
+      # A continuation restart that lost the singleton was superseded (a
+      # take-over landed in the gap between the close and the restart): that
+      # owner schedules from here, so this arm ends instead of following it.
+      wait "$child"
+      rc=$?
+      cycle_log_append "$rc" "$(cycle_signal_name "$rc")" continuation-superseded "attached:$HEALTHY_PID"
+      rm -f "$child_out" 2>/dev/null || true
+      exit 0
+    fi
     wait "$child"
     rc=$?
     owned_child_finished "$rc"
@@ -778,6 +900,11 @@ while :; do
     wait "$child"
     rc=$?
     child_done=1
+    # A child that closed before its health was ever observed is still an
+    # actionable close of the cycle this arm owns.
+    if continue_scanning "$rc"; then
+      continue
+    fi
     owned_child_finished "$rc"
     exit $?
   fi

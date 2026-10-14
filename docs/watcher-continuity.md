@@ -5,7 +5,7 @@ Read it when debugging a supervision gap or changing a harness's re-arm path.
 
 The watcher remains intentionally one-shot: one actionable reason closes one watcher cycle.
 Must-work continuity now lives above that process boundary instead of depending on the model remembering a re-arm step.
-In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a watcher cycle or attaches to one and returns the cycle's reason.
+In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts watcher cycles or attaches to an existing cycle.
 
 | Topic | Section |
 | --- | --- |
@@ -121,7 +121,7 @@ The Claude turn-end guard owns that notice commit contract, the monotonic failur
 ### Supervision host
 
 On a non-Pi primary, a home that runs the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
-The host owns successive watcher cycles through the same arm.
+The [arm header](../bin/fm-watch-arm.sh), "Scheduling continuation", owns the host successor's scheduling and handoff contract.
 [supervision-host.md](supervision-host.md#failure-direction) owns the hand-back's downtime restoration, including when the successor already exited; the arm's recovery and acknowledgement contracts below still apply.
 
 ## Actionable wake ordering
@@ -368,7 +368,7 @@ Branch acknowledgement retiring the check-row receipts of exactly its granted se
 
 | Child return | What the arm does |
 | --- | --- |
-| Actionable output | Returns that reason normally. |
+| Actionable output | Returns that reason unless the [arm header](../bin/fm-watch-arm.sh)'s "Scheduling continuation" contract applies. |
 | Zero/empty | Rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger. |
 
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one.
