@@ -53,6 +53,9 @@
 # owner is bin/fm-watch.sh's job, through its existing durable check queue.
 set -u
 
+# shellcheck source=bin/fm-operational-input.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-operational-input.sh"
+
 FM_ACTION_START_SECS_DEFAULT=300
 
 fm_action_start_secs() {
@@ -226,6 +229,13 @@ fm_action_admit_steer() {
   [ "$delivery_mode" != fire-and-forget ] || return 0
   id="steer-${rec##*/}"; id=${id%.msg}
   fm_action_exists "$state" "$task" "$id" && return 0
+  # The inbox keeps the transport envelope; native control binds the request.
+  if fm_message_from_firstmate "$text"; then
+    text=${text#"$FM_FROMFIRST_MARK"}
+    if [[ $text =~ ^corr=[a-fA-F0-9]{16}[[:blank:]]+ ]]; then
+      text=${text#"${BASH_REMATCH[0]}"}
+    fi
+  fi
   wt=$(awk -F= '$1=="worktree" {print substr($0,10); exit}' "$state/$task.meta" 2>/dev/null) || wt=
   head=$(git -C "${wt:-/dev/null}" rev-parse HEAD 2>/dev/null) || head=
   run=$(awk -F= '$1=="spawn_gen" {print substr($0,11); exit}' "$state/$task.meta" 2>/dev/null) || run=
