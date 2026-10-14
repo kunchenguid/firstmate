@@ -33,7 +33,7 @@ Readers must ignore members and events they do not recognize, so later versions 
 | `task.status`      | `state`, `key`, `text`                         | A complete, nonblank line in the task's status log is captured. |
 | `task.pr_ready`    | `pr`                                           | Firstmate records the task's PR as ready for review. |
 | `task.merged`      | `via` (`"pr"` or `"local"`), plus `pr` when `via` is `"pr"` | The task's PR merge is recorded, or its local-only branch landed. |
-| `task.cleaned_up`  | none                                           | The task's worker and local copy were removed. |
+| `task.cleaned_up`  | `verified` (only `false`, when present)        | The task's worker and local copy were removed. `verified: false` marks a retirement whose worktree could not be identified: its record and endpoint were released, but no local copy was touched and landed work was never checked. An ordinary close carries no such member. |
 
 `task.dispatched` members: `kind` is `ship`, `scout`, or `secondmate`; `project` is the project directory name, or `null` for a remote second mate; `harness` names the agent tool; `model` is the requested model, or `null` for the tool's default.
 

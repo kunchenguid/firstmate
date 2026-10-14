@@ -41,6 +41,23 @@
 # lift the deferral (it authorizes discarding unlanded WORK, never the
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
+# --retire-unidentified-worktree is the one supported way out for a record that
+# names no worktree (missing or empty worktree=), which the ordinary path
+# refuses and --force cannot relax, so such a record would hold its live-lane
+# slot forever. It closes the endpoint and removes the record like any cleanup,
+# but verifies nothing: it never moves, deletes, or changes the checkout of any
+# worktree or pool slot (the landed-work check it shares with the ordinary path
+# may refresh a claimed slot's remote-tracking ref, as it does there), never
+# guesses one from the project, window, or pool layout, and
+# never closes the backlog item - an open item goes back to Queued and an item
+# already Done stays Done, either way with the note RETIRE_BACKLOG_NOTE. It says
+# so everywhere - the "RETIRED UNVERIFIED" success line, that backlog note, and
+# data/<id>/retired-unverified.txt - and each names any pool slot still claimed
+# by this task and the home that recorded the claim (see
+# retire_read_claimed_slot). It refuses a record that names a worktree, a
+# secondmate, an Orca record, a pool whose slot claims cannot be listed, an
+# unreadable slot claim, a claimed pool slot the ordinary landed-work check
+# refuses (exit 1), and --force (exit 2).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -203,6 +220,9 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+#        fm-teardown.sh <task-id> --retire-unidentified-worktree [--legacy-record]
+#   --retire-unidentified-worktree retires a record that names no worktree
+#   without verifying its work (see the header above); it refuses --force.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -414,11 +434,13 @@ ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
 LEGACY_RECORD_GIVEN=0
+RETIRE_UNIDENTIFIED=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --retire-unidentified-worktree) RETIRE_UNIDENTIFIED=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -426,6 +448,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ "$RETIRE_UNIDENTIFIED" = 1 ] && [ "$FORCE" = --force ]; then
+  echo "error: --retire-unidentified-worktree cannot be combined with --force: forcing is authority to discard work, and this path discards nothing and guesses no worktree" >&2
+  exit 2
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -1148,9 +1174,107 @@ fi
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
+RETIRE_BACKLOG_NOTE="cleanup NOT verified - worktree identity unknown so landed work was not checked"
+# A retirement knows no worktree, but a pool slot may still carry this task's
+# durable claim (<pool>/<slot>/.fm-slot-owner, written by fm-spawn). That claim
+# is recorded evidence, never a guess, and it is only read here: no claim and no
+# checkout is ever changed, so the claim keeps protecting whatever the slot
+# holds. A claim is matched on the task id alone; its recorded home is
+# reported, never matched. A claim naming another task is that task's
+# (reassigned, as the ordinary path treats it) and is ignored. A slot claimed by
+# this task faces the ordinary path's own validate_worktree_teardown_safety, so
+# dirty, unlanded, uninspectable, or lock-blocked work refuses exactly as it
+# does there, except that no stale lock is cleared. An unreadable claim, or a
+# pool that cannot be listed at all, also refuses. Every refusal comes before
+# anything changes, and nothing forces past it. Another record naming the same
+# slot is not checked here: require_exclusive_worktree_slot_record guards the
+# return and process kill the ordinary path performs on a slot, and this path
+# returns, kills, and writes nothing under any slot.
+# Sets RETIRE_SLOT_NOTE to what was found.
+RETIRE_SLOT_NOTE=
+retire_read_claimed_slot() {
+  local status_json slot_paths path claimed='' unlisted='' marker safety_rc lock
+  RETIRE_SLOT_NOTE="the pool was searched and no durable pool-slot claim naming this task was found, so a pool slot may still be held without a claim"
+  if [ -z "$PROJ" ]; then
+    unlisted="task $ID's record names no project path"
+  elif [ ! -d "$PROJ" ]; then
+    unlisted="its project path $PROJ does not exist"
+  elif ! status_json=$(cd "$PROJ" && treehouse status --json 2>/dev/null); then
+    unlisted="treehouse status failed in its project path $PROJ"
+  elif ! slot_paths=$(printf '%s\n' "$status_json" | jq -r '.[]?.path? // empty' 2>/dev/null); then
+    unlisted="treehouse status in its project path $PROJ returned an unreadable pool listing"
+  fi
+  if [ -n "$unlisted" ]; then
+    echo "REFUSED: task $ID's pool slot claims could not be listed because $unlisted. No slot search could run, so unlanded work in a pool slot claimed by this task cannot be ruled out. The only ways forward: restore the project path ${PROJ:-this record should name} so its pool can be searched, then retry; or have the captain explicitly authorise discarding this task's work, through firstmate. Nothing was changed." >&2
+    return 1
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] && [ -d "$path" ] || continue
+    fm_treehouse_slot_owner_state "$path" "$ID"
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      mine)
+        safety_rc=0
+        (
+          WT=$path TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY='' GIT_OPTIONAL_LOCKS=0 \
+            validate_worktree_teardown_safety
+        ) || safety_rc=$?
+        if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+          lock=$(worktree_git_lock_path "$path") || lock="its git index lock"
+          echo "REFUSED: pool slot $path is claimed by task $ID (claim recorded by home ${FM_TREEHOUSE_SLOT_OWNER_HOME:-unrecorded}), and its git index is locked ($lock), so its state cannot be determined and unlanded work there cannot be ruled out. This path does not check or remove locks: wait for the lock's holder to finish, or clear the lock once its holder is gone, then retry; or have the captain explicitly authorise discarding the work, through firstmate. Nothing was changed." >&2
+          return 1
+        elif [ "$safety_rc" -ne 0 ]; then
+          echo "REFUSED: pool slot $path is claimed by task $ID (claim recorded by home ${FM_TREEHOUSE_SLOT_OWNER_HOME:-unrecorded}). --retire-unidentified-worktree accepts no --force: commit and land the slot's work, or have the captain explicitly authorise discarding it, through firstmate. Nothing was changed." >&2
+          return 1
+        fi
+        claimed="$claimed${claimed:+, }$path (claim recorded by home ${FM_TREEHOUSE_SLOT_OWNER_HOME:-unrecorded})"
+        ;;
+      unsafe)
+        marker=$(fm_treehouse_slot_owner_marker "$path") || marker="the claim beside $path"
+        echo "REFUSED: the slot-owner claim $marker for pool slot $path cannot be read, so whether it names task $ID cannot be told and unlanded work there cannot be ruled out. Inspect or repair that claim file, or have the captain explicitly authorise discarding the work, through firstmate. Nothing was changed - not even with --force." >&2
+        return 1
+        ;;
+    esac
+  done <<< "$slot_paths"
+  if [ -n "$claimed" ]; then
+    RETIRE_SLOT_NOTE="the pool slot at $claimed may still be claimed by this task; its claim and checkout were left untouched"
+  fi
+}
+if [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
+  # Only a record that names NO worktree is eligible: a recorded worktree,
+  # however stale, belongs to the ordinary path and its landed-work gates.
+  # Nothing is inferred to fill the gap, so WT stays empty and every step
+  # keyed on a worktree below skips itself.
+  if [ "$TEARDOWN_META_KIND" = secondmate ]; then
+    echo "REFUSED: --retire-unidentified-worktree does not apply to a secondmate home; nothing was changed" >&2
+    exit 1
+  fi
+  if [ -n "$WT" ] || [ "$(LC_ALL=C grep -c '^worktree=[^[:space:]]' "$META" 2>/dev/null || true)" != 0 ]; then
+    echo "REFUSED: task $ID's record names a worktree, so it is not an unidentified-worktree record; use ordinary teardown and its landed-work checks. Nothing was changed." >&2
+    exit 1
+  fi
+  WT=
+fi
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
   BACKEND=tmux
   T=
+elif [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
+  # The shared validator (which control and kill callers rely on to keep
+  # refusing a record with no worktree) is left unchanged. This path validates
+  # every other identity field exactly as it does, against a copy carrying a
+  # placeholder worktree that is never read back or used as a path.
+  RETIRE_SHAPE_META=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-teardown-retire.XXXXXX") || exit 1
+  { LC_ALL=C grep -v '^worktree=' "$META" || true; printf 'worktree=unidentified\n'; } > "$RETIRE_SHAPE_META"
+  if ! fm_backend_validate_task_endpoint "$RETIRE_SHAPE_META" "$ID"; then
+    rm -f "$RETIRE_SHAPE_META"
+    exit 1
+  fi
+  rm -f "$RETIRE_SHAPE_META"
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
+  if [ "$BACKEND" = orca ]; then
+    echo "REFUSED: an Orca record cannot be retired without its worktree identity, because releasing it needs that identity; nothing was changed" >&2
+    exit 1
+  fi
 else
   fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
@@ -1696,7 +1820,15 @@ backlog_refresh_reminder() {
   else
     backlog_display="${DATA%/}/backlog.md"
   fi
-  if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
+  if [ "$RETIRE_UNIDENTIFIED" = 1 ] && [ "$RETIRE_BACKLOG_NOTED" = requeued ]; then
+    printf '%s\n' "Backlog: $ID stays open in $backlog_display, back in Queued with a note that cleanup was NOT verified; its worktree was never identified. Check whether its work landed before re-dispatching or closing it."
+  elif [ "$RETIRE_UNIDENTIFIED" = 1 ] && [ "$RETIRE_BACKLOG_NOTED" = noted_done ]; then
+    printf '%s\n' "Backlog: $ID was already Done in $backlog_display and stays Done; it now carries a note that this cleanup was NOT verified."
+  elif [ "$RETIRE_UNIDENTIFIED" = 1 ] && [ "$RETIRE_BACKLOG_NOTED" = not_found ]; then
+    printf '%s\n' "Backlog: $ID has no item in $backlog_display, so no backlog note was recorded; this cleanup was NOT verified."
+  elif [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
+    printf '%s\n' "Backlog: $ID was retired without a verified close (${BACKLOG_SKIP_REASON:-its backlog item could not be updated}). In $backlog_display, keep $ID open in Queued with the note \"$RETIRE_BACKLOG_NOTE; pool slot: $RETIRE_SLOT_NOTE\" - never move it to Done unchecked."
+  elif [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
     printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
   elif [ "$BACKLOG_CLOSED" = 1 ]; then
     printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
@@ -3555,7 +3687,9 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
+  retire_read_claimed_slot || exit 1
+elif teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -3590,7 +3724,8 @@ BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
 BACKLOG_TRANSITION_FLAGS=()
 [ "$BACKLOG_TRANSITION" = close ] || BACKLOG_TRANSITION_FLAGS=(--retain)
 BACKLOG_SKIP_REASON=
-if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+RETIRE_BACKLOG_NOTED=
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ] && [ "$RETIRE_UNIDENTIFIED" != 1 ]; then
   backlog_done_args || {
     echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
     exit 1
@@ -3655,7 +3790,7 @@ teardown_legacy_stamp_rollback() {
     fi
     exit 1
   fi
-else
+elif [ "$TEARDOWN_BACKLOG_APPLIES" != 1 ]; then
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
   else
@@ -3670,7 +3805,10 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+if [ "$KIND" != secondmate ] && [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
+  # No worktree is known, so no run or process is attributed to a directory.
+  reap_task_worktree_processes tasktmp "$TASK_TMP"
+elif [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
@@ -3896,7 +4034,9 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
-[ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
+LEDGER_CLOSE_ARGS=(cleaned_up "$ID")
+[ "$RETIRE_UNIDENTIFIED" != 1 ] || LEDGER_CLOSE_ARGS+=(unverified)
+[ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" "${LEDGER_CLOSE_ARGS[@]}" || true
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
@@ -3959,9 +4099,33 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+  # A retirement never closes the item: nobody checked that its work landed.
+  if [ "$RETIRE_UNIDENTIFIED" = 1 ] && [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+    if fm_backlog_note_unverified "$DATA" "$ID" "$RETIRE_BACKLOG_NOTE; pool slot: $RETIRE_SLOT_NOTE"; then
+      RETIRE_BACKLOG_NOTED=$FM_BACKLOG_NOTE_RESULT
+    else
+      BACKLOG_SKIP_REASON="its backlog item could not be given the unverified note: $FM_BACKLOG_TRANSITION_ERROR"
+      echo "error: $ID's record was released, but $BACKLOG_SKIP_REASON" >&2
+    fi
+  fi
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+# A retirement without a worktree identity leaves its own plain-language
+# record beside the task's other durable files, so it reads as what it was
+# long after the backlog row is archived. It is written only once the record
+# is gone, so it never claims a release that did not happen.
+if [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
+  mkdir -p "$DATA/$ID" \
+    && printf '%s\n' \
+      "Retired without a verified close: $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
+      "The task record named no worktree, so landed work was NOT checked and no worktree was touched." \
+      "The endpoint ${T:-none} was closed and the task record was released." \
+      "Pool slot: $RETIRE_SLOT_NOTE." \
+      "Any worktree this task used was never identified here; reconcile it by hand if one survives." \
+      > "$DATA/$ID/retired-unverified.txt" \
+    || echo "warning: could not write $DATA/$ID/retired-unverified.txt; this retirement was still NOT verified" >&2
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
@@ -3972,6 +4136,10 @@ if [ -d "$STATE" ]; then
 fi
 if [ "$TEARDOWN_POOL_SLOT_LOST" = 1 ]; then
   echo "teardown $ID finished its cleanup and removed its task record, but a returned pool slot did not come back clean (see the warning above); clear those paths so the pool can reuse the slot" >&2
+elif [ "$RETIRE_UNIDENTIFIED" = 1 ]; then
+  retire_legacy_note=""
+  [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && retire_legacy_note=" (legacy record without spawn_gen, endpoint $TEARDOWN_LEGACY_ENDPOINT)"
+  echo "RETIRED UNVERIFIED $ID: record released and endpoint ${T:-none} closed$retire_legacy_note, but its worktree could not be identified, so landed work was NOT checked and no worktree was touched; $RETIRE_SLOT_NOTE; this is not an ordinary clean close"
 elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif teardown_owns_worktree; then
@@ -3981,3 +4149,4 @@ else
 fi
 backlog_refresh_reminder
 [ "$TEARDOWN_POOL_SLOT_LOST" = 0 ] || exit "$TEARDOWN_LOST_SLOT_EXIT"
+[ "$RETIRE_UNIDENTIFIED" != 1 ] || [ "$TEARDOWN_BACKLOG_APPLIES" != 1 ] || [ -n "$RETIRE_BACKLOG_NOTED" ] || exit 1

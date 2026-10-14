@@ -24,7 +24,7 @@
 #   fm-fleet-ledger.sh pr_ready <task> <url>
 #   fm-fleet-ledger.sh merged <task> pr <url>
 #   fm-fleet-ledger.sh merged <task> local
-#   fm-fleet-ledger.sh cleaned_up <task>
+#   fm-fleet-ledger.sh cleaned_up <task> [unverified]
 #   fm-fleet-ledger.sh capture
 #   fm-fleet-ledger.sh appended <config> <state>/<task>.status
 #
@@ -65,7 +65,7 @@ LOCK="$STATE/.fleet-ledger.lock"
 TEXT_MAX_CHARS=2000
 
 usage() {
-  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture | appended <config> <state>/<task>.status" >&2
+  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> [unverified] | capture | appended <config> <state>/<task>.status" >&2
   exit 2
 }
 
@@ -81,7 +81,7 @@ case "$cmd" in
     task_ok "${2:-}" || usage
     case "$#:${3:-}" in 4:pr) [ -n "$4" ] || usage ;; 3:local) ;; *) usage ;; esac
     ;;
-  cleaned_up) { [ "$#" -eq 2 ] && task_ok "$2"; } || usage ;;
+  cleaned_up) { { [ "$#" -eq 2 ] || { [ "$#" -eq 3 ] && [ "$3" = unverified ]; }; } && task_ok "$2"; } || usage ;;
   capture) [ "$#" -eq 1 ] || usage ;;
   appended)
     [ "$#" -eq 3 ] && [ -n "$2" ] || usage
@@ -226,7 +226,14 @@ case "$cmd" in
     ;;
   cleaned_up)
     capture_task "$2" || rc=1
-    append task.cleaned_up "$2" '{}' || rc=1
+    # An unverified close (bin/fm-teardown.sh --retire-unidentified-worktree)
+    # carries a named member rather than a new event type, so every reader of
+    # task.cleaned_up still sees the close and can tell it was never checked.
+    if [ "${3-}" = unverified ]; then
+      append task.cleaned_up "$2" '{verified: false}' || rc=1
+    else
+      append task.cleaned_up "$2" '{}' || rc=1
+    fi
     [ "$rc" -ne 0 ] || rm -f -- "$(offset_path "$2")"
     ;;
 esac

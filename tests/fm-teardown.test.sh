@@ -723,6 +723,430 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+# The real shape measured on a live home: a Herdr record carrying every
+# endpoint id and no worktree= line at all (or an empty one).
+write_unidentified_meta() {  # <case-dir> <id> [empty]
+  local case_dir=$1 id=$2 empty=${3:-}
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=lab:w1:p2" "endpoint_task_id=$id" "project=$case_dir/project" \
+    "harness=claude" "kind=ship" "backend=herdr" "herdr_session=lab" \
+    "herdr_workspace_id=w1" "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" \
+    "mode=no-mistakes" "spawn_gen=teardown-test-$id"
+  [ -z "$empty" ] || printf 'worktree=\n' >> "$case_dir/state/$id.meta"
+}
+
+# A herdr stub whose one pane is present until it is closed, then structurally
+# not found, and which logs every call.
+add_closing_herdr() {  # <case-dir>
+  cat > "$1/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$1/herdr.log"
+case " \$* " in
+  *" session list "*) echo '{"sessions":[{"name":"lab","running":true,"socket_path":"$1/herdr.sock"}]}' ;;
+  *" pane close "*) : > "$1/herdr.closed"; echo '{"result":{}}' ;;
+  *" pane get "*)
+    if [ -e "$1/herdr.closed" ]; then
+      echo '{"error":{"code":"pane_not_found"}}'
+    else
+      echo '{"result":{"pane":{"pane_id":"w1:p2"}}}'
+    fi ;;
+  *) echo '{"result":{}}' ;;
+esac
+exit 0
+SH
+  chmod +x "$1/fakebin/herdr"
+}
+
+run_teardown_id() {  # <case-dir> <id> [args...]
+  local case_dir=$1 id=$2; shift 2
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" "$id" "$@"
+}
+
+test_unidentified_worktree_retirement() {
+  local case_dir shape rc before after row_state
+  for shape in missing empty; do
+    case_dir=$(make_case "unidentified-$shape")
+    mkdir -p "$case_dir/project" "$case_dir/wt-bystander"
+    : > "$case_dir/wt-bystander/sentinel"
+    seed_backlog_in_flight "$case_dir"
+    sed -i 's/task-x1/tx-unid/' "$case_dir/data/backlog.md"
+    add_pool_status_treehouse "$case_dir"
+    add_closing_herdr "$case_dir"
+    write_unidentified_meta "$case_dir" tx-unid "$([ "$shape" = empty ] && echo empty)"
+    write_meta "$case_dir" no-mistakes ship
+    before=$(find "$case_dir/state" -maxdepth 1 -name "*.meta" | wc -l)
+
+    # The ordinary path still refuses, with and without --force, and touches nothing.
+    for flag in "" --force; do
+      set +e
+      run_teardown_id "$case_dir" tx-unid $flag > "$case_dir/o.out" 2> "$case_dir/o.err"
+      rc=$?
+      set -e
+      [ "$rc" -ne 0 ] || fail "unidentified-$shape: ordinary teardown ${flag:-without force} unexpectedly succeeded"
+      assert_grep "ambiguous worktree identity" "$case_dir/o.err" "unidentified-$shape: refusal wording changed"
+      assert_present "$case_dir/state/tx-unid.meta" "unidentified-$shape: refused teardown removed the record"
+    done
+    # --force can never be combined with the retirement path.
+    set +e
+    run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree --force > /dev/null 2> "$case_dir/f.err"
+    rc=$?
+    set -e
+    expect_code 2 "$rc" "unidentified-$shape: --force with the retirement path must be an invalid request"
+    assert_present "$case_dir/state/tx-unid.meta" "unidentified-$shape: invalid request removed the record"
+
+    run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree > "$case_dir/r.out" 2> "$case_dir/r.err" \
+      || fail "unidentified-$shape: retirement failed: $(cat "$case_dir/r.err")"
+    assert_grep "RETIRED UNVERIFIED tx-unid" "$case_dir/r.out" "unidentified-$shape: success line does not say it is unverified"
+    assert_grep "landed work was NOT checked" "$case_dir/r.out" "unidentified-$shape: success line hides that nothing was checked"
+    assert_no_grep "teardown tx-unid complete" "$case_dir/r.out" "unidentified-$shape: reported an ordinary clean close"
+    assert_no_grep "legacy record" "$case_dir/r.out" "unidentified-$shape: a record with spawn_gen was reported as legacy"
+    assert_absent "$case_dir/state/tx-unid.meta" "unidentified-$shape: record not released"
+    assert_present "$case_dir/state/task-x1.meta" "unidentified-$shape: a valid record was disturbed"
+    after=$(find "$case_dir/state" -maxdepth 1 -name "*.meta" | wc -l)
+    [ "$after" = "$((before - 1))" ] || fail "unidentified-$shape: live record count $before -> $after, expected one fewer"
+    assert_present "$case_dir/wt-bystander/sentinel" "unidentified-$shape: a worktree was touched"
+    assert_grep "pane close" "$case_dir/herdr.log" "unidentified-$shape: endpoint was not closed"
+    assert_grep "landed work was NOT checked" "$case_dir/data/tx-unid/retired-unverified.txt" \
+      "unidentified-$shape: durable record does not say landed work was not checked"
+    row_state=$(tasks-axi show tx-unid --file "$case_dir/data/backlog.md" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)
+    [ "$row_state" = "queued" ] \
+      || fail "unidentified-$shape: backlog item is '$row_state', expected it open in queued"
+    tasks-axi show tx-unid --full --file "$case_dir/data/backlog.md" 2>/dev/null \
+      | grep -F "cleanup NOT verified - worktree identity unknown so landed work was not checked" >/dev/null \
+      || fail "unidentified-$shape: backlog item does not carry the unverified note"
+    assert_absent "$case_dir/state/tx-unid.backlog-close" "unidentified-$shape: pending close left behind"
+  done
+  pass "teardown: a record with no worktree identity retires only through --retire-unidentified-worktree, loudly unverified, touching no worktree"
+}
+
+# The retirement only reads the durable slot-owner claim that names the task,
+# never a guessed worktree: every claim and checkout is left as it was, the
+# outcome names any slot this task still claims, and a claimed slot holding
+# commits on no remote, or whose state cannot be read, refuses before anything
+# changes.
+add_pool_status_treehouse() {  # <case-dir> <slot-path>...
+  local case_dir=$1 json='' slot
+  shift
+  for slot in "$@"; do json="$json${json:+,}{\"name\":\"s\",\"path\":\"$slot\"}"; done
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+case "\$*" in
+  *"status --json"*) echo '[$json]' ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# A pool slot checkout with one commit that is on its remote.
+make_pushed_slot() {  # <slot-path>
+  mkdir -p "$1"
+  git init -q "$1"
+  : > "$1/sentinel"
+  git -C "$1" add sentinel
+  git -C "$1" -c user.email=t@t -c user.name=t commit -q -m slot
+  git init -q --bare "$1.remote"
+  git -C "$1" remote add origin "$1.remote"
+  git -C "$1" push -q origin HEAD:refs/heads/main
+  git -C "$1" fetch -q origin
+}
+
+# One retirement case: an unidentified record, a closing endpoint, and a pool.
+setup_unidentified_slot_case() {  # <case-dir> <slot-path>...
+  local case_dir=$1
+  shift
+  mkdir -p "$case_dir/project"
+  add_pool_status_treehouse "$case_dir" "$@"
+  add_closing_herdr "$case_dir"
+  write_unidentified_meta "$case_dir" tx-unid
+  write_meta "$case_dir" no-mistakes ship
+}
+
+test_unidentified_retirement_slot_claim_and_ledger() {
+  local case_dir slot_a slot_b out claim rc
+  # (1) a claim names this task and its slot is on its remote: retired, the
+  # claim and the checkout stay exactly as they were, and the slot is named.
+  case_dir=$(make_case unidentified-slot-mine)
+  slot_a="$case_dir/pool/a/repo"; slot_b="$case_dir/pool/b/repo"
+  make_pushed_slot "$slot_a"
+  mkdir -p "$slot_b"
+  printf 'task=tx-unid\nhome=%s\n' "$case_dir" > "$case_dir/pool/a/.fm-slot-owner"
+  printf 'task=someone-else\nhome=%s\n' "$case_dir" > "$case_dir/pool/b/.fm-slot-owner"
+  setup_unidentified_slot_case "$case_dir" "$slot_a" "$slot_b"
+  : > "$case_dir/config/fleet-ledger"
+  out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1) \
+    || fail "slot-mine: retirement failed: $out"
+  assert_grep "task=tx-unid" "$case_dir/pool/a/.fm-slot-owner" "slot-mine: the claim naming this task was changed"
+  assert_grep "task=someone-else" "$case_dir/pool/b/.fm-slot-owner" "slot-mine: another task's claim was changed"
+  assert_present "$slot_a/sentinel" "slot-mine: a checkout was touched"
+  printf '%s' "$out" | grep -F "the pool slot at $slot_a (claim recorded by home $case_dir) may still be claimed by this task" >/dev/null \
+    || fail "slot-mine: success line does not name the still-claimed slot and its home: $out"
+  assert_no_grep "return" "$case_dir/treehouse.log" "slot-mine: a checkout was returned"
+  assert_grep "Pool slot: the pool slot at $slot_a (claim recorded by home $case_dir) may still be claimed" "$case_dir/data/tx-unid/retired-unverified.txt" \
+    "slot-mine: durable record omits the still-claimed slot"
+  claim=$(grep -F '"task.cleaned_up"' "$case_dir/state/fleet-ledger.jsonl") \
+    || fail "slot-mine: no cleaned-up ledger event"
+  printf '%s' "$claim" | jq -e '.verified == false' >/dev/null \
+    || fail "slot-mine: ledger close does not carry verified:false: $claim"
+
+  # (2) no claim names this task (absent, or another task's): it says so.
+  case_dir=$(make_case unidentified-slot-absent)
+  slot_a="$case_dir/pool/a/repo"; slot_b="$case_dir/pool/b/repo"
+  mkdir -p "$slot_a" "$slot_b"
+  printf 'task=someone-else\nhome=%s\n' "$case_dir" > "$case_dir/pool/b/.fm-slot-owner"
+  setup_unidentified_slot_case "$case_dir" "$slot_a" "$slot_b"
+  out=$(run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1) \
+    || fail "slot-absent: retirement failed: $out"
+  assert_grep "task=someone-else" "$case_dir/pool/b/.fm-slot-owner" "slot-absent: another task's claim was changed"
+  printf '%s' "$out" | grep -F "the pool was searched and no durable pool-slot claim naming this task was found" >/dev/null \
+    || fail "slot-absent: success line does not say no claim was found: $out"
+  printf '%s' "$out" | grep -F "RETIRED UNVERIFIED tx-unid" >/dev/null \
+    || fail "slot-absent: not reported as unverified: $out"
+
+  # (2b) a claim naming this task id is this task's whatever home recorded it:
+  # unpushed work there refuses, and once pushed the outcome names that home.
+  case_dir=$(make_case unidentified-slot-other-home)
+  mkdir -p "$case_dir/other-home"
+  slot_a="$case_dir/pool/a/repo"
+  make_pushed_slot "$slot_a"
+  printf 'unlanded\n' > "$slot_a/sentinel"
+  git -C "$slot_a" -c user.email=t@t -c user.name=t commit -q -am unlanded
+  printf 'task=tx-unid\nhome=%s\n' "$case_dir/other-home" > "$case_dir/pool/a/.fm-slot-owner"
+  setup_unidentified_slot_case "$case_dir" "$slot_a"
+  set +e
+  out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "slot-other-home: a claim recorded by another home must still face the unpushed refusal"
+  printf '%s' "$out" | grep -F "REFUSED: worktree $slot_a has work not on any remote and not landed." >/dev/null \
+    || fail "slot-other-home: refusal does not name the unpushed slot: $out"
+  assert_present "$case_dir/state/tx-unid.meta" "slot-other-home: the refused retirement removed the record"
+  git -C "$slot_a" push -q origin HEAD:refs/heads/main
+  git -C "$slot_a" fetch -q origin
+  out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1) \
+    || fail "slot-other-home: retirement failed once the slot was pushed: $out"
+  assert_grep "home=$case_dir/other-home" "$case_dir/pool/a/.fm-slot-owner" "slot-other-home: the claim was changed"
+  printf '%s' "$out" | grep -F "the pool slot at $slot_a (claim recorded by home $case_dir/other-home) may still be claimed by this task" >/dev/null \
+    || fail "slot-other-home: success line does not name the slot and the home that recorded its claim: $out"
+  assert_grep "claim recorded by home $case_dir/other-home" "$case_dir/data/tx-unid/retired-unverified.txt" \
+    "slot-other-home: durable record omits the claim's home"
+
+  # (2c) the claimed slot holds a commit on no remote: refused, nothing changed.
+  case_dir=$(make_case unidentified-slot-unpushed)
+  slot_a="$case_dir/pool/a/repo"
+  make_pushed_slot "$slot_a"
+  printf 'unlanded\n' > "$slot_a/sentinel"
+  git -C "$slot_a" -c user.email=t@t -c user.name=t commit -q -am unlanded
+  printf 'task=tx-unid\nhome=%s\n' "$case_dir" > "$case_dir/pool/a/.fm-slot-owner"
+  setup_unidentified_slot_case "$case_dir" "$slot_a"
+  set +e
+  out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "slot-unpushed: retirement over a claimed slot with unpushed commits must refuse"
+  printf '%s' "$out" | grep -F "REFUSED: worktree $slot_a has work not on any remote and not landed." >/dev/null \
+    || fail "slot-unpushed: refusal does not name the unpushed slot: $out"
+  assert_present "$case_dir/state/tx-unid.meta" "slot-unpushed: the refused retirement removed the record"
+  assert_grep "task=tx-unid" "$case_dir/pool/a/.fm-slot-owner" "slot-unpushed: the claim was changed"
+  assert_absent "$case_dir/herdr.log" "slot-unpushed: the endpoint was touched before the refusal"
+  assert_absent "$case_dir/data/tx-unid/retired-unverified.txt" "slot-unpushed: a retirement was recorded"
+
+  # (2d) the claimed slot's state cannot be read: refused, nothing changed.
+  case_dir=$(make_case unidentified-slot-unreadable)
+  slot_a="$case_dir/pool/a/repo"
+  mkdir -p "$slot_a"
+  printf 'task=tx-unid\nhome=%s\n' "$case_dir" > "$case_dir/pool/a/.fm-slot-owner"
+  setup_unidentified_slot_case "$case_dir" "$slot_a"
+  set +e
+  out=$(FM_HOME="$case_dir" GIT_CEILING_DIRECTORIES="$case_dir/pool" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "slot-unreadable: retirement over a claimed slot of unknown state must refuse"
+  printf '%s' "$out" | grep -F "REFUSED: cannot inspect worktree $slot_a for uncommitted changes." >/dev/null \
+    || fail "slot-unreadable: refusal does not name the unreadable slot: $out"
+  assert_present "$case_dir/state/tx-unid.meta" "slot-unreadable: the refused retirement removed the record"
+  assert_grep "task=tx-unid" "$case_dir/pool/a/.fm-slot-owner" "slot-unreadable: the claim was changed"
+  assert_absent "$case_dir/herdr.log" "slot-unreadable: the endpoint was touched before the refusal"
+
+  # (2f) the claimed slot has uncommitted changes on a pushed HEAD: refused by
+  # the ordinary path's own check, and the claim and checkout are untouched.
+  case_dir=$(make_case unidentified-slot-dirty)
+  slot_a="$case_dir/pool/a/repo"
+  make_pushed_slot "$slot_a"
+  printf 'unlanded\n' > "$slot_a/sentinel"
+  : > "$slot_a/untracked"
+  printf 'task=tx-unid\nhome=%s\n' "$case_dir" > "$case_dir/pool/a/.fm-slot-owner"
+  setup_unidentified_slot_case "$case_dir" "$slot_a"
+  set +e
+  out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "slot-dirty: retirement over a claimed slot with uncommitted changes must refuse"
+  printf '%s' "$out" | grep -F "REFUSED: worktree $slot_a has uncommitted changes." >/dev/null \
+    || fail "slot-dirty: refusal does not name the dirty slot: $out"
+  printf '%s' "$out" | grep -F "accepts no --force: commit and land the slot's work, or have the captain explicitly authorise discarding it, through firstmate" >/dev/null \
+    || fail "slot-dirty: refusal does not give the way forward without --force: $out"
+  assert_present "$case_dir/state/tx-unid.meta" "slot-dirty: the refused retirement removed the record"
+  assert_grep "task=tx-unid" "$case_dir/pool/a/.fm-slot-owner" "slot-dirty: the dirty slot's claim was changed"
+  assert_grep "unlanded" "$slot_a/sentinel" "slot-dirty: the dirty checkout was changed"
+  assert_present "$slot_a/untracked" "slot-dirty: an untracked file in the dirty slot was removed"
+  assert_absent "$case_dir/herdr.log" "slot-dirty: the endpoint was touched before the refusal"
+
+  # (2f') the claimed slot cannot be inspected while its git index is locked
+  # (a lone lock does not block the read-only status; a broken index under a
+  # lock does): refused, naming the lock, and the lock is left in place.
+  case_dir=$(make_case unidentified-slot-locked)
+  slot_a="$case_dir/pool/a/repo"
+  make_pushed_slot "$slot_a"
+  printf 'not an index' > "$slot_a/.git/index"
+  : > "$slot_a/.git/index.lock"
+  printf 'task=tx-unid\nhome=%s\n' "$case_dir" > "$case_dir/pool/a/.fm-slot-owner"
+  setup_unidentified_slot_case "$case_dir" "$slot_a"
+  set +e
+  out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "slot-locked: retirement over a claimed slot with a locked git index must refuse"
+  printf '%s' "$out" | grep -F "REFUSED: pool slot $slot_a is claimed by task tx-unid (claim recorded by home $case_dir), and its git index is locked" >/dev/null \
+    || fail "slot-locked: refusal does not say the slot's git index is locked: $out"
+  printf '%s' "$out" | grep -F "index.lock), so its state cannot be determined and unlanded work there cannot be ruled out" >/dev/null \
+    || fail "slot-locked: refusal does not name the lock or say unlanded work cannot be ruled out: $out"
+  printf '%s' "$out" | grep -F "wait for the lock's holder to finish, or clear the lock once its holder is gone, then retry; or have the captain explicitly authorise discarding the work, through firstmate" >/dev/null \
+    || fail "slot-locked: refusal does not give the way forward: $out"
+  printf '%s' "$out" | grep -F "commit and land the slot's work" >/dev/null \
+    && fail "slot-locked: refusal gives commit advice that the lock blocks: $out"
+  assert_present "$slot_a/.git/index.lock" "slot-locked: the lock was removed"
+  assert_present "$case_dir/state/tx-unid.meta" "slot-locked: the refused retirement removed the record"
+  assert_absent "$case_dir/herdr.log" "slot-locked: the endpoint was touched before the refusal"
+
+  # (2g) a slot-owner claim that cannot be read refuses: a symlink, a
+  # directory, or a file with no task= line.
+  local claim_shape marker
+  for claim_shape in symlink directory no-task; do
+    case_dir=$(make_case "unidentified-claim-$claim_shape")
+    slot_a="$case_dir/pool/a/repo"
+    make_pushed_slot "$slot_a"
+    marker="$case_dir/pool/a/.fm-slot-owner"
+    case "$claim_shape" in
+      symlink) printf 'task=tx-unid\n' > "$case_dir/elsewhere"; ln -s "$case_dir/elsewhere" "$marker" ;;
+      directory) mkdir "$marker" ;;
+      no-task) printf 'home=%s\n' "$case_dir" > "$marker" ;;
+    esac
+    setup_unidentified_slot_case "$case_dir" "$slot_a"
+    set +e
+    out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1)
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "claim-$claim_shape: an unreadable slot claim must refuse"
+    printf '%s' "$out" | grep -F "REFUSED: the slot-owner claim $marker for pool slot $slot_a cannot be read" >/dev/null \
+      || fail "claim-$claim_shape: refusal does not name the slot and its claim file: $out"
+    printf '%s' "$out" | grep -F "unlanded work there cannot be ruled out. Inspect or repair that claim file, or have the captain explicitly authorise discarding the work, through firstmate" >/dev/null \
+      || fail "claim-$claim_shape: refusal does not give the way forward: $out"
+    assert_present "$case_dir/state/tx-unid.meta" "claim-$claim_shape: the refused retirement removed the record"
+    assert_absent "$case_dir/herdr.log" "claim-$claim_shape: the endpoint was touched before the refusal"
+  done
+
+  # (2e) the pool's slot claims cannot be listed: refused, nothing changed.
+  local unlistable
+  for unlistable in no-project status-fails bad-json; do
+    case_dir=$(make_case "unidentified-slot-$unlistable")
+    setup_unidentified_slot_case "$case_dir"
+    case "$unlistable" in
+      no-project) rm -rf "${case_dir:?}/project" ;;
+      status-fails) printf '#!/usr/bin/env bash\nexit 1\n' > "$case_dir/fakebin/treehouse" ;;
+      bad-json) printf '#!/usr/bin/env bash\necho "not json"\n' > "$case_dir/fakebin/treehouse" ;;
+    esac
+    set +e
+    out=$(FM_HOME="$case_dir" run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1)
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "slot-$unlistable: retirement over an unlistable pool must refuse"
+    printf '%s' "$out" | grep -F "could not be listed" >/dev/null \
+      || fail "slot-$unlistable: refusal does not say the slot claims could not be listed: $out"
+    printf '%s' "$out" | grep -F "No slot search could run, so unlanded work in a pool slot claimed by this task cannot be ruled out" >/dev/null \
+      || fail "slot-$unlistable: refusal does not say unlanded work cannot be ruled out: $out"
+    printf '%s' "$out" | grep -F "restore the project path $case_dir/project so its pool can be searched" >/dev/null \
+      || fail "slot-$unlistable: refusal does not name the project path to restore: $out"
+    printf '%s' "$out" | grep -F "have the captain explicitly authorise discarding this task's work, through firstmate" >/dev/null \
+      || fail "slot-$unlistable: refusal does not name the captain's authorisation as the other way forward: $out"
+    if [ "$unlistable" = no-project ]; then
+      printf '%s' "$out" | grep -F "its project path $case_dir/project does not exist" >/dev/null \
+        || fail "slot-no-project: refusal does not name the missing project path: $out"
+    fi
+    assert_present "$case_dir/state/tx-unid.meta" "slot-$unlistable: the refused retirement removed the record"
+    assert_absent "$case_dir/herdr.log" "slot-$unlistable: the endpoint was touched before the refusal"
+  done
+
+  # (3) an ordinary close of a record with a valid worktree writes no unverified ledger member.
+  case_dir=$(make_case unidentified-ledger-ordinary)
+  write_meta "$case_dir" no-mistakes ship
+  : > "$case_dir/config/fleet-ledger"
+  run_teardown "$case_dir" > /dev/null 2>&1 || fail "ledger-ordinary: teardown failed"
+  claim=$(grep -F '"task.cleaned_up"' "$case_dir/state/fleet-ledger.jsonl") \
+    || fail "ledger-ordinary: no cleaned-up ledger event"
+  printf '%s' "$claim" | jq -e 'has("verified") | not' >/dev/null \
+    || fail "ledger-ordinary: an ordinary close carries a verified member: $claim"
+  pass "teardown: an unverified retirement only reads slot claims, names a still-claimed slot and its home, refuses over unpushed, unreadable, or unlistable slots, and marks its ledger close unverified"
+}
+
+test_unidentified_retirement_of_a_legacy_record_reports_unverified() {
+  local case_dir out
+  case_dir=$(make_case unidentified-legacy)
+  seed_backlog_in_flight "$case_dir"
+  sed -i 's/task-x1/tx-unid/' "$case_dir/data/backlog.md"
+  setup_unidentified_slot_case "$case_dir"
+  sed -i '/^spawn_gen=/d' "$case_dir/state/tx-unid.meta"
+  : > "$case_dir/herdr.closed"
+  out=$(run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree --legacy-record 2>&1) \
+    || fail "legacy: retirement failed: $out"
+  printf '%s' "$out" | grep -F "RETIRED UNVERIFIED tx-unid" >/dev/null \
+    || fail "legacy: a legacy record's retirement is not reported as unverified: $out"
+  printf '%s' "$out" | grep -F "teardown tx-unid complete" >/dev/null \
+    && fail "legacy: a legacy record's retirement reported an ordinary clean close: $out"
+  printf '%s' "$out" | grep -F "(legacy record without spawn_gen, endpoint missing)" >/dev/null \
+    || fail "legacy: a legacy record's retirement does not name the legacy acceptance and its endpoint: $out"
+  assert_absent "$case_dir/state/tx-unid.meta" "legacy: record not released"
+  pass "teardown: retiring a legacy record with no worktree identity still reports RETIRED UNVERIFIED, never a clean close"
+}
+
+test_unidentified_retirement_keeps_a_done_item_done() {
+  local case_dir out row_state
+  case_dir=$(make_case unidentified-done-item)
+  seed_backlog_in_flight "$case_dir"
+  sed -i 's/task-x1/tx-unid/' "$case_dir/data/backlog.md"
+  tasks-axi "done" tx-unid --file "$case_dir/data/backlog.md" >/dev/null
+  setup_unidentified_slot_case "$case_dir"
+  out=$(run_teardown_id "$case_dir" tx-unid --retire-unidentified-worktree 2>&1) \
+    || fail "done-item: retirement failed: $out"
+  row_state=$(tasks-axi show tx-unid --file "$case_dir/data/backlog.md" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)
+  [ "$row_state" = "done" ] || fail "done-item: a Done item was moved to '$row_state'"
+  tasks-axi show tx-unid --full --file "$case_dir/data/backlog.md" 2>/dev/null \
+    | grep -F "cleanup NOT verified - worktree identity unknown so landed work was not checked" >/dev/null \
+    || fail "done-item: the Done item does not carry the unverified note"
+  printf '%s' "$out" | grep -F "stays Done" >/dev/null \
+    || fail "done-item: output does not say the item stays Done: $out"
+  assert_absent "$case_dir/state/tx-unid.meta" "done-item: record not released"
+  pass "teardown: an unverified retirement leaves an already-Done item Done and only adds the unverified note"
+}
+
+test_unidentified_retirement_leaves_valid_records_alone() {
+  local case_dir rc
+  case_dir=$(make_case unidentified-valid-record)
+  write_meta "$case_dir" no-mistakes ship
+  set +e
+  run_teardown "$case_dir" --retire-unidentified-worktree > "$case_dir/o.out" 2> "$case_dir/o.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a record naming a worktree was retired without verification"
+  assert_grep "names a worktree" "$case_dir/o.err" "refusal does not explain that a worktree is named"
+  assert_present "$case_dir/state/task-x1.meta" "the refused retirement removed a valid record"
+  pass "teardown: --retire-unidentified-worktree refuses a record that names a worktree"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -5261,6 +5685,11 @@ test_teardown_skips_pipeline_spend_when_disabled
 test_teardown_records_unavailable_spend_for_a_gone_worktree
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_concludes_on_passed_with_override_after_abort
+test_unidentified_worktree_retirement
+test_unidentified_retirement_leaves_valid_records_alone
+test_unidentified_retirement_slot_claim_and_ledger
+test_unidentified_retirement_keeps_a_done_item_done
+test_unidentified_retirement_of_a_legacy_record_reports_unverified
 test_parked_own_run_concludes_on_passed_with_skips_after_abort
 test_parked_run_advanced_past_unfetched_head_is_still_aborted
 test_parked_run_with_mismatched_ledger_head_is_never_aborted
