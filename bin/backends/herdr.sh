@@ -153,6 +153,35 @@ FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 # projection.
 FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
 
+FM_BACKEND_HERDR_WORKER_WORKSPACE_CONFIG="herdr-worker-workspace"
+
+# fm_backend_herdr_worker_workspace_preference <config-dir>: the single owner
+# of config/herdr-worker-workspace parsing. Echoes the configured workspace
+# label verbatim (whitespace-stripped at both ends), or empty when the home
+# configured nothing - the launcher-workspace inheritance continues to bind
+# as before. A non-empty value directs plain ship/scout spawns called from
+# THIS home (the launcher-home path of fm_backend_herdr_workspace_ensure)
+# into a side workspace distinct from the launcher's own, so a supervising
+# agent pane never shares a workspace with its workers. Whitespace-free
+# labels only: a label with internal whitespace is unreadable to this
+# adapter's callers, so it is refused with a warning rather than silently
+# taken.
+fm_backend_herdr_worker_workspace_preference() {  # <config-dir>
+  local config_dir=${1:-} file value
+  [ -n "$config_dir" ] || return 0
+  file="$config_dir/$FM_BACKEND_HERDR_WORKER_WORKSPACE_CONFIG"
+  [ -f "$file" ] || return 0
+  value=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$file" 2>/dev/null | head -1)
+  case "$value" in
+    '') return 0 ;;
+    *[[:space:]]*)
+      echo "warning: $file: workspace labels must not contain whitespace; ignoring (\"$value\")" >&2
+      return 0
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+
 # fm_backend_herdr_presentation_preference <config-dir>: the single owner of
 # config/herdr-presentation-spaces parsing. Echoes exactly one of "off", "on"
 # (a deliberate opt-in, honored even below the version floor), or "default"
@@ -1684,21 +1713,22 @@ fm_backend_herdr_server_ensure() {  # <session>
 }
 
 # fm_backend_herdr_workspace_find_all: EVERY workspace id inside <session>
-# whose label equals this HOME's own label (fm_backend_herdr_workspace_label),
-# one per line, in herdr's own list order (normally creation order, oldest
-# first). Empty when none match. Never creates anything.
+# whose label equals <label> (2nd arg, default this HOME's own label via
+# fm_backend_herdr_workspace_label), one per line, in herdr's own list order
+# (normally creation order, oldest first). Empty when none match. Never
+# creates anything.
 #
-# Single owner of the home-label workspace query. Herdr enforces no workspace
-# label uniqueness at all (docs/herdr-backend.md "Label collisions"), so this
-# can legitimately return MORE THAN ONE id: a captain-owned workspace can
-# collide by label, a cwd-basename-derived label can coincide, and concurrent
-# first spawns can mint two same-labeled home workspaces. Callers decide what a
-# duplicate means for them - fm_backend_herdr_workspace_ensure refuses to guess
-# which one is the caller's, while the read-only recovery path below keeps its
-# historical first-match behavior.
-fm_backend_herdr_workspace_find_all() {  # <session>
-  local session=$1 label list
-  label=$(fm_backend_herdr_workspace_label)
+# Single owner of the label-scoped workspace query. Herdr enforces no
+# workspace label uniqueness at all (docs/herdr-backend.md "Label
+# collisions"), so this can legitimately return MORE THAN ONE id: a
+# captain-owned workspace can collide by label, a cwd-basename-derived label
+# can coincide, and concurrent first spawns can mint two same-labeled home
+# workspaces. Callers decide what a duplicate means for them - the spawn
+# path (fm_backend_herdr_workspace_ensure) refuses to guess, while
+# read-only/recovery paths keep their historical first-match answer.
+fm_backend_herdr_workspace_find_all() {  # <session> [<label>]
+  local session=$1 label=${2:-} list
+  [ -n "$label" ] || label=$(fm_backend_herdr_workspace_label)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
   # keyword (label/break), so declaring a jq variable named "label" is a
@@ -1953,14 +1983,18 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # <launcher-relationship> (3rd arg, default "launcher-home") says whether the
 # container being ensured belongs to the SAME firstmate home as the process
 # calling this:
-#   launcher-home - a crewmate or scout for the caller's own home. When the
-#                   caller is itself running in a herdr pane, the worker MUST
-#                   land in that exact workspace
-#                   (fm_backend_herdr_launcher_identity), never in whichever
-#                   same-labeled workspace happens to sort first.
+#   launcher-home - a crewmate or scout for the caller's own home.
+#                   fm_backend_herdr_launcher_workspace ($config_dir/
+#                   herdr-worker-workspace, when set) wins as the worker's
+#                   home; when it is unset/empty AND the caller itself runs
+#                   inside a herdr pane, the worker MUST land in that exact
+#                   workspace (fm_backend_herdr_launcher_identity), never in
+#                   whichever same-labeled workspace happens to sort first.
 #   other-home    - a --secondmate launch, which stands up a DIFFERENT home's
 #                   own per-home workspace by design. The launcher's workspace
-#                   is deliberately not inherited here.
+#                   is deliberately not inherited here, and
+#                   config/herdr-worker-workspace never applies - a secondmate
+#                   home's own workspace is the destination either way.
 # With no herdr ancestry at all there is no launcher workspace to inherit, so
 # the per-home label lookup below stays the resolver - but it must then resolve
 # to exactly ONE workspace. Two same-labeled home workspaces with no launcher
@@ -1970,23 +2004,36 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # Returns 0 on success, 3 for a refusal whose exact reason is already on
 # stderr, and 1 for a failed or unparseable herdr call.
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship>]
-  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status
+  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label worker_label config_dir matches count status
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
+  # config/herdr-worker-workspace directs a launcher-home spawn (a ship or
+  # scout for THIS home) into a side workspace that the launcher never
+  # inherits: workers stay visible to their supervisor without ever sharing
+  # that workspace. The launcher-workspace inheritance below fires only when
+  # the home configured nothing.
   if [ "$relationship" = launcher-home ]; then
-    fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
-    case "$status" in
-      0)
-        FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
-        printf '%s' "$FM_BACKEND_HERDR_WS_ID"
-        return 0
-        ;;
-      2) ;;
-      *) return 3 ;;
-    esac
+    config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+    worker_label=$(fm_backend_herdr_worker_workspace_preference "$config_dir")
+    if [ -z "$worker_label" ]; then
+      fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
+      case "$status" in
+        0)
+          FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+          printf '%s' "$FM_BACKEND_HERDR_WS_ID"
+          return 0
+          ;;
+        2) ;;
+        *) return 3 ;;
+      esac
+      label=$(fm_backend_herdr_workspace_label)
+    else
+      label=$worker_label
+    fi
+  else
+    label=$(fm_backend_herdr_workspace_label)
   fi
-  label=$(fm_backend_herdr_workspace_label)
-  matches=$(fm_backend_herdr_workspace_find_all "$session")
+  matches=$(fm_backend_herdr_workspace_find_all "$session" "$label")
   count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
   if [ "$count" -gt 1 ]; then
     echo "error: ${count} herdr workspaces in session '$session' are labeled '$label' (${matches//$'\n'/ }) and this spawn has no herdr parent pane to identify which one is its own; rename or close the extras, or run firstmate inside the workspace its workers belong in" >&2

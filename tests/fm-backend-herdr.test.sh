@@ -1169,6 +1169,44 @@ test_workspace_ensure_other_home_ignores_the_launcher_identity() {
   pass "fm_backend_herdr_workspace_ensure: a --secondmate container resolves that home's own workspace, not the launcher's"
 }
 
+test_workspace_ensure_worker_workspace_config_overrides_launcher_inheritance() {
+  # config/herdr-worker-workspace names a side workspace for this home's
+  # launches: the launcher's herdr pane must NOT be consulted, no
+  # launcher-workspace inheritance may fire, and the spawn resolves by the
+  # configured label exactly as it would by the home label.
+  local dir log resp fb out config
+  dir="$TMP_ROOT/ensure-worker-cfg"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  config="$dir/config"; mkdir -p "$config"
+  printf 'Workers\n' > "$config/herdr-worker-workspace"
+  # No launcher identity should be consulted at all: the resolve goes
+  # straight to the label path. Only the label match is scripted.
+  printf '{"result":{"workspaces":[{"workspace_id":"w7","label":"Workers"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_CONFIG_OVERRIDE="$config" \
+    HERDR_ENV=1 HERDR_PANE_ID=w9:p9 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT" )
+  [ "$out" = w7 ] || fail "a configured worker workspace label must resolve to that label's workspace, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get' "a configured worker workspace must never consult the launcher's pane"
+  pass "fm_backend_herdr_workspace_ensure: config/herdr-worker-workspace redirects launcher-home spawns to the named workspace"
+}
+
+test_workspace_ensure_worker_workspace_config_does_not_apply_to_other_home() {
+  # --secondmate launches stand up a DIFFERENT home's workspace by design;
+  # config/herdr-worker-workspace is a home-local preference that must NOT
+  # redirect an other-home spawn's destination either.
+  local dir log resp fb out config
+  dir="$TMP_ROOT/ensure-worker-cfg-other-home"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  config="$dir/config"; mkdir -p "$config"
+  printf 'Workers\n' > "$config/herdr-worker-workspace"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_CONFIG_OVERRIDE="$config" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp other-home' "$ROOT" )
+  [ "$out" = w1 ] || fail "an other-home spawn resolves the launched home's own label, not the worker-workspace config, got '$out'"
+  pass "fm_backend_herdr_workspace_ensure: config/herdr-worker-workspace is launcher-home only, never --secondmate"
+}
+
 test_container_ensure_refuses_an_ambiguous_home_label() {
   local dir log resp fb out status
   dir="$TMP_ROOT/container-ambiguous"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5922,6 +5960,8 @@ test_launcher_identity_refuses_a_workspace_missing_from_the_session
 test_workspace_ensure_prefers_the_launcher_over_the_first_label_match
 test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
 test_workspace_ensure_other_home_ignores_the_launcher_identity
+test_workspace_ensure_worker_workspace_config_overrides_launcher_inheritance
+test_workspace_ensure_worker_workspace_config_does_not_apply_to_other_home
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_server_ensure_scrubs_home_and_harness_identity
