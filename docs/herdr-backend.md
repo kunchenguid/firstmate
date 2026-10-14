@@ -120,6 +120,12 @@ Keyed `blocked`/`needs-decision` entries with no later `resolved` key stay overt
 An unavailable Herdr or Beads read yields an explicit partial/unknown result and a nonzero exit status rather than an empty or unblocked roster.
 The script header owns CLI flags, output fields, and observation boundaries.
 
+### Filing captain beads as a peer
+
+A hand-launched peer that files a Beads bead needing the captain's answer adds the label `requester:<name>`, where `<name>` is its registered peer name in the home's `state/peers/peers.tsv`.
+Firstmate's `bin/fm-captain-beads-check.sh` consumes closed captain beads and delivers each close reason to the requester that marker names - through `state/peers/peers.sh send` for a peer, `bin/fm-send.sh` for a firstmate-managed task or secondmate, and a `check:` wake when the requester is `firstmate` itself.
+Beads filed by `bin/fm-captain-hold.sh` or `bin/fm-captain-ask.sh` carry an equivalent `fm-requester:` body line automatically; the label convention exists for beads filed by hand or by other tooling.
+
 ### Focus
 
 Workspace and tab creation use `--no-focus`.

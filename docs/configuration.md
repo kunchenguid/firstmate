@@ -350,6 +350,14 @@ Captain rows have no Beads due semantics, so that create path waives a Beads `du
 
 Do not register a Beads `types.custom` `captain` type for this: captain is a hold kind, and the fleet Beads `due.required` policy for ordinary work stays in the federated beads config.
 
+### Captain bead board (config/beads-board)
+
+A home joins the captain-request loop by writing one line - the Beads working directory holding the shared captain board's `.beads` store - into `config/beads-board` (a leading `~` resolves against `$HOME`).
+Absent or empty config is the historical behavior: firstmate makes no `bd` call at all.
+With the config in place, [`bin/fm-captain-hold.sh`](../bin/fm-captain-hold.sh) mirrors every hold into one `captain`-label bead assigned to the captain and closes it with the recorded answer on every resolution path, and [`bin/fm-captain-ask.sh`](../bin/fm-captain-ask.sh) files firstmate's own direct asks on the same board.
+[`bin/fm-captain-beads-check.sh`](../bin/fm-captain-beads-check.sh) delivers each closed captain bead's close reason to the requester it names (`requester:<name>` label or the `fm-requester:` body line the mirroring writes), deduped once per bead; its `install` subcommand hash-binds it as this home's watcher check.
+Bead mirroring never gates the hold or the answer: a broken board surfaces one explicit warning while the backlog record stands.
+
 ### Automatic dispatch and completion
 
 When the automatic transition gate applies, dispatch and completion each move the work item in the same run that creates or removes its task record.

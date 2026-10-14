@@ -56,6 +56,16 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+# Mirroring onto the captain-request loop (the shared Beads board) is
+# automatic when this home carries `config/beads-board`: `hold` creates one
+# `captain`-label bead whose body names this task as its `fm-requester:` and
+# records the bead id under `state/<id>.captain-bead`; every close lane of
+# `answer` - done, `--release`, the idempotent replays, and the repaired
+# record - closes that bead with the captain's answer as its reason. Mirroring
+# never gates the backlog record: an absent config keeps the historical
+# no-bead behavior with no bd call at all, and a broken or refused board
+# surfaces one stderr warning while the hold or answer still stands.
+# bin/fm-bead-board-lib.sh owns the consumer contract.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -237,6 +247,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-bead-board-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-bead-board-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
@@ -248,6 +261,88 @@ publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
     0|1) PARENT_HOLD_PUBLISHED=1 ;;
     *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
   esac
+}
+
+# Captain-request loop bead mirroring (config/beads-board; the contract lives
+# in bin/fm-bead-board-lib.sh). Mirroring never gates the hold or the answer:
+# an absent config keeps the historical no-bead behavior, a broken or refused
+# board surfaces one explicit stderr warning, and the backlog records stay the
+# source of truth. The dedupe record state/<id>.captain-bead holds one line in
+# `v1 <bead-id>` form; answer paths keep writing through the SAME shell that
+# read it (reads in a subshell cannot hand back), so every record lane below
+# sets CAPTAIN_BEAD_ID in the running shell.
+
+# Read the recorded bead id into CAPTAIN_BEAD_ID; 0 = recorded, 1 = none yet.
+captain_bead_record_read() {  # <task-id>
+  local record line
+  CAPTAIN_BEAD_ID=
+  CAPTAIN_BEAD_RECORD=
+  record="$STATE/$1.captain-bead"
+  [ -f "$record" ] || return 1
+  CAPTAIN_BEAD_RECORD=$record
+  IFS= read -r line < "$record" || return 1
+  case "$line" in
+    'v1 '[A-Za-z0-9._-]*) CAPTAIN_BEAD_ID=${line#v1 } ;;
+    *) return 1 ;;
+  esac
+  [ -n "$CAPTAIN_BEAD_ID" ] || return 1
+}
+
+# Persist the bead id for this hold (0600, same privacy posture as state/).
+captain_bead_record_write() {  # <task-id> <bead-id>
+  local record tmp
+  record="$STATE/$1.captain-bead"
+  umask 077
+  tmp=$(mktemp "$STATE/.captain-bead.XXXXXX") \
+    || { printf 'fm-captain-hold: warning: cannot stage the bead record for %s\n' "$1" >&2; return 1; }
+  printf 'v1 %s\n' "$2" > "$tmp" && mv -f -- "$tmp" "$record"
+}
+
+captain_bead_warn() {  # <task-id> <what-happened> <why>
+  printf 'fm-captain-hold: warning: %s (task %s: %s); the hold itself stands, and no agent is notified\n' \
+    "$2" "$1" "$3" >&2
+}
+
+# Mirror one hold onto the configured board; no-op without config/beads-board.
+captain_hold_bead_sync() {  # <task-id> <title> <reason>
+  local id=$1 title=$2 reason=$3 rc=0 bead
+  captain_bead_record_read "$id" && return 0
+  if [ -n "$CAPTAIN_BEAD_RECORD" ]; then
+    captain_bead_warn "$id" 'the bead was not mirrored' "the bead record $CAPTAIN_BEAD_RECORD is unreadable"
+    return 0
+  fi
+  fm_bead_board_ready || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$rc" -eq 2 ]; then
+    captain_bead_warn "$id" 'the bead was not mirrored' 'the configured board surface is unavailable'
+    return 0
+  fi
+  [ -n "$title" ] || title="Captain call: $id"
+  if ! bead=$(fm_bead_headline_create "$title" "$id" "Hold reason: $reason" "Task: $id (home $FM_HOME)"); then
+    captain_bead_warn "$id" 'the bead was not mirrored' 'bd create against the configured board failed'
+    return 0
+  fi
+  captain_bead_record_write "$id" "$bead"
+}
+
+# Close this hold's mirrored bead with the captain's answer; no-op without a
+# recorded bead (including homes that never joined the loop).
+captain_hold_bead_close() {  # <task-id> <outcome> <decision-text>
+  local id=$1 outcome=$2 decision=$3 rc=0
+  captain_bead_record_read "$id" || return 0
+  fm_bead_board_ready || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    captain_bead_warn "$id" 'the captain answer did not reach the board' 'the configured board surface is unavailable'
+    return 0
+  fi
+  if ! fm_bead_close "$CAPTAIN_BEAD_ID" "Captain ${outcome}: $decision"; then
+    captain_bead_warn "$id" 'the captain answer did not reach the board' 'bd close against the configured board failed'
+    return 0
+  fi
+  rm -f -- "$CAPTAIN_BEAD_RECORD"
+  CAPTAIN_BEAD_RECORD=
 }
 
 CAPTAIN_META_LOCK=
@@ -1008,6 +1103,7 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  captain_hold_bead_sync "$id" "$title" "$reason"
   printf '%s\n' "$id"
 }
 
@@ -1104,7 +1200,7 @@ remove_interrupted_answer_stamp() {  # <task-id>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence bead_outcome
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1128,6 +1224,9 @@ command_answer() {
   # The occurrence the parent line names: the record about to be written is
   # one past those already in the body, and a retry names the newest one.
   occurrence=$(( $(resolution_record_count "$body") + 1 ))
+  # bead_outcome tracks the wording the bead close records: the idempotent
+  # replay and repaired-record lanes below adjust it before closing.
+  bead_outcome=$outcome
 
   if [ "$state" = "done" ]; then
     if body_has_resolution_record "$body"; then
@@ -1141,10 +1240,13 @@ command_answer() {
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
       remove_interrupted_answer_stamp "$id"
       if [ "$recorded_mode" = repaired ]; then
+        bead_outcome=repaired
         publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "answered (repaired)"
       else
+        bead_outcome=answered
         publish_parent_resolution_then_retire "$id" $((occurrence - 1)) answered
       fi
+      captain_hold_bead_close "$id" "$bead_outcome" "$DECISION_TEXT"
       printf 'answered: %s\n' "$id"
       return 0
     fi
@@ -1161,6 +1263,7 @@ command_answer() {
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
+    captain_hold_bead_close "$id" repaired "$DECISION_TEXT"
     publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)"
     printf 'repaired: %s\n' "$id"
     return 0
@@ -1185,6 +1288,7 @@ command_answer() {
         fail "could not close answered captain-held task $id"
       fi
       remove_interrupted_answer_stamp "$id"
+      captain_hold_bead_close "$id" "$outcome" "$DECISION_TEXT"
       publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "$outcome"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
@@ -1198,6 +1302,7 @@ command_answer() {
     show=$TASK_SHOW_OUTPUT
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
+    captain_hold_bead_close "$id" "$outcome" "$DECISION_TEXT"
     publish_parent_resolution_then_retire "$id" "$occurrence" "$outcome"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
@@ -1211,6 +1316,7 @@ command_answer() {
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
     remove_interrupted_answer_stamp "$id"
+    captain_hold_bead_close "$id" released "$DECISION_TEXT"
     publish_parent_resolution_then_retire "$id" $((occurrence - 1)) released
     printf 'released: %s\n' "$id"
     return 0
