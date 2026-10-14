@@ -415,6 +415,16 @@ attach_and_wait() {
       echo "watcher: FAILED - attached watcher pid=$attached_pid stalled (beacon ${age}s at or past hard bound ${STALL_BOUND}s)"
       return 1
     fi
+    # A subscribed input delivery already names the exact closed cycle in the
+    # durable ledger. Forward it now instead of spending the successor grace
+    # window before the Stop owner can request the handling turn. Missing or
+    # ordinary deliveries retain the existing recovery/attachment behavior.
+    if [ -f "$STATE/.captain-input" ] && cycle_delivered_reason \
+      && [ "${DELIVERED_REASON#check: captain-input }" != "$DELIVERED_REASON" ]; then
+      printf '%s\n' "$DELIVERED_REASON"
+      cycle_log_append unknown unknown attached-delivered-wake none
+      return 0
+    fi
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID

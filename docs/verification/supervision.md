@@ -508,6 +508,8 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 
 ## Watcher continuity
 
+[Continuous input verification](captain-input.md) records the opt-in shared-owner Claude laboratory and its current limits.
+
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.
 No credential material was copied into a fixture.
 
