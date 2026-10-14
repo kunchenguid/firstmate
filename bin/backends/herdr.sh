@@ -2407,9 +2407,10 @@ fm_backend_herdr_pane_owns_session() {  # <session> <pane_id> <pid>
 #                 agent whose process-level view is unreadable - the
 #                 registration alone is no longer trusted, and its absence is
 #                 not claimed either - or an unregistered pane whose process
-#                 view holds a non-shell, non-harness foreground process. The caller must fail safe toward refusal
-#                 here, never toward closing - this is the conservative
-#                 backstop the husk check depends on.
+#                 view holds a non-shell, non-harness foreground process. The
+#                 caller must fail safe toward refusal here, never toward
+#                 closing - this is the conservative backstop the husk check
+#                 depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
