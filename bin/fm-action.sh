@@ -12,6 +12,8 @@
 #       generic word such as yolo or auto is refused); the due time defaults to
 #       FM_ACTION_START_SECS (300) after admission. A gate class requires
 #       --ready-with, naming the independent ready actions or `none`.
+#   consume <task> ID --reason TEXT [--at EPOCH]
+#       Consume or report a returned validation call within FM_ACTION_START_SECS.
 #   ack <task> ID [--at EPOCH]
 #   start <task> ID [--units N] [--at EPOCH]
 #   result <task> ID ok|refused|failed|answered [--reason TEXT] [--at EPOCH]
@@ -30,6 +32,10 @@
 #
 # Reads never write. Nothing here interrupts, restarts, answers a captain hold,
 # or closes a task; fm-watch routes incidents through its existing check queue.
+# Ordinary inbox steers, launch/control events and watcher incidents are wired.
+# Internal fire-and-forget nudges are excluded; other execution owners must
+# record their own native start/result and validation-return consumption.
+# Live adoption is PENDING on scheduler PR https://github.com/kunchenguid/firstmate/pull/7234.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -149,6 +155,11 @@ case "$CMD" in
     fi
     FIELDS+=("head=$HEAD" "run=$RUN" "attempt=$ATTEMPT")
     fm_action_append "$STATE" "$TASK" "$AT" "$ID" admit "${FIELDS[@]}"
+    ;;
+  consume)
+    require_existing "$POSITIONAL"
+    [ -n "$REASON" ] || die "--reason is required: name the consumed or reported return"
+    fm_action_append "$STATE" "$TASK" "$AT" "$POSITIONAL" consume "reason=$(fm_action_clean "$REASON")"
     ;;
   ack)
     require_existing "$POSITIONAL"

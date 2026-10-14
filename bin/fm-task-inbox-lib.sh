@@ -221,7 +221,7 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
     printf -- '--\n'
     printf '%s' "$text"
-  } > "$tmp" && fm_action_admit_steer "${dir%/*}" "${task}" "$rec" "$text" && mv "$tmp" "$rec" || status=1
+  } > "$tmp" && fm_action_admit_steer "${dir%/*}" "${task}" "$rec" "$text" "$delivery_mode" && mv "$tmp" "$rec" || status=1
   [ "$status" -eq 0 ] || { rm -f "$tmp"; return 1; }
   printf '%s' "$rec"
 }

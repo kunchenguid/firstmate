@@ -625,6 +625,10 @@ action_followthrough_check() {
     [ "$(cat "$marker" 2>/dev/null || true)" != "$incident" ] || continue
     key="action-followthrough:$action_state:$task:$id:$incident"
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    if [ ! -f "$action_state/$task.actions" ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
     queued=$(fm_wake_queued_keys_locked check) || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
     reason="check: action-followthrough $task $id $incident owner=$owner operation=$operation ledger=$action_state/$task.actions"
     if ! printf '%s\n' "$queued" | awk -v key="$key" '$0==key {found=1} END {exit !found}'; then
