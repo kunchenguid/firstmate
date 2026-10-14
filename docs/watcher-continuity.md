@@ -424,6 +424,7 @@ It then simulates actionable and empty child closes against the actual Pi and Op
 - Verifies single-flight behavior.
 - Changes the session lock before close to prove ownership is rechecked.
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+- Lets a Pi successor's descendant print readiness after the arm exits to prove restoration retries until a live successor exists before delivery.
 
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, plus:
 
