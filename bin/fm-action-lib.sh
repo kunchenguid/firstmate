@@ -47,24 +47,30 @@
 #   result-unconsumed returned validation call not consumed within the start bound
 #   gate-overdue       a gate class past its due time and unanswered
 #   none               everything else
-# A started action with no result is executing and never an incident, and a
-# live hold suppresses only until its finite deadline. The fold never writes,
-# closes, answers, interrupts or restarts anything; routing an incident to its
+# A started action with no result is executing; only over-grant can flag it.
+# A live hold suppresses an unstarted incident only until its finite deadline.
+# The fold never writes, closes, answers, interrupts or restarts anything; routing an incident to its
 # owner is bin/fm-watch.sh's job, through its existing durable check queue.
 #
 # REGISTER. fm_action_register answers, for one live task and from files alone:
 # owner, last observed progress with its source, next checkpoint and verdict.
-# The last progress is the newest of ledger start/result/consume events, the
-# worker's own stamped status line, the worktree head commit time, an observed
-# note (state/<task>.checkpoint-progress, written by the watcher from a provably running
-# pipeline), and the task record itself. A task the worker owns that passes its
-# checkpoint without progress is the `checkpoint-missed` incident; a task
+# Remote-host tasks and secondmates are excluded. The last progress is the
+# newest of non-triage ledger start/result/consume events, the worker's stamped
+# status line, the worktree head commit time, native harness activity, an
+# observed note (state/<task>.checkpoint-progress, written by the watcher or
+# the supervisor), and the task record itself. Progress does not certify that
+# an ordinary steer started; its execution owner must record its own start.
+# A task the worker owns that passes its checkpoint without progress is the `checkpoint-missed` incident; a task
 # waiting on firstmate or a declared wait is listed with its owner and never an
 # incident here, because the existing decision and wait paths own those.
+# Declared waits use the canonical persistent-wait reader and configured verbs.
+# Checkpoint incident identity binds the current spawn generation and last
+# progress epoch so new progress or a relaunch does not inherit an old ladder.
 #
 # OBSERVER. The same register also answers whether the observer itself is
-# alive and on cadence: fm_action_observer_record, called by the watcher poll
-# (no second timer), appends every interval between two `.last-check` touches
+# alive and on cadence: fm_action_observer_record, called at watcher beacon
+# and check-touch boundaries before notification exits (no second timer),
+# appends every interval between two `.last-check` touches
 # that exceeded FM_CHECK_CADENCE_BOUND_SECS to state/.check-cadence-misses, an
 # append-only log nothing resets, so a failed cadence acceptance stays visible
 # after the cadence recovers. Beat liveness (`.last-watcher-beat`) is reported
@@ -75,11 +81,18 @@
 # without an additive `resolved` line leaves that record standing. That is a
 # record-lifecycle defect, reported as the `open-decision-stale` incident with
 # the exact additive line that closes it; the fold itself is never weakened.
+# Each open blocker is checked against its own latest stamped opening and a
+# later stamped working line. Its incident identity binds the current spawn
+# generation, native blocker key and opening epoch; one blocker's escalation
+# or resolution cannot suppress another blocker's report.
 #
 # LADDER. A reported incident advances through bounded stages in the watcher,
-# each emitted once: 0 report, 1 triage (a ledger action `triage-<id>` owned by
-# the triage owner, ACKed by the wake acknowledgement and closed only by a
-# verified result), 2 authority escalation. See fm_action_stage.
+# each emitted once: 0 report, 1 triage (a ledger action
+# `triage-<id>-<first-reported-epoch>` owned by the triage owner), 2 authority
+# escalation. Wake acknowledgement records delivery, not a ledger ack or
+# execution. An ok triage result requires its exact target incident to be gone;
+# the watcher also closes an open triage when that incident clears.
+# See fm_action_stage and bin/fm-watch.sh's action_followthrough_incident.
 set -u
 
 # shellcheck source=bin/fm-operational-input.sh

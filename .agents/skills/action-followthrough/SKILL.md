@@ -41,15 +41,15 @@ The `--inbox` field links a steering record, whose move to `handled/` counts as 
 
 `fm-watch.sh` polls every task ledger alongside inbox loss detection, including tasks without a live endpoint and remote parent-route ledgers, and routes incidents into its existing durable check queue with per-incident deduplication.
 For a parent-route incident, use its emitted ledger directory as `FM_STATE_OVERRIDE` when recording the response.
-`fm-action.sh incidents <task>` is read-only and reports:
+`fm-action.sh incidents <task>` is read-only and reports ledger incidents:
 - `unacked-unstarted` and `acked-unexecuted`: the action's owner starts it or records a concrete refusal; firstmate follows up when the owner does not.
 - `over-grant`: stop spending units and report the overrun; do not continue under the old grant.
 - `result-unconsumed`: consume or report the returned validation call before doing further work.
 - `gate-overdue`: surface the pending question to its owner while the independent ready actions keep running.
-- `checkpoint-missed`: the task's worker owns it and no progress evidence (ledger event, stamped status line, head commit, observed running pipeline, or `fm-action.sh progress`) landed within `FM_ACTION_CHECKPOINT_SECS` (3600).
-- `open-decision-stale`: a `blocked` record the fold still holds open while the worker kept stamping `working` lines; the fold is authoritative and is never weakened, so the opener (or firstmate on its behalf, saying so) appends the additive `resolved [at=<epoch>] [key=<key>]: <how it cleared>` line the report names.
+The watcher also reports `checkpoint-missed` and `open-decision-stale` using the register and blocker checks owned by `bin/fm-action-lib.sh`; the `incidents` CLI does not include those conditions.
+For a stale blocker, the opener (or firstmate on its behalf, saying so) appends the additive resolution line named in the report.
 A started action is never interrupted to meet a timing target.
-`fm-action.sh register [<task>]` lists every live non-secondmate task with owner, last progress and its source, next checkpoint, verdict and evidence; only a worker-owned task can be missed, and tasks waiting on firstmate or in a declared wait stay with the existing decision and wait paths.
+`fm-action.sh register [<task>]` lists every local live non-secondmate task with owner, last progress and its source, next checkpoint, verdict and evidence; only a worker-owned task can be missed, and tasks waiting on firstmate or in a declared wait stay with the existing decision and wait paths.
 
 `fm-action.sh register` with no task leads with an `observer` line that reports check cadence (`FM_CHECK_CADENCE_BOUND_SECS`, 360) and watcher beat liveness separately, so a late check is not read as a dead observer.
 A fresh beacon is not continuous ticking, so the line also counts `beat-gaps` (`FM_BEAT_GAP_BOUND_SECS`, 120) between consecutive beacon touches, which exposes the stretch between two foreground checkpoints where no watcher ran.

@@ -28,8 +28,9 @@
 #         --until EPOCH --reason TEXT [--at EPOCH]
 #       A legitimate wait; it must carry a finite deadline.
 #   show <task> [--now EPOCH]        every action, one tab-separated line each
-#   incidents <task> [--now EPOCH]   only the lines the fold reports as incidents
-#   register [<task>] [--now EPOCH]  one line per live non-secondmate task (all
+#   incidents <task> [--now EPOCH]   only ledger-fold incidents; checkpoint and
+#       stale-blocker conditions are reported separately by the watcher
+#   register [<task>] [--now EPOCH]  one line per local live non-secondmate task (all
 #       when no task is given), from files alone: task, owner, state, last
 #       progress epoch, its source, next checkpoint epoch, verdict (ok or MISSED)
 #       and evidence. FM_ACTION_CHECKPOINT_SECS (3600) bounds the checkpoint.

@@ -639,9 +639,11 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 `FM_ACTION_START_SECS` (default `300`) bounds how long an admitted action may sit without a start.
 `FM_ACTION_CHECKPOINT_SECS` (default `3600`) bounds how long a worker-owned task may go without progress evidence before a `checkpoint-missed` incident.
-`FM_CHECK_CADENCE_BOUND_SECS` (default `360`) is the longest accepted interval between two scheduled check sweeps, recorded by the watcher poll, and `FM_BEAT_GAP_BOUND_SECS` (default `120`) is the longest accepted gap between two watcher beacon touches before it is recorded as a stretch with no watcher.
+`FM_CHECK_CADENCE_BOUND_SECS` (default `360`) is the longest accepted interval between two watcher check touches, and `FM_BEAT_GAP_BOUND_SECS` (default `120`) is the longest accepted gap between two watcher beacon touches before it is recorded as a stretch with no watcher.
 `FM_ACTION_TRIAGE_SECS` (default `600`) and `FM_ACTION_ESCALATE_SECS` (default `1800`) bound the escalation ladder stages, and `FM_ACTION_TRIAGE_OWNER` (default `firstmate`) names who owns the triage action.
-Each is a positive integer number of seconds and an invalid value falls back to its default; the `action-followthrough` skill owns the loop that uses them.
+The time bounds are positive integer seconds with invalid values falling back to their defaults, except `FM_ACTION_START_SECS`, which also accepts zero.
+`FM_ACTION_TRIAGE_OWNER` is an owner name, not a time bound.
+The [`action-followthrough` skill](../.agents/skills/action-followthrough/SKILL.md) owns the operating loop.
 
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
