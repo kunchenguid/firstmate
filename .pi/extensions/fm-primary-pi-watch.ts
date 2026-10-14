@@ -1130,7 +1130,7 @@ export default function (pi: ExtensionAPI) {
       stderr += chunk.toString();
       observeEstablishedArm();
     });
-    armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    const finishArm = (code: number | null, signal: NodeJS.Signals | null): void => {
       if (settled) return;
       settled = true;
       resolveClosed();
@@ -1158,6 +1158,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       scheduleRetry(owner, classification.message, predecessor);
+    };
+    armChild.on("close", finishArm);
+    armChild.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      setImmediate(() => finishArm(code, signal));
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
