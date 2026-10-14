@@ -2514,13 +2514,17 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # The backend/current-state fixtures are not live-harness evidence.
 test_own_work_wait_keeps_first_alert_then_long_cadence() {
   local wait_kind dir state fakebin out capture_file statusf window key sig pid round
-  for wait_kind in background-shell pipeline-run foreground-command; do
+  for wait_kind in background-shell pipeline-run foreground-command local-file-and-pid; do
     dir=$(make_case "own-work-$wait_kind"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/own-work.status"
     window="test:fm-own-work"; key=$(printf '%s' "$window" | tr ':/.' '___')
     printf 'idle worker awaiting its own %s\n' "$wait_kind" > "$capture_file"
     printf 'window=%s\nkind=scout\nharness=grok\nbackend=tmux\n' "$window" > "$state/own-work.meta"
-    printf 'paused: waiting for my %s to finish; resume on completion\n' "$wait_kind" > "$statusf"
+    if [ "$wait_kind" = local-file-and-pid ]; then
+      printf 'paused [wait-file=%s/summary.json] [wait-pid=%s]: waiting for my job\n' "$dir" "$$" > "$statusf"
+    else
+      printf 'paused: waiting for my %s to finish; resume on completion\n' "$wait_kind" > "$statusf"
+    fi
     # Age before the first observation: backdating later can change the birth
     # time on macOS and accidentally turn this into a replacement declaration.
     set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
@@ -2567,6 +2571,7 @@ test_own_work_wait_keeps_first_alert_then_long_cadence() {
     wait_for_exit "$pid" 100 || { reap "$pid"; fail "$wait_kind never rechecked on the long cadence"; }
     grep -F 'awaiting external' "$dir/long-cadence.out" >/dev/null || fail "$wait_kind recheck lost its pause reason"
     grep -F 'possible wedge' "$dir/long-cadence.out" >/dev/null && fail "$wait_kind recheck became a wedge"
+    [ ! -d "$state/own-work.inbox" ] || fail "$wait_kind rang before its completion condition cleared"
   done
   # Disconfirming control: an idle worker with no declaration must still alarm.
   dir=$(make_case own-work-undeclared); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6603,6 +6608,44 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+test_status_paused_local_wait_fields() {
+  local file pid line
+  status_paused_local_wait_fields 'paused [at=123] [wait-file=/tmp/a b] [wait-pid=42]: my job' file pid
+  [ "$file" = '/tmp/a b' ] && [ "$pid" = 42 ] || fail "local completion fields did not parse"
+  status_is_paused 'paused [wait-file=/tmp/result] [wait-pid=42]: my job' \
+    || fail "completion tags changed the pause verb grammar"
+  printf 'paused [wait-file=/tmp/result]: my job\n' > "$TMP_ROOT/local-wait.status"
+  [ "$(last_status_line "$TMP_ROOT/local-wait.status")" = 'paused [wait-file=/tmp/result]: my job' ] \
+    || fail "a completion-tagged pause stopped being a recognized event"
+  for line in \
+    'paused: reason mentions [wait-file=/tmp/result] [wait-pid=42]' \
+    'working [wait-file=/tmp/result] [wait-pid=42]: active' \
+    'paused [wait-file=relative] [wait-pid=-42]: invalid' \
+    'paused [wait-file=] [wait-pid=0]: invalid' \
+    'paused [wait-file=~/result] [wait-pid=042]: invalid' \
+    'paused [wait-file=/tmp/a[b] [wait-pid=+42]: invalid' \
+    'paused [wait-file=/tmp/a:b] [wait-pid=42]: grammar delimiter' \
+    'paused [wait-file=/a] [wait-file=/b] [wait-pid=42] [wait-pid=43]: duplicates' \
+    'paused [wait-pid=2147483648]: invalid' \
+    'paused [wait-pid=99999999999999999999999999999999999999]: invalid' \
+    'paused [wait-pid=42: missing bracket' \
+    'paused [wait-file=/tmp/result] missing colon' \
+    'paused [wait-file=/tmp/a]b]: invalid path' \
+    'paused [wait-pid=42]3: invalid pid' \
+    $'paused [wait-file=/tmp/a\tb]: control character'; do
+    file=old; pid=old
+    status_paused_local_wait_fields "$line" file pid
+    [ -z "$file$pid" ] || fail "malformed or non-head completion fields parsed: $line"
+  done
+  status_paused_local_wait_fields 'paused [wait-file=relative] [wait-pid=42]: partial' file pid
+  [ -z "$file" ] && [ "$pid" = 42 ] || fail "invalid file hid an independently valid pid"
+  status_paused_local_wait_fields 'paused [wait-file=/tmp/result] [wait-pid=-1]: partial' file pid
+  [ "$file" = /tmp/result ] && [ -z "$pid" ] || fail "invalid pid hid an independently valid file"
+  FM_CLASSIFY_PAUSED_VERB=awaiting status_paused_local_wait_fields 'awaiting [wait-pid=42]: custom verb' file pid
+  [ "$pid" = 42 ] || fail "local fields did not follow the configured pause verb"
+  pass "local completion fields follow the status grammar, ignoring invalid or duplicate fields"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -6620,6 +6663,7 @@ test_classifier_primitives
 test_unrecognized_status_prefix_is_visible
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
+test_status_paused_local_wait_fields
 test_crew_absorb_class_classifier
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe

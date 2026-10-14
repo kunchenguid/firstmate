@@ -1024,8 +1024,25 @@ test_ship_and_scout_teach_validation_round_pause() {
       "$kind brief incorrectly promised to suppress the first alert"
     assert_grep 'Do not declare active implementation or reasoning as a wait' "$brief" \
       "$kind brief did not limit the declaration to actual waits"
+    assert_grep '[wait-file=<absolute completion path>]' "$brief" \
+      "$kind brief omitted its owned completion file"
+    assert_grep '[wait-pid=<positive pid>]' "$brief" \
+      "$kind brief omitted its owned background process"
+    assert_grep 'naming only a file or process you own on this host' "$brief" \
+      "$kind brief let workers declare another host or worker's wait"
+    assert_grep 'even if it exits without writing the file' "$brief" \
+      "$kind brief hid failed background jobs"
   done
-  pass "fm-brief.sh: ship and scout scaffolds declare a validation-round pause once, then hold it"
+  rm "$home/config/wait-no-turns"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-background-drive firstmate --mode no-mistakes >/dev/null 2>&1 \
+    || fail "background-drive scaffold failed"
+  brief="$home/data/brief-background-drive/brief.md"
+  assert_grep "including its \`[wait-pid=<pid>]\` and/or \`[wait-file=<absolute completion path>]\`" "$brief" \
+    "backgrounded no-mistakes drive did not declare observable completion"
+  assert_grep 'ending your turn without those fields leaves nobody listening to the return' "$brief" \
+    "backgrounded drive omitted the silent-stall consequence"
+  pass "fm-brief.sh: workers declare validation waits once and name local background completion"
+
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {

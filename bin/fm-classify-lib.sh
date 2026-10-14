@@ -415,6 +415,74 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
   return 1
 }
 
+# Worker-owned local completion fields, before the colon like other status tags:
+#   paused [wait-file=/absolute/path] [wait-pid=123]: waiting for my job
+# Either field is optional; completion is OR, so a dead pid wakes even when its
+# completion file was never written. Paths must be absolute and contain no colon,
+# bracket or control character (those delimit the status grammar); spaces are
+# literal, not shell syntax. Pids are canonical positive decimals <= 2147483647,
+# never kill's process-group forms. Duplicate or malformed fields are ignored
+# independently. The watcher only observes these fields; it never signals a job
+status_paused_local_wait_fields() {  # <line> <file-out-var> <pid-out-var>
+  local __fm_wait_head __fm_wait_rest __fm_wait_tag __fm_wait_value
+  local __fm_wait_file='' __fm_wait_pid='' __fm_wait_files=0 __fm_wait_pids=0
+  printf -v "$2" '%s' ''
+  printf -v "$3" '%s' ''
+  # Untagged polls need no status-verb subprocess
+  case "${1%%:*}" in *\[wait-file=*|*\[wait-pid=*) ;; *) return 0 ;; esac
+  status_is_paused "$1" || return 0
+  case "$1" in *:*) ;; *) return 0 ;; esac
+  __fm_wait_head=${1%%:*}
+  __fm_wait_rest=$__fm_wait_head
+  while [[ "$__fm_wait_rest" == *'['*']'* ]]; do
+    __fm_wait_rest=${__fm_wait_rest#*\[}
+    __fm_wait_tag=${__fm_wait_rest%%\]*}
+    __fm_wait_rest=${__fm_wait_rest#*\]}
+    # Reject a malformed suffix rather than observing a truncated path
+    case "$__fm_wait_rest" in ''|[[:space:]]*|\[*) ;; *) continue ;; esac
+    __fm_wait_value=${__fm_wait_tag#*=}
+    case "$__fm_wait_tag" in
+      wait-file=*)
+        __fm_wait_files=$((__fm_wait_files + 1))
+        case "$__fm_wait_value" in
+          /*)
+            case "$__fm_wait_value" in
+              *[[:cntrl:]\[\]:]*) ;;
+              *) __fm_wait_file=$__fm_wait_value ;;
+            esac ;;
+        esac ;;
+      wait-pid=*)
+        __fm_wait_pids=$((__fm_wait_pids + 1))
+        case "$__fm_wait_value" in
+          ''|0*|*[!0-9]*) ;;
+          *)
+            if [ "${#__fm_wait_value}" -le 10 ] && [ "$__fm_wait_value" -le 2147483647 ]; then
+              __fm_wait_pid=$__fm_wait_value
+            fi ;;
+        esac ;;
+    esac
+  done
+  [ "$__fm_wait_files" -eq 1 ] || __fm_wait_file=''
+  [ "$__fm_wait_pids" -eq 1 ] || __fm_wait_pid=''
+  printf -v "$2" '%s' "$__fm_wait_file"
+  printf -v "$3" '%s' "$__fm_wait_pid"
+}
+
+# Bind a notice to the declaration itself, not the entire log signature: an
+# unrelated resolved event may preserve the pause, but an identical pause
+# appended again is a new declaration. Only callers noticing completion spend
+# this full scan, and they cache it while the ordinary status signature stands
+status_declared_wait_identity() {  # <status-file> <declared-line> -> identity
+  local ident occurrence
+  ident=$(_fm_open_decisions_file_ident "$1") || return 1
+  occurrence=$(FM_WAIT_DECLARATION="$2" LC_ALL=C awk '
+    $0 == ENVIRON["FM_WAIT_DECLARATION"] { last = NR }
+    END { if (last) print last }
+  ' "$1") || return 1
+  [ -n "$occurrence" ] || return 1
+  printf '%s:%s' "$ident" "$occurrence"
+}
+
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to
 # clear with `until <YYYY-MM-DDTHH:MM[:SS]Z>` anywhere in its text (UTC only, so
 # no local-zone guess is ever recorded). Prints that time as epoch seconds so a

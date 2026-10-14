@@ -1181,6 +1181,189 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   pass "watcher: dead-pane recovery overrides stale busy state"
 }
 
+# A worker ends its turn on its own background job. Its unchanged paused
+# declaration is already on the long cadence; the job completion must still
+# reach the ordinary inbox on the next scan, without a supervisor wake.
+local_wait_watch_case() {  # <name> <fields> -> case dir
+  local dir
+  dir=$(setup_watch_case "$1")
+  idle_capture "$dir" >/dev/null
+  : > "$dir/send.log"
+  printf 'paused [at=%s] %s: waiting for my background job\n' "$(date +%s)" "$2" > "$dir/state/t1.status"
+  prime_status_seen "$dir/state" "$dir/state/t1.status"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    key=$(window_key sess:fm-t1)
+    pane=$(cat "$2/idle.capture")
+    h=$(printf "%s" "$pane" | hash_pane)
+    printf "%s" "$h" > "$STATE/.hash-$key"
+    printf "%s" "$h" > "$STATE/.stale-$key"
+    printf "1\n" > "$STATE/.count-$key"
+    stale_wait_declaration t1 > "$STATE/.paused-resurfaced-$key"
+  ' _ "$WATCH" "$dir" || fail "could not prime the declared wait"
+  printf '%s\n' "$dir"
+}
+
+# Wait for an entire scan rather than trusting an elapsed sleep on a loaded host
+local_wait_poll() {  # <case-dir> <watcher-pid>
+  local i=0 first='' now beat="$1/state/.last-watcher-beat"
+  while [ "$i" -lt 600 ]; do
+    kill -0 "$2" 2>/dev/null || return 1
+    if [ "$(uname)" = Darwin ]; then
+      now=$(stat -f %m "$beat" 2>/dev/null)
+    else
+      now=$(stat -c %Y "$beat" 2>/dev/null)
+    fi
+    if [ -n "$now" ]; then
+      if [ -n "$first" ] && [ "$first" != "$now" ]; then return 0; fi
+      first=$now
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+local_wait_records() {
+  find "$1/state/t1.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' '
+}
+
+local_wait_watch() {
+  watch_bg "$1/state" "$1/fakebin" "$1/watch.out" \
+    FM_SEND_LOG="$1/send.log" FM_FAKE_TMUX_CAPTURE="$1/idle.capture" \
+    FM_FAKE_TMUX_AGENT=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting for own job' \
+    FM_TASK_INBOX_GRACE_SECS=999999 FM_PAUSE_RESURFACE_SECS=14400
+}
+
+LOCAL_WAIT_JOB=
+local_wait_cleanup() {
+  if [ -n "$LOCAL_WAIT_JOB" ]; then
+    kill "$LOCAL_WAIT_JOB" 2>/dev/null || true
+    wait "$LOCAL_WAIT_JOB" 2>/dev/null || true
+  fi
+  fm_test_cleanup
+}
+trap local_wait_cleanup EXIT
+
+test_watcher_local_wait_completion() {
+  local mode=${1:-attended} kind dir file pid count
+  for kind in file pid both; do
+    file="$TMP_ROOT/local-$mode-$kind/summary.json"
+    case "$kind" in
+      file) dir=$(local_wait_watch_case "local-$mode-$kind" "[wait-file=$file]") ;;
+      pid) sleep 300 & LOCAL_WAIT_JOB=$!
+           dir=$(local_wait_watch_case "local-$mode-$kind" "[wait-pid=$LOCAL_WAIT_JOB]") ;;
+      both) sleep 300 & LOCAL_WAIT_JOB=$!
+            dir=$(local_wait_watch_case "local-$mode-$kind" "[wait-pid=$LOCAL_WAIT_JOB] [wait-file=$file]") ;;
+    esac
+    [ "$mode" != away ] || : > "$dir/state/.afk"
+    local_wait_watch "$dir"; pid=$!
+    local_wait_poll "$dir" "$pid" || fail "local wait watcher stopped before completion: $(cat "$dir/watch.out")"
+    [ "$(local_wait_records "$dir")" = 0 ] || fail "unfinished job got an instruction"
+    [ ! -s "$dir/send.log" ] && [ ! -s "$dir/state/.wake-queue" ] || fail "unfinished job disturbed the wait"
+    case "$kind" in
+      file) printf '{}\n' > "$file" ;;
+      *) kill "$LOCAL_WAIT_JOB"; wait "$LOCAL_WAIT_JOB" 2>/dev/null; LOCAL_WAIT_JOB='' ;;
+    esac
+    if ! local_wait_poll "$dir" "$pid" || ! local_wait_poll "$dir" "$pid"; then
+      fail "completion woke firstmate instead of the worker: $(cat "$dir/watch.out")"
+    fi
+    count=$(local_wait_records "$dir")
+    [ "$count" = 1 ] || fail "$kind completed but expected one worker instruction, got $count"
+    case "$kind" in
+      file) grep -qF "$file" "$dir/state/t1.inbox/001.msg" || fail "completion instruction omitted the file" ;;
+      *) grep -qF 'exited' "$dir/state/t1.inbox/001.msg" || fail "instruction hid a dead job without its completion file" ;;
+    esac
+    mv "$dir/state/t1.inbox/001.msg" "$dir/state/t1.inbox/handled/"
+    local_wait_poll "$dir" "$pid" || fail "watcher stopped after worker ack"
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    [ "$(local_wait_records "$dir")" = 0 ] || fail "same declaration wrote a second record"
+    [ "$(grep -cF 'Firstmate instruction waiting' "$dir/send.log")" = 1 ] || fail "same declaration rang more than once"
+    [ ! -s "$dir/state/.wake-queue" ] || fail "job completion queued a supervisor wake"
+  done
+  pass "watcher ($mode): a completed file or exited pid wakes a paused worker once, even without the file"
+}
+
+# Fresh processes prove declaration dedup survives a watcher restart. The
+# record is ordinary, so missed delivery remains the existing ladder's job
+local_wait_notice() {  # <case-dir> [window]
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_SEND_LOG="$1/send.log" \
+    FM_FAKE_TMUX_CAPTURE="$1/idle.capture" FM_FAKE_TMUX_AGENT=grok \
+    bash -c '. "$1"; paused_local_wait_notice "$2" t1 "$(status_declared_wait_line "$STATE/t1.status")"' \
+      _ "$WATCH" "${2:-sess:fm-t1}"
+}
+
+test_local_wait_notice_declaration_identity() {
+  local dir file rec line
+  file="$TMP_ROOT/local-identity/result with spaces.json"
+  dir=$(local_wait_watch_case local-identity "[key=job] [wait-file=$file] [wait-pid=$$]")
+  printf '{}\n' > "$file"
+  local_wait_notice "$dir" || fail "local file notice failed"
+  rec="$dir/state/t1.inbox/001.msg"
+  [ -f "$rec" ] || fail "a file appearing while the pid lives was not noticed"
+  grep -qF "$file" "$rec" || fail "spaces in the completion path were lost"
+  age_path "$rec"
+  [ "$(inbox_lib "$dir/state" fm_task_inbox_due_action "$dir/state" t1)" = "ring $rec" ] \
+    || fail "completion notice was not an ordinary retryable record"
+  mv "$rec" "$dir/state/t1.inbox/handled/"
+  fm_write_meta "$dir/state/t1.meta" 'window=sess:fm-t1-new' 'kind=ship' 'harness=grok'
+  local_wait_notice "$dir" sess:fm-t1-new || fail "notice failed after endpoint replacement"
+  [ "$(local_wait_records "$dir")" = 0 ] || fail "endpoint replacement rang the same declaration again"
+  fm_write_meta "$dir/state/t1.meta" 'window=sess:fm-t1' 'kind=ship' 'harness=grok'
+  printf 'resolved [key=other]: unrelated decision answered\n' >> "$dir/state/t1.status"
+  local_wait_notice "$dir" || fail "notice failed after an unrelated resolution"
+  [ "$(local_wait_records "$dir")" = 0 ] || fail "an unrelated resolved event rang the same declaration again"
+  # Even an identical line appended in the same second is a fresh declaration
+  line=$(head -n 1 "$dir/state/t1.status")
+  printf '%s\n' "$line" >> "$dir/state/t1.status"
+  local_wait_notice "$dir" || fail "replacement declaration failed"
+  [ "$(local_wait_records "$dir")" = 1 ] || fail "identical replacement declaration inherited the old marker"
+  local_wait_notice "$dir" || fail "repeated notice failed"
+  [ "$(local_wait_records "$dir")" = 1 ] || fail "fresh declaration was noticed twice"
+  pass "local wait: declaration identity survives ack, restart and endpoint replacement, not a fresh declaration"
+}
+
+test_local_wait_notice_ignores_other_waits_and_retries_write() {
+  local dir file kind
+  file="$TMP_ROOT/local-ignored/result.json"
+  dir=$(local_wait_watch_case local-ignored "[wait-file=$file]")
+  printf '{}\n' > "$file"
+  for kind in working captain-held; do
+    printf '%s [wait-file=%s]: not a local paused job\n' "$kind" "$file" > "$dir/state/t1.status"
+    local_wait_notice "$dir" || fail "$kind notice failed"
+    [ "$(local_wait_records "$dir")" = 0 ] || fail "$kind wait was rung"
+  done
+  printf 'paused [wait-file=%s]: my job\n' "$file" > "$dir/state/t1.status"
+  fm_write_meta "$dir/state/t1.meta" 'window=sess:fm-t1' 'kind=secondmate' 'harness=grok'
+  local_wait_notice "$dir" || fail "secondmate check failed"
+  [ "$(local_wait_records "$dir")" = 0 ] || fail "a secondmate was locally probed"
+  fm_write_meta "$dir/state/t1.meta" 'window=sess:fm-t1' 'kind=ship' 'harness=grok' 'remote_host=elsewhere'
+  local_wait_notice "$dir" || fail "remote check failed"
+  [ "$(local_wait_records "$dir")" = 0 ] || fail "another host's completion path was probed"
+  fm_write_meta "$dir/state/t1.meta" 'window=sess:fm-t1' 'kind=ship' 'harness=grok'
+  : > "$dir/state/t1.inbox"
+  local_wait_notice "$dir" 2>/dev/null || fail "unwritable inbox made the completion check fatal"
+  [ ! -s "$dir/send.log" ] || fail "unwritten notice rang the worker"
+  rm "$dir/state/t1.inbox"
+  local_wait_notice "$dir" || fail "notice did not retry after the inbox recovered"
+  [ "$(local_wait_records "$dir")" = 1 ] || fail "unwritable inbox swallowed the completion notice"
+  pass "local wait: other declarations and hosts are untouched; unwritten notices are retried"
+}
+
+test_local_wait_completion_regressions() {
+  test_watcher_local_wait_completion attended
+  test_watcher_local_wait_completion away
+  test_local_wait_notice_declaration_identity
+  test_local_wait_notice_ignores_other_waits_and_retries_write
+}
+
+# Match the triage suite's focused selector for stock Bash and local regressions
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
+test_local_wait_completion_regressions
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
