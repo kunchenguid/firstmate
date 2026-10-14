@@ -45,6 +45,7 @@ Each adapter:
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 The actionable restoration path applies the same live-child check after readiness, so output retained by a dead child's descendant cannot satisfy successor verification.
 Pi also settles an arm child on its process exit event, not only on stdio close, so a child that dies while a descendant still holds its pipes takes the same bounded retry.
+If a complete actionable line arrives while those pipes drain after exit, it replaces the provisional failure retry and takes the ordinary actionable restoration path.
 A failed follow-up never cancels continuity restoration.
 
 ### Pi session replacement

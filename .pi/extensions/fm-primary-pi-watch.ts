@@ -1142,6 +1142,20 @@ export default function (pi: ExtensionAPI) {
       if (reason && !armPendingActionable.has(armChild)) {
         const pending = createPendingActionable(reason, String(armChild.pid ?? ""));
         armPendingActionable.set(armChild, pending);
+        // `exit` can precede the final stdout/stderr data events. If that exit
+        // provisionally classified a partial buffer as a failure, replace its
+        // scheduled retry with the actionable restoration path once the full
+        // line arrives.
+        if (settled) {
+          enqueuePendingActionable(owner, pending);
+          if (!generationIsLive(owner)) return;
+          if (owner.retryTimer) {
+            clearTimeout(owner.retryTimer);
+            owner.retryTimer = null;
+          }
+          owner.retryFailures = 0;
+          void processPendingActionables(owner);
+        }
       }
     };
     const releaseChild = (): void => {
