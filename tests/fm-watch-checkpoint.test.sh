@@ -41,53 +41,321 @@ test_quiet_checkpoint_exits_124_cleanly() {
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 
-test_perl_timeout_fallback_honors_cleanup_bound_before_escalating() {
-  local home fallback_bin tool tool_path status watcher_pid
-  home=$(make_home perl-fallback)
-  fallback_bin="$home/fallback-bin"
-  mkdir -p "$home/root/bin" "$fallback_bin"
-  cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
-  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
-  for tool in bash dirname mktemp rm perl grep cat; do
-    tool_path=$(command -v "$tool") || fail "could not locate $tool for the Perl fallback fixture"
-    ln -s "$tool_path" "$fallback_bin/$tool"
-  done
-  cat > "$home/root/bin/fm-watch.sh" <<'PL'
-#!/usr/bin/env perl
-use strict;
-use warnings;
-$SIG{INT} = 'IGNORE';
-open my $pid_file, '>', "$ENV{FM_HOME}/watcher.pid" or die "open pid file: $!";
-printf {$pid_file} "%s\n", $$;
-close $pid_file;
-sleep 7;
-open my $cleanup_file, '>', "$ENV{FM_HOME}/cleanup-reached" or die "open cleanup marker: $!";
-print {$cleanup_file} "reached\n";
-close $cleanup_file;
-END {
-  if (open my $exit_file, '>', "$ENV{FM_HOME}/natural-exit") {
-    print {$exit_file} "natural\n";
-  }
+# The scheduled-check sweep must not depend on the model being inside a
+# checkpoint: a Codex coordinator's turn between two checkpoints (a long drain,
+# a provider wait) otherwise runs with no watcher at all, and a due sweep waits
+# for the next checkpoint (2026-10-14: the completed-sweep gap was 414s against
+# a 360s limit on a 300s interval, with a fresh beat at every observation).
+#
+# The fixtures run the real checkpoint, arm, and watcher in a home whose session
+# lock names a live process, as a Codex home's does: the lock is what the
+# continuing arm pins to know the session it serves.
+
+# A home with a live session, a registered sweep check, and a one-second check
+# interval. The check appends its epoch to <home>/sweeps and reports one event
+# for each <home>/emit.<n> it finds. Each fixture home is recorded so the exit
+# trap can stop what a failed test leaves behind.
+make_sweep_home() {  # <name>
+  local home
+  home=$(make_home "$1")
+  sleep 3600 >/dev/null 2>&1 &
+  printf '%s\n' "$!" > "$home/session.pid"
+  printf '%s\n' "$!" > "$home/state/.lock"
+  # A steady home: its last recovery episode was acknowledged, so nothing but
+  # the fixture's own events is a wake.
+  printf 'acked:downtime:fixture.1.aaa\n' > "$home/state/.watcher-down"
+  printf '%s\n' "$home" >> "$TMP_ROOT/homes"
+  fm_test_track_watcher_state "$home/state"
+  cat > "$home/state/sweep.check.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$(date +%s)" >> "$home/sweeps"
+for f in "$home"/emit.*; do
+  [ -e "\$f" ] || continue
+  rm -f "\$f"
+  printf 'fixture-event-%s\n' "\${f##*.}"
+  exit 0
+done
+SH
+  chmod 0700 "$home/state/sweep.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" sweep >/dev/null || fail "could not register the sweep check"
+  printf '%s\n' "$home"
 }
-sleep 20;
-PL
-  chmod +x "$home/root/bin/fm-watch-checkpoint.sh" "$home/root/bin/fm-watch.sh"
 
-  status=0
-  PATH="$fallback_bin" FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_WATCHER_CLEANUP_LOCK_BOUND=8 \
-    "$home/root/bin/fm-watch-checkpoint.sh" --seconds 1 >"$home/out.txt" 2>"$home/err.txt" || status=$?
+pid_live() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+pid_gone() { ! kill -0 "$1" 2>/dev/null; }
+parent_of() { ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '; }
 
-  expect_code 124 "$status" "Perl fallback checkpoint exit"
-  assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 1s" \
-    "Perl fallback did not return a quiet checkpoint"
-  [ -e "$home/cleanup-reached" ] || fail "the Perl fallback killed the watcher before its 8-second cleanup bound"
-  [ ! -e "$home/natural-exit" ] || fail "the INT-ignoring watcher exited naturally instead of being killed"
-  [ -s "$home/watcher.pid" ] || fail "the INT-ignoring watcher did not start"
-  watcher_pid=$(cat "$home/watcher.pid")
-  if kill -0 "$watcher_pid" 2>/dev/null; then
-    fail "the INT-ignoring watcher survived the Perl fallback escalation"
+# Stop what a fixture home still runs: the arm that owns its watcher, the
+# watcher, and its session.
+stop_sweep_home() {  # <home>
+  local home=$1 watcher arm pid
+  watcher=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$watcher" ]; then
+    arm=$(parent_of "$watcher")
+    case "$(ps -o command= -p "${arm:-0}" 2>/dev/null)" in *fm-watch-arm.sh*) kill -TERM "$arm" 2>/dev/null || true ;; esac
+    kill -TERM "$watcher" 2>/dev/null || true
   fi
-  pass "Perl fallback honors the cleanup bound before escalating an INT-ignoring direct watcher"
+  pid=$(cut -f1 "$home/state/.supervision-host-left" 2>/dev/null || true)
+  [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
+  pid=$(cat "$home/session.pid" 2>/dev/null || true)
+  [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
+}
+
+stop_all_sweep_homes() {
+  local home
+  [ -f "$TMP_ROOT/homes" ] || return 0
+  while IFS= read -r home; do stop_sweep_home "$home"; done < "$TMP_ROOT/homes"
+}
+
+# The checkpoint under the fixture's cadence: a quiet one by default.
+run_checkpoint() {  # <home> <seconds> [tag]; sets STATUS, output in <home>/out<tag>.txt
+  local home=$1 tag=${3:-}
+  STATUS=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 "$CHECKPOINT" --seconds "$2" \
+    >"$home/out$tag.txt" 2>"$home/err$tag.txt" || STATUS=$?
+}
+
+sweep_count() { if [ -f "$1/sweeps" ]; then wc -l < "$1/sweeps" | tr -d ' '; else echo 0; fi; }
+sweeps_reach() { [ "$(sweep_count "$1")" -ge "$2" ]; }
+event_consumed() { [ ! -e "$1/emit.$2" ]; }
+max_sweep_gap() {  # <home>
+  awk 'NR > 1 && $1 - p > m { m = $1 - p } { p = $1 } END { print m + 0 }' "$1/sweeps"
+}
+
+# The watcher processes running from this checkout's bin. A command substitution
+# inside a watcher is a forked copy with the same command line, so a process
+# whose parent is itself a watcher is not counted.
+live_watchers() {
+  ps -A -o pid= -o ppid= -o command= 2>/dev/null | awk -v w="$ROOT/bin/fm-watch.sh" '
+    $3 ~ /(^|\/)bash$/ && $4 == w { ppid[$1] = $2; order[++n] = $1 }
+    END { for (i = 1; i <= n; i++) if (!(ppid[order[i]] in ppid)) c++; print c + 0 }'
+}
+
+# The arm that owns the home's watcher cycle.
+cycle_arm() {  # <home>
+  parent_of "$(cat "$1/state/.watch.lock/pid" 2>/dev/null)"
+}
+
+left_arm_of() { cut -f1 "$1/state/.supervision-host-left" 2>/dev/null; }
+
+# Emit event <n> and require sweeps to carry on after the close it causes.
+emit_and_expect_sweeps() {  # <home> <n> <label>
+  local home=$1 n=$2 before
+  before=$(sweep_count "$home")
+  : > "$home/emit.$n"
+  wait_until 200 event_consumed "$home" "$n" || fail "$3: event $n was never swept"
+  wait_until 300 sweeps_reach "$home" $((before + 4)) \
+    || fail "$3: check sweeps stopped after event $n (sweeps $(sweep_count "$home"), were $before): the cycle that closed on it was not restarted"
+}
+
+wait_until() {  # <polls of 0.1s> <command...>
+  local limit=$1 i=0
+  shift
+  while [ "$i" -lt "$limit" ]; do
+    "$@" && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# The live gap (2026-10-14): the completed-check gap was 414s against a 360s
+# limit on a 300s interval, with a fresh beacon at every observation. The
+# checkpoint ran the watcher only for its own bound, so the model's turn between
+# two checkpoints had no watcher and a due sweep waited for the next checkpoint.
+test_check_sweeps_continue_between_checkpoints() {
+  local home before sweeps_in_gap max_gap first_arm
+  home=$(make_sweep_home sweeps-between)
+  run_checkpoint "$home" 3 1
+  expect_code 124 "$STATUS" "first quiet checkpoint exit"
+  assert_contains "$(cat "$home/out1.txt")" "checkpoint: no actionable wake within 3s" "first quiet checkpoint line missing"
+  before=$(sweep_count "$home")
+  [ "$before" -ge 1 ] || fail "fixture: the first checkpoint never swept"
+  first_arm=$(left_arm_of "$home")
+  pid_live "$first_arm" || fail "the quiet checkpoint did not leave its arm running: $(cat "$home/err1.txt")"
+  [ "$(cycle_arm "$home")" = "$first_arm" ] || fail "the arm the checkpoint recorded does not own the watcher"
+  # The model's turn between checkpoints: no checkpoint runs for 12 seconds.
+  sleep 12
+  sweeps_in_gap=$(( $(sweep_count "$home") - before ))
+  [ "$sweeps_in_gap" -ge 5 ] \
+    || fail "check sweeps stopped between checkpoints: $sweeps_in_gap sweeps in a 12s gap at a 1s interval (the cycle ran only inside the checkpoint)"
+  [ "$(live_watchers)" -eq 1 ] || fail "more than one watcher runs in the gap"
+  run_checkpoint "$home" 3 2
+  expect_code 124 "$STATUS" "second quiet checkpoint exit"
+  max_gap=$(max_sweep_gap "$home")
+  [ "$max_gap" -le 4 ] || fail "sweeps were ${max_gap}s apart across the checkpoints and the gap: $(tr '\n' ' ' < "$home/sweeps")"
+  [ "$(live_watchers)" -eq 1 ] || fail "more than one watcher runs after the second checkpoint"
+  ! kill -0 "$first_arm" 2>/dev/null || fail "the second checkpoint left the first arm running (pid $first_arm)"
+  [ "$(left_arm_of "$home")" != "$first_arm" ] || fail "the second checkpoint left the first arm's record in place"
+  [ "$(cycle_arm "$home")" = "$(left_arm_of "$home")" ] || fail "the arm the second checkpoint recorded does not own the watcher"
+  [ "$(grep -c 'reason=taken-over	' "$home/state/.watch-cycle-exits.log")" -eq 1 ] \
+    || fail "the second checkpoint did not take the first arm's cycle over exactly once: $(cut -c1-120 "$home/state/.watch-cycle-exits.log")"
+  stop_sweep_home "$home"
+  pass "checkpoint: check sweeps continue between checkpoints at the registered cadence under one arm and one watcher"
+}
+
+# Closes keep arriving while the model reasons between checkpoints. Each one
+# ends the cycle that saw it, the arm restarts the one watcher, and the events
+# stay queued exactly once for the drain.
+test_repeated_closes_while_the_model_reasons() {
+  local home n drained arm ack
+  home=$(make_sweep_home repeated-closes)
+  run_checkpoint "$home" 3 1
+  expect_code 124 "$STATUS" "quiet checkpoint exit"
+  arm=$(left_arm_of "$home")
+  for n in 1 2 3; do
+    emit_and_expect_sweeps "$home" "$n" "repeated closes"
+  done
+  [ "$(max_sweep_gap "$home")" -le 15 ] || fail "repeated closes: sweeps were $(max_sweep_gap "$home")s apart: $(tr '\n' ' ' < "$home/sweeps")"
+  [ "$(live_watchers)" -eq 1 ] || fail "repeated closes: more than one watcher runs"
+  [ "$(left_arm_of "$home")" = "$arm" ] && [ "$(cycle_arm "$home")" = "$arm" ] \
+    || fail "repeated closes: the left arm no longer owns the cycle"
+  for n in 1 2 3; do
+    [ "$(grep -c "fixture-event-$n\$" "$home/state/.wake-queue")" -eq 1 ] \
+      || fail "repeated closes: event $n is not queued exactly once:"$'\n'"$(cat "$home/state/.wake-queue")"
+  done
+  run_checkpoint "$home" 3 2
+  ! kill -0 "$arm" 2>/dev/null || fail "repeated closes: the next checkpoint left the arm it took over (pid $arm)"
+  [ "$(live_watchers)" -eq 1 ] || fail "repeated closes: more than one watcher runs after the take-over"
+  # The drain presents the newest event of the check and its acknowledgement
+  # covers all three queued rows.
+  drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1)
+  assert_contains "$drained" "fixture-event-3" "repeated closes: the newest event did not reach the drain"
+  assert_contains "$drained" "--ack-through 3" "repeated closes: the acknowledgement must cover all three events"
+  ack=$(printf '%s\n' "$drained" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p')
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" $ack >/dev/null 2>&1 || fail "repeated closes: the acknowledgement failed: $ack"
+  drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1)
+  assert_not_contains "$drained" "fixture-event-" "repeated closes: an acknowledged event was delivered again"
+  [ "$(grep -c 'fixture-event-' "$home/state/.wake-queue" 2>/dev/null || true)" -eq 0 ] \
+    || fail "repeated closes: an acknowledged event is still queued"
+  stop_sweep_home "$home"
+  pass "checkpoint: events that close the cycle between checkpoints are restarted past and delivered once"
+}
+
+# A wake that ends the checkpoint leaves the cycle running too: the model's
+# turn that handles it is the long one.
+test_an_actionable_close_leaves_the_cycle_running() {
+  local home pid status n arm
+  home=$(make_sweep_home close-leaves-cycle)
+  (
+    wait_until 100 sweeps_reach "$home" 1
+    printf 'done: synthetic wake\n' > "$home/state/demo.status"
+  ) &
+  run_checkpoint "$home" 20 1
+  wait
+  expect_code 0 "$STATUS" "an actionable checkpoint exit"
+  assert_contains "$(cat "$home/out1.txt")" "signal:" "the wake was not passed through"
+  arm=$(left_arm_of "$home")
+  pid_live "$arm" || fail "the actionable checkpoint did not leave its arm running"
+  for n in 1 2; do
+    emit_and_expect_sweeps "$home" "$n" "after the actionable close"
+  done
+  [ "$(live_watchers)" -eq 1 ] || fail "more than one watcher runs after the actionable close"
+  run_checkpoint "$home" 3 2
+  status=$STATUS
+  [ "$status" -eq 124 ] || [ "$status" -eq 0 ] || fail "the next checkpoint failed ($status): $(cat "$home/out2.txt" "$home/err2.txt")"
+  ! kill -0 "$arm" 2>/dev/null || fail "the next checkpoint left the arm it took over (pid $arm)"
+  [ "$(live_watchers)" -eq 1 ] || fail "more than one watcher runs after the take-over"
+  pid=$(left_arm_of "$home")
+  [ -n "$pid" ] || [ "$status" -eq 0 ] || fail "the next checkpoint recorded no arm"
+  stop_sweep_home "$home"
+  pass "checkpoint: a wake that ends a checkpoint leaves the cycle running for the next checkpoint to take over"
+}
+
+# The arm's own stop conditions end an unattended cycle: a session lock that now
+# names another session ends it at the next close, and the checkpoint after that
+# starts fresh instead of reusing the recorded identity.
+test_a_superseded_session_ends_the_left_cycle() {
+  local home arm other
+  home=$(make_sweep_home superseded)
+  run_checkpoint "$home" 3 1
+  arm=$(left_arm_of "$home")
+  [ -n "$arm" ] || fail "fixture: no arm was left"
+  sleep 3600 >/dev/null 2>&1 &
+  other=$!
+  printf '%s\n' "$other" > "$home/state/.lock"
+  : > "$home/emit.1"
+  wait_until 300 pid_gone "$arm" || { kill "$other" 2>/dev/null; fail "a superseded session's arm kept scanning (pid $arm)"; }
+  [ "$(live_watchers)" -eq 0 ] || { kill "$other" 2>/dev/null; fail "a superseded session's watcher kept running"; }
+  printf '%s\n' "$other" > "$home/session.pid.other"
+  # The interrupted supervision may surface as a recovery wake; either way the
+  # checkpoint starts a fresh cycle and leaves it.
+  run_checkpoint "$home" 3 2
+  [ "$STATUS" -eq 124 ] || [ "$STATUS" -eq 0 ] || fail "the checkpoint after a superseded session failed ($STATUS): $(cat "$home/out2.txt" "$home/err2.txt")"
+  [ -n "$(left_arm_of "$home")" ] && [ "$(left_arm_of "$home")" != "$arm" ] || fail "the checkpoint reused the superseded arm's record"
+  kill -0 "$(left_arm_of "$home")" 2>/dev/null || fail "the fresh cycle's arm is not running"
+  [ "$(live_watchers)" -eq 1 ] || fail "more than one watcher runs after the fresh start"
+  stop_sweep_home "$home"
+  kill "$other" 2>/dev/null || true
+  pass "checkpoint: a superseded session ends the left cycle and the next checkpoint starts a fresh one"
+}
+
+# A record whose process is gone, or whose pid was reused by something else, is
+# never taken over and never signalled.
+test_a_stale_left_record_is_never_reused() {
+  local home bystander dead
+  home=$(make_sweep_home stale-pid-reuse)
+  sleep 3600 >/dev/null 2>&1 &
+  bystander=$!
+  printf '%s\t%s\n' "$bystander" "not-the-identity-it-was-recorded-under" > "$home/state/.supervision-host-left"
+  run_checkpoint "$home" 3 1
+  expect_code 124 "$STATUS" "a checkpoint beside a reused-pid record: $(cat "$home/out1.txt" "$home/err1.txt")"
+  kill -0 "$bystander" 2>/dev/null || fail "the checkpoint signalled an unrelated process that reused a recorded pid"
+  [ "$(left_arm_of "$home")" != "$bystander" ] || fail "the reused-pid record was kept"
+  stop_sweep_home "$home"
+  kill "$bystander" 2>/dev/null || true
+  home=$(make_sweep_home stale-dead-pid)
+  dead=$(dead_pid)
+  printf '%s\t%s\n' "$dead" "gone" > "$home/state/.supervision-host-left"
+  run_checkpoint "$home" 3 1
+  expect_code 124 "$STATUS" "a checkpoint beside a dead-pid record: $(cat "$home/out1.txt" "$home/err1.txt")"
+  [ "$(left_arm_of "$home")" != "$dead" ] && [ -n "$(left_arm_of "$home")" ] || fail "the dead-pid record was kept"
+  stop_sweep_home "$home"
+  pass "checkpoint: a recorded arm that is gone or whose pid was reused is neither taken over nor signalled"
+}
+
+# The window of 2026-10-14: a watcher killed by SIGKILL while the model reasoned
+# was never replaced, and nothing swept until the next checkpoint (max gap 719s
+# against a 360s bound). The left arm replaces it; a watcher the next
+# checkpoint's take-over stops on purpose is not replaced by the arm it ended.
+test_a_killed_watcher_is_replaced_between_checkpoints() {
+  local home watcher before arm
+  home=$(make_sweep_home killed-watcher)
+  run_checkpoint "$home" 3 1
+  expect_code 124 "$STATUS" "quiet checkpoint exit"
+  arm=$(left_arm_of "$home")
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  before=$(sweep_count "$home")
+  kill -KILL "$watcher"
+  wait_until 100 pid_gone "$watcher" || fail "fixture: the watcher did not die"
+  wait_until 300 sweeps_reach "$home" $((before + 4)) \
+    || fail "a killed watcher was not replaced: sweeps $(sweep_count "$home"), were $before"
+  [ "$(live_watchers)" -eq 1 ] || fail "more than one watcher runs after the replacement"
+  [ "$(cat "$home/state/.watch.lock/pid")" != "$watcher" ] || fail "the watcher lock still names the killed watcher"
+  [ "$(cycle_arm "$home")" = "$arm" ] || fail "the replacement is not owned by the arm that was left"
+  run_checkpoint "$home" 3 2
+  ! kill -0 "$arm" 2>/dev/null || fail "the next checkpoint left the arm it took over"
+  [ "$(live_watchers)" -eq 1 ] || fail "more than one watcher runs after the take-over"
+  stop_sweep_home "$home"
+  pass "checkpoint: a watcher killed between checkpoints is replaced by the arm that was left, and a take-over still ends it once"
+}
+
+# A record that cannot be written leaves no cycle running that the next
+# checkpoint could not find: the arm is stopped, the quiet bound is reported, and
+# the failure is visible.
+test_an_unrecordable_cycle_is_stopped_and_reported() {
+  local home
+  home=$(make_sweep_home unrecordable)
+  mkdir "$home/state/.supervision-host-left"
+  run_checkpoint "$home" 3 1
+  expect_code 124 "$STATUS" "an unrecordable quiet checkpoint exit"
+  assert_contains "$(cat "$home/out1.txt")" "checkpoint: no actionable wake within 3s" "the quiet line is missing"
+  assert_contains "$(cat "$home/err1.txt")" "could not be left running" "the failure to leave the cycle running was not reported"
+  [ "$(live_watchers)" -eq 0 ] || fail "an unrecordable arm left a watcher running"
+  [ -z "$(ls -A "$home/state/.supervision-host-left")" ] || fail "an unrecordable arm left a file in the record: $(ls -A "$home/state/.supervision-host-left")"
+  stop_sweep_home "$home"
+  pass "checkpoint: a cycle that cannot be recorded is stopped and the failure is reported"
 }
 
 test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
@@ -222,10 +490,9 @@ test_existing_singleton_watcher_is_not_success() {
   mkdir "$home/state/.watch.lock"
   printf '%s\n' "$$" > "$home/state/.watch.lock/pid"
   status=0
-  FM_HOME="$home" FM_GUARD_GRACE=300 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
+  FM_HOME="$home" FM_GUARD_GRACE=300 FM_ARM_CONFIRM_TIMEOUT=2 "$CHECKPOINT" --seconds 15 >"$out" 2>"$err" || status=$?
   expect_code 1 "$status" "singleton checkpoint exit"
-  assert_contains "$(cat "$out")" "watcher: already running" "singleton watcher output was not passed through"
-  assert_contains "$(cat "$err")" "outside this foreground checkpoint" "singleton watcher failure was not explained"
+  assert_contains "$(cat "$out")" "watcher: FAILED" "the unconfirmed singleton was not reported as a failed cycle"
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
@@ -344,8 +611,15 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
   pass "checkpoint: the real host ends its park at the checkpoint bound as a quiet checkpoint"
 }
 
+trap 'stop_all_sweep_homes; fm_test_cleanup' EXIT
 test_quiet_checkpoint_exits_124_cleanly
-test_perl_timeout_fallback_honors_cleanup_bound_before_escalating
+test_check_sweeps_continue_between_checkpoints
+test_repeated_closes_while_the_model_reasons
+test_an_actionable_close_leaves_the_cycle_running
+test_a_superseded_session_ends_the_left_cycle
+test_a_stale_left_record_is_never_reused
+test_a_killed_watcher_is_replaced_between_checkpoints
+test_an_unrecordable_cycle_is_stopped_and_reported
 test_announced_recovery_is_not_reannounced_by_next_checkpoint
 test_never_announced_recovery_is_announced_once
 test_queue_append_during_checkpoint_still_resurfaces

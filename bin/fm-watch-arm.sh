@@ -108,6 +108,11 @@
 # when the home's session lock no longer names the session it started under,
 # when the away daemon's flag exists, or when a live host is idle and waiting
 # for the close. A fixed two-second minimum cycle bounds restart frequency.
+# The same continuation replaces a watcher that died of a signal the stop path
+# never sends (SIGKILL, a crash), which closed with no reason: TERM, INT, and
+# HUP are how --stop, --take-over, and the harness end a cycle on purpose and
+# are never restarted, and the fourth death in a row within a minute of its
+# start ends the arm with the failure instead.
 #
 # A copy of this script living under a disposable no-mistakes validation
 # checkout (a path containing /.no-mistakes/worktrees/) refuses every mode
@@ -172,6 +177,12 @@ CONT_READER=${FM_WATCH_ARM_CONTINUE_READER:-}
 CONT_SPOOL=${FM_WATCH_ARM_CONTINUE_SPOOL:-}
 CONT_BUSY=${FM_WATCH_ARM_CONTINUE_BUSY:-}
 CONT_MIN_CYCLE=2
+# A watcher that dies of a signal is replaced (continue_scanning), but not
+# without bound: more than CONT_DEATH_LIMIT deaths in a row, each inside
+# CONT_DEATH_WINDOW seconds of its start, end the arm with the failure.
+CONT_DEATH_LIMIT=3
+CONT_DEATH_WINDOW=60
+CONT_DEATHS=0
 unset FM_WATCH_ARM_CONTINUE_READER FM_WATCH_ARM_CONTINUE_SPOOL FM_WATCH_ARM_CONTINUE_BUSY
 CONT_READER_IDENTITY=
 CONT_LOCK_PID=
@@ -808,18 +819,45 @@ owned_child_finished() {
 # applies, record its close, start its one replacement as a handling successor
 # of this arm, and return 0 so the verification below confirms it; otherwise
 # return 1 and leave the close to owned_child_finished.
+# A watcher that died of a signal nobody on the stop path sends (SIGKILL, a
+# crash) left no close and no reason: the same continuation owns replacing it.
+# TERM, INT and HUP are how --stop, --take-over and the harness end a cycle on
+# purpose, so they are never restarted.
+continuation_unexplained_death() {  # <child-rc>
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -gt 128 ] && [ "$1" -ne 129 ] && [ "$1" -ne 130 ] && [ "$1" -ne 143 ]
+}
+
 continue_scanning() {  # <child-rc>
-  local rc=$1 reasons ran
-  [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out" || return 1
+  local rc=$1 reasons='' ran died=0
+  if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
+    :
+  elif continuation_unexplained_death "$rc"; then
+    died=1
+  else
+    return 1
+  fi
   [ -z "$CONT_SPOOL" ] || fm_lock_acquire_wait "$CONT_SPOOL.lock"
   if ! continuation_applies; then
     [ -z "$CONT_SPOOL" ] || fm_lock_release "$CONT_SPOOL.lock"
     return 1
   fi
-  reasons=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$child_out" 2>/dev/null || true)
   ran=$(( $(date +%s) - cycle_started_at ))
-  cycle_log_append "$rc" none "$(watch_output_reason_type "$child_out")" none
-  if [ "$CONT_SPOOLING" -eq 1 ]; then
+  if [ "$died" -eq 1 ]; then
+    [ "$ran" -lt "$CONT_DEATH_WINDOW" ] || CONT_DEATHS=0
+    CONT_DEATHS=$((CONT_DEATHS + 1))
+    if [ "$CONT_DEATHS" -gt "$CONT_DEATH_LIMIT" ]; then
+      [ -z "$CONT_SPOOL" ] || fm_lock_release "$CONT_SPOOL.lock"
+      return 1
+    fi
+    cycle_log_append "$rc" "$(cycle_signal_name "$rc")" signal-exit none
+  else
+    reasons=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$child_out" 2>/dev/null || true)
+    cycle_log_append "$rc" none "$(watch_output_reason_type "$child_out")" none
+  fi
+  if [ "$CONT_SPOOLING" -eq 1 ] && [ -n "$reasons" ]; then
     printf '%s\n' "$reasons" | awk '{ printf "C\t%s\n", $0 }' >> "$CONT_SPOOL" 2>/dev/null || true
   fi
   [ -z "$CONT_SPOOL" ] || fm_lock_release "$CONT_SPOOL.lock"

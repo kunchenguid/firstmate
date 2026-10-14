@@ -124,6 +124,12 @@ On a non-Pi primary, a home that runs the supervision host runs `bin/fm-supervis
 The [arm header](../bin/fm-watch-arm.sh), "Scheduling continuation", owns the host successor's scheduling and handoff contract.
 [supervision-host.md](supervision-host.md#failure-direction) owns the hand-back's downtime restoration, including when the successor already exited; the arm's recovery and acknowledgement contracts below still apply.
 
+### Codex plain checkpoint
+
+A Codex home that does not run the host runs its checkpoint cycle under the same continuing arm, with the checkpoint as the reader.
+The checkpoint ends with the arm still running, recorded in `state/.supervision-host-left`, so registered check sweeps and restarts of the one watcher carry on while the model reasons.
+The next checkpoint takes that arm over, and the [checkpoint header](../bin/fm-watch-checkpoint.sh) owns the handoff and the cases that stop the arm instead.
+
 ## Actionable wake ordering
 
 This section covers what each re-arm owner does between an actionable close and the wake reaching the model.

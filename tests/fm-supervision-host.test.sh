@@ -1623,6 +1623,55 @@ test_scheduled_checks_continue_while_main_owns_repeated_closes() {
   pass "host+hook: check sweeps continue at cadence across repeated closes and a handoff while main owns the turn, and every event is delivered once"
 }
 
+# The window of 2026-10-14 (isolated home): a watcher killed by SIGKILL while
+# main owned a long turn was never replaced, so nothing swept until the turn
+# ended. A killed watcher is replaced by the one arm that owns the cycle, with
+# the reader gone (main's turn) and with the host busy in an engine turn.
+test_killed_watcher_is_replaced_while_main_or_the_engine_owns_the_turn() {
+  local home n saved drained pid
+  home=$(make_primary_home hook-sched-killed)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo held > "$home/stub-mode"
+  mkfifo "$home/stub-release"
+  register_sweep_check "$home"
+  saved=$FM_CHECK_INTERVAL
+  export FM_CHECK_INTERVAL=1
+  start_hook_session "$home"
+  export FM_CHECK_INTERVAL=$saved
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "killed watcher: the Stop hook never started a watcher cycle"
+  wait_until 150 sweeps_reach "$home" 2 || fail "killed watcher: the parked cycle never swept its check"
+  append_status "$home" 'first actionable wake'
+  wait_until 250 test -s "$home/stub-ready" || fail "killed watcher: the engine did not reach its hold"
+  # The host is busy in the engine turn: kill the watcher the arm owns.
+  wait_until 150 watcher_live "$home" || fail "killed watcher: no successor watcher during the engine turn"
+  pid=$(cat "$home/state/.watch.lock/pid")
+  kill -KILL "$pid"
+  wait_until 150 sh -c '! kill -0 "$1" 2>/dev/null' _ "$pid" || fail "killed watcher: fixture could not kill the watcher"
+  emit_and_expect_sweeps "$home" 1 "killed watcher (busy host)"
+  [ "$(home_watchers "$home")" -eq 1 ] || fail "killed watcher: more than one watcher runs"
+  printf 'continue\n' > "$home/stub-release"
+  wait_until 300 hook_exited "$home" || fail "killed watcher: the held event never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "killed watcher"
+  # Main now owns a long turn (no Stop hook): kill the left cycle's watcher again.
+  wait_until 150 watcher_live "$home" || fail "killed watcher: no watcher left for main's turn"
+  pid=$(cat "$home/state/.watch.lock/pid")
+  kill -KILL "$pid"
+  wait_until 150 sh -c '! kill -0 "$1" 2>/dev/null' _ "$pid" || fail "killed watcher: fixture could not kill the left watcher"
+  emit_and_expect_sweeps "$home" 2 "killed watcher (main's turn)"
+  [ "$(max_sweep_gap "$home" 1)" -le "$SWEEP_GAP_BOUND" ] \
+    || fail "killed watcher: sweeps were $(max_sweep_gap "$home" 1)s apart, past the ${SWEEP_GAP_BOUND}s bound: $(tr '\n' ' ' < "$home/sweeps")"
+  [ "$(home_watchers "$home")" -eq 1 ] || fail "killed watcher: more than one watcher runs after the second kill"
+  for n in 1 2; do
+    [ "$(grep -c "fixture-event-$n\$" "$home/state/.wake-queue")" -eq 1 ] \
+      || fail "killed watcher: event $n is not queued exactly once for main:"$'\n'"$(cat "$home/state/.wake-queue")"
+  done
+  drained=$(main_drain "$home")
+  assert_contains "$drained" 'fixture-event-2' "killed watcher: the newest event must reach main's drain"
+  stop_home_processes "$home"
+  pass "host+hook: a killed watcher is replaced by the one owning arm, with the host busy and with main owning the turn"
+}
+
 test_scheduled_checks_continue_through_a_provider_wait() {
   local home n saved drained
   home=$(make_primary_home hook-sched-provider-wait)
@@ -3351,6 +3400,7 @@ test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
 test_pass_through_successor_survives_the_hook_process_group_teardown
 test_scheduled_checks_continue_while_main_owns_repeated_closes
 test_scheduled_checks_continue_through_a_provider_wait
+test_killed_watcher_is_replaced_while_main_or_the_engine_owns_the_turn
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
 test_unrecorded_successor_is_stopped_rather_than_left_for_main
