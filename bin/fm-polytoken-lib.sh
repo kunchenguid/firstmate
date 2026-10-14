@@ -8,7 +8,8 @@
 # .agents/skills/harness-adapters/references/harness/polytoken.md; the
 # empirical basis in docs/verification/polytoken.md.
 #
-# Verified live on polytoken 0.8.19 (docs/verification/polytoken.md):
+# Live evidence and refresh commands: docs/verification/polytoken.md.
+# Runtime capabilities (no release-number gate):
 #   - Polytoken is a daemon-plus-TUI. `polytoken new` spawns a per-session
 #     daemon (comm exactly `polytoken`) and attaches the TUI; the daemon
 #     exposes a typed, bearer-authenticated REST control plane on a per-session
@@ -196,7 +197,7 @@ name: $FM_POLYTOKEN_WORKER_FACET
 description: Firstmate worker role contract for crewmate and scout task workers.
 polytoken:
   tools: [tag!ALL, tag!ALL_MCP]
-  tools_deny: [switch_facet, subagent, message_subagent]
+  tools_deny: [switch_facet, handoff_plan, subagent, message_subagent]
 ---
 {{ transclude("polytoken://system_prompts/facet.md") }}
 
@@ -298,47 +299,64 @@ EOF
 # from `polytoken print models` (the completion surface for `--model`, which
 # reads the effective config). Empty output with a zero exit is a reachable
 # listing with nothing in it; a nonzero exit or a timeout is an unreachable
-# listing, which the caller treats per the record-and-omit contract.
+# listing, which refuses a launch whose reasoning pin cannot be proven.
 fm_polytoken_models_refs() {  # <bin> [timeout]
   local bin=$1 bound=${2:-15}
   case "$bound" in ''|*[!0-9]*|0*) bound=15 ;; esac
   fm_run_timed "$bound" "$bin" print models </dev/null 2>/dev/null
 }
 
-# fm_polytoken_model_ref: the launch model reference for a resolved model and
-# effort axis, or a refusal. Polytoken encodes reasoning effort inside the
-# model reference as `<model>(<effort>)`, so firstmate's separate axes are
-# composed here: the base id must be a listed selectable reference (an
-# unlisted model on a reachable listing is concrete unsupported evidence and
-# refuses the spawn), and an effort whose `<model>(<effort>)` form is not
-# listed is omitted from the reference while staying recorded in task
-# metadata - the shared record-and-omit contract, never a known-bad value.
-# An unreachable listing (nonzero exit or timeout) establishes nothing and
-# prints the unvalidated reference with a notice on stderr.
-# Prints nothing for a default model axis.
+# fm_polytoken_model_ref: compose the concrete model and nearest selectable
+# reasoning level using the installed binary's catalog, never its version.
+# Equal distances choose the lower effort. Only an explicit max request may
+# select max; xhigh caps at the highest non-max level. A missing catalog or
+# a model without a compatible reasoning level refuses rather than dropping
+# the pin. Model groups and already-parenthesized selectors are not base ids.
 fm_polytoken_model_ref() {  # <bin> <model> <effort> -> <ref>
-  local bin=$1 model=$2 effort=${3:-} refs rc=0
+  local bin=$1 model=$2 effort=${3:-} refs rc=0 selected
   [ -n "$model" ] && [ "$model" != default ] || return 0
   refs=$(fm_polytoken_models_refs "$bin") || rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$refs" ]; then
-    if [ "$rc" -eq 124 ]; then
-      echo "notice: 'polytoken print models' did not answer within the bound; launching with --model '$model' unvalidated" >&2
-    else
-      echo "notice: 'polytoken print models' listing is unreachable (exit $rc); launching with --model '$model' unvalidated" >&2
-    fi
+    echo "error: cannot pin polytoken model and reasoning: 'polytoken print models' is unavailable (exit $rc)" >&2
+    return 1
+  fi
+  case "$model" in
+    *'('*|*')'*|@*|mg:*|modelgroup:*)
+      echo "error: polytoken requires a concrete base model and separate --effort" >&2
+      return 1
+      ;;
+  esac
+  if ! printf '%s\n' "$refs" | grep -qxF -- "$model"; then
+    echo "error: polytoken model '$model' is not listed by 'polytoken print models'; choose a listed concrete model" >&2
+    return 1
+  fi
+  if [ -z "$effort" ] || [ "$effort" = default ]; then
     printf '%s' "$model"
     return 0
   fi
-  if ! printf '%s\n' "$refs" | grep -qxF -- "$model"; then
-    echo "error: polytoken model '$model' is not listed by 'polytoken print models'; choose a listed reference or omit --model" >&2
+  selected=$(printf '%s\n' "$refs" | awk -v model="$model" -v requested="$effort" '
+    BEGIN {
+      split("none minimal low medium high xhigh max ultra", levels, " ")
+      for (i in levels) rank[levels[i]]=i
+      best=999
+    }
+    index($0, model "(") == 1 && substr($0, length($0)) == ")" {
+      level=substr($0, length(model)+2, length($0)-length(model)-2)
+      if (!(level in rank) || !(requested in rank)) next
+      if (level == "max" && requested != "max") next
+      distance=rank[level]-rank[requested]; if (distance < 0) distance=-distance
+      if (distance < best || (distance == best && rank[level] < rank[chosen])) {
+        best=distance; chosen=level
+      }
+    }
+    END { if (chosen != "") print model "(" chosen ")" }
+  ')
+  [ -n "$selected" ] || {
+    echo "error: cannot pin polytoken reasoning '$effort' for model '$model': no compatible selectable level" >&2
     return 1
-  fi
-  if [ -n "$effort" ] && [ "$effort" != default ] \
-    && printf '%s\n' "$refs" | grep -qxF -- "$model($effort)"; then
-    printf '%s' "$model($effort)"
-    return 0
-  fi
-  printf '%s' "$model"
+  }
+  [ "$selected" = "$model($effort)" ] || echo "notice: polytoken maps effort '$effort' to '$selected' from the installed catalog" >&2
+  printf '%s' "$selected"
 }
 
 # fm_polytoken_sessions_json: the live-session listing for a launch's config

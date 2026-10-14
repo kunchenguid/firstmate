@@ -24,7 +24,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
@@ -48,13 +48,35 @@ STANDIN_BIN=$(fm_agent_standin "$STANDIN_DIR") || {
 SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
+LAB_PREPARED=0
 cleanup_all() {
-  [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
-  herdr_safe_stop_and_delete "$SESSION"
+  local status=$? cleanup_status=0
+  trap - EXIT
+  if [ -n "$SCRATCH" ]; then
+    if [ -d "$SCRATCH/home/state/hsmoke.git-hooks" ]; then
+      chmod u+w "$SCRATCH/home/state/hsmoke.git-hooks" || {
+        echo "not ok - could not restore write permission on test git hooks" >&2
+        cleanup_status=1
+      }
+    fi
+    rm -rf "$SCRATCH" || {
+      echo "not ok - could not remove Herdr smoke scratch tree: $SCRATCH" >&2
+      cleanup_status=1
+    }
+  fi
+  if [ "$LAB_PREPARED" = 1 ]; then
+    herdr_safe_stop_and_delete "$SESSION" || {
+      echo "not ok - could not tear down Herdr smoke lab session: $SESSION" >&2
+      cleanup_status=1
+    }
+  fi
   fm_test_cleanup
+  [ "$cleanup_status" = 0 ] || status=1
+  exit "$status"
 }
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+LAB_PREPARED=1
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
@@ -331,9 +353,16 @@ if OUT=$(run_control hsmoke exit 2>&1); then
   fail "exit should fail closed when the agent's composer is not proven empty: $OUT"
 fi
 case "$OUT" in
-  *"not proven empty"*) : ;;
-  *) fail "the exit failure should say the composer is not proven empty, got: $OUT" ;;
+  *"composer visibly holds pending text; refusing to type the /exit exit command"*|*"not proven empty; refusing to type the /exit exit command"*) : ;;
+  *) fail "the exit failure should refuse to type the /exit command for an unproven or pending composer, got: $OUT" ;;
 esac
-pass "real herdr: an agent behind an unproven composer fails closed instead of typing an exit command into it"
+[ "$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")" = alive ] \
+  || fail "the exit refusal did not preserve the fake foreground agent"
+SCREEN_AFTER=$(fm_backend_herdr_visible_capture "$SESSION:$PANE_ID") \
+  || fail "could not read the pane after the exit refusal"
+case "$SCREEN_AFTER" in
+  *'/exit'*) fail "the refused /exit command appeared on the agent pane" ;;
+esac
+pass "real herdr: exit refuses an unproven or pending composer without typing an exit command"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true

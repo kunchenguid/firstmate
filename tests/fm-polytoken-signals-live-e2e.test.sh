@@ -29,7 +29,8 @@ POLYTOKEN_BIN=$(fm_polytoken_binary 2>/dev/null) || POLYTOKEN_BIN=
 [ -n "$POLYTOKEN_BIN" ] || fail "polytoken is not installed"
 VERSION=$("$POLYTOKEN_BIN" --version 2>/dev/null || echo unknown)
 REAL_TMUX=$(command -v tmux)
-SOCKET="fm-polytoken-signals-$$"
+LAB_HOME_HELPER="$ROOT/bin/fm-lab-home.sh"
+LAB_TMUX_DIR=
 ID=ptguard
 LAB=
 
@@ -43,7 +44,10 @@ cleanup() {
         reap "$sid" --force --sessions-dir "$LAB/fm/state/$ID.polytoken-sessions" >/dev/null 2>&1 || true
     fi
   fi
-  "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  if [ -n "$LAB_TMUX_DIR" ]; then
+    TMUX_TMPDIR="$LAB_TMUX_DIR" "$REAL_TMUX" kill-server >/dev/null 2>&1 || true
+    "$LAB_HOME_HELPER" teardown "$LAB/fm" || exit 1
+  fi
   [ -z "$LAB" ] || { chmod -R u+w "$LAB" 2>/dev/null; rm -rf -- "$LAB"; }
 }
 
@@ -79,10 +83,21 @@ H="$LAB/fm"
 U="$LAB/user-home"
 PROJ="$LAB/project"
 WT="$LAB/wt"
+"$LAB_HOME_HELPER" create "$H" >/dev/null || fail "could not mark the lab home"
+LAB_TMUX_DIR=$("$LAB_HOME_HELPER" tmux-dir "$H") || fail "could not isolate tmux"
+export TMUX_TMPDIR="$LAB_TMUX_DIR"
 fm_test_spawn_home "$H" polytoken
-fm_git_worktree "$PROJ" "$WT" polytoken-live >/dev/null 2>&1 || fail "could not create the lab worktree"
+printf 'tmux\n' > "$H/config/backend"
+printf 'manual\n' > "$H/config/backlog-backend"
+fm_git_init_commit "$PROJ"
+git clone -q "$PROJ" "$WT" || fail "could not prepare the scratch clone"
+git -C "$WT" checkout -qb polytoken-live || fail "could not branch the scratch clone"
 mkdir -p "$U/.config/polytoken" "$U/.local/share/polytoken" "$LAB/bin"
-cp "$GLOBAL_CFG" "$U/.config/polytoken/config.yaml" || fail "could not stage the polytoken config copy"
+# Keep provider/model configuration, but do not start operator MCP services
+# from a disposable lab (those services may write outside the isolated HOME).
+awk '/^[^[:space:]#][^:]*:/ {skip=($0 ~ /^mcp_servers:/)} !skip {print}' \
+  "$GLOBAL_CFG" > "$U/.config/polytoken/config.yaml" || fail "could not stage the polytoken config copy"
+chmod 600 "$U/.config/polytoken/config.yaml"
 cp "$LICENSE_ACCEPT" "$U/.local/share/polytoken/license-acceptance.json" \
   || fail "could not stage the operator license acceptance copy"
 fm_test_spawn_brief "$H" "$ID" "Runtime verification only: compute 12345 plus 67890 using your shell tool and write only the result into answer.txt. Then use your shell tool to run 'bash $ROOT/bin/fm-harness.sh' and write its output to harness.txt. Do no other work, do not commit, and do not delegate."
@@ -90,11 +105,11 @@ fm_test_spawn_brief "$H" "$ID" "Runtime verification only: compute 12345 plus 67
 # Every backend read and write lands on this guard's private server, and the
 # pane's `treehouse get` enters the prepared worktree in a subshell exactly as
 # the real tool does.
-printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCKET" > "$LAB/bin/tmux"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$REAL_TMUX" > "$LAB/bin/tmux"
 # shellcheck disable=SC2016 # the single-quoted shim expands its own argument
 printf '#!/bin/sh\n[ "${1:-}" = get ] || exit 0\ncd "%s" && exec /bin/bash --noprofile --norc\n' "$WT" > "$LAB/bin/treehouse"
 chmod +x "$LAB/bin/tmux" "$LAB/bin/treehouse"
-export PATH="$LAB/bin:$PATH" FM_HOME="$H" HOME="$U" XDG_CONFIG_HOME="$U/.config" XDG_DATA_HOME="$U/.local/share"
+export PATH="$LAB/bin:$PATH" FM_HOME="$H" HOME="$U" XDG_CONFIG_HOME="$U/.config" XDG_DATA_HOME="$U/.local/share" XDG_STATE_HOME="$U/.local/state" XDG_CACHE_HOME="$U/.cache"
 unset TMUX FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
 tmux -f /dev/null new-session -d -s firstmate -n lab -x 160 -y 50 "/bin/bash --noprofile --norc" \
   || fail "could not start the isolated tmux server"
@@ -135,7 +150,16 @@ capture() { tmux capture-pane -p -t "$TARGET" -S -200 2>/dev/null || true; }
 screen=$(capture)
 case "$screen" in *firstmate-worker*) ;; *) fail "the spawned pane never showed the generated worker facet" ;; esac
 case "$screen" in *"perms: bypass"*) ;; *) fail "the spawned pane never rendered the enforced bypass posture" ;; esac
-pass "$VERSION: fm-spawn's generated launch starts a bound, alive worker on the generated config and facet"
+# Session listing model is the boot default on some binaries. The retained
+# selection event and daemon state prove the effective pin before inference.
+TOKEN=$(fm_polytoken_credential_token "$(meta_value polytoken_credential)") || fail "cannot read lab credential"
+state=$(fm_polytoken_rest_json GET "$(meta_value polytoken_port)" "$TOKEN" /state) || fail "cannot read daemon state"
+printf '%s' "$state" | jq -e '.active_model == "zai/glm-5.3-flash" and .active_reasoning_effort == "low"' >/dev/null \
+  || fail "daemon state does not match the model and effort pin"
+selection="$H/state/$ID.polytoken-sessions-v1/$SESSION1/log.jsonl"
+jq -se 'any(.[]; .message.selection.to_model == "zai/glm-5.3-flash" and .message.selection.reasoning_effort == "low")' "$selection" >/dev/null \
+  || fail "retained session has no matching model selection"
+pass "$VERSION: generated launch starts a bound worker; daemon state and retained selection prove the model and effort pin"
 
 wait_file "$WT/answer.txt"
 wait_file "$WT/harness.txt"
@@ -147,9 +171,17 @@ wait_record "idle polytoken-hook " "the finished brief turn never closed the bus
 [ -f "$H/state/$ID.turn-ended" ] || fail "the stop hook never touched the turn-ended marker"
 pass "$VERSION: the stop hook closes the busy record and touches the turn-ended marker"
 
-"$ROOT/bin/fm-send.sh" "$ID" 'Runtime interrupt verification: run sleep 90 in your shell tool and wait for it to finish. Do not respond before it finishes.' \
+"$ROOT/bin/fm-send.sh" "$ID" "Read the message in $H/state/$ID.inbox, acknowledge it by moving it into the handled/ subdirectory, then write steered into steer.txt. Complete that work and end the turn." \
   > "$LAB/send.log" 2>&1 || fail "fm-send could not steer the worker: $(cat "$LAB/send.log")"
-wait_record "busy polytoken-hook " "the steered turn never opened the busy record through the generated hook"
+wait_file "$WT/steer.txt"
+wait_record "idle polytoken-hook " "the acknowledgement turn did not finish"
+handled=$(find "$H/state/$ID.inbox/handled" -name '*.msg' -print | wc -l | tr -d ' ')
+[ "$handled" -gt 0 ] || fail "the durable steer was not acknowledged"
+pass "$VERSION: fm-send's durable message is read, acted on, and acknowledged"
+
+"$ROOT/bin/fm-send.sh" "$ID" 'Runtime interrupt verification: run sleep 90 in your shell tool and wait for it to finish. Do not respond before it finishes.' \
+  > "$LAB/send-interrupt.log" 2>&1 || fail "fm-send could not start the interrupt turn"
+wait_record "busy polytoken-hook " "the interrupt turn never opened the busy record"
 busy_row=
 for _ in $(seq 1 120); do
   if capture | fm_busy_lines_match polytoken; then busy_row=1; break; fi
@@ -190,3 +222,10 @@ wait_record "idle polytoken-hook " "the relaunched worker's turn never closed th
 [ "$(fm_backend_agent_state tmux "$TARGET")" = dead ] \
   || fail "the tmux backend does not classify the exited worker dead"
 pass "$VERSION: fm-control exit stops the real worker and the backend reads it dead"
+
+printf '# Polytoken guard report\nNo unresolved decisions.\n' > "$H/data/$ID/report.md"
+"$ROOT/bin/fm-captain-hold.sh" complete "$ID" --none >/dev/null || fail "could not complete the lab report inventory"
+"$ROOT/bin/fm-teardown.sh" "$ID" > "$LAB/teardown.log" 2>&1 \
+  || fail "fm-teardown failed: $(cat "$LAB/teardown.log")"
+[ ! -e "$META" ] || fail "teardown retained the lab task metadata"
+pass "$VERSION: teardown retires the task and its generated Polytoken artifacts"

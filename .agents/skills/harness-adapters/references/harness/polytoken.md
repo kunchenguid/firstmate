@@ -1,7 +1,8 @@
 # Polytoken CLI
 
-Verified on 2026-10-07 with Polytoken CLI 0.8.19 as a crewmate/scout adapter (the TUI-pane-plus-REST-control hybrid the captain approved the same day).
-The router owns the crewmate/scout-only boundary; primary and secondmate integration is Phase 2 follow-up.
+Polytoken is a crewmate/scout adapter using a TUI pane and per-session REST control.
+Capability discovery uses the installed binary; no Polytoken release number gates or warns on dispatch.
+The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
 [Verification evidence](../../../../../docs/verification/polytoken.md) and its live guard refresh the vendor facts below.
 
 ## Operating facts
@@ -13,11 +14,11 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Interrupt | No TUI chord exists at all (`print tui-command-actions` has no cancel action in Prompt scope; a single Escape does nothing; Escape Escape opens the rewind picker). Interrupt is `POST /turn/cancel` on the session daemon, answering `{"status":"cancel_requested","generation":N}`, with `GET /sync`'s `turn: null` as the typed settle. Firstmate never sends interrupt keys. |
 | Skill invocation | `@skill:<name>` in prompt text and the model's `skill` tool; no slash-command skill form. |
 | Resume | `polytoken continue --no-attach <session-id>` restarts from history on a new port with a rotated credential (verified by the scout). Firstmate's deterministic relaunch-from-brief remains the recovery path; the control plane relaunches fresh sessions. |
-| Model flag | `--model <ref>`, exactly the selectable references `polytoken print models` lists, including effort variants like `zai/glm-5.3-flash(low)`. An unlisted model on a reachable listing refuses the spawn; an unreachable listing launches unvalidated with a notice. |
-| Effort flag | None separate: effort rides the model reference as `<model>(<effort>)` when that form is listed, else it is recorded in task metadata and omitted (record-and-omit). |
+| Model flag | `--model <ref>`, exactly the selectable references `polytoken print models` lists, including effort variants like `zai/glm-5.3-flash(low)`. Canonical launches require concrete model and effort axes; an unlisted model or unreachable catalog refuses the spawn. |
+| Effort flag | None separate: `fm_polytoken_model_ref` in `bin/fm-polytoken-lib.sh` owns nearest-level mapping into `<model>(<effort>)`; task metadata retains the requested axis. |
 | Model discovery | `polytoken print models` (one selectable reference per line); `polytoken models` for the full human report. |
 | Marker | None; the daemon's anchored `polytoken` comm in tool-subprocess ancestry identifies the adapter (a tool subprocess's parent IS the daemon, verified live), and a structural polytoken ancestor outranks foreign inherited markers. |
-| Trust dialogs | None at launch: the permission posture comes from the generated config dir's `default_permission_matcher: bypass`, and the first-start license dialog is a BLOCKER by captain decision (2026-10-07) - `--accept-license-terms` is never passed, and the readiness gate fails loudly on a pane that never starts processing its brief. |
+| Trust dialogs | None at launch: the permission posture comes from the generated config dir's `default_permission_matcher: bypass`, and the first-start license dialog requires an operator decision - `--accept-license-terms` is never passed, and the readiness gate fails loudly on a pane that never starts processing its brief. |
 | Imported config | The worktree `.polytoken/` project layer (hooks and facets) plus the generated per-task config dir, which fully replaces the global config (verified live: a `version: 4`-only project config.yaml fails startup with zero providers, and no `--global-config-dir` reaches the daemon). |
 | Commit attribution | The shared `state/<id>.git-hooks` commit-msg strip covers polytoken like every launched runtime. |
 
@@ -30,7 +31,7 @@ Enter while a turn runs queues the text for the next agent pause - `Queued for t
 There is no verified composer-clear key: Ctrl+Shift+Y copies the prompt but leaves it in the composer (verified live), so text is only ever typed into a composer proven empty and pending text is never typed onto.
 Ctrl+C ends the session; Escape Escape opens the rewind picker; neither is ever sent by firstmate.
 A TUI-attached daemon stays alive while idle (verified minutes-scale) and exits on its own after its session ends, so the pane design needs no daemon-lifetime supervision.
-The daemon imposes no cap on consecutive `stop`-hook `continue` outcomes (verified live: five forced continuations all ran), so any Phase 2 turn-end guard must self-bound with its own latch.
+The daemon imposes no cap on consecutive `stop`-hook `continue` outcomes (verified live: five forced continuations all ran), so any future primary turn-end integration would need its own bounded latch.
 
 `../../../../../bin/fm-spawn.sh` owns autonomy (the generated config dir), the worktree hook and facet wiring, session discovery into task metadata (`polytoken sessions --format json` with the launch's `--config-dir` and `--sessions-dir`), the foreign-marker clearing (the fixed `env -u` set, including the generic `AGENT`, plus the ORCA_*/FM_ loop), and the readiness gate.
 `../../../../../bin/fm-polytoken-lib.sh` owns every generated artifact and the REST control core.
@@ -46,6 +47,6 @@ The delivery guard is never a busy-state source; recorded state comes from the p
 
 ## Primary integration
 
-No primary Stop guard, watcher protocol, pre-tool protection, or session-start contract is verified for polytoken; Phase 1 verified only the crewmate/scout adapter.
+No primary Stop guard, watcher protocol, pre-tool protection, or session-start contract is verified for Polytoken.
 Do not launch a primary or secondmate with this adapter.
-The complete lifecycle hook surface (session_start, post_clear, pre/post_compaction, stop-continue) and the REST event plane exist and were verified by the scout, so Phase 2 is follow-up work rather than new vendor surface.
+The worker facet removes `switch_facet`, `handoff_plan`, `subagent`, and `message_subagent` from its tool registry so a facet change or delegation cannot substitute a routed model for the explicit worker pin.

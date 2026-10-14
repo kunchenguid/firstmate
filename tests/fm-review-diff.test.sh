@@ -17,6 +17,12 @@
 #       the moved worktree HEAD
 #   (h) meta records base_branch= -> the diff is against origin/<base_branch>,
 #       so the base branch's own commits never appear as task changes
+#   (i) pr= forgejo /pulls/<n> URL with a reachable refs/pull/<n>/head -> the
+#       same live fetched-head review as GitHub
+#   (j) pr= forgejo URL whose repo is literally named pulls -> the LAST
+#       /pulls/ segment names the number, never an earlier one
+#   (k) pr= forgejo URL with no remote pull ref -> offline fallback to a
+#       recorded pr_head=
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -238,6 +244,56 @@ test_recorded_base_branch_is_the_review_base() {
   pass "fm-review-diff compares a task against its recorded base branch"
 }
 
+test_forgejo_pr_url_fetches_pull_head() {
+  local case_dir out
+  case_dir=$(make_case forgejo-pull-head)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/12/head"
+  write_task_meta "$case_dir" \
+    "pr=https://codeberg.org/example/repo/pulls/12"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "forgejo-pull-head: diff should show the fetched Forgejo PR head content"
+  assert_not_contains "$out" 'stale-local' "forgejo-pull-head: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-pull-head: should not warn when the Forgejo pull head is fetchable"
+  pass "fm-review-diff fetches refs/pull/<n>/head for a Forgejo /pulls/<n> pr= URL"
+}
+
+test_forgejo_repo_named_pulls_resolves_by_last_segment() {
+  local case_dir out
+  case_dir=$(make_case forgejo-repo-named-pulls)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/7/head"
+  write_task_meta "$case_dir" \
+    "pr=https://codeberg.org/example/pulls/pulls/7"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "forgejo-repo-named-pulls: the greedy /pulls/ split must resolve number 7"
+  assert_not_contains "$out" 'stale-local' "forgejo-repo-named-pulls: diff must not use the stale local branch"
+  pass "fm-review-diff resolves a Forgejo repo literally named pulls by the last /pulls/ segment"
+}
+
+test_forgejo_pr_url_falls_back_to_recorded_head() {
+  local case_dir out
+  case_dir=$(make_case forgejo-recorded-head)
+  stale_and_pr_commits "$case_dir"
+  # No remote pull ref: a recorded pr_head is the offline fallback.
+  write_task_meta "$case_dir" \
+    "pr=https://codeberg.org/example/repo/pulls/9" \
+    "pr_head=$PR_SHA"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "forgejo-recorded-head: recorded pr_head must be the offline fallback"
+  assert_not_contains "$out" 'stale-local' "forgejo-recorded-head: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-recorded-head: should not warn when recorded pr_head is reachable offline"
+  pass "fm-review-diff falls back to a recorded Forgejo pr_head when the pull ref cannot be fetched"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -246,3 +302,6 @@ test_unreachable_pr_head_falls_back_with_warning
 test_recorded_branch_beats_moved_worktree_head
 test_corrupt_recorded_branch_is_refused
 test_recorded_base_branch_is_the_review_base
+test_forgejo_pr_url_fetches_pull_head
+test_forgejo_repo_named_pulls_resolves_by_last_segment
+test_forgejo_pr_url_falls_back_to_recorded_head

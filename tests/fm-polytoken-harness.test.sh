@@ -26,8 +26,8 @@
 #      is REST-only: the TUI has no interrupt chord, so no interrupt key may
 #      ever be improvised for polytoken.
 #   5. The effort axis rides the model reference as `<model>(<effort>)` only
-#      when that form is listed (record-and-omit otherwise), and an unlisted
-#      base model on a reachable listing refuses the spawn.
+#      at the nearest supported level, and an unlisted base model or an
+#      unreachable catalog refuses the spawn instead of dropping the pin.
 #   6. Enter while a turn runs queues the text, so the busy-queued Enter
 #      conversion applies, and the composer is the verified separated shape:
 #      an idle polytoken proves an empty composer and a working one keeps the
@@ -351,7 +351,7 @@ test_polytoken_write_facet_carries_the_role_contract_without_a_model_pin() {
   [ -f "$facet" ] || fail "the facet must exist at the project facet layer path"
   body=$(cat "$facet")
   assert_contains "$body" "name: firstmate-worker" "the facet must be the firstmate-worker facet"
-  assert_contains "$body" "tools_deny: [switch_facet, subagent, message_subagent]" \
+  assert_contains "$body" "tools_deny: [switch_facet, handoff_plan, subagent, message_subagent]" \
     "the facet must deny facet switching and delegation at the tool-registry level"
   assert_contains "$body" 'transclude("polytoken://system_prompts/facet.md")' \
     "the facet must transclude the shipped base prompt to keep the tool-use framing"
@@ -523,8 +523,12 @@ test_polytoken_model_ref_composes_and_refuses() {
   [ "$out" = 'zai/glm-5.3-flash(low)' ] \
     || fail "a listed base with a listed effort must compose into the parenthesized ref, got '$out'"
   out=$(fm_polytoken_model_ref "$fakebin/polytoken" zai/glm-5.3-flash medium 2>/dev/null)
-  [ "$out" = 'zai/glm-5.3-flash' ] \
-    || fail "an effort outside the model's selectable set must be omitted from the ref, got '$out'"
+  [ "$out" = 'zai/glm-5.3-flash(low)' ] \
+    || fail "medium maps to the nearest level (lower on a tie), got '$out'"
+  out=$(fm_polytoken_model_ref "$fakebin/polytoken" zai/glm-5.3-flash xhigh 2>/dev/null)
+  [ "$out" = 'zai/glm-5.3-flash(high)' ] || fail "xhigh must cap below max"
+  out=$(fm_polytoken_model_ref "$fakebin/polytoken" zai/glm-5.3-flash max 2>/dev/null)
+  [ "$out" = 'zai/glm-5.3-flash(max)' ] || fail "explicit max must remain max"
   out=$(fm_polytoken_model_ref "$fakebin/polytoken" zai/glm-5.3-flash default 2>/dev/null)
   [ "$out" = 'zai/glm-5.3-flash' ] \
     || fail "a default effort axis must launch the bare model, got '$out'"
@@ -538,15 +542,15 @@ test_polytoken_model_ref_composes_and_refuses() {
   pass "fm-polytoken-lib: the model ref composes the effort axis and refuses unlisted models"
 }
 
-test_polytoken_model_ref_unreachable_listing_launches_unvalidated() {
-  local fakebin out
+test_polytoken_model_ref_unreachable_listing_refuses() {
+  local fakebin out rc=0
   fakebin=$(make_polytoken_fakebin "$TMP_ROOT/models-unreachable")
   export PTFAKE_LOG="$TMP_ROOT/models-unreachable/polytoken.log"
   : > "$PTFAKE_LOG"
-  out=$(PTFAKE_MODELS_FAIL=1 fm_polytoken_model_ref "$fakebin/polytoken" zai/glm-5.3-flash low 2>&1 >/dev/null)
-  assert_contains "$out" "unvalidated" \
-    "an unreachable listing must launch unvalidated with a notice"
-  pass "fm-polytoken-lib: an unreachable listing establishes nothing and launches unvalidated"
+  out=$(PTFAKE_MODELS_FAIL=1 fm_polytoken_model_ref "$fakebin/polytoken" zai/glm-5.3-flash low 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreachable catalog cannot prove the requested reasoning pin"
+  assert_contains "$out" "cannot pin" "refusal must explain the missing capability evidence"
+  pass "fm-polytoken-lib: an unreachable listing refuses an unprovable pin"
 }
 
 # ---------------------------------------------------------------------------
@@ -812,7 +816,7 @@ run_polytoken_spawn() {
     FM_POLYTOKEN_READY_POLLS="${FM_POLYTOKEN_READY_POLLS:-40}" \
     FM_POLYTOKEN_POLL_INTERVAL="${FM_POLYTOKEN_POLL_INTERVAL:-0.1}" \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness polytoken --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness polytoken --model zai/glm-5.3-flash --effort low --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 test_polytoken_launch_carries_the_hybrid_contract() {
@@ -893,7 +897,7 @@ test_polytoken_launch_carries_the_hybrid_contract() {
   pass "fm-spawn: the polytoken launch carries the hybrid contract end to end"
 }
 
-test_polytoken_effort_recorded_but_omitted_when_unlisted() {
+test_polytoken_effort_maps_to_nearest_listed_level() {
   local id rec out rc launch raw meta
   id="pt-xhigh-z2-$$"
   rec=$(make_polytoken_spawn_case xhigh "$id")
@@ -903,15 +907,27 @@ test_polytoken_effort_recorded_but_omitted_when_unlisted() {
   rc=$?
   expect_code 0 "$rc" "a polytoken spawn with an effort outside the model's set should still succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_contains "$launch" "--model zai/glm-5.3-flash" \
-    "the launch must carry the bare reference for an unlisted effort"
+  assert_contains "$launch" "--model zai/glm-5.3-flash(low)" \
+    "the launch must carry the nearest supported effort"
   assert_not_contains "$launch" "(medium)" "the launch must not pass the unlisted effort variant"
   raw=$(cat "$CASE_DIR/launch-line.log")
-  assert_contains "$raw" "--model 'zai/glm-5.3-flash'" \
-    "the raw launch line must carry the bare quoted reference"
+  assert_contains "$raw" "--model 'zai/glm-5.3-flash(low)'" \
+    "the raw launch line must carry the mapped reference"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'effort=medium' "$meta" "the meta must retain the omitted effort axis"
-  pass "fm-spawn: polytoken omits an unlisted effort from the launch but records it"
+  pass "fm-spawn: polytoken maps an unlisted effort and retains the requested axis"
+}
+
+test_polytoken_missing_axes_refuse_before_pane_creation() {
+  local id rec out rc=0
+  id="pt-nopin-$$"
+  rec=$(make_polytoken_spawn_case missing-pin "$id")
+  read_polytoken_spawn_record "$rec"
+  out=$(run_polytoken_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model default --effort low) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a canonical polytoken spawn must require concrete model and effort axes"
+  assert_contains "$out" "requires concrete --model and --effort" "missing pin diagnostic"
+  pass "fm-spawn: polytoken requires explicit model and effort axes"
 }
 
 test_polytoken_unlisted_model_refuses_before_pane_creation() {
@@ -1077,12 +1093,13 @@ test_polytoken_write_facet_carries_the_role_contract_without_a_model_pin
 test_polytoken_busy_writer_dispatches_without_argv_and_never_fails
 test_polytoken_write_hooks_binds_the_three_events
 test_polytoken_model_ref_composes_and_refuses
-test_polytoken_model_ref_unreachable_listing_launches_unvalidated
+test_polytoken_model_ref_unreachable_listing_refuses
 test_polytoken_rest_interrupt_settles_the_turn
 test_polytoken_interrupt_close_spares_a_reopened_turn
 test_polytoken_turn_settled_reads_the_typed_sync_verdict
 test_polytoken_launch_carries_the_hybrid_contract
-test_polytoken_effort_recorded_but_omitted_when_unlisted
+test_polytoken_effort_maps_to_nearest_listed_level
+test_polytoken_missing_axes_refuse_before_pane_creation
 test_polytoken_unlisted_model_refuses_before_pane_creation
 test_polytoken_secondmate_is_refused
 test_polytoken_existing_project_hook_layer_refuses
