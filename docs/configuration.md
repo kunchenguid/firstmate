@@ -1101,6 +1101,13 @@ This is not a sandbox: it cannot revoke same-user access to credential files, pr
 
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
 
+### Claude auto-updater
+
+Firstmate disables Claude Code's auto-updater by default for Claude workers, scouts, and secondmates so unattended launches cannot replace the shared Claude installation.
+A nonempty `DISABLE_AUTOUPDATER` value in the spawning process overrides this default, including when `config/launch-env-allowlist` filters the launch environment.
+Other harnesses receive no new default.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the delivery mechanics, with regression coverage in [`tests/fm-live-gate.test.sh`](../tests/fm-live-gate.test.sh).
+
 ### Compact adviser setting
 
 Every crewmate, scout, and secondmate Firstmate launches starts with `COMPACT_ADVISER_DISABLE=1` in its environment, on a fresh spawn and on a relaunch alike, so an unattended session never activates the compact adviser.

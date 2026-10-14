@@ -284,6 +284,94 @@ SH
     "fm-spawn must embed DISABLE_AUTOUPDATER in the launch command so a daemon-built pane that never inherited it still runs Claude with the updater off"
 }
 
+# Stage a launch through fm-spawn, then execute it without the spawner's
+# environment, as a long-lived backend daemon would. The probe reports what
+# the harness actually receives, including under an empty allowlist.
+spawn_autoupdater_value() {  # <name> <harness> <kind> <allowlist> <spawner-value|unset>
+  local name=$1 harness=$2 kind=$3 allowlist=$4 value=$5
+  local case_dir home proj wt fakebin launchlog panebin launch seen
+  local -a args
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"; proj="$case_dir/proj"; wt="$case_dir/wt"
+  launchlog="$case_dir/launch.log"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" gh gh-axi)
+  fm_test_spawn_home "$home" "$harness"
+  fm_git_worktree "$proj" "$wt" "wt-$name"
+  [ "$allowlist" = absent ] || : > "$home/config/launch-env-allowlist"
+  if [ "$kind" = secondmate ]; then
+    proj="$case_dir/secondmate-home"
+    mkdir -p "$proj/bin" "$proj/data"
+    printf '# Firstmate\n' > "$proj/AGENTS.md"
+    printf '%s\n' "$name" > "$proj/.fm-secondmate-home"
+    printf 'charter\n' > "$proj/data/charter.md"
+    git -C "$proj" init -q -b main
+    args=("$name" "$proj" --secondmate --harness "$harness")
+  else
+    fm_test_spawn_brief "$home" "$name"
+    args=("$name" "$proj")
+    if [ "$kind" = scout ]; then
+      args+=(--scout)
+    else
+      args+=(--mode no-mistakes --yolo off)
+    fi
+  fi
+  (
+    if [ "$value" = unset ]; then
+      unset DISABLE_AUTOUPDATER
+    else
+      export DISABLE_AUTOUPDATER="$value"
+    fi
+    FM_FAKE_LAUNCH_LOG="$launchlog" \
+      fm_test_run_spawn "$home" "$wt" "$fakebin" "${args[@]}"
+  ) >/dev/null 2>&1 || fail "$name: spawn must stage its launch command"
+  launch=$(cat "$launchlog")
+  [ -n "$launch" ] || fail "$name: no launch command was captured"
+  panebin="$case_dir/panebin"; mkdir -p "$panebin"
+  cat > "$panebin/$harness" <<'SH'
+#!/bin/sh
+printf '%s\n' "${DISABLE_AUTOUPDATER-unset}"
+SH
+  chmod +x "$panebin/$harness"
+  seen=$(env -i HOME="$home/user-home" PATH="$panebin:/usr/bin:/bin" \
+    /bin/sh -c "$launch") || fail "$name: staged launch must execute"
+  printf '%s\n' "$seen"
+}
+
+test_claude_launch_disables_autoupdater_by_default() {
+  local kind allowlist seen
+  for kind in ship scout secondmate; do
+    for allowlist in absent empty; do
+      seen=$(spawn_autoupdater_value "au-default-$kind-$allowlist" claude "$kind" "$allowlist" unset) \
+        || fail "$kind/$allowlist: could not execute the launch"
+      assert_equals 1 "$seen" \
+        "$kind/$allowlist: an ordinary Claude launch must disable the auto-updater without a spawner value"
+    done
+  done
+}
+
+test_claude_launch_preserves_explicit_autoupdater_value() {
+  local value allowlist seen index=0
+  for value in 1 0 "explicit ' value"; do
+    index=$((index + 1))
+    for allowlist in absent empty; do
+      seen=$(spawn_autoupdater_value "au-explicit-$index-$allowlist" claude ship "$allowlist" "$value") \
+        || fail "explicit/$allowlist: could not execute the launch"
+      assert_equals "$value" "$seen" \
+        "explicit/$allowlist: the spawner's nonempty value must win over the Claude default"
+    done
+  done
+}
+
+test_non_claude_launch_has_no_autoupdater_default() {
+  local allowlist seen
+  for allowlist in absent empty; do
+    seen=$(spawn_autoupdater_value "au-codex-$allowlist" codex ship "$allowlist" unset) \
+      || fail "codex/$allowlist: could not execute the launch"
+    assert_equals unset "$seen" \
+      "codex/$allowlist: a non-Claude launch must not acquire the Claude default"
+  done
+}
+
 test_every_live_guard_is_wired_to_the_shared_gate() {
   local script out listing checked=0
   listing=$("$ROOT/bin/fm-test-run.sh" --family live-harness-optin --list) \
@@ -328,4 +416,10 @@ test_disable_autoupdater_reaches_the_claude_pane_on_the_fm_spawn_launch_path
 pass "DISABLE_AUTOUPDATER rides fm-spawn's claude launch through to the harness pane"
 test_disable_autoupdater_survives_a_daemon_pane_that_never_inherited_it
 pass "DISABLE_AUTOUPDATER is embedded in the launch so a daemon-built pane keeps it"
+test_claude_launch_disables_autoupdater_by_default
+pass "ordinary Claude ship, scout, and secondmate launches disable auto-update with or without filtering"
+test_claude_launch_preserves_explicit_autoupdater_value
+pass "explicit spawner auto-updater values survive the launch, including filtering and shell quoting"
+test_non_claude_launch_has_no_autoupdater_default
+pass "non-Claude launches have no auto-updater default"
 test_every_live_guard_is_wired_to_the_shared_gate

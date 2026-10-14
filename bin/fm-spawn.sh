@@ -348,6 +348,12 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Claude auto-updater:
+#   Every Claude launch (ship, scout, secondmate, raw Claude command, and
+#   relaunch) exports DISABLE_AUTOUPDATER=1 unless this spawning process has a
+#   nonempty DISABLE_AUTOUPDATER value, which is embedded unchanged as before.
+#   The assignment runs inside any launch-env-allowlist wrapper, so filtering
+#   cannot strip it. Other harnesses receive no new default.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -5592,15 +5598,14 @@ fi
 # launch and the launch-env-allowlist `env -i` wrapper.
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
-# When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
-# own environment, carry it into the launch command text so Claude Code's
-# auto-updater cannot rewrite the shared binary during a live run. Embedding the
-# assignment - like COMPACT_ADVISER_DISABLE above - rather than leaning on
-# ambient inheritance is what survives a pre-existing backend daemon that
-# constructs the pane command without the gate's environment. It is gated on the
-# value being set here so ordinary spawns are unchanged.
+# Preserve explicit nonempty spawner values, including the live-harness gate's
+# export, and disable Claude's auto-updater by default for every Claude launch.
+# Embedding the export survives backend daemons without the spawner environment
+# and the cleared-environment wrapper below, protecting the shared install.
 if [ -n "${DISABLE_AUTOUPDATER:-}" ]; then
   LAUNCH="export DISABLE_AUTOUPDATER=$(shell_quote "$DISABLE_AUTOUPDATER"); $LAUNCH"
+elif [ "$HARNESS" = claude ]; then
+  LAUNCH="export DISABLE_AUTOUPDATER=1; $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
