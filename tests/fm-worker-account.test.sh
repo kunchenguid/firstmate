@@ -488,7 +488,8 @@ test_local_secondmate_respawn_keeps_the_recorded_pool_account() {
   assert_grep "CLAUDE_CONFIG_DIR=$CASE/mon" "$CASE/claude-worker" \
     "the respawned secondmate should run on the recorded account, not the pool's first line"
 
-  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  signed_in_claude_root "$CASE/spare"
+  printf '%s\n' "$CASE/work" "$CASE/spare" > "$HOME_DIR/config/claude-account"
   : > "$CASE/launch.log"
   out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
     fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" --secondmate); rc=$?

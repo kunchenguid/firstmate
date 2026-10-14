@@ -39,12 +39,13 @@
 # one absolute path, all distinct, with no blank or other lines. The first
 # line is the home's default account; a launch selects another only by naming
 # that exact line (fm-spawn.sh --account). A single line is today's pin,
-# unchanged. Every declared root must be usable, so a broken pool refuses
-# every Claude launch rather than being selected around. A relaunch keeps the
-# account recorded on its task while the file still declares it, and refuses
-# before the running agent stops when the file no longer does; an explicit
-# --account is a deliberate switch, and a home whose file is gone launches
-# unpinned as before. The Pi pin keeps one root and re-resolves on relaunch.
+# unchanged: every relaunch re-resolves it. Every declared root must be
+# usable, so a broken pool refuses every Claude launch rather than being
+# selected around. A relaunch in a pool keeps the account recorded on its task
+# while the file still declares it, and refuses before the running agent stops
+# when the file no longer does; an explicit --account is a deliberate switch,
+# and a home whose file is gone launches unpinned as before. The Pi pin keeps
+# one root and re-resolves on relaunch.
 #
 # The sign-in check asks the runner itself, with only HOME, PATH, TMPDIR,
 # USER, LOGNAME, and the selected root in its environment, so a credential
@@ -230,11 +231,11 @@ EOF_ENTRIES
 # Prints the Claude account a relaunch must name with --account, or nothing
 # for the launch's ordinary selection. An explicit entry wins and is validated
 # by the launch itself. Otherwise a Claude task recorded on a Claude account
-# keeps it while config/claude-account still declares it; when the file no
-# longer declares it, prints one error naming the recorded account and the fix
-# and returns 1, so the caller refuses before the running agent stops. A home
-# whose file is gone, another runner, or a task with no recorded Claude
-# account prints nothing.
+# keeps it while a several-line config/claude-account pool still declares it;
+# when the pool no longer declares it, prints one error naming the recorded
+# account and the fix and returns 1, so the caller refuses before the running
+# agent stops. A single-line pin, a home whose file is gone, another runner,
+# or a task with no recorded Claude account prints nothing.
 fm_worker_account_relaunch_entry() {
   local harness=$1 config=$2 recorded_harness=$3 recorded=$4 explicit=$5 id=$6 entries line list=
   if [ -n "$explicit" ]; then
@@ -243,7 +244,7 @@ fm_worker_account_relaunch_entry() {
   fi
   [ "$harness" = claude ] && [ "$recorded_harness" = claude ] && [ -n "$recorded" ] || return 0
   entries=$(fm_worker_account_entries claude "$config") || return 1
-  [ -n "$entries" ] || return 0
+  [ "$entries" != "${entries%%$'\n'*}" ] || return 0
   while IFS= read -r line; do
     if [ "${line%%$'\t'*}" = "$recorded" ]; then
       printf '%s\n' "$recorded"

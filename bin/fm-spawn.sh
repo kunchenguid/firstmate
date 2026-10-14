@@ -381,10 +381,11 @@
 #   several-line config/claude-account pool instead of its first line; it is
 #   refused for any other runner, for a home without config/claude-account,
 #   for an undeclared entry, and for a remote secondmate, whose own home owns
-#   its pin. A relaunch without --account keeps the Claude account recorded on
-#   the task while the file still declares it and refuses when it does not. A
-#   local secondmate respawn without --account keeps it the same way, but when
-#   the file no longer declares it the respawn re-resolves instead of refusing.
+#   its pin. In a pool, a relaunch without --account keeps the Claude account
+#   recorded on the task while the file still declares it and refuses when it
+#   does not; a single-line pin re-resolves as before. A local secondmate
+#   respawn without --account keeps it the same way, but when the pool no
+#   longer declares it the respawn re-resolves instead of refusing.
 #   bin/fm-worker-account-lib.sh owns parsing, pool selection, the relaunch
 #   rule, the check, and the shed list.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:

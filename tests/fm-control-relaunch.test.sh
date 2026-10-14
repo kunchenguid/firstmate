@@ -804,6 +804,24 @@ test_worker_account_pin_follows_the_relaunch() {
   [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "the relaunched record should carry the pinned account"
   assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" \
     "the replacement should launch under the pinned root"
+  mkdir -p "$dir/mon"
+  : > "$dir/mon/.credentials.json"
+  printf '%s\n' "$dir/mon" > "$dir/home/config/claude-account"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "pin changed"); rc=$?
+  expect_code 0 "$rc" "a relaunch after a single-line pin changes should follow the new pin"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/mon" ] || fail "the relaunched record should carry the changed pin"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/mon'" \
+    "the replacement should launch under the changed single-line pin, not the recorded account"
+  printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
+  printf 'zsh' > "$dir/fake/command"
+  : > "$dir/fake/literal"
+  out=$(run_spawn "$dir" "$id" --relaunch); rc=$?
+  expect_code 0 "$rc" "fm-spawn --relaunch should follow a changed single-line pin"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "fm-spawn --relaunch should record the changed pin"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" \
+    "fm-spawn --relaunch should launch under the changed single-line pin"
+  printf claude > "$dir/fake/command"
   rm "$dir/home/config/claude-account"
   : > "$dir/fake/literal"
   out=$(run_control "$dir" "$id" relaunch --note "pin removed"); rc=$?
@@ -811,7 +829,7 @@ test_worker_account_pin_follows_the_relaunch() {
   assert_no_grep "account=" "$dir/home/state/$id.meta" "a relaunch without a pin must drop the previous account from the record"
   assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
     "an unpinned replacement must launch exactly as before"
-  pass "fm-control relaunch: the replacement follows the home's current worker account pin"
+  pass "fm-control relaunch: the replacement follows the home's current single-line worker account pin"
 }
 
 # A pool task recorded on its second account: relaunch stays there while the
@@ -822,7 +840,7 @@ test_relaunch_keeps_the_recorded_pool_account() {
   dir=$(new_case acct-pool "$id")
   add_ship_task "$dir" "$id" claude
   make_claude_auth_stub "$dir"
-  mkdir -p "$dir/home/config" "$dir/work" "$dir/mon"
+  mkdir -p "$dir/home/config" "$dir/work" "$dir/mon" "$dir/spare"
   : > "$dir/work/.credentials.json"
   : > "$dir/mon/.credentials.json"
   printf '%s\n' "$dir/work" "$dir/mon" > "$dir/home/config/claude-account"
@@ -834,7 +852,7 @@ test_relaunch_keeps_the_recorded_pool_account() {
   assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/mon'" \
     "the replacement should launch on the recorded account, not the pool's first line"
 
-  printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
+  printf '%s\n' "$dir/work" "$dir/spare" > "$dir/home/config/claude-account"
   printf claude > "$dir/fake/command"
   : > "$dir/fake/literal"
   cp "$dir/home/state/$id.meta" "$dir/meta-before"

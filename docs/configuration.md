@@ -1007,10 +1007,12 @@ A launch without `--account` uses the pool's first line, exactly as a single-lin
 `fm-spawn.sh --account <entry>` launches a Claude worker on another line instead; the entry must equal one declared line exactly, and the flag refuses for any other runner, in a home without `config/claude-account`, and for a remote secondmate, whose own home owns its pin.
 Every declared root must be a readable, searchable directory, but only the account a launch selects is asked whether it is signed in.
 
-A relaunch keeps the account recorded on its task while the file still declares it.
-When the file no longer declares that account, the relaunch refuses before the running worker stops and names the account; restore the line, or relaunch with `--account <entry>` to move the task deliberately.
+A relaunch in a pool keeps the account recorded on its task while the file still declares it.
+When the pool no longer declares that account, the relaunch refuses before the running worker stops and names the account; restore the line, or relaunch with `--account <entry>` to move the task deliberately.
+That includes `/updatefirstmate`'s local secondmate restart, which reports such a mate as unreached with the refusal.
+A single-line pin is re-read on every relaunch, as before, so changing that line moves every relaunched task to the new account.
 A home whose file is gone relaunches unpinned, as before.
-A local secondmate respawn, such as the liveness sweep's recovery, keeps the recorded account the same way; when the file no longer declares it, the respawn uses the pool's first line instead of refusing.
+A local secondmate respawn, such as the liveness sweep's recovery, keeps the recorded account the same way; when the pool no longer declares it, the respawn uses the pool's first line instead of refusing.
 The Pi pin keeps one root, and its relaunch re-reads the current file.
 
 Firstmate chooses among declared accounts with [`bin/fm-claude-account.sh`](../bin/fm-claude-account.sh) `pick`, which reads `quota-axi` once and prints the evidence for every declared account before naming one; its header owns the lane matching, ranking, and exit codes.

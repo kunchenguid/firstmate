@@ -75,9 +75,11 @@
 #              A replacement Claude or Pi profile must also pass this home's
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
 #              that no longer resolves or is signed out refuses before the old
-#              agent stops. A Claude replacement stays on the Claude account
-#              recorded on the task while config/claude-account still declares
-#              it, and refuses here when the file no longer does; --account
+#              agent stops. A Claude replacement in a several-line
+#              config/claude-account pool stays on the Claude account recorded
+#              on the task while the pool still declares it, and refuses here
+#              when it no longer does; a single-line pin is re-resolved as
+#              before. --account
 #              <entry> moves it to another declared line deliberately and is
 #              passed through to the launch owner.
 #              The same pre-stop refusal applies to this home's worker tool
@@ -967,7 +969,7 @@ resolve_relaunch_profile() {
   fi
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
-  # signed out, or a recorded Claude account the file no longer declares, must
+  # signed out, or a recorded Claude account the pool no longer declares, must
   # refuse here, while nothing has changed yet.
   local account_model=$TARGET_MODEL account_config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   [ "$account_model" != default ] || account_model=
