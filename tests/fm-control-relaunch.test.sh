@@ -2556,6 +2556,49 @@ test_action_relaunch_receipts_and_worker_commit() {
   pass "real relaunch accepts its native resulting generation and preserves results across worker commits"
 }
 
+test_native_result_failure_sets_control_exit_status() {
+  local dir s out rc verb
+  local -a control_args
+  for verb in interrupt exit relaunch; do
+    dir=$(new_case "receipt-failure-$verb" result-failure)
+    add_ship_task "$dir" result-failure claude
+    s="$dir/home/state"
+    printf 'spawn_gen=old-run\n' >> "$s/result-failure.meta"
+    cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=''
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "$FM_TEST_RECEIPT_DEST" ]; then
+  echo 'fixture: receipt publication refused' >&2
+  exit 1
+fi
+exec "$FM_REAL_MV" "$@"
+SH
+    chmod +x "$dir/fakebin/mv"
+    control_args=("$verb")
+    if [ "$verb" = relaunch ]; then control_args+=(--note "continue accepted work"); fi
+    rc=0
+    out=$(FM_ACTION_ID=receipt-failure FM_REAL_MV="$(command -v mv)" \
+      FM_TEST_RECEIPT_DEST="$s/result-failure.action-receipts/receipt-failure" \
+      run_control "$dir" result-failure "${control_args[@]}") || rc=$?
+    expect_code 1 "$rc" "$verb must propagate a native result recording failure"
+    case "$verb" in
+      interrupt) assert_contains "$out" "interrupt-delivered result-failure" "interrupt completed before recording failed" ;;
+      exit) assert_equals zsh "$(cat "$dir/fake/command")" "exit completed before recording failed" ;;
+      relaunch) assert_contains "$out" "relaunched result-failure" "relaunch completed before recording failed" ;;
+    esac
+    assert_contains "$out" "fixture: receipt publication refused" "the receipt write actually failed"
+    assert_contains "$out" "native action result could not be recorded" "the failure is identified"
+    assert_absent "$s/.control-result-failure.lock"
+    assert_absent "$s/result-failure.composer-dialog"
+    assert_absent "$s/result-failure.action-receipts/receipt-failure"
+    out=$(FM_STATE_OVERRIDE="$s" bash "$ROOT/bin/fm-action.sh" show result-failure)
+    assert_contains "$out" $'receipt-failure\tauthorized\tstarted' "an unrecorded result cannot certify completion"
+    if [ "$verb" = relaunch ]; then chmod u+w "$s/"*.git-hooks; fi
+  done
+  pass "native result failures propagate after cleanup for all control verbs"
+}
+
 test_admitted_exit_steer_binds_native_control() {
   local kind dir s out rec body
   # shellcheck source=/dev/null
@@ -2598,6 +2641,7 @@ fi
 
 if [ "${1:-}" = action-receipts ]; then
   test_action_relaunch_receipts_and_worker_commit
+  test_native_result_failure_sets_control_exit_status
   exit 0
 fi
 
@@ -2681,3 +2725,5 @@ test_relaunch_moves_a_drifted_item_back_in_flight
 
 test_action_relaunch_receipts_and_worker_commit
 test_admitted_exit_steer_binds_native_control
+
+test_native_result_failure_sets_control_exit_status

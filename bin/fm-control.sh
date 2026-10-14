@@ -210,7 +210,7 @@ control_cleanup() {
     fm_action_native_result "$STATE" "$ID" "$ACTION_ID" "$ACTION_HEAD" \
       "$ACTION_RUN" "$ACTION_ATTEMPT" "$action_outcome" "${ACTION_RESULT_RUN:-$ACTION_RUN}" || {
         echo "error: native action result could not be recorded for $ID $ACTION_ID" >&2
-        status=1
+        [ "$status" -ne 0 ] || status=1
       }
   fi
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
@@ -229,7 +229,7 @@ control_cleanup() {
   if declare -F fm_lease_guard_release >/dev/null 2>&1; then
     fm_lease_guard_release || true
   fi
-  return "$status"
+  exit "$status"
 }
 
 # --- argument parsing -------------------------------------------------------

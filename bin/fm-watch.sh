@@ -2761,6 +2761,7 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
+touch "$STATE/.last-watcher-beat"
 action_followthrough_poll || exit 1
 
 # A merged poll may have queued its terminal wake and then lost the process

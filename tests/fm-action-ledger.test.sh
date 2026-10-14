@@ -829,7 +829,7 @@ test_condition_clearing_preserves_ordinary_action_markers() {
 }
 
 test_early_wakes_preserve_followthrough_and_observation() {
-  local dir s out now
+  local dir s out now beat i
   dir=$(native_case early-check-wake)
   s="$dir/home/state"
   now=$(date +%s)
@@ -843,11 +843,25 @@ test_early_wakes_preserve_followthrough_and_observation() {
   [ -f "$s/.t1.checkpoint-checked" ] || fail "the notification bypassed followthrough"
   dir=$(native_case early-action-wake)
   s="$dir/home/state"
-  act "$s" admit t1 --id overdue --class authorized --source captain:fixture --owner worker --operation "second image" --at "$((now-301))" || fail "admit overdue action"
+  for i in 1 2; do
+    act "$s" admit t1 --id "overdue-$i" --class authorized --source captain:fixture --owner worker --operation "image $i" --at "$((now-301))" || fail "admit overdue action"
+  done
   printf 'done [at=%s]: first image finished\n' "$now" > "$s/t1.status"
-  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$s" FM_ACTION_START_SECS=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 \
-    bash "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" || fail "real watcher action wake"
-  assert_contains "$(cat "$dir/watch.out")" "action-followthrough" "a notification cannot bypass an overdue action"
+  for i in 1 2; do
+    now=$(date +%s)
+    touch -d "@$((now-30))" "$s/.last-watcher-beat"
+    printf '%s\n' "$((now-30))" > "$s/.beat-gap-seen"
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$s" FM_ACTION_START_SECS=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+      bash "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" || fail "real watcher action wake"
+    assert_contains "$(cat "$dir/watch.out")" "action-followthrough t1 overdue-$i" "each startup arm reports its next overdue action"
+    beat=$(FM_STATE_OVERRIDE="$s" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_path_mtime "$2/.last-watcher-beat"' _ "$ROOT" "$s")
+    [ "$beat" -ge "$now" ] || fail "startup notification did not refresh its beacon"
+    assert_equals "$beat" "$(cat "$s/.beat-gap-seen")" "startup notification recorded its beacon"
+    out=$(act "$s" register --now "$beat")
+    assert_contains "$out" "beat=ok" "startup notification leaves a live observer"
+    assert_absent "$s/.beat-gaps"
+    drain_ack "$dir" >/dev/null || fail "acknowledge startup notification"
+  done
   pass "an early check wake preserves observer samples and task followthrough"
 }
 
