@@ -503,18 +503,18 @@ test_missed_checkpoint_climbs_the_bounded_ladder_once_per_stage() {
   s="$dir/home/state"
   assert_equals "" "$(poll_at "$dir" $((W0 + 3000)))" "inside the checkpoint nothing is reported"
   out=$(poll_at "$dir" $((W0 + 3700))) || fail "stage 0 poll"
-  assert_contains "$out" "action-followthrough t1 checkpoint checkpoint-missed" "a missed checkpoint is reported once"
+  assert_contains "$out" "action-followthrough t1 checkpoint-" "a missed checkpoint is reported once"
   before=$(wc -l < "$s/.wake-queue")
   assert_equals "" "$(poll_at "$dir" $((W0 + 3800)))" "an unchanged incident is not repeated"
   assert_equals "" "$(poll_at "$dir" $((W0 + 4200)))" "still inside the triage bound"
   assert_equals "$before" "$(wc -l < "$s/.wake-queue")" "no unchanged report is queued"
   out=$(poll_at "$dir" $((W0 + 4400))) || fail "stage 1 poll"
-  assert_contains "$out" "action-followthrough-triage t1 checkpoint checkpoint-missed" "the next stage is a bounded triage"
+  assert_contains "$out" "action-followthrough-triage t1 checkpoint-" "the next stage is a bounded triage"
   assert_contains "$out" "owner-state=owner-active" "triage names the owner's model-independent state"
   assert_contains "$(act "$s" show t1)" "triage-checkpoint-" "the triage is a tracked action with its own owner"
   assert_equals "" "$(poll_at "$dir" $((W0 + 4500)))" "triage window still open"
   out=$(poll_at "$dir" $((W0 + 6000))) || fail "stage 2 poll"
-  assert_contains "$out" "action-followthrough-escalate t1 checkpoint checkpoint-missed" "an unresolved triage becomes an authority escalation"
+  assert_contains "$out" "action-followthrough-escalate t1 checkpoint-" "an unresolved triage becomes an authority escalation"
   assert_contains "$out" "authority decision needed" "the escalation names the decision, not a repeat"
   n=$(wc -l < "$s/.wake-queue")
   assert_equals "" "$(poll_at "$dir" $((W0 + 9000)))" "the ladder ends at escalation"
@@ -632,7 +632,7 @@ test_teardown_retires_progress_and_ladder_state() {
   bash -c '. "$1/bin/fm-action-lib.sh"; . "$1/bin/fm-wake-lib.sh"; fm_action_retire "$2" t1' _ "$ROOT" "$s" || fail "retire"
   assert_absent "$s/t1.checkpoint-progress"
   assert_absent "$s/.t1.checkpoint-checked"
-  assert_absent "$s/.t1.action-incident-checkpoint"
+  assert_equals "" "$(compgen -G "$s/.t1.action-incident-checkpoint-*" || true)" "checkpoint markers retired"
   pass "retirement removes the progress note, checkpoint throttle and ladder marker"
 }
 
@@ -681,7 +681,7 @@ test_unclosed_blocker_is_a_record_lifecycle_incident() {
   assert_equals "" "$(poll_at "$dir" $((W0 + 3200)))" "the unchanged defect is not repeated"
   printf 'resolved [at=%s]: GPU free, blocker cleared\n' $((W0 + 3300)) >> "$s/t1.status"
   assert_equals "" "$(poll_at "$dir" $((W0 + 3400)))" "the additive resolved line clears it"
-  assert_absent "$s/.t1.action-incident-open-decision"
+  assert_equals "" "$(compgen -G "$s/.t1.action-incident-open-decision-*" || true)" "resolved blocker markers cleared"
   dir=$(stalled_case live-decision)
   s="$dir/home/state"
   printf 'needs-decision [at=%s]: pick A or B\nworking [at=%s]: independent work meanwhile\n' $((W0 + 10)) $((W0 + 20)) >> "$s/t1.status"
@@ -702,7 +702,8 @@ test_keyed_blockers_keep_their_own_opening_times() {
   assert_contains "$out" "STALE-OPEN-BLOCKER" "a fresh open key cannot hide a stale sibling"
   assert_contains "$out" "open-decision=blocked:other" "the register lists every open key"
   out=$(poll_at "$dir" "$((W0+220))")
-  assert_equals "" "$out" "the same incident stage is not repeated"
+  assert_contains "$out" "key=old" "a new stale key is reported independently"
+  assert_contains "$out" "key=other" "a second new stale key is reported independently"
   out=$(FM_STATE_OVERRIDE="$s" bash -c '. "$1/bin/fm-classify-lib.sh"; . "$1/bin/fm-action-lib.sh"; fm_action_open_decision_incident "$2" t1 "$3"' _ "$ROOT" "$s" "$((W0+220))")
   assert_contains "$out" "key=old opened $((W0+120))" "note-head keys use the canonical parser"
   assert_contains "$out" "key=other opened $((W0+140))" "all stale keys are included"
@@ -725,6 +726,106 @@ test_configured_waits_do_not_miss_checkpoints() {
     assert_equals "" "$out" "configured $verb cannot prompt checkpoint recovery"
   done
   pass "configured waits use the canonical classification through watcher reporting"
+}
+
+test_persistent_wait_survives_unrelated_resolution() {
+  local dir s out verb now
+  for verb in paused waiting; do
+    dir=$(stalled_case "persistent-$verb")
+    s="$dir/home/state"
+    printf '%s [key=ci] [at=%s]: CI running\nresolved [key=color] [at=%s]: blue\n' "$verb" "$W0" "$((W0+100))" > "$s/t1.status"
+    now=$((W0+99999))
+    out=$(FM_CLASSIFY_PAUSED_VERB="$verb" act "$s" register t1 --now "$now")
+    assert_contains "$out" "declared-wait" "unrelated resolutions preserve the $verb wait"
+    assert_not_contains "$out" "MISSED" "persistent $verb wait cannot miss a checkpoint"
+    assert_equals "" "$(FM_CLASSIFY_PAUSED_VERB="$verb" poll_at "$dir" "$now")" "the watcher respects a persistent $verb wait"
+    printf 'resolved [key=ci] [at=%s]: CI complete\n' "$now" >> "$s/t1.status"
+    out=$(FM_CLASSIFY_PAUSED_VERB="$verb" act "$s" register t1 --now "$((now+3700))")
+    assert_contains "$out" "executing" "resolving the wait's own key returns ownership"
+    assert_contains "$out" "MISSED" "resumed work is monitored normally"
+  done
+  pass "persistent waits survive unrelated resolutions through register and watcher"
+}
+
+test_blocker_ladders_are_independent_and_generation_bound() {
+  local dir s out aid bid tid resolve_a before
+  for resolve_a in no yes; do
+    dir=$(stalled_case "independent-$resolve_a")
+    s="$dir/home/state"
+    printf 'blocked [key=A] [at=%s]: A\nworking [at=%s]: resumed\n' "$((W0+10))" "$((W0+20))" >> "$s/t1.status"
+    out=$(poll_at "$dir" "$((W0+100))")
+    aid=$(printf '%s\n' "$out" | awk '$2 == "action-followthrough" {print $4}')
+    [ -n "$aid" ] || fail "A incident identity missing"
+    poll_at "$dir" "$((W0+800))" >/dev/null
+    tid=$(act "$s" show t1 | awk -F'\t' '$1 ~ /^triage-open-decision-/ {print $1}')
+    out=$(poll_at "$dir" "$((W0+2400))")
+    assert_contains "$out" "action-followthrough-escalate t1 $aid" "A reaches escalation"
+    printf 'blocked [key=B] [at=%s]: B\nworking [at=%s]: resumed\n' "$((W0+2500))" "$((W0+2520))" >> "$s/t1.status"
+    if [ "$resolve_a" = yes ]; then
+      printf 'resolved [key=A] [at=%s]: A cleared\n' "$((W0+2530))" >> "$s/t1.status"
+    fi
+    out=$(poll_at "$dir" "$((W0+2600))")
+    assert_contains "$out" "key=B opened $((W0+2500))" "A escalation cannot suppress B when A resolution is $resolve_a"
+    bid=$(printf '%s\n' "$out" | awk '$2 == "action-followthrough" {print $4}')
+    [ -n "$bid" ] && [ "$aid" != "$bid" ] || fail "blocker identities collapsed"
+    before=$(wc -l < "$s/.wake-queue")
+    assert_equals "" "$(poll_at "$dir" "$((W0+2700))")" "unchanged B is deduplicated after restart"
+    assert_equals "$before" "$(wc -l < "$s/.wake-queue")" "unchanged B does not enqueue again"
+    if [ "$resolve_a" = no ]; then
+      if act "$s" result t1 "$tid" ok --reason "A clear" --at "$((W0+2710))" 2>/dev/null; then fail "open A verified"; fi
+      printf 'resolved [key=A] [at=%s]: A cleared\n' "$((W0+2720))" >> "$s/t1.status"
+    fi
+    act "$s" result t1 "$tid" ok --reason "A cleared; B independent" --at "$((W0+2730))" || fail "B prevents verifying resolved A"
+    out=$(poll_at "$dir" "$((W0+3300))")
+    assert_contains "$out" "action-followthrough-triage t1 $bid" "B owns its bounded triage"
+    out=$(poll_at "$dir" "$((W0+4900))")
+    assert_contains "$out" "action-followthrough-escalate t1 $bid" "B owns its escalation"
+    assert_equals "" "$(poll_at "$dir" "$((W0+5000))")" "escalated B stays deduplicated"
+    printf 'resolved [key=B] [at=%s]: B cleared\nblocked [key=B] [at=%s]: B reopened\nworking [at=%s]: resumed\n' "$((W0+5010))" "$((W0+5020))" "$((W0+5030))" >> "$s/t1.status"
+    out=$(poll_at "$dir" "$((W0+5100))")
+    assert_contains "$out" "key=B opened $((W0+5020))" "a reopened native key has a fresh opening identity"
+    awk -F= '$1 == "spawn_gen" {print "spawn_gen=run-2"; next} {print}' "$s/t1.meta" > "$dir/meta.new"
+    mv "$dir/meta.new" "$s/t1.meta"
+    out=$(poll_at "$dir" "$((W0+5200))")
+    assert_contains "$out" "action-followthrough t1 open-decision-5-run-2-" "the current generation gets its own blocker report"
+    assert_equals "" "$(poll_at "$dir" "$((W0+5300))")" "unchanged generation is deduplicated"
+  done
+  pass "native blocker keys and generations isolate reporting, triage and results"
+}
+
+test_checkpoint_identity_tracks_progress_and_generation() {
+  local dir s out first second
+  dir=$(stalled_case checkpoint-identity)
+  s="$dir/home/state"
+  out=$(poll_at "$dir" "$((W0+3700))")
+  first=$(printf '%s\n' "$out" | awk '$2 == "action-followthrough" {print $4}')
+  poll_at "$dir" "$((W0+4400))" >/dev/null
+  poll_at "$dir" "$((W0+6000))" >/dev/null
+  act "$s" progress t1 --reason "work resumed" --at "$((W0+6100))" || fail "progress"
+  out=$(poll_at "$dir" "$((W0+9800))")
+  second=$(printf '%s\n' "$out" | awk '$2 == "action-followthrough" {print $4}')
+  [ -n "$second" ] && [ "$first" != "$second" ] || fail "a later missed checkpoint inherited the completed ladder"
+  assert_equals "" "$(poll_at "$dir" "$((W0+9900))")" "the same missed checkpoint is deduplicated"
+  awk -F= '$1 == "spawn_gen" {print "spawn_gen=run-2"; next} {print}' "$s/t1.meta" > "$dir/meta.new"
+  mv "$dir/meta.new" "$s/t1.meta"
+  out=$(poll_at "$dir" "$((W0+10000))")
+  assert_contains "$out" "action-followthrough t1 checkpoint-5-run-2-" "checkpoints are bound to the current generation"
+  pass "checkpoint identity follows progress and the current generation"
+}
+
+test_condition_clearing_preserves_ordinary_action_markers() {
+  local dir s id out
+  dir=$(stalled_case ordinary-prefix)
+  s="$dir/home/state"
+  for id in checkpoint-sibling open-decision-sibling; do
+    act "$s" admit t1 --id "$id" --class authorized --source captain:fixture --owner worker --operation "ordinary work" --at "$W0" || fail "ordinary admission"
+  done
+  out=$(poll_at "$dir" "$((W0+301))")
+  assert_contains "$out" "checkpoint-sibling unacked-unstarted" "ordinary checkpoint-prefix action reports"
+  assert_contains "$out" "open-decision-sibling unacked-unstarted" "ordinary blocker-prefix action reports"
+  assert_equals "" "$(poll_at "$dir" "$((W0+401))")" "ordinary markers remain deduplicated"
+  assert_equals "" "$(poll_at "$dir" "$((W0+501))")" "condition clearing cannot reset ordinary ladders"
+  pass "condition clearing preserves ordinary action markers regardless of ID prefix"
 }
 
 test_early_wakes_preserve_followthrough_and_observation() {
@@ -784,3 +885,9 @@ test_unclosed_blocker_is_a_record_lifecycle_incident
 test_keyed_blockers_keep_their_own_opening_times
 test_configured_waits_do_not_miss_checkpoints
 test_early_wakes_preserve_followthrough_and_observation
+
+test_persistent_wait_survives_unrelated_resolution
+test_blocker_ladders_are_independent_and_generation_bound
+test_checkpoint_identity_tracks_progress_and_generation
+
+test_condition_clearing_preserves_ordinary_action_markers

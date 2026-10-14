@@ -666,7 +666,7 @@ action_followthrough_incident() {  # <task> <action-state> <id> <incident> <owne
       reason="check: action-followthrough-escalate $task $id $incident owner-state=$ostate triage=$triage: authority decision needed - $next, or stop the task; unresolved since $mk_first" ;;
   esac
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  if [ ! -f "$action_state/$task.actions" ] && { { [ "$id" != checkpoint ] && [ "$id" != open-decision ]; } || [ ! -f "$action_state/$task.meta" ]; }; then
+  if [ ! -f "$action_state/$task.actions" ] && { { [ "$incident" != checkpoint-missed ] && [ "$incident" != open-decision-stale ]; } || [ ! -f "$action_state/$task.meta" ]; }; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
@@ -702,7 +702,7 @@ action_followthrough_clear() {  # <task> <action-state> <id> <now>
 # checkpoint on a provably running pipeline is progress the task's own files do
 # not show, so it is noted and cleared rather than reported.
 action_followthrough_lines() {  # <task> <action-state> <now>
-  local task=$1 action_state=$2 now=$3 line checked
+  local task=$1 action_state=$2 now=$3 line checked conditions marker condition_id marker_incident
   fm_action_fold "$action_state" "$task" "$now"
   [ "$action_state" = "$STATE" ] && [ -f "$action_state/$task.meta" ] || return 0
   checked=$(cat "$action_state/.$task.checkpoint-checked" 2>/dev/null || echo 0)
@@ -714,11 +714,19 @@ action_followthrough_lines() {  # <task> <action-state> <now>
     fm_action_note_progress "$action_state" "$task" "$now" run-step || true
     line=
   fi
-  if [ -n "$line" ]; then printf '%s\n' "$line"
-  else printf 'checkpoint\tcheckpoint\tok\tnone\t0\t%s\t0\tprogress\n' "$task"; fi
+  conditions=$line
   line=$(fm_action_open_decision_incident "$action_state" "$task" "$now")
-  if [ -n "$line" ]; then printf '%s\n' "$line"
-  else printf 'open-decision\topen-decision\tok\tnone\t0\t%s\t0\tclosed\n' "$task"; fi
+  if [ -n "$line" ]; then conditions="${conditions}${conditions:+$'\n'}$line"; fi
+  [ -z "$conditions" ] || printf '%s\n' "$conditions"
+  for marker in "$action_state/.$task.action-incident-"*; do
+    [ -f "$marker" ] || continue
+    condition_id=${marker#"$action_state/.$task.action-incident-"}
+    IFS=$'\t' read -r marker_incident _ < "$marker" || continue
+    case "$marker_incident" in checkpoint-missed|open-decision-stale) ;; *) continue ;; esac
+    if ! printf '%s\n' "$conditions" | awk -F'\t' -v id="$condition_id" '$1 == id { f = 1 } END { exit !f }'; then
+      printf '%s\tcondition\tok\tnone\t0\t%s\t0\tcleared\n' "$condition_id" "$task"
+    fi
+  done
 }
 
 # Per-task follow-through poll: route the incidents through the ladder. A cleared incident removes its marker,

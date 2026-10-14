@@ -423,17 +423,18 @@ fm_action_task_progress() {  # <state-dir> <task-id>
 # state: executing | waiting-firstmate | declared-wait. Only an executing task
 # can be MISSED; the others are listed so every active item shows an owner.
 fm_action_register() {  # <state-dir> <task-id> <now-epoch>
-  local state=$1 task=$2 now=$3 verb last src owner st next verdict=ok kind open
+  local state=$1 task=$2 now=$3 verb last src owner st next verdict=ok kind open wait
   [ -f "$state/$task.meta" ] || return 0
   kind=$(fm_action_meta "$state" "$task" kind)
   [ "$kind" != secondmate ] || return 0
   [ -z "$(fm_action_meta "$state" "$task" remote_host)" ] || return 0
   IFS=$'\t' read -r last src < <(fm_action_task_progress "$state" "$task")
   verb=$(fm_action_status_verb "$state" "$task")
+  wait=$(status_declared_wait_line "$state/$task.status")
   case "$verb" in
     done|blocked|needs-decision|failed) owner=firstmate; st=waiting-firstmate ;;
     *)
-      if status_is_paused_or_captain_held "$verb:"; then owner=declared-wait; st=declared-wait
+      if status_is_paused_or_captain_held "$wait"; then owner=declared-wait; st=declared-wait
       else owner=$task; st=executing; fi ;;
   esac
   next=$((last + $(fm_action_bound FM_ACTION_CHECKPOINT_SECS "$FM_ACTION_CHECKPOINT_SECS_DEFAULT")))
@@ -448,13 +449,20 @@ fm_action_register() {  # <state-dir> <task-id> <now-epoch>
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$task" "$owner" "$st" "$last" "$src" "$next" "$verdict" "status=${verb:-none} source=$src$open"
 }
 
+fm_action_condition_id() {
+  local generation key=$4
+  generation=$(fm_action_meta "$1" "$2" spawn_gen)
+  printf '%s-%s-%s-%s-%s-%s' "$3" "${#generation}" "$generation" "${#key}" "$key" "$5"
+}
+
 # Fold-shaped incident line for a MISSED register verdict, else nothing.
 fm_action_checkpoint_incident() {  # <state-dir> <task-id> <now-epoch>
-  local t owner st last src next verdict evidence
+  local t owner st last src next verdict evidence id
   IFS=$'\t' read -r t owner st last src next verdict evidence < <(fm_action_register "$@") || true
   [ "${verdict:-}" = MISSED ] || return 0
-  printf 'checkpoint\tcheckpoint\t%s\tcheckpoint-missed\t%d\t%s\t%s\t%s\n' \
-    "$st" "$(( $3 - last ))" "$owner" "$next" "no progress since $last ($evidence)"
+  id=$(fm_action_condition_id "$1" "$2" checkpoint '' "$last")
+  printf '%s\tcheckpoint\t%s\tcheckpoint-missed\t%d\t%s\t%s\t%s\n' \
+    "$id" "$st" "$(( $3 - last ))" "$owner" "$next" "no progress since $last ($evidence)"
 }
 
 fm_action_stale_open_blocker() {  # <state-dir> <task-id>
@@ -484,16 +492,15 @@ fm_action_stale_open_blocker() {  # <state-dir> <task-id>
 }
 
 fm_action_open_decision_incident() {  # <state-dir> <task-id> <now-epoch>
-  local key opened first='' evidence=''
+  local key opened id
   [ -f "$1/$2.meta" ] || return 0
   [ "$(fm_action_meta "$1" "$2" kind)" != secondmate ] || return 0
   while IFS=$'\t' read -r key opened; do
     [ -n "$key" ] || continue
-    if [ -z "$first" ] || [ "$opened" -lt "$first" ]; then first=$opened; fi
-    evidence="${evidence}blocked record key=$key opened $opened was never closed; the owner appends: resolved [at=<epoch>] [key=$key]: <how it cleared> to $2.status; "
+    id=$(fm_action_condition_id "$1" "$2" open-decision "$key" "$opened")
+    printf '%s\topen-decision\topen\topen-decision-stale\t%d\t%s\t%s\t%s\n' "$id" "$(( $3 - opened ))" "$2" "$opened" \
+      "blocked record key=$key opened $opened was never closed; the owner appends: resolved [at=<epoch>] [key=$key]: <how it cleared> to $2.status"
   done < <(fm_action_stale_open_blocker "$1" "$2")
-  [ -n "$first" ] || return 0
-  printf 'open-decision\topen-decision\topen\topen-decision-stale\t%d\t%s\t%s\t%s\n' "$(( $3 - first ))" "$2" "$first" "$evidence"
 }
 
 # Observer cadence: record every over-bound interval between two check touches,
@@ -588,13 +595,14 @@ fm_action_triage_verified() {  # <state-dir> <task-id> <triage-id> <now-epoch>
   target=$(fm_action_field "$1" "$2" "$3" target) || return 1
   [ -n "$target" ] || return 1
   incident=$(fm_action_field "$1" "$2" "$3" incident)
-  if [ "$target" = checkpoint ]; then
-    [ -z "$(fm_action_checkpoint_incident "$1" "$2" "$4")" ]
-  elif [ "$target" = open-decision ]; then
-    [ -z "$(fm_action_open_decision_incident "$1" "$2" "$4")" ]
-  else
-    ! fm_action_incidents "$1" "$2" "$4" | awk -F'\t' -v id="$target" -v inc="$incident" '$1 == id && $4 == inc { f = 1 } END { exit !f }'
-  fi
+  case "$incident" in
+    checkpoint-missed)
+      ! fm_action_checkpoint_incident "$1" "$2" "$4" | awk -F'\t' -v id="$target" '$1 == id { f = 1 } END { exit !f }' ;;
+    open-decision-stale)
+      ! fm_action_open_decision_incident "$1" "$2" "$4" | awk -F'\t' -v id="$target" '$1 == id { f = 1 } END { exit !f }' ;;
+    *)
+      ! fm_action_incidents "$1" "$2" "$4" | awk -F'\t' -v id="$target" -v inc="$incident" '$1 == id && $4 == inc { f = 1 } END { exit !f }' ;;
+  esac
 }
 
 fm_action_retire() {
