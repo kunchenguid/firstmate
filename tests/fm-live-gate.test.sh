@@ -284,6 +284,138 @@ SH
     "fm-spawn must embed DISABLE_AUTOUPDATER in the launch command so a daemon-built pane that never inherited it still runs Claude with the updater off"
 }
 
+test_pi_composer_guard_isolation_and_availability() (
+  local dir="$TMP_ROOT/pi-composer-boundaries" tool scenario case_dir binary expected rc out
+  local mode home agent cwd identities args lab_home checked
+  local -a controls=()
+  mkdir -p "$dir/bin"
+  for tool in bash env dirname mktemp mkdir uname ps sed cat od tr date find rm stat chmod id head grep; do
+    ln -s "$(command -v "$tool")" "$dir/bin/$tool" || fail "cannot stage $tool"
+  done
+  cat > "$dir/pi-fixture" <<'SH'
+#!/usr/bin/env bash
+set -eu
+mode=tui
+for arg in "$@"; do
+  case "$arg" in --version) mode=version ;; --help) mode=help ;; esac
+done
+agent=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+mkdir -p "$agent"
+printf '%s\n' '{"clearEditor":"ctrl+c"}' > "$agent/keybindings.json"
+printf '%s\n' '{}' > "$agent/auth.json"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "${0##*/}" "$mode" "$HOME" "$agent" "$PWD" \
+  "${HERDR_ENV-unset},${HERDR_SOCKET_PATH-unset},${HERDR_PANE_ID-unset},${HERDR_TAB_ID-unset},${HERDR_WORKSPACE_ID-unset},${HERDR_SESSION-unset}" \
+  "$*" >> "$FM_PI_BOUNDARY_LOG"
+case "$mode" in
+  version) printf 'fixture-version\n' ;;
+  help) printf '%s\n' '--tui-mode --approve' ;;
+  tui) exit 71 ;;
+esac
+SH
+  cat > "$dir/tmux-fixture" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${1:-}" != -L ] || shift 2
+case "${1:-}" in
+  new-session)
+    cwd=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -c) cwd=$2; shift 2 ;;
+        --) shift; break ;;
+        *) shift ;;
+      esac
+    done
+    cd "$cwd"
+    exec "$@"
+    ;;
+  kill-server) exit 0 ;;
+  *) exit 72 ;;
+esac
+SH
+  chmod +x "$dir/pi-fixture" "$dir/tmux-fixture"
+  for scenario in plain signed both absent absent-forced-own absent-forced-family no-tmux no-tmux-forced disabled-own disabled-family; do
+    case_dir="$dir/$scenario"
+    mkdir -p "$case_dir/home/.pi/agent" "$case_dir/pi" "$case_dir/cwd" "$case_dir/tmp"
+    printf '%s\n' '{"clear":"ctrl+c"}' > "$case_dir/keybindings.before"
+    cp "$case_dir/keybindings.before" "$case_dir/home/.pi/agent/keybindings.json"
+    cp "$case_dir/keybindings.before" "$case_dir/pi/keybindings.json"
+    rm -f "$dir/bin/pi" "$dir/bin/pi-signed" "$dir/bin/tmux"
+    controls=()
+    binary=pi
+    expected=1
+    case "$scenario" in
+      signed) binary=pi-signed ;;
+      absent|no-tmux) expected=0 ;;
+      absent-forced-own|no-tmux-forced) controls=(FM_COMPOSER_PI_IDLE_LIVE=1) ;;
+      absent-forced-family) controls=(FM_LIVE=1) ;;
+      disabled-own) controls=(FM_LIVE=1 FM_COMPOSER_PI_IDLE_LIVE=0); expected=0 ;;
+      disabled-family) controls=(FM_LIVE=0); expected=0 ;;
+    esac
+    case "$scenario" in
+      absent*) ;;
+      *) ln -s "$dir/pi-fixture" "$dir/bin/$binary" ;;
+    esac
+    [ "$scenario" != both ] || ln -s "$dir/pi-fixture" "$dir/bin/pi-signed"
+    case "$scenario" in
+      no-tmux*) ;;
+      *) ln -s "$dir/tmux-fixture" "$dir/bin/tmux" ;;
+    esac
+    rc=0
+    out=$(cd "$case_dir/cwd" && clean_env \
+      PATH="$dir/bin" HOME="$case_dir/home" PI_CODING_AGENT_DIR="$case_dir/pi" TMPDIR="$case_dir/tmp" \
+      HERDR_ENV=1 HERDR_SOCKET_PATH=fixture-socket HERDR_PANE_ID=fixture-pane \
+      HERDR_TAB_ID=fixture-tab HERDR_WORKSPACE_ID=fixture-workspace HERDR_SESSION=fixture-session \
+      FM_PI_BOUNDARY_LOG="$case_dir/invocations" ${controls[@]+"${controls[@]}"} \
+      bash "$ROOT/tests/fm-composer-pi-idle-live-e2e.test.sh" 2>&1) || rc=$?
+    expect_code "$expected" "$rc" "$scenario: Pi guard exit"
+    cmp -s "$case_dir/keybindings.before" "$case_dir/home/.pi/agent/keybindings.json" \
+      || fail "$scenario: ambient HOME keybindings changed"
+    cmp -s "$case_dir/keybindings.before" "$case_dir/pi/keybindings.json" \
+      || fail "$scenario: ambient Pi keybindings changed"
+    [ ! -e "$case_dir/home/.pi/agent/auth.json" ] && [ ! -e "$case_dir/pi/auth.json" ] \
+      || fail "$scenario: ambient authentication file created"
+    case "$scenario" in
+      plain|signed|both)
+        assert_contains "$out" "$binary (fixture-version): could not launch in private tmux server" \
+          "$scenario: the installed Pi must reach the fixture TUI, not skip"
+        [ -f "$case_dir/invocations" ] || fail "$scenario: no Pi invocation recorded"
+        lab_home=''
+        checked=0
+        while IFS=$'\t' read -r tool mode home agent cwd identities args; do
+          [ "$tool" = "$binary" ] || fail "$scenario: wrong executable $tool"
+          case "$checked:$mode" in 0:version|1:help|2:tui) ;; *) fail "$scenario: unexpected invocation $checked:$mode" ;; esac
+          case "$home" in "$case_dir/tmp"/fm-composer-pi-live.*/home) ;; *) fail "$scenario: Pi used non-lab HOME $home" ;; esac
+          [ -n "$lab_home" ] || lab_home=$home
+          [ "$home" = "$lab_home" ] && [ "$agent" = "${lab_home%/home}/pi" ] && [ "$cwd" = "${lab_home%/home}/cwd" ] \
+            || fail "$scenario: $mode escaped the shared lab environment"
+          [ "$identities" = unset,unset,unset,unset,unset,unset ] || fail "$scenario: $mode inherited Herdr identities"
+          for tool in '--provider openai-codex' '--model gpt-6.1-sol' '--thinking xhigh' \
+            --offline --no-session --no-extensions --no-skills --no-prompt-templates --no-themes; do
+            assert_contains " $args " " $tool " "$scenario: $mode missing $tool"
+          done
+          checked=$((checked + 1))
+        done < "$case_dir/invocations"
+        [ "$checked" -eq 3 ] || fail "$scenario: expected version, help and TUI invocations, saw $checked"
+        ;;
+      *)
+        [ ! -e "$case_dir/invocations" ] || fail "$scenario: Pi ran despite the gate"
+        case "$scenario" in
+          absent|no-tmux) assert_contains "$out" 'skip: live:' "$scenario: unavailable tools must capability-skip" ;;
+          absent-forced*|no-tmux-forced)
+            assert_contains "$out" 'was requested but' "$scenario: forced missing tools must fail"
+            assert_not_contains "$out" 'skip:' "$scenario: forced failure must not skip"
+            ;;
+          disabled*) assert_contains "$out" 'skip: live: disabled by' "$scenario: opt-out must skip" ;;
+        esac
+        ;;
+    esac
+  done
+  pass "Pi composer probes and TUI preserve ambient configuration with plain-only or signed-only availability"
+)
+
 test_every_live_guard_is_wired_to_the_shared_gate() {
   local script out listing checked=0
   listing=$("$ROOT/bin/fm-test-run.sh" --family live-harness-optin --list) \
@@ -328,4 +460,5 @@ test_disable_autoupdater_reaches_the_claude_pane_on_the_fm_spawn_launch_path
 pass "DISABLE_AUTOUPDATER rides fm-spawn's claude launch through to the harness pane"
 test_disable_autoupdater_survives_a_daemon_pane_that_never_inherited_it
 pass "DISABLE_AUTOUPDATER is embedded in the launch so a daemon-built pane keeps it"
+test_pi_composer_guard_isolation_and_availability
 test_every_live_guard_is_wired_to_the_shared_gate
