@@ -1,0 +1,53 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR\"/bin/fm-sessionstart-devin.sh",
+          "timeout": 180
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR\"/bin/fm-turnend-guard-devin.sh",
+          "timeout": 28800
+        }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "^exec$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --devin",
+          "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --devin",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR\"/bin/fm-subagent-pretool-check.sh --devin",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

@@ -26,13 +26,19 @@ unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+# omp 18.1.11), and a substring match would claim ompd or comp. devin is anchored
+# the same way: the live binary's basename is exactly `devin` for both the
+# front-end and its per-session `devin acp` child (verified, devin 3000.11.3),
+# and a loose match would claim names like devin-foo.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^devin$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
+# bin/fm-claude-stop-autoarm.sh. devin is deliberately absent here: Devin's
+# install tree `~/.local/share/devin/cli/_versions/<v>/...` puts a `devin`
+# component on the path of every bundled helper, so path-component evidence
+# would name unrelated vendored processes as the harness.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
 # Print the exact harness name carried by executable path $1 - its own basename

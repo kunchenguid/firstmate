@@ -1,7 +1,7 @@
 # Devin CLI
 
-Verified on 2026-09-21 and 2026-09-22 with Devin CLI 3000.11.1 (cc4e349ca55e).
-The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
+Worker lifecycle verified on 2026-09-21 and 2026-09-22 with Devin CLI 3000.11.1 (cc4e349ca55e), and primary integration verified on 2026-09-26 with 3000.11.3 (9c803229faa4).
+The router owns the dispatch boundary: primary, crewmate, and scout are supported; secondmate integration is unsupported.
 [Verification evidence](../../../../../docs/verification/devin.md) and its live guard refresh the vendor facts below.
 
 ## Operating facts
@@ -43,6 +43,10 @@ The shared slash-command settling path also handles `/quit` autocomplete.
 
 ## Primary integration
 
-No primary Stop guard, watcher protocol, pre-tool protection, or session-start contract was verified for Devin.
-Do not launch a primary or secondmate with this adapter.
+A Devin primary is supported when launched from the firstmate home under tmux or Herdr; a secondmate is not.
+Tracked `.devin/config.json` sets `read_config_from.claude` false, so the repo's `.claude/settings.json` hooks cannot double-execute beside Devin's own registrations; `AGENTS.md` and `.agents/skills` still load.
+Tracked `.devin/hooks.v1.json` registers `../../../../../bin/fm-sessionstart-devin.sh` on `SessionStart`, `../../../../../bin/fm-turnend-guard-devin.sh` on `Stop` with a 28800-second timeout, and the arm, cd, and delegation pre-tool guards on `PreToolUse`.
+Devin awaits a `Stop` hook synchronously, so the park model holds the turn boundary open on one foreground watcher cycle and returns a wake as a single `{"decision":"block","reason":...}` continuation inside the same turn; queued captain input and Escape stand the park down rather than waiting out the park.
+While parked, a typed-plus-Enter captain message is visibly queued and drains as its own turn only after the hook exits without a block, and Devin kills only the hook's own shell at timeout, orphaning its children.
+[`../../../../../docs/supervision-protocols/devin.md`](../../../../../docs/supervision-protocols/devin.md) owns the supervision contract and [`../../../../../docs/turnend-guard.md`](../../../../../docs/turnend-guard.md) owns the loop bound and pane stand-down contract.
 ACP, quota-provider integration, and native Fusion subagent accounting remain separate follow-ups.

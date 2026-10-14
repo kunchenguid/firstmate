@@ -245,6 +245,36 @@ test_stdin_transports_and_output_shapes() {
   pass "both stdin transports classify correctly and Claude's deny keeps stdout empty"
 }
 
+test_devin_mode_delegation_and_output_shape() {
+  local rc=0 actual
+  : > "$OUT"; : > "$ERR"
+  # Devin's persistent delegation tool carries tool_name "sidekick" and must be
+  # denied as a block-decision object on stdout, the channel Devin reads.
+  printf '%s' '{"tool_name":"sidekick","tool_input":{"prompt":"go"}}' \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --devin > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "Devin deny must exit 0 so the block decision on stdout is read, got $rc"
+  [ ! -s "$ERR" ] || fail "Devin deny wrote stderr: $(cat "$ERR")"
+  jq -e '.decision == "block" and (.reason | startswith("[subagent-dispatch]") and contains("blocked tool: sidekick"))' "$OUT" >/dev/null 2>&1 \
+    || fail "Devin deny must be a block decision naming the tool: $(cat "$OUT")"
+
+  # read_subagent only observes existing work and stays allowed.
+  rc=0
+  : > "$OUT"; : > "$ERR"
+  printf '%s' '{"tool_name":"read_subagent","tool_input":{}}' \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --devin > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "read_subagent must allow, got exit $rc"
+  [ ! -s "$OUT" ] && [ ! -s "$ERR" ] || fail "read_subagent allow wrote output"
+
+  # The shape is harness-independent: --tool sidekick under Claude mode still
+  # denies through the Claude channel.
+  rc=0
+  run_tool sidekick || rc=$?
+  [ "$rc" -eq 2 ] || fail "sidekick under Claude mode must deny, got exit $rc"
+  pass "Devin mode denies sidekick as a stdout block decision and keeps read_subagent allowed"
+}
+
 test_malformed_transport_fails_open() {
   local rc payload
   for payload in '{not-json' '' '{}' '{"tool_name":null}'; do
@@ -287,5 +317,6 @@ test_escape_hatch_allows_deliberate_use
 test_task_worktree_and_non_firstmate_repo_are_inert
 test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
+test_devin_mode_delegation_and_output_shape
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open

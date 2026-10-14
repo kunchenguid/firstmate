@@ -19,7 +19,7 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 
 ## Ownership
 
-On Pi, omp, OpenCode, Cursor, and Claude primaries, one component owns re-arming the watcher.
+On Pi, omp, OpenCode, Cursor, Devin, and Claude primaries, one component owns re-arming the watcher.
 Codex and Grok keep their own protocols; see [Manual recovery and other harnesses](#manual-recovery-and-other-harnesses).
 
 | Harness | Re-arm owner |
@@ -28,6 +28,7 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | omp | `.omp/extensions/fm-primary-omp-watch.ts` |
 | OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` |
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
+| Devin | `.devin/hooks.v1.json` `Stop` hook (`bin/fm-turnend-guard-devin.sh`) |
 | Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
 On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
@@ -79,6 +80,12 @@ omp's replacement follows its own generation-owner contract in `.omp/extensions/
 Cursor's `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) owns routine tokenless re-arm for a Cursor primary.
 It re-arms by parking that awaited hook on `bin/fm-watch-arm.sh` and returning an actionable close as one follow-up.
 [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns its Pi-host stand-down, loop bounds, and supersession baton.
+
+### Devin Stop hook
+
+Devin's `.devin/hooks.v1.json` `Stop` hook (`bin/fm-turnend-guard-devin.sh`) owns routine tokenless re-arm for a Devin primary.
+It has the same park shape as the Cursor stop hook: the awaited hook foregrounds `bin/fm-watch-arm.sh` and returns an actionable close as one block-decision continuation.
+Its differences are captain stand-down on Devin's visible queued-message and Escape pane markers, a `prompt_id`-keyed loop counter, and the tmux-or-Herdr pane requirement, all owned by [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 
 ### Claude Stop hook
 

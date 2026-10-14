@@ -1,11 +1,11 @@
-# Devin CLI worker verification
+# Devin CLI verification
 
 Audience: maintainer verification.
 
-Verified 2026-09-21 and re-verified 2026-09-22 on macOS arm64 with `devin 3000.11.1 (cc4e349ca55e)`.
+Worker lifecycle was verified 2026-09-21 and re-verified 2026-09-22 on macOS arm64 with `devin 3000.11.1 (cc4e349ca55e)`; the primary integration was verified 2026-09-26 with `devin 3000.11.3 (9c803229faa4)`.
 The [adapter reference](../../.agents/skills/harness-adapters/references/harness/devin.md) owns operating facts; executable owners carry launch and state mechanics.
-This verification covers crewmates and scouts, with tmux as the exercised runtime backend and a Herdr 0.9.0 lab session for the lifecycle checks below.
-Primary, secondmate, ACP, and quota-provider integration are outside this guarantee.
+This verification covers the primary (see [Devin primary](#devin-primary-2026-09-26) below), crewmates, and scouts, with tmux as the exercised runtime backend and a Herdr 0.9.0 lab session for the lifecycle checks below.
+Secondmate, ACP, and quota-provider integration are outside this guarantee.
 
 ## Refresh commands
 
@@ -112,6 +112,33 @@ Herdr names the pane from its own screen-detection manifest; with Claude hook im
 A second `fm-send` while the worker ran `sleep 40` rendered no cancellation, and both the running instruction and the queued one completed.
 `exit` on Herdr refuses for a Devin worker: the cursorless composer classifier finds the `❭` row but reads the plain rule below it as an unpaired Pi separator and answers `unknown`.
 
+## Devin primary, 2026-09-26
+
+Verified 2026-09-26 on macOS arm64 with `devin 3000.11.3 (9c803229faa4)`, SWE-2 Medium, in a throwaway firstmate home on a private tmux socket.
+The primary surface is the tracked `.devin/` registration: `config.json` holds `read_config_from.claude=false`, and `hooks.v1.json` wires `SessionStart` (timeout 180), `Stop` (timeout 28800), and `PreToolUse` to the shared wrappers with `--devin`.
+The `Stop` hook is awaited, so `bin/fm-turnend-guard-devin.sh` parks the turn boundary tokenlessly and emits one `{"decision":"block","reason":...}` object per actionable wake; the reason reaches the model verbatim as a same-turn continuation.
+Hook processes see `TMUX` and `TMUX_PANE`, which lets the park read its own pane for the `─ N queued ─` / `Press Enter to send queued messages now` / `esc again to interrupt` markers and stand down so queued captain input drains as its own turn.
+The full mechanism table and the live guard output are recorded in [supervision.md](supervision.md#devin-primary-park-2026-09-26).
+
+Refresh commands:
+
+```sh
+bin/fm-test-run.sh tests/fm-devin-primary.test.sh
+FM_DEVIN_PRIMARY_LIVE=1 bin/fm-test-run.sh tests/fm-devin-primary-live-e2e.test.sh
+```
+
+The live guard completed with exit 0:
+
+```text
+ok - devin primary: the SessionStart hook takes the fleet lock as the devin acp process
+ok - devin primary: the run-tier session start completes every stage
+ok - devin primary: SessionStart additionalContext reaches model context before the first turn
+ok - devin primary: the Stop-hook park delivers a real watcher wake as one block continuation
+ok - devin primary: the park owns an arm cycle with a live watcher beacon
+ok - devin primary: queued captain input stands the park down, drains as its own turn, and the next stop re-parks
+ok - devin primary: read_config_from.claude=false held - no Claude-shaped hook or auto-arm ran
+```
+
 ## Coverage and limits
 
 The portable regression drives ancestry evidence, rejects unrelated process names, preserves drafts, checks both delivery signals independently, exercises config preservation and generation rejection, and verifies worker-only launch plus model and effort handling.
@@ -121,4 +148,4 @@ The live guard checks main-turn completion, Claude hook isolation, commit attrib
 The shared process classifier supplies the same native identity to tmux and Herdr; Herdr interrupt, steering, and identity were exercised in a lab session, while Herdr `exit` refuses as described above.
 Zellij, Orca, and cmux were inspected through their existing backend-neutral delivery and key capability surfaces, not live-tested here.
 Orca's existing lack of Escape delivery means a Devin interrupt is refused there.
-A direct keyboard cancellation bypassing `fm-control` can retain a busy record until normal completion or session exit; no primary supervision guarantee is implied by these worker hooks.
+A direct keyboard cancellation bypassing `fm-control` can retain a worker busy record until normal completion or session exit.
