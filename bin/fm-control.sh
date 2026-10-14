@@ -207,9 +207,8 @@ control_cleanup() {
   if [ "$ACTION_ACTIVE" = 1 ]; then
     action_outcome=${ACTION_OUTCOME:-failed}
     [ "$status" -eq 0 ] || action_outcome=failed
-    action_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || action_head=
-    fm_action_native_result "$STATE" "$ID" "$ACTION_ID" "$action_head" \
-      "$ACTION_RUN" "$ACTION_ATTEMPT" "$action_outcome" || {
+    fm_action_native_result "$STATE" "$ID" "$ACTION_ID" "$ACTION_HEAD" \
+      "$ACTION_RUN" "$ACTION_ATTEMPT" "$action_outcome" "${ACTION_RESULT_RUN:-$ACTION_RUN}" || {
         echo "error: native action result could not be recorded for $ID $ACTION_ID" >&2
         status=1
       }
@@ -1203,6 +1202,7 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ACTION_RESULT_RUN=$(fm_meta_get "$META" spawn_gen)
     ACTION_OUTCOME=ok
     ;;
 esac

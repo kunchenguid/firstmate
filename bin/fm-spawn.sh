@@ -5919,7 +5919,6 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
-SPAWN_ACTION_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || SPAWN_ACTION_HEAD=
 fm_action_native_result "$STATE" "$ID" "$SPAWN_ACTION_ID" "$SPAWN_ACTION_HEAD" \
   "$SPAWN_GEN" "$SPAWN_GEN" ok || {
     echo "error: worker launched but native launch result could not be recorded for $ID" >&2

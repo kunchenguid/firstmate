@@ -14,7 +14,8 @@ An action is done only with a native result and, where the task requires it, a n
 
 ## Trigger and record
 
-Inbox writes from `fm-send.sh` admit each steered action automatically, including idempotent and remote inbox writes.
+Inbox writes from `fm-send.sh` admit ordinary steered actions automatically, including idempotent and remote inbox writes.
+Internal fire-and-forget supervision nudges are excluded and need no execution tracking.
 Launch submission and lifecycle control record their native start and result through the same library.
 Other next actions use `fm-action.sh admit`, classifying them as one of three classes.
 - `authorized`: name the exact grant in `--source` and the exact operation; set `--units` to the counted amount the grant allows.
@@ -26,7 +27,8 @@ The `--inbox` field links a steering record, whose move to `handled/` counts as 
 
 - `start` is recorded by the code that natively begins the action, never by the request that asked for it.
 - `result` is `ok`, `refused` with a concrete reason, `failed` with a concrete reason, or `answered` for a gate.
-- `accept` requires the canonical native receipt matching the task, action, head, run and attempt bound at admission.
+- `accept` requires the canonical native receipt matching the task, action, head, run and attempt bound at admission, with the resulting generation recorded by a native relaunch transition.
+  Native results retain the admitted head even if the worker commits while the operation finishes; acceptance checks current evidence freshness separately.
   The launch and control owners produce these receipts; an ordinary turn ending or a busy event cannot certify the requested operation.
   To execute a steered lifecycle operation through `fm-control.sh`, set `FM_ACTION_ID=steer-NNN` and `FM_ACTION_ATTEMPT=NNN.msg`; the admitted operation must equal the native verb.
   Other operations still need their native execution owner to record `start` and `result`; unsupported acceptance evidence remains unknown.
@@ -41,8 +43,19 @@ For a parent-route incident, use its emitted ledger directory as `FM_STATE_OVERR
 `fm-action.sh incidents <task>` is read-only and reports:
 - `unacked-unstarted` and `acked-unexecuted`: the action's owner starts it or records a concrete refusal; firstmate follows up when the owner does not.
 - `over-grant`: stop spending units and report the overrun; do not continue under the old grant.
+- `result-unconsumed`: consume or report the returned validation call before doing further work.
 - `gate-overdue`: surface the pending question to its owner while the independent ready actions keep running.
 A started action is never interrupted to meet a timing target.
+The existing teardown owner retires action ledgers, receipts, incident markers and queued incidents along with the task.
+
+## Consume validation returns
+
+Admit each issued `no-mistakes axi respond` or `no-mistakes axi run` call using the exact command as its operation and record its native start.
+When the call returns, record `result` and consume its output or report the concrete return with `consume --reason` within `FM_ACTION_START_SECS` (default 300 seconds).
+The existing ledger fold and watcher report `result-unconsumed` after that bound; acknowledging the instruction does not consume a return.
+For a backgrounded drive, keep its tool session and output reference, wait for its completion and read its return, then record the result and consumption before leaving the action.
+Never leave a backgrounded drive unconsumed or issue another response without reading the returned gate.
+This check requires producer events from the execution owner; it does not intercept the external no-mistakes CLI or take over pipeline ownership.
 
 ## Verify
 

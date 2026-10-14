@@ -227,9 +227,16 @@ native_case() {
   cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$1" in
+  send-keys)
+    for arg in "$@"; do
+      if [ "$arg" = /exit ] && [ -n "${FM_TEST_COMMIT_WT:-}" ]; then
+        git -C "$FM_TEST_COMMIT_WT" -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m "worker committed during exit" || exit 1
+        printf zsh > "$FM_TEST_COMMAND_FILE"
+      fi
+    done ;;
   display-message)
     for arg in "$@"; do
-      case "$arg" in *pane_current_command*) printf 'zsh\n'; exit 0 ;; *cursor_y*) printf '1\n'; exit 0 ;; esac
+      case "$arg" in *pane_current_command*) if [ -n "${FM_TEST_COMMAND_FILE:-}" ]; then cat "$FM_TEST_COMMAND_FILE"; else printf 'zsh\n'; fi; exit 0 ;; *cursor_y*) printf '1\n'; exit 0 ;; esac
     done
     printf 'fakepane\n' ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
@@ -366,6 +373,61 @@ test_missing_relative_evidence_terminates() {
   pass "relative probes and acceptance terminate on missing paths"
 }
 
+test_internal_nudge_is_not_an_action() {
+  local dir s out
+  dir=$(native_case nudge)
+  s="$dir/home/state"
+  awk '$0=="kind=ship" {print "kind=secondmate"; next} {print}' "$s/t1.meta" > "$dir/nudge.meta"
+  mv "$dir/nudge.meta" "$s/t1.meta"
+  send_native "$dir" --fire-and-forget 0123456789abcdef "drain the notifications" || fail "real nudge send"
+  mv "$s/t1.inbox/001.msg" "$s/t1.inbox/handled/"
+  assert_equals "" "$(poll_native "$dir")" "handled internal nudge never produces an action incident"
+  [ ! -f "$s/t1.actions" ] || fail "internal nudge was admitted"
+  send_native "$dir" "prepare independent work" || fail "real ordinary steer"
+  mv "$s/t1.inbox/002.msg" "$s/t1.inbox/handled/"
+  out=$(poll_native "$dir") || fail "real steer poll"
+  assert_contains "$out" "acked-unexecuted" "ordinary acknowledged steer remains enforced"
+  pass "handled fire-and-forget nudges are excluded while real steers remain enforced"
+}
+
+test_control_result_keeps_admitted_head() {
+  local dir s head out
+  dir=$(native_case commit-during-control)
+  s="$dir/home/state"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  send_native "$dir" exit || fail "exit admission"
+  printf claude > "$dir/command"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ACTION_ID=steer-001 FM_ACTION_ATTEMPT=001.msg \
+    FM_TEST_COMMIT_WT="$dir/wt" FM_TEST_COMMAND_FILE="$dir/command" \
+    bash "$ROOT/bin/fm-control.sh" t1 exit > "$dir/control.out" 2> "$dir/control.err" || fail "exit must survive a worker commit"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" != "$head" ] || fail "fixture worker did not commit during exit"
+  assert_equals "$head" "$(awk -F'\t' '{print $4}' "$s/t1.action-receipts/steer-001")" "result preserves admitted head"
+  out=$(act "$s" show t1)
+  assert_contains "$out" "resulted" "native result remains recorded after worker commit"
+  if act "$s" accept t1 steer-001 --evidence "$s/t1.action-receipts/steer-001" 2>/dev/null; then fail "changed-head evidence must remain unknown"; fi
+  pass "native control completion survives worker commits while acceptance checks freshness"
+}
+
+test_validation_returns_are_consumed() {
+  local s command id out
+  s=$(fresh_state validation-return)
+  for command in respond run; do
+    id="validation-$command"
+    act "$s" admit t1 --id "$id" --class authorized --owner worker --operation "no-mistakes axi $command --wait" \
+      --source "task-owner:validation:$command" --at "$T0" || fail "validation call admission"
+    act "$s" start t1 "$id" --at $((T0+1)) || fail "call start"
+    assert_equals "" "$(incident_kinds "$s" $((T0+10000)))" "running background drive is not interrupted"
+    act "$s" result t1 "$id" ok --at $((T0+10000)) || fail "returned call"
+    assert_equals "" "$(incident_kinds "$s" $((T0+10299)))" "returned call inside consumption bound"
+    act "$s" ack t1 "$id" --at $((T0+10001)) || fail "ack"
+    out=$(incident_kinds "$s" $((T0+10301)))
+    assert_contains "$out" "$id:result-unconsumed" "returned $command cannot stay unconsumed"
+    act "$s" consume t1 "$id" --reason "read and reported the returned gate" --at $((T0+10302)) || fail "consume return"
+    assert_equals "" "$(incident_kinds "$s" $((T0+20000)))" "consumption closes returned-call incident"
+  done
+  pass "respond and background drive returns require consumption within the finite bound"
+}
+
 test_ready_but_unstarted
 test_handled_but_unexecuted
 test_start_and_refusal_satisfy_the_bound
@@ -380,3 +442,7 @@ test_failed_gate_attempt_stays_pending
 test_missing_relative_evidence_terminates
 test_native_intake_and_poll
 test_native_acceptance_identity
+
+test_internal_nudge_is_not_an_action
+test_control_result_keeps_admitted_head
+test_validation_returns_are_consumed
