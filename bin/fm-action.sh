@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# fm-action.sh - the ONLY writer of the per-task action ledger owned by
+# fm-action.sh - the manual writer CLI of the per-task action ledger owned by
 # bin/fm-action-lib.sh (record format, authority classes and the fold live
-# there; this script owns mutation mechanics and input validation only).
+# there; this script owns CLI input validation).
 #
 # Subcommands (state dir: FM_STATE_OVERRIDE, else $FM_HOME/state):
 #   admit <task> --id ID --class authorized|human-decision|external-gate
 #         --owner WHO --operation TEXT [--source GRANT] [--due EPOCH]
 #         [--units N] [--inbox NNN.msg] [--ready-with IDS|none] [--at EPOCH]
+#         [--head SHA --run ID --attempt ID]
 #       Record one next action. `authorized` requires an exact --source (a
 #       generic word such as yolo or auto is refused); the due time defaults to
 #       FM_ACTION_START_SECS (300) after admission. A gate class requires
@@ -14,9 +15,10 @@
 #   ack <task> ID [--at EPOCH]
 #   start <task> ID [--units N] [--at EPOCH]
 #   result <task> ID ok|refused|failed|answered [--reason TEXT] [--at EPOCH]
-#   accept <task> ID --receipt REF [--evidence PATH] [--at EPOCH]
-#       --evidence names the native receipt file; acceptance is recorded only
-#       when it is present, so inaccessible (unknown) or absent evidence refuses.
+#   accept <task> ID --evidence PATH [--at EPOCH]
+#       Requires the native producer receipt under state/<task>.action-receipts/ID
+#       with successful outcome and exact admitted head/run/attempt identity.
+#       Missing, inaccessible, stale or unbound evidence never certifies acceptance.
 #   probe PATH
 #       Print present, absent, or unknown with the blocked directory and a
 #       read-only fallback route; an access failure is never reported as absent.
@@ -27,7 +29,7 @@
 #   incidents <task> [--now EPOCH]   only the lines the fold reports as incidents
 #
 # Reads never write. Nothing here interrupts, restarts, answers a captain hold,
-# or closes a task; incidents are routed by the scheduler that polls them.
+# or closes a task; fm-watch routes incidents through its existing check queue.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,7 +71,8 @@ shift 2
 fm_pr_task_id_valid "$TASK" || die "invalid task id: $TASK"
 
 ID='' CLASS='' OWNER='' OPERATION='' SOURCE='' DUE='' UNITS='' INBOX='' READY_WITH=''
-AT='' NOW='' REASON='' RECEIPT='' EVIDENCE='' KIND='' UNTIL=''
+HEAD='' RUN='' ATTEMPT=''
+AT='' NOW='' REASON='' EVIDENCE='' KIND='' UNTIL=''
 POSITIONAL='' POSITIONAL2=''
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -85,7 +88,9 @@ while [ $# -gt 0 ]; do
     --at) AT=${2:-}; shift 2 || usage ;;
     --now) NOW=${2:-}; shift 2 || usage ;;
     --reason) REASON=${2:-}; shift 2 || usage ;;
-    --receipt) RECEIPT=${2:-}; shift 2 || usage ;;
+    --head) HEAD=${2:-}; shift 2 || usage ;;
+    --run) RUN=${2:-}; shift 2 || usage ;;
+    --attempt) ATTEMPT=${2:-}; shift 2 || usage ;;
     --evidence) EVIDENCE=${2:-}; shift 2 || usage ;;
     --kind) KIND=${2:-}; shift 2 || usage ;;
     --until) UNTIL=${2:-}; shift 2 || usage ;;
@@ -111,6 +116,9 @@ require_existing() {  # <id>
 
 case "$CMD" in
   admit)
+    for VALUE in "$HEAD" "$RUN" "$ATTEMPT"; do
+      [ -z "$VALUE" ] || token_valid "$VALUE" || die "head, run and attempt must be plain tokens"
+    done
     token_valid "$ID" || die "--id is required and must be a plain token"
     case "$CLASS" in authorized|human-decision|external-gate) : ;; *) die "--class must be authorized, human-decision or external-gate" ;; esac
     token_valid "$OWNER" || die "--owner is required and must be a plain token"
@@ -139,6 +147,7 @@ case "$CMD" in
       case "$INBOX" in [0-9][0-9][0-9]*.msg) : ;; *) die "--inbox must be a steering record name like 001.msg" ;; esac
       FIELDS+=("inbox=$INBOX")
     fi
+    FIELDS+=("head=$HEAD" "run=$RUN" "attempt=$ATTEMPT")
     fm_action_append "$STATE" "$TASK" "$AT" "$ID" admit "${FIELDS[@]}"
     ;;
   ack)
@@ -161,12 +170,11 @@ case "$CMD" in
     ;;
   accept)
     require_existing "$POSITIONAL"
-    [ -n "$RECEIPT" ] || die "--receipt is required: acceptance needs a native receipt"
-    if [ -n "$EVIDENCE" ]; then
-      PROBE=$(fm_action_probe_evidence "$EVIDENCE")
-      [ "$PROBE" = present ] || die "acceptance evidence is not confirmed: $PROBE"
-    fi
-    fm_action_append "$STATE" "$TASK" "$AT" "$POSITIONAL" accept "receipt=$(fm_action_clean "$RECEIPT")"
+    [ -n "$EVIDENCE" ] || die "--evidence is required: acceptance needs native evidence"
+    PROBE=$(fm_action_probe_evidence "$EVIDENCE")
+    [ "$PROBE" = present ] || die "acceptance evidence is not confirmed: $PROBE"
+    fm_action_verify_receipt "$STATE" "$TASK" "$POSITIONAL" "$EVIDENCE" || die "acceptance evidence is unknown: native identity or successful outcome not confirmed"
+    fm_action_append "$STATE" "$TASK" "$AT" "$POSITIONAL" accept "receipt=$(fm_action_clean "$EVIDENCE")"
     ;;
   hold)
     require_existing "$POSITIONAL"

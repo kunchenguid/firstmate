@@ -2,7 +2,7 @@
 # fm-action-lib.sh - the ONE owner of the per-task action ledger: what the next
 # action is, who may authorize it, and how far it actually got.
 #
-# Sourced, never executed. bin/fm-action.sh is the only writer CLI.
+# Sourced, never executed. Native intake and lifecycle owners use this library.
 #
 # WHY THIS EXISTS. A steering message that was queued, doorbelled and
 # acknowledged is not an action that started, and an action that started is not
@@ -17,11 +17,16 @@
 # Events:
 #   admit   class=authorized|human-decision|external-gate owner= operation=
 #           [source=] [due=] [units=] [inbox=NNN.msg] [ready_with=ids|none]
+#           [head=] [run=spawn_gen] [attempt=]
 #   ack     the worker acknowledged (an inbox record moved to handled/ also
 #           counts, via inbox=)
 #   start   the action's native execution began [units=N]
-#   result  outcome=ok|refused|failed|answered [reason=]
-#   accept  receipt=<native acceptance reference>
+#   result  outcome=ok|refused|failed|answered [reason=] [native=1]
+#   accept  receipt=<native acceptance path>
+# Native receipts: state/<task>.action-receipts/<action>, one TSV record:
+#   v1 task action head run attempt outcome epoch
+# Only an exact current identity and a matching successful native result
+# certify acceptance; unavailable, unbound or stale evidence is unknown.
 #   hold    kind=safe-boundary|resource-wait|running-job until=<epoch> reason=
 #
 # AUTHORITY CLASSES (recorded, never inferred). `authorized` names the exact
@@ -43,7 +48,7 @@
 # A started action with no result is executing and never an incident, and a
 # live hold suppresses only until its finite deadline. The fold never writes,
 # closes, answers, interrupts or restarts anything; routing an incident to its
-# owner is the scheduler's job, not this library's.
+# owner is bin/fm-watch.sh's job, through its existing durable check queue.
 set -u
 
 FM_ACTION_START_SECS_DEFAULT=300
@@ -93,15 +98,6 @@ fm_action_exists() {  # <state-dir> <task-id> <action-id>
   awk -F'\t' -v id="$3" '$3 == id && $4 == "admit" { found = 1 } END { exit !found }' "$ledger"
 }
 
-fm_action_class_of() {  # <state-dir> <task-id> <action-id>
-  local ledger
-  ledger=$(fm_action_ledger "$1" "$2")
-  [ -f "$ledger" ] || return 1
-  awk -F'\t' -v id="$3" '$3 == id && $4 == "admit" {
-    for (i = 5; i <= NF; i++) if (index($i, "class=") == 1) { print substr($i, 7); exit }
-  }' "$ledger"
-}
-
 # Names of acknowledged steering records for the task, space-delimited.
 fm_action_handled_names() {  # <state-dir> <task-id>
   local dir=$1/$2.inbox/handled f out=' '
@@ -145,7 +141,7 @@ fm_action_fold() {  # <state-dir> <task-id> <now-epoch>
         id = order[n]; c = cls[id]
         isgate = (c == "human-decision" || c == "external-gate")
         ack = (id in acked) || (inbox[id] != "" && index(handled, " " inbox[id] " ") > 0)
-        if (isgate) phase = (outcome[id] != "" ? "answered" : "gated")
+        if (isgate) phase = (outcome[id] == "answered" ? "answered" : "gated")
         else if (id in accepted) phase = "accepted"
         else if (outcome[id] == "refused") phase = "refused"
         else if (outcome[id] == "failed") phase = "failed"
@@ -183,6 +179,7 @@ fm_action_incidents() {  # <state-dir> <task-id> <now-epoch>
 # never success; the fallback names a read-only way to settle it.
 fm_action_probe_evidence() {  # <path>
   local path=$1 dir
+  case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
   if [ -e "$path" ] || [ -L "$path" ]; then
     if [ -r "$path" ]; then printf 'present\n'; return 0; fi
     printf 'unknown reason=permission-denied blocked=%s fallback=ask the path owner to run: stat %s\n' "$path" "$path"
@@ -199,7 +196,92 @@ fm_action_probe_evidence() {  # <path>
       printf 'unknown reason=permission-denied blocked=%s fallback=ask the directory owner to run: stat %s\n' "$dir" "$path"
       return 0
     fi
-    break
+    dir=${dir%/*}
+    [ -n "$dir" ] || dir=/
   done
+  if [ ! -x / ]; then
+    printf 'unknown reason=permission-denied blocked=/ fallback=ask the directory owner to inspect the path\n'
+    return 0
+  fi
   printf 'absent\n'
+}
+
+fm_action_field() {
+  local ledger
+  ledger=$(fm_action_ledger "$1" "$2")
+  [ -r "$ledger" ] || return 1
+  awk -F'\t' -v id="$3" -v key="$4" '$3 == id && $4 == "admit" {
+    for (i=5; i<=NF; i++) if (index($i,key "=")==1) { print substr($i,length(key)+2); exit }
+  }' "$ledger"
+}
+
+fm_action_admit_steer() {
+  local state=$1 task=$2 rec=$3 text=$4 id head run wt at
+  id="steer-${rec##*/}"; id=${id%.msg}
+  fm_action_exists "$state" "$task" "$id" && return 0
+  wt=$(awk -F= '$1=="worktree" {print substr($0,10); exit}' "$state/$task.meta" 2>/dev/null) || wt=
+  head=$(git -C "${wt:-/dev/null}" rev-parse HEAD 2>/dev/null) || head=
+  run=$(awk -F= '$1=="spawn_gen" {print substr($0,11); exit}' "$state/$task.meta" 2>/dev/null) || run=
+  at=$(date +%s)
+  fm_action_append "$state" "$task" "$at" "$id" admit class=authorized "owner=$task" \
+    "operation=$(fm_action_clean "$text")" "source=firstmate-steer:${rec##*/}" \
+    "inbox=${rec##*/}" "due=$((at + $(fm_action_start_secs)))" units=1 \
+    "head=$head" "run=$run" "attempt=${rec##*/}"
+}
+
+fm_action_native_begin() {
+  local state=$1 task=$2 id=$3 operation=$4 head=$5 run=$6 attempt=$7 at key actual
+  at=$(date +%s)
+  if fm_action_exists "$state" "$task" "$id"; then
+    [ "$(fm_action_field "$state" "$task" "$id" class)" = authorized ] && \
+      [ "$(fm_action_field "$state" "$task" "$id" operation)" = "$operation" ] || return 1
+    for key in head run attempt; do
+      case "$key" in head) actual=$head ;; run) actual=$run ;; attempt) actual=$attempt ;; esac
+      [ -n "$actual" ] && [ "$(fm_action_field "$state" "$task" "$id" "$key")" = "$actual" ] || return 1
+    done
+  else
+    fm_action_append "$state" "$task" "$at" "$id" admit class=authorized "owner=$task" \
+      "operation=$operation" "source=native:$operation:$id" "head=$head" "run=$run" \
+      "attempt=$attempt" "due=$((at + $(fm_action_start_secs)))" units=1 || return 1
+  fi
+  fm_action_append "$state" "$task" "$at" "$id" start units=1
+}
+
+fm_action_native_result() {
+  local state=$1 task=$2 id=$3 head=$4 run=$5 attempt=$6 outcome=$7 at dir tmp
+  at=$(date +%s)
+  [ "$(fm_action_field "$state" "$task" "$id" head)" = "$head" ] && \
+    [ "$(fm_action_field "$state" "$task" "$id" run)" = "$run" ] && \
+    [ "$(fm_action_field "$state" "$task" "$id" attempt)" = "$attempt" ] || return 1
+  dir="$state/$task.action-receipts"
+  mkdir -p "$dir" || return 1
+  tmp=$(mktemp "$dir/.receipt.XXXXXX") || return 1
+  printf 'v1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$task" "$id" "$head" "$run" "$attempt" "$outcome" "$at" > "$tmp" && \
+    mv "$tmp" "$dir/$id" || { rm -f "$tmp"; return 1; }
+  fm_action_append "$state" "$task" "$at" "$id" result "outcome=$outcome" "reason=native:$outcome" native=1
+}
+
+fm_action_verify_receipt() {
+  local state=$1 task=$2 id=$3 path=$4 expected head run attempt receipt_at result_at phase wt current_run current_head
+  expected="$state/$task.action-receipts/$id"
+  [ "$path" = "$expected" ] && [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  head=$(fm_action_field "$state" "$task" "$id" head) || return 1
+  run=$(fm_action_field "$state" "$task" "$id" run) || return 1
+  attempt=$(fm_action_field "$state" "$task" "$id" attempt) || return 1
+  [ -n "$head" ] && [ -n "$run" ] && [ -n "$attempt" ] || return 1
+  wt=$(awk -F= '$1=="worktree" {print substr($0,10); exit}' "$state/$task.meta") || return 1
+  current_run=$(awk -F= '$1=="spawn_gen" {print substr($0,11); exit}' "$state/$task.meta") || return 1
+  current_head=$(git -C "${wt:-/dev/null}" rev-parse HEAD 2>/dev/null) || return 1
+  [ "$current_run" = "$run" ] && [ "$current_head" = "$head" ] || return 1
+  receipt_at=$(awk -F'\t' 'NR==1 {print $8}' "$path") || return 1
+  result_at=$(awk -F'\t' -v id="$id" '$3==id && $4=="admit" {admitted=$2}
+    $3==id && $4=="result" {at=""; ok=0; native=0; for(i=5;i<=NF;i++) {if($i=="outcome=ok") ok=1; if($i=="native=1") native=1} if(ok && native && $2>=admitted) at=$2}
+    END {print at}' "$(fm_action_ledger "$state" "$task")") || return 1
+  [ -n "$result_at" ] && [ "$receipt_at" = "$result_at" ] || return 1
+  phase=$(fm_action_fold "$state" "$task" "$(date +%s)" | awk -F'\t' -v id="$id" '$1==id {print $3 ":" $4}') || return 1
+  case "$phase" in resulted:none|accepted:none) ;; *) return 1 ;; esac
+  awk -F'\t' -v task="$task" -v id="$id" -v head="$head" -v run="$run" -v attempt="$attempt" \
+    'NF==8 && $1=="v1" && $2==task && $3==id && $4==head && $5==run && $6==attempt && $7=="ok" && $8 ~ /^[0-9]+$/ {valid++}
+     END {exit !(NR==1 && valid==1)}' "$path"
 }

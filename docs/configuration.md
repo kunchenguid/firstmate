@@ -90,7 +90,7 @@ Each effective `FM_HOME` contains private operational directories.
 - One-shot Bearings reconcile requests under `state/reconcile-notify/`.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
-- Per-task action ledgers under `state/<id>.actions` recording each next action's authority class, start, result, and acceptance (`bin/fm-action-lib.sh`, written only by `bin/fm-action.sh`).
+- Per-task action ledgers under `state/<id>.actions` recording each next action's authority class, start, result, and acceptance (`bin/fm-action-lib.sh`, written by intake, native lifecycle owners and `bin/fm-action.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.

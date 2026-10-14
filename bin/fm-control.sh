@@ -194,6 +194,9 @@ die() {  # <message>
   exit 1
 }
 
+# shellcheck source=bin/fm-action-lib.sh
+. "$SCRIPT_DIR/fm-action-lib.sh"
+ACTION_ACTIVE=0
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
@@ -201,6 +204,16 @@ RELAUNCH_PHASE=start
 
 control_cleanup() {
   local status=$?
+  if [ "$ACTION_ACTIVE" = 1 ]; then
+    action_outcome=${ACTION_OUTCOME:-failed}
+    [ "$status" -eq 0 ] || action_outcome=failed
+    action_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || action_head=
+    fm_action_native_result "$STATE" "$ID" "$ACTION_ID" "$action_head" \
+      "$ACTION_RUN" "$ACTION_ATTEMPT" "$action_outcome" || {
+        echo "error: native action result could not be recorded for $ID $ACTION_ID" >&2
+        status=1
+      }
+  fi
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
@@ -1153,6 +1166,16 @@ do_relaunch() {
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
+ACTION_ID=${FM_ACTION_ID:-control-$VERB-$(date +%s)-$$}
+case "$ACTION_ID" in ''|*[!A-Za-z0-9._-]*) die "invalid FM_ACTION_ID" ;; esac
+ACTION_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || ACTION_HEAD=
+ACTION_RUN=$(fm_meta_get "$META" spawn_gen)
+ACTION_ATTEMPT=${FM_ACTION_ATTEMPT:-$ACTION_ID}
+case "$ACTION_ATTEMPT" in ''|*[!A-Za-z0-9._-]*) die "invalid FM_ACTION_ATTEMPT" ;; esac
+fm_action_native_begin "$STATE" "$ID" "$ACTION_ID" "$VERB" "$ACTION_HEAD" \
+  "$ACTION_RUN" "$ACTION_ATTEMPT" || die "native action does not match its admitted identity and operation"
+ACTION_ACTIVE=1
+
 # --- verbs ------------------------------------------------------------------
 
 case "$VERB" in
@@ -1170,13 +1193,16 @@ case "$VERB" in
       *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle key into an unattributed endpoint" ;;
     esac
     proof=$(do_interrupt)
+    case "$proof" in *cancel=confirmed*|*cancel=not-running*) ACTION_OUTCOME=ok ;; esac
     echo "interrupt-delivered $ID harness=$HARNESS backend=$BACKEND verified=$proof"
     ;;
   exit)
     result=$(do_exit)
+    ACTION_OUTCOME=ok
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)
     do_relaunch
+    ACTION_OUTCOME=ok
     ;;
 esac
