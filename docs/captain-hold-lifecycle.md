@@ -11,6 +11,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 | Question | Section |
 | --- | --- |
 | What is a captain call, and which subcommand does what? | [Mechanism](#mechanism) |
+| What announces a deferred review when its date arrives? | [Announcing a deferred review](#announcing-a-deferred-review) |
 | Why does cleanup of finished work leave a captain call open? | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
 | How does a keyed answer from chat or a board reach the call? | [Answer-time resolution](#answer-time-resolution) |
 | How is a call closed when it stopped being a question? | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
@@ -34,6 +35,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | Subcommand | What it does | Details |
 | --- | --- | --- |
 | `hold` | Creates or reuses a task and holds it for the captain. | [Creating a hold](#creating-a-hold-hold) |
+| `due-reviews` | Queues an announcement for each unblocked captain-held task whose hold date arrived; `--needs-monitoring` is the read-only supervision probe. | [Announcing a deferred review](#announcing-a-deferred-review) |
 | `answer` | Records the captain's exact words and resolves the call. | [Answering a call](#answering-a-call-answer) |
 | `complete` | Records the reviewed captain-held task ids in the originating task's metadata. | [Recording a reviewed inventory](#recording-a-reviewed-inventory-complete) |
 | `verify` | Read-only check that scout teardown runs before removing source state. | [Checking before scout teardown](#checking-before-scout-teardown-verify) |
@@ -67,6 +69,20 @@ Repeat and edge cases:
   If that write fails, the backend hold is not attempted.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
+
+### Announcing a deferred review
+
+The native watcher calls `fm-captain-hold.sh due-reviews` at its base heartbeat cadence, before status-signal exits can starve the scan.
+The command header owns structured date selection and publication receipts; delivery rides the existing queue acknowledgement contract that [`watcher-continuity.md`](watcher-continuity.md#recovery-episode-acknowledgement) owns.
+The scan uses the canonical markdown backlog projection; a different configured backend reports its unavailable projection without requiring monitoring or interrupting an existing watcher.
+Unresolved blockers take precedence over the date through the canonical fleet snapshot's `hold_bucket` classification, leaving Bearings buckets unchanged.
+The shared supervision predicate includes future dated reviews, so startup guards and native Stop recovery keep monitoring even when no worker or registered check remains.
+It stops requiring supervision for that date once its queued announcement is acknowledged; a new date restores the requirement.
+
+Keep an external prerequisite undated and hold it with kind `external`; block the work on that prerequisite and give an independent captain-held review its own date, with no dependency edge to the work.
+Answering or closing the review, deferring it again, expiry, restart, and wake acknowledgement leave the prerequisite open.
+Only recording that the external prerequisite itself completed makes the dependent work eligible.
+The watcher regression in `tests/fm-watch-triage.test.sh` exercises this pattern through the real watcher, drain, tasks backend, and captured board-answer intake, including repeated delivery.
 
 ### Answering a call (`answer`)
 
@@ -631,7 +647,7 @@ Projection regressions live in two suites:
 
 | Suite | What it covers |
 | --- | --- |
-| `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping. |
+| `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, title stripping, and the backlog-only projection's reuse of the canonical classification. |
 | `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, and scout-report precedence over competing pull-request links. |
 
 ### Refreshing this record

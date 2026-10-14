@@ -6605,149 +6605,502 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
 
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
+# The observer must distinguish an empty backlog from an unreadable or truncated
+# listing, and its durable cadence must survive watcher restarts.
+test_due_review_scan_bounds_and_failures() (
+  command -v tasks-axi >/dev/null 2>&1 || { pass "due scan skipped: tasks-axi unavailable"; return; }
+  local home state fakebin out pid real_jq status
+  home=$(make_case due-review-bounds); state="$home/state"; fakebin="$home/fakebin"; out="$home/watch.out"
+  mkdir -p "$home/data" "$home/config"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  # These homes deliberately remain local to each test subshell.
+  # shellcheck disable=SC2030,SC2031
+  export FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config"
+  unset TASKS_AXI_FILE TASKS_AXI_BACKEND
+  "$ROOT/bin/fm-captain-hold.sh" due-reviews > "$out" || fail "empty backlog refused"
+  [ ! -s "$out" ] || fail "empty backlog announced a review"
+  "$ROOT/bin/fm-captain-hold.sh" hold sample-review --title 'Review wait' --reason 'Review progress' --until 2026-08-01 >/dev/null
+  real_jq=$(command -v jq)
+  export FM_DUE_REAL_JQ="$real_jq" FM_DUE_SCAN_LOG="$home/scan.log"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -Rn ]; then
+  printf 'scan\n' >> "$FM_DUE_SCAN_LOG"
+  case "${FM_DUE_PROJECTION_FAILURE:-}" in
+    unavailable) exit 1 ;;
+    incomplete)
+      printf '%s\n' '{"path":"backlog.md","present":false,"records":[]}'
+      exit 0 ;;
+  esac
+fi
+exec "$FM_DUE_REAL_JQ" "$@"
+SH
+  chmod +x "$fakebin/jq"
+  for status in unavailable incomplete; do
+    if PATH="$fakebin:$PATH" FM_DUE_PROJECTION_FAILURE="$status" FM_CAPTAIN_HOLD_NOW=2026-08-01T12:00:00Z \
+        "$ROOT/bin/fm-captain-hold.sh" due-reviews > "$out" 2> "$home/error"; then
+      fail "$status listing was accepted as complete"
+    fi
+    [ ! -s "$state/.wake-queue" ] || fail "$status listing queued a partial result"
+  done
+  # Establish a current native summary and slow-check cadence before observing
+  # ordinary polls. An absent summary intentionally causes a startup refresh.
+  "$ROOT/bin/fm-home-summary-refresh.sh" >/dev/null || fail "summary preparation failed"
+  touch "$state/.last-check"
+  : > "$home/scan.log"
+  touch "$state/.last-due-review-scan"
+  watch_bg "$state" "$fakebin" "$out" env FM_CAPTAIN_HOLD_NOW=2026-08-01T12:00:00Z
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "bounded watcher stopped"
+  wait_poll_cycle "$state" "$pid" || fail "bounded watcher stopped on second poll"
+  [ ! -s "$home/scan.log" ] || fail "backlog read on ordinary poll hot path"
+  reap "$pid"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "bounded watcher acknowledgement failed"
+  : > "$home/scan.log"
+  watch_bg "$state" "$fakebin" "$out" env FM_CAPTAIN_HOLD_NOW=2026-08-01T12:00:00Z
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "bounded restart stopped"
+  [ ! -s "$home/scan.log" ] || fail "restart discarded review scan cadence"
+  reap "$pid"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "bounded restart acknowledgement failed"
+
+  # A receipt write failure cannot consume or suppress the queued review.
+  mkdir "$state/.due-review-announced"
+  mkdir "$state/.due-review-announced/sample-review.2026-08-01"
+  if FM_CAPTAIN_HOLD_NOW=2026-08-01T12:00:00Z "$ROOT/bin/fm-captain-hold.sh" due-reviews > "$out" 2> "$home/error"; then
+    fail "invalid receipt accepted"
+  fi
+  rmdir "$state/.due-review-announced/sample-review.2026-08-01"
+  FM_CAPTAIN_HOLD_NOW=2026-08-01T12:00:00Z "$ROOT/bin/fm-captain-hold.sh" due-reviews > "$out" || fail "scan retry failed"
+  rm "$state/.due-review-announced/sample-review.2026-08-01"
+  mkdir "$state/.due-review-announced/sample-review.2026-08-01"
+  if PATH="$fakebin:$PATH" ack_stopped_cycle "$state" > "$home/ack.out" 2> "$home/ack.err"; then
+    fail "acknowledgement discarded a wake without a receipt"
+  fi
+  assert_contains "$(cat "$state/.wake-queue")" 'due-review:sample-review:2026-08-01' "failed acknowledgement lost wake"
+  rmdir "$state/.due-review-announced/sample-review.2026-08-01"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "receipt recovery acknowledgement failed"
+  FM_CAPTAIN_HOLD_NOW=2026-08-01T12:00:00Z "$ROOT/bin/fm-captain-hold.sh" due-reviews > "$out" || fail "post-ack scan failed"
+  [ ! -s "$out" ] || fail "acknowledged retry announced again"
+  pass "due-review scans are bounded, reject incomplete reads, and preserve failed acknowledgements"
+)
+
+# Exercise the real watcher, queue drain, tasks backend, and board-answer intake
+# together. No endpoint or visual service is started in this disposable home.
+test_due_review_preserves_external_prerequisite() (
+  command -v tasks-axi >/dev/null 2>&1 || { pass "due review skipped: tasks-axi unavailable"; return; }
+  local home state fakebin out pid shown result before after count answered
+  home=$(make_case due-review); state="$home/state"; fakebin="$home/fakebin"; out="$home/watch.out"
+  mkdir -p "$home/data" "$home/config"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  # These homes deliberately remain local to each test subshell.
+  # shellcheck disable=SC2030,SC2031
+  export FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config"
+  export FM_BACKEND=tmux
+  unset TASKS_AXI_FILE TASKS_AXI_BACKEND
+  due_tasks() { (cd "$home" && tasks-axi "$@"); }
+  due_hold() { "$ROOT/bin/fm-captain-hold.sh" "$@"; }
+  assert_external_wait() {
+    shown=$(due_tasks show sample-prerequisite --full)
+    assert_contains "$shown" 'state: queued' "external prerequisite closed"
+    assert_contains "$shown" 'hold_kind: external' "external prerequisite lost its hold"
+    assert_contains "$shown" 'hold_until: "-"' "external prerequisite acquired a date"
+    shown=$(due_tasks ready)
+    assert_not_contains "$shown" 'sample-work' "review handling made work eligible"
+  }
+  due_watch() {
+    watch_bg "$state" "$fakebin" "$out" env FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 \
+      FM_CAPTAIN_HOLD_NOW="$1"
+    pid=$!
+  }
+  due_tasks add sample-prerequisite 'External prerequisite' >/dev/null
+  due_tasks hold sample-prerequisite --kind external --reason 'Waiting for external evidence' >/dev/null
+  due_tasks add sample-work 'Work needing the prerequisite' >/dev/null
+  due_tasks block sample-work --by sample-prerequisite >/dev/null
+  due_hold hold sample-review --title 'Review the external wait, including retries' --reason 'Review progress' --until 2026-08-01 >/dev/null
+  due_hold hold sample-undated --title 'Undated review' --reason 'Review separately' >/dev/null
+  due_tasks add sample-external-dated 'Other external wait' >/dev/null
+  due_tasks hold sample-external-dated --kind external --reason 'Other wait' --until 2026-08-01 >/dev/null
+  before=$(due_tasks show sample-prerequisite --full)
+
+  # Restart before the date: neither start may announce a future review.
+  due_watch 2026-07-31T12:00:00Z
+  wait_poll_cycle "$state" "$pid" || fail "watcher stopped before date: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "future review announced"
+  reap "$pid"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "restart acknowledgement failed"
+  due_watch 2026-07-31T12:00:00Z
+  wait_poll_cycle "$state" "$pid" || fail "restart stopped before date"
+  [ ! -s "$state/.wake-queue" ] || fail "restart announced future review"
+  reap "$pid"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "restart acknowledgement failed"
+  assert_external_wait
+
+  due_watch 2026-08-01T12:00:00Z
+  wait_for_exit "$pid" 200 || fail "due review did not wake the watcher: $(cat "$out")"
+  assert_contains "$(cat "$out")" 'check: due-review sample-review 2026-08-01' "missing due announcement"
+  count=$(awk -F '\t' '$4 == "due-review:sample-review:2026-08-01" {n++} END {print n+0}' "$state/.wake-queue")
+  [ "$count" = 1 ] || fail "expected one due-date wake"
+  assert_not_contains "$(cat "$state/.wake-queue")" 'sample-undated' "undated review announced"
+  assert_not_contains "$(cat "$state/.wake-queue")" 'sample-external-dated' "external hold announced as review"
+  assert_external_wait
+
+  # Presenting is not handling: a restart and repeated drains retain the row.
+  PATH="$fakebin:$PATH" "$DRAIN" > "$home/drain-one" 2> "$home/drain.err"
+  due_watch 2026-08-02T12:00:00Z
+  wait_poll_cycle "$state" "$pid" || fail "handling successor failed to supervise"
+  reap "$pid"
+  PATH="$fakebin:$PATH" "$DRAIN" > "$home/drain-two" 2> "$home/drain.err"
+  assert_contains "$(cat "$home/drain-one")" 'due-review sample-review 2026-08-01' "first presentation missing"
+  assert_contains "$(cat "$home/drain-two")" 'due-review sample-review 2026-08-01' "restart presentation missing"
+  count=$(awk -F '\t' '$4 == "due-review:sample-review:2026-08-01" {n++} END {print n+0}' "$state/.wake-queue")
+  [ "$count" = 1 ] || fail "restart duplicated pending review"
+  # Simulate a publisher death after enqueue but before its receipt. The ack
+  # must complete publication before it consumes the pending row.
+  rm "$state/.due-review-announced/sample-review.2026-08-01"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge review"
+  assert_external_wait
+
+  due_watch 2026-08-02T12:00:00Z
+  wait_poll_cycle "$state" "$pid" || fail "acknowledged date fired again: $(cat "$out")"
+  reap "$pid"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "restart acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged review requeued"
+
+  # Deferring the independent review schedules one more announcement only.
+  due_hold hold sample-review --reason 'Still waiting; review again' --until 2026-08-03 >/dev/null
+  assert_external_wait
+  due_watch 2026-08-02T12:00:00Z
+  wait_poll_cycle "$state" "$pid" || fail "new future date fired early"
+  reap "$pid"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "restart acknowledgement failed"
+  due_watch 2026-08-03T12:00:00Z
+  wait_for_exit "$pid" 200 || fail "new review date did not announce"
+  assert_contains "$(cat "$out")" 'due-review sample-review 2026-08-03' "new date missing"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "new date acknowledgement failed"
+  assert_external_wait
+
+  # A captured board answer goes through the adapter and the same keyed intake
+  # as production, including an exact delivery retry. Closing this review is
+  # deliberately separate from resolving the external prerequisite.
+  result="$home/board.result"
+  cat > "$result" <<'RESULT'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "1","Wait review\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-review\",\n  \"selection\": \"still-waiting\",\n  \"note\": \"I followed up; still waiting on the external team.\"\n}","section#call > form",choice,"Wait review"
+RESULT
+  "$ROOT/bin/fm-procevent-lavish.sh" answers "$result" > "$home/answers" || fail "board adapter failed"
+  assert_contains "$(cat "$home/answers")" 'sample-review' "board answer missing"
+  due_hold answers --source 'synthetic board' < "$home/answers" > "$home/answer.out" || fail "keyed answer failed"
+  assert_external_wait
+  answered=$(due_tasks show sample-review --full)
+  due_hold answers --source 'synthetic board' < "$home/answers" > "$home/retry.out" || fail "answer retry failed"
+  assert_external_wait
+  [ "$answered" = "$(due_tasks show sample-review --full)" ] || fail "answer replay duplicated the resolution"
+  assert_contains "$answered" 'state: done' "review did not close"
+  after=$(due_tasks show sample-prerequisite --full)
+  [ "$before" = "$after" ] || fail "review lifecycle mutated the external prerequisite"
+  due_watch 2026-08-04T12:00:00Z
+  wait_poll_cycle "$state" "$pid" || fail "closed review reannounced"
+  reap "$pid"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "restart acknowledgement failed"
+  due_tasks "done" sample-prerequisite >/dev/null
+  assert_contains "$(due_tasks ready)" 'sample-work' "clearing prerequisite did not make work eligible"
+  pass "due reviews survive restart, acknowledge once per date, and never release external work"
+)
+
+# An independent review can itself have a prerequisite. Backend blocker
+# resolution, including a missing blocker, must precede date notification.
+test_due_review_blocker_precedes_date() (
+  command -v tasks-axi >/dev/null 2>&1 || { pass "due blockers skipped: tasks-axi unavailable"; return; }
+  local home state out
+  home=$(make_case due-review-blocker); state="$home/state"
+  mkdir -p "$home/data" "$home/config"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  # shellcheck disable=SC2030,SC2031
+  export FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config"
+  export FM_CAPTAIN_HOLD_NOW=2026-08-01T12:00:00Z
+  (cd "$home" && tasks-axi add sample-prerequisite 'Review prerequisite' >/dev/null)
+  "$ROOT/bin/fm-captain-hold.sh" hold sample-review --title 'Blocked review' --reason 'Review progress' --until 2026-08-01 >/dev/null
+  (cd "$home" && tasks-axi block sample-review --by sample-prerequisite >/dev/null)
+  out=$("$ROOT/bin/fm-captain-hold.sh" due-reviews) || fail "blocked review scan failed"
+  [ -z "$out" ] && [ ! -s "$state/.wake-queue" ] || fail "blocked review announced when date arrived"
+  # Represent a missing prerequisite through a synthetic restored backlog.
+  cp "$home/data/backlog.md" "$home/saved-backlog"
+  sed '/^- \[ \] sample-prerequisite /d' "$home/saved-backlog" > "$home/data/backlog.md"
+  if (cd "$home" && tasks-axi show sample-prerequisite >/dev/null 2>&1); then fail "fixture did not remove prerequisite"; fi
+  out=$("$ROOT/bin/fm-captain-hold.sh" due-reviews) || fail "missing blocker scan failed"
+  [ -z "$out" ] && [ ! -s "$state/.wake-queue" ] || fail "missing blocker was treated as resolved"
+  cp "$home/saved-backlog" "$home/data/backlog.md"
+  (cd "$home" && tasks-axi "done" sample-prerequisite >/dev/null)
+  out=$("$ROOT/bin/fm-captain-hold.sh" due-reviews) || fail "resolved blocker scan failed"
+  assert_contains "$out" 'check: due-review sample-review 2026-08-01' "resolved blocker did not permit the review announcement"
+  pass "unresolved and missing review blockers outrank its date until actually done"
+)
+
+# This is the shared monitoring predicate used by startup, Stop and restart.
+# The hook integration has a separate fixture in fm-claude-stop-autoarm.test.sh.
+test_due_review_only_home_needs_monitoring() (
+  command -v tasks-axi >/dev/null 2>&1 || { pass "due monitoring skipped: tasks-axi unavailable"; return; }
+  local home state
+  home=$(make_case due-review-only); state="$home/state"
+  mkdir -p "$home/data" "$home/config"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  # shellcheck disable=SC2030,SC2031
+  export FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-supervision-lib.sh"
+  if fm_supervision_needed "$state"; then fail "empty home needs monitoring"; fi
+  "$ROOT/bin/fm-captain-hold.sh" hold sample-review --title 'Future review' --reason 'Review progress' --until 2099-01-01 >/dev/null
+  fm_supervision_needed "$state" || fail "date-only home does not request monitoring"
+  # Session start reaches this same native guard through its wake drain.
+  FM_GUARD_READ_ONLY=1 "$ROOT/bin/fm-guard.sh" > "$home/startup-guard" 2>&1
+  assert_contains "$(cat "$home/startup-guard")" 'Dated review monitoring' "startup guard missed the date-only monitoring need"
+  [ "$FM_SUP_IN_FLIGHT" = 0 ] && [ "$FM_SUP_SOURCES" = 0 ] && [ "$FM_SUP_CHECKS" = 0 ] \
+    || fail "test accidentally provided another monitoring reason"
+  FM_CAPTAIN_HOLD_NOW=2099-01-01T12:00:00Z "$ROOT/bin/fm-captain-hold.sh" due-reviews >/dev/null || fail "due scan failed"
+  fm_supervision_needed "$state" || fail "unhandled date announcement lost monitoring"
+  PATH="$home/fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "date-only acknowledgement failed"
+  if fm_supervision_needed "$state"; then fail "handled date unnecessarily keeps monitoring"; fi
+  "$ROOT/bin/fm-captain-hold.sh" hold sample-review --reason 'Revisit again' --until 2099-01-02 >/dev/null
+  fm_supervision_needed "$state" || fail "new date did not restore monitoring"
+  printf 'Review complete.\n' > "$home/answer"
+  "$ROOT/bin/fm-captain-hold.sh" answer sample-review --decision-file "$home/answer" >/dev/null || fail "review close failed"
+  if fm_supervision_needed "$state"; then fail "closed review keeps monitoring"; fi
+  "$ROOT/bin/fm-captain-hold.sh" hold sample-undated --title 'Undated review' --reason 'No scheduled review' >/dev/null
+  if fm_supervision_needed "$state"; then fail "undated review starts extra monitoring"; fi
+  pass "a dated review alone keeps native monitoring only until handled or closed"
+)
+
+# Known unavailable projections do not change the home's existing supervision.
+# A failed supported read is distinct and still retains monitoring.
+test_due_review_unsupported_backend_stays_idle() (
+  local home state fakebin out pid rc
+  home=$(make_case due-unsupported); state="$home/state"; fakebin="$home/fakebin"
+  mkdir -p "$home/data" "$home/config"
+  printf 'backend = "beads"\n' > "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  # shellcheck disable=SC2030,SC2031
+  export FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config"
+  unset TASKS_AXI_FILE TASKS_AXI_BACKEND
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-supervision-lib.sh"
+  rc=0
+  "$ROOT/bin/fm-captain-hold.sh" due-reviews --needs-monitoring > "$home/probe.out" 2> "$home/probe.err" || rc=$?
+  [ "$rc" = 3 ] || fail "unsupported projection did not have a distinct result: $rc"
+  assert_contains "$(cat "$home/probe.err")" 'unavailable' "unsupported projection was silent"
+  if fm_supervision_needed "$state" 2> "$home/probe.err"; then fail "unsupported backend alone requested supervision"; fi
+  [ "$FM_SUP_DATED_REVIEW" = false ] || fail "unsupported backend claimed a dated review"
+  FM_GUARD_READ_ONLY=1 "$ROOT/bin/fm-guard.sh" > "$home/guard.out" 2>&1
+  assert_not_contains "$(cat "$home/guard.out")" 'Dated review monitoring' "unsupported backend printed a dated-review banner"
+  out="$home/watch.out"
+  watch_bg "$state" "$fakebin" "$out" env FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "unsupported projection stopped the watcher: $(cat "$out")"
+  assert_contains "$(cat "$state/.watch-triage.log")" 'due-review projection unavailable' "watcher did not report the unsupported projection"
+  [ ! -s "$state/.wake-queue" ] || fail "unsupported backend announced a review"
+  reap "$pid"
+  PATH="$fakebin:$PATH" ack_stopped_cycle "$state" >/dev/null || fail "unsupported watcher acknowledgement failed"
+
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  rm "$home/data/backlog.md"
+  mkdir "$home/data/backlog.md"
+  rc=0
+  "$ROOT/bin/fm-captain-hold.sh" due-reviews --needs-monitoring > "$home/probe.out" 2> "$home/probe.err" || rc=$?
+  [ "$rc" = 2 ] || fail "failed markdown read was confused with an unsupported backend: $rc"
+  fm_supervision_needed "$state" 2> "$home/probe.err" || fail "failed markdown read lost supervision"
+  [ "$FM_SUP_DATED_REVIEW" = true ] || fail "failed markdown read lost its monitoring diagnostic"
+  pass "unsupported backends remain idle and report unavailability while failed markdown reads retain supervision"
+)
+
+# A live queue-lock holder cannot indefinitely block the synchronous guard path.
+test_due_review_monitoring_lock_is_bounded() (
+  local home state rc out
+  home=$(make_case due-monitor-lock); state="$home/state"
+  mkdir -p "$home/data" "$home/config"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  # shellcheck disable=SC2030,SC2031
+  export FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config"
+  unset TASKS_AXI_FILE TASKS_AXI_BACKEND
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-wake-lib.sh"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || fail "could not hold the fixture queue lock"
+  rc=0
+  out=$(FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 fm_run_timed 8 \
+    "$ROOT/bin/fm-captain-hold.sh" due-reviews --needs-monitoring 2>&1) || rc=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  [ "$rc" = 2 ] || fail "monitoring probe exceeded its own lock bound or lost failure status: $rc $out"
+  rc=0
+  "$ROOT/bin/fm-captain-hold.sh" due-reviews --needs-monitoring >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "monitoring probe did not recover after the lock cleared: $rc"
+  pass "dated-review monitoring bounds a live queue-lock wait and recovers after release"
+)
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
+  "$FM_TEST_ONLY" || exit 1
   exit 0
 fi
 
-test_status_span_actionable_classifier
-test_status_span_survives_a_later_routine_append
-test_status_span_respects_decision_closure
-test_status_span_closure_from_an_offset
-test_malformed_seen_signature_reads_the_whole_log
-test_stale_is_terminal_classifier
-test_classifier_primitives
-test_unrecognized_status_prefix_is_visible
-test_crew_is_provably_working_classifier
-test_status_is_paused_classifier
-test_crew_absorb_class_classifier
-test_crew_worktree_written_since_classifier
-test_empty_write_prune_widens_the_probe
-test_empty_write_prune_from_the_environment_widens_the_probe
-test_worktree_write_probe_is_wall_clock_bounded
-test_signal_crew_provably_working_classifier
-test_secondmate_status_routine_absorbed_routed_surfaced_classifier
-test_provably_working_signal_absorbed
-test_turn_ended_provably_working_absorbed
-test_turn_ended_not_working_surfaced
-test_turn_ended_churning_pane_absorbed
-test_turn_ended_churn_resets_prior_stale_classification
-test_turn_ended_churn_resets_wedge_state_before_stale_poll
-test_turn_ended_churn_existing_marker_absorbed
-test_turn_ended_still_pane_surfaced
-test_turn_ended_malformed_prior_hash_surfaced
-test_turn_ended_trailing_newline_prior_hash_surfaced
-test_secondmate_turn_ended_churning_pane_surfaced
-test_turn_ended_colliding_window_key_surfaced
-test_turn_ended_duplicate_endpoint_records_surfaced
-test_turn_ended_mixed_positive_evidence_batch_absorbed
-test_turn_ended_mixed_positive_evidence_batch_default_off
-test_status_and_turn_end_batch_never_uses_churn_evidence
-test_turn_ended_churn_absorb_off_by_default
-test_turn_ended_churn_absorb_bounded
-test_turn_ended_churn_timer_write_failure_surfaced
-test_turn_ended_invalid_churn_bound_surfaced
-test_turn_ended_oversized_churn_bound_surfaced
-test_turn_ended_invalid_churn_deadline_surfaced
-test_turn_ended_surfaced_batch_opens_no_partial_deadline
-test_working_note_not_working_surfaced
-test_secondmate_status_note_surfaced_despite_busy_agent
-test_secondmate_routine_progress_absorbed_then_note_surfaced
-test_secondmate_buried_block_wakes_despite_busy_agent
-test_self_announced_close_does_not_rewake_but_next_note_does
-test_self_announced_close_after_open_decisions_fold_does_not_rewake
-test_folded_worker_decision_without_home_append_still_wakes
-test_separate_self_announced_answers_after_fold_wake_once
-test_self_announced_close_after_fold_still_surfaces_folded_worker_failure
-test_self_announced_close_after_fold_still_surfaces_folded_secondmate_lines
-test_actionable_signal_surfaced
-test_needs_decision_signal_payload_marked_for_branch_exclusion
-test_needs_decision_reconciliation_required_still_marked
-test_captain_held_signal_payload_marked_for_branch_exclusion
-test_pending_reply_escalation_signal_payload_marked_for_branch_exclusion
-test_ordinary_blocked_signal_payload_remains_branch_eligible
-test_routine_signal_payload_not_marked_needs_decision
-test_actionable_signal_survives_a_later_routine_append
-test_keyed_decision_signal_reads_only_the_new_span
-test_release_completion_survives_a_later_routine_append
-test_routine_appends_after_a_classified_event_stay_absorbed
-test_unreadable_status_reports_once_per_file_state
-test_permission_recovery_surfaces_preserved_status
-test_terminal_stale_surfaced
-test_stale_terminal_status_overridden_by_active_run
-test_nonterminal_stale_provably_working_absorbed_then_escalated
-test_wedge_escalation_marks_demand_deep_inspection_after_threshold
-test_wedge_escalation_resets_when_pane_becomes_active
-test_gone_endpoint_reports_once_instead_of_escalating_forever
-test_live_and_unproven_endpoints_still_wedge_escalate
-test_gone_report_rearms_when_the_endpoint_comes_back
-test_second_death_after_a_same_window_relaunch_reports_in_full
-test_identical_dead_display_of_a_successor_still_reports
-test_term_stops_a_watcher_blocked_inside_a_poll
-test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held
-test_cleanup_marker_lock_bound_is_decimal_with_zero_default
-test_busy_pane_below_turn_age_bound_is_absorbed
-test_busy_pane_stable_hash_escalates_past_turn_age_bound
-test_busy_pane_changing_hash_escalates_past_turn_age_bound
-test_busy_pane_turn_end_touch_resets_age
-test_busy_pane_native_progress_resets_age
-test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
-test_busy_pane_default_turn_age_bound_is_3600s
-test_busy_declared_pause_is_rechecked_not_wedge_escalated
-test_afk_busy_declared_pause_hands_off_plain_stale
-test_afk_busy_declared_pause_ticking_pane_hands_off_once
-test_nonterminal_stale_not_working_surfaced
-test_nonterminal_stale_paused_absorbed_then_resurfaced
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces
-test_own_work_wait_keeps_first_alert_then_long_cadence
-test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
-test_live_declared_wait_churn_honors_the_resurface_throttle
-test_live_paused_until_controls_recheck_time
-test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
-test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
-test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
-test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
-test_wedge_threshold_parked_gate_needs_an_unanswered_decision
-test_wedge_threshold_parked_gate_is_off_until_armed
-test_wedge_defer_refuses_a_half_filled_wait_record
-test_open_captain_call_bounds_stale_churn
-test_stale_churn_without_a_captain_call_still_alarms
-test_failed_wake_append_does_not_arm_the_captain_hold_throttle
-test_reheld_captain_call_starts_its_own_resurface_window
-test_secondmate_paused_resurfaces_in_normal_mode
-test_secondmate_captain_held_resurfaces_in_normal_mode
-test_secondmate_nonpaused_stale_remains_suppressed
-test_secondmate_unpause_clears_pause_tracking
-test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
-test_nonterminal_paused_rechecks_authoritative_state
-test_paused_authoritative_working_preserves_wedge_timer
-test_nonterminal_stale_repairs_missing_or_corrupt_timer
-test_wedge_escalation_deferred_while_worktree_is_written
-test_write_deferral_resurfaces_on_the_bounded_cadence
-test_secondmate_home_supervision_churn_is_not_write_evidence
-test_timer_repair_drops_a_finished_write_deferral_chain
-test_terminal_first_sight_drops_a_finished_write_deferral_chain
-test_triage_log_size_cap_accepts_spaced_wc_counts
-test_procevent_captured_result_surfaces_proactively
-test_procevent_unacknowledged_result_redrains_until_handled
-test_procevent_marker_keys_are_injective
-test_procevent_headlines_classify_queue_keys
-test_procevent_launch_failed_episodes_are_each_delivered
-test_procevent_surface_serializes_with_drain
-test_procevent_surface_crash_boundaries
-test_procevent_marker_failure_exits_and_replays
-test_heartbeat_no_change_absorbed
-test_heartbeat_backstop_surfaces_unsurfaced_status
-test_heartbeat_backstop_surfaces_a_masked_status
-test_beacon_stays_fresh_while_absorbing
-test_afk_signal_records_heartbeat_endpoint
-test_afk_present_reverts_watcher_to_one_shot
-test_afk_paused_changed_pane_hands_off_plain_stale
-test_captain_held_never_rechecked_while_away_record_exists
-test_live_captain_held_first_sight_silenced_by_away_record
-test_backlog_hold_never_rechecked_while_away_record_exists
-test_afk_one_shot_never_hands_off_captain_held_under_away_record
-test_captain_held_rechecked_under_a_quiet_record
-test_paused_until_near_future_is_quiet_before_the_cadence
-test_paused_until_wrong_year_is_bounded_by_the_cadence
-test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_status_span_actionable_classifier || exit 1
+test_status_span_survives_a_later_routine_append || exit 1
+test_status_span_respects_decision_closure || exit 1
+test_status_span_closure_from_an_offset || exit 1
+test_malformed_seen_signature_reads_the_whole_log || exit 1
+test_stale_is_terminal_classifier || exit 1
+test_classifier_primitives || exit 1
+
+test_unrecognized_status_prefix_is_visible || exit 1
+test_crew_is_provably_working_classifier || exit 1
+test_status_is_paused_classifier || exit 1
+test_crew_absorb_class_classifier || exit 1
+test_crew_worktree_written_since_classifier || exit 1
+test_empty_write_prune_widens_the_probe || exit 1
+test_empty_write_prune_from_the_environment_widens_the_probe || exit 1
+test_worktree_write_probe_is_wall_clock_bounded || exit 1
+test_signal_crew_provably_working_classifier || exit 1
+test_secondmate_status_routine_absorbed_routed_surfaced_classifier || exit 1
+test_provably_working_signal_absorbed || exit 1
+test_turn_ended_provably_working_absorbed || exit 1
+test_turn_ended_not_working_surfaced || exit 1
+test_turn_ended_churning_pane_absorbed || exit 1
+test_turn_ended_churn_resets_prior_stale_classification || exit 1
+test_turn_ended_churn_resets_wedge_state_before_stale_poll || exit 1
+test_turn_ended_churn_existing_marker_absorbed || exit 1
+test_turn_ended_still_pane_surfaced || exit 1
+test_turn_ended_malformed_prior_hash_surfaced || exit 1
+test_turn_ended_trailing_newline_prior_hash_surfaced || exit 1
+test_secondmate_turn_ended_churning_pane_surfaced || exit 1
+test_turn_ended_colliding_window_key_surfaced || exit 1
+test_turn_ended_duplicate_endpoint_records_surfaced || exit 1
+test_turn_ended_mixed_positive_evidence_batch_absorbed || exit 1
+test_turn_ended_mixed_positive_evidence_batch_default_off || exit 1
+test_status_and_turn_end_batch_never_uses_churn_evidence || exit 1
+test_turn_ended_churn_absorb_off_by_default || exit 1
+test_turn_ended_churn_absorb_bounded || exit 1
+test_turn_ended_churn_timer_write_failure_surfaced || exit 1
+test_turn_ended_invalid_churn_bound_surfaced || exit 1
+test_turn_ended_oversized_churn_bound_surfaced || exit 1
+test_turn_ended_invalid_churn_deadline_surfaced || exit 1
+test_turn_ended_surfaced_batch_opens_no_partial_deadline || exit 1
+test_working_note_not_working_surfaced || exit 1
+test_secondmate_status_note_surfaced_despite_busy_agent || exit 1
+test_secondmate_routine_progress_absorbed_then_note_surfaced || exit 1
+test_secondmate_buried_block_wakes_despite_busy_agent || exit 1
+test_self_announced_close_does_not_rewake_but_next_note_does || exit 1
+test_self_announced_close_after_open_decisions_fold_does_not_rewake || exit 1
+test_folded_worker_decision_without_home_append_still_wakes || exit 1
+test_separate_self_announced_answers_after_fold_wake_once || exit 1
+test_self_announced_close_after_fold_still_surfaces_folded_worker_failure || exit 1
+test_self_announced_close_after_fold_still_surfaces_folded_secondmate_lines || exit 1
+test_actionable_signal_surfaced || exit 1
+test_needs_decision_signal_payload_marked_for_branch_exclusion || exit 1
+test_needs_decision_reconciliation_required_still_marked || exit 1
+test_captain_held_signal_payload_marked_for_branch_exclusion || exit 1
+test_pending_reply_escalation_signal_payload_marked_for_branch_exclusion || exit 1
+test_ordinary_blocked_signal_payload_remains_branch_eligible || exit 1
+test_routine_signal_payload_not_marked_needs_decision || exit 1
+test_actionable_signal_survives_a_later_routine_append || exit 1
+test_keyed_decision_signal_reads_only_the_new_span || exit 1
+test_release_completion_survives_a_later_routine_append || exit 1
+test_routine_appends_after_a_classified_event_stay_absorbed || exit 1
+test_unreadable_status_reports_once_per_file_state || exit 1
+test_permission_recovery_surfaces_preserved_status || exit 1
+test_terminal_stale_surfaced || exit 1
+test_stale_terminal_status_overridden_by_active_run || exit 1
+test_nonterminal_stale_provably_working_absorbed_then_escalated || exit 1
+test_wedge_escalation_marks_demand_deep_inspection_after_threshold || exit 1
+test_wedge_escalation_resets_when_pane_becomes_active || exit 1
+test_gone_endpoint_reports_once_instead_of_escalating_forever || exit 1
+test_live_and_unproven_endpoints_still_wedge_escalate || exit 1
+test_gone_report_rearms_when_the_endpoint_comes_back || exit 1
+test_second_death_after_a_same_window_relaunch_reports_in_full || exit 1
+test_identical_dead_display_of_a_successor_still_reports || exit 1
+test_term_stops_a_watcher_blocked_inside_a_poll || exit 1
+test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held || exit 1
+test_cleanup_marker_lock_bound_is_decimal_with_zero_default || exit 1
+test_busy_pane_below_turn_age_bound_is_absorbed || exit 1
+test_busy_pane_stable_hash_escalates_past_turn_age_bound || exit 1
+test_busy_pane_changing_hash_escalates_past_turn_age_bound || exit 1
+test_busy_pane_turn_end_touch_resets_age || exit 1
+test_busy_pane_native_progress_resets_age || exit 1
+test_busy_pane_repeated_escalation_reaches_demand_deep_inspection || exit 1
+test_busy_pane_default_turn_age_bound_is_3600s || exit 1
+test_busy_declared_pause_is_rechecked_not_wedge_escalated || exit 1
+test_afk_busy_declared_pause_hands_off_plain_stale || exit 1
+test_afk_busy_declared_pause_ticking_pane_hands_off_once || exit 1
+test_nonterminal_stale_not_working_surfaced || exit 1
+test_nonterminal_stale_paused_absorbed_then_resurfaced || exit 1
+test_exited_declared_pause_is_bounded_but_live_gate_surfaces || exit 1
+test_own_work_wait_keeps_first_alert_then_long_cadence || exit 1
+test_absorbed_replacement_wait_does_not_inherit_the_old_throttle || exit 1
+test_live_declared_wait_churn_honors_the_resurface_throttle || exit 1
+test_live_paused_until_controls_recheck_time || exit 1
+test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict || exit 1
+test_wedge_threshold_keeps_a_wait_past_a_default_key_answer || exit 1
+test_wedge_threshold_recheck_names_the_captain_for_a_held_lane || exit 1
+test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human || exit 1
+test_wedge_threshold_parked_gate_needs_an_unanswered_decision || exit 1
+test_wedge_threshold_parked_gate_is_off_until_armed || exit 1
+test_wedge_defer_refuses_a_half_filled_wait_record || exit 1
+test_open_captain_call_bounds_stale_churn || exit 1
+test_stale_churn_without_a_captain_call_still_alarms || exit 1
+test_failed_wake_append_does_not_arm_the_captain_hold_throttle || exit 1
+test_reheld_captain_call_starts_its_own_resurface_window || exit 1
+test_secondmate_paused_resurfaces_in_normal_mode || exit 1
+test_secondmate_captain_held_resurfaces_in_normal_mode || exit 1
+test_secondmate_nonpaused_stale_remains_suppressed || exit 1
+test_secondmate_unpause_clears_pause_tracking || exit 1
+test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash || exit 1
+test_nonterminal_paused_rechecks_authoritative_state || exit 1
+test_paused_authoritative_working_preserves_wedge_timer || exit 1
+test_nonterminal_stale_repairs_missing_or_corrupt_timer || exit 1
+test_wedge_escalation_deferred_while_worktree_is_written || exit 1
+test_write_deferral_resurfaces_on_the_bounded_cadence || exit 1
+test_secondmate_home_supervision_churn_is_not_write_evidence || exit 1
+test_timer_repair_drops_a_finished_write_deferral_chain || exit 1
+test_terminal_first_sight_drops_a_finished_write_deferral_chain || exit 1
+test_triage_log_size_cap_accepts_spaced_wc_counts || exit 1
+test_procevent_captured_result_surfaces_proactively || exit 1
+test_procevent_unacknowledged_result_redrains_until_handled || exit 1
+test_procevent_marker_keys_are_injective || exit 1
+test_procevent_headlines_classify_queue_keys || exit 1
+test_procevent_launch_failed_episodes_are_each_delivered || exit 1
+test_procevent_surface_serializes_with_drain || exit 1
+test_procevent_surface_crash_boundaries || exit 1
+test_procevent_marker_failure_exits_and_replays || exit 1
+test_heartbeat_no_change_absorbed || exit 1
+test_heartbeat_backstop_surfaces_unsurfaced_status || exit 1
+test_heartbeat_backstop_surfaces_a_masked_status || exit 1
+test_beacon_stays_fresh_while_absorbing || exit 1
+test_afk_signal_records_heartbeat_endpoint || exit 1
+test_afk_present_reverts_watcher_to_one_shot || exit 1
+test_afk_paused_changed_pane_hands_off_plain_stale || exit 1
+test_captain_held_never_rechecked_while_away_record_exists || exit 1
+test_live_captain_held_first_sight_silenced_by_away_record || exit 1
+test_backlog_hold_never_rechecked_while_away_record_exists || exit 1
+test_afk_one_shot_never_hands_off_captain_held_under_away_record || exit 1
+test_captain_held_rechecked_under_a_quiet_record || exit 1
+test_paused_until_near_future_is_quiet_before_the_cadence || exit 1
+test_paused_until_wrong_year_is_bounded_by_the_cadence || exit 1
+test_paused_until_that_passed_is_rechecked_before_the_cadence || exit 1
+
+test_due_review_preserves_external_prerequisite || exit 1
+
+test_due_review_scan_bounds_and_failures || exit 1
+
+test_due_review_blocker_precedes_date || exit 1
+test_due_review_only_home_needs_monitoring || exit 1
+
+test_due_review_unsupported_backend_stays_idle || exit 1
+test_due_review_monitoring_lock_is_bounded || exit 1

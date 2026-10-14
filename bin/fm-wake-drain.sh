@@ -914,6 +914,15 @@ if [ -n "$ACK_THROUGH" ]; then
       exit 1
     }
   fi
+  if [ "$ACTOR" = branch ]; then
+    receipt_rows=$ELIGIBLE_ROWS_FILE
+  else
+    receipt_rows=$MAIN_ROWS_FILE
+  fi
+  fm_wake_commit_due_review_receipts_through "$ACK_THROUGH" "$receipt_rows" || {
+    echo "wake drain: due-review receipt could not be recorded safely" >&2
+    exit 1
+  }
   ACK_REMOVED=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$DRAIN_TMP") ))
   if [ ! -s "$DRAIN_TMP" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"

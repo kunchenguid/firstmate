@@ -1152,6 +1152,29 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# The date observer needs the canonical classification without collecting any
+# worker or remote-home observations.
+test_backlog_only_projection() {
+  local home full backlog out fakebin
+  home=$(make_home backlog-only)
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] review - Review wait blocked-by: missing (hold: Review progress) (hold-kind: captain) (hold-until: 2026-08-01)
+
+## Done
+EOF
+  full=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-01T12:00:00Z "$SNAPSHOT" --json) || fail "full snapshot failed"
+  backlog=$(printf '%s' "$full" | jq -Sc .backlog)
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-01T12:00:00Z "$SNAPSHOT" --backlog-json) || fail "backlog projection failed"
+  [ "$(printf '%s' "$out" | jq -Sc .)" = "$backlog" ] || fail "backlog-only projection differs from canonical snapshot"
+  printf '%s' "$out" | jq -e '.records[0].hold_bucket == "blocked" and .records[0].unresolved_blocker_ids == ["missing"]' >/dev/null \
+    || fail "backlog-only projection changed missing-blocker semantics"
+  pass "backlog-only output reuses canonical blocked-before-dated classification"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1170,3 +1193,5 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+
+test_backlog_only_projection
