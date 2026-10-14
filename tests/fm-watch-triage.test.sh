@@ -6647,6 +6647,13 @@ test_paused_bg_job_without_until_stays_silent_after_the_job_ends() {
 
 test_paused_bg_job_until_timeout_rechecks_after_the_job_ends() {
   local dir state started
+  started=$(date +%s)
+  dir=$(bg_job_paused_case bg-job-until-running \
+    "paused [key=nightly-build] [at=$started]: nightly build (background job, 600s timeout); resume when it ends, until $(iso_utc_at "$(( started + 600 ))")")
+  state="$dir/state"
+  parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked absorb \
+    || fail "a worker paused on its running background job woke before the job's timeout"
+  [ "$(bg_job_stale_wakes "$state")" -eq 0 ] || fail "the running job surfaced before its timeout"
   started=$(( $(date +%s) - 180 ))
   dir=$(bg_job_paused_case bg-job-until \
     "paused [key=nightly-build] [at=$started]: nightly build (background job, 120s timeout); resume when it ends, until $(iso_utc_at "$(( started + 120 ))")")
@@ -6657,6 +6664,10 @@ test_paused_bg_job_until_timeout_rechecks_after_the_job_ends() {
   [ "$(bg_job_stale_wakes "$state")" -eq 1 ] || fail "the passed timeout queued the wrong number of rechecks"
   awk -F '\t' '$3 == "stale" && $5 == "stale: test:fm-parked" { found = 1 } END { exit !found }' \
     "$state/.wake-queue" || fail "the recheck carried an unexpected reason: $(cat "$state/.wake-queue")"
+  case "$(cat "$state/.paused-resurfaced-test_fm-parked" 2>/dev/null)" in
+    *:due) ;;
+    *) fail "the recheck was not recorded as the passed declared time" ;;
+  esac
   ack_stopped_cycle "$state" || fail "could not acknowledge the due recheck"
   printf '[bg failed] nightly build - Exited with code 1 (idle)' > "$dir/pane.txt"
   parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked absorb \
