@@ -927,6 +927,7 @@ ok - opencode mid-turn absolute cwd rail on a 300-column pane reads empty
 ok - opencode idle absolute cwd rail on a 300-column pane reads empty
 not ok - mid-turn absolute cwd rail read 'pending', want empty
 ```
+
 The cursorless backends still defer: on a cursorless read (Herdr and Zellij) a full-pane capture of this version answers `unknown` because the status rail below the composer floor row is contiguous non-blank content the selector refuses to outrank, which is the strict posture and not this defect; and very narrow panes where the cwd rail starts in the left half of the row defer the same way.
 
 ## Steering-inbox doorbell
