@@ -807,6 +807,10 @@ test_view_renders_snapshot() {
     "view should show secondmate endpoint agent liveness"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
+  assert_contains "$view" "## Follow-through" "view should list every live task's follow-through"
+  assert_contains "$view" "| cmux-task | cmux-task | executing |" "view should name the worker as owner of an executing task"
+  assert_contains "$view" "| ship-task | firstmate | waiting-firstmate |" "view should show a finished task as waiting on firstmate"
+  assert_not_contains "$view" "| secondmate-task | secondmate-task |" "view should not set a checkpoint for an idle-by-design secondmate"
   pass "fleet view renders the snapshot without secondmate peek guidance"
 }
 

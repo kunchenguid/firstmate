@@ -1,6 +1,6 @@
 ---
 name: action-followthrough
-description: Load when recording the next action of a task at intake, when an action incident (ready-but-unstarted, acknowledged-but-unexecuted, over-grant, overdue gate) is reported, and before treating a steered or dispatched action as done.
+description: Load when recording the next action of a task at intake, when an action incident (ready-but-unstarted, acknowledged-but-unexecuted, over-grant, overdue gate, checkpoint-missed) or its triage or escalation wake is reported, when asked which live tasks have an owner, progress and next checkpoint, and before treating a steered or dispatched action as done.
 user-invocable: false
 metadata:
   internal: true
@@ -26,6 +26,7 @@ The `--inbox` field links a steering record, whose move to `handled/` counts as 
 ## Evidence required
 
 - `start` is recorded by the code that natively begins the action, never by the request that asked for it.
+  For an ordinary steer with no native owner, the watcher poll records `source=observed:status` or `observed:head` only from worker-originated evidence that postdates the admit; the inbox acknowledgement is never that evidence, and lifecycle operations are never observed.
 - `result` is `ok`, `refused` with a concrete reason, `failed` with a concrete reason, or `answered` for a gate.
 - `accept` requires the canonical native receipt matching the task, action, head, run and attempt bound at admission, with the resulting generation recorded by a native relaunch transition.
   Native results retain the admitted head even if the worker commits while the operation finishes; acceptance checks current evidence freshness separately.
@@ -45,8 +46,21 @@ For a parent-route incident, use its emitted ledger directory as `FM_STATE_OVERR
 - `over-grant`: stop spending units and report the overrun; do not continue under the old grant.
 - `result-unconsumed`: consume or report the returned validation call before doing further work.
 - `gate-overdue`: surface the pending question to its owner while the independent ready actions keep running.
+- `checkpoint-missed`: the task's worker owns it and no progress evidence (ledger event, stamped status line, head commit, observed running pipeline, or `fm-action.sh progress`) landed within `FM_ACTION_CHECKPOINT_SECS` (3600).
 A started action is never interrupted to meet a timing target.
-The existing teardown owner retires action ledgers, receipts, incident markers and queued incidents along with the task.
+`fm-action.sh register [<task>]` lists every live non-secondmate task with owner, last progress and its source, next checkpoint, verdict and evidence; only a worker-owned task can be missed, and tasks waiting on firstmate or in a declared wait stay with the existing decision and wait paths.
+
+## Escalation ladder
+
+An incident is reported once, then advances one bounded stage at a time and never repeats an unchanged report: report, then triage after `FM_ACTION_TRIAGE_SECS` (600), then authority escalation after `FM_ACTION_ESCALATE_SECS` (1800) once a triage window has passed.
+Each stage is one durable wake; the triage wake names the owner state from native process and pane-staleness evidence, not from the model, so it holds when the model route is unavailable:
+- `owner-down`: recover with `stuck-crewmate-recovery`, then `fm-control.sh <task> relaunch`.
+- `owner-idle`: inspect it, and relaunch on an available profile (`quota-array-dispatch`) when a model usage or capacity limit stopped it.
+- `owner-active`: no progress evidence yet, so ask for status or record a finite hold.
+The triage is a ledger action `triage-<id>-<epoch>` owned by the triage owner (`FM_ACTION_TRIAGE_OWNER`, default firstmate).
+Its wake acknowledgement is only delivery; record `fm-action.sh start`, then close it with `result ... ok` only once the incident is gone (the command refuses otherwise, so renew a genuine checkpoint first with `fm-action.sh progress --reason` naming what was seen).
+A refused or failed triage escalates at once, and the escalation is a concrete authority decision rather than another reminder.
+The existing teardown owner retires action ledgers, receipts, progress notes, incident markers and queued incidents along with the task.
 
 ## Consume validation returns
 
@@ -65,3 +79,4 @@ An acknowledgement alone never clears an execution incident; a returned validati
 
 Branch wiring and live adoption are distinct.
 Live adoption is PENDING on the scheduler correction in [PR #7234](https://github.com/kunchenguid/firstmate/pull/7234); this change adds no daemon, timer or process-event source.
+The poll that detects a missed checkpoint is the watcher's own, so a stale watcher cannot report itself: model-independent scheduler-health detection stays with that correction.

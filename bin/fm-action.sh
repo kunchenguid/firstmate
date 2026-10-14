@@ -29,6 +29,20 @@
 #       A legitimate wait; it must carry a finite deadline.
 #   show <task> [--now EPOCH]        every action, one tab-separated line each
 #   incidents <task> [--now EPOCH]   only the lines the fold reports as incidents
+#   register [<task>] [--now EPOCH]  one line per live non-secondmate task (all
+#       when no task is given), from files alone: task, owner, state, last
+#       progress epoch, its source, next checkpoint epoch, verdict (ok or MISSED)
+#       and evidence. FM_ACTION_CHECKPOINT_SECS (3600) bounds the checkpoint.
+#       Only a task its worker owns can be MISSED; tasks waiting on firstmate
+#       or in a declared wait are listed with their owner and never missed here.
+#   progress <task> --reason TEXT [--at EPOCH]
+#       A supervisor's inspected observation that the worker is genuinely
+#       progressing; renews the task's checkpoint with source supervisor:TEXT.
+#       It is evidence the supervisor saw, so name what was seen.
+#   An ordinary steer's start is recorded by the watcher poll as
+#   source=observed:status|head from worker-originated evidence, never from the
+#   inbox acknowledgement. A `triage-*` action opened by the escalation ladder
+#   accepts `result ... ok` only once its incident is gone.
 #
 # Reads never write. Nothing here interrupts, restarts, answers a captain hold,
 # or closes a task; fm-watch routes incidents through its existing check queue.
@@ -47,6 +61,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-action-lib.sh
 . "$SCRIPT_DIR/fm-action-lib.sh"
 
@@ -68,6 +84,30 @@ epoch_valid() {  # <value>
 if [ "${1:-}" = probe ]; then
   [ $# -eq 2 ] || usage
   fm_action_probe_evidence "$2"
+  exit 0
+fi
+if [ "${1:-}" = register ]; then
+  shift
+  REG_TASK='' REG_NOW=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --now) REG_NOW=${2:-}; shift 2 || usage ;;
+      --*) die "unknown option: $1" ;;
+      *) [ -z "$REG_TASK" ] || die "unexpected argument: $1"; REG_TASK=$1; shift ;;
+    esac
+  done
+  [ -n "$REG_NOW" ] || REG_NOW=$(date +%s)
+  epoch_valid "$REG_NOW" || die "--now must be epoch seconds"
+  if [ -n "$REG_TASK" ]; then
+    fm_pr_task_id_valid "$REG_TASK" || die "invalid task id: $REG_TASK"
+    fm_action_register "$STATE" "$REG_TASK" "$REG_NOW"
+  else
+    for REG_META in "$STATE"/*.meta; do
+      [ -f "$REG_META" ] || continue
+      REG_TASK=${REG_META##*/}; REG_TASK=${REG_TASK%.meta}
+      fm_action_register "$STATE" "$REG_TASK" "$REG_NOW"
+    done
+  fi
   exit 0
 fi
 [ $# -ge 2 ] || usage
@@ -177,6 +217,10 @@ case "$CMD" in
     FIELDS=("outcome=$POSITIONAL2")
     [ -z "$REASON" ] || FIELDS+=("reason=$(fm_action_clean "$REASON")")
     [ "$POSITIONAL2" != refused ] && [ "$POSITIONAL2" != failed ] || [ -n "$REASON" ] || die "a refusal or failure needs a concrete --reason"
+    case "$POSITIONAL" in
+      triage-*) [ "$POSITIONAL2" != ok ] || fm_action_triage_verified "$STATE" "$TASK" "$POSITIONAL" "$AT" \
+        || die "triage result not verified: the incident it targets is still present" ;;
+    esac
     fm_action_append "$STATE" "$TASK" "$AT" "$POSITIONAL" result "${FIELDS[@]}"
     ;;
   accept)
@@ -193,6 +237,11 @@ case "$CMD" in
     epoch_valid "$UNTIL" || die "a hold needs a finite --until deadline (epoch seconds)"
     [ -n "$REASON" ] || die "--reason is required"
     fm_action_append "$STATE" "$TASK" "$AT" "$POSITIONAL" hold "kind=$KIND" "until=$UNTIL" "reason=$(fm_action_clean "$REASON")"
+    ;;
+  progress)
+    [ -n "$REASON" ] || die "--reason is required: name the progress that was inspected"
+    [ -f "$STATE/$TASK.meta" ] || die "unknown live task $TASK"
+    fm_action_note_progress "$STATE" "$TASK" "$AT" "supervisor:$REASON"
     ;;
   show)
     fm_action_fold "$STATE" "$TASK" "$NOW"

@@ -51,17 +51,50 @@
 # live hold suppresses only until its finite deadline. The fold never writes,
 # closes, answers, interrupts or restarts anything; routing an incident to its
 # owner is bin/fm-watch.sh's job, through its existing durable check queue.
+#
+# OBSERVED START. An ordinary steer has no native execution owner, so the
+# watcher poll calls fm_action_observe, the ONLY writer of a start it did not
+# witness itself: it records `start` with source=observed:<kind> when
+# model-independent worker-originated evidence postdates the admit - a status
+# line the worker stamped later, or a worktree head that moved. An inbox
+# acknowledgement is never such evidence. Native lifecycle operations
+# (exit|relaunch|interrupt) are never observed; only their owner records them.
+#
+# REGISTER. fm_action_register answers, for one live task and from files alone:
+# owner, last observed progress with its source, next checkpoint and verdict.
+# The last progress is the newest of ledger start/result/consume events, the
+# worker's own stamped status line, the worktree head commit time, an observed
+# note (state/<task>.progress, written by the watcher from a provably running
+# pipeline), and the task record itself. A task the worker owns that passes its
+# checkpoint without progress is the `checkpoint-missed` incident; a task
+# waiting on firstmate or a declared wait is listed with its owner and never an
+# incident here, because the existing decision and wait paths own those.
+#
+# LADDER. A reported incident advances through bounded stages in the watcher,
+# each emitted once: 0 report, 1 triage (a ledger action `triage-<id>` owned by
+# the triage owner, ACKed by the wake acknowledgement and closed only by a
+# verified result), 2 authority escalation. See fm_action_stage.
 set -u
 
 # shellcheck source=bin/fm-operational-input.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-operational-input.sh"
 
 FM_ACTION_START_SECS_DEFAULT=300
+FM_ACTION_CHECKPOINT_SECS_DEFAULT=3600
+FM_ACTION_TRIAGE_SECS_DEFAULT=600
+FM_ACTION_ESCALATE_SECS_DEFAULT=1800
 
 fm_action_start_secs() {
   local s=${FM_ACTION_START_SECS:-$FM_ACTION_START_SECS_DEFAULT}
   case "$s" in ''|*[!0-9]*) s=$FM_ACTION_START_SECS_DEFAULT ;; esac
   printf '%s' "$s"
+}
+
+fm_action_bound() {  # <env-name> <default> -> positive integer seconds
+  local v=${!1:-}
+  case "$v" in ''|*[!0-9]*) v=$2 ;; esac
+  [ "$v" -gt 0 ] 2>/dev/null || v=$2
+  printf '%s' "$v"
 }
 
 fm_action_ledger() {  # <state-dir> <task-id>
@@ -315,13 +348,179 @@ fm_action_verify_receipt() {
      END {exit !(NR==1 && valid==1)}' "$path"
 }
 
+fm_action_meta() {  # <state-dir> <task-id> <key>
+  awk -F= -v key="$3" '$1 == key { print substr($0, length(key) + 2); exit }' "$1/$2.meta" 2>/dev/null || true
+}
+
+# Newest worker-stamped `[at=<epoch>]` in the task's status log, else empty.
+fm_action_status_epoch() {  # <state-dir> <task-id>
+  awk 'match($0, /\[at=[0-9]+\]/) { e = substr($0, RSTART + 4, RLENGTH - 5) + 0; if (e > m) m = e }
+       END { if (m) print m }' "$1/$2.status" 2>/dev/null || true
+}
+
+fm_action_status_verb() {  # <state-dir> <task-id>
+  awk 'NF { v = $1 } END { sub(/:$/, "", v); print v }' "$1/$2.status" 2>/dev/null || true
+}
+
+# Commit time of the worktree head, else empty.
+fm_action_head_epoch() {  # <state-dir> <task-id>
+  local wt
+  wt=$(fm_action_meta "$1" "$2" worktree)
+  [ -n "$wt" ] || return 0
+  git -C "$wt" log -1 --format=%ct 2>/dev/null || true
+}
+
+fm_action_lifecycle_operation() {  # <operation>
+  case "$1" in exit|relaunch|interrupt) return 0 ;; esac
+  return 1
+}
+
+# Record a start for queued/acked steered actions that model-independent
+# worker-originated evidence postdates. The one writer of an observed start.
+fm_action_observe() {  # <state-dir> <task-id> <now-epoch>
+  local state=$1 task=$2 now=$3 id class phase incident age owner due operation at0 source head status_at wt_head kind
+  [ -f "$(fm_action_ledger "$state" "$task")" ] || return 0
+  status_at=$(fm_action_status_epoch "$state" "$task")
+  wt_head=$(git -C "$(fm_action_meta "$state" "$task" worktree)" rev-parse HEAD 2>/dev/null) || wt_head=
+  while IFS=$'\t' read -r id class phase incident age owner due operation; do
+    [ "$class" = authorized ] || continue
+    case "$phase" in queued|acked) ;; *) continue ;; esac
+    source=$(fm_action_field "$state" "$task" "$id" source)
+    case "$source" in firstmate-steer:*) ;; *) continue ;; esac
+    ! fm_action_lifecycle_operation "$operation" || continue
+    at0=$((now - age))
+    head=$(fm_action_field "$state" "$task" "$id" head)
+    kind=
+    if [ -n "$status_at" ] && [ "$status_at" -gt "$at0" ]; then kind=status
+    elif [ -n "$head" ] && [ -n "$wt_head" ] && [ "$head" != "$wt_head" ]; then kind='head'
+    fi
+    [ -n "$kind" ] || continue
+    fm_action_append "$state" "$task" "$now" "$id" start "source=observed:$kind"
+  done < <(fm_action_fold "$state" "$task" "$now")
+}
+
+# Watcher-observed progress that no file in the task's own record shows, such as
+# a provably running pipeline. One line: <epoch> <source>.
+fm_action_note_progress() {  # <state-dir> <task-id> <epoch> <source>
+  local f=$1/$2.progress tmp
+  tmp=$(mktemp "$1/.progress.XXXXXX") || return 1
+  if ! { printf '%s\t%s\n' "$3" "$(fm_action_clean "$4")" > "$tmp" && mv "$tmp" "$f"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# Newest progress evidence for a task: "<epoch>\t<source>". Always prints a line;
+# the task record itself is the floor so a fresh task is not instantly missed.
+fm_action_task_progress() {  # <state-dir> <task-id>
+  local state=$1 task=$2 best=0 src=none e ledger
+  _fm_action_progress_pick() {  # <epoch> <source>
+    case "$1" in ''|*[!0-9]*) return 0 ;; esac
+    if [ "$1" -gt "$best" ]; then best=$1; src=$2; fi
+  }
+  if declare -F fm_path_mtime >/dev/null 2>&1 && [ -f "$state/$task.meta" ]; then
+    _fm_action_progress_pick "$(fm_path_mtime "$state/$task.meta")" task-record
+  fi
+  _fm_action_progress_pick "$(fm_action_status_epoch "$state" "$task")" status
+  _fm_action_progress_pick "$(fm_action_head_epoch "$state" "$task")" head-commit
+  e=$(awk -F'\t' 'NF >= 2 { print $1 }' "$state/$task.progress" 2>/dev/null | tail -1 || true)
+  _fm_action_progress_pick "$e" "$(awk -F'\t' 'NR==1 { print $2 }' "$state/$task.progress" 2>/dev/null || true)"
+  ledger=$(fm_action_ledger "$state" "$task")
+  if [ -f "$ledger" ]; then
+    e=$(awk -F'\t' '$1 == "v1" && ($4 == "start" || $4 == "result" || $4 == "consume") && $3 !~ /^triage-/ { if ($2 + 0 > m) m = $2 + 0 } END { if (m) print m }' "$ledger")
+    _fm_action_progress_pick "$e" ledger
+  fi
+  printf '%s\t%s\n' "$best" "$src"
+}
+
+# One register line for a live non-secondmate task:
+#   <task> <owner> <state> <last-progress> <source> <next-checkpoint> <verdict> <evidence>
+# state: executing | waiting-firstmate | declared-wait. Only an executing task
+# can be MISSED; the others are listed so every active item shows an owner.
+fm_action_register() {  # <state-dir> <task-id> <now-epoch>
+  local state=$1 task=$2 now=$3 verb last src owner st next verdict=ok kind open
+  [ -f "$state/$task.meta" ] || return 0
+  kind=$(fm_action_meta "$state" "$task" kind)
+  [ "$kind" != secondmate ] || return 0
+  [ -z "$(fm_action_meta "$state" "$task" remote_host)" ] || return 0
+  IFS=$'\t' read -r last src < <(fm_action_task_progress "$state" "$task")
+  verb=$(fm_action_status_verb "$state" "$task")
+  case "$verb" in
+    done|blocked|needs-decision|failed) owner=firstmate; st=waiting-firstmate ;;
+    paused|captain-held) owner=declared-wait; st=declared-wait ;;
+    *) owner=$task; st=executing ;;
+  esac
+  next=$((last + $(fm_action_bound FM_ACTION_CHECKPOINT_SECS "$FM_ACTION_CHECKPOINT_SECS_DEFAULT")))
+  if [ "$st" = executing ] && [ "$now" -gt "$next" ]; then verdict=MISSED; fi
+  # A decision the log still holds open outranks later events in fm-crew-state,
+  # so show it beside the latest verb instead of silently choosing between them.
+  open=
+  if declare -F status_open_decisions >/dev/null 2>&1; then
+    open=$(status_open_decisions "$state/$task.status" "$kind" 2>/dev/null | awk -F'\t' 'NR == 1 && $2 != "" { print " open-decision=" $2 ":" $1 }' || true)
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$task" "$owner" "$st" "$last" "$src" "$next" "$verdict" "status=${verb:-none} source=$src$open"
+}
+
+# Fold-shaped incident line for a MISSED register verdict, else nothing.
+fm_action_checkpoint_incident() {  # <state-dir> <task-id> <now-epoch>
+  local t owner st last src next verdict evidence
+  IFS=$'\t' read -r t owner st last src next verdict evidence < <(fm_action_register "$@")
+  [ "${verdict:-}" = MISSED ] || return 0
+  printf 'checkpoint\tcheckpoint\t%s\tcheckpoint-missed\t%d\t%s\t%s\t%s\n' \
+    "$st" "$(( $3 - last ))" "$owner" "$next" "no progress since $last ($evidence)"
+}
+
+# Ladder stage for an incident first reported at <first-epoch>:
+# 0 report, 1 triage, 2 authority escalation.
+fm_action_stage() {  # <first-epoch> <now-epoch>
+  local age=$(( $2 - $1 ))
+  if [ "$age" -ge "$(fm_action_bound FM_ACTION_ESCALATE_SECS "$FM_ACTION_ESCALATE_SECS_DEFAULT")" ]; then echo 2
+  elif [ "$age" -ge "$(fm_action_bound FM_ACTION_TRIAGE_SECS "$FM_ACTION_TRIAGE_SECS_DEFAULT")" ]; then echo 1
+  else echo 0; fi
+}
+
+# Admit the triage action for one incident episode (idempotent). The triage
+# owner starts it and closes it with a result; `fm-action.sh result` verifies an ok.
+fm_action_admit_triage() {  # <state-dir> <task-id> <triage-id> <target-id> <incident> <owner> <now> <operation-text>
+  local state=$1 task=$2 id=$3 target=$4 incident=$5 owner=$6 now=$7 text=$8
+  fm_action_exists "$state" "$task" "$id" && return 0
+  fm_action_append "$state" "$task" "$now" "$id" admit class=authorized "owner=$owner" \
+    "operation=$(fm_action_clean "$text")" "source=native:triage:$target:$incident" \
+    "target=$target" "incident=$incident" "due=$((now + $(fm_action_start_secs)))" units=1 \
+    head= run= attempt=
+}
+
+# Verdict of a triage action: resolved | refused | open.
+fm_action_triage_state() {  # <state-dir> <task-id> <triage-id>
+  local ledger
+  ledger=$(fm_action_ledger "$1" "$2")
+  [ -f "$ledger" ] || { echo open; return 0; }
+  awk -F'\t' -v id="$3" '$3 == id && $4 == "result" {
+      o = ""; for (i = 5; i <= NF; i++) if (index($i, "outcome=") == 1) o = substr($i, 9)
+      r = (o == "ok" ? "resolved" : (o == "refused" || o == "failed" ? "refused" : r)) }
+    END { print (r == "" ? "open" : r) }' "$ledger"
+}
+
+# True when the target of a triage action no longer shows its incident now.
+fm_action_triage_verified() {  # <state-dir> <task-id> <triage-id> <now-epoch>
+  local target incident
+  target=$(fm_action_field "$1" "$2" "$3" target) || return 1
+  [ -n "$target" ] || return 1
+  incident=$(fm_action_field "$1" "$2" "$3" incident)
+  if [ "$target" = checkpoint ]; then
+    [ -z "$(fm_action_checkpoint_incident "$1" "$2" "$4")" ]
+  else
+    ! fm_action_incidents "$1" "$2" "$4" | awk -F'\t' -v id="$target" -v inc="$incident" '$1 == id && $4 == inc { f = 1 } END { exit !f }'
+  fi
+}
+
 fm_action_retire() {
   local state=$1 task=$2 target=${3:-} queue_state=$1 lock status=0
   [ -d "$state" ] || return 0
   case "$state" in */parent-route) queue_state=${state%/parent-route} ;; esac
   lock="$queue_state/.wake-queue.lock"
   fm_lock_acquire_wait "$lock" || return 1
-  rm -f "$state/$task.actions" "$state/.$task.action-incident-"* || status=1
+  rm -f "$state/$task.actions" "$state/$task.progress" "$state/.$task.checkpoint-checked" "$state/.$task.action-incident-"* || status=1
   rm -rf "$state/$task.action-receipts" || status=1
   if [ "$status" -eq 0 ]; then
     fm_wake_queue_prune_task_locked "$queue_state" "$task" "$target" "$state" || status=1

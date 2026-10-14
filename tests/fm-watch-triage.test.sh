@@ -4815,6 +4815,8 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   printf '1\n' > "$state/.count-$key"
   # No completed turn ever recorded for this task: age the spawn record itself.
   touch -t 200001010000 "$state/busy-stable.meta"
+  printf '%s\tfixture\n' "$(date +%s)" > "$state/busy-stable.progress"
+  touch -t 200001010000 "$state/busy-stable.progress"
 
   # Phase A: past the bound, the stable-hash busy pane is absorbed but starts
   # the wedge timer (mirrors the existing provably-working-stale Phase A/B).

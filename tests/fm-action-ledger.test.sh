@@ -240,7 +240,7 @@ case "$1" in
     done
     printf 'fakepane\n' ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
-  list-windows) printf 'fm-t1\n' ;;
+  list-windows) [ -n "${FM_TEST_NO_WINDOW:-}" ] || printf 'fm-t1\n' ;;
 esac
 SH
   chmod +x "$dir/fakebin/tmux"
@@ -428,6 +428,221 @@ test_validation_returns_are_consumed() {
   pass "respond and background drive returns require consumption within the finite bound"
 }
 
+# --- structure slice: progress, register, escalation ladder, triage ---------
+#
+# Drives the real caller chain: fm-send admission, the watcher poll
+# (action_followthrough_check), the durable wake queue, the real wake drain with
+# its acknowledgement, and the fm-action.sh CLI. The poll clock is injected;
+# the pane-staleness marker is the one the watcher's own pane loop writes.
+
+W0=1999990000  # worker-stamped progress; checkpoint bound 3600 => missed after 1999993600
+
+poll_at() {  # <dir> <now> [task] [agent-command]
+  local dir=$1 now=$2 task=${3:-t1} cmd=${4:-claude}
+  printf '%s' "$cmd" > "$dir/command"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_TEST_NOW="$now" FM_TEST_NO_WINDOW="${FM_TEST_NO_WINDOW:-}" FM_TEST_PROVABLY="${FM_TEST_PROVABLY:-0}" FM_TEST_COMMAND_FILE="$dir/command" bash -c '
+    . "$1/bin/fm-watch.sh"
+    date() { printf "%s\n" "$FM_TEST_NOW"; }
+    wake() { printf "%s\n" "$1"; }
+    crew_is_provably_working() { [ "$FM_TEST_PROVABLY" = 1 ]; }
+    action_followthrough_check "$2" "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT" "$task"
+}
+
+drain_ack() {  # <dir> -> prints the drained rows, then acknowledges them
+  local dir=$1 state="$1/home/state" seq gen
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2> "$dir/drain.err" || fail "wake drain failed: $(cat "$dir/drain.err")"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain.err")
+  gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+  [ -n "$seq" ] && [ -n "$gen" ] || fail "drain printed no acknowledgement command: $(cat "$dir/drain.err")"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$gen" \
+    > "$dir/ack.out" 2> "$dir/ack.err" || fail "wake acknowledgement failed: $(cat "$dir/ack.err")"
+  cat "$dir/drain.out"
+}
+
+stalled_case() {  # <name> -> a ship whose worker last reported at W0
+  local dir
+  dir=$(native_case "$1")
+  printf 'working [at=%s]: implementing\n' "$W0" > "$dir/home/state/t1.status"
+  printf '%s' "$dir"
+}
+
+test_register_lists_every_live_task_with_owner_and_checkpoint() {
+  local dir s out
+  dir=$(stalled_case register)
+  s="$dir/home/state"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register t1 --now $((W0 + 100)))
+  assert_equals "t1	t1	executing	$W0	status	$((W0 + 3600))	ok	status=working source=status" "$out" "an executing task shows owner, progress, checkpoint and evidence"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register t1 --now $((W0 + 3601)))
+  assert_contains "$out" "MISSED" "a worker-owned task past its checkpoint is missed"
+  printf 'blocked [at=%s]: need a decision\nworking [at=%s]: resumed without closing it\n' $((W0 + 50)) $((W0 + 55)) >> "$s/t1.status"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register t1 --now $((W0 + 100)))
+  assert_contains "$out" "open-decision=blocked:default" "a still-open blocker is shown beside the later working line instead of being silently chosen"
+  assert_contains "$out" "executing" "later worker progress keeps the latest verb as the owner"
+  printf 'blocked [at=%s]: need a decision\n' $((W0 + 60)) >> "$s/t1.status"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register t1 --now $((W0 + 99999)))
+  assert_contains "$out" "firstmate	waiting-firstmate" "a task waiting on firstmate lists firstmate as owner"
+  assert_not_contains "$out" "MISSED" "waiting work is left to the decision path, never missed here"
+  printf 'paused [at=%s]: ci running\n' $((W0 + 60)) >> "$s/t1.status"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register t1 --now $((W0 + 99999)))
+  assert_contains "$out" "declared-wait" "a declared wait is listed and never missed"
+  cp "$s/t1.meta" "$s/t2.meta"
+  awk '$0=="kind=ship" {print "kind=secondmate"; next} {print}' "$s/t1.meta" > "$s/t2.meta"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register --now $((W0 + 99999)))
+  assert_not_contains "$out" "t2" "an idle-by-design secondmate is not a checkpoint subject"
+  FM_STATE_OVERRIDE="$s" bash "$ACTION" progress t1 --reason "reviewed the worktree: tests are running" --at $((W0 + 99990)) || fail "supervisor progress"
+  out=$(FM_STATE_OVERRIDE="$s" bash "$ACTION" register t1 --now $((W0 + 99999)))
+  assert_contains "$out" "supervisor:reviewed the worktree" "an inspected observation renews the checkpoint with its evidence"
+  pass "the register gives every live task an owner, last progress, next checkpoint and evidence"
+}
+
+test_missed_checkpoint_climbs_the_bounded_ladder_once_per_stage() {
+  local dir s out n before
+  dir=$(stalled_case ladder)
+  s="$dir/home/state"
+  assert_equals "" "$(poll_at "$dir" $((W0 + 3000)))" "inside the checkpoint nothing is reported"
+  out=$(poll_at "$dir" $((W0 + 3700))) || fail "stage 0 poll"
+  assert_contains "$out" "action-followthrough t1 checkpoint checkpoint-missed" "a missed checkpoint is reported once"
+  before=$(wc -l < "$s/.wake-queue")
+  assert_equals "" "$(poll_at "$dir" $((W0 + 3800)))" "an unchanged incident is not repeated"
+  assert_equals "" "$(poll_at "$dir" $((W0 + 4200)))" "still inside the triage bound"
+  assert_equals "$before" "$(wc -l < "$s/.wake-queue")" "no unchanged report is queued"
+  out=$(poll_at "$dir" $((W0 + 4400))) || fail "stage 1 poll"
+  assert_contains "$out" "action-followthrough-triage t1 checkpoint checkpoint-missed" "the next stage is a bounded triage"
+  assert_contains "$out" "owner-state=owner-active" "triage names the owner's model-independent state"
+  assert_contains "$(act "$s" show t1)" "triage-checkpoint-" "the triage is a tracked action with its own owner"
+  assert_equals "" "$(poll_at "$dir" $((W0 + 4500)))" "triage window still open"
+  out=$(poll_at "$dir" $((W0 + 6000))) || fail "stage 2 poll"
+  assert_contains "$out" "action-followthrough-escalate t1 checkpoint checkpoint-missed" "an unresolved triage becomes an authority escalation"
+  assert_contains "$out" "authority decision needed" "the escalation names the decision, not a repeat"
+  n=$(wc -l < "$s/.wake-queue")
+  assert_equals "" "$(poll_at "$dir" $((W0 + 9000)))" "the ladder ends at escalation"
+  assert_equals "$n" "$(wc -l < "$s/.wake-queue")" "no repeated unchanged reports after escalation"
+  pass "a missed checkpoint climbs report, triage, escalation once each and then stops"
+}
+
+test_triage_delivery_ack_and_verified_result() {
+  local dir s out tid
+  dir=$(stalled_case triage-delivery)
+  s="$dir/home/state"
+  poll_at "$dir" $((W0 + 3700)) > /dev/null
+  poll_at "$dir" $((W0 + 4400)) > /dev/null
+  out=$(drain_ack "$dir")
+  assert_contains "$out" "action-followthrough-triage t1 checkpoint" "the triage owner receives the work through the real queue"
+  assert_equals "" "$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$s" bash "$ROOT/bin/fm-wake-drain.sh" 2> /dev/null | grep -F 'action-followthrough' || true)" "the acknowledged triage wake is not presented again"
+  tid=$(act "$s" show t1 | awk -F'\t' '$1 ~ /^triage-checkpoint-/ {print $1}')
+  [ -n "$tid" ] || fail "triage action missing"
+  act "$s" start t1 "$tid" --at $((W0 + 4500)) || fail "triage start"
+  if act "$s" result t1 "$tid" ok --reason "looked fine" --at $((W0 + 4600)) 2> "$dir/verify.err"; then
+    fail "a triage result with the incident still present must not be accepted"
+  fi
+  assert_contains "$(cat "$dir/verify.err")" "not verified" "an unverified result is refused with the reason"
+  act "$s" progress t1 --reason "pane shows the test suite running; commit follows" --at $((W0 + 4700)) || fail "progress"
+  act "$s" result t1 "$tid" ok --reason "worker confirmed progressing" --at $((W0 + 4800)) || fail "verified triage result"
+  assert_equals "" "$(poll_at "$dir" $((W0 + 4900)))" "the cleared incident does not escalate"
+  assert_contains "$(act "$s" show t1 --now $((W0 + 4900)))" "$tid	authorized	resulted" "the triage records a verified result"
+  pass "a triage reaches its owner through the real queue with an acknowledgement and a verified result"
+}
+
+test_refused_triage_escalates_immediately() {
+  local dir s tid out
+  dir=$(stalled_case triage-refused)
+  s="$dir/home/state"
+  poll_at "$dir" $((W0 + 3700)) > /dev/null
+  poll_at "$dir" $((W0 + 4400)) > /dev/null
+  tid=$(act "$s" show t1 | awk -F'\t' '$1 ~ /^triage-checkpoint-/ {print $1}')
+  act "$s" result t1 "$tid" refused --reason "no capacity to inspect" --at $((W0 + 4450)) || fail "refused triage"
+  out=$(poll_at "$dir" $((W0 + 4460)))
+  assert_contains "$out" "action-followthrough-escalate" "a concrete refusal escalates without waiting out the window"
+  pass "a refused triage becomes an authority escalation at once"
+}
+
+test_dead_and_idle_owner_are_classified_without_the_model() {
+  local dir s out
+  dir=$(stalled_case owner-down)
+  s="$dir/home/state"
+  poll_at "$dir" $((W0 + 3700)) t1 claude > /dev/null
+  out=$(FM_TEST_NO_WINDOW=1 poll_at "$dir" $((W0 + 4400)) t1 zsh)
+  assert_contains "$out" "owner-state=owner-down" "a missing endpoint is a dead owner"
+  assert_contains "$out" "stuck-crewmate-recovery" "a dead owner routes to recovery"
+  dir=$(stalled_case owner-idle)
+  s="$dir/home/state"
+  poll_at "$dir" $((W0 + 3700)) t1 claude > /dev/null
+  printf '3' > "$s/.count-sess_fm-t1"
+  out=$(poll_at "$dir" $((W0 + 4400)) t1 claude)
+  assert_contains "$out" "owner-state=owner-idle" "a static pane with no progress is an idle owner"
+  assert_contains "$out" "quota-array-dispatch" "an interrupted model route points at an available profile"
+  pass "a dead or capacity-idle owner is classified from native process state and staleness, never from the model"
+}
+
+test_pipeline_progress_clears_a_missed_checkpoint() {
+  local dir s out
+  dir=$(stalled_case pipeline-progress)
+  s="$dir/home/state"
+  out=$(FM_TEST_PROVABLY=1 poll_at "$dir" $((W0 + 3700)))
+  assert_equals "" "$out" "a provably running pipeline is progress, not a missed checkpoint"
+  assert_contains "$(cat "$s/t1.progress")" "run-step" "the observation is recorded with its source"
+  out=$(poll_at "$dir" $((W0 + 3800)))
+  assert_equals "" "$out" "the noted progress renews the checkpoint"
+  pass "an observed running pipeline renews the checkpoint instead of raising a false miss"
+}
+
+test_ordinary_steer_start_is_observed_not_assumed() {
+  local dir s out
+  dir=$(native_case observed-start)
+  s="$dir/home/state"
+  send_native "$dir" "prepare the second image" || fail "real send"
+  mv "$s/t1.inbox/001.msg" "$s/t1.inbox/handled/"
+  out=$(poll_at "$dir" 2000000000)
+  assert_contains "$out" "acked-unexecuted" "acknowledgement alone is not execution"
+  assert_not_contains "$(act "$s" show t1 --now 2000000000)" "started" "no start is recorded from the acknowledgement"
+  printf 'working [at=%s]: preparing the second image\n' 2000000100 >> "$s/t1.status"
+  assert_equals "" "$(poll_at "$dir" 2000000200)" "worker-originated progress satisfies the start bound"
+  assert_contains "$(act "$s" show t1 --now 2000000200)" "steer-001	authorized	started" "the start is recorded"
+  assert_contains "$(cat "$s/t1.actions")" "source=observed:status" "the start carries its observed evidence"
+  dir=$(native_case observed-head)
+  s="$dir/home/state"
+  send_native "$dir" "land the change" || fail "real send"
+  git -C "$dir/wt" -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m "worker change"
+  poll_at "$dir" 2000000000 > /dev/null
+  assert_contains "$(cat "$s/t1.actions")" "source=observed:head" "a moved worktree head is observed execution"
+  dir=$(native_case observed-lifecycle)
+  s="$dir/home/state"
+  send_native "$dir" exit || fail "real exit steer"
+  printf 'working [at=%s]: unrelated\n' 2000000100 >> "$s/t1.status"
+  poll_at "$dir" 2000000200 > /dev/null
+  assert_not_contains "$(cat "$s/t1.actions")" "observed:" "a lifecycle operation is never observed, only its native owner records it"
+  pass "an ordinary steer start comes from worker-originated evidence, never the acknowledgement"
+}
+
+test_restart_resumes_the_ladder_from_durable_records() {
+  local dir s out
+  dir=$(stalled_case restart)
+  s="$dir/home/state"
+  poll_at "$dir" $((W0 + 3700)) > /dev/null
+  rm -f "$s/.t1.checkpoint-checked"
+  out=$(poll_at "$dir" $((W0 + 3750)))
+  assert_equals "" "$out" "a fresh watcher process does not repeat a reported stage"
+  out=$(poll_at "$dir" $((W0 + 4400)))
+  assert_contains "$out" "action-followthrough-triage" "a fresh watcher process continues at the next stage"
+  pass "the ladder survives a watcher restart through its durable marker and ledger"
+}
+
+test_teardown_retires_progress_and_ladder_state() {
+  local dir s
+  dir=$(stalled_case retire)
+  s="$dir/home/state"
+  poll_at "$dir" $((W0 + 3700)) > /dev/null
+  act "$s" progress t1 --reason "seen working" --at $((W0 + 3710)) || fail "progress"
+  [ -f "$s/t1.progress" ] || fail "progress note missing"
+  bash -c '. "$1/bin/fm-action-lib.sh"; . "$1/bin/fm-wake-lib.sh"; fm_action_retire "$2" t1' _ "$ROOT" "$s" || fail "retire"
+  assert_absent "$s/t1.progress"
+  assert_absent "$s/.t1.checkpoint-checked"
+  assert_absent "$s/.t1.action-incident-checkpoint"
+  pass "retirement removes the progress note, checkpoint throttle and ladder marker"
+}
+
 test_ready_but_unstarted
 test_handled_but_unexecuted
 test_start_and_refusal_satisfy_the_bound
@@ -446,3 +661,13 @@ test_native_acceptance_identity
 test_internal_nudge_is_not_an_action
 test_control_result_keeps_admitted_head
 test_validation_returns_are_consumed
+
+test_register_lists_every_live_task_with_owner_and_checkpoint
+test_missed_checkpoint_climbs_the_bounded_ladder_once_per_stage
+test_triage_delivery_ack_and_verified_result
+test_refused_triage_escalates_immediately
+test_dead_and_idle_owner_are_classified_without_the_model
+test_pipeline_progress_clears_a_missed_checkpoint
+test_ordinary_steer_start_is_observed_not_assumed
+test_restart_resumes_the_ladder_from_durable_records
+test_teardown_retires_progress_and_ladder_state

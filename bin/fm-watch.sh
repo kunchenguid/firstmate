@@ -613,31 +613,127 @@ inbox_steer_check() {  # <window> <task>
   esac
 }
 
+# Model-independent owner liveness for an incident: the backend's own process
+# verdict plus the pane-staleness marker this poll already keeps. Never reads
+# pane text, so it holds when the model itself is unavailable or capacity-limited.
+action_owner_state() {  # <task> <action-state>
+  local w st key
+  w=$(fm_action_meta "$2" "$1" window)
+  [ -n "$w" ] || { echo owner-unknown; return 0; }
+  st=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null || true)
+  case "$st" in dead|missing) echo owner-down; return 0 ;; esac
+  key=$(window_key "$w")
+  if [ "$(cat "$STATE/.count-$key" 2>/dev/null || echo 0)" -ge 2 ]; then echo owner-idle; else echo owner-active; fi
+}
+
+# One incident through the bounded ladder in bin/fm-action-lib.sh: each stage is
+# one durable wake keyed by stage, so an unchanged incident is never repeated,
+# and the ladder advances one stage per poll so triage always gets its window.
+# Marker: <incident> TAB <first-reported-epoch> TAB <stage> TAB <stage-epoch>.
+action_followthrough_incident() {  # <task> <action-state> <id> <incident> <owner> <operation> <now>
+  local task=$1 action_state=$2 id=$3 incident=$4 owner=$5 operation=$6 now=$7
+  local marker="$action_state/.$task.action-incident-$id" mk_inc='' mk_first='' mk_stage='' mk_at='' stage key reason queued ostate triage tid
+  local triage_owner=${FM_ACTION_TRIAGE_OWNER:-firstmate} next
+  IFS=$'\t' read -r mk_inc mk_first mk_stage mk_at 2>/dev/null < "$marker" || true
+  if [ "$mk_inc" != "$incident" ]; then mk_first=$now; mk_stage=-1; mk_at=$now; fi
+  case "$mk_first" in ''|*[!0-9]*) mk_first=$now ;; esac
+  case "$mk_stage" in ''|*[!0-9-]*) mk_stage=0 ;; esac
+  case "$mk_at" in ''|*[!0-9]*) mk_at=$mk_first ;; esac
+  tid="triage-$id-$mk_first"
+  stage=$(fm_action_stage "$mk_first" "$now")
+  [ "$stage" -le $((mk_stage + 1)) ] || stage=$((mk_stage + 1))
+  triage=$(fm_action_triage_state "$action_state" "$task" "$tid")
+  if [ "$stage" -eq 2 ] && [ "$mk_stage" -lt 2 ] && [ "$triage" != refused ] \
+    && [ $((now - mk_at)) -lt "$(fm_action_bound FM_ACTION_TRIAGE_SECS "$FM_ACTION_TRIAGE_SECS_DEFAULT")" ]; then
+    return 0
+  fi
+  [ "$stage" -gt "$mk_stage" ] || { [ "$triage" = refused ] && [ "$mk_stage" -lt 2 ] && stage=2; } || return 0
+  ostate=$(action_owner_state "$task" "$action_state")
+  case "$ostate" in
+    owner-down) next="recover the dead owner (stuck-crewmate-recovery, then bin/fm-control.sh $task relaunch)" ;;
+    owner-idle) next="owner idle without progress: inspect it, and if a model usage or capacity limit stopped it relaunch on an available profile (quota-array-dispatch); otherwise steer it" ;;
+    *) next="owner has no progress evidence: ask for status, or record a finite hold with bin/fm-action.sh hold" ;;
+  esac
+  case "$stage" in
+    0)
+      key="action-followthrough:$action_state:$task:$id:$incident"
+      reason="check: action-followthrough $task $id $incident owner=$owner operation=$operation ledger=$action_state/$task.actions" ;;
+    1)
+      key="action-followthrough:$action_state:$task:$id:$incident:triage"
+      reason="check: action-followthrough-triage $task $id $incident owner-state=$ostate triage-owner=$triage_owner next: $next; record bin/fm-action.sh start $task $tid then result $task $tid ok|refused --reason TEXT (ok is accepted only once the incident is gone)" ;;
+    *)
+      key="action-followthrough:$action_state:$task:$id:$incident:escalate"
+      reason="check: action-followthrough-escalate $task $id $incident owner-state=$ostate triage=$triage: authority decision needed - $next, or stop the task; unresolved since $mk_first" ;;
+  esac
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if [ ! -f "$action_state/$task.actions" ] && { [ "$id" != checkpoint ] || [ ! -f "$action_state/$task.meta" ]; }; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  if [ "$stage" -eq 1 ]; then
+    fm_action_admit_triage "$action_state" "$task" "$tid" "$id" "$incident" "$triage_owner" "$now" \
+      "triage $task $id $incident: $next" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+  fi
+  queued=$(fm_wake_queued_keys_locked check) || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+  if ! printf '%s\n' "$queued" | awk -v key="$key" '$0==key {found=1} END {exit !found}'; then
+    fm_wake_append_locked check "$key" "$reason" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$incident" "$mk_first" "$stage" "$now" > "$marker" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  wake "$reason"
+}
+
+# A cleared incident resets its ladder; an open triage action it left behind is
+# closed with the verification that the incident is gone.
+action_followthrough_clear() {  # <task> <action-state> <id> <now>
+  local marker="$2/.$1.action-incident-$3" mk_inc='' mk_first='' tid
+  if [ -f "$marker" ]; then
+    IFS=$'\t' read -r mk_inc mk_first 2>/dev/null < "$marker" || true
+    tid="triage-$3-$mk_first"
+    if [ -n "$mk_first" ] && fm_action_exists "$2" "$1" "$tid" && [ "$(fm_action_triage_state "$2" "$1" "$tid")" = open ]; then
+      fm_action_append "$2" "$1" "$4" "$tid" result outcome=ok "reason=incident cleared before a triage result" || return 1
+    fi
+  fi
+  rm -f "$marker"
+}
+
+# Incident lines for one task: the ledger fold, plus (for a task in this home's
+# own state) the register's missed checkpoint, or a clear line. A missed
+# checkpoint on a provably running pipeline is progress the task's own files do
+# not show, so it is noted and cleared rather than reported.
+action_followthrough_lines() {  # <task> <action-state> <now>
+  local task=$1 action_state=$2 now=$3 line checked
+  fm_action_fold "$action_state" "$task" "$now"
+  [ "$action_state" = "$STATE" ] && [ -f "$action_state/$task.meta" ] || return 0
+  checked=$(cat "$action_state/.$task.checkpoint-checked" 2>/dev/null || echo 0)
+  case "$checked" in ''|*[!0-9]*) checked=0 ;; esac
+  [ $((now - checked)) -ge 60 ] || return 0
+  printf '%s\n' "$now" > "$action_state/.$task.checkpoint-checked" || return 0
+  line=$(fm_action_checkpoint_incident "$action_state" "$task" "$now")
+  if [ -n "$line" ] && crew_is_provably_working "$task" 2>/dev/null; then
+    fm_action_note_progress "$action_state" "$task" "$now" run-step || true
+    line=
+  fi
+  if [ -n "$line" ]; then printf '%s\n' "$line"
+  else printf 'checkpoint\tcheckpoint\tok\tnone\t0\t%s\t0\tprogress\n' "$task"; fi
+}
+
+# Per-task follow-through poll: observe model-independent start evidence, then
+# route the incidents through the ladder. A cleared incident removes its marker,
+# which also resets the ladder.
 action_followthrough_check() {
-  local task=$1 action_state=${2:-$STATE} id class phase incident age owner due operation marker key queued reason
+  local task=$1 action_state=${2:-$STATE} id class phase incident age owner due operation now
+  now=$(date +%s)
+  fm_action_observe "$action_state" "$task" "$now" || return 1
   while IFS=$'\t' read -r id class phase incident age owner due operation; do
     [ -n "$id" ] || continue
-    marker="$action_state/.$task.action-incident-$id"
+    case "$id" in triage-*) continue ;; esac
     if [ "$incident" = none ]; then
-      rm -f "$marker" || return 1
+      action_followthrough_clear "$task" "$action_state" "$id" "$now" || return 1
       continue
     fi
-    [ "$(cat "$marker" 2>/dev/null || true)" != "$incident" ] || continue
-    key="action-followthrough:$action_state:$task:$id:$incident"
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-    if [ ! -f "$action_state/$task.actions" ]; then
-      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-      return 0
-    fi
-    queued=$(fm_wake_queued_keys_locked check) || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
-    reason="check: action-followthrough $task $id $incident owner=$owner operation=$operation ledger=$action_state/$task.actions"
-    if ! printf '%s\n' "$queued" | awk -v key="$key" '$0==key {found=1} END {exit !found}'; then
-      fm_wake_append_locked check "$key" "$reason" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
-    fi
-    printf '%s\n' "$incident" > "$marker" || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-    wake "$reason"
-  done < <(fm_action_fold "$action_state" "$task" "$(date +%s)")
+    action_followthrough_incident "$task" "$action_state" "$id" "$incident" "$owner" "$operation" "$now" || return 1
+  done < <(action_followthrough_lines "$task" "$action_state" "$now")
 }
 
 # 0 (benign/absorb) if EVERY task in a no-verb "signal:" wake has positive work
@@ -3070,9 +3166,12 @@ EOF
     fi
   fi
 
-  for action_ledger in "$STATE"/*.actions "$STATE/parent-route"/*.actions; do
+  for action_ledger in "$STATE"/*.actions "$STATE/parent-route"/*.actions "$STATE"/*.meta; do
     [ -f "$action_ledger" ] || continue
-    action_task=${action_ledger##*/}; action_task=${action_task%.actions}
+    action_task=${action_ledger##*/}; action_task=${action_task%.*}
+    case "$action_ledger" in
+      *.meta) [ ! -f "$STATE/$action_task.actions" ] || continue ;;
+    esac
     action_followthrough_check "$action_task" "${action_ledger%/*}" || exit 1
   done
 
