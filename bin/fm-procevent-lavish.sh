@@ -479,6 +479,83 @@ session_field() {  # <result-file> <field>
   ' "$1"
 }
 
+# Lavish encodes its response as TOON, which frames a prompts or feedback block
+# in one of two shapes. When every item carries only primitive fields it is the
+# tabular `prompts[N]{field,...}:` header plus N indented CSV rows. When any item
+# carries a nested object, such as the `target:` of a table-cell annotation, the
+# whole block becomes an expanded list: a `prompts[N]:` header, each item opened
+# by `- ` at one indent with its sibling fields two columns deeper. This perl
+# prelude reads the expanded shape; callers keep their own tabular parsers.
+# toon_list_items consumes the indented block after the header and returns the
+# items as hashes of their primitive fields, plus a count of items it could not
+# read. A nested block or array field is skipped whole, because only the item's
+# own primitive fields carry the captain's words, and a quoted value is
+# unescaped exactly as a quoted tabular field is.
+# shellcheck disable=SC2016 # A literal Perl prelude; perl, not the shell, expands its variables.
+LAVISH_TOON_LIST_PL='
+  use strict; use warnings;
+  sub toon_list_items {
+    my ($fh) = @_;
+    my (@items, $item, $item_indent);
+    my $malformed = 0;
+    my $finish = sub {
+      return unless $item;
+      if ($item->{bad}) { $malformed++ } else { push @items, $item->{fields} }
+      $item = undef;
+    };
+    while (my $line = <$fh>) {
+      last unless $line =~ /^\s/;
+      chomp $line;
+      $line =~ /^(\s*)(.*)$/;
+      my ($indent, $body) = (length $1, $2);
+      if (!defined $item_indent) {
+        if ($body =~ /^-(?: |$)/) {
+          $item_indent = $indent;
+        } else {
+          $malformed++;
+          next;
+        }
+      }
+      my $text;
+      if ($indent == $item_indent && $body =~ /^-(?: (.*))?$/) {
+        $finish->();
+        $item = { fields => {}, bad => 0 };
+        $text = $1;
+        if (!defined $text || !length $text) { $item->{bad} = 1; next }
+      } elsif ($item && $indent > $item_indent + 2) {
+        next;
+      } elsif ($item && $indent == $item_indent + 2) {
+        $text = $body;
+      } else {
+        if ($item) { $item->{bad} = 1 } else { $malformed++ }
+        next;
+      }
+      my ($key, $value);
+      if ($text =~ /^"((?:[^"\\]|\\.)*)":(?: (.*))?$/ || $text =~ /^([A-Za-z_][\w.]*):(?: (.*))?$/) {
+        ($key, $value) = ($1, $2);
+      } elsif ($text =~ /^(?:"(?:[^"\\]|\\.)*"|[A-Za-z_][\w.]*)\[\d+\]/) {
+        next;
+      } else {
+        $item->{bad} = 1;
+        next;
+      }
+      next unless defined $value && length $value;
+      if ($value =~ /^"/) {
+        if ($value =~ /^"((?:[^"\\]|\\.)*)"$/) {
+          $value = $1;
+          $value =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
+        } else {
+          $item->{bad} = 1;
+          next;
+        }
+      }
+      $item->{fields}{$key} = $value;
+    }
+    $finish->();
+    return (\@items, $malformed);
+  }
+'
+
 # Classify a completed result into a lifecycle state for the handler.
 cmd_classify() {
   local file=${1-} status error_code error_message
@@ -526,7 +603,8 @@ cmd_terminal() {
 
 # Whether a completed result carries any queued content block at all. The
 # published response frames content as a top-level `prompts[N]{...}:` or
-# `feedback[N]{...}:` header whose rows are INDENTED, so this anchors on column
+# `feedback[N]{...}:` header, or the expanded `prompts[N]:` form described at
+# LAVISH_TOON_LIST_PL, whose items are INDENTED, so this anchors on column
 # zero: an indented payload line is captain-supplied text and must never be able
 # to forge - or, here, to hide behind - a content header. Any recognized block
 # is content regardless of its declared count, while a malformed top-level
@@ -537,7 +615,7 @@ cmd_terminal() {
 # failed" is never proof that nothing was said.
 result_has_queued_content() {  # <result-file>
   awk '
-    /^(prompts|feedback)\[[0-9]+\]\{[^}]*\}:[[:space:]]*$/ {
+    /^(prompts|feedback)\[[0-9]+\](\{[^}]*\})?:[[:space:]]*$/ {
       verdict = "present"
       exit
     }
@@ -578,7 +656,8 @@ cmd_silent() {
 # card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
 # a `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
 # quoted fields carry JSON-style escapes, so this reads the declared field ORDER
-# rather than assuming a fixed column, and takes only rows whose `tag` field is
+# rather than assuming a fixed column, or as the expanded list that
+# LAVISH_TOON_LIST_PL reads, and takes only rows whose `tag` field is
 # `choice`. A freeform `message` row is captain prose and is deliberately never a
 # source of decision keys. A row that does not carry both a slug-shaped `question`
 # and the versioned `selection` and `note` fields inside its `Context data:` block
@@ -592,13 +671,17 @@ cmd_choice_rows() {
   local selection=$1 file=${2-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  perl -MJSON::PP -e '
+  perl -MJSON::PP -e "$LAVISH_TOON_LIST_PL" -e '
     use strict; use warnings;
     my ($selection, $path) = @ARGV;
     open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
+    my (@fields, $want, @rows, $listed);
     while (my $line = <$fh>) {
       if (!@fields) {
+        if ($line =~ /^prompts\[\d+\]:\s*$/) {
+          ($listed) = toon_list_items($fh);
+          last;
+        }
         next unless $line =~ /^prompts\[(\d+)\]\{([^}]*)\}:\s*$/;
         ($want, @fields) = ($1, split /,/, $2);
         next;
@@ -611,22 +694,26 @@ cmd_choice_rows() {
     close $fh;
     my %seen;
     my @choices;
-    for my $row (@rows) {
-      $row =~ s/^\s+//;
-      my @vals;
-      while (length $row) {
-        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
-          my $v = $1;
-          $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
-          push @vals, $v;
-        } else {
-          $row =~ s/^([^,]*)//;
-          push @vals, $1;
-        }
-        last unless $row =~ s/^,//;
-      }
+    for my $row ($listed ? @$listed : @rows) {
       my %f;
-      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
+      if (ref $row) {
+        %f = %$row;
+      } else {
+        $row =~ s/^\s+//;
+        my @vals;
+        while (length $row) {
+          if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
+            my $v = $1;
+            $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
+            push @vals, $v;
+          } else {
+            $row =~ s/^([^,]*)//;
+            push @vals, $1;
+          }
+          last unless $row =~ s/^,//;
+        }
+        $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
+      }
       next unless defined $f{tag} && $f{tag} eq "choice";
       my $prompt = $f{prompt};
       next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
@@ -713,15 +800,30 @@ cmd_read() {
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
-  perl -e '
+  perl -e "$LAVISH_TOON_LIST_PL" -e '
     use strict; use warnings;
     my ($path, $lifecycle, $session_ended) = @ARGV;
     open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
+    my (@fields, $want, @rows, @parsed);
+    my $malformed = 0;
     while (my $line = <$fh>) {
       if (!@fields) {
-        next unless $line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/;
-        ($want, @fields) = ($1, split /,/, $2);
+        if ($line =~ /^(?:prompts|feedback)\[(\d+)\]:\s*$/) {
+          $want = $1;
+          my ($items, $bad) = toon_list_items($fh);
+          @parsed = @$items;
+          $malformed = $bad;
+          last;
+        }
+        if ($line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/) {
+          ($want, @fields) = ($1, split /,/, $2);
+          next;
+        }
+        # A content block this reader cannot frame is never an empty read.
+        if ($line =~ /^(?:prompts|feedback)/) {
+          $malformed++;
+          last;
+        }
         next;
       }
       last unless $line =~ /^\s/;
@@ -731,8 +833,6 @@ cmd_read() {
     }
     close $fh;
     $want = 0 unless defined $want;
-    my @parsed;
-    my $malformed = 0;
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
