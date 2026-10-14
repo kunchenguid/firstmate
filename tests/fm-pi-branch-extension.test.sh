@@ -2106,7 +2106,7 @@ if (openedByCaptain?.messages?.some((message) => message.customType === "fm-bran
   throw new Error(`captain-opened processing was not stripped: ${JSON.stringify(openedByCaptain)}`);
 }
 aborted = false;
-await fire("before_agent_start", { prompt: "captain typed this now" }, abortCtx);
+await fire("before_agent_start", { messageType: "user", prompt: "captain typed this now" }, abortCtx);
 const stolen = await fire("context", {
   messages: [{ role: "user", content: "captain typed this now" }, processingMsg],
 }, abortCtx);
@@ -2116,12 +2116,21 @@ if (stolen?.messages?.some((message) => message.customType === "fm-branch-proces
 }
 await fire("agent_end", {});
 aborted = false;
+await fire("before_agent_start", { messageType: "custom", message: processingMsg }, abortCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+const openedByCustomRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+if (!aborted) throw new Error("a Pi 1.2.0 custom processing turn with history was not aborted under the record");
+if (openedByCustomRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`custom processing with history was not stripped: ${JSON.stringify(openedByCustomRequest)}`);
+}
+await fire("agent_end", {});
+aborted = false;
 await fire("before_agent_start", { prompt: pending.message.content }, abortCtx);
 await fire("agent_start", {}, defaultSessionCtx);
-const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+const openedByLegacyRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
 if (!aborted) throw new Error("a dedicated processing turn with history was not aborted under the record");
-if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
-  throw new Error(`dedicated processing with history was not stripped: ${JSON.stringify(openedByRequest)}`);
+if (openedByLegacyRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`dedicated processing with history was not stripped: ${JSON.stringify(openedByLegacyRequest)}`);
 }
 await fire("agent_end", {});
 await fire("agent_settled", {});

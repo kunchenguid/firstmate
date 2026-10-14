@@ -1244,7 +1244,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("before_agent_start", (event) => {
-    consumeWake(generation, event.prompt);
+    // Pi 1.2.0 made before_agent_start fire for extension-injected runs too,
+    // unioned on messageType: a "custom" run carries `message` and no wake
+    // text, while a user run (and every older Pi, which always carried
+    // `prompt`) carries the submitted prompt. Read the new user field with an
+    // older-Pi fallback so a primary on either release consumes its wake.
+    const prompt =
+      event.messageType === "custom" ? null : typeof event.prompt === "string" ? event.prompt : null;
+    if (prompt !== null) consumeWake(generation, prompt);
   });
   pi.on?.("message_start", (event) => {
     if (event.message.role !== "user") return;
