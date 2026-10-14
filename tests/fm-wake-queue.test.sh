@@ -2247,23 +2247,25 @@ test_ack_line_names_the_rows_it_acknowledges() {
     || fail "the command parsed from the summarised line did not acknowledge"
   [ ! -s "$state/.wake-queue" ] || fail "the parsed acknowledgement left rows queued"
 
-  dir=$(make_case ack-rows-summary-capped)
+  dir=$(make_case ack-rows-summary-seven)
   state="$dir/state"
   i=1
   while [ "$i" -le 7 ]; do
     append_wake "$state" stale "window-$i" "stale: window-$i" || fail "could not queue row $i"
     i=$((i + 1))
   done
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2> "$dir/capped.err" || fail "drain with seven queued rows failed"
-  line=$(sed -n '/^WAKE_ACK_REQUIRED:/p' "$dir/capped.err" | head -1)
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2> "$dir/seven.err" || fail "drain with seven queued rows failed"
+  line=$(sed -n '/^WAKE_ACK_REQUIRED:/p' "$dir/seven.err" | head -1)
   case "$line" in
-    *"rows: 7 ["*"stale window-1"*"stale window-5, +2 more] after handling completes run bin/fm-wake-drain.sh --ack-through "*) ;;
-    *) fail "the acknowledgement line did not bound its rows summary: $line" ;;
+    *"rows: 7 ["*"stale window-1"*"stale window-5"*"stale window-6"*"stale window-7] after handling completes run bin/fm-wake-drain.sh --ack-through "*) ;;
+    *) fail "the acknowledgement line did not name all seven rows: $line" ;;
   esac
   case "$line" in
-    *window-6*|*window-7*) fail "the rows summary listed rows past its cap: $line" ;;
+    *" more]"*) fail "the rows summary hid rows behind a count: $line" ;;
   esac
-  pass "wake drain: the acknowledgement line names the rows it acknowledges, bounded, with its command intact"
+  sequence=$(printf '%s\n' "$line" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p')
+  [ -n "$sequence" ] || fail "the seven-row summary broke the machine-readable acknowledgement command: $line"
+  pass "wake drain: the acknowledgement line names every row it acknowledges, with its command intact"
 }
 
 test_recovery_ack_failure_is_reported() {

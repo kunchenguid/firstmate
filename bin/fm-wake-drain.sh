@@ -1072,18 +1072,16 @@ DRAIN_LOCK_HELD=false
 # The rows summary precedes the command because callers parse the command with
 # a pattern anchored to the end of this line. It lives on this line, not its own,
 # so a stdout discard or a single-line filter keeps the rows the command acks.
-ACK_ROWS_SUMMARY=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' -v max=5 '
+ACK_ROWS_SUMMARY=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' '
   NF >= 5 && $2 ~ /^[0-9]+$/ {
     total++
-    if (total <= max) {
-      kind = $3; key = $4
-      gsub(/[^A-Za-z0-9._:\/@+=-]/, "_", kind)
-      gsub(/[^A-Za-z0-9._:\/@+=-]/, "_", key)
-      list = list (total > 1 ? ", " : "") $2 " " kind " " substr(key, 1, 48)
-    }
+    kind = $3; key = $4
+    gsub(/[^A-Za-z0-9._:\/@+=-]/, "_", kind)
+    gsub(/[^A-Za-z0-9._:\/@+=-]/, "_", key)
+    list = list (total > 1 ? ", " : "") $2 " " kind " " substr(key, 1, 48)
   }
   END {
-    if (total) printf "rows: %d [%s%s] ", total, list, (total > max ? ", +" (total - max) " more" : "")
+    if (total) printf "rows: %d [%s] ", total, list
   }
 ') || exit 1
 printf 'WAKE_ACK_REQUIRED: %safter handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
