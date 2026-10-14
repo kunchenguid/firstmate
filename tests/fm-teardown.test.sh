@@ -42,6 +42,8 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (q6) no-mistakes + pushed branch, recorded PR still open           -> REFUSE
+#   (q7) no-mistakes + pushed branch, recorded PR merged               -> ALLOW
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -863,6 +865,78 @@ test_no_mistakes_origin_remote_allows() {
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+}
+
+# Override GitHub lookups to report PR 7 in the supplied state (open or closed),
+# never merged. Args: case_dir state
+add_gh_pr_state() {
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\n' "pull_request:" "  number: 7" "  state: $state" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "error: gh unavailable" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# A pushed task branch is reachable from a remote, so the landed-work test alone
+# accepts it, yet its recorded PR may still be waiting on its merge. Cleanup
+# then closed the backlog item and removed the record fm-pr-merge.sh needs.
+# Args: case_dir
+setup_pushed_branch_with_recorded_pr() {
+  local case_dir=$1
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  append_pr_meta_for_current_head "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+}
+
+test_open_pr_refuses_cleanup() {
+  local case_dir rc head
+  case_dir=$(make_case open-pr)
+  setup_pushed_branch_with_recorded_pr "$case_dir"
+  add_gh_pr_state "$case_dir" open
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr: teardown should refuse while the recorded PR is open"
+  grep -F 'REFUSED' "$case_dir/stderr" | grep -F 'https://github.com/example/repo/pull/7' | grep -qF 'still open' \
+    || fail "open-pr: refusal did not name the open PR: $(cat "$case_dir/stderr")"
+  assert_refusal_retained_task_state "$case_dir" open-pr "$head"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "open-pr: refusal changed the backlog item: $(backlog_row_state "$case_dir")"
+  pass "a task whose recorded PR is still open is not cleaned up, even with its branch pushed"
+}
+
+test_merged_pr_with_pushed_branch_cleans_up() {
+  local case_dir rc
+  case_dir=$(make_case merged-pr-pushed)
+  setup_pushed_branch_with_recorded_pr "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-pr-pushed: teardown should clean up once the recorded PR merged"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-pushed: teardown printed a REFUSED line"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "merged-pr-pushed: backlog item not closed: $(backlog_row_state "$case_dir")"
+  pass "a task whose recorded PR merged is cleaned up"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -5041,6 +5115,8 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_open_pr_refuses_cleanup
+test_merged_pr_with_pushed_branch_cleans_up
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
