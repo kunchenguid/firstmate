@@ -160,6 +160,26 @@ test_fold_is_read_only() {
   pass "incident detection never records, closes, or answers anything"
 }
 
+# The loop the action-followthrough skill describes, run end to end: an incident
+# appears, the owner acts, and the incident clears because of a start/result and
+# not because of the acknowledgement.
+test_runbook_loop() {
+  local s out
+  s=$(fresh_state loop)
+  admit_authorized "$s" a1 --inbox 001.msg || fail "admit"
+  mkdir -p "$s/t1.inbox/handled"
+  : > "$s/t1.inbox/handled/001.msg"
+  assert_equals "a1:acked-unexecuted" "$(incident_kinds "$s" $((T0 + 400)))" "loop: acknowledged work is an incident"
+  act "$s" start t1 a1 --at $((T0 + 410)) || fail "start"
+  assert_equals "" "$(incident_kinds "$s" $((T0 + 420)))" "loop: the native start clears the incident"
+  act "$s" result t1 a1 ok --at $((T0 + 900)) || fail "result"
+  act "$s" accept t1 a1 --receipt "run:42 head:abc" --at $((T0 + 950)) || fail "accept"
+  out=$(act "$s" show t1 --now $((T0 + 1000)))
+  assert_contains "$out" "accepted" "loop: acceptance is recorded with its receipt"
+  if act "$s" accept t1 a1 --at "$T0" 2>/dev/null; then fail "acceptance without a native receipt must be refused"; fi
+  pass "the documented follow-through loop clears incidents only through start, result and acceptance"
+}
+
 test_ready_but_unstarted
 test_handled_but_unexecuted
 test_start_and_refusal_satisfy_the_bound
@@ -167,3 +187,4 @@ test_holds_are_finite
 test_gate_never_freezes_independent_work
 test_no_blanket_grant_and_counted_grant
 test_fold_is_read_only
+test_runbook_loop
