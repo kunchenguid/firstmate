@@ -1988,6 +1988,15 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
+  if [ -n "$unpushed_raw" ] && refresh_remote_tracking_refs; then
+    # Commits looked unpushed against whatever tracking refs are on disk; a
+    # fresh read of every remote's branch heads may show them already pushed.
+    if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+      echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
+      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
@@ -2026,6 +2035,29 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+}
+
+# Refresh the worktree's remote-tracking refs from every configured remote
+# (a fork counts, not only origin) so the reachability test below reads the
+# remotes' current branch heads instead of whatever was last fetched. Used only
+# once commits already look unpushed, so it can clear a false refusal and never
+# turns anything into a pass by itself: a remote that cannot be fetched keeps
+# its old refs, and the refusal stands unless some fetched ref now contains HEAD.
+# Returns non-zero when no remote was refreshed.
+refresh_remote_tracking_refs() {
+  local remote refreshed=1 limit=${FM_TEARDOWN_FETCH_TIMEOUT:-60}
+  case "$limit" in ''|*[!0-9]*) limit=60 ;; esac
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    if command -v timeout >/dev/null 2>&1; then
+      timeout "$limit" git -C "$WT" fetch --quiet --no-tags "$remote" \
+        "+refs/heads/*:refs/remotes/$remote/*" >/dev/null 2>&1 && refreshed=0
+    else
+      git -C "$WT" fetch --quiet --no-tags "$remote" \
+        "+refs/heads/*:refs/remotes/$remote/*" >/dev/null 2>&1 && refreshed=0
+    fi
+  done < <(git -C "$WT" remote 2>/dev/null)
+  return "$refreshed"
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
