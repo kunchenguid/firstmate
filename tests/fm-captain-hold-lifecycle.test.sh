@@ -876,6 +876,92 @@ test_gate_finds_an_answered_call_in_the_archive() {
   pass "the completion gate finds an answered call in the archive and still refuses an unrecorded one"
 }
 
+# A held row closed outside the owner and then archived leaves a call nothing
+# can answer. The evidence record closes it for the gate without captain words,
+# and never for a call that is live, unheld, or already resolved.
+test_archived_moot_call_closes_on_evidence_only() {
+  local home id archive evidence
+  home=$(make_home archived-moot)
+  id=sample-moot-review
+  archive="$home/data/done-archive.md"
+  evidence="$home/moot-evidence.txt"
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate moot reach" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Report\n\nOne call.\n' > "$home/data/$id/report.md"
+  printf 'Shipped in the firstmate change; the named records no longer exist.\n' > "$evidence"
+
+  # A ship row held for the captain, then closed straight through the backend.
+  tasks_in "$home" add sample-moot-ship "Moot ship row" --kind ship --repo sample >/dev/null \
+    || fail "could not add the ship row"
+  run_captain "$home" hold sample-moot-ship --reason "parked" >/dev/null || fail "could not hold the ship row"
+  # A live held call the captain still owns.
+  run_captain "$home" hold sample-live-call --title "Live call" --reason "pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the live call"
+  if run_captain "$home" reconcile archived sample-live-call --evidence-file "$evidence" >/dev/null 2>&1; then
+    fail "archived reconcile accepted a live call"
+  fi
+  tasks_in "$home" "done" sample-moot-ship --keep 0 >/dev/null || fail "could not close the ship row"
+  assert_grep "- [x] sample-moot-ship - " "$archive" "the ship row is not archived"
+  assert_grep "(hold-kind: captain)" "$archive" "the archived row lost its hold marker"
+  if run_captain "$home" complete "$id" sample-moot-ship >/dev/null 2> "$home/moot-before.err"; then
+    fail "the gate accepted an archived ship row with no record"
+  fi
+  assert_grep "no captain-held task sample-moot-ship" "$home/moot-before.err" "the refusal changed"
+
+  if run_captain "$home" reconcile archived sample-moot-ship >/dev/null 2>&1; then
+    fail "archived reconcile ran without evidence"
+  fi
+  if run_captain "$home" reconcile archived sample-nowhere --evidence-file "$evidence" >/dev/null 2>&1; then
+    fail "archived reconcile accepted an id that is not archived"
+  fi
+  run_captain "$home" reconcile archived sample-moot-ship --evidence-file "$evidence" >/dev/null \
+    || fail "archived reconcile refused the archived held row"
+  run_captain "$home" reconcile archived sample-moot-ship --evidence-file "$evidence" >/dev/null \
+    || fail "archived reconcile is not idempotent"
+  printf 'different\n' > "$home/other-evidence.txt"
+  if run_captain "$home" reconcile archived sample-moot-ship --evidence-file "$home/other-evidence.txt" >/dev/null 2>&1; then
+    fail "archived reconcile accepted drifting evidence"
+  fi
+  assert_grep "Resolution mode: reconciled" "$home/data/moot-calls/sample-moot-ship.md" "the record lost its mode"
+  assert_grep "Reconciliation evidence:" "$home/data/moot-calls/sample-moot-ship.md" "the record lost its label"
+  if grep -q "Captain decision" "$home/data/moot-calls/sample-moot-ship.md"; then
+    fail "the moot record claims captain words"
+  fi
+  run_captain "$home" complete "$id" sample-moot-ship >/dev/null 2> "$home/moot-after.err" \
+    || fail "the gate refused a call closed on evidence: $(cat "$home/moot-after.err")"
+  run_captain "$home" verify "$id" >/dev/null || fail "verify refused a call closed on evidence"
+
+  # A moot record is bound to the origin its archived hold was recorded for.
+  tasks_in "$home" add sample-moot-other "Other origin row" --kind ship --repo sample >/dev/null \
+    || fail "could not add the other-origin row"
+  run_captain "$home" hold sample-moot-other --reason "parked" --origin sample-other-origin >/dev/null \
+    || fail "could not hold the other-origin row"
+  tasks_in "$home" "done" sample-moot-other --keep 0 >/dev/null || fail "could not close the other-origin row"
+  run_captain "$home" reconcile archived sample-moot-other --evidence-file "$evidence" >/dev/null \
+    || fail "archived reconcile refused the other-origin row"
+  if run_captain "$home" complete "$id" sample-moot-other >/dev/null 2> "$home/moot-other.err"; then
+    fail "a moot record satisfied the gate for an origin it was not held for"
+  fi
+  assert_grep "was held for origin sample-other-origin, not $id" "$home/moot-other.err" "the origin refusal changed"
+
+  # A forged or edited record does not satisfy the gate.
+  printf 'x\n' >> "$home/data/moot-calls/sample-moot-ship.md"
+  printf 'Moot call recorded by fm-captain-hold.\nTask: sample-forged\n' > "$home/data/moot-calls/sample-forged.md"
+  if run_captain "$home" complete "$id" sample-forged >/dev/null 2>&1; then
+    fail "the gate accepted a forged moot record"
+  fi
+  # An archived row that was never held cannot be reconciled.
+  tasks_in "$home" add sample-plain "Plain" --kind ship --repo sample >/dev/null || fail "add plain"
+  tasks_in "$home" "done" sample-plain --keep 0 >/dev/null || fail "close plain"
+  if run_captain "$home" reconcile archived sample-plain --evidence-file "$evidence" >/dev/null 2>&1; then
+    fail "archived reconcile accepted a row that never carried a captain hold"
+  fi
+  pass "an archived moot call closes on evidence only and never stands in for a live call"
+}
+
 # The recorded-answer rule: answering closes with the captain's exact words, an
 # exact retry is idempotent, a drifted retry is rejected, dependent work routed
 # behind the answered task is released by the close, and the completion gate is
@@ -4709,6 +4795,7 @@ test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_gate_finds_an_answered_call_in_the_archive
+test_archived_moot_call_closes_on_evidence_only
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility

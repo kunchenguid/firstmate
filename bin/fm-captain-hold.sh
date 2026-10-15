@@ -35,6 +35,7 @@
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
 #   fm-captain-hold.sh reconcile note <task-id> --note-file <path>
+#   fm-captain-hold.sh reconcile archived <task-id> --evidence-file <path>
 #
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
@@ -113,6 +114,19 @@
 # appends one dated `Captain hold reconciled:` note and leaves the hold in
 # place. A normal answer also retires the request because the call is settled.
 # `list` is the read-only enumeration.
+#
+# `reconcile archived` is the evidence-only outcome for a call whose row was
+# closed OUTSIDE this script (so it carries no answer and no reconciliation) and
+# has since left the live backlog: the hold outlived its row, nothing can answer
+# it, and the completion gate would refuse forever. It needs no board request
+# because there is no live call to mutate. It requires the id to be absent from
+# the live backlog and present in the done archive with its captain hold still
+# attached and no recorded resolution, and it writes the supplied EVIDENCE to
+# data/moot-calls/<id>.md under mode `reconciled` and a `Reconciliation
+# evidence:` label. `verify` and `complete` accept that record only for an id with
+# no live row and only for the origin the archived hold was recorded for, so a
+# call the captain still owns is never satisfied by it, and it never contains
+# captain words.
 # docs/captain-hold-lifecycle.md owns the semantics.
 #
 # A channel's ONLY job is to turn whatever it received into those keyed lines
@@ -441,8 +455,8 @@ archive_path() {  # prints the markdown done archive; fails when the backend has
 # Read one closed row from the archive into TASK_SHOW_OUTPUT, shaped like a live
 # `show --full` so the durability checks read it unchanged. A non-zero return
 # means no such row. The newest archived row of an id wins.
-archived_task_show() {  # <id>; sets TASK_SHOW_OUTPUT
-  local id=$1 archive row body encoded
+archived_task_show() {  # <id> [any-kind]; sets TASK_SHOW_OUTPUT
+  local id=$1 any_kind=${2:-} archive row body encoded
   archive=$(archive_path) || return 1
   row=$(LC_ALL=C awk -v prefix="- [x] $id - " '
     function keep() {
@@ -459,10 +473,13 @@ archived_task_show() {  # <id>; sets TASK_SHOW_OUTPUT
     END { keep(); printf "%s", last }
   ' "$archive")
   [ -n "$row" ] || return 1
-  case "$(printf '%s\n' "$row" | sed -n 1p)" in
-    *"(kind: captain)"*) : ;;
-    *) return 1 ;;
-  esac
+  ARCHIVED_ROW_LINE=$(printf '%s\n' "$row" | sed -n 1p)
+  if [ -z "$any_kind" ]; then
+    case "$ARCHIVED_ROW_LINE" in
+      *"(kind: captain)"*) : ;;
+      *) return 1 ;;
+    esac
+  fi
   body=$(printf '%s\n' "$row" | sed 1d)
   encoded=$(printf '%s' "$body" | perl -MJSON::PP -e '
     local $/;
@@ -940,6 +957,34 @@ refuse_self_inventory() {
   fail "origin $origin cannot be its own captain-call inventory entry; hold a separate captain task for the call and list that task"
 }
 
+# A call whose row left the backlog while still carrying its captain hold (the
+# row was closed outside this script, so no answer or reconciliation was ever
+# written) cannot be answered and cannot be verified: the thing the gate asks
+# about is gone. `reconcile archived` records the EVIDENCE that made it moot in
+# a private record beside the data directory, never in captain words, and the
+# gate accepts that record only while no live row exists for the id.
+moot_record_path() {  # <task-id>; prints the evidence record path
+  local data
+  data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
+  printf '%s/moot-calls/%s.md\n' "$data" "$1"
+}
+
+moot_record_valid() {  # <task-id>; true when a well-formed evidence record exists
+  local id=$1 path text
+  path=$(moot_record_path "$id")
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  [ "$(sed -n 1p "$path")" = "Moot call recorded by fm-captain-hold." ] || return 1
+  [ "$(sed -n 2p "$path")" = "Task: $id" ] || return 1
+  [ "$(sed -n 4p "$path")" = "Resolution mode: reconciled" ] || return 1
+  text=$(sed -n '/^Reconciliation evidence:$/,$p' "$path" | sed 1d)
+  [ -n "$text" ] || return 1
+  [ "$(sed -n 3p "$path")" = "Decision digest: $(sha256_text "$text")" ]
+}
+
+moot_record_origin() {  # <task-id>; prints the origin the archived hold was recorded for
+  sed -n '1,/^$/s/^Captain hold origin: \(.*\)$/\1/p' "$(moot_record_path "$1")" | head -1
+}
+
 # Resolve one entry and verify the row it names is durably captain-held. A
 # resolution failure that is not the read bound keeps resolve_entry's own
 # status - its stderr already named the entry; 124 means the backend never
@@ -953,18 +998,26 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
     refuse_self_inventory "$origin" "$entry"
   fi
-  resolved=$(resolve_entry "$origin" "$entry" archive) || resolve_status=$?
-  if [ "$resolve_status" -ne 0 ]; then
-    [ "$resolve_status" -ne 124 ] \
-      || fail "the backlog backend exceeded its read bound resolving $entry"
-    exit "$resolve_status"
+  # A moot-evidence record stands in only for an entry with no live row, so a
+  # call the captain still owns can never be satisfied by it.
+  if ! task_show "$entry" && moot_record_valid "$entry"; then
+    id=$entry
+    how=moot-record
+    stored=$(moot_record_origin "$entry")
+  else
+    resolved=$(resolve_entry "$origin" "$entry" archive) || resolve_status=$?
+    if [ "$resolve_status" -ne 0 ]; then
+      [ "$resolve_status" -ne 124 ] \
+        || fail "the backlog backend exceeded its read bound resolving $entry"
+      exit "$resolve_status"
+    fi
+    id=${resolved%% *}
+    how=${resolved##* }
+    verify_hold_durable "$id"
+    id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
+    validate_slug backend-task-id "$id"
+    stored=$(body_hold_origin "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
   fi
-  id=${resolved%% *}
-  how=${resolved##* }
-  verify_hold_durable "$id"
-  id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
-  validate_slug backend-task-id "$id"
-  stored=$(body_hold_origin "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
   origin_id=$origin
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     origin_id=$(task_identity "$origin") || exit $?
@@ -1667,6 +1720,7 @@ command_reconcile() {
     list)    reconcile_list "$@" ;;
     close)   reconcile_close "$@" ;;
     note)    reconcile_note "$@" ;;
+    archived) reconcile_archived "$@" ;;
     *) usage >&2; exit 2 ;;
   esac
 }
@@ -1750,6 +1804,66 @@ reconcile_close() {
   [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
     || fail "could not publish the reconciled captain-held task $id to its parent"
   reconcile_request_retire "$id"
+  printf 'reconciled: %s\n' "$id"
+}
+
+# The archived-moot outcome: the call's row was closed outside this script and
+# has left the live backlog, so there is neither a hold to answer nor a pending
+# board request to retire. It records the EVIDENCE under the `reconciled` mode,
+# refuses a row that is live (the captain still owns that call), a row that never
+# carried a captain hold, and a row that already records a resolution.
+reconcile_archived() {
+  local id=${1:-} evidence_file='' path existing digest stamp tmp held_origin
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --evidence-file) shift; evidence_file=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  [ -n "$evidence_file" ] || fail "--evidence-file is required; a moot call closes on evidence, never on assertion"
+  load_decision "$evidence_file"
+  acquire_task_control_lock "$id"
+  require_tasks_axi
+  if task_show "$id"; then
+    fail "task $id is still in the live backlog; a live captain call closes only through answer or reconcile close"
+  elif [ "$?" -eq 124 ]; then
+    fail "the backlog backend exceeded its read bound reading $id"
+  fi
+  archived_task_show "$id" any \
+    || fail "task $id is not in the done archive, so there is no archived row to reconcile"
+  case "$ARCHIVED_ROW_LINE" in
+    *"(hold-kind: captain)"*) : ;;
+    *) fail "archived task $id never carried a captain hold; there is no captain call to reconcile" ;;
+  esac
+  if body_has_resolution_record "$(show_field "$TASK_SHOW_OUTPUT" body)"; then
+    fail "archived task $id already records a resolution; nothing needs reconciling"
+  fi
+  held_origin=$(body_hold_origin "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
+  path=$(moot_record_path "$id")
+  if [ -e "$path" ]; then
+    moot_record_valid "$id" || fail "$path exists but is not a valid moot-call record; inspect it rather than overwrite it"
+    existing=$(sed -n 3p "$path")
+    [ "$existing" = "Decision digest: $DECISION_DIGEST" ] \
+      || fail "task $id already records different moot evidence; it cannot be reconciled again"
+    printf 'reconciled: %s\n' "$id"
+    return 0
+  fi
+  digest=$DECISION_DIGEST
+  stamp=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+  mkdir -p -- "${path%/*}" || fail "cannot create ${path%/*}"
+  tmp=$(mktemp "${path%/*}/.moot.XXXXXX") || fail "cannot stage the moot-call record"
+  if ! printf 'Moot call recorded by fm-captain-hold.\nTask: %s\nDecision digest: %s\nResolution mode: reconciled\nRecorded: %s\n%s\nReconciliation evidence:\n%s\n' \
+      "$id" "$digest" "$stamp" "${held_origin:+Captain hold origin: $held_origin
+}" "$DECISION_TEXT" > "$tmp" \
+    || ! mv -- "$tmp" "$path"; then
+    rm -f -- "$tmp"
+    fail "could not write the moot-call record for $id"
+  fi
+  moot_record_valid "$id" || { rm -f -- "$path"; fail "the moot-call record for $id did not verify after writing"; }
   printf 'reconciled: %s\n' "$id"
 }
 

@@ -45,8 +45,9 @@ Both outcomes refuse unless that task still has the pending request created by t
 A normal captain answer also retires any pending request because the call is settled, including close, release, and idempotent replay paths.
 A retirement failure makes the command fail without reversing the already-durable answer, close, or note, and `reconcile list` keeps the surviving request visible for retry.
 `reconcile list` names every request still outstanding.
+A held row closed outside this owner and since archived has no live call to answer, so its gate is satisfied only by `bin/fm-captain-hold.sh reconcile archived <id> --evidence-file <path>`, which records evidence for an id with no live row and never captain words.
 Never use `answer` for an evidence-only moot call: `answer` records what the captain said, while `reconcile close` records verified evidence.
-A captain-held task closed outside this owner leaves no durable answer, so the completion gate keeps failing until `answer` records the decision the captain actually gave.
+A captain-held task closed outside this owner and still in the live backlog leaves no durable answer, so the completion gate keeps failing until `answer` records the decision the captain actually gave.
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create held tasks.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
 
