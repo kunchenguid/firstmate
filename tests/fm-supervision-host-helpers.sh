@@ -2970,7 +2970,7 @@ test_superseded_host_leaves_the_owner_untouched() {
 # watcher, arm, host, and Stop hook in a fixture home whose Main-owned wait is
 # overdue, and asserts the close is handed to main with its reason line.
 test_main_owned_wait_escalation_reaches_main_as_a_check_wake() {
-  local home record sig since owner parent key
+  local home record sig since owner key
   home=$(make_primary_home wait-escalation)
   printf 'blocked [at=%s] [key=wait]: external condition until 2099-01-01T00:00Z\n' "$(date +%s)" \
     > "$home/state/demo.status"
