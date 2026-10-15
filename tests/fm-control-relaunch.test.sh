@@ -681,7 +681,38 @@ SH
     "an aborted relaunch must leave a facet it did not generate in place"
   [ "$(meta_field "$dir" rl45 harness)" = claude ] \
     || fail "a refused relaunch must keep the prior record"
-  pass "fm-control relaunch: a refused relaunch onto polytoken keeps the project's own hook layer"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch onto polytoken must send nothing"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch onto polytoken must not stop the agent"
+  pass "fm-control relaunch: a refused relaunch onto polytoken keeps the project's own hook layer and the running agent"
+}
+
+test_refused_polytoken_profile_leaves_the_running_agent() {
+  local dir out rc
+  dir=$(new_case polytokenprofile rl47)
+  add_ship_task "$dir" rl47 claude
+  printf 'polytoken' > "$dir/fake/becomes"
+  cat > "$dir/fakebin/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  'print models') printf '%s\n' 'zai/glm-5.3-flash' 'zai/glm-5.3-flash(low)' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/polytoken"
+  out=$(run_control "$dir" rl47 relaunch --harness polytoken --note "switching runtime"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a switch onto polytoken with default axes must refuse"$'\n'"$out"
+  assert_contains "$out" "requires concrete --model and --effort" \
+    "the refusal must name the missing worker profile"$'\n'"$out"
+  out=$(run_control "$dir" rl47 relaunch --harness polytoken \
+    --model zai/unlisted --effort low --note "switching runtime"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a switch onto an unlisted polytoken model must refuse"$'\n'"$out"
+  assert_contains "$out" "is not listed by 'polytoken print models'" \
+    "the refusal must come from the polytoken catalog"$'\n'"$out"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused polytoken profile must send nothing"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused polytoken profile must not stop the agent"
+  [ "$(meta_field "$dir" rl47 harness)" = claude ] || fail "a refused polytoken profile must keep the prior record"
+  [ ! -e "$dir/wt/.polytoken" ] || fail "a refused polytoken profile must write no wiring"
+  pass "fm-control relaunch: a refused polytoken profile leaves the running agent untouched"
 }
 
 test_relaunch_from_a_raw_polytoken_launch_keeps_the_project_layers() {
@@ -2604,6 +2635,7 @@ test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer
+test_refused_polytoken_profile_leaves_the_running_agent
 test_relaunch_from_a_raw_polytoken_launch_keeps_the_project_layers
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness

@@ -2736,11 +2736,9 @@ fi
 # compatible selectable `<model>(<effort>)` reference. Resolved
 # before the busy wiring arms, so the generated launch command carries the
 # composed reference and task metadata keeps the separate axes.
-if [ "$HARNESS" = polytoken ]; then
-  if [ "$RAW_LAUNCH" -eq 0 ] && { [ -z "$MODEL" ] || [ "$MODEL" = default ] || [ -z "$EFFORT" ]; }; then
-    echo "error: polytoken requires concrete --model and --effort axes; its own default routing cannot choose a worker profile" >&2
-    exit 1
-  fi
+if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  POLYTOKEN_MODEL_REF=$(fm_polytoken_launch_ref "$POLYTOKEN_BIN" "$MODEL" "$EFFORT") || exit 1
+elif [ "$HARNESS" = polytoken ]; then
   POLYTOKEN_MODEL_REF=$(fm_polytoken_model_ref "$POLYTOKEN_BIN" "$MODEL" "$EFFORT") || exit 1
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or

@@ -255,7 +255,8 @@ EOF
 # fm_polytoken_require_hooks_free: refuse a worktree that already carries a
 # `.polytoken/hooks.json` - a project's own hook layer is never firstmate's to
 # clobber. fm-spawn runs this before writing any wiring or arming a relaunch's
-# abort cleanup, so a refusal leaves the worktree and state untouched.
+# abort cleanup, and fm-control runs it before stopping a relaunch's running
+# agent, so a refusal leaves the worktree, state, and agent untouched.
 fm_polytoken_require_hooks_free() {  # <worktree>
   local hooks
   hooks=$(fm_polytoken_hooks_file "$1") || return 1
@@ -304,6 +305,19 @@ fm_polytoken_models_refs() {  # <bin> [timeout]
   local bin=$1 bound=${2:-15}
   case "$bound" in ''|*[!0-9]*|0*) bound=15 ;; esac
   fm_run_timed "$bound" "$bin" print models </dev/null 2>/dev/null
+}
+
+# fm_polytoken_launch_ref: the worker launch profile. A canonical worker
+# launch requires concrete model and effort axes, because polytoken's own
+# default routing cannot choose a worker profile, then composes the exact
+# reference below. fm-spawn and fm-control's relaunch both ask this one owner,
+# so a relaunch refuses before its running agent is stopped.
+fm_polytoken_launch_ref() {  # <bin> <model> <effort> -> <ref>
+  if [ -z "$2" ] || [ "$2" = default ] || [ -z "$3" ] || [ "$3" = default ]; then
+    echo "error: polytoken requires concrete --model and --effort axes; its own default routing cannot choose a worker profile" >&2
+    return 1
+  fi
+  fm_polytoken_model_ref "$@"
 }
 
 # fm_polytoken_model_ref: compose the concrete model and nearest selectable
