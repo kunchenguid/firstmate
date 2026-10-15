@@ -144,8 +144,10 @@ EOF
       esac
     done
     rank=
-    for i in "${!RULE_GROUP[@]}"; do
+    i=0
+    while [ "$i" -lt "${#RULE_GROUP[@]}" ]; do
       [ "${RULE_GROUP[i]}" = "$group" ] && { rank=${RULE_RANK[i]}; break; }
+      i=$((i + 1))
     done
     [ -n "$rank" ] || { groups=$((groups + 1)); rank=$groups; }
     RULE_GROUP+=("$group")
@@ -166,7 +168,8 @@ resolve_group() {
   RANK=0
   [ "$GROUPS_MODE" = rules ] || return 0
   for kind in task repo any; do
-    for i in "${!RULE_GROUP[@]}"; do
+    i=0
+    while [ "$i" -lt "${#RULE_GROUP[@]}" ]; do
       read -r -a sels <<EOF
 ${RULE_SELECTORS[i]}
 EOF
@@ -185,6 +188,7 @@ EOF
         RANK=${RULE_RANK[i]}
         return 0
       done
+      i=$((i + 1))
     done
   done
   RANK=$FM_HERDR_GROUPS_UNMATCHED_RANK
@@ -256,7 +260,7 @@ collect_tasks() { # [<task>]
 # task_sessions: the distinct sessions of the collected tasks, one per line.
 task_sessions() {
   local record session
-  for record in "${TASKS[@]}"; do
+  for record in ${TASKS[@]+"${TASKS[@]}"}; do
     IFS=$'\t' read -r _ _ _ session _ _ <<EOF
 $record
 EOF
@@ -284,7 +288,7 @@ EOF
 cmd_plan() {
   local record
   collect_tasks "${1:-}"
-  for record in "${TASKS[@]}"; do
+  for record in ${TASKS[@]+"${TASKS[@]}"}; do
     plan_task "$record"
     printf '%s\t%s\t%s\t%s\t%s\n' "$P_TASK" "$P_GROUP" "$P_STATE" "$P_SORT" "$P_ORDER"
   done
