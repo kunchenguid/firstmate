@@ -516,22 +516,30 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
-# tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
-# and refuses anything else, so a Gerrit change URL is recorded on the row as a
-# note instead. The subshell keeps the parse from overwriting a caller's
-# FM_PR_* identity.
-fm_backlog_pr_is_gerrit_change() {  # <url>
-  ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
+# tasks-axi types a --pr link only as a canonical GitHub or Forgejo pull request
+# URL and refuses anything else, so a Gerrit change URL or a GitLab merge request
+# URL is recorded on the row as a note instead, labeled by its forge so the
+# history keeps naming what the link is. The subshell keeps the parse from
+# overwriting a caller's FM_PR_* identity.
+fm_backlog_pr_note_label() {  # <url>; prints the forge label, returns 1 when tasks-axi can type the url as a pr link
+  (
+    fm_pr_url_parse "$1" || return 1
+    case "$FM_PR_PROVIDER" in
+      gerrit) printf '%s' 'Gerrit change' ;;
+      gitlab) printf '%s' 'GitLab merge request' ;;
+      *) return 1 ;;
+    esac
+  )
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2 arg previous_arg=''
+  local data=$1 id=$2 arg previous_arg='' label
   local -a done_args=()
   shift 2
   for arg in "$@"; do
-    if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
+    if [ "$previous_arg" = --pr ] && label=$(fm_backlog_pr_note_label "$arg"); then
       done_args[${#done_args[@]}-1]=--note
-      done_args+=("Gerrit change $arg")
+      done_args+=("$label $arg")
     else
       done_args+=("$arg")
     fi
@@ -543,7 +551,7 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
-    --pr) ! fm_backlog_pr_is_gerrit_change "$value" ;;
+    --pr) ! fm_backlog_pr_note_label "$value" >/dev/null ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -557,7 +565,7 @@ fm_backlog_row_artifact_supported() {
 # bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
-  local data authorized_data=$1 id=$2 out command_status previous_arg=''
+  local data authorized_data=$1 id=$2 out command_status previous_arg='' retain_label
   local arg deliverable='' line body new_body tmp
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
@@ -579,7 +587,8 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
           deliverable="${deliverable:+$deliverable; }PR $arg"
           row_args=(--pr "$arg")
         else
-          deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
+          retain_label=$(fm_backlog_pr_note_label "$arg")
+          deliverable="${deliverable:+$deliverable; }$retain_label $arg"
         fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;

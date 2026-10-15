@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# tests/fm-project-mode.test.sh - unit tests for the `forgejo` value of
-# bin/fm-project-mode.sh's closed `forge=` registry binding. The binding's
-# grammar, its Gerrit value, and its refusals are pinned in
-# tests/fm-task-delivery.test.sh; this file covers only what forgejo adds: it
-# binds in any token order, keeps +yolo (unlike gerrit), is refused on
+# tests/fm-project-mode.test.sh - unit tests for the `forgejo` and `gitlab`
+# values of bin/fm-project-mode.sh's closed `forge=` registry binding. The
+# binding's grammar, its Gerrit value, and its refusals are pinned in
+# tests/fm-task-delivery.test.sh; this file covers what the opt-in forges add:
+# forgejo binds in any token order, keeps +yolo (unlike gerrit), is refused on
 # local-only like every forge, and the plain (no --forge/--raw) output stays
 # exactly two words, because tests/fm-secondmate-safety.test.sh and
 # tests/fm-secondmate-lifecycle-e2e.test.sh assert that shape with strict
-# string equality.
+# string equality; gitlab resolves its forge and keeps the same two-word
+# default output.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -26,7 +27,7 @@ cat > "$DATA/projects.md" <<'EOF'
 - lead [forge=forgejo direct-PR +yolo] - forge token first, order must not matter (added 2026-01-01)
 - kept [local-only forge=forgejo] - a forge on a mode that publishes nothing (added 2026-01-01)
 - colon [no-mistakes forge:forgejo] - a colon-spelled token is not a forge binding (added 2026-01-01)
-- glabbed [no-mistakes forge=gitlab] - gitlab is not a forge value (added 2026-01-01)
+- glabbed [no-mistakes forge=gitlab] - a GitLab instance binding (added 2026-01-01)
 EOF
 
 run_mode() {
@@ -67,16 +68,11 @@ pass "fm-project-mode: forge=forgejo on local-only is refused like every forge"
 [ "$(run_forge colon)" = "none" ] || fail "forge:forgejo must not bind a forge; only forge=forgejo does: $(run_forge colon)"
 pass "fm-project-mode: the colon spelling forge:forgejo is not a forge binding"
 
-for flag in "" --forge; do
-  # shellcheck disable=SC2086 # An empty flag must expand to nothing.
-  out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" $flag glabbed 2>/dev/null)
-  status=$?
-  [ "$status" -eq 3 ] || fail "forge=gitlab did not refuse${flag:+ under $flag} (status $status, got '$out')"
-  [ -z "$out" ] || fail "a refused forge=gitlab still handed the caller a posture: '$out'"
-done
-err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" glabbed 2>&1 >/dev/null) || true
-assert_contains "$err" 'forge=forgejo' "the unknown-forge refusal did not name forge=forgejo as an accepted value"
-pass "fm-project-mode: a value outside none|gerrit|forgejo is refused and the refusal names forge=forgejo"
+[ "$(run_forge glabbed)" = "gitlab" ] || fail "forge=gitlab did not resolve: $(run_forge glabbed)"
+[ "$(run_mode glabbed)" = "no-mistakes off" ] || fail "a forge=gitlab entry changed the default two-word output: $(run_mode glabbed)"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" glabbed 2>&1 >/dev/null)
+[ -z "$err" ] || fail "a registered forge=gitlab warned: $err"
+pass "fm-project-mode: forge=gitlab binds the gitlab forge and keeps the two-word default output"
 
 [ "$(run_forge missing-project)" = "none" ] || fail "a missing project must default --forge to none: $(run_forge missing-project)"
 [ "$(FM_DATA_OVERRIDE="$TMP_ROOT/no-such-dir" "$PROJECT_MODE" --forge legacy 2>/dev/null)" = "none" ] \
