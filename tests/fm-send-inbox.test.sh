@@ -131,7 +131,7 @@ test_text_steer_rides_inbox() {
   body=$(record_body _ "$rec")
   [ "$body" = "please rebase onto main" ] || fail "the recorded body differs: $body"
   typed=$(cat "$dir/send.log")
-  assert_contains "$typed" "Firstmate instruction waiting: read \"\$FM_TASK_INBOX\"/*.msg in order" \
+  assert_contains "$typed" "Firstmate instruction waiting: act on \"\$FM_TASK_INBOX\"/*.msg in order" \
     "the doorbell should direct the worker to drain the inbox"
   case "$typed" in
   *"please rebase onto main"*) fail "the payload must never be typed:"$'\n'"$typed" ;;

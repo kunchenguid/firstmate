@@ -955,7 +955,7 @@ ok - grok (grok 1.0.5 (5115b46bc909) [stable]): the doorbell reached a real work
 ok - muse (Muse Code 0.2.1 (0.2.1-R1215.1)): the doorbell reached a real worker, which acted and acked with the mv
 ```
 
-The current 90-character line, which drops the inbox name so its length is fixed, was re-verified on 2026-10-15 against the harnesses installed on that machine, on tmux 3.4, Linux x86_64:
+The current 87-character line, which drops the inbox name so its length is fixed and word-wraps to 2 rows even in a 53-column pane, was re-verified on 2026-10-15 against the harnesses installed on that machine, on tmux 3.4, Linux x86_64:
 
 ```sh
 FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES="claude pi" tests/fm-send-inbox-doorbell-live-e2e.test.sh

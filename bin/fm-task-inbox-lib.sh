@@ -315,15 +315,15 @@ fm_task_inbox_body() {  # <record-path>
 # A worker launched before that export finds the full path in its brief
 # (bin/fm-dod-lib.sh role contract, bin/fm-brief.sh inbox section).
 # The line carries no path and no task name, so its length is fixed and stays
-# at most 90 characters: a Claude composer in a short pane shows only its last
-# few wrapped rows, and a longer line whose head scrolls out of view fails the
-# Herdr composer proof, so the submit reports it did not reach the pane on
-# every re-ring. The leading `: ` is the POSIX shell no-op, so the same line
+# at most 90 characters, word-wrapping to 2 rows even in a 53-column pane: a
+# Claude composer in a short pane shows only its last few wrapped rows, and a
+# longer line whose head scrolls out of view fails the Herdr composer proof, so
+# the submit reports it did not reach the pane on every re-ring. The leading `: ` is the POSIX shell no-op, so the same line
 # typed into a pane whose agent has exited (a bare shell) runs nothing; see the
 # dead-pane note in the header.
 fm_task_inbox_doorbell_line() {
   # shellcheck disable=SC2016 # the literal "$FM_TASK_INBOX" is the point
-  printf ': Firstmate instruction waiting: read "$FM_TASK_INBOX"/*.msg in order, act, mv to handled/'
+  printf ': Firstmate instruction waiting: act on "$FM_TASK_INBOX"/*.msg in order, mv to handled/'
 }
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory

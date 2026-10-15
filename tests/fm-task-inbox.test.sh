@@ -173,7 +173,7 @@ test_write_is_durable_and_exact() {
   doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
   [ "$doorbell" = "$doorbell2" ] \
     || fail "every record in one inbox should ring the same drain-all doorbell"
-  assert_contains "$doorbell" "read \"\$FM_TASK_INBOX\"/*.msg" "doorbell should read all unhandled records through FM_TASK_INBOX"
+  assert_contains "$doorbell" "act on \"\$FM_TASK_INBOX\"/*.msg" "doorbell should act on all unhandled records through FM_TASK_INBOX"
   assert_contains "$doorbell" "in order" "doorbell should require ordered processing"
   assert_contains "$doorbell" "handled/" "doorbell should name the handled dir"
   assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
@@ -233,9 +233,11 @@ test_doorbell_is_a_shell_noop() {
 # scrolled out of view: a 191-character doorbell wrapped to 5 rows in a
 # 57-column pane and never reached the worker. The doorbell must stay short
 # for every task, including the longest task id a spawn accepts (64
-# characters); 90 characters keep it to 2 rows at that width.
+# characters). Claude wraps at word boundaries, so the line must also fit 2
+# rows of a 53-column pane's 51-column composer (2 columns go to the prompt
+# glyph) once word-wrapped, the narrowest geometry verified live.
 test_doorbell_fits_a_short_composer() {
-  local state long rec rec2 doorbell doorbell2
+  local state long rec rec2 doorbell doorbell2 rows
   state="$TMP_ROOT/short/state"
   mkdir -p "$state"
   long=$(printf 'a%.0s' $(seq 1 64))
@@ -247,7 +249,10 @@ test_doorbell_fits_a_short_composer() {
     || fail "the doorbell for a 64-character task id is ${#doorbell} characters, over 90: $doorbell"
   [ "$doorbell" = "$doorbell2" ] \
     || fail "the doorbell length must not depend on the task id:"$'\n'"$doorbell"$'\n'"$doorbell2"
-  pass "inbox: the doorbell stays within 90 characters for the longest task id"
+  rows=$(printf '%s\n' "$doorbell" | fold -s -w 51 | wc -l)
+  [ "$rows" -le 2 ] \
+    || fail "the doorbell word-wraps to $rows rows in a 51-column composer, over 2:"$'\n'"$(printf '%s\n' "$doorbell" | fold -s -w 51)"
+  pass "inbox: the doorbell stays within 90 characters and 2 composer rows of a 53-column pane"
 }
 
 # An inbox name never reaches the pane: a name carrying terminal controls still
@@ -705,7 +710,7 @@ test_watcher_rerings_idle_pane_quietly() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "Firstmate instruction waiting: read \"\$FM_TASK_INBOX\"/*.msg in order" "$log" \
+  grep -qF "Firstmate instruction waiting: act on \"\$FM_TASK_INBOX\"/*.msg in order" "$log" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never re-rang the doorbell:"$'\n'"$(cat "$log")"; }
   kill -0 "$pid" 2>/dev/null \
     || fail "a healthy re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
