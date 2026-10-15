@@ -27,7 +27,11 @@
 # unmergeable, with the same nonzero exit as any other refusal.
 # A required check that never reported is absent from the checks
 # list rather than red, so github_read_required_contexts below reads the
-# required set from classic branch protection and active rulesets. Check-run
+# required set from classic branch protection and active rulesets. An explicit
+# null classic required_status_checks inside a readable protection object is
+# empty (review-only or other non-check protection), not unreadable; a missing
+# protection object, a missing required_status_checks key, or a non-object value
+# remains unreadable. Check-run
 # requirements retain their producer app binding: a same-named check run from another app cannot
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
 # Unbound requirements match by name. A bound requirement reported as a check
