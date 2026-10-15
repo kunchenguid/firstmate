@@ -907,7 +907,7 @@ test_push_landed_ref_is_recorded_and_validated() {
   out=$(run_spawn "$id" --mode local-only --yolo off --push-landed-ref integration/main)
   status=$?
   [ "$status" -ne 0 ] || fail "a local-only spawn with --push-landed-ref should refuse"
-  assert_contains "$out" "requires mode=direct-PR" "the local-only refusal did not preserve local-main delivery"
+  assert_contains "$out" "does not resolve to a delivery posture" "the local-only push-only registry refusal did not preserve local-main delivery"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused local-only spawn published task metadata"
 
   id='pool-push-landed-invalid-r1'

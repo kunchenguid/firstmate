@@ -26,7 +26,7 @@ cat > "$DATA/projects.md" <<'EOF'
 - lead [forge=forgejo direct-PR +yolo] - forge token first, order must not matter (added 2026-01-01)
 - kept [local-only forge=forgejo] - a forge on a mode that publishes nothing (added 2026-01-01)
 - pusher [direct-PR forge=push-only] - direct-push delivery (added 2026-01-01)
-- local-pusher [local-only forge=push-only] - registered direct-push completion (added 2026-01-01)
+- local-pusher [local-only forge=push-only] - a forge on a mode that publishes nothing (added 2026-01-01)
 - pipeline-pusher [no-mistakes forge=push-only] - pipeline must retain publication ownership (added 2026-01-01)
 - colon [no-mistakes forge:forgejo] - a colon-spelled token is not a forge binding (added 2026-01-01)
 - glabbed [no-mistakes forge=gitlab] - gitlab is not a forge value (added 2026-01-01)
@@ -68,11 +68,16 @@ pass "fm-project-mode: forge=forgejo on local-only is refused like every forge"
 
 [ "$(run_mode pusher)" = "direct-PR off" ] || fail "forge=push-only changed direct-PR mode output: $(run_mode pusher)"
 [ "$(run_forge pusher)" = "push-only" ] || fail "forge=push-only did not resolve for direct-PR: $(run_forge pusher)"
-[ "$(run_mode local-pusher)" = "local-only off" ] || fail "forge=push-only local-only mode was refused: $(run_mode local-pusher)"
-[ "$(run_forge local-pusher)" = "push-only" ] || fail "forge=push-only did not resolve for local-only: $(run_forge local-pusher)"
+for flag in "" --forge; do
+  # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+  out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" $flag local-pusher 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "forge=push-only local-only did not refuse${flag:+ under $flag} (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused push-only local-only forge still handed the caller a posture: '$out'"
+done
 [ "$(run_mode pipeline-pusher)" = "no-mistakes off" ] || fail "forge=push-only changed no-mistakes mode output: $(run_mode pipeline-pusher)"
 [ "$(run_forge pipeline-pusher)" = "push-only" ] || fail "forge=push-only did not resolve for no-mistakes: $(run_forge pipeline-pusher)"
-pass "fm-project-mode: forge=push-only is available for spawn to restrict by task mode"
+pass "fm-project-mode: forge=push-only supports direct-PR and no-mistakes, never local-only"
 
 [ "$(run_mode colon)" = "no-mistakes off" ] || fail "a colon-spelled token changed the posture: $(run_mode colon)"
 [ "$(run_forge colon)" = "none" ] || fail "forge:forgejo must not bind a forge; only forge=forgejo does: $(run_forge colon)"

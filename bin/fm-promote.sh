@@ -37,7 +37,8 @@
 # because that script has no registry access at all, and bin/fm-spawn.sh checks
 # its value against the registry; bin/fm-project-mode.sh's header owns the
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
-# the refusal of a forge on local-only.
+# the refusal of a forge on local-only. A push-only direct-PR promotion is also
+# refused because promotion has no registered delivery ref to persist.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--upstream-consent <host>/<owner>/<repo>]
 # --upstream-consent records the captain's one-off approval for this task to
 # publish to firstmate's own upstream repository; promotion applies the same
@@ -149,6 +150,10 @@ fi
 # fires.
 refuse_impossible_forge_posture() {
   fm_forge_valid_for_mode "$FORGE" "$MODE" fm-promote.sh || return 1
+  if [ "$FORGE" = push-only ] && [ "$MODE" = direct-PR ]; then
+    echo "error: forge=push-only direct-PR cannot promote a scout without a registered --push-landed-ref; start a fresh ship spawn with that ref instead" >&2
+    return 1
+  fi
   if [ "$FORGE" = gerrit ] && [ "$YOLO" = on ]; then
     echo "error: --yolo on is refused for forge=gerrit: a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); promote with --yolo off and take any landing on a current explicit captain instruction naming that concrete change" >&2
     return 1

@@ -273,6 +273,31 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+test_promote_refuses_unregistered_push_only_direct_pr() {
+  local home proj meta id out status
+  id=promote-push-only-d1
+  home="$TMP_ROOT/promote-push-only/home"
+  proj="$home/projects/proj"
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state" "$home/data" "$proj"
+  printf '%s\n' '- proj [direct-PR forge=push-only] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "push-only promotion scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Ship the direct-push change." "Preserve the delivery boundary."
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unregistered push-only direct-PR promotion should refuse"
+  assert_contains "$out" "cannot promote a scout without a registered --push-landed-ref" \
+    "the push-only promotion refusal did not explain the missing delivery ref"
+  assert_grep 'kind=scout' "$meta" "the refused push-only promotion changed the task record"
+  assert_absent "$home/data/$id/ship-instructions.md" \
+    "the refused push-only promotion published ship instructions"
+  pass "fm-promote: push-only direct-PR scouts require a fresh registered spawn"
+}
+
 # A symlink at state/<id>.meta is the containment hazard the shared publisher
 # refuses: promotion must not rewrite the symlink target in place.
 test_promote_refuses_a_symlinked_task_record() {
@@ -1683,6 +1708,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_refuses_unregistered_push_only_direct_pr
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch

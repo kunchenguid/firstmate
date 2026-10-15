@@ -57,9 +57,9 @@
 # header owns what the registry binding means, and this file owns what each
 # forge changes for a WORKER (docs/gerrit-forge-integration.md is the gerrit
 # design). In the Definition of done, forgejo changes only the CLI a direct-PR
-# worker opens its pull request with: tea instead of gh-axi. `push-only` is the
-# exception that permits direct-PR and local-only, while no-mistakes remains
-# pipeline-owned; a registered direct-push ref is accepted only on direct-PR. Other forge bindings compose with the two modes that publish
+# worker opens its pull request with: tea instead of gh-axi. `push-only` permits
+# only the registered direct-PR delivery shape, while no-mistakes remains
+# pipeline-owned. Every forge binding composes with the two modes that publish
 # and are refused on local-only, which publishes nothing. On gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
 # that straight away, and no-mistakes first runs the pipeline with its three
@@ -151,7 +151,7 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
       echo "error: $caller: unknown forge '$forge' (expected none, gerrit, forgejo, or push-only)" >&2
       return 1 ;;
   esac
-  if [ "$forge" != none ] && [ "$forge" != push-only ] && [ "$mode" = local-only ]; then
+  if [ "$forge" != none ] && [ "$mode" = local-only ]; then
     echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
     return 1
   fi

@@ -68,8 +68,8 @@
 #   account of the host, and the captain's confirmation is what this record holds.
 #   `push-only` marks the direct-push shape whose completion may register its
 #   long-lived target branch. Its registration is accepted only for direct-PR
-#   tasks, while no-mistakes remains pipeline-owned. Other forge bindings compose with
-#   no-mistakes and direct-PR and are REFUSED on local-only, which publishes nothing: that mode
+#   tasks, while no-mistakes remains pipeline-owned. Every forge binding composes with
+#   no-mistakes and direct-PR and is REFUSED on local-only, which publishes nothing: that mode
 #   lands by fast-forwarding local main, which on a review-server project
 #   advances it with content the server has never seen
 #   (docs/gerrit-forge-integration.md section 3).
@@ -231,7 +231,7 @@ case "$forge" in
     echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, and forge=push-only, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
 esac
-if [ "$forge" != none ] && [ "$forge" != push-only ] && [ "$mode" = local-only ]; then
+if [ "$forge" != none ] && [ "$mode" = local-only ]; then
   echo "refused: $NAME is registered local-only with forge=$forge in $REG; local-only publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; register no-mistakes or direct-PR to publish through the forge, or drop the forge token to keep the project local" >&2
   exit 3
 fi
