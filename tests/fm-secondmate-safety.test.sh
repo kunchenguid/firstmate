@@ -78,7 +78,13 @@ test_fm_home_parameterization() {
   fm_git_init_commit "$home_one/wt"
   git -C "$home_one/wt" update-ref refs/remotes/origin/main "$(git -C "$home_one/wt" rev-parse HEAD)"
   mkdir -p "$home_one/fakebin"
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$home_one/fakebin/gh"
+  cat > "$home_one/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *title,body*) printf '{"title":"change","body":"public explanation"}\n' ;;
+  *) exit 1 ;;
+esac
+SH
   chmod +x "$home_one/fakebin/gh"
   printf 'project=x\nworktree=%s\n' "$home_one/wt" > "$home_one/state/task-a.meta"
   PATH="$home_one/fakebin:$PATH" FM_HOME="$home_one" FM_GUARD_GRACE=999999 \

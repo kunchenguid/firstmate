@@ -141,8 +141,14 @@ EOF
 test_flag_on_records_a_pr_registration() {
   local pr_url=https://github.com/acme/sample/pull/9 rows out
   make_case on-pr-ready on
-  # An unreadable forge answer: no draft refusal and no recorded head.
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$FAKEBIN/gh"
+  # Public text is readable; every other forge answer fails: no draft refusal and no recorded head.
+  cat > "$FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *title,body*) printf '{"title":"change","body":"public explanation"}\n' ;;
+  *) exit 1 ;;
+esac
+SH
   chmod +x "$FAKEBIN/gh"
   out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1) \
     || fail "spawn failed: $out"
