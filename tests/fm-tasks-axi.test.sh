@@ -290,6 +290,32 @@ test_unblock_clears_a_mistaken_edge() {
   pass "an explicitly unblocked objective closes; there is no other override"
 }
 
+test_missing_child_remains_a_blocker() {
+  local dir action out rc before
+  for action in done close; do
+    dir=$(objective_home "obj-missing-$action" | sed -n 1p)
+    obj_w "$dir" "done" study >/dev/null || fail "closing study failed"
+    # Simulate a lost child row in the persisted Markdown backlog contract.
+    sed '/^- \[ \] impl - /d' "$dir/home/data/backlog.md" > "$dir/backlog.md"
+    mv "$dir/backlog.md" "$dir/home/data/backlog.md"
+    out=$(obj_w "$dir" show impl 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || fail "the child row was not removed"
+    out=$(obj_w "$dir" show obj) || fail "reading the objective failed"
+    assert_contains "$out" "blocked-by:impl" "the missing child's dependency was lost"
+    before=$(cat "$dir/home/data/backlog.md")
+    out=$(obj_w "$dir" "$action" obj 2>&1); rc=$?
+    expect_code 2 "$rc" "$action with a missing child"
+    assert_contains "$out" "impl" "the refusal did not name the missing child"
+    assert_not_contains "$out" "study" "a Done child was reported as open"
+    assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "a refused close changed the backlog"
+    obj_w "$dir" unblock obj --by impl >/dev/null || fail "unblocking the missing child failed"
+    obj_w "$dir" "$action" obj >/dev/null || fail "the explicitly unblocked objective did not close"
+    out=$(obj_w "$dir" show obj) || fail "reading the closed objective failed"
+    assert_contains "$out" "state: done" "the unblocked objective remained open"
+  done
+  pass "done and close refuse a missing child until its dependency is explicitly unblocked"
+}
+
 test_closure_command_help() {
   local dir action flag expected expected_rc out rc before
   dir=$(objective_home obj-help | sed -n 1p)
@@ -386,6 +412,7 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_single_home
   test_objective_close_refused_while_children_open
   test_unblock_clears_a_mistaken_edge
+  test_missing_child_remains_a_blocker
   test_closure_command_help
   test_objective_close_with_relative_directories
   test_objective_close_refused_when_parent_read_fails

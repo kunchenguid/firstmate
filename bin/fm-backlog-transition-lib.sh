@@ -563,9 +563,10 @@ fm_backlog_open_blockers() {  # <data-dir> <id>
     return 2
   fi
   [ "$line" != "done" ] || return 0
-  blockers=$(printf '%s\n' "$out" | sed -n 's/^ *blocked_by: *//p' | sed -n '1p' | tr -d '"')
-  case "$blockers" in ''|none|-) return 0 ;; esac
-  for b in $(printf '%s' "$blockers" | tr ',' ' '); do
+  # blocked_by omits missing rows; deps retains edges until explicit unblock.
+  blockers=$(printf '%s\n' "$out" | sed -n 's/^ *deps: *//p' | sed -n '1p' |
+    tr -d '"' | tr ',' '\n' | sed -n 's/^blocked-by://p')
+  for b in $blockers; do
     bstate=
     if bout=$(fm_backlog_row_show "$data" "$b"); then
       bstate=$(printf '%s\n' "$bout" | sed -n 's/^ *state: *//p' | sed -n '1p')
