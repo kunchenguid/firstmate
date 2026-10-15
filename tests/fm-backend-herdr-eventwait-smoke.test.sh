@@ -64,7 +64,7 @@ CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "container_ensur
 CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
 IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-evwait1" /tmp "$SEEDED_TAB_ID") || fail "create_task failed"
-read -r _TAB_ID PANE_ID <<EOF
+read -r _TAB_ID PANE_ID _ <<EOF
 $IDS
 EOF
 [ -n "$PANE_ID" ] || fail "create_task did not return a pane id"

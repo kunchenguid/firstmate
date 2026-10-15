@@ -84,7 +84,7 @@ WSID=${CONTAINER#*:}
 CREW_LABEL="fm-respawn-crew1"
 CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$CREW_LABEL" "$PROJ_CWD" "$SEEDED_TAB_ID") \
   || fail "initial crewmate-shaped task creation failed"
-read -r CREW_TAB_ID CREW_PANE_ID <<EOF
+read -r CREW_TAB_ID CREW_PANE_ID _ <<EOF
 $CREW_IDS
 EOF
 if [ -z "$CREW_TAB_ID" ] || [ -z "$CREW_PANE_ID" ]; then
@@ -94,7 +94,7 @@ fi
 SM_LABEL="fm-respawn-sm1"
 SM_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$SM_LABEL" "$PROJ_CWD") \
   || fail "initial secondmate-shaped task creation failed"
-read -r SM_TAB_ID SM_PANE_ID <<EOF
+read -r SM_TAB_ID SM_PANE_ID _ <<EOF
 $SM_IDS
 EOF
 if [ -z "$SM_TAB_ID" ] || [ -z "$SM_PANE_ID" ]; then
@@ -127,7 +127,7 @@ pass "repro confirmed: after a real session restart, both task panes survive ali
 
 RESPAWN_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$CREW_LABEL" "$PROJ_CWD") \
   || fail "REGRESSION: create_task refused to respawn into the crewmate-shaped husk instead of closing-and-replacing it - this is the exact 2026-07-03 incident (manual pane close required)"
-read -r NEW_CREW_TAB_ID NEW_CREW_PANE_ID <<EOF
+read -r NEW_CREW_TAB_ID NEW_CREW_PANE_ID _ <<EOF
 $RESPAWN_CREW_IDS
 EOF
 if [ -z "$NEW_CREW_TAB_ID" ] || [ -z "$NEW_CREW_PANE_ID" ]; then
@@ -141,7 +141,7 @@ pass "fixed: create_task closes and replaces the crewmate-shaped restored husk i
 
 RESPAWN_SM_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$SM_LABEL" "$PROJ_CWD") \
   || fail "REGRESSION: create_task refused to respawn into the secondmate-shaped husk instead of closing-and-replacing it"
-read -r NEW_SM_TAB_ID NEW_SM_PANE_ID <<EOF
+read -r NEW_SM_TAB_ID NEW_SM_PANE_ID _ <<EOF
 $RESPAWN_SM_IDS
 EOF
 if [ -z "$NEW_SM_TAB_ID" ] || [ -z "$NEW_SM_PANE_ID" ]; then
