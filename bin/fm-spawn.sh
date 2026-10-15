@@ -6108,7 +6108,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   elif [ "$BACKEND" = herdr ]; then
     spawn_lease_herdr_slot
   else
-    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+    SPAWN_TREEHOUSE_ROOT=$(fm_treehouse_home_root "$FM_HOME") || {
+      echo "error: could not resolve the Treehouse worktree root for home '$FM_HOME'; refusing to allocate task $ID a worktree from a pool shared with other homes" >&2
+      exit 1
+    }
+    spawn_send_text_line "$WT_TARGET" "treehouse --root $(shell_quote "$SPAWN_TREEHOUSE_ROOT") get"
+  fi
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
     # Target the stable window id, not the name: if the name is ever lost (e.g. an

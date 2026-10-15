@@ -388,12 +388,21 @@ seeded_origin_url() {
 }
 
 acquire_treehouse_home() {
-  local id=$1 home
+  local id=$1 home root
+  # Lease from the SEEDING home's own Treehouse root: this home owns the lease
+  # and is what returns it, and separate roots are what keep two homes cloning
+  # one origin out of each other's pool slots. fm_treehouse_home_root
+  # (bin/fm-wake-lib.sh) owns the derivation; the rollback return below needs no
+  # matching flag because a return resolves its pool from the path it is given.
+  root=$(fm_treehouse_home_root "$FM_HOME") || {
+    echo "error: could not resolve the treehouse worktree root for home $FM_HOME" >&2
+    return 1
+  }
   # Durably lease a firstmate worktree from the pool. The lease persists with no
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
   # to stdout (banners go to stderr), so command substitution captures the path.
-  home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
+  home=$(cd "$FM_ROOT" && treehouse --root "$root" get --lease --lease-holder "$id") || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }

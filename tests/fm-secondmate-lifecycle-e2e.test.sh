@@ -129,7 +129,13 @@ phase_spawn() {
   assert_grep "$SUB_ABS/data/charter.md" "$LOG" "launch did not use the persistent charter"
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
   assert_no_grep 'turn-ended' "$LOG" "secondmate codex launch referenced a parent turn-ended signal"
-  assert_no_grep 'treehouse get' "$LOG" "secondmate spawn ran a project treehouse get"
+  # A project acquire now carries the home's worktree root, so match the command
+  # in either spelling rather than the old bare "treehouse get", or this would
+  # pass because the text moved rather than because no acquire ran. Matching the
+  # command and not the bare word also keeps a leased home's own path, which
+  # contains "treehouse", from reading as an acquire.
+  grep -E 'treehouse( --root [^ ]+)? get' "$LOG" >/dev/null \
+    && fail "secondmate spawn ran a project worktree acquire"
   pass "spawn: launches in the subhome with persistent charter, records routing meta"
 }
 

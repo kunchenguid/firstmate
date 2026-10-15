@@ -21,7 +21,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Report the installed version and the printed `upgrade:` command and wait for the same consent rule before running it; a printed command that is the tool's own installer means that tool ships no self-updater yet, so the upgrade reuses its install command.
   [`bin/fm-bootstrap.sh`](../../../bin/fm-bootstrap.sh) owns the floor policy, and never argue the floor down to whatever the home happens to have installed.
   For `no-mistakes`, the floor is 1.46.0 because this repo's PR gate requires structured pipeline attestation that older builds do not write.
-  For `treehouse`, the requirement is `treehouse get --lease` support.
+  For `treehouse`, the requirement is both `treehouse get --lease` and global `--root` support.
   For `tasks-axi`, the requirement also covers the separate feature probe (`bin/fm-tasks-axi-lib.sh` owns the definition); `config/backlog-backend=manual` only suppresses the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not this report.
   For `quota-axi`, bootstrap requires it because firstmate reads its current output directly before resolving every crew-dispatch profile array; without it, report the requirement and do not choose around an unexamined candidate.
 - `PRESENTATION_UNAVAILABLE: lavish-axi ...` - explain that visual presentation is unavailable and continue nonvisual work with plain-text decisions and reports; do not hold unrelated dispatch for installation consent.
