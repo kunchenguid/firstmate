@@ -1696,6 +1696,8 @@ test_unanswered_thread_is_raised_again_under_hold() {
   out=$(poll_at "$home" 2026-09-18T09:00:00Z) || fail 'poll a day after the re-raise failed'
   printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 49h$' \
     || fail "the thread was not raised again a day later: $out"
+  jq -e '[.records[0].notified[] | select(startswith("unanswered:"))] | length == 1' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'acknowledged re-raises stayed in the notified list'
   # A reply from the contribution author in the thread ends the tracking and
   # withdraws the signal nobody had acknowledged yet.
   jq -n --arg head "$HEAD_A" '[{id:31,user:{login:"maintainer"},author_association:"OWNER",
@@ -1728,7 +1730,7 @@ test_resolved_thread_is_answered() {
 }
 
 test_reply_rules() {
-  local home
+  local home out
   home=$(new_home reply-rules)
   forge_home "$home"
   jq -n --arg head "$HEAD_A" '[
@@ -1749,10 +1751,15 @@ test_reply_rules() {
     {id:74,in_reply_to_id:72,user:{login:"maintainer"},author_association:"OWNER",body:"Still wrong",html_url:"https://github.com/o/r/pull/8#discussion_r74",created_at:"2026-09-16T05:00:00Z",updated_at:"2026-09-16T05:00:00Z",commit_id:$head}]' \
     > "$home/forge/inline.json"
   poll_at "$home" 2026-09-16T08:00:00Z >/dev/null || fail 'poll failed'
-  jq -e '[.records[0].threads[].key] | sort == ["comment:51","review-comment:70","review-comment:74","review:62"]' \
+  jq -e '[.records[0].threads[].key] | sort == ["review-comment:70","review-comment:74","review:62"]' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail "wrong threads tracked: $(jq -c '[.records[0].threads[].key]' "$home/data/delivery/contributions.json")"
-  pass 'only comments with no author reply, resolution or reply requirement are tracked as unanswered'
+  out=$(poll_at "$home" 2026-09-18T08:00:00Z) || fail 'poll two days later failed'
+  [ "$(printf '%s\n' "$out" | grep -o 'unanswered https://[^ ]*' | sort)" = "$(printf '%s\n' \
+    'unanswered https://github.com/o/r/pull/8#discussion_r70' 'unanswered https://github.com/o/r/pull/8#discussion_r74' \
+    'unanswered https://github.com/o/r/pull/8#pullrequestreview-62')" ] \
+    || fail "a plain comment was raised again, or a tracked thread was not: $out"
+  pass 'only inline threads and reviews requesting changes with no author reply or resolution are tracked as unanswered'
 }
 
 test_reply_age_is_configurable_and_validated() {

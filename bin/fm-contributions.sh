@@ -104,11 +104,12 @@
 # cannot consume the pending signal.
 #
 # Acknowledging a signal never ends tracking of its thread. On an open pull
-# request, each maintainer comment, review with text that neither approves nor
-# is dismissed, and inline review comment is an unanswered thread until the
-# contribution author replies or the thread is resolved. An inline comment is
-# answered by an author reply in its own thread, a comment or review by any
-# later author comment, review text or inline reply. The record keeps one
+# request, each maintainer inline review comment and each maintainer review in
+# state CHANGES_REQUESTED is an unanswered thread until the contribution author
+# replies or the thread is resolved. Plain issue comments and other reviews stay
+# one-shot signals and are never raised again. An inline comment is answered by
+# an author reply in its own thread, a review requesting changes by any later
+# author comment, review text or inline reply. The record keeps one
 # threads[] entry per unanswered thread (key, source, author, at, raised). Once
 # a thread is FM_CONTRIBUTIONS_REPLY_AGE seconds old (default 86400, a day),
 # poll adds one pending "unanswered" signal and a wake whose text names the
@@ -403,8 +404,8 @@ observe() { # canonical GitHub URL -> normalized JSON
       | ($comments[0] | add // []) as $issue_comments
       | ($inline[0] | add // []) as $inline_comments
       | [$threads[0][] | .data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved) | .comments.nodes[0].databaseId] as $resolved
-      # Replies by the contribution author, as timestamps: a comment or review
-      # is answered by any later author comment, review body or inline reply.
+      # Replies by the contribution author, as timestamps: a review requesting
+      # changes is answered by any later author comment, review body or inline reply.
       | ([$issue_comments[] | select(.user.login == $c.user.login) | .created_at]
         + [$inline_comments[] | select(.user.login == $c.user.login) | .created_at]
         + [$reviews[] | select(.user.login == $c.user.login and ((.body // "") != "")) | .submitted_at]) as $replied_at
@@ -423,13 +424,12 @@ observe() { # canonical GitHub URL -> normalized JSON
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
                  author:.user.login,body:(.body // "" | .[:500]),at:$at,
-                 # A resolved inline thread counts as answered; a review that
-                 # approves, is dismissed or has no text asks for no reply.
+                 # A resolved inline thread counts as answered.
                  unanswered:(if ._signal == "review-comment" then
                      ($resolved | index($root)) == null
                      and (any($inline_comments[]; .user.login == $c.user.login and (.in_reply_to_id // .id) == $root and .id > $e.id) | not)
-                   elif ._signal == "review" and ((.body // "") == "" or (.state | IN("APPROVED","DISMISSED"))) then false
-                   else (any($replied_at[]; . >= $at) | not) end)}))}' > "$TMP/observation.json" \
+                   elif ._signal == "review" and .state == "CHANGES_REQUESTED" then (any($replied_at[]; . >= $at) | not)
+                   else false end)}))}' > "$TMP/observation.json" \
       || unobserved 'observation could not be assembled' || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
@@ -503,7 +503,8 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
         $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null,threads:[],
-          pending:[$old[0].pending[] | select(.type != "unanswered")]}' > "$TMP/row.json"
+          pending:[$old[0].pending[] | select(.type != "unanswered")],
+          notified:[($old[0].notified // [])[] | select(startswith("unanswered:") | not)]}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done
@@ -592,6 +593,7 @@ poll() {
           | $old + {checked_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
+            notified:[($old.notified // [])[] | select((startswith("unanswered:") | not) or IN($old.pending[]?.token))],
             threads:[$tracked[] | if .key | IN($due_keys[]) then .raised = $now else . end],
             pending:((($old.pending // []) + $arrived
                 | map(select(.type != "unanswered" or (.thread as $k | ($live | index($k)) != null and ($due_keys | index($k)) == null))))
