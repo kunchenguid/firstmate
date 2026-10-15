@@ -104,13 +104,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$CMD_SET" -eq 0 ]; then
-  # Builtin-only stdin slurp: avoids the fork `cat` would cost on every
-  # invocation. Trailing-newline handling differs from $(cat) (read keeps
-  # them, command substitution would strip them), which is immaterial here -
-  # PAYLOAD is only ever emptiness-tested or handed to jq, and jq ignores
-  # trailing whitespace.
-  PAYLOAD=''
-  IFS= read -r -d '' PAYLOAD || true
+  PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
   # Resolve this script's directory without forking `dirname` on the common

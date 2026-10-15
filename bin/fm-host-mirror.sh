@@ -232,12 +232,7 @@ append_entry() {  # <captain|main> <text> [<id>]
 case "$1" in
   hook)
     [ "$#" -eq 2 ] || exit 0
-    # Builtin-only stdin slurp avoids the fork `cat` would cost on every
-    # prompt-submit and Stop. Trailing-newline handling differs from $(cat)
-    # (read keeps them, command substitution would strip them), which is
-    # immaterial here - PAYLOAD is only ever emptiness-tested or handed to jq.
-    PAYLOAD=''
-    IFS= read -r -d '' PAYLOAD || true
+    PAYLOAD=$(cat 2>/dev/null || true)
     [ -n "$PAYLOAD" ] || exit 0
     if [ "$2" = claude ]; then
       # shellcheck source=bin/fm-hook-host-lib.sh
