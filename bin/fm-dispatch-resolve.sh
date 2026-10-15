@@ -304,7 +304,7 @@ fm_dispatch_target_paths() {  # <brief-file>
     for token in ${tokens[@]+"${tokens[@]}"}; do
       printf '%s\n' "$token"
     done
-  done < <(awk 'match($0, /^Target paths:[[:space:]]*/) { print substr($0, RSTART + RLENGTH) }' "$1")
+  done < <(awk '!/[`,]/ && match($0, /^Target paths:[[:space:]]*/) { print substr($0, RSTART + RLENGTH) }' "$1")
 }
 
 FORCED_RULE=$(jq -r '

@@ -1100,7 +1100,7 @@ glob_out=$(cd "$TMP_ROOT/globcwd" && PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_D
 assert_contains "$glob_out" '  forced_path: infra/*.tf   forced_pattern: *.tf or *.tfvars' "a declared path is never expanded against the working directory"
 
 # shellcheck disable=SC2016  # the literal backticks are the markdown a brief author might write
-for line in '- Target paths: infra/main.tf' 'Target paths: `infra/main.tf`' 'Target paths: infra/main.tf, src/app.ts'; do
+for line in '- Target paths: infra/main.tf' 'Target paths: `infra/main.tf`' 'Target paths: infra/main.tf, src/app.ts' 'Target paths: `infra/k8s/app.yaml`' 'Target paths: k8s/a.yaml, src/x.ts'; do
   { cat "$BRIEF"; printf '\n%s\n' "$line"; } > "$PATH_BRIEF"
   reset_log
   write_careful_response "$RESPONSE" rule_1
