@@ -1,0 +1,21 @@
+profile	stage	run	emit	extra	session_timeout_sec
+slim	lock	yes	body		30
+slim	role	yes	body		30
+slim	bootstrap	no	pointer		30
+slim	wake-queue	yes	body		30
+slim	supervision-instructions	yes	body		30
+slim	read-once	yes	body		30
+slim	fleet-state	yes	body	identity	30
+slim	network-checks	no	pointer		30
+slim	context	yes	slots	all=pointer	30
+slim	next-step	yes	body		30
+full	lock	yes	body		120
+full	role	yes	body		120
+full	bootstrap	yes	body		120
+full	wake-queue	yes	body		120
+full	supervision-instructions	yes	body		120
+full	read-once	yes	body		120
+full	fleet-state	yes	body	full:tail=5,queued=20,endpoint=10	120
+full	network-checks	yes	body		120
+full	context	yes	slots	all=body:uncapped	120
+full	next-step	yes	body		120

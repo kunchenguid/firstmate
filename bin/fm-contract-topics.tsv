@@ -1,0 +1,14 @@
+# Contract residue rows wait until .agents/contract/<id>.md exists.
+id	trigger	path
+quota-array	a matched profile array must be ranked	.agents/skills/quota-array-dispatch/SKILL.md
+secondmates	create, route, recover, seed, or retire a secondmate; edit data/secondmates.md	.agents/skills/secondmate-provisioning/SKILL.md
+relay	Relay is enabled, or a wake is a Relay milestone or public follow-up	.agents/skills/fmx-respond/SKILL.md
+ship-landing	a ship reports a PR or ready branch, or landing or teardown is in play	.agents/skills/ship-landing/SKILL.md
+scout-completion	a scout reports completion, shows a visual for iteration, or is up for promotion	.agents/skills/scout-completion/SKILL.md
+validation	a ship has a no-mistakes run, including a mid-run finding	.agents/skills/validation-supervision/SKILL.md
+ask-user	deciding or answering an ask-user finding	.agents/skills/ask-user-authority/SKILL.md
+stuck-worker	stopped, looping, confused, or unresponsive worker, including a live worker claiming validation is dead	.agents/skills/stuck-crewmate-recovery/SKILL.md
+away-quiet	/afk, /quiet, state/.afk-contract, state/.afk, or FM_INJECT_MARK	.agents/skills/away-quiet-supervision/SKILL.md
+self-update	captain invokes /updatefirstmate or asks to update firstmate	.agents/skills/updatefirstmate/SKILL.md
+project-admin	add, create, remove, or initialize a project	.agents/skills/project-management/SKILL.md
+layout	locating or changing home, config, data, state, or project paths	.agents/skills/operational-home-layout/SKILL.md
