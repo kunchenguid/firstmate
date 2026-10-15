@@ -2911,6 +2911,11 @@ collect_descendant_task_locks() {
     echo "REFUSED: secondmate home $home is publishing a task right now (task-set lock is held); forced teardown changed nothing" >&2
     return 1
   fi
+  if ! fm_lock_set_role "$task_set_lock" forced-teardown; then
+    fm_lock_release "$task_set_lock" || true
+    echo "REFUSED: secondmate home $home could not record its task-set lock holder; forced teardown changed nothing" >&2
+    return 1
+  fi
   DESCENDANT_LOCK_PATHS+=("$task_set_lock")
   child_ids=()
   for child_meta in "$sub_state"/*.meta; do

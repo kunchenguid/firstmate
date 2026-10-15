@@ -3254,6 +3254,101 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   pass "a captain-held lane is rechecked as a hold on the captain, never as an external wait, and never at all while the captain is away"
 }
 
+# The backlog record of the same hold. Once firstmate hands a decision to the
+# captain through bin/fm-captain-hold.sh, the worker's own line stays whatever it
+# was, so a stuck worker on a stable pane reaches the wedge timer with nothing in
+# its status log that reads as a wait. The open captain call must bound the wedge
+# ladder exactly as a `captain-held:` line does.
+backlog_hold_wedge_fixture() {  # <name> <status-age-secs> [<wedge-timer-age-secs>] [<status-log>]
+  local dir
+  dir=$(wedge_threshold_fixture "$1" "${4:-working: answering the dialog}" "$2" "${3-}") || return 1
+  mkdir -p "$dir/data"
+  fm_test_tasks_toml "$dir/.tasks.toml" || return 1
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  (cd "$dir" && tasks-axi add wedge 'stuck at a captain-only dialog' --file data/backlog.md) >/dev/null 2>&1 \
+    || return 1
+  run_hold "$dir" hold wedge --reason 'awaiting the captain on the dialog' || return 1
+  printf '%s\n' "$dir"
+}
+
+test_wedge_threshold_defers_to_a_backlog_captain_hold() {
+  local dir state fakebin out capture window key n queued armed_timer past
+  local working='state: working · source: run-step · ci running'
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (backlog captain hold wedge bound)"; return 0; }
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # A fresh status line is no record of when the hold began, so the first
+  # threshold rechecks it once, as a wait on the captain with no wait age.
+  dir=$(backlog_hold_wedge_fixture backlog-hold-quiet 0) \
+    || fail "could not build a backlog captain-hold wedge fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" \
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a backlog-held lane was never rechecked at the threshold: $(cat "$out")"
+  grep -F 'awaiting the captain' "$out" >/dev/null \
+    || fail "the backlog-hold recheck did not name the captain: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a backlog-held lane was reported as a possible wedge: $(cat "$out")"
+  grep -E ', waiting [0-9]+s' "$out" >/dev/null \
+    && fail "the backlog-hold recheck published the status line's age as the hold's: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the backlog-hold recheck"
+
+  # Inside the recheck cadence the hold is absorbed whole, threshold after threshold.
+  queued=$(wedge_stale_wakes "$state" "$window")
+  n=1
+  while [ "$n" -le 3 ]; do
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" \
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "a backlog-held lane wedge-escalated at threshold $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq "$queued" ] \
+    || fail "a backlog-held lane queued a further wake inside its recheck cadence: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a backlog-held lane counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+
+  # A paused line whose own clearing time has passed explains nothing, so the
+  # hold the worker's line never shows still bounds the ladder.
+  past=$(iso_utc_at "$(( $(date +%s) - 7200 ))")
+  dir=$(backlog_hold_wedge_fixture backlog-hold-elapsed-pause 0 '' \
+    "paused: waiting on the build queue until $past") \
+    || fail "could not build a backlog captain-hold wedge fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" \
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a backlog-held lane behind an elapsed pause was never rechecked: $(cat "$out")"
+  grep -F 'awaiting the captain' "$out" >/dev/null \
+    || fail "a backlog-held lane behind an elapsed pause was not rechecked as a wait on the captain: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a backlog-held lane behind an elapsed pause was reported as a possible wedge: $(cat "$out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a backlog-held lane behind an elapsed pause counted a wedge escalation"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the elapsed-pause backlog-hold recheck"
+
+  # While the away-posture record exists it is never rechecked, and the backlog
+  # read that proves the hold is paced by the idle timer rather than every poll.
+  dir=$(backlog_hold_wedge_fixture backlog-hold-away 2000 2000) \
+    || fail "could not build a backlog captain-hold wedge fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  armed_timer=$(cat "$state/.stale-since-$key")
+  write_away_record "$state"
+  n=1
+  while [ "$n" -le 3 ]; do
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_TEST_PAUSE_RESURFACE=240 \
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "a backlog-held lane was rechecked at threshold $n while the away-posture record existed: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a backlog-held lane woke the away captain: $(cat "$state/.wake-queue")"
+  [ ! -s "$out" ] \
+    || fail "a backlog-held lane printed a recheck while the away-posture record existed: $(cat "$out")"
+  [ "$(cat "$state/.stale-since-$key")" != "$armed_timer" ] \
+    || fail "an away-silenced backlog hold left the idle timer expired, so its backlog read repeats on every poll"
+  pass "a backlog captain hold bounds the wedge ladder like a captain-held line, and stays silent while the captain is away"
+}
+
 # --- the wedge threshold reads the crew's own parked-gate state --------------
 # Upstream kunchenguid/firstmate#3055: a lane parked at a validation gate that is
 # waiting on a HUMAN is correctly quiet, but nothing in the status LINE says so -
@@ -6603,6 +6698,78 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+# --- a live worker paused on its own background job --------------------------
+# A worker declared `paused:` on its own background job and the job then ended
+# without a new status line, so only the passage of time can tell the watcher
+# the wait should be over. Without `until`, the first-sight alert spends the
+# declaration's re-surface throttle and every later sight - including the one
+# after the job ended - is held for PAUSE_RESURFACE_SECS. Naming the job's
+# start plus its timeout as `until` gives that same declaration one recheck once
+# the job can no longer be running.
+bg_job_paused_case() {  # <name> <status-line> -> dir
+  local dir state window key
+  dir=$(make_case "$1"); state="$dir/state"; window="test:fm-parked"
+  printf 'window=%s\nkind=scout\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf '%s\n' "$2" > "$state/parked.status"
+  printf '%s' "$(seen_sig "$state/parked.status")" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'nightly build running' > "$dir/pane.txt"
+  printf '%s' "$(hash_text 'nightly build running')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' "$dir"
+}
+
+bg_job_stale_wakes() {  # <state> -> count of stale wakes queued for the parked window
+  awk -F '\t' '$3 == "stale" && $4 == "test:fm-parked" { n++ } END { print n + 0 }' \
+    "$1/.wake-queue" 2>/dev/null || echo 0
+}
+
+test_paused_bg_job_without_until_stays_silent_after_the_job_ends() {
+  local dir state
+  dir=$(bg_job_paused_case bg-job-no-until \
+    "paused [key=nightly-build] [at=$(date +%s)]: nightly build; resume when the job finishes")
+  state="$dir/state"
+  parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked exit \
+    || fail "first sight of a worker paused on its background job did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first-sight alert"
+  printf '[bg failed] nightly build - Exited with code 1' > "$dir/pane.txt"
+  parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked absorb \
+    || fail "the ended job surfaced although the declaration names no time"
+  [ "$(bg_job_stale_wakes "$state")" -eq 0 ] \
+    || fail "the ended job surfaced inside the cadence although the declaration names no time"
+  pass "without until, a worker paused on its own ended background job is not rechecked inside the cadence"
+}
+
+test_paused_bg_job_until_timeout_rechecks_after_the_job_ends() {
+  local dir state started
+  started=$(date +%s)
+  dir=$(bg_job_paused_case bg-job-until-running \
+    "paused [key=nightly-build] [at=$started]: nightly build (background job, 600s timeout); resume when it ends, until $(iso_utc_at "$(( started + 600 ))")")
+  state="$dir/state"
+  parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked absorb \
+    || fail "a worker paused on its running background job woke before the job's timeout"
+  [ "$(bg_job_stale_wakes "$state")" -eq 0 ] || fail "the running job surfaced before its timeout"
+  started=$(( $(date +%s) - 180 ))
+  dir=$(bg_job_paused_case bg-job-until \
+    "paused [key=nightly-build] [at=$started]: nightly build (background job, 120s timeout); resume when it ends, until $(iso_utc_at "$(( started + 120 ))")")
+  state="$dir/state"
+  printf '[bg failed] nightly build - Exited with code 1' > "$dir/pane.txt"
+  parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked exit \
+    || fail "the job's timeout passed without a recheck of the worker paused on it"
+  [ "$(bg_job_stale_wakes "$state")" -eq 1 ] || fail "the passed timeout queued the wrong number of rechecks"
+  awk -F '\t' '$3 == "stale" && $5 == "stale: test:fm-parked" { found = 1 } END { exit !found }' \
+    "$state/.wake-queue" || fail "the recheck carried an unexpected reason: $(cat "$state/.wake-queue")"
+  case "$(cat "$state/.paused-resurfaced-test_fm-parked" 2>/dev/null)" in
+    *:due) ;;
+    *) fail "the recheck was not recorded as the passed declared time" ;;
+  esac
+  ack_stopped_cycle "$state" || fail "could not acknowledge the due recheck"
+  printf '[bg failed] nightly build - Exited with code 1 (idle)' > "$dir/pane.txt"
+  parked_watch_round "$state" "$dir/fakebin" "$dir/watch.out" "$dir/pane.txt" test:fm-parked absorb \
+    || fail "the due recheck repeated instead of returning to the cadence"
+  pass "until set to a background job's timeout rechecks the worker paused on it once the job must have ended"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -6706,6 +6873,7 @@ test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
+test_wedge_threshold_defers_to_a_backlog_captain_hold
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed
@@ -6751,3 +6919,191 @@ test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_paused_bg_job_without_until_stays_silent_after_the_job_ends
+test_paused_bg_job_until_timeout_rechecks_after_the_job_ends
+
+# The recorded Claude background-task exit picker. The footer is the last
+# non-blank row, which is what fm_composer_blocking_dialog requires.
+write_exit_picker() {  # <file>
+  printf '%s\n' \
+    'Background work is running' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '❯ 1. Exit and stop tasks' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$1"
+}
+
+# The same words quoted above a normal composer. That is not a live picker.
+write_quoted_exit_picker() {  # <file>
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'Enter to confirm · Esc to cancel' \
+    '╭──────────────╮' \
+    '│ > next steer │' \
+    '╰──────────────╯' > "$1"
+}
+
+prime_picker_window() {  # <state> <id> <window> <kind> <capture> <status-line>
+  local state=$1 id=$2 window=$3 kind=$4 capture=$5 status_line=$6 key statusf
+  statusf="$state/$id.status"
+  printf 'window=%s\nkind=%s\nbackend=tmux\n' "$window" "$kind" > "$state/$id.meta"
+  printf '%s\n' "$status_line" > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-${id}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$(cat "$capture")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$key"
+}
+
+test_exit_picker_stale_names_the_dialog() {
+  local dir state fakebin out capture_file window key pid count_file
+  dir=$(make_case exit-picker-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; count_file="$dir/captures"
+  window="test:fm-picker"
+  write_exit_picker "$capture_file"
+  key=$(prime_picker_window "$state" picker "$window" ship "$capture_file" 'working: parked between turns')
+  printf '0\n' > "$count_file"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a pane parked on the exit picker: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the picker wake was not a stale wake: $(cat "$out")"
+  grep -F 'blocked-on-prompt: Claude background-task exit picker' "$out" >/dev/null \
+    || fail "the picker wake did not name the dialog: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null && fail "the first picker stale was labeled a wedge: $(cat "$out")"
+  [ "$(cat "$count_file")" -eq 1 ] || fail "the picker poll captured the pane $(cat "$count_file") times"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$(hash_text "$(cat "$capture_file")")" ] \
+    || fail "the picker stale did not record the pane hash"
+  unset FM_FAKE_CREW_STATE
+  pass "a pane on the exit picker is a named stale, from the one capture the poll already takes"
+}
+
+test_exit_picker_wedge_keeps_climbing() {
+  local dir state fakebin out capture_file window key pid n
+  dir=$(make_case exit-picker-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-picker-wedge"
+  write_exit_picker "$capture_file"
+  key=$(prime_picker_window "$state" picker "$window" ship "$capture_file" 'working: parked between turns')
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a working pane on the picker exited instead of keeping the wedge timer: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a working pane on the picker woke before the wedge timer: $(cat "$out")"
+  [ -s "$state/.stale-since-$key" ] || fail "the picker did not start the wedge timer"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the picker absorb"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_WEDGE_DEMAND_INSPECT_COUNT=3 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the first picker wedge did not escalate: $(cat "$out")"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null || fail "the first picker wedge lost its count: $(cat "$out")"
+  grep -F 'blocked-on-prompt: Claude background-task exit picker' "$out" >/dev/null \
+    || fail "the first picker wedge dropped the dialog name: $(cat "$out")"
+  grep -F 'demand-deep-inspection' "$out" >/dev/null && fail "escalation 1 demanded inspection: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge picker escalation 1"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_WEDGE_DEMAND_INSPECT_COUNT=3 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the third picker wedge did not escalate: $(cat "$out")"
+  grep -F 'possible wedge, escalation 3' "$out" >/dev/null || fail "the ladder did not reach escalation 3: $(cat "$out")"
+  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone, blocked-on-prompt: Claude background-task exit picker' \
+    "$out" >/dev/null || fail "the dialog name was not after demand-deep-inspection: $(cat "$out")"
+  n=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)
+  [ "$n" -eq 3 ] || fail "the escalation count was $n, not 3"
+  unset FM_FAKE_CREW_STATE
+  pass "a pane on the exit picker keeps the wedge ladder, and the name follows demand-deep-inspection"
+}
+
+test_quoted_exit_picker_stays_ordinary_stale() {
+  local dir state fakebin out capture_file window pid
+  dir=$(make_case quoted-exit-picker); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-quoted"
+  write_quoted_exit_picker "$capture_file"
+  prime_picker_window "$state" quoted "$window" ship "$capture_file" 'working: parked between turns' >/dev/null
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a quoted picker did not take the ordinary stale path: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "a quoted picker was not an ordinary stale: $(cat "$out")"
+  grep -F 'blocked-on-prompt' "$out" >/dev/null && fail "a quoted picker was named as a dialog: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "picker text quoted above a composer stays an ordinary stale"
+}
+
+test_secondmate_exit_picker_stays_quiet() {
+  local dir state fakebin out capture_file window pid count_file
+  dir=$(make_case secondmate-exit-picker); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; count_file="$dir/captures"
+  window="test:fm-picker-mate"
+  write_exit_picker "$capture_file"
+  prime_picker_window "$state" mate "$window" secondmate "$capture_file" 'working: the parent supervises this secondmate' >/dev/null
+  printf '0\n' > "$count_file"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a second mate on the exit picker woke: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a second mate on the exit picker printed a wake: $(cat "$out")"; }
+  [ "$(cat "$count_file")" -eq 0 ] \
+    || { reap "$pid"; fail "a second mate on the exit picker was captured $(cat "$count_file") times"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a second mate on the exit picker stays quiet, and the poll does not capture the pane"
+}
+
+# The away daemon saved this name while the picker was up. Once the pane leaves
+# it, the same capture the stale path already takes has to drop the name, or
+# the persistence line would still say the dialog is open.
+test_closed_exit_picker_drops_saved_dialog_name() {
+  local dir state fakebin out capture_file window pid
+  dir=$(make_case exit-picker-closed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-picker-closed"
+  printf 'idle at the prompt\n' > "$capture_file"
+  prime_picker_window "$state" closer "$window" ship "$capture_file" 'working: parked between turns' >/dev/null
+  printf '%s' 'Claude background-task exit picker' > "$state/.subsuper-dialog-closer"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a closed picker did not take the ordinary stale path: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "a closed picker was not an ordinary stale: $(cat "$out")"
+  grep -F 'blocked-on-prompt' "$out" >/dev/null && fail "a closed picker was still named as a dialog: $(cat "$out")"
+  [ ! -e "$state/.subsuper-dialog-closer" ] || fail "a closed picker left the saved dialog name"
+  unset FM_FAKE_CREW_STATE
+  pass "a closed picker drops the saved dialog name, and the stale stays ordinary"
+}
+
+test_exit_picker_stale_names_the_dialog
+test_exit_picker_wedge_keeps_climbing
+test_quoted_exit_picker_stays_ordinary_stale
+test_secondmate_exit_picker_stays_quiet
+test_closed_exit_picker_drops_saved_dialog_name

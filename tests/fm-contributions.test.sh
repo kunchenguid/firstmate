@@ -101,6 +101,9 @@ test_newest_check_has_no_verdict() {
 }
 
 
+# Budget seconds left depend on the wall clock unless a test freezes it.
+mask_budget() { sed -E 's/ with -?[0-9]+s of budget left: / with Ns of budget left: /'; }
+
 forge_home() {
   local home=$1
   mkdir -p "$home/forge" "$home/root/bin" "$home/wt"
@@ -426,6 +429,106 @@ test_unsupported_forge_is_not_fleet_work() {
   pass 'unsupported forge coverage is disclosed without inventing fleet work'
 }
 
+test_unsupported_poll_is_silent_and_clears_legacy_errors() {
+  local home mode out url task
+  for mode in fresh legacy; do
+    home=$(new_home "unsupported-poll-$mode")
+    forge_home "$home"
+    wrap_forge "$home"
+    rm -f "$home/state/delivery.meta" "$home/data/delivery/contributions.json"
+    printf '# Backlog\n\n## Queued\n' > "$home/data/backlog.md"
+    for task in gitlab selfhosted hyphenated wildcard; do
+      case "$task" in
+        gitlab) url=https://gitlab.com/o/r/-/merge_requests/2 ;;
+        selfhosted) url=https://git.example.org/group/subgroup/r/-/merge_requests/3 ;;
+        hyphenated) url=https://github-com/o/r/pull/8 ;;
+        wildcard) url=https://githubXcom/o/r/issues/9 ;;
+      esac
+      printf -- '- [ ] %s - Filed %s (repo: sample) (kind: ship)\n' "$task" "$url" >> "$home/data/backlog.md"
+      if [ "$mode" = legacy ]; then
+        mkdir -p "$home/data/$task"
+        jq -n --arg task "$task" --arg url "$url" --arg now "$NOW" '
+          {schema:"fm-contributions.v1",task:$task,records:[{url:$url,
+            kind:(if ($url | contains("/issues/")) then "issue" else "pr" end),checked_at:$now,error:"forge observation unavailable or changed during read",
+            observation:null,verdict:null,seen:[],pending:[],notified:[],provenance:"retained ownership"}]}' \
+          > "$home/data/$task/contributions.json"
+        jq '.records[].error=null' "$home/data/$task/contributions.json" > "$home/$task.expected.json"
+      fi
+    done
+    # Forgejo pulls are not accepted by the existing contribution ownership schema.
+    printf -- '- [ ] forgejo - Filed https://codeberg.org/o/r/pulls/2 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+    # Saved URLs retain ownership after their backlog links disappear.
+    [ "$mode" != legacy ] || printf '# Backlog\n\n## Queued\n' > "$home/data/backlog.md"
+    out=$(with_home "$home" bash "$ROOT/bin/fm-contributions.sh" poll 2>&1) \
+      || fail "unsupported poll failed ($mode): $out"
+    [ -z "$out" ] || fail "unsupported poll printed an unavailable signal ($mode): $out"
+    [ ! -s "$home/forge/calls" ] || fail "unsupported poll contacted the forge ($mode)"
+    [ ! -s "$home/state/.wake-queue" ] || fail "unsupported poll enqueued a wake ($mode)"
+    for task in gitlab selfhosted hyphenated wildcard; do
+      if [ "$mode" = legacy ]; then
+        jq -e --slurpfile expected "$home/$task.expected.json" '. == $expected[0]' \
+          "$home/data/$task/contributions.json" >/dev/null \
+          || fail 'legacy cleanup changed evidence beyond its unsupported error'
+      else
+        [ ! -e "$home/data/$task/contributions.json" ] || fail 'unsupported poll fabricated a record'
+      fi
+    done
+    bearings "$home" | jq -e '.contributions | .known == 4 and .checked == 0
+      and .unmeasured == 4 and .unreadable_records == 0
+      and .counts == {captain:0,fleet:0,maintainer:0,nobody:0}
+      and .complete == false and .proven_clear == false' >/dev/null \
+      || fail "unsupported poll corrupted unmeasured coverage ($mode)"
+  done
+  pass 'unsupported ownership stays silent and unmeasured; legacy errors clear without fabricated evidence'
+}
+
+test_legacy_cleanup_preserves_supported_failure() {
+  local home out
+  home=$(new_home legacy-mixed-errors)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].observation=null
+    | .records[0].error="forge observation unavailable or changed during read"
+    | .records += [(.records[0] | .url="https://gitlab.com/o/r/-/merge_requests/2"),
+      (.records[0] | .url="https://github-com/o/r/pull/8"),
+      (.records[0] | .url="https://githubXcom/o/r/issues/9" | .kind="issue")]'
+  jq '[.records[] | select(.url != "https://github.com/o/r/pull/8") | .error=null]' \
+    "$home/data/delivery/contributions.json" > "$home/unsupported.expected.json"
+  printf 'down\n' > "$home/forge/fault"
+  out=$(with_home "$home" bash "$ROOT/bin/fm-contributions.sh" poll 2>&1) \
+    || fail "mixed legacy-error poll failed: $out"
+  [ -z "$out" ] || fail "an existing GitHub failure episode re-alerted: $out"
+  grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'supported ownership was not retried'
+  # The transient 502 core read is retried once; unsupported records add no reads.
+  [ "$(wc -l < "$home/forge/calls")" -eq 2 ] || fail 'unsupported mixed records triggered forge reads'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'mixed legacy cleanup enqueued a wake'
+  jq -e --slurpfile expected "$home/unsupported.expected.json" '.records | length == 4
+    and all(.[]; .observation == null)
+    and any(.[]; .url == "https://github.com/o/r/pull/8" and .error != null)
+    and ([.[] | select(.url != "https://github.com/o/r/pull/8")] | sort_by(.url))
+      == ($expected[0] | sort_by(.url))' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'unsupported cleanup erased supported failure or fabricated an observation'
+  bearings "$home" | jq -e '.contributions | .known == 4 and .checked == 0
+    and .unmeasured == 3 and .unreadable_records == 0
+    and .counts == {captain:0,fleet:1,maintainer:0,nobody:0} and .complete == false' >/dev/null \
+    || fail 'mixed legacy cleanup confused supported failures with unmeasured coverage'
+  rm "$home/forge/fault"
+  out=$(with_home "$home" bash "$ROOT/bin/fm-contributions.sh" poll 2>&1) \
+    || fail "mixed saved-file recovery failed: $out"
+  [ -z "$out" ] || fail "mixed saved-file recovery printed an alert: $out"
+  [ ! -s "$home/state/.wake-queue" ] || fail 'mixed saved-file recovery enqueued a wake'
+  jq -e --slurpfile expected "$home/unsupported.expected.json" '
+    [.records[] | select(.url != "https://github.com/o/r/pull/8")] | sort_by(.url)
+    == ($expected[0] | sort_by(.url))' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'supported recovery changed retained unsupported evidence'
+  bearings "$home" | jq -e '.contributions | .known == 4 and .checked == 1
+    and .unmeasured == 3 and .unreadable_records == 0
+    and .counts == {captain:0,fleet:0,maintainer:1,nobody:0} and .complete == false' >/dev/null \
+    || fail 'real GitHub recovery lost mixed saved ownership'
+  pass 'legacy cleanup preserves unsupported ownership and supported missing-evidence failure in the same file'
+}
+
 test_held_unsupported_forge_is_not_captain_work() {
   local home
   home=$(new_home held-unsupported-forge)
@@ -468,6 +571,7 @@ test_shared_contribution_signal_wakes_once() {
 test_watcher_keeps_diagnostics_separate_from_contribution_wakes() {
   local home out rc wakes diagnostic
   home=$(new_home watcher-diagnostics)
+  printf -- '- [ ] unsupported - Filed https://gitlab.com/o/r/-/merge_requests/2 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   forge_home "$home"
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register delivery for diagnostic watcher wake'
@@ -649,12 +753,32 @@ case "$fault:$*" in
   slow-wave:'api repos/o/r/pulls/8') sleep 3 ;;
   slow-wave:'api repos/o/r/pulls/8/reviews?'*) sleep 6 ;;
   exhaust:'api repos/o/r/issues/8/comments?'*) clock_bump 100 ;;
-  fail-late:'api repos/o/r/pulls/8/reviews?'*) clock_bump 100; printf 'HTTP 502\n' >&2; exit 1 ;;
-  fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
-  down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
-  not-found:'api repos/o/r/'*) printf 'HTTP 404\n' >&2; exit 1 ;;
+  fail-late:'api repos/o/r/pulls/8/reviews?'*) clock_bump 100; printf 'gh: Bad Gateway (HTTP 502)\n' >&2; exit 1 ;;
+  fail:'api repos/o/r/pulls/8/reviews?'*) printf 'gh: Internal Server Error (HTTP 500)\n' >&2; exit 1 ;;
+  fail-once:'api repos/o/r/pulls/8/reviews?'*)
+    if [ ! -e "$FORGE/fail-once-spent" ]; then
+      : > "$FORGE/fail-once-spent"
+      printf 'gh: Internal Server Error (HTTP 500)\n' >&2
+      exit 1
+    fi
+    ;;
+  real-reviews:'api repos/o/r/pulls/8/reviews?'*)
+    printf '%s\n' "$FORGE_ERROR_TEXT" >&2
+    exit "${FORGE_ERROR_RC:-1}"
+    ;;
+  real-core:'api repos/o/r/pulls/8')
+    printf '%s\n' "$FORGE_ERROR_TEXT" >&2
+    exit "${FORGE_ERROR_RC:-1}"
+    ;;
+  real-closing:'pr view '*)
+    printf '%s\n' "$FORGE_ERROR_TEXT" >&2
+    exit "${FORGE_ERROR_RC:-1}"
+    ;;
+  down:*) printf 'gh: Bad Gateway (HTTP 502)\n' >&2; exit 1 ;;
+  not-found:'api repos/o/r/'*) printf 'gh: Not Found (HTTP 404)\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
+  headless:'pr view '*) printf '{"headRefOid":null,"reviewDecision":"APPROVED"}\n'; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
 SH
@@ -700,17 +824,271 @@ test_genuine_failure_near_deadline_is_unavailable() {
   /bin/date +%s > "$home/forge/clock"
   printf 'fail-late\n' > "$home/forge/fault"
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed on a genuine forge failure'
-  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
-    || fail "a genuine forge failure past the deadline was swallowed: $out"
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 - reviews read exited 1 with -80s of budget left: gh: Bad Gateway (HTTP 502)' ] \
+    || fail "a genuine forge failure past the deadline was swallowed or lost its cause: $out"
   jq -e --arg now "$NOW" '.records[0].checked_at == $now
-    and .records[0].error == "forge observation unavailable or changed during read"' \
+    and .records[0].error == "forge observation unavailable: reviews read exited 1 with -80s of budget left: gh: Bad Gateway (HTTP 502)"' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
-  pass 'a genuine forge failure inside the budget still records the error and wakes'
+  pass 'a genuine forge failure inside the budget still records the error, its cause and wakes'
+}
+
+test_http_500_once_retries_without_waking() {
+  local home out calls
+  home=$(new_home retry-http-500-once)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'fail-once\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed after one transient HTTP 500'
+  [ -z "$out" ] || fail "a recovered HTTP 500 printed an unavailable line: $out"
+  calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "one HTTP 500 made $calls review reads, expected 2"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a recovered HTTP 500 left an error in the contribution record'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a recovered HTTP 500 enqueued a wake'
+  pass 'one HTTP 500 is retried once and a successful retry stays healthy'
+}
+
+test_http_500_twice_records_the_failed_read() {
+  local home out calls why='reviews read exited 1 with Ns of budget left: gh: Internal Server Error (HTTP 500)'
+  home=$(new_home retry-http-500-twice)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'fail\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed after two HTTP 500 responses'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "two HTTP 500 responses did not print one unavailable line: $out"
+  calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "two HTTP 500 responses made $calls review reads, expected 2"
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a failed retry did not name the reviews read and its error'
+  pass 'two transient failures wake once and name the failed read in the record'
+}
+
+test_http_404_is_not_retried() {
+  local home out calls why='core read exited 1 with Ns of budget left: gh: Not Found (HTTP 404)'
+  home=$(new_home no-retry-http-404)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'not-found\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed after an HTTP 404'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "an HTTP 404 did not print one unavailable line: $out"
+  calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$calls" = 1 ] || fail "an HTTP 404 made $calls core reads, expected 1"
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'an HTTP 404 did not name the core read and its error'
+  pass 'an HTTP 404 is reported without retrying'
+}
+
+test_real_gh_errors_drive_retry_and_summary() {
+  local home out calls status message row repo error summary why
+  message=$'error connecting to no-such-host-f67.invalid\ncheck your internet connection or https://githubstatus.com'
+  home=$(new_home real-gh-dns)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-reviews\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a real gh DNS error shape'
+  why='reviews read exited 1 with Ns of budget left: error connecting to no-such-host-f67.invalid'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "a persistent DNS error did not print one unavailable line: $out"
+  calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "a gh DNS error made $calls review reads, expected 2"
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a gh DNS error did not retain its error'
+
+  for row in \
+    'kunchenguid/firstmate|proxyconnect tcp: dial tcp 127.0.0.1:1: connect: connection refused|connection error' \
+    'coredns/coredns|dial tcp 140.82.112.6:443: connect: connection refused|connection error' \
+    'openssl/openssl|read tcp 10.0.0.2:50000->140.82.112.6:443: read: connection reset by peer|connection error' \
+    'rustls/rustls|unexpected EOF|connection error' \
+    'coredns/coredns|net/http: TLS handshake timeout|TLS error' \
+    'openssl/openssl|dial tcp: lookup api.github.com: no such host|DNS error'; do
+    IFS='|' read -r repo error summary <<< "$row"
+    message="Get \"https://api.github.com/repos/$repo/pulls/7262/reviews?per_page=100\": $error"
+    home=$(new_home "real-gh-network-$(printf '%s' "$row" | shasum | cut -c1-8)")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-reviews\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed on a real gh $summary shape"
+    why="reviews read exited 1 with Ns of budget left: $message"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "a persistent $summary did not print one unavailable line: $out"
+    calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+    [ "$calls" = 2 ] || fail "a gh $summary made $calls review reads, expected 2"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail "a gh $summary from $repo did not retain its error"
+  done
+
+  for message in \
+    'GraphQL: Could not resolve to a PullRequest with the number of 99999999. (repository.pullRequest)' \
+    "GraphQL: Could not resolve to a Repository with the name 'missing'. (repository)" \
+    "GraphQL: Could not resolve to a Repository with the name 'openssl/openssl'. (repository)" \
+    "GraphQL: Could not resolve to a Repository with the name 'o/dnsmasq'. (repository)"; do
+    home=$(new_home "real-gh-graphql-$(printf '%s' "$message" | shasum | cut -c1-8)")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-closing\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail 'poll failed on a real gh GraphQL not-found shape'
+    why="head read exited 1 with Ns of budget left: $message"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "a GraphQL not-found did not print one unavailable line: $out"
+    calls=$(grep -cF 'pr view https://github.com/o/r/pull/8' "$home/forge/calls")
+    [ "$calls" = 1 ] || fail "a GraphQL not-found made $calls closing reads, expected 1"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail 'a GraphQL not-found did not retain its error'
+  done
+
+  for status in 404 401; do
+    case "$status" in 404) message='gh: Not Found (HTTP 404)' ;; 401) message='gh: Bad credentials (HTTP 401)' ;; esac
+    home=$(new_home "real-gh-http-$status")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-core\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed on a real gh HTTP $status shape"
+    why="core read exited 1 with Ns of budget left: $message"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "HTTP $status did not print one unavailable line: $out"
+    calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+    [ "$calls" = 1 ] || fail "HTTP $status made $calls core reads, expected 1"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail "HTTP $status lost its error"
+  done
+
+  # Only GitHub's secondary rate limit makes a 403 transient.
+  for row in \
+    'secondary|2|gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)' \
+    'forbidden|1|gh: Resource not accessible by integration (HTTP 403)'; do
+    IFS='|' read -r status calls message <<< "$row"
+    home=$(new_home "real-gh-http-403-$status")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-core\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed on a real gh $status HTTP 403 shape"
+    why="core read exited 1 with Ns of budget left: $message"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "a persistent $status HTTP 403 did not print one unavailable line: $out"
+    [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = "$calls" ] \
+      || fail "a $status HTTP 403 did not make exactly $calls core read(s)"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail "a $status HTTP 403 lost its error"
+  done
+
+  for status in 500 502 503 429; do
+    home=$(new_home "real-gh-bare-http-$status")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-core\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="gh: HTTP $status" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed on bare gh HTTP $status"
+    why="core read exited 1 with Ns of budget left: gh: HTTP $status"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "bare gh HTTP $status did not print one unavailable line: $out"
+    calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+    [ "$calls" = 2 ] || fail "bare gh HTTP $status made $calls core reads, expected 2"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail "bare gh HTTP $status lost its error"
+  done
+
+  home=$(new_home real-gh-bare-http-404)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT='gh: HTTP 404' "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on bare gh HTTP 404'
+  why='core read exited 1 with Ns of budget left: gh: HTTP 404'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "bare gh HTTP 404 did not print one unavailable line: $out"
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 1 ] \
+    || fail 'bare gh HTTP 404 was retried'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'bare gh HTTP 404 lost its error'
+
+  home=$(new_home real-gh-http-line)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT='HTTP 503: Service Unavailable' "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a line-leading HTTP status'
+  why='core read exited 1 with Ns of budget left: HTTP 503: Service Unavailable'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "a line-leading HTTP 503 did not print one unavailable line: $out"
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] \
+    || fail 'a line-leading HTTP 503 was not retried exactly once'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a line-leading HTTP status was not retained'
+
+  home=$(new_home real-gh-graphql-bare-http)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-closing\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT='HTTP 503 (https://api.github.com/graphql)' "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a message-less GraphQL HTTP status'
+  why='head read exited 1 with Ns of budget left: HTTP 503 (https://api.github.com/graphql)'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "a message-less GraphQL HTTP 503 did not print one unavailable line: $out"
+  [ "$(grep -cF 'pr view https://github.com/o/r/pull/8' "$home/forge/calls")" = 2 ] \
+    || fail 'a message-less GraphQL HTTP 503 was not retried exactly once'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a message-less GraphQL HTTP status was not retained'
+
+  home=$(new_home real-gh-exit-137)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT='process killed outside the read bound' FORGE_ERROR_RC=137 \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed after an external exit 137'
+  why='core read exited 137 with Ns of budget left: process killed outside the read bound'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "an external exit 137 was treated as budget refusal: $out"
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 1 ] \
+    || fail 'an external exit 137 was retried'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'an external exit 137 left no error evidence'
+  pass 'real gh error shapes drive the intended retry decision and keep their error'
+}
+
+test_next_url_does_not_inherit_a_forge_diagnostic() {
+  local home out pull_line issue_line why='reviews read exited 1 with Ns of budget left: gh: Internal Server Error (HTTP 500)'
+  home=$(new_home next-url-no-stale-diagnostic)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf -- '- [ ] filed - Filed https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  # Malformed comment pages fail the issue after its reads succeed; the PR
+  # fails on its reviews read before it checks comments.
+  printf '{}\n' > "$home/forge/comments.json"
+  printf 'fail\n' > "$home/forge/fault"
+  # This rotation bucket reads the failing PR before the issue.
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:05:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed while a GitHub issue followed a failed PR read'
+  pull_line=$(grep -nF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls" | head -n 1 | cut -d: -f1)
+  issue_line=$(grep -nFx 'api repos/o/r/issues/9' "$home/forge/calls" | head -n 1 | cut -d: -f1)
+  [ -n "$pull_line" ] && [ -n "$issue_line" ] && [ "$pull_line" -lt "$issue_line" ] \
+    || fail 'the seeded PR read failure did not run before the issue'
+  printf '%s\n' "$out" | mask_budget | grep -Fxq "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" \
+    || fail 'the seeded PR failure did not wake'
+  printf '%s\n' "$out" | grep -Fxq 'contributions: observation unavailable for https://github.com/o/r/issues/9 - comment pages returned an unexpected shape' \
+    || fail 'the malformed issue observation did not wake'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'the PR record lost its failed read diagnostic'
+  jq -e '.records[0].error == "forge observation unavailable: comment pages returned an unexpected shape"' \
+    "$home/data/filed/contributions.json" >/dev/null \
+    || fail 'the issue inherited the preceding PR read diagnostic'
+  pass 'a URL never inherits the previous URL read diagnostic'
 }
 
 test_shared_url_observed_once() {
   local mode home out calls expected
-  for mode in ok fail head; do
+  for mode in ok fail head headless; do
     home=$(new_home "shared-once-$mode")
     forge_home "$home"
     wrap_forge "$home"
@@ -719,17 +1097,24 @@ test_shared_url_observed_once() {
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "shared-owner poll failed ($mode)"
     calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
     [ "$calls" = 1 ] || fail "a URL owned by two tasks was observed $calls times in one poll ($mode)"
+    case "$mode" in
+      ok) why= ;;
+      fail) why='reviews read exited 1 with Ns of budget left: gh: Internal Server Error (HTTP 500)' ;;
+      head) why='head changed during observation' ;;
+      headless) why='head read named no head commit' ;;
+    esac
     if [ "$mode" = ok ]; then
       expected=null
       [ -z "$out" ] || fail "a healthy shared observation printed: $out"
     else
-      expected='"forge observation unavailable or changed during read"'
-      [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
-        || fail "a shared unavailable observation did not wake exactly once ($mode): $out"
+      expected="\"forge observation unavailable: $why\""
+      [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+        || fail "a shared unavailable observation did not wake exactly once with its cause ($mode): $out"
     fi
     for task in delivery duplicate; do
-      jq -e --arg now "$NOW" --argjson error "$expected" '.records[0].checked_at == $now and .records[0].error == $error' \
-        "$home/data/$task/contributions.json" >/dev/null || fail "owner $task did not receive the shared result ($mode)"
+      jq -e --arg now "$NOW" '.records[0].checked_at == $now' "$home/data/$task/contributions.json" >/dev/null \
+        && [ "$(jq -c .records[0].error "$home/data/$task/contributions.json" | mask_budget)" = "$expected" ] \
+        || fail "owner $task did not receive the shared result ($mode)"
     done
   done
   pass 'a URL owned by two tasks is observed once and every owner receives the result'
@@ -1047,20 +1432,28 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
 }
 
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
-  local error='"forge observation unavailable or changed during read"'
+  local why='core read exited 1 with Ns of budget left: gh: Bad Gateway (HTTP 502)'
+  local home out line="contributions: observation unavailable for https://github.com/o/r/pull/8 - $why"
   home=$(new_home failure-episode)
   forge_home "$home"
   wrap_forge "$home"
   printf 'down\n' > "$home/forge/fault"
-  poll_at() { with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll || fail "poll at $1 failed"; }
+  poll_at() {
+    local polled
+    polled=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll) || fail "poll at $1 failed"
+    printf '%s\n' "$polled" | mask_budget
+  }
   out=$(poll_at 2026-09-16T09:00:00Z)
-  [ "$out" = "$line" ] || fail "the first failure of an episode did not wake: $out"
+  [ "$out" = "$line" ] || fail "the first failure of an episode did not wake with its cause: $out"
   out=$(poll_at 2026-09-16T10:00:00Z)
   [ -z "$out" ] || fail "an unchanged read failure woke again on the next cycle: $out"
-  jq -e --argjson error "$error" '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == $error' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'a repeated read failure stopped recording its error'
-  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] || fail 'a failing open PR stopped being observed'
+  jq -e '.records[0].checked_at == "2026-09-16T10:00:00Z"' "$home/data/delivery/contributions.json" >/dev/null \
+    && [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a repeated read failure stopped recording its error and cause'
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 4 ] || fail 'a failing open PR stopped being observed'
+  bearings "$home" | jq -e '.contributions | .known == 1 and .checked == 0
+    and .unmeasured == 0 and .counts.fleet == 1 and .complete == false' >/dev/null \
+    || fail 'a supported GitHub failure became unmeasured or successful coverage'
   : > "$home/forge/fault"
   out=$(poll_at 2026-09-16T11:00:00Z)
   [ -z "$out" ] || fail "a successful read printed: $out"
@@ -1073,21 +1466,21 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
 }
 
 test_late_owner_keeps_failure_episode_suppressed() {
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
-  local error='forge observation unavailable or changed during read' task
+  local why='core read exited 1 with Ns of budget left: gh: Bad Gateway (HTTP 502)' home out task
+  local line="contributions: observation unavailable for https://github.com/o/r/pull/8 - $why"
   home=$(new_home late-owner-failure-episode)
   forge_home "$home"
   wrap_forge "$home"
   printf 'down\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'initial failing poll failed'
-  [ "$out" = "$line" ] || fail "the initial failure did not wake: $out"
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "$line" ] || fail "the initial failure did not wake with its cause: $out"
   printf -- '- [ ] duplicate - Filed https://github.com/o/r/pull/8 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T10:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'late-owner failing poll failed'
   [ -z "$out" ] || fail "a late owner restarted an unchanged failure episode: $out"
   for task in delivery duplicate; do
-    jq -e --arg error "$error" '.records[0].error == $error' "$home/data/$task/contributions.json" >/dev/null \
+    [ "$(jq -r .records[0].error "$home/data/$task/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
       || fail "owner $task did not retain the shared failure evidence"
   done
   : > "$home/forge/fault"
@@ -1101,18 +1494,19 @@ test_late_owner_keeps_failure_episode_suppressed() {
   printf 'down\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T12:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'new shared failing poll failed'
-  [ "$out" = "$line" ] || fail "a failure after shared recovery did not wake: $out"
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "$line" ] || fail "a failure after shared recovery did not wake: $out"
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
 test_retire_ends_observation_of_a_gone_contribution() {
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8' url=https://github.com/o/r/pull/8
+  local home out url=https://github.com/o/r/pull/8
+  local line='contributions: observation unavailable for https://github.com/o/r/pull/8 - core read exited 1 with Ns of budget left: gh: Not Found (HTTP 404)'
   home=$(new_home retire-gone)
   forge_home "$home"
   wrap_forge "$home"
   printf 'not-found\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) || fail 'failing poll failed'
-  [ "$out" = "$line" ] || fail "a gone repository did not raise the unavailable check: $out"
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "$line" ] || fail "a gone repository did not raise the unavailable check with its cause: $out"
   bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
     and .contributions.complete == false and .contributions.proven_clear == false' >/dev/null \
     || fail 'an unreadable contribution did not hold coverage incomplete before retirement'
@@ -1183,7 +1577,7 @@ test_retire_is_idempotent_and_refuses_unknown_pairs() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

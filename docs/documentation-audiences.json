@@ -153,6 +153,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/firstmate-self-repo/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -186,6 +190,10 @@
     },
     {
       "path": ".agents/skills/harness-adapters/references/harness/codex.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/commandcode.md",
       "audience": "agent-runtime"
     },
     {
@@ -474,6 +482,10 @@
     },
     {
       "path": "docs/verification/agy.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/commandcode.md",
       "audience": "maintainer-verification"
     },
     {
