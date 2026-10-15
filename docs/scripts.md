@@ -19,6 +19,9 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-fleet-ledger.sh`     | Append the opt-in fleet activity ledger's records ([contract](fleet-ledger.md))      |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-flow.sh`             | Read fleet lifecycle and wait metrics as JSON ([reader reference](fleet-ledger.md#reading-lifecycle-metrics)) |
+| `fm-task-outcome.sh`     | Append one durable per-task outcome row (models, timestamps, outcome, PR) at teardown ([per-model statistics](fleet-ledger.md#per-model-statistics)) |
+| `fm-model-stats.sh`      | Read per-model merge rate, time-to-merge, first-pass and rework statistics as JSON ([per-model statistics](fleet-ledger.md#per-model-statistics)) |
+| `fm-skill-stats.sh`      | Read per-skill fleet read counts as JSON ([skill statistics](fleet-ledger.md#skill-statistics)) |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-dashboard.sh`        | Build fleet dashboard data and reference pages, or serve the read-only fleet app |

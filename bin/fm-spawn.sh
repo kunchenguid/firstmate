@@ -5883,6 +5883,17 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
   fi
 fi
+# Durable per-incarnation runtime history, one line per launch that stays
+# running: a fresh spawn once the commit point holds (a rolled-back fresh spawn
+# is not a launch), and every relaunch, whose launch delivery already succeeded.
+# bin/fm-task-outcome.sh reads it at task end to attribute the task to every
+# harness/model/effort it ran on, in order. Best effort: a write failure never
+# blocks the launch.
+if [ -n "$ID" ] && { [ "$RELAUNCH" -eq 1 ] || [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ]; }; then
+  [ "$RELAUNCH" -eq 1 ] || rm -f "$STATE/$ID.models"
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "${HARNESS:-default}" "${MODEL:-default}" "${EFFORT:-default}" \
+    >> "$STATE/$ID.models" 2>/dev/null || true
+fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"

@@ -57,7 +57,7 @@ DELTA_SHIM="$TMP_ROOT/delta-shim"
 EXEC_LOG="$TMP_ROOT/delta-execs"
 mkdir -p "$DELTA_SHIM"
 for TOOL in perl shasum sha256sum od tail head wc tr date stat dirname basename; do
-  REAL=$(PATH=/usr/bin:/bin command -v "$TOOL" 2>/dev/null || true)
+  REAL=$(command -v "$TOOL" 2>/dev/null || true)
   [ -n "$REAL" ] || continue
   cat > "$DELTA_SHIM/$TOOL" <<SH
 #!/bin/sh
@@ -101,7 +101,9 @@ PREFIX_SHA=$(sha 'alpha\nbeta\n')
 run_reader 11 "$PREFIX_SHA" 4 > "$TMP_ROOT/truncated.out" &
 READER_PID=$!
 sleep 0.3
-printf 'a\n' > "$DELTA_HOME/$DELTA_LOG_REL"
+# Replace the log atomically: an in-place `>` would expose a zero-length file
+# the concurrent reader can sample as a different break.
+printf 'a\n' > "$TMP_ROOT/shrunk.status" && mv "$TMP_ROOT/shrunk.status" "$DELTA_HOME/$DELTA_LOG_REL"
 wait "$READER_PID" || fail 'the truncated read did not exit 0'
 OUT=$(<"$TMP_ROOT/truncated.out")
 assert_contains "$OUT" 'status=continuity-broken' 'truncation did not produce a break'
@@ -117,7 +119,9 @@ printf 'alpha\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
 run_reader 11 "$PREFIX_SHA" 4 > "$TMP_ROOT/rewrite.out" &
 READER_PID=$!
 sleep 1.1
-printf 'OMEGA\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
+# Overwrite in place without truncating: a `>` redirect would expose a
+# zero-length window that the concurrent reader can sample as "truncated".
+printf 'OMEGA\nbeta\n' 1<> "$DELTA_HOME/$DELTA_LOG_REL"
 wait "$READER_PID" || fail 'the rewritten read did not exit 0'
 OUT=$(<"$TMP_ROOT/rewrite.out")
 assert_contains "$OUT" 'status=continuity-broken' 'a same-size rewrite did not produce a break'
@@ -137,7 +141,7 @@ fraction=111111111
 [ ! -e "$FM_TEST_REWRITE_DONE" ] || fraction=222222222
 printf '11:100.%s:100.%s:123:456\n' "$fraction" "$fraction"
 SH
-REAL_SHASUM=$(PATH=/usr/bin:/bin command -v shasum)
+REAL_SHASUM=$(command -v shasum)
 cat > "$SUBSECOND_SHIM/shasum" <<SH
 #!/bin/sh
 "$REAL_SHASUM" "\$@" || exit \$?
