@@ -293,7 +293,7 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 # The *.check.sh sweep covers authenticated merge/CI polls, the Relay x-watch
 # shim (which overrides this to 30s via config/x-mode.env when armed - see
-# docs/configuration.md "Relay dispatch"), and custom check shims including
+# docs/configuration.md "Relay (.env)"), and custom check shims including
 # bin/fm-seat.sh auto and bin/fm-usage-warner.sh check. None of those need a
 # 5-minute floor on their own: merge/CI detection already lags the real event
 # by however long CI took, the seat auto-trigger is a graceful rotation ahead
