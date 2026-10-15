@@ -204,7 +204,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -226,6 +226,13 @@
 #   config/claude-permission-mode is not mapped: Devin auto approves read-only
 #   tools, unlike Claude auto. Effort is part of Devin model ids, so the
 #   independent --effort axis is recorded but omitted from argv.
+#   Command Code (`commandcode`) is worker-only and tmux/herdr-only (see the
+#   backend refusal below): --yolo and --trust allow
+#   unattended tools in a fresh worktree, and --mod loads the tracked
+#   bin/fm-commandcode-mod.ts busy-state writer for that one process with the
+#   task's generation in --mod-option values; no global or project config is
+#   edited. Its --effort is passed only where the model's accepted set is
+#   verified, because an unknown value exits the launch.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -328,8 +335,9 @@
 #   blank lines and lines beginning with # are ignored. Invalid input refuses
 #   before launch, as do path inspection errors such as inaccessible config
 #   directories. An empty file retains only the operational floor below.
-#   Names are read once per spawn; values are expanded in the destination pane,
-#   not copied from the invoking process or written into the launch text.
+#   Names are read once per spawn; unless the Orca source below applies, values
+#   are expanded in the destination pane, not copied from the invoking process
+#   or written into the launch text.
 #   Unset names stay unset and empty values stay empty.
 #   The fixed operational floor is HOME PATH USER LOGNAME SHELL TERM COLORTERM
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
@@ -348,6 +356,36 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+#   On backend=orca the destination is an Orca terminal whose environment comes
+#   from the Orca app and shell startup, not this home, so a nonempty allowlist
+#   without the source below prints a stderr warning and launches unchanged.
+# Orca environment source (config/launch-env-tmux-session):
+#   Optional local file containing one exact tmux session name (letters, digits,
+#   underscores or hyphens). Only fresh Orca spawns use it; other backends are
+#   unchanged. It requires config/launch-env-allowlist and refuses without one,
+#   so tmux's automatic update-environment names (SSH_AUTH_SOCK) never ride
+#   along. Before allocation, each allowlisted name is read from that session's
+#   local environment (tmux -u show-environment -t =<session> <name>), never
+#   tmux's server-global or the invoking process's environment; -u keeps values
+#   intact under absent or C locales. A missing name, unreadable session, or
+#   malformed selector refuses before the Orca worktree or terminal exists,
+#   while an explicit -NAME record deliberately leaves that name unset. Launch
+#   keeps env -i and the operational floor, replaces destination expansion of
+#   allowlisted names with the snapshotted values, and sets
+#   GIT_CONFIG_NOSYSTEM=1 so a system credential helper cannot answer for the
+#   worker. Values are shell-quoted only in the owner-only staged launch file,
+#   never terminal input, and the pane deletes that file as sourcing starts,
+#   before the worker executes; a deletion failure refuses the worker launch and
+#   keeps the interactive shell, even with errexit set (a Bash 3.2 or dash
+#   errexit pane still exits if spawn reclaims the file in the instant between
+#   the pane's existence check and its source). Spawn waits up to 30
+#   seconds for that deletion; if the pane never ran the command or could not
+#   delete the file, or HUP, INT or TERM interrupts spawn first, spawn removes
+#   it unless the pane already did, refuses the worker launch, and leaves the
+#   Orca terminal open.
+#   The selector is not inherited into secondmate homes. This is not a
+#   filesystem sandbox; project and harness sandbox
+#   settings still own access to personal credential files.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -422,6 +460,8 @@
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
+#     __COMMANDCODEBIN__ resolved Command Code executable
+#     __COMMANDCODEMOD__ --mod and --mod-option arguments of the busy-state mod
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
@@ -452,7 +492,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, devin, and commandcode are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1339,6 +1379,7 @@ CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
+SPAWN_STAGED_LAUNCH_FILE=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1365,6 +1406,19 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+# Non-forced unlink arbitration for a delivered Orca source-mode launch file:
+# the pane unlinks it before launching the worker and refuses when that unlink
+# fails, so exactly one side's unlink succeeds. Returns 0 when this spawn removed
+# it (the worker is refused), 1 when the pane already had, and 2 when the file
+# could not be removed.
+spawn_orca_reclaim_launch_file() {
+  rm -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null && return 0
+  if [ -e "$SPAWN_STAGED_LAUNCH_FILE" ] || [ -L "$SPAWN_STAGED_LAUNCH_FILE" ]; then
+    return 2
+  fi
+  return 1
 }
 
 spawn_abort_cleanup() {
@@ -1495,6 +1549,21 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  if [ "$status" -ne 0 ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" = 1 ] && [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; then
+    if [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
+      rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
+    else
+      # The open terminal may still source the delivered file, and no other
+      # owner is left to remove it once this spawn exits, so arbitrate exactly
+      # as the consume deadline does.
+      local reclaim_status=0
+      spawn_orca_reclaim_launch_file || reclaim_status=$?
+      case "$reclaim_status" in
+        0) kimi_spawn_fail "spawn ended before Orca terminal $T ran the launch command; removed the launch file and refused the worker launch" || true ;;
+        2) echo "warning: could not remove Orca launch file $SPAWN_STAGED_LAUNCH_FILE; remove it by hand" >&2 ;;
+      esac
+    fi
+  fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -1680,7 +1749,7 @@ if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
 spawn_refuse_if_away_spend_cap() {
-  local cap live meta
+  local cap live
   [ "$RELAUNCH" -ne 1 ] || return 0
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
@@ -1690,12 +1759,13 @@ spawn_refuse_if_away_spend_cap() {
   case "$cap" in
   '' | *[!0-9]* | 0) return 0 ;;
   esac
-  live=0
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    [ "$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" != secondmate ] || continue
-    live=$((live + 1))
-  done
+  live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
+  case "$live" in
+  '' | *[!0-9]*)
+    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and this home's live ordinary task count could not be read; task $ID stays queued (spend cap: bin/fm-afk-contract.sh)" >&2
+    exit 1
+    ;;
+  esac
   if [ "$live" -ge "$cap" ]; then
     echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
     exit 1
@@ -1705,10 +1775,10 @@ spawn_refuse_if_away_spend_cap() {
 # away record exists (never a quiet-mode one, whose captain is present and
 # spends as attended: bin/fm-afk-contract.sh mode), a fresh ordinary spawn
 # refuses for BOTH actors once this home already holds that many ordinary task
-# records, counted the same way the return brief counts tasks live at return
-# (every state/*.meta whose kind is not secondmate). A relaunch replaces a
-# worker that already counts, and a secondmate is a persistent home rather than
-# spend, so both are exempt. Checked before any endpoint, worktree, or record
+# records, counted by that script's own `live-workers`, which is also the count
+# its entry records as the cap. A relaunch replaces a worker that already
+# counts, and a secondmate is a persistent home rather than spend, so both are
+# exempt. Checked before any endpoint, worktree, or record
 # exists, so a refusal costs nothing to unwind; rechecked after the task-set
 # lock so two fresh spawns cannot both publish from a stale count.
 spawn_refuse_if_away_spend_cap
@@ -1744,6 +1814,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
 fi
+ORCA_LAUNCH_ENV_ENABLED=0
+ORCA_LAUNCH_ENV_ARGS=
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
     echo "error: could not create parent state directory" >&2
@@ -1828,6 +1900,28 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
+    ORCA_LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-tmux-session") || exit 1
+    if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+      if [ "$LAUNCH_ENV_ENABLED" != 1 ]; then
+        echo "error: config/launch-env-tmux-session requires config/launch-env-allowlist; refusing Orca launch" >&2
+        exit 1
+      fi
+      if [ ! -f "$CONFIG/launch-env-tmux-session" ] || [ ! -r "$CONFIG/launch-env-tmux-session" ]; then
+        echo "error: config/launch-env-tmux-session must be a readable regular file" >&2
+        exit 1
+      fi
+      ORCA_LAUNCH_ENV_SESSION=$(cat "$CONFIG/launch-env-tmux-session") || exit 1
+      case "$ORCA_LAUNCH_ENV_SESSION" in
+        ''|*[!A-Za-z0-9_-]*)
+          echo "error: config/launch-env-tmux-session must contain one session name (letters, digits, underscores or hyphens)" >&2
+          exit 1
+          ;;
+      esac
+      ORCA_LAUNCH_ENV_ARGS=$(fm_backend_orca_launch_env_args \
+        "$ORCA_LAUNCH_ENV_SESSION" "$LAUNCH_ENV_NAMES") || exit 1
+    elif [ -n "$LAUNCH_ENV_NAMES" ]; then
+      echo "warning: backend=orca resolves config/launch-env-allowlist names from the Orca terminal's own environment, not this home's; set config/launch-env-tmux-session to take them from a scoped tmux session" >&2
+    fi
   fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
@@ -1997,7 +2091,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2325,6 +2419,13 @@ launch_template() {
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
   devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Command Code receives the typed launch envelope after -- as its initial
+  # message. --yolo bypasses permission prompts, --trust skips the folder-trust
+  # prompt of a fresh worktree, and --skip-onboarding skips taste onboarding.
+  # __COMMANDCODEMOD__ loads the tracked busy-state mod for this process only.
+  # NO_COLOR is cleared and COLORTERM pinned so the composer placeholder keeps
+  # the truecolor styling the shared composer guard reads.
+  commandcode) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR COLORTERM=truecolor __COMMANDCODEBIN__ --yolo --trust --skip-onboarding --no-auto-update __MODELFLAG____EFFORTFLAG____COMMANDCODEMOD__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2435,7 +2536,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, devin, and commandcode are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2449,7 +2550,9 @@ esac
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
+# commandcode has none either: only its worker busy mod is verified, and
+# docs/supervision-protocols/ carries no Command Code wake protocol (1.74.1).
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2460,6 +2563,14 @@ fi
 # standing one up with no way to arm its watch cycle.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# Command Code's idle placeholder reads empty only with a Command Code pane
+# identity, which tmux and Herdr supply and zellij, cmux, and orca do not, so
+# there the composer would never read empty and steering would stall.
+if [ "$HARNESS" = commandcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
+  echo "error: commandcode is verified on the tmux and herdr backends only; backend=$BACKEND cannot prove its composer empty. Select backend tmux or herdr." >&2
   exit 1
 fi
 
@@ -2474,6 +2585,12 @@ case "$HARNESS" in
 devin)
   DEVIN_BIN=$(command -v devin) || {
     echo "error: devin executable not found on PATH" >&2
+    exit 1
+  }
+  ;;
+commandcode)
+  COMMANDCODE_BIN=$(command -v commandcode) || {
+    echo "error: commandcode executable not found on PATH" >&2
     exit 1
   }
   ;;
@@ -2754,7 +2871,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2795,6 +2912,17 @@ effort_flag_for_harness() {
     # omitted rather than passed as known-bad values (record-and-omit).
     case "$effort" in
     low | medium | high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+    esac
+    ;;
+  commandcode)
+    # Command Code's --effort set is model-scoped and an unknown value exits
+    # the launch (verified, 1.74.1). DeepSeek V4.1 Flash accepts
+    # off|low|high|max, so medium and xhigh are omitted there, and every other
+    # model, whose set is unverified, keeps its own default (record-and-omit).
+    case "$model:$effort" in
+    deepseek/deepseek-v4.1-flash:low | deepseek/deepseek-v4.1-flash:high | deepseek/deepseek-v4.1-flash:max)
+      printf -- '--effort %s ' "$(shell_quote "$effort")"
+      ;;
     esac
     ;;
   pi | pi-signed)
@@ -4773,7 +4901,7 @@ BUSY_GEN=
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin)
+  gemini | devin | commandcode)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -4858,6 +4986,13 @@ BUSY_GEN=
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       FM_KEEP_AI_TRAILERS="$KEEP_AI_TRAILERS" "$SCRIPT_DIR/fm-devin-config.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
     fi
+    ;;
+  commandcode)
+    # Command Code's busy wiring rides the launch command (__COMMANDCODEMOD__).
+    # Its taste learning, which has no per-process switch, seeds
+    # .commandcode/taste/ in the project on every start (verified, 1.74.1) and
+    # learns into it, so that vendor runtime state stays out of worker commits.
+    exclude_path '.commandcode/taste/'
     ;;
   gemini)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -5480,6 +5615,18 @@ devin)
   LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "$DEVIN_BIN")"}
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
   ;;
+commandcode)
+  LAUNCH=${LAUNCH//__COMMANDCODEBIN__/"$(shell_quote "$COMMANDCODE_BIN")"}
+  COMMANDCODEMOD=
+  if [ -n "${BUSY_GEN:-}" ]; then
+    COMMANDCODEMOD="--mod $(shell_quote "$FM_ROOT/bin/fm-commandcode-mod.ts")"
+    COMMANDCODEMOD="$COMMANDCODEMOD --mod-option $(shell_quote "fmWriter=$FM_ROOT/bin/fm-busy-event.sh")"
+    COMMANDCODEMOD="$COMMANDCODEMOD --mod-option $(shell_quote "fmState=$STATE_REAL")"
+    COMMANDCODEMOD="$COMMANDCODEMOD --mod-option $(shell_quote "fmId=$ID")"
+    COMMANDCODEMOD="$COMMANDCODEMOD --mod-option $(shell_quote "fmGen=$BUSY_GEN") "
+  fi
+  LAUNCH=${LAUNCH//__COMMANDCODEMOD__/$COMMANDCODEMOD}
+  ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
@@ -5508,7 +5655,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -5705,6 +5852,10 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
+  # A configured Orca source replaces destination expansion of allowlisted
+  # names, so a name the source leaves unset cannot revive a personal pane value.
+  LAUNCH_ENV_FORWARD_NAMES=$LAUNCH_ENV_NAMES
+  [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || LAUNCH_ENV_FORWARD_NAMES=
   # COMPACT_ADVISER_DISABLE is the intentional declarative floor-membership
   # entry; the explicit COMPACT_ADVISER_DISABLE=1 assignment below is the
   # authoritative setter.
@@ -5713,13 +5864,21 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
     FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
-    $LAUNCH_ENV_NAMES; do
+    $LAUNCH_ENV_FORWARD_NAMES; do
+    if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+      case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
+        *$'\n'"$env_name"$'\n'*) continue ;;
+      esac
+    fi
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
     # shellcheck disable=SC2016
     printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
   done
+  if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $ORCA_LAUNCH_ENV_ARGS GIT_CONFIG_NOSYSTEM=1"
+  fi
   # COMPACT_ADVISER_DISABLE is retained by the floor loop above, which forwards
   # whatever the pane export set, and then pinned here to the one value Firstmate
   # launches on. The literal assignment comes last deliberately: `env` applies
@@ -5746,6 +5905,11 @@ if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
 fi
 LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
 LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+  # The sourcing shell already holds the open file; unlink the credentials
+  # before launching the worker, including on a later command failure.
+  LAUNCH="command rm -- $(shell_quote "$LAUNCH_FILE") || { echo 'error: cannot remove private launch file; refusing worker launch' >&2; return 1 2>/dev/null || exit 1; }; $LAUNCH"
+fi
 if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
   echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
   exit 1
@@ -5756,15 +5920,67 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
   exit 1
 fi
+SPAWN_STAGED_LAUNCH_FILE=$LAUNCH_FILE
+if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+  # Bash runs the EXIT trap for an untrapped fatal signal with status 0, which
+  # abort cleanup reads as success, so exit with the signal's status instead
+  # until the pane has consumed the published launch file.
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+fi
 sleep 0.3
+spawn_orca_launch_send_fail() {
+  rm -f -- "$LAUNCH_FILE" 2>/dev/null || true
+  kimi_spawn_fail "launch command could not be delivered to Orca terminal $T"
+  rovo_endpoint_cleanup
+  exit 1
+}
+# Orca source mode: the pane unlinks the credential-bearing file as it starts
+# sourcing it. A pane that accepted the text but never ran it, or ran it and
+# could not unlink it, would otherwise leave the file until teardown, so wait a
+# bounded time and reclaim it. The worker never started, but the interactive
+# pane stays open.
+spawn_orca_wait_launch_consumed() {
+  local i=0 max=${FM_ORCA_LAUNCH_CONSUME_POLLS:-150} reclaim_status=0
+  while [ -e "$LAUNCH_FILE" ]; do
+    i=$((i + 1))
+    if [ "$i" -gt "$max" ]; then
+      spawn_orca_reclaim_launch_file || reclaim_status=$?
+      [ "$reclaim_status" != 1 ] || return 0
+      kimi_spawn_fail "Orca terminal $T did not run the launch command or could not remove the launch file; refused the worker launch"
+      exit 1
+    fi
+    sleep 0.2
+  done
+}
 SPAWN_LAUNCH_SENT=1
-spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
+# errexit is on here: a failed send still exits, and Orca source mode first
+# removes the credential-bearing file the pane never received.
+LAUNCH_SOURCE_TEXT=". $(shell_quote "$LAUNCH_FILE")"
+if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+  # A refused source-mode launch fails the source command, and some shells exit
+  # under errexit on sourcing a file spawn already reclaimed even inside ||, so
+  # keep an errexit pane shell open in both cases.
+  LAUNCH_SOURCE_TEXT="if [ -e $(shell_quote "$LAUNCH_FILE") ]; then $LAUNCH_SOURCE_TEXT || true; else echo 'error: private launch file was already removed; refusing worker launch' >&2; fi"
+fi
+if ! spawn_send_literal "$T" "$LAUNCH_SOURCE_TEXT"; then
+  [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
+  exit 1
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+if ! spawn_send_key "$T" Enter; then
+  [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
+  exit 1
+fi
+if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+  spawn_orca_wait_launch_consumed
+  trap - HUP INT TERM
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

@@ -26,10 +26,19 @@ concurrency:
 # tiers and their rationale; tests/fm-ci-workflow.test.sh guards this workflow.
 # Each job comment identifies the tier implemented by its executable value.
 
+# Fork opt-out: a fork sets the repository variable FM_CI_SKIP_PUSH to 1 to
+# skip the push run, and FM_CI_SKIP_MACOS to 1 to skip the macOS job, without
+# a tracked edit that drifts from upstream; with neither set, every job runs
+# exactly as before. The skip is a job-level condition, repeated per job
+# because workflow syntax has no shared anchor, and never a trigger filter: a
+# job skipped by its condition reports success, while a workflow filtered out
+# at the trigger stays pending and blocks the merge. CONTRIBUTING.md documents
+# the variables.
 jobs:
   lint:
     name: Lint ${{ matrix.partition }}
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     strategy:
@@ -79,6 +88,7 @@ jobs:
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Fast tier: the coverage guard is a seconds-long local computation.
     timeout-minutes: 5
     steps:
@@ -91,6 +101,7 @@ jobs:
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -135,6 +146,7 @@ jobs:
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -179,6 +191,7 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     strategy:
@@ -251,6 +264,7 @@ jobs:
   tests-herdr:
     name: Behavior tests (Herdr)
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Heavy tier (see the timeout policy above): the last-resort job backstop.
     # The family-run step below owns the hang tripwire, so a wedged suite fails
     # there with the always() cleanup and timing upload still running.
@@ -379,7 +393,7 @@ jobs:
       - tests-portable-parallel-2
       - tests-portable-serial
       - tests-herdr
-    if: always()
+    if: ${{ always() && !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     steps:
       - uses: actions/checkout@v6
       - name: Download lane timing artifacts
@@ -412,6 +426,7 @@ jobs:
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && vars.FM_CI_SKIP_MACOS != '1' }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -506,6 +521,7 @@ jobs:
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') }}
     # Fast tier: the invariant checks are seconds-long file comparisons.
     timeout-minutes: 5
     steps:
