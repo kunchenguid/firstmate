@@ -266,7 +266,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   # This unconditional retirement is the authorized containment documented
   # with the presentation floor ownership in bin/backends/herdr.sh.
   fm_backend_herdr_projection_close_pane_focus_preserving \
-    "$session" "$pane" no-agent || close_status=$?
+    "$session" "$pane" no-agent "fm-$id" || close_status=$?
   state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   if [ "$state" = dead ]; then
     if [ -f "$journal" ] && [ ! -L "$journal" ] \

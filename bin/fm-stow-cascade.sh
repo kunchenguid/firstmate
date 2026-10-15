@@ -130,7 +130,7 @@ resolve_local_transport() { # <id> <resolved-home>
     set_transport direct 'recorded endpoint has no target'
     return 0
   fi
-  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf 'unreadable')" in
+  case "$(fm_backend_agent_state "$backend" "$target" "fm-$id" 2>/dev/null || printf 'unreadable')" in
     alive) set_transport agent ;;
     *) set_transport direct 'no live agent on the recorded endpoint' ;;
   esac

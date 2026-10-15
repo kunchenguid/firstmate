@@ -217,7 +217,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target="$window"
-  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+  agent_state=$(fm_backend_agent_state "$backend" "$target" "fm-$id" 2>/dev/null) || agent_state=unreadable
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
     *)
@@ -302,7 +302,7 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
       window=$(fm_meta_get "$meta" window)
       target=$window
     fi
-    [ -z "$target" ] || fm_backend_kill "$backend" "$target" 2>/dev/null || true
+    [ -z "$target" ] || fm_backend_kill "$backend" "$target" "" "fm-$id" 2>/dev/null || true
   fi
   if [ -n "$timeout" ]; then
     FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 fm_run_timed "$timeout" "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
