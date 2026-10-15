@@ -117,6 +117,15 @@
 #   without a valid base URL), which is actionable, never selected around.
 #   The capability probe is the one other exit: 1 for an unsupported source.
 #
+# Record: every resolution that reached the API (clear, ambiguous, escalate, or
+#   error after the request) appends one JSON line to $FM_HOME/state/
+#   dispatch-resolve.jsonl: ts, task (the <id> of data/<id>/brief.md, else
+#   null), project, status, rule, rule_when (first 60 characters), confidence,
+#   probabilities, fallback_rule when taken, and profile (harness, model,
+#   effort) when clear. It never holds brief text or the key. The off path and
+#   usage errors write nothing, and a failed write only prints one stderr
+#   warning; stdout and the exit code are unchanged.
+#
 # Environment:
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, FM_DISPATCH_BASE_URL,
 #   FM_DISPATCH_API_KEY, TYPESAFE_API_KEY, TYPESAFE_BASE, OPENROUTER_API_KEY, and
@@ -190,9 +199,11 @@ no_rules() {
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
   exit 0
 }
+REQUEST_SENT=0
 emit_error() {
   local reason=$1
   record_task error || true
+  [ "$REQUEST_SENT" -eq 1 ] && record_resolution '{"status":"error"}'
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
   exit 0
@@ -463,6 +474,27 @@ done < <(jq -r '
 
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
+RECORD_PATH="$FM_HOME/state/dispatch-resolve.jsonl"
+record_resolution() {
+  local line
+  line=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg brief "$BRIEF" --arg project "$PROJECT" --argjson r "$1" '
+    {
+      ts: $ts,
+      task: ($brief | capture("(^|/)data/(?<id>[^/]+)/brief\\.md$").id? // null),
+      project: $project,
+      status: $r.status,
+      rule: ($r.rule // null),
+      rule_when: ($r.rule_when // null),
+      confidence: ($r.confidence // null),
+      probabilities: ($r.probabilities // null),
+      fallback_rule: ($r.fallback_rule // null),
+      profile: (if $r.status == "clear" then ($r.chosen.profile | {harness, model: (.model // null), effort: (.effort // null)}) else null end)
+    }' 2>/dev/null) || line=''
+  if [ -z "$line" ] || ! { mkdir -p "$(dirname "$RECORD_PATH")" && printf '%s\n' "$line" >> "$RECORD_PATH"; } 2>/dev/null; then
+    echo "dispatch-resolve: could not write $RECORD_PATH" >&2
+  fi
+}
+
 if [ "$RULE_COUNT" -eq 0 ]; then
   no_rules
 fi
@@ -565,6 +597,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
     BODY=$REQUEST
   fi
   never_send_check
+  REQUEST_SENT=1
   T0=$(fm_timing_now_ms)
   if [ -n "$KEY_PRIVATE" ]; then
     HTTP=$(printf '%s' "$BODY" | curl --globoff -sS --max-time "$TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
@@ -827,5 +860,6 @@ STATUS=$(jq -r '.status' <<<"$RESULT") || emit_error "status rendering failed"
 PROFILE=$(jq -c 'if .chosen then .chosen.profile | {harness, model: (.model // null), effort: (.effort // null)} else null end' <<<"$RESULT") \
   || emit_error "profile rendering failed"
 record_task "$STATUS" "$PROFILE" || emit_error "could not record the dispatch resolution"
+record_resolution "$RESULT"
 printf '%s\n' "$TEXT"
 exit 0
