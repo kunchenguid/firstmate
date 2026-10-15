@@ -22,6 +22,8 @@
 # captain-approved <host>/<owner>/<repo> publication scope for this one task,
 # rendered as an `upstream-consent=<scope>` suffix token on the Delivery
 # contract line so brief, spawn record, and worker instructions agree.
+# The optional seventh argument is the registered direct-push delivery ref;
+# bin/fm-spawn.sh's header owns registration and matching-base requirements.
 # Callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
@@ -60,7 +62,7 @@
 # worker opens its pull request with: tea instead of gh-axi. `push-only` permits
 # only the registered direct-PR delivery shape, while no-mistakes remains
 # pipeline-owned. Every forge binding composes with the two modes that publish
-# and are refused on local-only, which publishes nothing. On gerrit the worker publishes one squashed change with
+# and is refused on local-only, which publishes nothing. On gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
 # that straight away, and no-mistakes first runs the pipeline with its three
 # forge-facing steps skipped and recovers the pipeline's own fix commits into its
@@ -166,7 +168,7 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
 # lines (fm_brief_base_branches) disagree, and records base_branch= in the task
 # metadata, and every later consumer reads that metadata field. It is
 # refused on local-only, whose landing fast-forwards local main, and on every
-# forge except push-only direct-PR.
+# non-none forge except push-only direct-PR.
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   local base=$1 mode=$2 forge=$3 caller=$4
   [ -n "$base" ] || return 0

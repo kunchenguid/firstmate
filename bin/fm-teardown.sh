@@ -55,9 +55,11 @@
 # A task whose meta records push_landed_ref= (bin/fm-spawn.sh --push-landed-ref)
 # instead delivers by direct push to a long-lived branch with no pull request:
 # HEAD being an ancestor of origin's copy of that registered ref proves the work
-# landed. The registration is explicit per task and never guessed; without it the
-# shapes above stand alone, and a direct push the local remote-tracking refs have
-# not seen yet still refuses.
+# landed after a successful fetch of that exact ref from origin. A failed fetch
+# or a fetched ref that lacks HEAD supplies no landing proof. The registration
+# is explicit per direct-PR task and never guessed; without it the shapes above
+# stand alone. tests/fm-teardown.test.sh covers the registered, unregistered,
+# and non-containing-ref cases.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git

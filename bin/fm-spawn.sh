@@ -52,8 +52,8 @@
 #   --push-landed-ref registers the long-lived branch a push-only ship task
 #   delivers to by direct push instead of a pull request. The spawn records it as
 #   push_landed_ref= in state/<id>.meta, which a relaunch reuses and
-#   bin/fm-teardown.sh's landed check reads: HEAD being an ancestor of origin's
-#   copy of the registered ref proves the work landed. It is refused on scouts,
+#   bin/fm-teardown.sh's landed check reads; its header owns the landing proof.
+#   It is refused on scouts,
 #   secondmates, relaunches, local-only, no-mistakes, and projects not registered
 #   forge=push-only. It requires a direct-PR task to provide the ref, persists a
 #   short branch name, and leaves teardown's landed check unchanged without it.
