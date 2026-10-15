@@ -3,6 +3,7 @@
 # lifecycle verbs addressed to an exact task id.
 #
 # Usage: fm-control.sh <task-id> interrupt
+#        fm-control.sh <task-id> clear-composer
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
@@ -32,6 +33,40 @@
 #              an idle agent (Devin's revert picker) sends its later presses
 #              only after the first press rendered a running turn, and
 #              otherwise reports `cancel=not-running` having sent one press.
+#   clear-composer
+#              Discard ONE unsubmitted line from the agent's composer, never
+#              submit it. This is the recovery path for a pane left holding a
+#              doorbell that was typed and not submitted: fm-send refuses to
+#              type over pending text, relaunch refuses to type /exit onto it,
+#              and interrupt does not clear it, so without this verb a live
+#              idle agent holding one such line is unreachable. It was a
+#              separate verb rather than a step inside interrupt so that
+#              interrupt keeps meaning only "cancel the turn" for a pane with
+#              an empty composer, and so a clear is never a side effect of
+#              asking for a cancellation.
+#              The key is Ctrl+U (C-u), never Enter: Enter frequently does not
+#              submit the stuck line, and submitting it would make the agent act
+#              on a stale instruction. The durable inbox already holds the real
+#              message, so discarding the doorbell loses nothing. The composer
+#              is read through the shared verdict owner (bin/fm-composer-lib.sh
+#              via fm_backend_composer_state); an already-empty composer is
+#              reported `composer-already-empty` and receives no key. A pending
+#              composer gets Ctrl+U presses (a wrapped line needs one per
+#              rendered row) until it reads empty, and the clear then has to
+#              HOLD: every consecutive re-read, a short interval apart, must
+#              read empty for at least 5 seconds after the last press
+#              (FM_CONTROL_CLEAR_HOLD), because a single read can be a
+#              mid-redraw artifact that reappears seconds later. An artifact that returns resumes
+#              pressing within the same budget; a composer still not empty
+#              when the budget ends refuses, reporting the last read.
+#              Refused, sending nothing, when: the backend cannot deliver
+#              Ctrl+U (Orca), the composer verdict is unknown or unreadable, a
+#              recognised dialog is on screen (an Escape or a key could answer
+#              it), or no agent runs at the endpoint. It is allowed while the
+#              agent is busy, because Ctrl+U edits the composer and does not
+#              touch the running turn. It only edits the composer of the task
+#              named by the exact id, so it does not relax fm-send's refusal to
+#              type over a third party's pending text.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
@@ -132,6 +167,17 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_CLEAR_PRESSES     Ctrl+U press budget for clear-composer (8)
+#   FM_CONTROL_CLEAR_CONFIRMS    minimum consecutive empty reads that prove a
+#                                clear held (3), spaced FM_CONTROL_CLEAR_SETTLE
+#                                apart
+#   FM_CONTROL_CLEAR_HOLD        minimum span of those consecutive empty reads,
+#                                counted from the last Ctrl+U press (5); a line
+#                                measured reappearing seconds after an apparent
+#                                clear must be caught. Reads continue until both
+#                                minimums are met, so the span is bounded by
+#                                max(CONFIRMS, ceil(HOLD / SETTLE)) reads
+#   FM_CONTROL_CLEAR_SETTLE      pause before each clear-composer read (0.4)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -188,6 +234,12 @@ ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+CLEAR_PRESSES=${FM_CONTROL_CLEAR_PRESSES:-8}
+CLEAR_CONFIRMS=${FM_CONTROL_CLEAR_CONFIRMS:-3}
+CLEAR_HOLD=${FM_CONTROL_CLEAR_HOLD:-5}
+CLEAR_SETTLE=${FM_CONTROL_CLEAR_SETTLE:-0.4}
+CLEAR_READS=$(awk -v c="$CLEAR_CONFIRMS" -v h="$CLEAR_HOLD" -v s="$CLEAR_SETTLE" \
+  'BEGIN{n = 0; if (s > 0) { n = int(h / s); if (n * s < h) n++ } printf "%d", (n > c ? n : c)}')
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -568,6 +620,81 @@ do_interrupt() {
   cancel=$(deliver_interrupt) || return $?
   proof=$(verify_interrupt_running) || return $?
   printf '%s cancel=%s' "$proof" "$cancel"
+}
+
+# clear_composer_read: print the composer verdict, and leave any recognised
+# dialog the read saw in the sink file. A dialog is refused by the caller.
+clear_composer_read() {
+  : > "$FM_COMPOSER_DIALOG_SINK" \
+    || die "task $ID's dialog check could not be recorded"
+  fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null || printf 'unknown'
+}
+
+clear_composer_refuse_dialog() {
+  if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    refuse_blocking_prompt "$(cat "$FM_COMPOSER_DIALOG_SINK")"
+  fi
+}
+
+# do_clear_composer: discard the pending composer line with Ctrl+U and prove the
+# composer is empty and stays empty. Never sends Enter, so the line is never
+# submitted. See the header for the contract.
+do_clear_composer() {
+  local state composer_state presses=0 confirmed i
+  fm_control_backend_supports_key "$BACKEND" C-u \
+    || die "task $ID runs on the $BACKEND backend, which cannot deliver Ctrl+U, the only key that clears a composer line; refusing rather than report a clear it did not achieve (Enter would submit the line)"
+  state=$(agent_state)
+  case "$state" in
+    alive|unverified) ;;
+    dead|missing) die "no agent is running at task $ID's recorded endpoint (state: $state); there is no composer to clear" ;;
+    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a key into an unattributed endpoint" ;;
+  esac
+  composer_state=$(clear_composer_read)
+  clear_composer_refuse_dialog
+  case "$composer_state" in
+    empty)
+      printf 'composer-already-empty'
+      return 0
+      ;;
+    pending|pending-unproven) ;;
+    *)
+      die "task $ID's composer state is '$composer_state', which cannot be verified; refusing to send Ctrl+U without a readable composer, because a clear that cannot be proven is not reported"
+      ;;
+  esac
+  while [ "$presses" -lt "$CLEAR_PRESSES" ]; do
+    fm_backend_send_key "$BACKEND" "$T" C-u "$LABEL" \
+      || die "Ctrl+U was not delivered to task $ID on $BACKEND after $presses press(es); its composer may still hold the line"
+    presses=$((presses + 1))
+    sleep "$CLEAR_SETTLE"
+    composer_state=$(clear_composer_read)
+    clear_composer_refuse_dialog
+    [ "$composer_state" = empty ] || continue
+    # One empty read can be a redraw artifact, and one was measured coming back
+    # seconds later. It has to hold across the whole window, and a line that
+    # comes back resumes pressing.
+    confirmed=1
+    i=1
+    while [ "$i" -lt "$CLEAR_READS" ]; do
+      sleep "$CLEAR_SETTLE"
+      composer_state=$(clear_composer_read)
+      clear_composer_refuse_dialog
+      if [ "$composer_state" != empty ]; then
+        confirmed=0
+        break
+      fi
+      i=$((i + 1))
+    done
+    if [ "$confirmed" = 1 ]; then
+      state=$(agent_state)
+      case "$state" in
+        alive|unverified) ;;
+        *) die "task $ID's endpoint reads '$state' after its composer was cleared; a clear must leave the agent running" ;;
+      esac
+      printf 'composer-cleared presses=%s verified=empty-x%s' "$presses" "$CLEAR_READS"
+      return 0
+    fi
+  done
+  die "task $ID's composer still reads '$composer_state' after $presses Ctrl+U press(es); the line was not cleared and nothing was submitted"
 }
 
 # Drop busy_gen from the task record when it still names <gen>.
@@ -1171,6 +1298,10 @@ case "$VERB" in
     esac
     proof=$(do_interrupt)
     echo "interrupt-delivered $ID harness=$HARNESS backend=$BACKEND verified=$proof"
+    ;;
+  clear-composer)
+    result=$(do_clear_composer)
+    echo "${result%% *} $ID harness=$HARNESS backend=$BACKEND endpoint=$T${result#"${result%% *}"}"
     ;;
   exit)
     result=$(do_exit)

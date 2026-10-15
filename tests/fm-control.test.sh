@@ -145,6 +145,19 @@ case "${1:-}" in
           picker) [ -n "${FM_FAKE_DEVIN_PICKER_STUCK:-}" ] || printf idle > "$D/devin" ;;
         esac
       fi
+      if [ "$payload" = C-u ] && [ -s "$D/composer" ] && [ ! -f "$D/ctrl-u-inert" ]; then
+        if [ -f "$D/artifact" ]; then
+          n=$(cat "$D/artifact")
+          cp "$D/composer" "$D/composer.held"; rm -f "$D/artifact"
+          : > "$D/composer"; printf '%s' "${n:-1}" > "$D/redraw"
+        else
+          : > "$D/composer"
+        fi
+      fi
+      if [ "$payload" = Enter ] && [ -s "$D/composer" ]; then
+        # Enter must never be how a stuck line is dealt with: it submits.
+        cat "$D/composer" >> "$D/submitted"
+      fi
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
@@ -175,6 +188,23 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    if [ -f "$D/redraw" ] || [ -f "$D/composer" ]; then
+      if [ -f "$D/redraw" ]; then
+        n=$(cat "$D/redraw")
+        if [ "$n" -gt 0 ]; then
+          printf '%s' "$((n - 1))" > "$D/redraw"
+          : > "$D/composer"
+        else
+          cp "$D/composer.held" "$D/composer"; rm -f "$D/redraw"
+        fi
+      fi
+      if [ -s "$D/composer" ]; then
+        printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
+      else
+        printf '╭────╮\n│    │\n╰────╯\n'
+      fi
+      exit 0
+    fi
     if [ -f "$D/after-enter" ] && [ -f "$D/keys" ] && grep -qx Enter "$D/keys"; then
       # after-enter-late holds how many captures after Enter still show the
       # ordinary pane, for a screen that renders after the submit has read it.
@@ -257,6 +287,7 @@ run_control() {
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_CONTROL_CLEAR_SETTLE=0.01 FM_CONTROL_CLEAR_HOLD="${FM_CONTROL_CLEAR_HOLD:-0}" \
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
@@ -750,7 +781,147 @@ test_verb_allowlist_is_closed() {
   expect_code 2 "$rc" "arbitrary text is not a control verb"
   [ -z "$(literals "$dir")" ] || fail "a refused verb must send nothing"
   [ -z "$(keys_sent "$dir")" ] || fail "a refused verb must send no keys"
-  pass "fm-control: the verb list is closed - no raw keys, arbitrary text, or clear verb"
+  pass "fm-control: the verb list is closed - no raw keys, arbitrary text, or generic clear verb"
+}
+
+# --- 4b. clear-composer ------------------------------------------------------
+
+# The 2026-10-14 shape: the agent is alive and idle and its composer holds exactly
+# one unsubmitted doorbell line. It must be recovered without a relaunch and
+# without submitting that line.
+test_clear_composer_discards_one_unsubmitted_line_without_submitting() {
+  local dir out rc
+  dir=$(new_case clear-stuck)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf 'Firstmate operational input waiting: read the inbox' > "$dir/fake/composer"
+  out=$(run_control "$dir" t1 clear-composer); rc=$?
+  expect_code 0 "$rc" "a stuck doorbell line should be cleared"$'\n'"$out"
+  assert_contains "$out" "composer-cleared t1 harness=claude backend=tmux" "the clear should be reported"
+  [ ! -s "$dir/fake/composer" ] || fail "the composer must be empty afterwards"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the agent must be left running, not relaunched"
+  grep -qx 'C-u' "$dir/fake/keys" || fail "the clear key must be C-u"
+  ! grep -qx 'Enter' "$dir/fake/keys" || fail "a clear must never send Enter"
+  [ ! -e "$dir/fake/submitted" ] || fail "the pending line must never be submitted"
+  [ -z "$(literals "$dir")" ] || fail "a clear types no text, got: $(literals "$dir")"
+  pass "fm-control clear-composer: one stuck line is discarded with C-u, never submitted, agent untouched"
+}
+
+test_clear_composer_on_an_empty_composer_sends_nothing() {
+  local dir out rc
+  dir=$(new_case clear-empty)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 clear-composer); rc=$?
+  expect_code 0 "$rc" "an empty composer is already clear"$'\n'"$out"
+  assert_contains "$out" "composer-already-empty t1" "an empty composer should be named as such"
+  [ -z "$(cat "$dir/fake/keys")" ] || fail "an empty composer must receive no key"
+  pass "fm-control clear-composer: an empty composer receives no key"
+}
+
+test_clear_composer_does_not_trust_a_single_redraw_artifact() {
+  local dir out rc
+  dir=$(new_case clear-artifact)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf 'stuck doorbell' > "$dir/fake/composer"
+  : > "$dir/fake/artifact"
+  out=$(run_control "$dir" t1 clear-composer); rc=$?
+  expect_code 0 "$rc" "a line that reappears after an apparent clear must be cleared again"$'\n'"$out"
+  [ ! -s "$dir/fake/composer" ] || fail "the composer must end empty"
+  [ "$(grep -cx 'C-u' "$dir/fake/keys")" -ge 2 ] \
+    || fail "a reappearing line must be pressed again, got: $(cat "$dir/fake/keys")"
+  ! grep -qx 'Enter' "$dir/fake/keys" || fail "a clear must never send Enter"
+  pass "fm-control clear-composer: an empty read is re-checked, and a reappearing line is cleared again"
+}
+
+# The measured artifact came back seconds later, after more empty reads than the
+# confirm count alone requires. The hold window has to outlast it.
+test_clear_composer_holds_past_a_late_returning_line() {
+  local dir out rc
+  dir=$(new_case clear-late-artifact)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf 'stuck doorbell' > "$dir/fake/composer"
+  printf 6 > "$dir/fake/artifact"
+  out=$(FM_CONTROL_CLEAR_HOLD=0.1 run_control "$dir" t1 clear-composer); rc=$?
+  expect_code 0 "$rc" "a line that returns inside the hold window must be cleared again"$'\n'"$out"
+  assert_contains "$out" "verified=empty-x10" "the hold window should set the empty-read count"
+  [ ! -s "$dir/fake/composer" ] || fail "the composer must end empty"
+  [ "$(grep -cx 'C-u' "$dir/fake/keys")" -ge 2 ] \
+    || fail "a line returning inside the hold window must be pressed again, got: $(cat "$dir/fake/keys")"
+  ! grep -qx 'Enter' "$dir/fake/keys" || fail "a clear must never send Enter"
+  pass "fm-control clear-composer: the hold window outlasts a line that returns after the confirm count"
+}
+
+test_clear_composer_that_does_not_clear_fails_without_submitting() {
+  local dir out rc
+  dir=$(new_case clear-inert)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf 'stuck doorbell' > "$dir/fake/composer"
+  : > "$dir/fake/ctrl-u-inert"
+  out=$(FM_CONTROL_CLEAR_PRESSES=3 run_control "$dir" t1 clear-composer); rc=$?
+  expect_code 1 "$rc" "a composer that never clears must not be reported cleared"$'\n'"$out"
+  assert_contains "$out" "after 3 Ctrl+U press" "the refusal should say how far it got"
+  [ "$(grep -cx 'C-u' "$dir/fake/keys")" = 3 ] || fail "presses must stay inside the budget"
+  ! grep -qx 'Enter' "$dir/fake/keys" || fail "a failed clear must never fall back to Enter"
+  [ ! -e "$dir/fake/submitted" ] || fail "the pending line must never be submitted"
+  pass "fm-control clear-composer: a clear that does not take is reported, bounded, and never falls back to Enter"
+}
+
+test_clear_composer_refuses_when_the_composer_cannot_be_read() {
+  local dir out rc
+  dir=$(new_case clear-unreadable)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf 'stuck doorbell' > "$dir/fake/composer"
+  printf 'garbled' > "$dir/fake/pane"
+  rm -f "$dir/fake/composer"
+  out=$(run_control "$dir" t1 clear-composer); rc=$?
+  expect_code 1 "$rc" "an unreadable composer must refuse"$'\n'"$out"
+  assert_contains "$out" "cannot be verified" "the refusal should say the composer is unproven"
+  [ -z "$(cat "$dir/fake/keys")" ] || fail "an unproven composer must receive no key"
+  pass "fm-control clear-composer: an unreadable composer refuses and sends no key"
+}
+
+test_clear_composer_refuses_when_no_agent_runs() {
+  local dir out rc
+  dir=$(new_case clear-dead)
+  add_task "$dir" t1 claude
+  printf 'stuck doorbell' > "$dir/fake/composer"
+  out=$(run_control "$dir" t1 clear-composer); rc=$?
+  expect_code 1 "$rc" "no agent means no composer to clear"$'\n'"$out"
+  assert_contains "$out" "no agent is running" "the refusal should say so"
+  [ -z "$(cat "$dir/fake/keys")" ] || fail "a dead endpoint must receive no key"
+  pass "fm-control clear-composer: refuses where no agent runs"
+}
+
+test_clear_composer_refuses_on_a_backend_without_ctrl_u() {
+  local dir out rc
+  dir=$(new_case clear-orca)
+  add_task "$dir" t1 claude ship orca "term-1"
+  {
+    cat "$dir/home/state/t1.meta"
+    echo "terminal=term-1"
+    echo "orca_worktree_id=wt-1::/orca/wt-1"
+  } > "$dir/home/state/t1.meta.new"
+  sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 clear-composer); rc=$?
+  expect_code 1 "$rc" "orca cannot deliver Ctrl+U"$'\n'"$out"
+  assert_contains "$out" "cannot deliver Ctrl+U" "the refusal should name the missing key"
+  [ -z "$(cat "$dir/fake/keys")" ] || fail "a refused clear must send no key"
+  pass "fm-control clear-composer: a backend that cannot deliver Ctrl+U refuses with the reason"
+}
+
+test_clear_composer_only_applies_without_relaunch_flags() {
+  local dir out rc
+  dir=$(new_case clear-flags)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 clear-composer --note x); rc=$?
+  expect_code 1 "$rc" "relaunch-only flags apply to relaunch only"$'\n'"$out"
+  pass "fm-control clear-composer: relaunch-only flags are rejected"
 }
 
 test_resume_is_refused_with_its_reason() {
@@ -1196,6 +1367,15 @@ test_record_bound_to_another_task_is_refused
 test_remote_secondmate_is_refused_by_placement
 test_interrupt_and_exit_lock_before_task_state_resolution
 test_verb_allowlist_is_closed
+test_clear_composer_discards_one_unsubmitted_line_without_submitting
+test_clear_composer_on_an_empty_composer_sends_nothing
+test_clear_composer_does_not_trust_a_single_redraw_artifact
+test_clear_composer_holds_past_a_late_returning_line
+test_clear_composer_that_does_not_clear_fails_without_submitting
+test_clear_composer_refuses_when_the_composer_cannot_be_read
+test_clear_composer_refuses_when_no_agent_runs
+test_clear_composer_refuses_on_a_backend_without_ctrl_u
+test_clear_composer_only_applies_without_relaunch_flags
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent

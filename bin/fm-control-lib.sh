@@ -48,6 +48,7 @@
 fm_control_verbs() {
   cat <<'EOF'
 interrupt
+clear-composer
 exit
 relaunch
 EOF
@@ -55,7 +56,7 @@ EOF
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|clear-composer|exit|relaunch) return 0 ;;
   esac
   return 1
 }

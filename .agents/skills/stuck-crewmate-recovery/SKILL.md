@@ -17,7 +17,8 @@ A stale or dead-endpoint report for a worker whose pull request has already land
 
 Follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards) when recovering a worker that hosts a board.
 
-Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
+Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> interrupt|clear-composer|exit|relaunch`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
+A live, idle worker that every steer skips with "doorbell skipped, composer visibly holds pending text" is holding one unsubmitted line: run `clear-composer` (Ctrl+U, never Enter), then ring again; "doorbell did not reach" is a broken transport instead.
 That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
 Load `harness-adapters` before a resume command or a harness-specific skill invocation, and whenever the adapter's own quirks matter.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.

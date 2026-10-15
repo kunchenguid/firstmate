@@ -15,7 +15,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, which have no side effects, so they can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `clear-composer`, `exit`, `relaunch`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
@@ -33,6 +33,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
+| `clear-composer` | Discard one unsubmitted composer line with Ctrl+U, never submitting it. | The shared composer verdict reads `empty` and keeps reading `empty` on every consecutive re-read for at least 5 seconds after the last Ctrl+U press (`FM_CONTROL_CLEAR_HOLD`), because one apparent clear was measured as a redraw artifact that reappeared seconds later; a line that comes back is pressed again within a bounded press budget. An already-empty composer reports `composer-already-empty` and receives no key. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
@@ -48,6 +49,15 @@ muse's session log records `terminal=cancelled` for the interrupted run, so the 
 An interrupt is not complete until the composer is empty.
 muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
+
+`clear-composer` is the recovery path for a live, idle agent left holding one unsubmitted line, typically a doorbell typed and never submitted.
+That line blocks every other path: `fm-send` refuses to type over pending text, `relaunch` and `exit` refuse to type the exit command onto it, and `interrupt` does not clear it.
+It is a separate verb rather than a step inside `interrupt`, so an ordinary interrupt of an empty composer is unchanged.
+Ctrl+U is the only key used; Enter frequently does not submit a stuck line, and submitting it would make the agent act on a stale instruction.
+The durable inbox already holds the real message, so the discarded doorbell loses nothing, and the next ring is read normally.
+It refuses, sending no key, on a backend that cannot deliver Ctrl+U (Orca), when the composer verdict is unknown, when a recognised dialog is on screen, and when no agent runs.
+It does not relax `fm-send`'s refusal to type over pending text: it acts only on the composer of the exact task id it is given.
+`fm-send` distinguishes the two symptoms by wording: "doorbell did not reach" is a broken transport, while "doorbell skipped, composer visibly holds pending text" is this case.
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
 `exit` also refuses, naming the dialog as `blocked on a prompt`, when the screen shows a recognised dialog that a further Enter would answer, whether the dialog was open before the exit command was typed or the submitting Enter opened it; it sends no Escape and chooses no option, so closing the dialog is left to the operator.
