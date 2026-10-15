@@ -105,13 +105,81 @@ FM_LEASE_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d
 FM_LEASE_GUARD_LOCK=
 
 fm_lease_lock_helpers() {
-  command -v fm_lock_acquire_wait >/dev/null 2>&1 && return 0
-  # fm-wake-lib.sh is a canonical lint root in its own right and is already
-  # sourced directly by every caller of this lazy fallback; keep this an
-  # analysis boundary so ShellCheck's external-source traversal does not
-  # recursively duplicate that large graph for every lease-lib consumer.
-  # shellcheck source=/dev/null
-  . "$FM_LEASE_LIB_DIR/fm-wake-lib.sh"
+  if ! command -v fm_lock_acquire_wait >/dev/null 2>&1; then
+    # fm-wake-lib.sh is a canonical lint root in its own right and is already
+    # sourced directly by every caller of this lazy fallback; keep this an
+    # analysis boundary so ShellCheck's external-source traversal does not
+    # recursively duplicate that large graph for every lease-lib consumer.
+    # shellcheck source=/dev/null
+    . "$FM_LEASE_LIB_DIR/fm-wake-lib.sh"
+  fi
+  if ! command -v fm_lock_age >/dev/null 2>&1; then
+    # fm-lock-lib.sh is a side-effect-free leaf that owns the lock-age read
+    # used by the bounded lease-command acquire below.
+    # shellcheck source=bin/fm-lock-lib.sh
+    . "$FM_LEASE_LIB_DIR/fm-lock-lib.sh"
+  fi
+}
+
+# The lease-command lock serializes every lease inspection and mutation in the
+# home, so a holder that never releases it wedges the whole lease surface at
+# once - every steer, relaunch, teardown, claim, and sweep. The holder's pid
+# cannot decide that on its own: a post-reboot leftover whose pid has been
+# recycled onto an unrelated live process looks exactly like a working holder,
+# and a wedged holder is genuinely alive. The lock's own age is the abandonment
+# proof instead, so the wait is bounded by it: past this bound a live holder is
+# treated as abandoned and the lock is reclaimed, and a holder still inside the
+# bound is never preempted. 300s is the fleet's usual guard grace and sits far
+# above any real lease-command hold (claim, release, and steer are sub-second;
+# a relaunch or teardown is the longest and still finishes in seconds).
+FM_LEASE_COMMAND_LOCK_MAX_AGE_SECS=${FM_LEASE_COMMAND_LOCK_MAX_AGE_SECS:-300}
+
+# fm_lease_command_lock_max_age: echo the validated bound (invalid -> 300).
+# Read at call time because this is a sourced library serving many commands in
+# one shell.
+fm_lease_command_lock_max_age() {
+  local age=${FM_LEASE_COMMAND_LOCK_MAX_AGE_SECS:-300}
+  case "$age" in '' | *[!0-9]* | 0) age=300 ;; esac
+  printf '%s\n' "$age"
+}
+
+# fm_lease_command_lock_reclaim <lock> <max-age>: remove <lock> when it is still
+# present and at least <max-age> seconds old. The age proof is re-verified while
+# holding the lock's steal mutex, the same election fm_lock_try_acquire uses for
+# stale-owner reclaim: while it is held no competing acquirer can publish a
+# fresh lock (fm_lock_claim_blocked_by_steal), so a reclaimer can never delete a
+# newer claim, and a lock younger than the bound is left untouched. Returns 0
+# only when an over-age lock was removed.
+#
+# A lock whose age cannot be read is never reclaimed: an unprovable age keeps
+# the ordinary wait rather than risking a live holder.
+fm_lease_command_lock_reclaim() {
+  local lock=$1 max_age=$2 steal age
+  steal="$lock.steal"
+  fm_lock_try_acquire_steal_mutex "$steal" || return 1
+  if age=$(fm_lock_age "$lock") && [ "$age" -ge "$max_age" ]; then
+    fm_lock_remove_path "$lock" || true
+    fm_lock_release "$steal"
+    return 0
+  fi
+  fm_lock_release "$steal"
+  return 1
+}
+
+# fm_lease_command_lock_acquire <lock>: the bounded replacement for a bare
+# fm_lock_acquire_wait on the lease-command lock (used by bin/fm-lease.sh and
+# fm_lease_guard). The ordinary stale-owner recovery still clears a provably
+# dead holder; beyond that the wait is bounded by the lock's age, so an alive
+# holder past FM_LEASE_COMMAND_LOCK_MAX_AGE_SECS is reclaimed instead of
+# blocking forever. One stuck relaunch can therefore never wedge every relaunch
+# and steer in the home.
+fm_lease_command_lock_acquire() {
+  local lock=$1 max_age
+  fm_lease_lock_helpers
+  max_age=$(fm_lease_command_lock_max_age)
+  while ! fm_lock_try_acquire "$lock"; do
+    fm_lease_command_lock_reclaim "$lock" "$max_age" || sleep 0.1
+  done
 }
 
 # fm_lease_home_runs_host: 0 iff this home runs the supervision host
@@ -220,7 +288,7 @@ fm_lease_guard() {
   # A caller with more than one guarded phase already excludes claims until
   # its shared cleanup; do not recursively acquire the non-reentrant lock.
   if [ "$FM_LEASE_GUARD_LOCK" != "$lock" ]; then
-    fm_lock_acquire_wait "$lock"
+    fm_lease_command_lock_acquire "$lock"
     FM_LEASE_GUARD_LOCK=$lock
   fi
   if ! fm_lease_live "$task"; then

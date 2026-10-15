@@ -1187,6 +1187,97 @@ test_guard_holds_exclusivity_through_mutation() {
   pass "lease guard excludes a concurrent actor for the complete mutation"
 }
 
+# The lease-command lock is the home-wide serialization point for the lease
+# surface, so a holder that never releases it wedges every steer, relaunch,
+# teardown, and claim at once. Its wait is bounded by the lock's own age: an
+# alive holder past the bound is reclaimed - pid alone cannot tell a recycled
+# post-reboot leftover or a wedged process from a working one - and an alive
+# holder still inside the bound is never preempted.
+test_lease_command_lock_wait_is_bounded_by_age() {
+  local home lock probe status i
+  home="$TMP_ROOT/lease-command-lock-home"
+  mkdir -p "$home/state"
+  lock="$home/state/.fm-lease-command.lock"
+
+  # (1) An alive holder past the bound must not keep wedging the home: before
+  # this bound existed, the second command never returned. The lock is
+  # fabricated in the supported owner-dir shape with a live pid (this test's own
+  # shell stands in for a pid recycled onto an unrelated live process), aged by
+  # the framework's portable timestamp helper because touch(1) otherwise follows
+  # a lock symlink to its owner directory.
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  fm_touch_epoch "$(( $(date +%s) - 900 ))" "$lock"
+  FM_HOME="$home" FM_LEASE_COMMAND_LOCK_MAX_AGE_SECS=5 \
+    "$ROOT/bin/fm-lease.sh" claim task-stuck --actor main > "$home/stuck.out" 2>&1 &
+  probe=$!
+  i=0
+  while kill -0 "$probe" 2>/dev/null && [ "$i" -lt 60 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if kill -0 "$probe" 2>/dev/null; then
+    kill "$probe" 2>/dev/null || true
+    wait "$probe" 2>/dev/null || true
+    fail "an over-age lease-command lock still wedged a lease command: $(cat "$home/stuck.out" 2>/dev/null || true)"
+  fi
+  wait "$probe"; status=$?
+  [ "$status" -eq 0 ] || fail "claim behind an over-age lock exited $status: $(cat "$home/stuck.out")"
+  [ ! -e "$lock" ] || fail "the claim did not release the reclaimed lease-command lock"
+
+  # (2) An alive holder inside the bound is never preempted, so the second
+  # command is still waiting while the lock is young; it proceeds only once the
+  # lock itself ages past the bound.
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  FM_HOME="$home" FM_LEASE_COMMAND_LOCK_MAX_AGE_SECS=300 \
+    "$ROOT/bin/fm-lease.sh" claim task-held --actor main > "$home/held.out" 2>&1 &
+  probe=$!
+  sleep 0.5
+  kill -0 "$probe" 2>/dev/null \
+    || fail "an in-bound live holder did not block a second lease command: $(cat "$home/held.out")"
+  fm_touch_epoch "$(( $(date +%s) - 900 ))" "$lock"
+  i=0
+  while kill -0 "$probe" 2>/dev/null && [ "$i" -lt 60 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if kill -0 "$probe" 2>/dev/null; then
+    kill "$probe" 2>/dev/null || true
+    wait "$probe" 2>/dev/null || true
+    fail "an aged-out live holder still blocked a lease command: $(cat "$home/held.out")"
+  fi
+  wait "$probe"; status=$?
+  [ "$status" -eq 0 ] || fail "claim behind an aged-out live holder exited $status: $(cat "$home/held.out")"
+
+  # (3) The guarded-mutation path (steer, relaunch, teardown) takes the same
+  # lock through the same bounded acquire, so an over-age holder cannot wedge it
+  # either - the exact relaunch-and-steer outage this bound exists to end.
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  fm_touch_epoch "$(( $(date +%s) - 900 ))" "$lock"
+  # The positional parameter belongs to the nested shell.
+  # shellcheck disable=SC2016
+  PI_CODING_AGENT=true STATE="$home/state" FM_LEASE_COMMAND_LOCK_MAX_AGE_SECS=5 \
+    bash -c '. "$1"; fm_lease_guard task-stuck "probe"; fm_lease_guard_release; echo guard-pass' \
+    _ "$ROOT/bin/fm-lease-lib.sh" > "$home/guard.out" 2>&1 &
+  probe=$!
+  i=0
+  while kill -0 "$probe" 2>/dev/null && [ "$i" -lt 60 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if kill -0 "$probe" 2>/dev/null; then
+    kill "$probe" 2>/dev/null || true
+    wait "$probe" 2>/dev/null || true
+    fail "an over-age lease-command lock still wedged the guarded mutation path: $(cat "$home/guard.out" 2>/dev/null || true)"
+  fi
+  wait "$probe"; status=$?
+  [ "$status" -eq 0 ] || fail "the guarded mutation path behind an over-age lock exited $status: $(cat "$home/guard.out")"
+  assert_contains "$(cat "$home/guard.out")" "guard-pass" "the guarded mutation path never reached its guarded work"
+  pass "the lease-command lock wait is bounded by the lock's age and never preempts an in-bound holder"
+}
+
 test_claim_refuses_the_other_actors_name_loudly() {
   local home out status
   home="$TMP_ROOT/claim-guard-home"
@@ -1567,6 +1658,7 @@ test_lease_liveness_binds_to_the_session_lock
 test_concurrent_stale_lease_claims_have_one_winner
 test_guard_stale_clear_cannot_delete_a_new_claim
 test_guard_holds_exclusivity_through_mutation
+test_lease_command_lock_wait_is_bounded_by_age
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
 test_branch_cannot_force_teardown_or_directly_relaunch
