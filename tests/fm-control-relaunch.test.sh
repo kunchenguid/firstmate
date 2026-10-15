@@ -895,6 +895,40 @@ SH
   chmod +x "$1/fakebin/claude"
 }
 
+# A fake byokit-accounts whose pick always refuses with the contract JSON on
+# stdout and one sentence on stderr, the way the real tool answers. It records
+# its argv so a test can prove the pool was asked.
+make_pool_refusal_stub() {  # <case-dir>
+  mkdir -p "$1/fakebin"
+  cat > "$1/fakebin/byokit-accounts" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$1/pool-calls'
+printf '%s\n' '{"ok":false,"tool":"claude","reason":"No claude account can take a run right now.","rows":[{"id":"pa_a","name":"Work","state":"resting"},{"id":"pa_b","name":"Personal","state":"signed_out"}]}'
+printf 'error: No claude account can take a run right now.\n' >&2
+exit 1
+SH
+  chmod +x "$1/fakebin/byokit-accounts"
+}
+
+test_pool_with_no_free_account_refuses_before_stop() {
+  local dir out rc id=rl-pool-out
+  dir=$(new_case pool-out "$id")
+  add_ship_task "$dir" "$id" claude
+  make_pool_refusal_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/pool"
+  printf 'state=%s\n' "$dir/pool" > "$dir/home/config/account-pool"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  out=$(run_control "$dir" "$id" relaunch --note "pool has nothing free"); rc=$?
+  expect_code 1 "$rc" "a relaunch with no pool account free must refuse"
+  assert_contains "$out" "cannot start a claude worker" "the refusal should come from the pool pick"
+  assert_contains "$out" "Work resting, Personal signed out" \
+    "the refusal should say who is resting or signed out"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a pool refusal must happen before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "a pool refusal must send no lifecycle input"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "a refused relaunch must leave the task record untouched"
+  pass "fm-control relaunch: a home with no pool account free refuses before the old agent stops"
+}
+
 test_signed_out_worker_account_pin_refuses_before_stop() {
   local dir out rc id=rl-acct-out
   dir=$(new_case acct-out "$id")
@@ -2689,6 +2723,7 @@ test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
+test_pool_with_no_free_account_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
