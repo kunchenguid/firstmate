@@ -134,12 +134,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$TOOL_SET" -eq 0 ]; then
-  # Builtin-only stdin slurp: avoids the fork `cat` would cost on every tool
-  # call. Trailing-newline handling differs from $(cat) (read keeps them,
-  # command substitution would strip them), which is immaterial here -
-  # PAYLOAD is only ever emptiness-tested, pattern-matched, or handed to jq.
-  PAYLOAD=''
-  IFS= read -r -d '' PAYLOAD || true
+  PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   # Builtin-only superset prefilter. Strip everything but letters and digits
   # from the WHOLE raw payload (not just the eventual tool name) and test
