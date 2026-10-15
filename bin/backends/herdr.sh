@@ -1657,26 +1657,15 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
   return 0
 }
 
-# fm_backend_herdr_session_dir: the on-disk directory Herdr reports for
-# <session> in `session list --json`'s `.session_dir` (default ->
-# ~/.config/herdr, named -> ~/.config/herdr/sessions/<name>), so any XDG
-# override is Herdr's to resolve, not ours. Listed whether or not that
-# session's server is running (docs/verification/runtime-backends.md "Session
-# directory"). Empty on any failure, including a Herdr whose listing omits the
-# field.
-fm_backend_herdr_session_dir() {  # <session>
-  local session=$1
-  "$(fm_backend_herdr_bin)" session list --json 2>/dev/null \
-    | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .session_dir // empty' 2>/dev/null \
-    | head -1
-}
-
 # External server ownership (issue #7320). A service manager such as a systemd
 # user unit can own a session's server, and then only it may start one: a
 # Firstmate-started server races the owner during a unit restart or a
 # `server live-handoff`, while `status` briefly reports not running, and splits
 # panes across two servers. The owner declares itself with marker files in the
-# session directory above, shared by every Firstmate home on that session:
+# session directory, the directory holding the `.server.socket` that
+# `status --json` reports whether or not the server is running
+# (docs/verification/runtime-backends.md "Session directory"), shared by every
+# Firstmate home on that session:
 #   firstmate-server-owner      persistent; first line names the owner
 #   firstmate-server-replacing  present only while the owner replaces the server
 # docs/herdr-backend.md "Externally managed servers" owns the operator contract.
@@ -1702,21 +1691,23 @@ fm_backend_herdr_server_owner_name() {  # <owner-marker>
 # inherited from whichever agent happened to start it. Bounded poll for the
 # server to report running.
 #
-# A running server returns after one session-directory read, unless that
-# directory holds a replacement marker. While the session directory holds an
-# owner marker with the server down, or a replacement marker at all, this never
-# starts or releases callers to the server: it polls the non-starting
-# fm_backend_herdr_server_running_state read up to 60 times, 0.5s apart, until
-# the replacement marker is gone and the server reports running, and fails
-# naming the replacement or the owner otherwise. A replacement marker that
+# A running server returns after one marker check in the session directory,
+# unless that directory holds a replacement marker. While the session directory
+# holds an owner marker with the server down, or a replacement marker at all,
+# this never starts or releases callers to the server: it polls the
+# non-starting fm_backend_herdr_server_running_state read up to 60 times, 0.5s
+# apart, until the replacement marker is gone and the server reports running,
+# and fails naming the replacement or the owner otherwise. A replacement marker that
 # clears with no owner marker hands back to the Firstmate-owned start below.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i dir owner_marker replacing_marker owner polls=60
-  running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
-  dir=$(fm_backend_herdr_session_dir "$session")
-  if [ -z "$dir" ]; then
+  local session=$1 status running socket out i dir owner_marker replacing_marker owner polls=60
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null)
+  running=$(printf '%s' "$status" | jq -r '.server.running // false' 2>/dev/null)
+  socket=$(printf '%s' "$status" | jq -r '.server.socket // empty' 2>/dev/null)
+  if [ -z "$socket" ]; then
     [ "$running" = "true" ] && return 0
   else
+    dir=$(dirname "$socket")
     owner_marker="$dir/$FM_BACKEND_HERDR_SERVER_OWNER_MARKER"
     replacing_marker="$dir/$FM_BACKEND_HERDR_SERVER_REPLACING_MARKER"
     [ "$running" = "true" ] && [ ! -e "$replacing_marker" ] && return 0

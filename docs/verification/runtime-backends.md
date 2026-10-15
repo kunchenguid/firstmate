@@ -1326,22 +1326,26 @@ The refusal is a JSON error on stderr with exit 1 and empty stdout, and both cli
 
 ### Session directory
 
-Measured 2026-10-15 on Linux x86_64 with Herdr 0.9.5, reading only session listings: an empty `sessions/probe` directory under a fresh `XDG_CONFIG_HOME` with no server, then the host's two running sessions.
+Measured 2026-10-15 on Linux x86_64 with Herdr 0.9.5, reading only `status`: the default and an empty `sessions/probe` session under a fresh `XDG_CONFIG_HOME` with no server, then the host's running `firstmate` session.
 
 ```sh
 herdr --version
 d=$(mktemp -d /tmp/hx.XXXXXX); mkdir -p "$d/herdr/sessions/probe"
-XDG_CONFIG_HOME="$d" herdr session list --json | jq -c --arg d "$d" '[.sessions[] | {name, running, session_dir: (.session_dir | sub("^" + $d; "$XDG_CONFIG_HOME"))}]'
-herdr session list --json | jq -c --arg h "$HOME" '[.sessions[] | {name, running, session_dir: (.session_dir | sub("^" + $h; "~"))}]'
+for s in default probe; do XDG_CONFIG_HOME="$d" herdr --session "$s" status --json | jq -c --arg d "$d" '{session: .server.session, running: .server.running, socket: (.server.socket | sub("^" + $d; "$XDG_CONFIG_HOME"))}'; done
+herdr --session firstmate status --json | jq -c --arg h "$HOME" '{session: .server.session, running: .server.running, socket: (.server.socket | sub("^" + $h; "~"))}'
+HERDR_SOCKET_PATH=/tmp/xx/zz.sock herdr --session default status --json | jq -c '.server.socket | sub("^" + env.HOME; "~")'
 ```
 
 ```text
 herdr 0.9.5
-[{"name":"default","running":false,"session_dir":"$XDG_CONFIG_HOME/herdr"},{"name":"probe","running":false,"session_dir":"$XDG_CONFIG_HOME/herdr/sessions/probe"}]
-[{"name":"default","running":true,"session_dir":"~/.config/herdr"},{"name":"firstmate","running":true,"session_dir":"~/.config/herdr/sessions/firstmate"}]
+{"session":null,"running":false,"socket":"$XDG_CONFIG_HOME/herdr/herdr.sock"}
+{"session":"probe","running":false,"socket":"$XDG_CONFIG_HOME/herdr/sessions/probe/herdr.sock"}
+{"session":"firstmate","running":true,"socket":"~/.config/herdr/sessions/firstmate/herdr.sock"}
+"~/.config/herdr/herdr.sock"
 ```
 
-A session whose server is stopped is still listed with its `session_dir`, and the directory follows `XDG_CONFIG_HOME`, so the [externally managed server](../herdr-backend.md#externally-managed-servers) markers stay readable through a restart.
+A session whose server is stopped still reports its socket, the socket's directory is the session directory `herdr session list --json` reports as `session_dir`, it follows `XDG_CONFIG_HOME`, and an inherited `HERDR_SOCKET_PATH` does not move it under `--session`, so the [externally managed server](../herdr-backend.md#externally-managed-servers) markers stay readable through a restart without an extra Herdr call.
+The `status` read created nothing under the fresh config directory.
 `tests/fm-backend-herdr.test.sh` pins the marker behavior against fakes.
 
 ### Submit confirmation

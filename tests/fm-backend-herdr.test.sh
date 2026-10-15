@@ -41,9 +41,7 @@ export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 # reads 1.out, call 2 reads 2.out, ...) so a test can script a short sequence
 # of calls precisely. A missing response file means "succeed with empty
 # stdout" (mirrors send-text/send-keys/pane close/tab close, which are silent
-# on success in the real CLI - verified in herdr-verification-p2.md). The
-# session-less `session list --json` read that server_ensure makes for the
-# ownership markers lists no sessions without consuming a response.
+# on success in the real CLI - verified in herdr-verification-p2.md).
 make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -61,10 +59,6 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
-  exit 0
-fi
-if [ "$*" = "session list --json" ]; then
-  printf '{"sessions":[]}\n'
   exit 0
 fi
 if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
@@ -173,8 +167,7 @@ SH
 }
 
 # make_herdr_owned_server_fakebin: a stateful server stub for the ownership
-# markers. `session list` reports $FM_HERDR_SESSION_DIR for every session,
-# `status` reports running while $FM_HERDR_SERVER_MARKER exists and counts each
+# markers. `status` reports its socket in $FM_HERDR_SESSION_DIR, reports running while $FM_HERDR_SERVER_MARKER exists and counts each
 # read in $FM_HERDR_STATUS_COUNT, and `server` records its launch in
 # $FM_HERDR_START_LOG. A `sleep` stub returns at once and counts each wait in
 # $FM_HERDR_SLEEP_COUNT; when $FM_HERDR_FLIP_AFTER is set, the wait with that
@@ -188,15 +181,12 @@ make_herdr_owned_server_fakebin() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 case "${1:-} ${2:-}" in
-  "session list")
-    printf '{"sessions":[{"name":"fmtest","session_dir":"%s"}]}\n' "$FM_HERDR_SESSION_DIR"
-    ;;
   "status --json")
     echo $(( $(cat "$FM_HERDR_STATUS_COUNT" 2>/dev/null || echo 0) + 1 )) > "$FM_HERDR_STATUS_COUNT"
     if [ -e "$FM_HERDR_SERVER_MARKER" ]; then
-      printf '{"server":{"running":true}}\n'
+      printf '{"server":{"running":true,"socket":"%s/herdr.sock"}}\n' "$FM_HERDR_SESSION_DIR"
     else
-      printf '{"server":{"running":false}}\n'
+      printf '{"server":{"running":false,"socket":"%s/herdr.sock"}}\n' "$FM_HERDR_SESSION_DIR"
     fi
     ;;
   server*)

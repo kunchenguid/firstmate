@@ -673,7 +673,7 @@ By default Firstmate starts a session's Herdr server itself, headless, whenever 
 That is wrong when a service manager, such as a systemd user unit, owns the server.
 During a unit restart or a `server live-handoff`, `status` can briefly report not running, and a server Firstmate started would race the owner and split panes across two servers.
 
-The owner opts out by writing marker files into the session directory that `herdr session list --json` reports as `session_dir`:
+The owner opts out by writing marker files into the session directory, the directory holding the socket that `herdr --session <name> status --json` reports as `.server.socket`:
 
 | Marker | Written by the owner | Firstmate behavior |
 | --- | --- | --- |
@@ -683,8 +683,8 @@ The owner opts out by writing marker files into the session directory that `herd
 The wait is up to 60 checks half a second apart, 30 seconds in all.
 A replacement marker that clears with no owner marker hands the session back to the default, so Firstmate starts the server if it is still down.
 A replacement marker left behind fails every operation naming its path, so the owner must remove it when the replacement ends.
-Every operation reads the session directory once, even when the server reports running, so a replacement marker holds callers off the old server as well as the new one.
-Herdr lists a session's `session_dir` even while its server is stopped ([verification](verification/runtime-backends.md#session-directory)), and a Herdr whose listing omits the field cannot carry the markers and keeps the default behavior.
+Every operation checks the session directory for a replacement marker once, even when the server reports running, so a replacement marker holds callers off the old server as well as the new one.
+That check reuses the `status` read Firstmate already makes, which reports the socket even while the server is stopped ([verification](verification/runtime-backends.md#session-directory)); a Herdr whose `status` omits the socket cannot carry the markers and keeps the default behavior.
 
 ### Husks after a server restart
 
