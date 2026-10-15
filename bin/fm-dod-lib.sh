@@ -52,7 +52,10 @@
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
 # appends " forge=gerrit shape=squash" to that line and a forge=forgejo block
-# appends " forge=forgejo". The "Ship branch: <branch>"
+# appends " forge=forgejo". A push-only block appends " forge=push-only";
+# direct-PR also carries shape=direct-push-registration-required until registered,
+# then shape=registered-direct-push and push-landed-ref=<ref>.
+# The "Ship branch: <branch>"
 # line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
 # forge is none|gerrit|forgejo|push-only and defaults to none; bin/fm-project-mode.sh's

@@ -95,8 +95,8 @@
 # scaffold so detection does not depend on the caller recognizing the repo;
 # bin/fm-spawn.sh repeats the check at launch regardless.
 # The generated ship brief records the chosen mode as a fixed machine-readable
-# "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
-# on Gerrit or " forge=forgejo" on Forgejo. bin/fm-spawn.sh reads that line and
+# "Delivery contract: mode=<mode>" line; bin/fm-dod-lib.sh owns its forge-specific
+# suffixes. bin/fm-spawn.sh reads that line and
 # refuses to launch a ship task whose explicit --mode or registered forge
 # disagrees, so an adjusted brief and the recorded task metadata cannot drift
 # apart.
