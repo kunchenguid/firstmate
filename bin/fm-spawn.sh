@@ -54,7 +54,7 @@
 #   bin/fm-teardown.sh's landed check reads: HEAD being an ancestor of origin's
 #   copy of the registered ref proves the work landed. It is refused on scouts,
 #   secondmates, relaunches, local-only, no-mistakes, and projects not registered
-#   forge=push-only. It accepts only direct-PR tasks, persists a
+#   forge=push-only. It requires a direct-PR task to provide the ref, persists a
 #   short branch name, and leaves teardown's landed check unchanged without it.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
@@ -3583,6 +3583,10 @@ if [ "$KIND" = ship ]; then
         echo "error: --push-landed-ref requires mode=direct-PR; local-only has its own local-main delivery contract" >&2
         exit 1 ;;
     esac
+  fi
+  if [ "$RELAUNCH" -eq 0 ] && [ "$STANDING_FORGE" = push-only ] && [ "$MODE" = direct-PR ] && [ -z "$PUSH_LANDED_REF" ]; then
+    echo "error: forge=push-only direct-PR requires --push-landed-ref <ref>; without the registered direct-push branch this task has no delivery path" >&2
+    exit 1
   fi
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
   # the captain's decision of 2026-09-15: a Code-Review+2 is a positive

@@ -859,7 +859,7 @@ test_prose_base_branch_line_is_ignored() {
 # A push-only ship registers the long-lived branch it delivers to by direct
 # push, so teardown can prove that shape landed (bin/fm-teardown.sh reads
 # push_landed_ref= from the task meta). The flag is normalized to a short branch
-# name, absent without the flag, and restricted to push-only direct-PR tasks.
+# name and restricted to push-only direct-PR tasks.
 test_push_landed_ref_is_recorded_and_validated() {
   local rec id out status
   id='pool-push-landed-record-r1'
@@ -886,8 +886,9 @@ test_push_landed_ref_is_recorded_and_validated() {
   printf '%s\n' 'Delivery contract: mode=direct-PR forge=push-only' >> "$HOME_DIR/data/$id/brief.md"
   out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
-  expect_code 0 "$status" "a ship spawn without --push-landed-ref should launch"$'\n'"$out"
-  assert_no_grep 'push_landed_ref=' "$HOME_DIR/state/$id.meta" "an unflagged spawn recorded a push-landed ref"
+  [ "$status" -ne 0 ] || fail "a push-only direct-PR spawn without --push-landed-ref should refuse"
+  assert_contains "$out" "requires --push-landed-ref" "the unregistered direct-push refusal did not explain itself"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused unregistered direct-push spawn published task metadata"
 
   id='pool-push-landed-scout-r1'
   rec=$(make_case push-landed-scout "$id")
