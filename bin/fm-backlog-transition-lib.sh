@@ -553,9 +553,15 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 fm_backlog_open_blockers() {  # <data-dir> <id>
   local data id=$2 out line blockers b bout bstate open=0
   data=$(fm_backlog_data_absolute "$1") || return 2
-  out=$(fm_backlog_row_show "$data" "$id") || return 2
+  if ! out=$(fm_backlog_row_show "$data" "$id"); then
+    printf '%s\n' "${out:-tasks-axi show $id failed with no output}"
+    return 2
+  fi
   line=$(printf '%s\n' "$out" | sed -n 's/^ *state: *//p' | sed -n '1p')
-  [ -n "$line" ] || return 2
+  if [ -z "$line" ]; then
+    printf 'tasks-axi show %s returned no state\n' "$id"
+    return 2
+  fi
   [ "$line" != "done" ] || return 0
   blockers=$(printf '%s\n' "$out" | sed -n 's/^ *blocked_by: *//p' | sed -n '1p' | tr -d '"')
   case "$blockers" in ''|none|-) return 0 ;; esac

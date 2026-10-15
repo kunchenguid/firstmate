@@ -156,6 +156,8 @@ case "${1:-}" in
       open_status=$?
       if [ "$open_status" -eq 1 ]; then
         fail "$2 still has open blockers, so it cannot be closed: $(printf '%s' "$open_blockers" | tr '\n' ' ')"
+      elif [ "$open_status" -ne 0 ]; then
+        fail "$2 cannot be closed because blocker verification failed: $open_blockers"
       fi
     fi
     ;;

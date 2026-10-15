@@ -286,8 +286,45 @@ test_unblock_clears_a_mistaken_edge() {
   dir=$(objective_home obj-unblock | sed -n 1p)
   obj_w "$dir" unblock obj --by study >/dev/null || fail "unblock failed"
   obj_w "$dir" unblock obj --by impl >/dev/null || fail "unblock failed"
-  obj_w "$dir" "done" obj >/dev/null || fail "an objective with no remaining edge must close"
+  obj_w "$dir" close obj >/dev/null || fail "an objective with no remaining edge must close"
   pass "an explicitly unblocked objective closes; there is no other override"
+}
+
+test_objective_close_refused_when_parent_read_fails() {
+  local dir real_tasks mode action out rc before
+  dir=$(objective_home obj-read-failure | sed -n 1p)
+  real_tasks=$(command -v tasks-axi)
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = obj ]; then
+  case "$FM_READ_FAILURE" in
+    unreadable) shift 2; exec "$FM_REAL_TASKS_AXI" show missing-objective "$@" ;;
+    timeout) exec sleep 30 ;;
+  esac
+fi
+exec "$FM_REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  before=$(cat "$dir/home/data/backlog.md")
+  for mode in unreadable timeout; do
+    for action in done close; do
+      out=$(PATH="$dir/fakebin:$PATH" FM_REAL_TASKS_AXI="$real_tasks" \
+        FM_READ_FAILURE="$mode" FM_BACKLOG_ROW_TIMEOUT_SECS=1 \
+        obj_w "$dir" "$action" obj 2>&1); rc=$?
+      expect_code 2 "$rc" "$action with a $mode parent read"
+      assert_contains "$out" "blocker verification failed" "the refusal did not explain the read failure"
+      case "$mode" in
+        unreadable) assert_contains "$out" "NOT_FOUND" "the real CLI read diagnostic was lost" ;;
+        timeout) assert_contains "$out" "exceeded its 1s backlog read bound" "the read timeout diagnostic was lost" ;;
+      esac
+      assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "a failed parent read still changed the backlog"
+    done
+  done
+  obj_w "$dir" "done" study >/dev/null || fail "closing study after read failures failed"
+  obj_w "$dir" "done" impl >/dev/null || fail "closing implementation after read failures failed"
+  obj_w "$dir" close obj >/dev/null || fail "closing the objective after read recovery failed"
+  pass "done and close refuse unreadable and timed-out parent reads without losing diagnostics"
 }
 
 test_guard_reports_regular_code_root_backlog
@@ -302,6 +339,7 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_single_home
   test_objective_close_refused_while_children_open
   test_unblock_clears_a_mistaken_edge
+  test_objective_close_refused_when_parent_read_fails
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"
 fi
