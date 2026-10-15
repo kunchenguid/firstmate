@@ -11,7 +11,8 @@
 # it in the tool output of whatever it was doing - the one channel every harness
 # has. The one exception is an idle home whose only need is registered custom
 # checks (FM_SUP_CHECKS_ONLY) and whose beacon is past grace: that is the normal
-# state after a session-scoped harness was closed, so it stays silent. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
+# state after a session-scoped harness was closed, so it stays silent.
+# Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
 # bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
 # between turns, so mid-turn a fresh beacon with no live watcher is healthy, and
 # a stale beacon is still healthy while fm_autoarm_midturn_healthy proves a
