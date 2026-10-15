@@ -328,8 +328,15 @@ fm_test_run_spawn() {
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
+  # This suite's throwaway pane-shell $HOME is nested inside $home (FM_HOME),
+  # which the spawn guard against a Treehouse root inside a Firstmate home
+  # would otherwise reject once fm-spawn derives its default root from that
+  # same $HOME; give it an explicit root outside both homes so callers of this
+  # fixture measure their own behavior, not that unrelated guard. A caller
+  # that needs to exercise the guard itself overrides TREEHOUSE_ROOT.
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    TREEHOUSE_ROOT="${TREEHOUSE_ROOT:-${home%/*}/treehouse-root}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
