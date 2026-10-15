@@ -510,6 +510,12 @@ test_board_json_feeds_the_app() {
     and any(.flow.bottlenecks[]; .cause == "credential_external" and .additive == false)
     and .flow.capacity.observed_at >= .flow.at
     and .flow.capacity.mac.reachable == null' "$d/board.json" >/dev/null || fail "Insights observation checks: $(jq -c '{present:(.flow!=null),reader_ok:(.flow_error==null),median:.flow.time_to_merge.median_seconds,p85:.flow.time_to_merge.p85_seconds,known:.flow.time_to_merge.known,unknown:.flow.time_to_merge.unknown,merged:(.flow.executed_7d|length),title_ok:any(.flow.lanes[];.task=="m-fix" and .display_title=="Fix the login"),link_ok:any(.flow.lanes[];.task=="m-fix" and .pr=="https://github.com/acme/alpha/pull/12"),dependency_ok:any(.flow.queue[];.task=="m-after" and .display_why=="Waiting for: Start the ready thing"),cause_ok:any(.flow.bottlenecks[];.cause=="credential_external" and .additive==false),capacity_ok:(.flow.capacity.observed_at>=.flow.at),mac_unknown:(.flow.capacity.mac.reachable==null)}' "$d/board.json")"
+  jq -e '.models.schema == "fm-model-stats.v1" and .models_error == null
+    and .models.windows == [7, 30] and (.models.models | type) == "array"' \
+    "$d/board.json" >/dev/null || fail "Insights is missing the Models statistics: $(jq -c '{present:(.models!=null),error:.models_error}' "$d/board.json")"
+  jq -e '.skills.schema == "fm-skill-stats.v1" and .skills_error == null
+    and .skills.windows == [7, 30] and (.skills.skills | type) == "array" and (.skills.by_home | type) == "object"' \
+    "$d/board.json" >/dev/null || fail "Insights is missing the Skills statistics: $(jq -c '{present:(.skills!=null),error:.skills_error}' "$d/board.json")"
 
   printf '{"ts":%s,"event":"task.merged","task":"m-gitlab","pr":"https://gitlab.example/team/nested/app/-/merge_requests/27"}\n{"ts":%s,"event":"task.merged","task":"m-gerrit","pr":"https://review.example/c/team/nested/app/+/27"}\n' "$((now - 60))" "$((now - 60))" >> "$home/state/fleet-ledger.jsonl"
   printf 'done [key=merged-z-lab] [at=%s]: merged z-lab https://gitlab.example/team/app/-/merge_requests/50\ndone [key=merged-z-review] [at=%s]: merged z-review https://review.example/c/team/app/+/51\n' "$((now - 60))" "$((now - 60))" >> "$home/state/zephyrine.status"

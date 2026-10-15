@@ -19,6 +19,9 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-fleet-ledger.sh`     | Append the opt-in fleet activity ledger's records ([contract](fleet-ledger.md))      |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-flow.sh`             | Read fleet lifecycle and wait metrics as JSON ([reader reference](fleet-ledger.md#reading-lifecycle-metrics)) |
+| `fm-task-outcome.sh`     | Append one durable per-task outcome row (models, timestamps, outcome, PR) at teardown ([per-model statistics](fleet-ledger.md#per-model-statistics)) |
+| `fm-model-stats.sh`      | Read per-model merge rate, time-to-merge, first-pass and rework statistics as JSON ([per-model statistics](fleet-ledger.md#per-model-statistics)) |
+| `fm-skill-stats.sh`      | Read per-skill fleet read counts as JSON ([skill statistics](fleet-ledger.md#skill-statistics)) |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-dashboard.sh`        | Build fleet dashboard data and reference pages, or serve the read-only fleet app |
@@ -153,7 +156,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub, GitLab, or Forgejo URL, refuse a Gerrit change because firstmate never submits one, then refuse an outcome it cannot prove landed or queued |
 | `fm-pr-state.sh`         | Read-only: print one line per GitHub pull-request blocker it can see, reporting on checks that have reported rather than verdicting merge-readiness |
 | `fm-pr-reviewers.sh`     | Read-only: suggest reviewers from GitHub's own author mapping of recent commits on a pull request's changed files, never requesting one |
-| `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |
+| `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome and run the optional `config/post-merge` hook |
 | `fm-merge-authority-lib.sh` | Resolve merge authority at the gate, persist it against the accepted canonical PR, and identity-check its later poll consumption |
 | `fm-parent-channel-lib.sh` | Resolve a secondmate home's parent channel and append a captain-facing outcome line to it at most once |
 | `fm-wait-timers-lib.sh`  | Waiting-state episodes for recorded blocked, needs-decision, and declared paused waits: owner and escalation wakes, native Herdr blocked admission, and parent-channel reports ([configuration.md](configuration.md#waiting-state-escalation)) |

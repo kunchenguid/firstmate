@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker account pool](#worker-account-pool-configaccount-pool), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [host memory guard](#host-memory-guard-confighost-memory) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1106,6 +1106,29 @@ A remote secondmate is launched on its host from its own home's configuration, s
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
 
+## Worker account pool (config/account-pool)
+
+A home that keeps a pool of logins for one tool can have its launches pick the account with the most room instead of always starting on the one default login.
+The pool is opt-in and secondary to the pin: with no file every launch is unchanged, and a home pin always wins for its own runner.
+The file is local and gitignored.
+It holds one `state=<absolute pool folder>`, the folder that holds the pool's `pool.json`, and optionally one `command=<byokit-accounts command>`, either a bare name resolved from `PATH` (the default `byokit-accounts`) or an absolute path.
+Blank lines and `#` comments are ignored, and a file with no usable `state=`, a relative `state=` path, or a `command=` value that names a relative path, refuses the launch and names the file.
+
+The pool applies only to the harnesses whose pool tool exists today: `claude` to `claude`, `codex` to `codex`, and `pi` and `pi-signed` to `pi`.
+Every other harness keeps today's behavior; the Cursor and OpenCode Go pools are later work.
+When no pin applies and the harness is mapped, Firstmate runs `<command> pick <tool> --json --state <state>` before any endpoint, local copy, or task record exists, and before a relaunch stops the running worker, and the command answers with the account with the most room among that tool's ready, not-resting accounts, from the same list the captain reads and switches with `byokit-accounts list` and `byokit-accounts use`.
+
+A launch carries the picked folder the same way a pin carries its root: an `env -u <name> ... <VAR>=<folder>` prefix on the launch line, so the launch line and the task record hold folder paths only.
+No key, token, or login file ever reaches a launch line, a task record, a log, a status line, or an error message.
+The spawn prints the pick as `account=<id>` and records the same field in the task record.
+Because the pool's `env` prefix and the pick's `unset` list are prepended to a raw launch command, a raw launch command whose leading `NAME=VALUE` words set the picked store variable or one of those unset names refuses before anything is created; remove the assignment, or remove `config/account-pool`.
+
+A malformed file (including a `config/account-pool` that exists but is not a readable regular file, such as a broken symlink), a `pick` that exits non-zero, an answer whose `unset` is not an array of environment-variable names, or an answer that names no usable account folder - not the tool's own store variable (`CLAUDE_CONFIG_DIR` for Claude, `CODEX_HOME` for Codex, `PI_CODING_AGENT_DIR` for Pi) or not an existing readable, searchable directory - refuses the launch before anything is created.
+A failed `pick` refusal names the tool and the login to do and says which accounts are resting or signed out, in the tone of the pin's sign-in refusal; Firstmate never falls back to an ambient login or copies a credential.
+Like the pin, the pool is not inherited into secondmate homes: a local secondmate agent launches on the launching home's pool, while the secondmate's own workers read the secondmate home's file.
+
+[`bin/fm-account-pool-lib.sh`](../bin/fm-account-pool-lib.sh) owns parsing, the harness-to-tool map, the `pick` invocation, and the refusal messages; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the launch-line mechanics.
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.
@@ -1145,9 +1168,16 @@ When the file exists and is executable, `bin/fm-merge-local.sh` runs `config/mer
 `<worktree>` is the task's recorded worktree, or `-` when none is recorded, and `<head>` is the exact commit the merge will land.
 `-` means no worktree: a gate must treat it as a plain argument and must not `cd` into it (`cd -` changes to the previous directory, or fails with `OLDPWD not set`).
 The gate runs under `FM_MERGE_GATE_TIMEOUT` seconds (default `600`), because it runs while the task's control lock is held; a gate that outlives the bound is killed and refuses the merge with `merge gate timed out after Ns or exited <rc>` (a gate that exits 124 or 137 on its own gets the same wording), so the lock is always released.
-A nonzero exit refuses the merge and prints the gate's output; an absent file leaves merge behavior unchanged, and a file that exists, including a dangling symlink, but is not executable refuses the merge and names the file.
+The gate's output is printed whether it passes or refuses, so a report-only gate can show its verdict; a nonzero exit refuses the merge, an absent file leaves merge behavior unchanged, and a file that exists, including a dangling symlink, but is not executable refuses the merge and names the file.
 On the pull-request path the gate runs after the live merge checks and before the completion-receipt check; on the local-only path it runs after the completion-receipt check, right before the fast-forward. The gate can only add a refusal, never waive one.
 The gate's content is home-local policy; [`fm_dod_merge_gate`](../bin/fm-dod-lib.sh) owns the invocation mechanics, and the README's "Proof and decision tools" section installs done-done-axi's shipped gate script.
+
+## Post-merge hook (config/post-merge)
+
+The optional local, gitignored `config/post-merge` is an executable that runs once after a confirmed merge, for example to post the merge's evidence card to a sign-off board.
+When the file exists and is executable, `bin/fm-merge-local.sh` runs `config/post-merge <task-id> <worktree|-> <head> -` after its fast-forward when the fast-forward moved the branch, and the shared PR merge outcome runs `config/post-merge <task-id> <worktree|-> - <pr-url>` the first time it records a merge, whether this home merged it or its merge poll saw it, both with `FM_HOME` set.
+The merge has already landed, so the hook can never undo or refuse it: its output is printed, and a failure, a timeout after `FM_POST_MERGE_TIMEOUT` seconds (default `120`), or a file that is not executable is reported and otherwise ignored.
+The hook's content is home-local policy; [`fm_merge_post_hook`](../bin/fm-merge-outcome-lib.sh) owns the invocation mechanics.
 
 ## Home brief include (config/brief-include.md)
 

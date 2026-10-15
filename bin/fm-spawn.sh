@@ -388,6 +388,13 @@
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate reads this launching home's file; pins are never inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
+# Worker account pool (config/account-pool):
+#   Opt-in and secondary to the pin. When no pin applies and the harness maps to
+#   a BYOKit pool tool (claude, codex, pi, pi-signed), the launch asks
+#   `byokit-accounts pick` for the account with the most room and carries its
+#   folder as an `env -u <name> ... <VAR>=<folder>` prefix, folder paths only and
+#   never a secret; a failed pick refuses before anything exists, naming the login
+#   to do. The pick is recorded as account=. bin/fm-account-pool-lib.sh owns it.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -716,6 +723,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-account-pool-lib.sh
+. "$SCRIPT_DIR/fm-account-pool-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2691,15 +2700,35 @@ fi
 RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
 WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND") || exit 1
-WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
-WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
-WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
-WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT_ROOT%%$'\t'*}
+WORKER_ACCOUNT_DECLARED=$(fm_worker_account_tuple_field "$WORKER_ACCOUNT" 1)
+WORKER_ACCOUNT_ROOT=$(fm_worker_account_tuple_field "$WORKER_ACCOUNT" 2)
+WORKER_ACCOUNT_PROVIDER=$(fm_worker_account_tuple_field "$WORKER_ACCOUNT" 3)
 if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
     export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
   else
     unset CLAUDE_CONFIG_DIR
+  fi
+fi
+# Worker account pool (bin/fm-account-pool-lib.sh): resolved beside the pin,
+# before any endpoint, worktree, or record exists, and only when no pin applies.
+# A picked Claude root is exported here because the trust registration below
+# writes the store the worker will actually read.
+POOL_ACCOUNT=
+if [ -z "$WORKER_ACCOUNT" ]; then
+  POOL_ACCOUNT=$(fm_account_pool_select "$HARNESS" "$CONFIG" "$RAW_COMMAND") || exit 1
+fi
+POOL_ACCOUNT_ID=
+POOL_ACCOUNT_VAR=
+POOL_ACCOUNT_FOLDER=
+POOL_ACCOUNT_UNSET=
+if [ -n "$POOL_ACCOUNT" ]; then
+  POOL_ACCOUNT_ID=$(fm_worker_account_tuple_field "$POOL_ACCOUNT" 1)
+  POOL_ACCOUNT_VAR=$(fm_worker_account_tuple_field "$POOL_ACCOUNT" 2)
+  POOL_ACCOUNT_FOLDER=$(fm_worker_account_tuple_field "$POOL_ACCOUNT" 3)
+  POOL_ACCOUNT_UNSET=$(fm_worker_account_tuple_field "$POOL_ACCOUNT" 4)
+  if [ "$POOL_ACCOUNT_VAR" = CLAUDE_CONFIG_DIR ]; then
+    export CLAUDE_CONFIG_DIR=$POOL_ACCOUNT_FOLDER
   fi
 fi
 
@@ -5482,10 +5511,11 @@ preserve_relaunch_meta() {
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
-  # The worker account pin, only when this home declares one, so an unpinned
-  # task record stays byte-identical.
+  # The worker account pin or pool pick, only when this home declares one, so
+  # an unpinned, pool-less task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
+  [ -z "$POOL_ACCOUNT" ] || echo "account=$POOL_ACCOUNT_ID"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   if [ "$KIND" = ship ] && { grep -qx 'Completion receipt: required' "$BRIEF" \
@@ -5778,20 +5808,24 @@ esac
 # an unset value is the single-store default and needs no prefix.
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
-# sheds the environment credentials Claude ranks above the root's login.
+# sheds the environment credentials Claude ranks above the root's login. The
+# account pool's pick replaces it the same way, carrying the picked folder as
+# `env -u <name> ... <VAR>=<folder>` (bin/fm-account-pool-lib.sh).
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
     if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
-      LAUNCH="$(fm_worker_account_claude_shed) CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
+      LAUNCH="$(fm_worker_account_claude_shed "$FM_WORKER_ACCOUNT_CLAUDE_SHED") CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     else
-      LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $LAUNCH"
+      LAUNCH="$(fm_worker_account_claude_shed "$FM_WORKER_ACCOUNT_CLAUDE_SHED") -u CLAUDE_CONFIG_DIR $LAUNCH"
     fi
     ;;
   pi | pi-signed)
     LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     ;;
   esac
+elif [ -n "$POOL_ACCOUNT" ]; then
+  LAUNCH="$(fm_worker_account_claude_shed "$POOL_ACCOUNT_UNSET") $POOL_ACCOUNT_VAR=$(shell_quote "$POOL_ACCOUNT_FOLDER") $LAUNCH"
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
@@ -6130,6 +6164,17 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
   fi
 fi
+# Durable per-incarnation runtime history, one line per launch that stays
+# running: a fresh spawn once the commit point holds (a rolled-back fresh spawn
+# is not a launch), and every relaunch, whose launch delivery already succeeded.
+# bin/fm-task-outcome.sh reads it at task end to attribute the task to every
+# harness/model/effort it ran on, in order. Best effort: a write failure never
+# blocks the launch.
+if [ -n "$ID" ] && { [ "$RELAUNCH" -eq 1 ] || [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ]; }; then
+  [ "$RELAUNCH" -eq 1 ] || rm -f "$STATE/$ID.models"
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "${HARNESS:-default}" "${MODEL:-default}" "${EFFORT:-default}" \
+    >> "$STATE/$ID.models" 2>/dev/null || true
+fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
@@ -6158,6 +6203,7 @@ SPAWN_DELIVERY=
 SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT" ] || SPAWN_ACCOUNT=" account=$WORKER_ACCOUNT_DECLARED"
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
+[ -z "$POOL_ACCOUNT" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account=$POOL_ACCOUNT_ID"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
 # Herdr assigns every agent a random call-sign at start and fresh ones across

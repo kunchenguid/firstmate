@@ -1,5 +1,5 @@
 // Native SVG over the shipped durable-record reader. Missing observations never become zero.
-import { html, useState, hname, dur } from './ui.js'
+import { html, useState, hname, dur, Av } from './ui.js'
 const DAY = 86400, number = n => n == null ? 'Unknown' : n.toLocaleString('en-US', { maximumFractionDigits: 12 })
 const seconds = n => n == null ? 'Unknown' : n < 60 ? '<1m' : dur(n)
 const bytes = n => n == null ? 'Unknown' : `≈${(n / 2 ** 30).toFixed(2)} GiB`
@@ -39,10 +39,100 @@ function Lifecycle({ lane }) {
     <${Row} name="Merge → cleanup" value=${seconds(lane.durations.merge_to_cleanup)}/>
     ${lane.open_waits.map(w => html`<${Row} name=${CAUSES[w.cause]} value=${seconds(w.seconds)} note=${w.display_reason}/>`)}</div><p class="i-note">Unrecorded splits are unknown.</p>`
 }
+const pct = v => v == null ? 'Unknown' : `${Math.round(v * 100)}%`
+const hrs = v => v == null ? 'Unknown' : v < 10 ? `${v.toFixed(1)} h` : `${Math.round(v)} h`
+const nOf = v => v == null ? 'Unknown' : v.toLocaleString('en-US')
+const METRIC = (label, value, sample) => ({ label, value, sample })
+function modelMetrics(s) {
+  return [
+    METRIC('Started', nOf(s.n_started), s.n_started),
+    METRIC('Finished', nOf(s.n_finished), s.n_finished),
+    METRIC('Merged', nOf(s.merged), s.merged),
+    METRIC('Merge rate', pct(s.merge_rate), s.ended_ship),
+    METRIC('Time to merge · P50', hrs(s.p50_hours), s.timed_merges),
+    METRIC('Time to merge · P75', hrs(s.p75_hours), s.timed_merges),
+    METRIC('First pass', pct(s.first_pass_rate), s.first_pass_sample),
+    METRIC('Rework', nOf(s.rework), s.first_pass_sample),
+    METRIC('Reverted', nOf(s.reverted), s.first_pass_sample),
+    METRIC('Escaped', nOf(s.escaped), s.first_pass_sample),
+    METRIC('Cancelled or failed', nOf(s.cancelled_failed), s.n_finished),
+    METRIC('Model switches', nOf(s.switches), s.n_finished),
+  ]
+}
+function ModelRow({ m, w, d }) {
+  const s = m['w' + w], small = s.n_finished < 5
+  const metrics = modelMetrics(s)
+  return html`<details class=${'i-model' + (small ? ' i-model-small' : '')}>
+    <summary>
+      <${Av} m=${m.family}/>
+      <span class="i-mname"><b>${m.name}</b>${m.provider && html`<small>${m.provider}</small>`}</span>
+      <span class="i-mnums"><b>${pct(s.merge_rate)}</b><small>merge · n=${nOf(s.ended_ship)}</small></span>
+      <span class="i-mnums"><b>${nOf(s.n_finished)}</b><small>finished</small></span>
+    </summary>
+    <div class="i-mbody">
+      <div class="i-mbar" aria-hidden="true"><i style=${{ width: `${(s.merge_rate == null ? 0 : s.merge_rate) * 100}%` }}></i></div>
+      <div class="i-mtable">${metrics.map(x => html`<div class="i-mcell"><span>${x.label}</span><b>${x.value}</b><small>n=${nOf(x.sample)}</small></div>`)}</div>
+      <p class="i-note">${m.model}${small ? ' · small sample, greyed' : ''}</p>
+    </div></details>`
+}
+function SkillIcon() {
+  return html`<svg width="16" height="16" viewBox="0 0 16 16" role="img" aria-label="Skill" style=${{ color: 'var(--m-sol)', flex: 'none' }}>
+    <circle cx="8" cy="8" r="7.6" fill="currentColor" fill-opacity=".18" stroke="currentColor" stroke-opacity=".35" stroke-width=".8"/>
+    <path d="M4 4.2h3.4a1.5 1.5 0 0 1 1.5 1.5V12a1.2 1.2 0 0 0-1.2-1.2H4zM12 4.2H8.6a1.5 1.5 0 0 0-1.5 1.5V12a1.2 1.2 0 0 1 1.2-1.2H12z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>`
+}
+function SkillRow({ s, w, d, max }) {
+  const read = s['w' + w], zero = read.reads === 0
+  const homes = Object.keys(d.skills.by_home).map(home => {
+    const entry = d.skills.by_home[home].find(e => e.skill === s.skill)
+    return entry && entry['w' + w].reads ? { home, reads: entry['w' + w].reads } : null
+  }).filter(Boolean).sort((a, b) => b.reads - a.reads)
+  return html`<details class=${'i-model i-skill' + (zero ? ' i-model-small' : '')}>
+    <summary>
+      <${SkillIcon}/>
+      <span class="i-mname"><b>${s.skill}</b></span>
+      <span class="i-mnums"><b>${nOf(read.reads)}</b><small>reads</small></span>
+      <span class="i-mnums"><b>${nOf(read.homes)}</b><small>${read.homes === 1 ? 'home' : 'homes'}</small></span>
+    </summary>
+    <div class="i-mbody">
+      <div class="i-mbar" aria-hidden="true"><i style=${{ width: `${(read.reads / max) * 100}%` }}></i></div>
+      ${homes.length ? html`<${Rows} title=${`By home · ${homes.length}`}>${homes.map(h => html`<${Row} name=${hname(d, h.home)} value=${nOf(h.reads)} note="reads"/>`)}</${Rows}>` : ''}
+      <p class="i-note">${s.skill} · ${w} days${zero ? ' · no reads this window, greyed' : ''}</p>
+    </div></details>`
+}
+const SKILL_TOP = 15
+function Skills({ d, w, setW }) {
+  if (!d.skills) return html`<section class="i-panel i-skills"><h2>Skills</h2><p class="i-note">${d.skills_error || 'Skill statistics unavailable.'}</p></section>`
+  const all = [...(d.skills.skills || [])].sort((a, b) => b['w' + w].reads - a['w' + w].reads || a.skill.localeCompare(b.skill)), cov = d.skills.coverage || {}
+  const rows = all.slice(0, SKILL_TOP), max = Math.max(...all.map(s => s['w' + w].reads), 1)
+  const zero = d.skills['zero_read_w' + w] || []
+  return html`<section class="i-panel i-skills"><h2>Skills · last ${w} days</h2>
+    <div class="i-mtoggle" role="group" aria-label="Skill statistics window">
+      ${d.skills.windows.map(x => html`<button type="button" class=${x === w ? 'on' : ''} aria-pressed=${x === w} onClick=${() => setW(x)}>${x} days</button>`)}
+    </div>
+    <p class="i-note">All homes · reads recorded by the private skill collector · most-read first${all.length > rows.length ? ` · top ${rows.length} of ${nOf(all.length)}` : ''}</p>
+    ${rows.length ? rows.map(s => html`<${SkillRow} s=${s} w=${w} d=${d} max=${max}/>`) : html`<p class="i-note">No skill-read records yet.</p>`}
+    ${zero.length ? html`<p class="i-note">${zero.length} known ${zero.length === 1 ? 'skill' : 'skills'} with no reads in ${w} days: ${zero.join(', ')}</p>` : ''}
+    <p class="i-note">${nOf(cov.rows)} daily records · ${nOf(cov.skills)} skills · ${nOf(cov.homes)} homes${d.skills.limitations ? ` · ${d.skills.limitations} coverage notices` : ''}</p>
+  </section>`
+}
+function Models({ d, w, setW }) {
+  if (!d.models) return html`<section class="i-panel"><h2>Models</h2><p class="i-note">${d.models_error || 'Model statistics unavailable.'}</p></section>`
+  const rows = d.models.models
+  const cov = d.models.coverage || {}
+  return html`<section class="i-panel i-models"><h2>Models · last ${w} days</h2>
+    <div class="i-mtoggle" role="group" aria-label="Model statistics window">
+      ${d.models.windows.map(x => html`<button type="button" class=${x === w ? 'on' : ''} aria-pressed=${x === w} onClick=${() => setW(x)}>${x} days</button>`)}
+    </div>
+    <p class="i-note">All homes · every figure shows its sample size · small samples (finished ${'<'} 5) are greyed, not hidden</p>
+    ${rows.length ? rows.map(m => html`<${ModelRow} m=${m} w=${w} d=${d}/>`) : html`<p class="i-note">No per-model records yet.</p>`}
+    <p class="i-note">${nOf(cov.outcome_rows)} recorded outcomes · ${nOf(cov.sampled_tasks)} older tasks from the sampled lane ledger${d.models.limitations ? ` · ${d.models.limitations} coverage notices` : ''}</p>
+  </section>`
+}
 export function Insights({ d }) {
-  const [home, setHome] = useState(''), [chosen, choose] = useState('')
+  const [home, setHome] = useState(''), [chosen, choose] = useState(''), [w, setW] = useState(7), [sw, setSW] = useState(7)
   const f = d.flow
-  if (!f) return html`<div class="ins"><section class="i-panel"><h2>Observations unavailable</h2><p>${d.flow_error || 'No flow observation was collected.'}</p></section></div>`
+  const stats = html`<${Models} d=${d} w=${w} setW=${setW}/><${Skills} d=${d} w=${sw} setW=${setSW}/>`
+  if (!f) return html`<div class="ins"><section class="i-panel"><h2>Observations unavailable</h2><p>${d.flow_error || 'No flow observation was collected.'}</p></section>${stats}</div>`
   const mine = l => !home || l.home === home, lanes = f.lanes.filter(mine), open = lanes.filter(l => l.open), queue = f.queue.filter(mine)
   const merged = f.executed_7d.filter(mine), day = f.executed_24h.filter(mine), timed = home ? f.time_to_merge_by_home[home] : f.time_to_merge
   const days = home ? f.trend_7d_by_home[home] : f.trend_7d
@@ -63,6 +153,7 @@ export function Insights({ d }) {
     <section class="i-panel i-waits"><h2>Why work waits now</h2><p class="i-note">All homes · causes overlap</p>
       ${ranked.length ? ranked.map(b => html`<div class="i-wait"><span>${CAUSES[b.cause]}</span><b title=${`${b.age == null ? 'No known wait' : seconds(b.age) + ' known lower bound'}; ${b.items.length} ${b.items.length === 1 ? 'task' : 'tasks'}; ${b.unknown} unknown durations`}>${b.age == null ? 'Unknown' : `${b.unknown ? '≥ ' : ''}${seconds(b.age)}`}</b><div><i style=${{ width: (b.age ?? 0) / maxWait * 100 + '%' }}></i></div><small>${b.items.length} ${b.items.length === 1 ? 'task' : 'tasks'}${b.unknown ? ` · ${b.unknown} unknown` : ''}</small></div>`) : html`<p class="i-note">No open waits recorded.</p>`}
     </section>
+    ${stats}
     <div class="i-grid"><${Trend} days=${days}/><section class="i-panel"><h2>Why queued work has not started</h2>
       ${groups.map(([name, n]) => html`<${Row} name=${name} value=${number(n)}/>`)}<${Rows} title=${`${queue.length} queued ${queue.length === 1 ? 'item' : 'items'} · why-lines`}>${queue.map(q => html`<${Row} name=${title(q)} value=${hname(d, q.home)} note=${queueWhy(q)}/>`)}</${Rows}></section>
       <${Rows} title=${`${open.length} open ${open.length === 1 ? 'task' : 'tasks'} · stage and reason`}>${[...open].sort((a, b) => (b.seconds_in_stage ?? -1) - (a.seconds_in_stage ?? -1)).map(l => html`<${Row} name=${title(l)} value=${seconds(l.seconds_in_stage)} note=${`${hname(d, l.home)} · ${STAGES[l.stage] || 'Stage unknown'} · ${displayWhy(l)}${l.stage_clock.overdue === true ? ' · past recorded stage clock' : ''}`}/>`)}</${Rows}>

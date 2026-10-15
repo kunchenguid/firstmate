@@ -64,6 +64,18 @@ FM_WORKER_ACCOUNT_CHECK_SECONDS=${FM_WORKER_ACCOUNT_CHECK_SECONDS:-30}
 # code.claude.com/docs/en/env-vars).
 FM_WORKER_ACCOUNT_CLAUDE_SHED="CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_MANTLE ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE ANTHROPIC_FEDERATION_RULE_ID"
 
+# fm_worker_account_tuple_field <tuple> <index>
+# Prints field <index> (1-based) of a tab-separated account tuple, empty when
+# the tuple has no such field. The pin prints "declared<TAB>root<TAB>provider"
+# and the pool "id<TAB>var<TAB>folder<TAB>unset names"; this is the single
+# decoder for both.
+fm_worker_account_tuple_field() {
+  local tuple=$1 want=$2
+  local -a fields=()
+  IFS=$'\t' read -r -a fields <<<"$tuple"
+  printf '%s\n' "${fields[want - 1]-}"
+}
+
 # fm_worker_account_file <harness>
 # Prints the pin file name for a pinnable runner; returns 1 for any other.
 fm_worker_account_file() {
@@ -268,14 +280,16 @@ fm_worker_account_select() {
   printf '%s\t%s\t%s\n' "$declared" "$root" "$provider"
 }
 
-# fm_worker_account_claude_shed
-# Prints the `env` launch prefix that unsets the environment credentials Claude
-# ranks above a pinned root's stored login. The caller appends the root
-# assignment, or -u CLAUDE_CONFIG_DIR for the ordinary account.
+# fm_worker_account_claude_shed <names>
+# Prints the `env` launch prefix that unsets the space-separated environment
+# credentials in <names> - the credentials Claude ranks above the selected
+# root's stored login. The caller passes the pin's FM_WORKER_ACCOUNT_CLAUDE_SHED
+# list or a pool pick's own unset list, and appends the root assignment (or
+# -u CLAUDE_CONFIG_DIR for the ordinary account).
 fm_worker_account_claude_shed() {
-  local var prefix=env
-  for var in $FM_WORKER_ACCOUNT_CLAUDE_SHED; do
-    prefix="$prefix -u $var"
+  local name prefix=env
+  for name in $1; do
+    prefix="$prefix -u $name"
   done
   printf '%s\n' "$prefix"
 }
