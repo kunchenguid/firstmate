@@ -222,5 +222,68 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: a handling successor skips the generation it inherited at start (the
+# predecessor's wake is already on the way) but recovers, exactly once, a
+# generation an external durable append opens after it started; otherwise a
+# quiet fleet leaves the appended note unacknowledged indefinitely.
+test_handling_successor_recovers_generation_opened_after_start() {
+  local dir home state fakebin child now out count marker
+  dir=$(make_case recovery-successor-late-generation)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  : > "$state/crew.meta"
+  printf 'pending:downtime:inherited.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  sleep 3
+  if grep -F 'check: rearm-resurface' "$out" >/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "handling successor re-announced the generation it inherited: $(cat "$out")"
+  fi
+  # An external durable append (the fm-inbox.sh note path) opens a fresh
+  # pending generation while the successor is alive.
+  append_wake "$state" check inbox-note "check: captain note"
+  now=0
+  while [ "$now" -lt 40 ]; do
+    grep -F 'check: rearm-resurface' "$out" >/dev/null 2>&1 && break
+    sleep 0.5
+    now=$((now + 1))
+  done
+  if ! grep -F 'check: rearm-resurface' "$out" >/dev/null 2>&1; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "handling successor never recovered the generation opened after it started: $(cat "$out")"
+  fi
+  sleep 2
+  count=$(grep -cF 'check: rearm-resurface' "$out" || true)
+  marker=$(cat "$state/.watcher-down")
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  [ "$count" = 1 ] || fail "expected exactly one rearm-resurface for the new generation, got $count: $(cat "$out")"
+  case "$marker" in
+    announced:downtime:*) ;;
+    *) fail "late generation was not marked announced: $marker" ;;
+  esac
+  [ "$marker" != "announced:downtime:inherited.1.aaa" ] \
+    || fail "the late generation did not replace the inherited one: $marker"
+  pass "a handling successor skips its inherited generation and recovers one opened after it started"
+}
+
 test_handling_successor_does_not_go_blind
+test_handling_successor_recovers_generation_opened_after_start
 test_unacknowledged_recovery_is_announced_once_per_generation

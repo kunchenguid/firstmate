@@ -2718,8 +2718,17 @@ resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
   # unbounded recovery loop; stay in the poll loop and supervise instead.
+  # The start-up arm check already retired every generation that existed when
+  # this successor started, so a still-pending downtime generation here was
+  # opened afterwards by an external durable append (fm-inbox.sh note, a
+  # queued wake) that nobody else is waiting on. Recover only that one; the
+  # arm check marks it announced, so it stays once per generation.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+    fm_recovery_marker_read "$WATCHER_DOWNTIME_MARKER" || return 0
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*) ;;
+      *) return 0 ;;
+    esac
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
