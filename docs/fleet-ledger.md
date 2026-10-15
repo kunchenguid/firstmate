@@ -41,7 +41,7 @@ Readers must ignore members and events they do not recognize, so later versions 
 It is written each time firstmate records a PR for the task, so registering a replacement PR, or the same PR again, writes another record; recording the PR again as part of merging it writes none.
 
 `task.status` members: `state` is the status line's leading word, such as `working`, `needs-decision`, `blocked`, `paused`, `done`, `failed`, or `resolved`, or `null` when the line has none.
-`key` is the line's `[key=...]` decision key, or `null`.
+`key` is the line's stated decision key (`[key=...]` or an unbracketed `key=<slug>` word before the colon; see `bin/fm-classify-lib.sh`), or `null`.
 `text` is the status line after its first colon, verbatim, capped at 2000 characters; if the line has no colon, it is the whole line.
 
 Example:
