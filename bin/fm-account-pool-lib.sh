@@ -80,13 +80,12 @@ fm_account_pool_detail() {
      else "not ready" end) ] | join(", ")' <<<"${1:-}" 2>/dev/null
 }
 
-# fm_account_pool_select <harness> <config-dir> [<raw-command>]: "id<TAB>var<TAB>
-# folder<TAB>unset names" for a mapped harness with a usable pool; nothing when
-# the pool is off; one error and non-zero on any refusal, never a fallback to an
-# ambient login. A raw launch command whose leading assignments set the picked
-# account's store variable, or a variable the pick sheds, refuses.
+# fm_account_pool_select <harness> <config-dir>: "id<TAB>var<TAB>folder<TAB>
+# unset names" for a mapped harness with a usable pool; nothing when the pool
+# is off; one error and non-zero on any refusal, never an ambient login fallback.
+# fm-spawn.sh refuses raw launch commands before calling this named-harness hook.
 fm_account_pool_select() {
-  local harness=$1 config=$2 raw=${3:-} tool store_var cfg command state out errf rc id var folder shed reason detail shed_bad=0 word
+  local harness=$1 config=$2 tool store_var cfg command state out errf rc id var folder shed reason detail shed_bad=0
   tool=$(fm_account_pool_tool "$harness") || return 0
   cfg=$(fm_account_pool_config "$config") || return 1
   [ -n "$cfg" ] || return 0
@@ -135,18 +134,5 @@ fm_account_pool_select() {
     echo "error: config/account-pool's '$command' answered with an unusable $tool account selection; expected an account id and one absolute account folder, with no secret" >&2
     return 1
   fi
-  for word in $raw; do
-    case "$word" in
-    [A-Za-z_]*=*)
-      case " $store_var $shed " in
-      *" ${word%%=*} "*)
-        echo "error: config/account-pool picks a $tool worker account, but the raw launch command sets ${word%%=*}, which would override the picked account; remove ${word%%=*} from the raw command, or remove config/account-pool" >&2
-        return 1
-        ;;
-      esac
-      ;;
-    *) break ;;
-    esac
-  done
   printf '%s\t%s\t%s\t%s\n' "$id" "$var" "$folder" "$shed"
 }

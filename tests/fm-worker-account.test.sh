@@ -537,34 +537,53 @@ ANSWERS
   pass "the pool refuses a malformed unset list, a foreign store variable, and a non-directory folder"
 }
 
-test_pool_refuses_a_raw_command_that_overrides_the_pick() {
-  local out rc id=acct-pool-raw var
-  new_case pool-raw claude
-  enable_pool "$HOME_DIR" "$CASE/pool"
-  mkdir -p "$CASE/pool/claude" "$CASE/other"
-  pool_pick_ok "$CASE" claude pa_aa11bb22 CLAUDE_CONFIG_DIR "$CASE/pool/claude" '["ANTHROPIC_API_KEY"]'
-  for var in "CLAUDE_CONFIG_DIR=$CASE/other" ANTHROPIC_API_KEY=override-key; do
-    out=$(spawn_ship "$id-${var%%=*}" --harness "FOO=1 $var claude --print raw"); rc=$?
-    expect_code 1 "$rc" "a raw Claude command setting ${var%%=*} must refuse under a pool pick"
-    assert_refused_before_launch "$id-${var%%=*}" "$out" "the raw launch command sets ${var%%=*}"
-    assert_contains "$out" "remove ${var%%=*} from the raw command, or remove config/account-pool" \
-      "the refusal should say how to proceed"
+test_pool_refuses_raw_commands_before_selection() {
+  local out rc tool var raw id n=0
+  for tool in claude codex pi; do
+    new_case "pool-raw-$tool" "$tool"
+    cat > "$FAKEBIN/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> '$CASE/copy-calls'
+exit 1
+SH
+    enable_pool "$HOME_DIR" "$CASE/pool state"
+    mkdir -p "$CASE/pool state/selected folder"
+    printf 'pool-secret-canary\n' > "$CASE/pool state/selected folder/login.json"
+    case "$tool" in
+      claude) var=CLAUDE_CONFIG_DIR ;;
+      codex) var=CODEX_HOME ;;
+      pi) var=PI_CODING_AGENT_DIR ;;
+    esac
+    pool_pick_ok "$CASE" "$tool" pa_cc33dd44 "$var" "$CASE/pool state/selected folder" '["ANTHROPIC_API_KEY"]'
+    for raw in "$tool --print raw" \
+      "$var='$CASE/other folder' $tool --print raw" \
+      "ANTHROPIC_API_KEY=raw-secret-canary $tool --print raw" \
+      "env $var='$CASE/other folder' $tool --print raw" \
+      "sh -c 'exec $tool --print raw'"; do
+      n=$((n + 1))
+      id="acct-pool-raw-$n"
+      out=$(spawn_ship "$id" --harness "$raw"); rc=$?
+      expect_code 1 "$rc" "a raw $tool command must refuse while the pool is on"
+      assert_refused_before_launch "$id" "$out" "config/account-pool does not support raw launch commands"
+      assert_contains "$out" "use a named harness" "the refusal should explain how to proceed"
+      assert_not_contains "$out" "secret-canary" "the refusal must not echo credentials or raw arguments"
+      assert_absent "$CASE/pool-calls" "raw commands must refuse before account selection"
+      assert_absent "$HOME_DIR/state/$id.status" "raw commands must not publish worker status"
+      assert_absent "$CASE/copy-calls" "raw commands must not call the copy allocator"
+    done
   done
-  assert_absent "$CASE/claude-worker" "a refused raw override must never start Claude"
 
-  new_case pool-raw-ok claude
+  # A pin still wins for named launches, but does not reopen the raw escape hatch.
+  new_case pool-raw-pin claude
   enable_pool "$HOME_DIR" "$CASE/pool"
-  mkdir -p "$CASE/pool/claude"
-  pool_pick_ok "$CASE" claude pa_cc33dd44 CLAUDE_CONFIG_DIR "$CASE/pool/claude" '["ANTHROPIC_API_KEY"]'
-  out=$(spawn_ship acct-pool-raw-ok --harness "FOO=1 claude --print raw"); rc=$?
-  expect_code 0 "$rc" "a raw Claude command that sets nothing the pick needs should still launch: $out"
-  assert_contains "$out" "account=pa_cc33dd44" "the raw spawn should report the picked account"
-  run_pane
-  assert_grep "CLAUDE_CONFIG_DIR=$CASE/pool/claude" "$CASE/claude-worker" \
-    "a raw Claude worker should run under the picked folder"
-  assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" \
-    "a raw Claude worker should still shed the pick's unset list"
-  pass "a pool home refuses a raw launch command that overrides the pick, and keeps one that does not"
+  signed_in_claude_root "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship acct-pool-raw-pin --harness 'claude --print raw'); rc=$?
+  expect_code 1 "$rc" "a pin must not permit a raw command while the pool is on"
+  assert_refused_before_launch acct-pool-raw-pin "$out" "use a named harness"
+  assert_absent "$CASE/claude-checks" "raw commands must refuse before the pin's sign-in check"
+  assert_absent "$CASE/pool-calls" "raw commands must refuse before the pool pick"
+  pass "a pool home refuses plain, overriding, env, and shell-wrapped raw commands before account selection"
 }
 
 test_pool_config_broken_symlink_refuses() {
@@ -603,7 +622,7 @@ test_local_secondmate_reads_the_launching_home_pin
 test_pool_selects_an_account_when_no_pin_applies
 test_pool_sheds_exactly_the_picks_unset_list
 test_pool_refuses_an_unusable_answer
-test_pool_refuses_a_raw_command_that_overrides_the_pick
+test_pool_refuses_raw_commands_before_selection
 test_pool_config_broken_symlink_refuses
 test_a_pin_still_wins_over_the_pool
 test_pool_refusals_create_nothing
