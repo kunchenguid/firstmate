@@ -68,6 +68,22 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Write the tracked default backlog configuration into a fixture home. Never copy
+# "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
+# there (for example a beads backend at its live backlog), so a copy points the
+# fixture at the operator's queue and produces false failures. This mirrors the
+# tracked .tasks.toml defaults.
+fm_test_tasks_toml() {  # <destination-file>
+  cat > "$1" <<'TOML'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+TOML
+}
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -82,6 +98,33 @@ fail() {
 
 pass() {
   printf 'ok - %s\n' "$1"
+}
+
+# Harness argument assertions reuse the emitted prefix rather than duplicating
+# its per-spawn env-file path. The dispatch suite executes it separately to prove
+# credential preservation, hooks-path selection and invalid-count refusal.
+fm_test_launch_git_prefix() {  # <launch>
+  local launch=$1 helper tail end=' || return 1 2>/dev/null || exit 1; '
+  case "$launch" in
+    *' env-file '*"$end"*) ;;
+    *) fail "launch has no complete Git configuration prefix" ;;
+  esac
+  helper=${launch%%' env-file '*}
+  helper=${helper##*; }
+  tail=${launch#*' env-file '}
+  tail=${tail%%"$end"*}
+  printf '%s env-file %s%s' "$helper" "$tail" "$end"
+}
+
+# The command a pane runs after the launch's Git configuration prefix and its
+# leading export statements, for suites that split it into arguments.
+fm_test_launch_command() {  # <launch>
+  local command=$1 end=' || return 1 2>/dev/null || exit 1; '
+  case "$command" in *"$end"*) command=${command#*"$end"} ;; esac
+  while [[ "$command" == export\ *\;* ]]; do
+    command=${command#*; }
+  done
+  printf '%s' "$command"
 }
 
 # --- self-cleaning temp root ------------------------------------------------

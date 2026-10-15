@@ -2833,6 +2833,25 @@ TS
     return 1
   }
 
+  # Pi's "Reloading..." box is a single intermediate frame, so no polling
+  # interval can be guaranteed to sample it on a loaded machine. Wait instead
+  # for the durable status row Pi appends to the transcript once the reload has
+  # completed and the chat has been rebuilt: it is absent before the reload and
+  # never appears when the reload fails.
+  wait_for_geometry_reload() {
+    local file=$1 reloaded_text=$2 final_text=$3 attempt=0
+    while [ "$attempt" -lt 600 ]; do
+      capture_geometry_viewport "$file" || true
+      if grep -Fq "$reloaded_text" "$file" 2>/dev/null &&
+        grep -Fq "$final_text" "$file" 2>/dev/null; then
+        return 0
+      fi
+      sleep 0.01
+      attempt=$((attempt + 1))
+    done
+    return 1
+  }
+
   assert_geometry_gap() {
     local file=$1 label=$2
     skill_line=$(grep -n -m1 '\[skill\] ahoy' "$file" | cut -d: -f1)
@@ -2879,8 +2898,10 @@ TS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  # Poll the persistent completion, not a loading frame that can fall between captures.
-  wait_for_geometry_text "$snapshot" "Reloaded keybindings, extensions, skills, prompts, themes, and context files" \
+  wait_for_geometry_reload \
+    "$snapshot" \
+    "Reloaded keybindings, extensions, skills, prompts, themes, and context files" \
+    "CALM_GEOMETRY_FINAL" \
     || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
@@ -3871,6 +3892,7 @@ await fire("agent_start");
 check(liveTimers === 1, "a later run did not use the boat after an idle Calm toggle");
 await fire("agent_settled");
 check(liveTimers === 0, "the later run did not clean up");
+
 
 // --- A settle through a disposed session never throws ------------------------------
 // Pi quitting on a signal mid-run disposes the session before agent_settled, and
