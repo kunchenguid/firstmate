@@ -1890,6 +1890,12 @@ Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFI
 bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON block on stdout
 ```
 
+**Resolution record**
+
+Every resolution that reached the API appends one JSON line to the gitignored `state/dispatch-resolve.jsonl` of the effective home.
+The line holds the UTC timestamp, task id, project, status, matched rule and its `when` excerpt, confidence, probabilities, fallback rule when taken, and the chosen profile when clear, and never brief text or the key.
+The off path and usage errors write nothing, and a failed write prints one stderr warning without changing the output or exit code.
+
 **When firstmate invokes the resolver**
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
