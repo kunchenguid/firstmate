@@ -15,8 +15,8 @@
 # and is the immutable task branch rendered in every delivery contract.
 # The optional fifth argument is the task's base branch from bin/fm-brief.sh
 # --base-branch; empty means the repository default. A named base is the branch
-# the worker starts from, never pushes to, and targets with its pull request, and
-# fm_base_branch_valid refuses it where no pull request carries the work.
+# the worker starts from and normally targets with its pull request; registered
+# push-only direct delivery instead pushes that same named base branch.
 # The optional sixth argument is the task's recorded upstream consent for a
 # firstmate-repository contribution (bin/fm-role-lib.sh owns the boundary): a
 # captain-approved <host>/<owner>/<repo> publication scope for this one task,
@@ -159,13 +159,14 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
 }
 
 # A task's optional base branch replaces the repository default as the branch
-# its copy starts from and its pull request targets. bin/fm-brief.sh records it
+# its copy starts from and normally targets with its pull request. A registered
+# push-only direct-PR task instead pushes its matching delivery branch. bin/fm-brief.sh records it
 # as a "Base branch: <name>" line under the brief's `# Setup` heading,
 # bin/fm-spawn.sh takes it as --base-branch, refuses a brief whose Base branch
 # lines (fm_brief_base_branches) disagree, and records base_branch= in the task
 # metadata, and every later consumer reads that metadata field. It is
-# refused on local-only, whose landing fast-forwards local main, and on a Gerrit
-# forge, whose publish path targets the change's own branch.
+# refused on local-only, whose landing fast-forwards local main, and on every
+# forge except push-only direct-PR.
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   local base=$1 mode=$2 forge=$3 caller=$4
   [ -n "$base" ] || return 0
@@ -177,7 +178,7 @@ fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
     echo "error: $caller: a base branch cannot ship mode=local-only, whose landing fast-forwards local main; ship no-mistakes or direct-PR, which open a pull request against the base" >&2
     return 1
   fi
-  if [ "$forge" != none ]; then
+  if [ "$forge" != none ] && { [ "$forge" != push-only ] || [ "$mode" != direct-PR ]; }; then
     echo "error: $caller: a base branch is not supported on forge=$forge" >&2
     return 1
   fi
@@ -207,6 +208,11 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   fi
   if [ "$forge" = push-only ] && [ "$mode" = direct-PR ]; then
     if [ -n "$push_landed_ref" ]; then
+      push_landed_ref=$(fm_dod_normalize_push_landed_ref "$push_landed_ref") || {
+        echo "error: fm_ship_rule_one: a push-landed ref requires mode=direct-PR forge=push-only" >&2
+        return 1
+      }
+      fm_dod_push_landed_base_valid "$base" "$push_landed_ref" fm_ship_rule_one || return 1
       printf '%s\n' "1. Never open or merge a PR. Push only your current HEAD to the registered delivery branch \`$push_landed_ref\`, exactly as the Definition of done directs."
     else
       printf '%s\n' "1. Never open or merge a PR. Do not push until firstmate has registered the direct-push delivery branch in the current Definition of done."
@@ -425,6 +431,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
       echo "error: fm_dod_block: a push-landed ref requires mode=direct-PR forge=push-only" >&2
       return 1
     fi
+    fm_dod_push_landed_base_valid "$base" "$push_landed_ref" fm_dod_block || return 1
   fi
   if [ -n "$consent" ]; then
     if [ "$mode" = local-only ]; then
@@ -647,6 +654,14 @@ fm_dod_normalize_push_landed_ref() {  # <ref>
   esac
   git check-ref-format --branch "$ref" >/dev/null 2>&1 || return 1
   printf '%s\n' "$ref"
+}
+
+fm_dod_push_landed_base_valid() {  # <base> <push-landed-ref> <caller>
+  local base=$1 ref=$2 caller=$3
+  [ -z "$base" ] || [ "$base" = "$ref" ] || {
+    echo "error: $caller: --base-branch '$base' must match the registered push-landed ref '$ref' for forge=push-only direct-PR" >&2
+    return 1
+  }
 }
 
 fm_dod_registered_ref_contains_named_head() {  # <worktree> <meta> <mode> <sha>

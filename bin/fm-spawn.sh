@@ -42,7 +42,8 @@
 #   to start from and target instead of origin's default branch. A fresh launch
 #   resets its pooled copy to origin/<branch>, refusing when the project has no
 #   origin or origin lacks that branch, or when the project's registered forge
-#   cannot carry it. It must agree with every Setup "Base branch:" line in the
+#   cannot carry it. For registered push-only direct-PR delivery it must equal
+#   --push-landed-ref. It must agree with every Setup "Base branch:" line in the
 #   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
 #   and a brief with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
@@ -3587,6 +3588,9 @@ if [ "$KIND" = ship ]; then
   if [ "$RELAUNCH" -eq 0 ] && [ "$STANDING_FORGE" = push-only ] && [ "$MODE" = direct-PR ] && [ -z "$PUSH_LANDED_REF" ]; then
     echo "error: forge=push-only direct-PR requires --push-landed-ref <ref>; without the registered direct-push branch this task has no delivery path" >&2
     exit 1
+  fi
+  if [ "$STANDING_FORGE" = push-only ] && [ "$MODE" = direct-PR ] && [ -n "$PUSH_LANDED_REF" ]; then
+    fm_dod_push_landed_base_valid "$BASE_BRANCH" "$PUSH_LANDED_REF" "fm-spawn.sh --base-branch" || exit 1
   fi
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
   # the captain's decision of 2026-09-15: a Code-Review+2 is a positive

@@ -865,11 +865,17 @@ test_push_landed_ref_is_recorded_and_validated() {
   id='pool-push-landed-record-r1'
   rec=$(make_case push-landed-record "$id")
   read_case_record "$rec"
+  publish_feature_branch integration/main
   printf '%s\n' '- project [direct-PR forge=push-only] - fixture (added 2026-01-01)' > "$HOME_DIR/data/projects.md"
+  brief_with_base "$id" integration/main
   printf '%s\n' 'Delivery contract: mode=direct-PR forge=push-only' >> "$HOME_DIR/data/$id/brief.md"
-  out=$(run_spawn "$id" --mode direct-PR --yolo off --push-landed-ref refs/heads/integration/main)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch integration/main --push-landed-ref refs/heads/integration/main)
   status=$?
   expect_code 0 "$status" "a ship spawn with --push-landed-ref should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/integration/main)" ] \
+    || fail "the registered push-only spawn did not start from its delivery branch"
+  assert_grep 'base_branch=integration/main' "$HOME_DIR/state/$id.meta" \
+    "the spawn did not record the direct-push base branch"
   assert_grep 'push_landed_ref=integration/main' "$HOME_DIR/state/$id.meta" \
     "the spawn did not normalize and record its push-landed ref"
   assert_grep 'shape=registered-direct-push push-landed-ref=integration/main' "$HOME_DIR/data/$id/launch-brief.md" \
@@ -878,6 +884,19 @@ test_push_landed_ref_is_recorded_and_validated() {
     "the launched worker did not receive the registered branch push command"
   assert_no_grep 'open a PR' "$HOME_DIR/data/$id/launch-brief.md" \
     "the registered direct-push launch still tells the worker to open a PR"
+
+  id='pool-push-landed-base-mismatch-r1'
+  rec=$(make_case push-landed-base-mismatch "$id")
+  read_case_record "$rec"
+  publish_feature_branch integration/main
+  printf '%s\n' '- project [direct-PR forge=push-only] - fixture (added 2026-01-01)' > "$HOME_DIR/data/projects.md"
+  brief_with_base "$id" integration/main
+  printf '%s\n' 'Delivery contract: mode=direct-PR forge=push-only' >> "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch integration/main --push-landed-ref release/main)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a push-only delivery base different from its registered ref should refuse"
+  assert_contains "$out" "must match the registered push-landed ref" "the mismatched direct-push base refusal did not explain itself"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused mismatched direct-push base published task metadata"
 
   id='pool-push-landed-absent-r1'
   rec=$(make_case push-landed-absent "$id")
