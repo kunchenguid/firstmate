@@ -1036,6 +1036,9 @@ for pair in \
   'scripts/deploy/deploy.ps1|deploy or release script' \
   'scripts/deployment/env.sh|deploy or release script' \
   'bin/redeploy.sh|deploy or release script' \
+  'scripts/release.sh|deploy or release script' \
+  'bin/release.ps1|deploy or release script' \
+  'scripts/release/publish.sh|deploy or release script' \
   '.github/workflows/release.yml|release workflow' \
   '.github/workflows/publish-image.yaml|release workflow' \
   'tests/fixtures/deploy.sh|deploy or release script'; do
@@ -1052,7 +1055,7 @@ pass "every deployment-configuration path class in the fact list forces the care
 # through to the model unchanged. A path under tests/ is a deliberate match
 # above, because forcing is the safe direction and the list carries no
 # exclusions; a docs page or a UI chart directory is not.
-for near in docs/deployment.md docs/template-guide.md src/application.yaml src/argonaut/app.yaml README.md src/charts/bar.tsx app/terraform-notes.md src/deploy_helper.py .github/workflows/ci.yml; do
+for near in docs/deployment.md docs/template-guide.md src/application.yaml src/argonaut/app.yaml README.md src/charts/bar.tsx app/terraform-notes.md src/deploy_helper.py src/release_notes.py .github/workflows/ci.yml; do
   brief_with_paths "$near"
   reset_log
   write_careful_response "$RESPONSE" rule_1

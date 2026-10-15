@@ -276,14 +276,14 @@ fm_dispatch_path_class() {  # <path> -> prints the matched pattern label, or exi
       printf 'Helm chart manifest\n'; return 0 ;;
     *.k8s.yaml|*.k8s.yml|*deployment*.yaml|*deployment*.yml|*ingress*.yaml|*ingress*.yml)
       printf 'Kubernetes or ingress manifest\n'; return 0 ;;
-    *deploy*.sh|*deploy*.ps1) printf 'deploy or release script\n'; return 0 ;;
+    *deploy*.sh|*deploy*.ps1|*release*.sh|*release*.ps1) printf 'deploy or release script\n'; return 0 ;;
   esac
   case "/$lower" in
     */cloudformation/*) printf 'CloudFormation template directory\n'; return 0 ;;
     */k8s/*|*/kubernetes/*) printf 'Kubernetes manifest directory\n'; return 0 ;;
     */argocd/*|*/argo-cd/*|*/argo/*) printf 'ArgoCD manifest directory\n'; return 0 ;;
     */helm/*) printf 'Helm chart directory\n'; return 0 ;;
-    */scripts/deploy*) printf 'deploy or release script\n'; return 0 ;;
+    */scripts/deploy*|*/scripts/release*) printf 'deploy or release script\n'; return 0 ;;
   esac
   case "/$lower" in
     */.github/workflows/*)
