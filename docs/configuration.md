@@ -998,7 +998,7 @@ Each relaunch installs a fresh worker extension with the home's current list, so
 ## Worker account pin (config/claude-account, config/pi-account)
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
-The pin is opt-in: with neither file, every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
+The pin is opt-in: without a pin or [account pool](#worker-account-pool-configaccount-pool), every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
 
 Both files are local and gitignored.
 
@@ -1022,7 +1022,8 @@ An unqualified model, an undeclared provider, or a raw Pi launch command, which 
 
 ### Launch scope and sign-in checks
 
-When a file is present, every launch of that runner from this home uses it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+When a file is present, every permitted launch of that runner from this home uses it: ships, scouts, local secondmate agents, and relaunches.
+Raw Claude launch eligibility is governed by the [account pool contract](#worker-account-pool-configaccount-pool).
 A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFIG_DIR` or a credential that a pinned launch unsets, such as `ANTHROPIC_API_KEY`.
 The assignment would override the pin.
 The refusal names the variable; remove that assignment from the raw command, or change or remove `config/claude-account`.
@@ -1048,19 +1049,20 @@ A remote secondmate is launched on its host from its own home's configuration, s
 ## Worker account pool (config/account-pool)
 
 A home that keeps a pool of logins for one tool can have its launches pick the account with the most room instead of always starting on the one default login.
-The pool is opt-in and secondary to the pin: with no file every launch is unchanged, and a home pin always wins for its own runner.
+The pool is opt-in and secondary to the pin: with no file every launch is unchanged, and a home pin always wins for its own named runner.
 The file is local and gitignored.
 It holds one `state=<absolute pool folder>`, the folder that holds the pool's `pool.json`, and optionally one `command=<byokit-accounts command>`, either a bare name resolved from `PATH` (the default `byokit-accounts`) or an absolute path.
 Blank lines and `#` comments are ignored, and a file with no usable `state=`, a relative `state=` path, or a `command=` value that names a relative path, refuses the launch and names the file.
 
 The pool applies only to the harnesses whose pool tool exists today: `claude` to `claude`, `codex` to `codex`, and `pi` and `pi-signed` to `pi`.
-Every other harness keeps today's behavior; the Cursor and OpenCode Go pools are later work.
+Every other named harness keeps today's behavior; the Cursor and OpenCode Go pools are later work.
 When no pin applies and the harness is mapped, Firstmate runs `<command> pick <tool> --json --state <state>` before any endpoint, local copy, or task record exists, and before a relaunch stops the running worker, and the command answers with the account with the most room among that tool's ready, not-resting accounts, from the same list the captain reads and switches with `byokit-accounts list` and `byokit-accounts use`.
 
 A launch carries the picked folder the same way a pin carries its root: an `env -u <name> ... <VAR>=<folder>` prefix on the launch line, so the launch line and the task record hold folder paths only.
 No key, token, or login file ever reaches a launch line, a task record, a log, a status line, or an error message.
 The spawn prints the pick as `account=<id>` and records the same field in the task record.
-Because the pool's `env` prefix and the pick's `unset` list are prepended to a raw launch command, a raw launch command whose leading `NAME=VALUE` words set the picked store variable or one of those unset names refuses before anything is created; remove the assignment, or remove `config/account-pool`.
+While `config/account-pool` exists, raw launch commands refuse before account selection or endpoint, local-copy, or task-record creation, even when a pin applies.
+Use a named harness such as `--harness claude`, `--harness codex`, or `--harness pi` so a command or shell wrapper cannot bypass or override the selected account.
 
 A malformed file (including a `config/account-pool` that exists but is not a readable regular file, such as a broken symlink), a `pick` that exits non-zero, an answer whose `unset` is not an array of environment-variable names, or an answer that names no usable account folder - not the tool's own store variable (`CLAUDE_CONFIG_DIR` for Claude, `CODEX_HOME` for Codex, `PI_CODING_AGENT_DIR` for Pi) or not an existing readable, searchable directory - refuses the launch before anything is created.
 A failed `pick` refusal names the tool and the login to do and says which accounts are resting or signed out, in the tone of the pin's sign-in refusal; Firstmate never falls back to an ambient login or copies a credential.

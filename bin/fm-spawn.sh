@@ -371,11 +371,12 @@
 #   and its operator contract. Resolve it with bin/fm-exclude-tools-lib.sh
 #   before provisioning; __PIEXCLUDE__ below owns the Pi launch substitution.
 # Worker account pin (config/claude-account, config/pi-account):
-#   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
+#   Opt-in. Without a pin or pool, a Claude or Pi launch is unchanged: Claude still
 #   receives this process's own CLAUDE_CONFIG_DIR when it is set, and Pi the
 #   destination pane's ambient account. A present file pins every launch of
-#   that runner from this home - ship, scout, local secondmate, raw Claude
-#   command, and relaunch - to the declared account root, and the spawn
+#   that runner from this home - ship, scout, local secondmate, and relaunch -
+#   to the declared account root. Raw launch eligibility is owned by the worker
+#   account sections in docs/configuration.md. The spawn
 #   refuses before any endpoint, worktree, or record exists when the file is
 #   malformed, the root is unusable, or the runner's own check says it is not
 #   signed in. A pinned Claude launch sheds the environment credentials Claude
@@ -391,7 +392,8 @@
 #   `byokit-accounts pick` for the account with the most room and carries its
 #   folder as an `env -u <name> ... <VAR>=<folder>` prefix, folder paths only and
 #   never a secret; a failed pick refuses before anything exists, naming the login
-#   to do. The pick is recorded as account=. bin/fm-account-pool-lib.sh owns it.
+#   to do. Raw launch commands refuse while config/account-pool exists; use a
+#   named harness. The pick is recorded as account=. bin/fm-account-pool-lib.sh owns it.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -2413,6 +2415,10 @@ launch_template() {
 
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
+  if [ -e "$CONFIG/account-pool" ] || [ -L "$CONFIG/account-pool" ]; then
+    echo "error: config/account-pool does not support raw launch commands; use a named harness such as --harness claude, --harness codex, or --harness pi so the selected account cannot be overridden" >&2
+    exit 1
+  fi
   RAW_LAUNCH=1
   LAUNCH=$ARG3
   HARNESS=""
@@ -2618,7 +2624,7 @@ fi
 # writes the store the worker will actually read.
 POOL_ACCOUNT=
 if [ -z "$WORKER_ACCOUNT" ]; then
-  POOL_ACCOUNT=$(fm_account_pool_select "$HARNESS" "$CONFIG" "$RAW_COMMAND") || exit 1
+  POOL_ACCOUNT=$(fm_account_pool_select "$HARNESS" "$CONFIG") || exit 1
 fi
 POOL_ACCOUNT_ID=
 POOL_ACCOUNT_VAR=
