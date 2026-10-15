@@ -19,6 +19,8 @@ The throttle is scoped to both the current captain-call lifecycle and the status
 A secondmate reaches the stale path only for a wait declared in its status line, so a hold recorded only in the backlog while its last line is `working:` or `done:` is outside this guard.
 Reaching that case would require consulting the backlog for windows the secondmate gate deliberately skips, putting backlog reads on the ordinary poll hot path this design preserves.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
+A plain stale wake, or the final wedge escalation, for a pane that shows a recognised dialog also ends its reason with `blocked-on-prompt:` and the dialog's name, on the unchanged triage and schedule; `bin/fm-watch.sh`'s header owns the wording.
+The deferral, dead-record, and declared-wait recheck reasons described below do not carry the name.
 In the same branch that is about to escalate, the pane's own account of its quiet is consulted first: the worker's declared `paused:` or verified `captain-held` status line.
 That declaration defers the escalation to the `FM_PAUSE_RESURFACE_SECS` recheck cadence instead, because a lane waiting on something it named is silent for a reason the escalation would misreport, and the ladder would otherwise climb for as long as the wait lasts.
 A declared clearing time (`paused: ... until <UTC ISO 8601>`) that has already passed stops counting as that account, so a lane whose own wait is over, and a lane that never declared one, both keep the unchanged escalation schedule, reason and `demand-deep-inspection` wording.
@@ -317,7 +319,7 @@ The session-start bootstrap step keeps valid dispatch configuration silent unles
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, agy, and devin while preserving the requested profile for later audit.
+That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, agy, devin, and commandcode while preserving the requested profile for later audit.
 Polytoken composes a concrete model and supported reasoning level through its [adapter contract](../.agents/skills/harness-adapters/references/harness/polytoken.md).
 
 ## Optional secondmates

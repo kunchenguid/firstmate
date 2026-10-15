@@ -105,8 +105,12 @@ fm_tmux_composer_caps() {
 #     unknown.
 #   - status: the shape owner's verified busy footer via fm_pane_is_busy,
 #     mapped onto the idle/working vocabulary herdr's probe reports natively.
-# Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
-# live shape owner.
+# It answers Command Code the same way, from its anchored `command-code`
+# foreground process name and its own verified busy footer: its composer is a
+# bare `❯` row between the same two rules, and its placeholder needs the
+# identity-scoped ghost ceiling in bin/fm-composer-lib.sh.
+# Prints "<owner><TAB>idle" or "<owner><TAB>working" for owner pi,
+# polytoken, or commandcode; exits 1 when the pane is not a live shape owner.
 fm_tmux_composer_identity() {  # <target>
   local target=$1 tty pgid tpgid comm owner='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
@@ -118,6 +122,7 @@ fm_tmux_composer_identity() {  # <target>
         case "${comm##*/}" in
           pi|pi-signed|pi-launcher|Pi) owner=pi ;;
           polytoken) owner=polytoken ;;
+          command-code) owner=commandcode ;;
         esac
         [ -n "$owner" ] && break
       done <<EOF
@@ -134,8 +139,9 @@ EOF
   fi
   [ -n "$owner" ] || return 1
   # The busy footer read is scoped to the matched owner's own harness
-  # signature (pi for the pi family, polytoken's `Running for` row) so one
-  # owner's ordinary output can never acknowledge another's pane.
+  # signature (pi for the pi family, polytoken's `Running for` row, Command
+  # Code's own footer) so one owner's ordinary output can never acknowledge
+  # another's pane.
   status=$(fm_pane_busy_state "$target" "$owner")
   case "$status" in
     busy) printf '%s\tworking' "$owner" ;;
@@ -149,8 +155,9 @@ EOF
 # pending-unproven | unknown, positive proof required for empty, unrecognized
 # future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
 # is fetched lazily, only when the classifier reports the verdict depends on
-# it (a pi separator pair under the cursor), so the common read never pays
-# for the process probe.
+# it (a pi separator pair under the cursor) or the cursor-anchored read is
+# `unknown` (the Command Code check below), so an `unknown` read pays one
+# process probe and a definite read never does.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cy pane verdict identity
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
@@ -175,6 +182,15 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # harness is untouched.
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+  fi
+  # Command Code parks its terminal cursor below its footer too, drawing its
+  # own reverse-video cursor cell in the composer (verified live, Command Code
+  # 1.74.1), so it takes the same cursorless reclassification, gated on its own
+  # process identity and read with that identity.
+  if [ "$verdict" = unknown ] && identity=$(fm_tmux_composer_identity "$target") \
+     && [ "${identity%%$'\t'*}" = commandcode ]; then
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '' "$identity")
+    [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
 }
