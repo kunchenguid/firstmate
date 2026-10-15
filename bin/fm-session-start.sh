@@ -276,28 +276,88 @@ while [ "$#" -gt 0 ]; do
 done
 
 # --- 0. runtime bound ---------------------------------------------------------
-# The ordered stage list is the contract behind the truncation banner: the child
-# names the stage it is entering, and the parent reports every stage at or after
-# that one as never emitted. Keep it in the exact order the digest prints.
-SESSION_START_STAGES='lock role bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+# shellcheck source=bin/fm-load-profile-lib.sh
+. "$SCRIPT_DIR/fm-load-profile-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
-stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
-  [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
-  printf '%s\n' "$1" > "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
-}
+PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+BACKEND=$(fm_backend_name)
+if ! fm_load_profile_bind "$FM_HOME" "$PRIMARY_HARNESS" "$BACKEND"; then
+  printf 'LOAD PROFILE: bind failed\n'
+  exit 1
+fi
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
+# The ordered stage list is the contract behind the truncation banner: the child
+# names the stage it is entering, and the parent reports every stage at or after
+# that one as never emitted. The bound profile owns that order.
+SESSION_START_STAGES=$(fm_load_profile_stages | tr '\n' ' ')
+SESSION_START_STAGES=${SESSION_START_STAGES% }
+
+stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
+  [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
+  printf '%s\n' "$1" > "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
+}
+
+stage_runs() {  # <stage-id>
+  case "$(fm_load_profile_policy "$1")" in
+    run=yes*) return 0 ;;
+  esac
+  return 1
+}
+
+# A non-positive or non-numeric budget is not a budget (`timeout 0` disables
+# the deadline outright). The bound profile already keeps a usable
+# FM_SESSION_START_TIMEOUT and otherwise the table's session_timeout_sec.
+session_start_budget() {
+  local policy timeout
+  policy=$(fm_load_profile_policy lock) || return 1
+  timeout=${policy##* timeout=}
+  case "$timeout" in ''|*[!0-9]*) timeout=120 ;; esac
+  [ "$timeout" -gt 0 ] 2>/dev/null || timeout=120
+  printf '%s\n' "$timeout"
+}
+
+emit_capped_digest() {  # <file>
+  local max bytes marker keep
+  max=$(fm_load_profile_slim_max_bytes)
+  bytes=$(wc -c < "$1" | tr -d '[:space:]')
+  if [ "$bytes" -le "$max" ]; then
+    cat "$1"
+    return 0
+  fi
+  marker=$(printf '\nSLIM DIGEST TRUNCATED at %s bytes\n' "$max")
+  keep=$((max - ${#marker}))
+  [ "$keep" -gt 0 ] || keep=0
+  head -c "$keep" "$1"
+  printf '%s' "$marker"
+}
+
+run_bounded_session_start() {
+  local out rc
+  if [ "$(fm_load_profile_bound_id)" != slim ]; then
+    fm_run_timed "$SESSION_START_BUDGET" "$@"
+    return
+  fi
+  out=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-digest.XXXXXX" 2>/dev/null) || out=
+  if [ -z "$out" ]; then
+    fm_run_timed "$SESSION_START_BUDGET" "$@"
+    return
+  fi
+  fm_run_timed "$SESSION_START_BUDGET" "$@" >"$out"
+  rc=$?
+  emit_capped_digest "$out"
+  rm -f "$out"
+  return "$rc"
+}
+
 if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
-  SESSION_START_BUDGET=${FM_SESSION_START_TIMEOUT:-120}
-  # A non-positive or non-numeric budget is not a budget (`timeout 0` disables
-  # the deadline outright), so an unusable value falls back to the default
-  # rather than silently removing the bound.
-  case "$SESSION_START_BUDGET" in ''|*[!0-9]*) SESSION_START_BUDGET=120 ;; esac
-  [ "$SESSION_START_BUDGET" -gt 0 ] 2>/dev/null || SESSION_START_BUDGET=120
+  SESSION_START_BUDGET=$(session_start_budget) || SESSION_START_BUDGET=120
   SESSION_START_STAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-stage.XXXXXX" 2>/dev/null) || SESSION_START_STAGE_FILE=
   if [ -z "$SESSION_START_STAGE_FILE" ]; then
     # Without a breadcrumb the bound still holds; only the banner's precision
@@ -306,20 +366,20 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   fi
   if [ "$REEMIT" -eq 1 ]; then
     if [ -n "$SESSION_SOURCE" ]; then
-      fm_run_timed "$SESSION_START_BUDGET" \
+      run_bounded_session_start \
         env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
         "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SESSION_SOURCE"
     else
-      fm_run_timed "$SESSION_START_BUDGET" \
+      run_bounded_session_start \
         env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
         "$SCRIPT_DIR/fm-session-start.sh" --reemit
     fi
   elif [ -n "$SESSION_SOURCE" ]; then
-    fm_run_timed "$SESSION_START_BUDGET" \
+    run_bounded_session_start \
       env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
       "$SCRIPT_DIR/fm-session-start.sh" --source "$SESSION_SOURCE"
   else
-    fm_run_timed "$SESSION_START_BUDGET" \
+    run_bounded_session_start \
       env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
       "$SCRIPT_DIR/fm-session-start.sh"
   fi
@@ -361,10 +421,6 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   exit 0
 fi
 
-PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
-
-# shellcheck source=bin/fm-backend.sh
-. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
@@ -397,6 +453,21 @@ case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 ENDPOINT_TIMEOUT=${FM_SESSION_START_ENDPOINT_TIMEOUT:-10}
 case "$ENDPOINT_TIMEOUT" in ''|*[!0-9]*) ENDPOINT_TIMEOUT=10 ;; esac
 [ "$ENDPOINT_TIMEOUT" -gt 0 ] 2>/dev/null || ENDPOINT_TIMEOUT=10
+FLEET_POLICY=$(fm_load_profile_policy fleet-state)
+case "$FLEET_POLICY" in
+  *' depth=full '*)
+    FLEET_FULL=1
+    FLEET_REST=${FLEET_POLICY##* tail=}
+    STATUS_TAIL=${FLEET_REST%% *}
+    FLEET_REST=${FLEET_POLICY##* queued=}
+    QUEUED_LIMIT=${FLEET_REST%% *}
+    FLEET_REST=${FLEET_POLICY##* endpoint=}
+    ENDPOINT_TIMEOUT=${FLEET_REST%% *}
+    ;;
+  *)
+    FLEET_FULL=0
+    ;;
+esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 
 RULE='================================================================================'
@@ -423,6 +494,140 @@ print_file_or_absent() {
   else
     printf 'ABSENT\n'
   fi
+}
+
+print_memory_pointer() {  # <path> <label>
+  local path=$1 label=$2 bytes
+  subsection "$label"
+  if [ -f "$path" ]; then
+    bytes=$(wc -c < "$path" | tr -d '[:space:]')
+    printf 'PRESENT %s bytes\n' "$bytes"
+  else
+    printf 'ABSENT\n'
+  fi
+}
+
+print_context_digest() {
+  local slots id emit path label policy
+  slots=$(fm_load_profile_memory_slots || true)
+  if [ -z "$slots" ]; then
+    policy=$(fm_load_profile_policy context)
+    case "$policy" in
+      *' emit=pointer '*)
+        printf 'deferred: data/projects.md data/secondmates.md data/captain.md data/captain-shared.md data/learnings.md\n'
+        return 0
+        ;;
+    esac
+    print_file_or_absent "$DATA/projects.md" "data/projects.md"
+    print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+    print_file_or_absent "$DATA/captain.md" "data/captain.md"
+    print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+    print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+    return 0
+  fi
+  while IFS=$'\t' read -r id emit _rest; do
+    [ -n "$id" ] || continue
+    case "$id" in
+      projects)
+        path=$DATA/projects.md
+        label='data/projects.md'
+        ;;
+      secondmates)
+        path=$DATA/secondmates.md
+        label='data/secondmates.md'
+        ;;
+      captain)
+        path=$DATA/captain.md
+        label='data/captain.md'
+        ;;
+      captain-shared)
+        path=$DATA/captain-shared.md
+        label='data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)'
+        ;;
+      learnings)
+        path=$DATA/learnings.md
+        label='data/learnings.md'
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    if [ "$emit" = pointer ]; then
+      print_memory_pointer "$path" "$label"
+    else
+      print_file_or_absent "$path" "$label"
+    fi
+  done <<EOF
+$slots
+EOF
+}
+
+print_read_once_contract() {
+  local boot net fleet slots full=1
+  boot=$(fm_load_profile_policy bootstrap)
+  net=$(fm_load_profile_policy network-checks)
+  fleet=$(fm_load_profile_policy fleet-state)
+  slots=$(fm_load_profile_memory_slots || true)
+  case "$boot" in run=yes*) ;; *) full=0 ;; esac
+  case "$net" in run=yes*) ;; *) full=0 ;; esac
+  case "$fleet" in *' depth=full '*) ;; *) full=0 ;; esac
+  case "$slots" in *$'projects\tbody\t'*) ;; *) full=0 ;; esac
+  if [ "$full" -eq 1 ]; then
+    cat <<'EOF'
+Everything below is printed in full for this session start: every state/*.meta,
+a compact data/backlog.md listing, a bounded tail of every state/*.status,
+data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
+and data/learnings.md.
+Do NOT re-read any of them after reading this digest, and do NOT bulk-read
+data/backlog.md or state/*.status: re-reading everything defeats the entire
+point of this command.
+
+Go to a source directly only when:
+  - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
+  - its contents looked unparseable or corrupt,
+  - an individual full status log is needed for older wake-event history, or a
+    status line was capped and its tail matters (each task's full log path is
+    printed with its tail),
+  - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
+  - the backlog listing disclosed omitted queued items and this turn needs them,
+  - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
+    turn needs their verdict (bin/fm-startup-network.sh report),
+  - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
+    which case that stage's sources were never emitted and must be reconciled,
+  - or a context re-emit opened with a read cue because the
+    harness cut the digest short.
+EOF
+    return 0
+  fi
+  printf '%s\n' 'This digest did not print every source in full.'
+  case "$fleet" in
+    *' depth=identity '*)
+      printf '%s\n' 'Fleet state printed a compact data/backlog.md listing and every state/*.meta. It did not print status tails or per-task endpoint lines.'
+      ;;
+    *' depth=full '*)
+      printf '%s\n' 'Fleet state printed a compact data/backlog.md listing, every state/*.meta, a bounded tail of every state/*.status, and per-task endpoint lines.'
+      ;;
+  esac
+  case "$slots" in
+    *$'projects\tpointer\t'*)
+      printf '%s\n' 'CONTEXT prints PRESENT or ABSENT and the byte size for data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md, and data/learnings.md. It does not print their bodies.'
+      ;;
+    *)
+      printf '%s\n' 'CONTEXT printed data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md, and data/learnings.md in full.'
+      ;;
+  esac
+  case "$boot" in
+    run=no*)
+      printf '%s\n' 'Bootstrap did not run. It is deferred: bin/fm-bootstrap.sh.'
+      ;;
+  esac
+  case "$net" in
+    run=no*)
+      printf '%s\n' 'Network checks did not run. They are deferred: bin/fm-startup-network.sh.'
+      ;;
+  esac
+  printf '%s\n' 'Do NOT re-read the sources this digest printed in full.'
+  printf '%s\n' 'A STARTUP TRUNCATED banner names a stage that never ran. Reconcile that stage before acting on what it would have shown.'
 }
 
 print_backlog_pointer() {
@@ -670,6 +875,12 @@ if [ "$REEMIT" -eq 0 ] && [ "$SESSION_SOURCE" = startup ]; then
   AGENTS_START_HASH=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
 fi
 
+printf 'LOAD PROFILE: %s (%s)\n' "$(fm_load_profile_bound_id)" "$(fm_load_profile_source)"
+LOAD_PROFILE_DIAG=$(fm_load_profile_diagnostic || true)
+if [ -n "$LOAD_PROFILE_DIAG" ]; then
+  printf 'LOAD PROFILE DIAGNOSTIC: %s\n' "$LOAD_PROFILE_DIAG"
+fi
+
 if [ "$REEMIT" -eq 1 ]; then
   # First in the output on purpose: a harness that spills a large hook output
   # delivers only a short head inline (Claude: about 2,000 characters), and
@@ -703,8 +914,14 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
     printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
-    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
-    printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
+    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. '
+    if stage_runs bootstrap; then
+      printf 'Detect-only bootstrap\n'
+      printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
+    else
+      printf 'Bootstrap did not run\n'
+      printf '●  (deferred: bin/fm-bootstrap.sh). The rest of this read-only-safe digest still ran below.\n'
+    fi
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
     printf '%s\n' "$BAR"
@@ -742,10 +959,12 @@ if [ "$READ_ONLY" -eq 0 ]; then
   # read-only GitHub-auth probe is owed. A read-only session starts nothing at
   # all: it holds no mutation authority for the sweeps, and it must not spawn,
   # steer, or merge anyway, so it has no action left for an auth verdict to gate.
-  NETWORK_STAGE_LOCKED=1
-  [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
-  "$SCRIPT_DIR/fm-startup-network.sh" start \
-    --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
+  if stage_runs network-checks; then
+    NETWORK_STAGE_LOCKED=1
+    [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
+    "$SCRIPT_DIR/fm-startup-network.sh" start \
+      --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
+  fi
 fi
 
 # --- 2. bootstrap --------------------------------------------------------
@@ -754,23 +973,27 @@ fi
 # re-block this digest and race the worker's sweeps against themselves.
 stage bootstrap
 subsection "BOOTSTRAP"
-if [ "$READ_ONLY" -eq 1 ]; then
-  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
-elif [ "$REEMIT" -eq 1 ]; then
-  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+if ! stage_runs bootstrap; then
+  printf 'deferred: bin/fm-bootstrap.sh\n'
 else
-  BOOT_OUT=$(
-    "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
-    FM_BOOTSTRAP_NETWORK=skip FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
-      "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
-  )
-fi
-if [ -n "$BOOT_OUT" ]; then
-  printf '%s\n' "$BOOT_OUT"
-else
-  printf '(silent - all good)\n'
+  if [ "$READ_ONLY" -eq 1 ]; then
+    BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+      FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  elif [ "$REEMIT" -eq 1 ]; then
+    BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
+      FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  else
+    BOOT_OUT=$(
+      "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
+      FM_BOOTSTRAP_NETWORK=skip FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
+        "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
+    )
+  fi
+  if [ -n "$BOOT_OUT" ]; then
+    printf '%s\n' "$BOOT_OUT"
+  else
+    printf '(silent - all good)\n'
+  fi
 fi
 
 # --- 3. wake-drain ---------------------------------------------------------
@@ -874,30 +1097,7 @@ fi
 # a stage that never ran, which the truncation banner names by stage.
 stage read-once
 section "READ-ONCE CONTRACT"
-cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
-a compact data/backlog.md listing, a bounded tail of every state/*.status,
-data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
-Do NOT re-read any of them after reading this digest, and do NOT bulk-read
-data/backlog.md or state/*.status: re-reading everything defeats the entire
-point of this command.
-
-Go to a source directly only when:
-  - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
-  - its contents looked unparseable or corrupt,
-  - an individual full status log is needed for older wake-event history, or a
-    status line was capped and its tail matters (each task's full log path is
-    printed with its tail),
-  - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
-  - the backlog listing disclosed omitted queued items and this turn needs them,
-  - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
-    turn needs their verdict (bin/fm-startup-network.sh report),
-  - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
-    which case that stage's sources were never emitted and must be reconciled,
-  - or a context re-emit opened with a read cue because the
-    harness cut the digest short.
-EOF
+print_read_once_contract
 
 # --- 6. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
@@ -915,47 +1115,51 @@ for meta in "$STATE"/*.meta; do
   printf '\n--- %s ---\n' "$id"
   cat "$meta"
 
-  window=$(fm_meta_get "$meta" window)
-  target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
-    backend=$(fm_backend_of_meta "$meta")
-    endpoint_rc=0
-    fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?
-    # Only the timeout owner's own statuses mean the read itself failed: 124 is
-    # the bound firing and >=128 is a signal death. Every other nonzero status
-    # is the probe's own verdict that the endpoint is gone.
-    if [ "$endpoint_rc" -eq 0 ]; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
-      printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
-        "$backend" "$window" "$ENDPOINT_TIMEOUT"
+  if [ "$FLEET_FULL" -eq 1 ]; then
+    window=$(fm_meta_get "$meta" window)
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$window" ]; then
+      backend=$(fm_backend_of_meta "$meta")
+      endpoint_rc=0
+      fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?
+      # Only the timeout owner's own statuses mean the read itself failed: 124 is
+      # the bound firing and >=128 is a signal death. Every other nonzero status
+      # is the probe's own verdict that the endpoint is gone.
+      if [ "$endpoint_rc" -eq 0 ]; then
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
+        printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
+          "$backend" "$window" "$ENDPOINT_TIMEOUT"
+      else
+        printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      fi
     else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      printf 'endpoint: unknown (no window recorded)\n'
     fi
-  else
-    printf 'endpoint: unknown (no window recorded)\n'
-  fi
 
-  status="$STATE/$id.status"
-  if [ -f "$status" ]; then
-    print_status_tail "$status"
-  else
-    printf 'status tail: (no status file yet: %s)\n' "$status"
+    status="$STATE/$id.status"
+    if [ -f "$status" ]; then
+      print_status_tail "$status"
+    else
+      printf 'status tail: (no status file yet: %s)\n' "$status"
+    fi
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
-subsection "Orphan status logs (state/*.status without matching .meta)"
-ORPHAN_STATUS_FOUND=0
-for status in "$STATE"/*.status; do
-  [ -f "$status" ] || continue
-  id=$(basename "$status" .status)
-  [ -f "$STATE/$id.meta" ] && continue
-  ORPHAN_STATUS_FOUND=1
-  printf '\n--- %s ---\n' "$id"
-  print_status_tail "$status"
-done
-[ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+if [ "$FLEET_FULL" -eq 1 ]; then
+  subsection "Orphan status logs (state/*.status without matching .meta)"
+  ORPHAN_STATUS_FOUND=0
+  for status in "$STATE"/*.status; do
+    [ -f "$status" ] || continue
+    id=$(basename "$status" .status)
+    [ -f "$STATE/$id.meta" ] && continue
+    ORPHAN_STATUS_FOUND=1
+    printf '\n--- %s ---\n' "$id"
+    print_status_tail "$status"
+  done
+  [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+fi
 
 subsection "AFK"
 # The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
@@ -1017,7 +1221,9 @@ fi
 # printed, and whatever it has not is named as not yet confirmed.
 stage network-checks
 section "NETWORK CHECKS"
-if [ "$READ_ONLY" -eq 1 ]; then
+if ! stage_runs network-checks; then
+  printf 'deferred: bin/fm-startup-network.sh\n'
+elif [ "$READ_ONLY" -eq 1 ]; then
   printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
   printf 'secondmate liveness and convergence, and pending handoff delivery were not run.\n'
   printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
@@ -1033,11 +1239,7 @@ fi
 # take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
-print_file_or_absent "$DATA/projects.md" "data/projects.md"
-print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
-print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_context_digest
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

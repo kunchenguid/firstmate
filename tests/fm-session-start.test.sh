@@ -21,6 +21,8 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
+#   - pi + herdr homes follow the slim load profile unless config/load-profile
+#     says full
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -558,14 +560,19 @@ SH
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
 # Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
+# (Pi family), GROK_AGENT (grok), and the markers harness_marker checks
+# before Pi (CURSOR_AGENT, CURSOR_INVOKED_AS, GEMINI_CLI, rovo, omp).
 # codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# claude/pi/grok/cursor session fails cases that pin a different fake harness
+# while CI (no ambient markers) still passes. Ancestry collapses pi-signed to
+# the pi family, so a forced pi-signed identity has to be the marker, and a
+# cursor marker checked first would hide it.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
@@ -578,7 +585,9 @@ run_session_start() {
 run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   local home=$1 root=$2 path=$3
   shift 3
-  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+  env -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
+    PI_CODING_AGENT=true FM_PI_HARNESS=pi \
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
@@ -3040,6 +3049,164 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+# seed_pi_herdr_world <name>
+# Harness is Pi (FM_PI_HARNESS via run_pi_session_start plus a fake ps).
+# Backend is herdr via config/backend, the same token fm_backend_name reads.
+# Echoes root|home|fakebin|bytes for the seeded projects.md.
+seed_pi_herdr_world() {
+  local name=$1 rec root home fakebin body bytes
+  rec=$(new_world "$name")
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  printf '%s\n' herdr > "$home/config/backend"
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  cat > "$fakebin/herdr" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$home/herdr.calls"
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
+  [ "\${3:-}" = p-live ] && exit 0
+  exit 1
+fi
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-live.meta"
+  printf 'working: step SLIMTAIL\n' > "$home/state/task-live.status"
+  body='projects-body-marker unique line'
+  printf '%s\n' "$body" > "$home/data/projects.md"
+  bytes=$(wc -c < "$home/data/projects.md" | tr -d '[:space:]')
+  printf '%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$bytes"
+}
+
+pi_herdr_path() {  # <fakebin>
+  printf '%s\n' "$1:$(fm_test_base_path_sans "$BASE_PATH" node)"
+}
+
+test_pi_herdr_session_start_follows_slim_profile() {
+  local rec root home fakebin bytes out path
+  rec=$(seed_pi_herdr_world slim-profile)
+  IFS='|' read -r root home fakebin bytes <<EOF
+$rec
+EOF
+  path=$(pi_herdr_path "$fakebin")
+  out=$(run_pi_session_start "$home" "$root" "$path")
+
+  assert_contains "$out" "LOAD PROFILE: slim (default-pi-herdr)" \
+    "pi herdr session start did not name the slim profile"
+  assert_not_contains "$out" "LOAD PROFILE DIAGNOSTIC:" \
+    "a valid default profile printed a diagnostic"
+  assert_contains "$out" "deferred: bin/fm-bootstrap.sh" \
+    "slim bootstrap did not name bin/fm-bootstrap.sh"
+  assert_not_contains "$out" "MISSING: tasks-axi" \
+    "slim session start ran fm-bootstrap.sh"
+  assert_contains "$out" "deferred: bin/fm-startup-network.sh" \
+    "slim network stage did not name bin/fm-startup-network.sh"
+  assert_absent "$home/state/.startup-network.status" \
+    "slim session start started the network worker"
+  assert_contains "$out" "kind=ship" "slim fleet state dropped the task meta"
+  assert_not_contains "$out" "working: step SLIMTAIL" \
+    "slim fleet state printed a status tail"
+  assert_not_contains "$out" "endpoint:" \
+    "slim fleet state printed an endpoint line"
+  assert_not_contains "$out" "status tail (last" \
+    "slim fleet state printed a status tail header"
+  assert_contains "$out" "PRESENT $bytes bytes" \
+    "slim context did not print the projects.md byte size"
+  assert_not_contains "$out" "projects-body-marker unique line" \
+    "slim context printed the projects.md body"
+  assert_contains "$out" "It did not print status tails or per-task endpoint lines." \
+    "slim read-once contract still claimed a full fleet digest"
+  assert_not_contains "$out" "a bounded tail of every state/*.status" \
+    "slim read-once contract described status tails that were not printed"
+  assert_contains "$out" "lock acquired:" "slim session start skipped the lock"
+  assert_contains "$out" "WAKE QUEUE" "slim session start skipped the wake queue"
+  assert_contains "$out" "fm-role: user (default)" "slim session start skipped the home role"
+
+  rec=$(seed_pi_herdr_world slim-diagnostic)
+  IFS='|' read -r root home fakebin bytes <<EOF
+$rec
+EOF
+  printf 'nope\n' > "$home/config/load-profile"
+  path=$(pi_herdr_path "$fakebin")
+  out=$(run_pi_session_start "$home" "$root" "$path")
+  assert_contains "$out" "LOAD PROFILE: slim (default-pi-herdr)" \
+    "an unknown load-profile token left the pi herdr default"
+  assert_contains "$out" "LOAD PROFILE DIAGNOSTIC: unknown load-profile token: nope" \
+    "an unknown load-profile token did not print its diagnostic"
+  assert_contains "$out" "deferred: bin/fm-bootstrap.sh" \
+    "an unknown token ran bootstrap on a pi herdr home"
+
+  pass "pi herdr session start emits the slim profile"
+}
+
+test_pi_herdr_full_config_restores_fat_digest() {
+  local rec root home fakebin bytes out path
+  rec=$(seed_pi_herdr_world full-config)
+  IFS='|' read -r root home fakebin bytes <<EOF
+$rec
+EOF
+  printf 'full\n' > "$home/config/load-profile"
+  path=$(pi_herdr_path "$fakebin")
+  out=$(run_pi_session_start "$home" "$root" "$path")
+
+  assert_contains "$out" "LOAD PROFILE: full (config)" \
+    "config/load-profile full did not select the full profile"
+  assert_contains "$out" "MISSING: tasks-axi" \
+    "full profile did not run fm-bootstrap.sh"
+  assert_not_contains "$out" "deferred: bin/fm-bootstrap.sh" \
+    "full profile deferred bootstrap"
+  assert_contains "$out" "working: step SLIMTAIL" \
+    "full profile dropped the status tail"
+  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" \
+    "full profile dropped the endpoint sweep"
+  assert_contains "$out" "projects-body-marker unique line" \
+    "full profile did not print the projects.md body"
+  assert_contains "$out" "a bounded tail of every state/*.status" \
+    "full read-once contract dropped the status-tail sentence"
+  assert_contains "$out" "Do NOT re-read any of them after reading this digest" \
+    "full read-once contract changed its re-read sentence"
+  assert_not_contains "$out" "deferred: bin/fm-startup-network.sh" \
+    "full profile deferred network checks"
+  assert_not_contains "$out" "PRESENT $bytes bytes" \
+    "full profile printed a context pointer instead of the body"
+
+  pass "config/load-profile full restores the fat digest on a pi herdr home"
+}
+
+test_slim_digest_stops_at_the_byte_cap() {
+  local rec root home fakebin bytes out path digest size
+  rec=$(seed_pi_herdr_world slim-cap)
+  IFS='|' read -r root home fakebin bytes <<EOF
+$rec
+EOF
+  {
+    printf 'STARTMARKER\n'
+    dd if=/dev/zero bs=40000 count=1 2>/dev/null | tr '\0' 'M'
+    printf '\nENDMARKER\n'
+  } > "$home/state/task-big.meta"
+  path=$(pi_herdr_path "$fakebin")
+  digest=$home/digest.out
+  run_pi_session_start "$home" "$root" "$path" > "$digest"
+  size=$(wc -c < "$digest" | tr -d '[:space:]')
+  [ "$size" -le 24576 ] || fail "slim digest is $size bytes, over the 24576 cap"
+  out=$(cat "$digest")
+  assert_contains "$out" "LOAD PROFILE: slim (default-pi-herdr)" \
+    "the byte cap dropped the load profile line"
+  assert_contains "$out" "STARTMARKER" \
+    "the byte cap dropped the head of the digest"
+  assert_not_contains "$out" "ENDMARKER" \
+    "the byte cap kept the tail of the oversized meta"
+  assert_contains "$out" "SLIM DIGEST TRUNCATED at 24576 bytes" \
+    "an oversized slim digest did not say it was truncated"
+
+  pass "slim digest truncates at 24576 bytes"
+}
+
+test_pi_herdr_session_start_follows_slim_profile
+test_pi_herdr_full_config_restores_fat_digest
+test_slim_digest_stops_at_the_byte_cap
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path

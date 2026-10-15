@@ -12,7 +12,7 @@ unset FM_SESSION_START_TIMEOUT FM_SESSION_START_STATUS_TAIL
 unset FM_SESSION_START_QUEUED_LIMIT FM_SESSION_START_ENDPOINT_TIMEOUT
 
 TMP_ROOT=$(fm_test_tmproot fm-load-profile)
-SCOPE_BEFORE=$(cksum "$ROOT/AGENTS.md" "$ROOT/bin/fm-session-start.sh")
+SCOPE_BEFORE=$(cksum "$ROOT/AGENTS.md")
 
 SLIM_STAGES='lock
 role
@@ -252,8 +252,8 @@ test_pi_extensions_and_prefix_stay() {
   assert_not_contains "$stages" 'SKILL.md' "bound stages name a skill file"
   assert_not_contains "$stages" '.agents/' "bound stages inject an always-on skill path"
   assert_absent "$home/AGENTS.md" "bind wrote an always-on prefix"
-  after=$(cksum "$ROOT/AGENTS.md" "$ROOT/bin/fm-session-start.sh")
-  assert_equals "$SCOPE_BEFORE" "$after" "unit edited AGENTS.md or session start"
+  after=$(cksum "$ROOT/AGENTS.md")
+  assert_equals "$SCOPE_BEFORE" "$after" "unit edited AGENTS.md"
   pass "slim bind leaves Pi primary extensions on and does not inject skills"
 }
 
