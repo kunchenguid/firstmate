@@ -290,6 +290,33 @@ test_unblock_clears_a_mistaken_edge() {
   pass "an explicitly unblocked objective closes; there is no other override"
 }
 
+test_objective_close_with_relative_directories() {
+  local dir mode action out rc child
+  local relative_env=()
+  for mode in home data root; do
+    for action in done close; do
+      dir=$(objective_home "obj-relative-$mode-$action" | sed -n 1p)
+      case "$mode" in
+        home) relative_env=(FM_HOME=home FM_ROOT_OVERRIDE="$ROOT") ;;
+        data) relative_env=(FM_HOME="$dir/home" FM_DATA_OVERRIDE=home/data FM_ROOT_OVERRIDE="$ROOT") ;;
+        root) relative_env=(FM_ROOT_OVERRIDE=home) ;;
+      esac
+      out=$(cd "$dir" && env "${relative_env[@]}" "$WRAPPER" "$action" obj 2>&1); rc=$?
+      expect_code 2 "$rc" "$action with relative $mode and open children"
+      assert_contains "$out" "study impl" "relative addressing did not find the objective's open children"
+      for child in study impl; do
+        (cd "$dir" && env "${relative_env[@]}" "$WRAPPER" "$action" "$child" >/dev/null) \
+          || fail "$action refused an unblocked child with relative $mode"
+      done
+      (cd "$dir" && env "${relative_env[@]}" "$WRAPPER" "$action" obj >/dev/null) \
+        || fail "$action refused an objective with Done children and relative $mode"
+      out=$(obj_w "$dir" show obj) || fail "reading the closed objective failed"
+      assert_contains "$out" "state: done" "relative $mode closed a different backlog"
+    done
+  done
+  pass "done and close share the caller's backlog with relative home, data, and root paths"
+}
+
 test_objective_close_refused_when_parent_read_fails() {
   local dir real_tasks mode action out rc before
   dir=$(objective_home obj-read-failure | sed -n 1p)
@@ -339,6 +366,7 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_single_home
   test_objective_close_refused_while_children_open
   test_unblock_clears_a_mistaken_edge
+  test_objective_close_with_relative_directories
   test_objective_close_refused_when_parent_read_fails
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"

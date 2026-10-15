@@ -133,6 +133,7 @@ done
 command -v tasks-axi >/dev/null 2>&1 || fail "tasks-axi is not on PATH; run bin/fm-bootstrap.sh for the install command"
 
 FM_BACKLOG_TRANSITION_ERROR=
+DATA=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: ${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 if ! fm_backlog_tasks_axi_addressing "$DATA"; then
   fail "${FM_BACKLOG_TRANSITION_ERROR:-data directory cannot be resolved: $DATA}"
 fi
