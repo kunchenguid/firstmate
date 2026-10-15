@@ -540,6 +540,38 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$data" "done" "$id" "${done_args[@]+"${done_args[@]}"}"
 }
 
+# The blocked-by edges tasks-axi records are the objective-to-child dependency
+# the backlog already owns; tasks-axi itself closes a row whose blockers are
+# still open, so bin/fm-tasks-axi.sh refuses an explicit close here. Lifecycle
+# teardown deliberately does not call this: landed work is never held open by a
+# blocker that was recorded for ordering. Prints nothing and returns 0 when every
+# blocker of <id> is Done (or <id> is already Done, which keeps the idempotent
+# link backfill working); returns 1 and prints each blocker that is not Done,
+# an unreadable blocker included, because unknown is never done. Returns 2 when
+# the row itself cannot be read. There is no waiver: clear a mistaken edge with
+# `tasks-axi unblock <id> --by <other>`.
+fm_backlog_open_blockers() {  # <data-dir> <id>
+  local data id=$2 out line blockers b bout bstate open=0
+  data=$(fm_backlog_data_absolute "$1") || return 2
+  out=$(fm_backlog_row_show "$data" "$id") || return 2
+  line=$(printf '%s\n' "$out" | sed -n 's/^ *state: *//p' | sed -n '1p')
+  [ -n "$line" ] || return 2
+  [ "$line" != "done" ] || return 0
+  blockers=$(printf '%s\n' "$out" | sed -n 's/^ *blocked_by: *//p' | sed -n '1p' | tr -d '"')
+  case "$blockers" in ''|none|-) return 0 ;; esac
+  for b in $(printf '%s' "$blockers" | tr ',' ' '); do
+    bstate=
+    if bout=$(fm_backlog_row_show "$data" "$b"); then
+      bstate=$(printf '%s\n' "$bout" | sed -n 's/^ *state: *//p' | sed -n '1p')
+    fi
+    if [ "$bstate" != "done" ]; then
+      printf '%s\n' "$b"
+      open=1
+    fi
+  done
+  [ "$open" -eq 0 ] || return 1
+}
+
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in

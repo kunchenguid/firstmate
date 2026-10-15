@@ -47,6 +47,9 @@
 #     later would notice (`start <id>` stays a documented direct transition);
 #   - a data directory that cannot be resolved, or whose backend configuration
 #     cannot be read (bin/fm-tasks-axi-lib.sh owns that diagnostic);
+#   - `done` (or `close`) of a task that is blocked-by a task that is not Done
+#     (an unreadable blocker counts as not Done); clear a mistaken edge with
+#     `unblock`, there is no override;
 #   - a markdown `<data>/backlog.md` that is itself a symlink, because the
 #     first write would replace the link with a private copy, exactly the fork
 #     this command exists to prevent. Lifecycle transitions refuse the same file.
@@ -144,6 +147,19 @@ else
 fi
 
 cd "$FM_BACKLOG_AXI_ROOT" || fail "cannot enter the backlog root $FM_BACKLOG_AXI_ROOT"
+case "${1:-}" in
+  done|close)
+    # An objective is not done while a task it is blocked-by is not. A mistaken
+    # edge is cleared with `unblock`; there is no override.
+    if [ -n "${2:-}" ]; then
+      open_blockers=$(fm_backlog_open_blockers "$DATA" "$2")
+      open_status=$?
+      if [ "$open_status" -eq 1 ]; then
+        fail "$2 still has open blockers, so it cannot be closed: $(printf '%s' "$open_blockers" | tr '\n' ' ')"
+      fi
+    fi
+    ;;
+esac
 case "${1:-}" in
   show|view|list)
     set -o pipefail

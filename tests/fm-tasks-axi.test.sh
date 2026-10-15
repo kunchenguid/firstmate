@@ -239,6 +239,57 @@ test_wrapper_single_home() {
   pass "fm-tasks-axi.sh keeps the single-home layout addressing its own code-root backlog"
 }
 
+
+# An objective is a row blocked-by the tasks it waits on. tasks-axi closes such a
+# row while its blockers are open, so the wrapper refuses the close; the cases
+# drive the real CLI through the wrapper and pin both directions.
+objective_home() {  # <name>; prints the case directory
+  local dir="$TMP_ROOT/$1" t
+  mkdir -p "$dir/home/data" "$dir/home/state"
+  fm_test_tasks_toml "$dir/home/.tasks.toml"
+  empty_backlog "$dir/home/data/backlog.md"
+  printf '%s\n' "$dir"
+  for t in obj study impl; do
+    (cd "$dir" && FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$WRAPPER" add "$t" "$t row" >/dev/null) || return 1
+  done
+  for t in study impl; do
+    (cd "$dir" && FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$WRAPPER" block obj --by "$t" >/dev/null) || return 1
+  done
+}
+
+obj_w() {  # <case-dir> <args...>
+  local dir=$1
+  shift
+  (cd "$dir" && FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$WRAPPER" "$@")
+}
+
+test_objective_close_refused_while_children_open() {
+  local dir out rc
+  dir=$(objective_home obj-close | sed -n 1p)
+  out=$(obj_w "$dir" "done" obj 2>&1); rc=$?
+  expect_code 2 "$rc" "closing an objective with two open children"
+  assert_contains "$out" "study impl" "the refusal did not name both open children"
+  assert_grep "[ ] obj" "$dir/home/data/backlog.md" "a refused close still moved the objective"
+  obj_w "$dir" "done" study --note finished >/dev/null || fail "closing a child with no blockers failed"
+  out=$(obj_w "$dir" "done" obj 2>&1); rc=$?
+  expect_code 2 "$rc" "closing an objective with one open child"
+  assert_contains "$out" "impl" "the refusal did not name the remaining child"
+  assert_not_contains "$out" "study" "a Done child was reported as open"
+  obj_w "$dir" "done" impl --note finished >/dev/null || fail "closing the last child failed"
+  obj_w "$dir" "done" obj >/dev/null || fail "the objective did not close once every child was Done"
+  obj_w "$dir" "done" obj --note again >/dev/null || fail "the idempotent link backfill on a Done objective was refused"
+  pass "an objective cannot close while a child is open and closes once every child is Done"
+}
+
+test_unblock_clears_a_mistaken_edge() {
+  local dir
+  dir=$(objective_home obj-unblock | sed -n 1p)
+  obj_w "$dir" unblock obj --by study >/dev/null || fail "unblock failed"
+  obj_w "$dir" unblock obj --by impl >/dev/null || fail "unblock failed"
+  obj_w "$dir" "done" obj >/dev/null || fail "an objective with no remaining edge must close"
+  pass "an explicitly unblocked objective closes; there is no other override"
+}
+
 test_guard_reports_regular_code_root_backlog
 test_guard_reports_foreign_link_and_archive
 test_guard_silent_for_single_home
@@ -249,6 +300,8 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_refusals
   test_wrapper_refuses_add_start
   test_wrapper_single_home
+  test_objective_close_refused_while_children_open
+  test_unblock_clears_a_mistaken_edge
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"
 fi
