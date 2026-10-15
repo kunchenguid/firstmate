@@ -241,7 +241,11 @@ EOF
         parent=1
         fm_wait_timer_save "$record" "$signature" "$since" "$owner" "$parent" "$key" "$misses" || return 1
       else
-        reason="escalation: waiting-state $task ($verb, observed ${age}s, level=main; Main must unblock it now)"
+        # The reason line's leading word is the wake kind every consumer
+        # classifies by, so it must read "check:" like the kind this row is
+        # queued under: a prefix outside that taxonomy classifies as no wake at
+        # all, and the escalation then reaches nobody.
+        reason="check: waiting-state $task ($verb, observed ${age}s, level=main; Main must unblock it now)"
         fm_wake_append check "$key-escalation" "$reason" || return 1
         parent=1
         fm_wait_timer_save "$record" "$signature" "$since" "$owner" "$parent" "$key" "$misses" || return 1

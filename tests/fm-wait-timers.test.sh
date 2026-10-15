@@ -108,7 +108,7 @@ cycle
 IFS=$'\t' read -r sig since owner _parent key _misses < "$dir/state/.waiting-timers/lane"
 printf '%s\t%s\t%s\t0\t%s\t0\n' "$sig" "$since" "$((owner - 900))" "$key" > "$dir/state/.waiting-timers/lane"
 cycle
-grep -q 'escalation: waiting-state lane .*level=main' "$dir/events" || fail 'Main-owned wait did not escalate to Main'
+grep -q 'check: waiting-state lane .*level=main' "$dir/events" || fail 'Main-owned wait did not escalate to Main'
 ! grep -qi 'captain' "$dir/events" || fail 'Main-owned escalation paged the captain'
 [ "$(grep -c 'level=main' "$dir/events")" -eq 1 ] || fail 'Main-owned escalation repeated'
 IFS=$'\t' read -r _sig _since _owner parent _key _misses < "$dir/state/.waiting-timers/lane"
