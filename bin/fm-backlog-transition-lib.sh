@@ -548,8 +548,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 # blocker of <id> is Done (or <id> is already Done, which keeps the idempotent
 # link backfill working); returns 1 and prints each blocker that is not Done,
 # an unreadable blocker included, because unknown is never done. Returns 2 when
-# the row itself cannot be read. There is no waiver: clear a mistaken edge with
-# `tasks-axi unblock <id> --by <other>`.
+# the data directory cannot be resolved or the row itself cannot be read or
+# supplies no state; row-read failures print their diagnostic. The wrapper's
+# header owns the public refusal and explicit-unblock contract.
 fm_backlog_open_blockers() {  # <data-dir> <id>
   local data id=$2 out line blockers b bout bstate open=0
   data=$(fm_backlog_data_absolute "$1") || return 2
