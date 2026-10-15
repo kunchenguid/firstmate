@@ -99,8 +99,10 @@ test_registered_push_dod_requires_no_pr() {
     "the registered direct-push Definition of done did not name its delivery shape"
   assert_grep 'git push origin HEAD:refs/heads/integration/main' "$out" \
     "the registered direct-push Definition of done did not direct the registered push"
-  assert_no_grep 'open a PR' "$out" \
-    "the registered direct-push Definition of done still directs a pull request"
+  assert_grep 'Do NOT open or merge a PR.' "$out" \
+    "the registered direct-push Definition of done did not forbid a pull request"
+  assert_no_grep 'gh-axi pr create' "$out" \
+    "the registered direct-push Definition of done still directs pull-request creation"
   fm_dod_block no-mistakes pipeline-push fm/pipeline-push push-only > "$TMP_ROOT/pipeline-push-dod.md" \
     || fail "an unregistered push-only no-mistakes Definition of done was refused"
   pass "push-only direct delivery requires a registered branch while no-mistakes remains valid"

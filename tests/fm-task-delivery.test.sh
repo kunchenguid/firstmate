@@ -1163,6 +1163,7 @@ ROWS
     [ "$(printf '%s\n' "$err" | grep -c .)" -eq 1 ] || fail "$label: expected one warning line, got: $err"
     assert_contains "$err" "\"$token\"" "$label: the warning did not name the token"
     assert_contains "$err" 'forge=gerrit' "$label: the warning did not name the forge=gerrit spelling"
+    assert_contains "$err" 'forge=push-only' "$label: the warning did not name the forge=push-only spelling"
   done <<'ROWS'
 a dropped character in the key|- fp [no-mistakes forg=gerrit] - fixture (added 2026-01-01)|forg=gerrit|no-mistakes off
 a swapped pair in the key|- fp [direct-PR froge=gerrit +yolo] - fixture (added 2026-01-01)|froge=gerrit|direct-PR on

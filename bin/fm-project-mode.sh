@@ -90,7 +90,7 @@
 # `branch` resolves as it did before the forge existed, and in the mode slot it
 # is read as an unknown mode. A key one or two edits from `forge` (such as
 # `forg=` or `Forge=`) is still ignored, with one stderr warning naming the token
-# and the forge=gerrit and forge=forgejo spellings. The one refusal is a
+# and the forge=gerrit, forge=forgejo, and forge=push-only spellings. The one refusal is a
 # malformed forge binding - a `forge=` token whose value is empty or outside the
 # closed set - which is REFUSED in the default and --forge output forms: nothing
 # on stdout, exit status 3, the token named. Resolving it to "no registered
@@ -200,7 +200,7 @@ fi
 posture=
 while IFS=' ' read -r kind rest; do
   case "$kind" in
-    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit or forge=forgejo" >&2 ;;
+    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=forgejo, or forge=push-only" >&2 ;;
     posture) posture=$rest ;;
   esac
 done <<EOF
