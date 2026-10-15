@@ -53,13 +53,14 @@
 # appends " forge=forgejo". The "Ship branch: <branch>"
 # line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
-# forge is none|gerrit|forgejo and defaults to none; bin/fm-project-mode.sh's
+# forge is none|gerrit|forgejo|push-only and defaults to none; bin/fm-project-mode.sh's
 # header owns what the registry binding means, and this file owns what each
 # forge changes for a WORKER (docs/gerrit-forge-integration.md is the gerrit
 # design). In the Definition of done, forgejo changes only the CLI a direct-PR
-# worker opens its pull request with: tea instead of gh-axi. A forge composes with
-# the two modes that publish and is refused on local-only, which publishes
-# nothing. On gerrit the worker publishes one squashed change with
+# worker opens its pull request with: tea instead of gh-axi. `push-only` is the
+# exception that permits direct-PR and local-only, while no-mistakes remains
+# pipeline-owned. Other forge bindings compose with the two modes that publish
+# and are refused on local-only, which publishes nothing. On gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
 # that straight away, and no-mistakes first runs the pipeline with its three
 # forge-facing steps skipped and recovers the pipeline's own fix commits into its
@@ -141,17 +142,23 @@ EOF
 }
 
 # Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a
-# caller cannot reach a half-rendered contract. local-only is refused rather than
-# rendered with an inert annotation: it publishes nothing, and its landing
-# fast-forwards local main with content the review server has never seen.
+# caller cannot reach a half-rendered contract.
 fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   local forge=$1 mode=$2 caller=$3
   case "$forge" in
-    none|gerrit|forgejo) ;;
+    none|gerrit|forgejo|push-only) ;;
     *)
-      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, or forgejo)" >&2
+      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, forgejo, or push-only)" >&2
       return 1 ;;
   esac
+  if [ "$forge" = push-only ]; then
+    case "$mode" in
+      direct-PR|local-only) return 0 ;;
+      *)
+        echo "error: $caller: forge=push-only can ship only mode=direct-PR or mode=local-only" >&2
+        return 1 ;;
+    esac
+  fi
   if [ "$forge" != none ] && [ "$mode" = local-only ]; then
     echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
     return 1
@@ -421,8 +428,10 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
     contract_consent=" upstream-consent=$consent"
   fi
   draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
+  if [ "$forge" = forgejo ] || [ "$forge" = push-only ]; then
+    contract_forge=" forge=$forge"
+  fi
   if [ "$forge" = forgejo ]; then
-    contract_forge=' forge=forgejo'
     forge_cli=tea
     draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
   fi
@@ -499,7 +508,7 @@ EOF
     local-only:*)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=local-only
+Delivery contract: mode=local-only$contract_forge
 Ship branch: $branch
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
@@ -598,6 +607,31 @@ fm_dod_pr_url_from_done_note() {  # <note>
 # The last recorded <key>= value in <meta>, or empty.
 fm_dod_meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+fm_dod_normalize_push_landed_ref() {  # <ref>
+  local ref=$1
+  case "$ref" in
+    refs/heads/*) ref=${ref#refs/heads/} ;;
+  esac
+  case "$ref" in
+    ''|-*|refs/*) return 1 ;;
+  esac
+  git check-ref-format --branch "$ref" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$ref"
+}
+
+fm_dod_registered_ref_contains_named_head() {  # <worktree> <meta> <mode> <sha>
+  local wt=$1 meta=$2 mode=$3 sha=$4 ref
+  case "$mode" in
+    direct-PR|local-only) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$meta" ] && [ -f "$meta" ] || return 1
+  ref=$(fm_dod_normalize_push_landed_ref "$(fm_dod_meta_value "$meta" push_landed_ref)") || return 1
+  git -C "$wt" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$wt" fetch --quiet origin "+refs/heads/$ref:refs/remotes/origin/$ref" >/dev/null 2>&1 || return 1
+  git -C "$wt" merge-base --is-ancestor "$sha" "refs/remotes/origin/$ref" 2>/dev/null
 }
 
 # 0 when the forge's head for a PR is the head the done names. In no-mistakes
@@ -699,11 +733,12 @@ fm_dod_nm_custody_returned() {  # <worktree>
 
 # 0 when <sha> is reachable from a ref that survives the disposable worktree:
 # any remote-tracking ref, or - for local-only - heads in the project clone.
-fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
-  local wt=$1 project=$2 mode=$3 sha=$4
+fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha> [<meta>]
+  local wt=$1 project=$2 mode=$3 sha=$4 meta=${5:-}
   fm_dod_ref_contains "$wt" refs/remotes "$sha" && return 0
   fm_dod_ref_contains "$project" refs/remotes "$sha" && return 0
-  [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
+  [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha" && return 0
+  fm_dod_registered_ref_contains_named_head "$wt" "$meta" "$mode" "$sha"
 }
 
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
@@ -753,7 +788,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
     return 1
   fi
-  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha" "$meta"; then
     return 0
   fi
   printf '%s\n' "named head $sha is unreachable outside the worker copy"

@@ -397,6 +397,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -1199,7 +1201,6 @@ fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 BASE_BRANCH=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
-PUSH_LANDED_REF=$(grep '^push_landed_ref=' "$META" | cut -d= -f2- || true)
 
 # A record accepted as a legacy incarnation (no spawn_gen, and either
 # --legacy-record given or the record is windowless) may be torn down only
@@ -1647,24 +1648,6 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
-# Has the worktree's HEAD already been pushed to the task's explicitly
-# registered delivery ref on origin? push-only projects deliver by pushing
-# directly to a long-lived branch and never open a pull request, so neither
-# pr_is_merged nor content_in_default can prove that shape landed. The
-# registration is bin/fm-spawn.sh --push-landed-ref's push_landed_ref= meta
-# record; without it this returns non-zero before touching anything and the
-# existing checks stand alone. Fetches the ref first because a direct push
-# leaves this copy's remote-tracking refs stale. Returns non-zero when
-# inconclusive (no origin, fetch failure, missing ref), so the caller refuses
-# rather than guesses.
-pushed_to_registered_ref() {
-  local ref=${PUSH_LANDED_REF:-}
-  [ -n "$ref" ] || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "+refs/heads/$ref:refs/remotes/origin/$ref" >/dev/null 2>&1 || return 1
-  git -C "$WT" merge-base --is-ancestor HEAD "refs/remotes/origin/$ref" 2>/dev/null
-}
-
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
@@ -1675,7 +1658,7 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default && return 0
-  pushed_to_registered_ref
+  fm_dod_registered_ref_contains_named_head "$WT" "$META" "$MODE" HEAD
 }
 
 # The completion links this teardown already holds locally. A scout's

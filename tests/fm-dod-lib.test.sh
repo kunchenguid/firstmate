@@ -62,6 +62,34 @@ test_remote_containing_named_head_is_accepted() {
   pass "named head on a remote-tracking ref is accepted"
 }
 
+test_registered_push_ref_is_fetched_for_done_gate() {
+  local repo wt meta state reason rc
+  repo="$TMP_ROOT/registered-push-repo"
+  wt="$TMP_ROOT/registered-push-wt"
+  state="$TMP_ROOT/registered-push-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/registered-push
+  git -C "$wt" commit -q --allow-empty -m 'pushed only to the registered ref'
+  git -C "$wt" push -q origin HEAD:refs/heads/integration/main
+  git -C "$wt" update-ref -d refs/remotes/origin/integration/main
+  ! git -C "$wt" rev-parse --quiet --verify refs/remotes/origin/integration/main >/dev/null 2>&1 \
+    || fail "registered push fixture unexpectedly has a local tracking ref"
+  meta="$state/registered-push.meta"
+  printf 'kind=ship\nmode=direct-PR\npush_landed_ref=integration/main\n' > "$meta"
+
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" 'done: PR https://example.test/o/r/pull/4 checks green' "$state" registered-push "$meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a no-mistakes done accepted a registered direct push"
+  assert_contains "$reason" "unreachable outside the worker copy" \
+    "the no-mistakes refusal did not preserve the ordinary gate"
+
+  accept_done ship direct-PR "$wt" "$repo" 'done: branch integration/main pushed to origin' "$state" registered-push "$meta" \
+    || fail "the done gate did not fetch and verify the registered push ref"
+  git -C "$wt" rev-parse --quiet --verify refs/remotes/origin/integration/main >/dev/null \
+    || fail "the done gate accepted without fetching the registered ref"
+  pass "the shared done gate fetches a registered direct-push ref only outside no-mistakes"
+}
+
 test_moved_branch_without_named_head_is_refused() {
   local repo wt main_sha fix_sha reason rc
   repo="$TMP_ROOT/moved-repo"
@@ -428,6 +456,7 @@ test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
+test_registered_push_ref_is_fetched_for_done_gate
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune

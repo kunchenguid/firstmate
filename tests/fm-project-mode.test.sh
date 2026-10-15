@@ -25,6 +25,9 @@ cat > "$DATA/projects.md" <<'EOF'
 - lab [no-mistakes forge=forgejo] - forge token after mode (added 2026-01-01)
 - lead [forge=forgejo direct-PR +yolo] - forge token first, order must not matter (added 2026-01-01)
 - kept [local-only forge=forgejo] - a forge on a mode that publishes nothing (added 2026-01-01)
+- pusher [direct-PR forge=push-only] - direct-push delivery (added 2026-01-01)
+- local-pusher [local-only forge=push-only] - registered direct-push completion (added 2026-01-01)
+- pipeline-pusher [no-mistakes forge=push-only] - pipeline must retain publication ownership (added 2026-01-01)
 - colon [no-mistakes forge:forgejo] - a colon-spelled token is not a forge binding (added 2026-01-01)
 - glabbed [no-mistakes forge=gitlab] - gitlab is not a forge value (added 2026-01-01)
 EOF
@@ -63,6 +66,14 @@ for flag in "" --forge; do
 done
 pass "fm-project-mode: forge=forgejo on local-only is refused like every forge"
 
+[ "$(run_mode pusher)" = "direct-PR off" ] || fail "forge=push-only changed direct-PR mode output: $(run_mode pusher)"
+[ "$(run_forge pusher)" = "push-only" ] || fail "forge=push-only did not resolve for direct-PR: $(run_forge pusher)"
+[ "$(run_mode local-pusher)" = "local-only off" ] || fail "forge=push-only local-only mode was refused: $(run_mode local-pusher)"
+[ "$(run_forge local-pusher)" = "push-only" ] || fail "forge=push-only did not resolve for local-only: $(run_forge local-pusher)"
+[ "$(run_mode pipeline-pusher)" = "no-mistakes off" ] || fail "forge=push-only changed no-mistakes mode output: $(run_mode pipeline-pusher)"
+[ "$(run_forge pipeline-pusher)" = "push-only" ] || fail "forge=push-only did not resolve for no-mistakes: $(run_forge pipeline-pusher)"
+pass "fm-project-mode: forge=push-only is available for spawn to restrict by task mode"
+
 [ "$(run_mode colon)" = "no-mistakes off" ] || fail "a colon-spelled token changed the posture: $(run_mode colon)"
 [ "$(run_forge colon)" = "none" ] || fail "forge:forgejo must not bind a forge; only forge=forgejo does: $(run_forge colon)"
 pass "fm-project-mode: the colon spelling forge:forgejo is not a forge binding"
@@ -75,8 +86,8 @@ for flag in "" --forge; do
   [ -z "$out" ] || fail "a refused forge=gitlab still handed the caller a posture: '$out'"
 done
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" glabbed 2>&1 >/dev/null) || true
-assert_contains "$err" 'forge=forgejo' "the unknown-forge refusal did not name forge=forgejo as an accepted value"
-pass "fm-project-mode: a value outside none|gerrit|forgejo is refused and the refusal names forge=forgejo"
+assert_contains "$err" 'forge=push-only' "the unknown-forge refusal did not name forge=push-only as an accepted value"
+pass "fm-project-mode: a value outside none|gerrit|forgejo|push-only is refused and the refusal names forge=push-only"
 
 [ "$(run_forge missing-project)" = "none" ] || fail "a missing project must default --forge to none: $(run_forge missing-project)"
 [ "$(FM_DATA_OVERRIDE="$TMP_ROOT/no-such-dir" "$PROJECT_MODE" --forge legacy 2>/dev/null)" = "none" ] \

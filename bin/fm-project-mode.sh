@@ -7,7 +7,7 @@
 # is absent, so every existing installation keeps its current "fm/<task-id>"
 # branch names unchanged.
 # With --forge it prints one word instead: the project's registered forge,
-# none|gerrit|forgejo. The forge is asked for explicitly, so the default output
+# none|gerrit|forgejo|push-only. The forge is asked for explicitly, so the default output
 # stays the same two words for every project, bound or not.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
@@ -29,6 +29,7 @@
 #   - <name> [<mode> +yolo branch=<prefix>] - <desc> (added <date>)  -> <mode> <yolo> <prefix>
 #   - <name> [<mode> forge=gerrit] - <desc> (added <date>)           -> <mode> off, --forge gerrit
 #   - <name> [<mode> forge=forgejo] - <desc> (added <date>)          -> <mode> <yolo>, --forge forgejo
+#   - <name> [<mode> forge=push-only] - <desc> (added <date>)        -> <mode> <yolo>, --forge push-only
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
 #   Bracket tokens are order-independent: +yolo, branch=<prefix>, and forge=<value>
 #   are recognized by their own shape wherever they appear, and whichever token is
@@ -65,8 +66,10 @@
 #   bin/fm-forge-detect.sh proposes gerrit from a protocol fact at project-add
 #   intake, forgejo has no such fact and is proposed from the captain's own
 #   account of the host, and the captain's confirmation is what this record holds.
-#   A forge describes what a mode publishes, so it composes with no-mistakes and
-#   direct-PR and is REFUSED on local-only, which publishes nothing: that mode
+#   `push-only` marks the direct-push shape whose completion may register its
+#   long-lived target branch. Its registration is accepted only for direct-PR
+#   and local-only tasks, while no-mistakes remains pipeline-owned. Other forge bindings compose with
+#   no-mistakes and direct-PR and are REFUSED on local-only, which publishes nothing: that mode
 #   lands by fast-forwarding local main, which on a review-server project
 #   advances it with content the server has never seen
 #   (docs/gerrit-forge-integration.md section 3).
@@ -220,15 +223,15 @@ if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
 fi
 
 case "$forge" in
-  none|forge=gerrit|forge=forgejo) forge=${forge#forge=} ;;
+  none|forge=gerrit|forge=forgejo|forge=push-only) forge=${forge#forge=} ;;
   forge=)
-    echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted values are forge=gerrit and forge=forgejo, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+    echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, and forge=push-only, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
   *)
-    echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are forge=gerrit and forge=forgejo, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+    echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, and forge=push-only, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
 esac
-if [ "$forge" != none ] && [ "$mode" = local-only ]; then
+if [ "$forge" != none ] && [ "$forge" != push-only ] && [ "$mode" = local-only ]; then
   echo "refused: $NAME is registered local-only with forge=$forge in $REG; local-only publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; register no-mistakes or direct-PR to publish through the forge, or drop the forge token to keep the project local" >&2
   exit 3
 fi

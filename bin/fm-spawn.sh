@@ -53,8 +53,9 @@
 #   push_landed_ref= in state/<id>.meta, which a relaunch reuses and
 #   bin/fm-teardown.sh's landed check reads: HEAD being an ancestor of origin's
 #   copy of the registered ref proves the work landed. It is refused on scouts,
-#   secondmates, relaunches, and mode=local-only, and without it teardown's
-#   landed check is unchanged.
+#   secondmates, relaunches, no-mistakes, and projects not registered
+#   forge=push-only. It accepts direct-PR and local-only tasks, persists a
+#   short branch name, and leaves teardown's landed check unchanged without it.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -1061,14 +1062,10 @@ else
         echo "error: --push-landed-ref requires a ref name" >&2
         exit 1
       }
-      if [ "${PUSH_LANDED_REF#-}" != "$PUSH_LANDED_REF" ] || ! git check-ref-format --branch "$PUSH_LANDED_REF" >/dev/null 2>&1; then
+      if ! PUSH_LANDED_REF=$(fm_dod_normalize_push_landed_ref "$PUSH_LANDED_REF"); then
         echo "error: --push-landed-ref '$PUSH_LANDED_REF' is not a valid git branch name" >&2
         exit 1
       fi
-      [ "$MODE" != local-only ] || {
-        echo "error: --push-landed-ref is meaningless on local-only, which pushes nothing to a remote; drop it" >&2
-        exit 1
-      }
     fi
   else
     [ "$MODE_SET" -eq 0 ] || {
@@ -2085,6 +2082,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   UPSTREAM_CONSENT=$(fm_meta_get "$RELAUNCH_META" upstream_consent)
   PUSH_LANDED_REF=$(fm_meta_get "$RELAUNCH_META" push_landed_ref)
+  if [ -n "$PUSH_LANDED_REF" ] && ! PUSH_LANDED_REF=$(fm_dod_normalize_push_landed_ref "$PUSH_LANDED_REF"); then
+    echo "error: task $ID has an invalid recorded push-landed ref '$PUSH_LANDED_REF'" >&2
+    exit 1
+  fi
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -3557,6 +3558,18 @@ if [ "$KIND" = ship ]; then
     fi
     echo "error: forge mismatch for $ID: $PROJ_NAME is registered forge=$STANDING_FORGE but $SOURCE_BRIEF records forge=$BRIEF_FORGE; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $forge_scaffold, then re-fill those two subsections, so the worker's publication matches the project's forge" >&2
     exit 1
+  fi
+  if [ -n "$PUSH_LANDED_REF" ]; then
+    [ "$STANDING_FORGE" = push-only ] || {
+      echo "error: --push-landed-ref requires $PROJ_NAME to be registered forge=push-only; it is registered forge=$STANDING_FORGE" >&2
+      exit 1
+    }
+    case "$MODE" in
+      direct-PR|local-only) ;;
+      *)
+        echo "error: --push-landed-ref is refused for mode=$MODE; no-mistakes owns publication through its pipeline" >&2
+        exit 1 ;;
+    esac
   fi
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
   # the captain's decision of 2026-09-15: a Code-Review+2 is a positive
