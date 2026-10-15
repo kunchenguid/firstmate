@@ -91,7 +91,17 @@
 #      unbounded re-block loop below that override.
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve this script's directory without forking `dirname` on the common
+# path: Claude always invokes hooks with the absolute
+# "$CLAUDE_PROJECT_DIR"/bin/... path, so a leading "/" lets a pure parameter
+# expansion stand in for it. A relative invocation (manual runs, tests) falls
+# back to the original dirname-based resolution unchanged.
+case "${BASH_SOURCE[0]}" in
+  /*) _SRC_DIR=${BASH_SOURCE[0]%/*}; [ -n "$_SRC_DIR" ] || _SRC_DIR=/ ;;
+  *) _SRC_DIR=$(dirname "${BASH_SOURCE[0]}") ;;
+esac
+SCRIPT_DIR="$(cd "$_SRC_DIR" && pwd)"
+unset _SRC_DIR
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -150,8 +160,12 @@ trap record_parent_stop_state EXIT
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
-# stdin.
-PAYLOAD=$(cat 2>/dev/null || true)
+# stdin. Builtin-only slurp avoids the fork `cat` would cost on every Stop.
+# Trailing-newline handling differs from $(cat) (read keeps them, command
+# substitution would strip them), which is immaterial here - PAYLOAD is only
+# ever emptiness-tested or handed to jq, and jq ignores trailing whitespace.
+PAYLOAD=''
+IFS= read -r -d '' PAYLOAD || true
 [ -n "$PAYLOAD" ] || exit 0
 
 # jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
