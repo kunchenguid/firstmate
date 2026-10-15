@@ -6,10 +6,10 @@ import { subscribeFirstmateEvents, TURN_END_EVENTS, watchArmCoordinatorKey } fro
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
-function runProcess(command, args, input = "") {
+function runProcess(command, args, input) {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
@@ -19,10 +19,10 @@ function runProcess(command, args, input = "") {
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.stdin.on("error", () => {});
+    child.stdin?.on("error", (error) => resolve({ code: 127, stdout, stderr: String(error?.message ?? error) }));
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
-    child.stdin.end(input);
+    child.stdin?.end(input);
   });
 }
 

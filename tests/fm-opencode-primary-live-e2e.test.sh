@@ -177,9 +177,9 @@ try:
     assert 'watcher-pipeline' in shell_errors(), shell_errors()
 
     env['OPENCODE_PASSWORD'] = password
-    tui = 'env ' + ' '.join(shlex.quote(key + '=' + value) for key, value in env.items())
-    tui += ' opencode --server ' + shlex.quote(base) + ' --session ' + session
-    subprocess.run(['tmux', '-L', socket_name, 'new-session', '-d', '-s', 'fixture', '-c', str(project), tui], check=True)
+    tui = 'opencode --server ' + shlex.quote(base) + ' --session ' + session
+    subprocess.run(['tmux', '-L', socket_name, 'new-session', '-d', '-s', 'fixture', '-c', str(project), tui],
+                   env=env, check=True)
     def capture():
         return subprocess.run(['tmux', '-L', socket_name, 'capture-pane', '-p', '-t', 'fixture', '-S', '-800'],
                               capture_output=True, text=True, check=True).stdout
