@@ -88,7 +88,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    Never describe one of these as reloaded; its agent is still running the wiring it launched with.
 
 5. **Report to the captain in plain outcomes, in one line where you can.**
-   Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
+   Summarize what landed under `.agents/contract/captain-voice.md` without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
    Say plainly when a mate got the message rather than a clean reload, and why - never let a partial reload read as a full one.
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.

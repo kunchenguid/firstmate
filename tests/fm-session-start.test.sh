@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-session-start.test.sh - behavior tests for bin/fm-session-start.sh,
-# the single command that collapses AGENTS.md sections 3 (bootstrap) and 5
-# (recovery) into one ordered digest.
+# the single command that collapses session-start bootstrap and recovery
+# into one ordered digest.
 #
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest

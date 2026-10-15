@@ -25,7 +25,7 @@
 # link would have carried for that same mismatch.
 # This is a manual project-initialization utility, not a supervision script,
 # so it does not call fm-guard.sh. No brief calls it: the sections it inserts
-# and the pointer it creates are additions, and AGENTS.md section 6 bounds
+# and the pointer it creates are additions, and `.agents/contract/task-lifecycle.md` bounds
 # crewmate edits of project memory files to correcting the wrong text only.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
 set -eu

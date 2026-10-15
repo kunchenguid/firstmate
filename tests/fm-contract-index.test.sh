@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Topic index path refusal. AGENTS.md markers are Unit 3.
+# Topic index path refusal, AGENTS.md marker match, and the 3200-word ceiling.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -26,8 +26,8 @@ expect_refuse() {  # <path-cell> <label>
   assert_contains "$(cat "$err")" "refuse path: $1" "$2 did not refuse the path"
 }
 
-test_tracked_topics_check_without_agents_markers() {
-  local out err code
+test_tracked_topics_match_agents_index() {
+  local out err code words agents
   err=$TMP_ROOT/tracked.err
   out=$("$INDEX" --check 2>"$err")
   code=$?
@@ -37,9 +37,73 @@ test_tracked_topics_check_without_agents_markers() {
   out=$("$INDEX" render 2>"$err")
   assert_contains "$out" '| quota-array | a matched profile array must be ranked | .agents/skills/quota-array-dispatch/SKILL.md |' \
     "render dropped the quota-array topic"
+  assert_contains "$out" '| harness-dispatch | before spawn, recovery, or choosing among a dispatch-profile array | .agents/contract/harness-dispatch.md |' \
+    "render dropped the harness-dispatch topic"
+  assert_contains "$out" '| task-lifecycle | filing, holding, dispatching, or merging when the skill triggers above do not already apply | .agents/contract/task-lifecycle.md |' \
+    "render dropped the task-lifecycle topic"
+  assert_contains "$out" '| captain-voice | a captain-facing reply needs the internal-to-outcome glossary | .agents/contract/captain-voice.md |' \
+    "render dropped the captain-voice topic"
+  assert_contains "$out" '| supervision-wake | a wake kind is not covered by the emitted supervision block | .agents/contract/supervision-wake.md |' \
+    "render dropped the supervision-wake topic"
   assert_contains "$out" '| layout | locating or changing home, config, data, state, or project paths | .agents/skills/operational-home-layout/SKILL.md |' \
     "render dropped the layout topic"
-  pass "tracked topics render and check without AGENTS.md markers"
+  agents=$(cat "$ROOT/AGENTS.md")
+  assert_contains "$agents" '| harness-dispatch | before spawn, recovery, or choosing among a dispatch-profile array | .agents/contract/harness-dispatch.md |' \
+    "AGENTS.md index omitted harness-dispatch"
+  assert_contains "$agents" '<!-- fm-contract-index:begin -->' "AGENTS.md lost the index begin marker"
+  assert_contains "$agents" '<!-- fm-contract-index:end -->' "AGENTS.md lost the index end marker"
+  words=$(wc -w <"$ROOT/AGENTS.md" | tr -d '[:space:]')
+  [ "$words" -le 3200 ] || fail "AGENTS.md is $words words"
+  pass "tracked topics match the AGENTS.md index under the word ceiling"
+}
+
+test_check_rejects_drift_and_ceiling() {
+  local copy err out code words file
+  copy=$TMP_ROOT/agents.md
+  err=$TMP_ROOT/agents.err
+  {
+    printf '%s\n' '<!-- fm-contract-index:begin -->'
+    "$INDEX" render
+    printf '%s\n' '<!-- fm-contract-index:end -->'
+  } >"$copy"
+  export FM_CONTRACT_AGENTS=$copy
+  out=$("$INDEX" --check 2>"$err")
+  code=$?
+  assert_equals 0 "$code" "a matching copy failed check"
+  assert_equals '' "$out" "a matching copy printed a table"
+  sed 's|harness-dispatch.md|harness-dispatch-drift.md|' "$copy" >"$TMP_ROOT/drift.md"
+  mv "$TMP_ROOT/drift.md" "$copy"
+  out=$("$INDEX" --check 2>"$err")
+  code=$?
+  assert_not_equals 0 "$code" "a drifted index was accepted"
+  assert_equals '' "$out" "a drifted index printed a table"
+  assert_contains "$(cat "$err")" 'AGENTS.md contract index drifted' "drift was not reported"
+  {
+    printf '%s\n' '<!-- fm-contract-index:begin -->'
+    "$INDEX" render
+    printf '%s\n' '<!-- fm-contract-index:end -->'
+    python3 -c 'print("pad " * 3300, end="")'
+  } >"$copy"
+  out=$("$INDEX" --check 2>"$err")
+  code=$?
+  words=$(wc -w <"$copy" | tr -d '[:space:]')
+  assert_not_equals 0 "$code" "a file over 3200 words was accepted"
+  assert_equals '' "$out" "a fat file printed a table"
+  assert_contains "$(cat "$err")" "fm-contract-index: AGENTS.md is $words words; ceiling is 3200" \
+    "the ceiling message did not name the word count"
+  printf '%s\n' 'no markers here' >"$copy"
+  out=$("$INDEX" --check 2>"$err")
+  code=$?
+  assert_not_equals 0 "$code" "missing markers were accepted"
+  assert_contains "$(cat "$err")" 'AGENTS.md contract index markers missing or repeated' \
+    "missing markers were not reported"
+  file=$(write_topics ok-with-broken-agents '.agents/skills/quota-array-dispatch/SKILL.md')
+  out=$("$INDEX" --check "$file" 2>"$err")
+  code=$?
+  assert_equals 0 "$code" "an explicit topic table consulted AGENTS.md"
+  assert_equals '' "$out" "an explicit topic table printed a table"
+  unset FM_CONTRACT_AGENTS
+  pass "check rejects a drifted index, a file over 3200 words, and missing markers"
 }
 
 test_refuse_escaping_paths() {
@@ -67,5 +131,6 @@ test_refuse_escaping_paths() {
   pass "index refuses absolute, parent, dollar, home, state, data, and missing paths"
 }
 
-test_tracked_topics_check_without_agents_markers
+test_tracked_topics_match_agents_index
 test_refuse_escaping_paths
+test_check_rejects_drift_and_ceiling

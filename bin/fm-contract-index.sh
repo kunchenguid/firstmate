@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# fm-contract-index.sh — markdown index of deferred contract topics.
+# fm-contract-index.sh - markdown index of deferred contract topics.
 #
-# render (default) prints the table. --check validates the topic table.
-# AGENTS.md marker comparison and the 3200-word ceiling are Unit 3.
-# This script does not read AGENTS.md.
+# render (default) prints the table.
+# --check with no table argument also compares the AGENTS.md marker block
+# to that table and enforces a 3200-word ceiling (wc -w).
+# --check with a table argument validates that table only.
+# --write replaces the marker block in AGENTS.md.
+# FM_CONTRACT_AGENTS, when set, is the file those two modes read.
+# Tests point it at a copy so a drifted index or a fat file can fail
+# without editing the tracked contract.
 #
 # Usage: fm-contract-index.sh [render]
 #        fm-contract-index.sh --check [tsv]
+#        fm-contract-index.sh --write
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -127,9 +133,92 @@ fm_contract_index_render() {
   done
 }
 
+_fm_ci_agents_path() {
+  if [ -n "${FM_CONTRACT_AGENTS:-}" ]; then
+    printf '%s\n' "$FM_CONTRACT_AGENTS"
+  else
+    printf '%s\n' "$FM_CONTRACT_ROOT/AGENTS.md"
+  fi
+}
+
+_fm_ci_extract_index() {  # <agents-file>
+  awk '
+    $0 == "<!-- fm-contract-index:begin -->" { n++; cap = 1; next }
+    $0 == "<!-- fm-contract-index:end -->" {
+      if (cap != 1) bad = 1
+      cap = 0
+      ended++
+      next
+    }
+    cap == 1 { print }
+    END {
+      if (n != 1 || ended != 1 || bad == 1 || cap == 1) exit 1
+    }
+  ' "$1"
+}
+
+_fm_ci_check_agents() {
+  local agents rendered extracted words
+  agents=$(_fm_ci_agents_path)
+  [ -f "$agents" ] || { _fm_ci_die "missing AGENTS.md" || return 1; }
+  rendered=$(fm_contract_index_render) || return 1
+  if ! extracted=$(_fm_ci_extract_index "$agents"); then
+    _fm_ci_die "AGENTS.md contract index markers missing or repeated" || return 1
+  fi
+  [ "$extracted" = "$rendered" ] || {
+    _fm_ci_die "AGENTS.md contract index drifted" || return 1
+  }
+  words=$(wc -w <"$agents" | tr -d '[:space:]') || {
+    _fm_ci_die "could not count AGENTS.md words" || return 1
+  }
+  case "$words" in
+    ''|*[!0-9]*) _fm_ci_die "could not count AGENTS.md words" || return 1 ;;
+  esac
+  [ "$words" -le 3200 ] || {
+    _fm_ci_die "AGENTS.md is $words words; ceiling is 3200" || return 1
+  }
+}
+
+_fm_ci_write_agents() {
+  local agents rendered tmp
+  agents=$(_fm_ci_agents_path)
+  [ -f "$agents" ] || { _fm_ci_die "missing AGENTS.md" || return 1; }
+  _fm_ci_extract_index "$agents" >/dev/null || {
+    _fm_ci_die "AGENTS.md contract index markers missing or repeated" || return 1
+  }
+  rendered=$(mktemp) || return 1
+  tmp=$(mktemp) || { rm -f "$rendered"; return 1; }
+  if ! fm_contract_index_render >"$rendered"; then
+    rm -f "$rendered" "$tmp"
+    return 1
+  fi
+  if ! awk -v repl="$rendered" '
+    BEGIN {
+      begin = "<!-- fm-contract-index:begin -->"
+      end = "<!-- fm-contract-index:end -->"
+    }
+    $0 == begin {
+      print
+      while ((getline line < repl) > 0) print line
+      close(repl)
+      skip = 1
+      next
+    }
+    $0 == end { skip = 0; print; next }
+    skip { next }
+    { print }
+  ' "$agents" >"$tmp"; then
+    rm -f "$rendered" "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$agents" || { rm -f "$rendered" "$tmp"; return 1; }
+  rm -f "$rendered"
+}
+
 _fm_ci_usage() {
   printf '%s\n' 'usage: fm-contract-index.sh [render]' >&2
   printf '%s\n' '       fm-contract-index.sh --check [tsv]' >&2
+  printf '%s\n' '       fm-contract-index.sh --write' >&2
   return 2
 }
 
@@ -141,7 +230,15 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
       ;;
     --check)
       [ "$#" -le 2 ] || { _fm_ci_usage; exit 2; }
-      _fm_ci_load "${2:-}"
+      if [ "$#" -eq 2 ]; then
+        _fm_ci_load "$2"
+      else
+        _fm_ci_load && _fm_ci_check_agents
+      fi
+      ;;
+    --write)
+      [ "$#" -eq 1 ] || { _fm_ci_usage; exit 2; }
+      _fm_ci_write_agents
       ;;
     *)
       _fm_ci_usage

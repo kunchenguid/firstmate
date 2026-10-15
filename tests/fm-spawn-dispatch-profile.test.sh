@@ -113,7 +113,7 @@ run_spawn() {
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
 
-# Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
+# Ship spawns carry an explicit delivery contract (`.agents/contract/task-lifecycle.md`); these
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
