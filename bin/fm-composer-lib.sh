@@ -255,6 +255,13 @@ fm_composer_normalize_trim_var() {  # <varname>
 # the tightest margin over the 128 default in the fleet. Above ~150 that glyph is
 # stripped as ghost text, which is why the bare-glyph fallback below must also
 # recognise every agent glyph from the UNSTRIPPED plain row.
+# Command Code draws its idle placeholder in truecolor 38;2;138;148;168,
+# luminance ~147.3, while its typed text is the default foreground (verified
+# live, Command Code 1.74.1 with COLORTERM=truecolor, which its launch pins; a
+# 256-colour terminal gets the untested 38;5;145 instead). Raising the fleet-wide
+# ceiling to reach it would over-strip other harnesses, so only a screen that the
+# backend's identity probe attributes to Command Code is read with a fixed
+# ceiling of 160 in its place (fm_composer_classify_screen).
 # The dim/faint and dark-foreground states are tracked together as "de-emphasis";
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
@@ -353,6 +360,7 @@ fm_composer_strip_ghost() {
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; omp: "Working…"; grok: "Ctrl+c:cancel"; agy: "esc to cancel";
 # devin: "esc twice to interrupt" and its "❭ Guide Devin while it works" working composer.
+# commandcode: "esc to interrupt" beside a bullet-framed elapsed cell.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -382,6 +390,12 @@ FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[
 # Devin 3000.11.1: the working composer and interrupt hint are independent
 # delivery signals. Neither is used as semantic worker-state evidence.
 FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT='esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
+# Command Code 1.74.1 renders one status row while a turn runs, for example
+# ` ○ Contemplificating…  esc to interrupt • 2s • ↓ 41`: the `esc to interrupt`
+# token and the bullet-framed elapsed cell are independent delivery signals, and
+# the idle footer carries neither. Delivery guard only; recorded worker state
+# comes from the commandcode-mod writer in bin/fm-busy-lib.sh.
+FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT='esc to interrupt|•[[:space:]]+[0-9]+[smh]([[:space:]]+[0-9]+[smh])*[[:space:]]+•'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
@@ -430,6 +444,7 @@ fm_busy_lines_match() {  # [harness]
     case "$harness" in
       claude) regex=$FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT ;;
       devin) regex=$FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT ;;
+      commandcode) regex=$FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
@@ -467,9 +482,12 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). Devin renders the anchored `Ask Devin to build features,
 # fix bugs, or work on your code` as dim text after its `❭` glyph (verified
-# live, devin 3000.11.1). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
+# live, devin 3000.11.1). Command Code renders the anchored `Ask your question...`
+# after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
+# bright for the default ghost ceiling, so fm_composer_classify_screen reads its
+# screen with a raised one. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -742,8 +760,9 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # identity result was supplied, and the verdict depends on it. Adapters answer
 # `need-identity` by running their identity probe once and re-calling with
 # either its result or `probe-absent`; the sentinel never escapes an adapter.
-# Identity stays a lazy second pass so the common non-pi read never pays for
-# the probe.
+# Identity stays a lazy second pass: an adapter probes only on `need-identity`
+# or, on tmux, to recheck an `unknown` read for Command Code, so a definite
+# non-pi read never pays for the probe.
 #
 # Consumers that can overwrite input or confirm delivery must accept only the
 # exact positive proof they require (`empty`), so unrecognized future verdicts
@@ -760,6 +779,37 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
     *────────*) return 0 ;;
   esac
   return 1
+}
+
+# _fm_composer_titled_rule_row: 0 when a trimmed row is a composer rule with a
+# session title burned into it (Claude Code draws a named session's title into
+# its composer's TOP rule: `──────── <name> ─`, issues #5601 and #5558), proven
+# by collapsing to exactly the column width of <plain-rule-spaces>, the partner
+# closing rule already mapped to spaces.
+#
+# This is deliberately NOT a relaxation of _fm_composer_pi_separator_row, and
+# the two must not be merged: that predicate also feeds the pi identity
+# conjunction, so it stays strictly dashes-only. This one has the single
+# consumer _fm_composer_bare_rule_sandwich.
+#
+# The row must OPEN with the same 8-column dash run the strict separator
+# requires. Width is proven by comparing canonical space strings, never by
+# `${#row}`, which counts characters under UTF-8 and bytes under LC_ALL=C
+# (issue #1988). Title text is ASCII-printable only, the same boundary
+# _fm_composer_titled_bottom_ok holds; any other glyph leaves residue, and the
+# verdict stays `unknown`, the safe direction.
+_fm_composer_titled_rule_row() {  # <trimmed-row> <plain-rule-spaces>
+  local row=$1 expected=$2 spaces
+  case "$row" in
+    ────────*) ;;
+    *) return 1 ;;
+  esac
+  spaces=${row//─/ }
+  spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
+  case "$spaces" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  [ "$spaces" = "$expected" ]
 }
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
@@ -1288,16 +1338,157 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
   if [ "$styled" = 1 ]; then printf 'pending'; else printf 'unknown'; fi
 }
 
-# _fm_composer_classify_leftbar: opencode's left-bar composer. Blank rows and
-# the idle hint read empty; the run's LAST row may be the mode/model footer
-# (composer furniture, never typed text). Real content is pending when styling
-# can prove it real, unknown otherwise.
-_fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
-  local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
-  footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
+# OpenCode renders the pane's working directory and git branch as a right-aligned
+# "<cwd>:<branch>" indicator inside the composer's bottom rows, present since
+# 1.18.0 (upstream anomalyco/opencode#36457, merged 2026-07-11) and drawn
+# whenever the pane has an active session and no higher-priority footer hint;
+# observed live on 1.18.31, tmux backend, 2026-09-18 (dated evidence in
+# docs/verification/runtime-backends.md). The string wraps over up to three
+# rail-width fragments on the rows immediately above the mode/model footer
+# row, and its final fragment is drawn at the right end of the footer row
+# itself. The fragments are drawn in a grey whose luminance sits exactly on
+# the ghost-luma ceiling (RGB 128,128,128), so they survive
+# fm_composer_strip_ghost and an idle 1.18.31 pane used to answer `pending`,
+# which skipped the steering doorbell, the watcher's re-ring ladder, and
+# /exit typing for every such worker. The recognition is structural, never a
+# match on one machine's paths, and position-gated, so a wrong call defers
+# except the documented residual: a lone whitespace-free "~/..." or absolute
+# "/<name>..." token typed
+# so far right that its text starts beyond the region's midpoint
+# (_fm_composer_leftbar_cwd_start).
+
+# _fm_composer_leftbar_cwd_start: the first row of that furniture run inside
+# a leftbar composer region (<first-row>..<last-row>), or -1 when the region
+# carries none. Recognition is structural and position-gated:
+#   - the run is the contiguous rows immediately above the footer row (the
+#     region's LAST row, which must match the footer); the
+#     string wraps BOTTOM-aligned, so a cwd:branch shorter than the rail
+#     leaves blank rail rows ABOVE its fragments and never between them and
+#     the footer (verified live on 1.18.31, 2026-09-18: the one-fragment
+#     "~/.treehouse/anvil-99d6f9/2/anvil:fm/" sat directly above the footer
+#     under two blank rail rows, tests/fixtures/opencode-1.18.31-cwd/
+#     opencode-1.18.31-idle-short-cwd.ansi), so the walk tolerates no gap;
+#   - every run row's content is a single whitespace-free token that does
+#     NOT start at the composer's left edge: its gap after the bar exceeds
+#     half the REGION's width (the widest trimmed plain row across the
+#     region), so real typed text - which starts at the left edge, inside
+#     the left half - is still typed text, and a path-shaped string a user
+#     typed there is typed text too (position, not shape alone, decides);
+#   - the run's TOPMOST fragment itself begins with "~/" (a cwd under $HOME)
+#     or is an absolute path with at least one character that is neither "/"
+#     nor whitespace after its leading slash (a cwd outside $HOME, such as a
+#     worktree pool under /srv), so the fragments concatenate to a path,
+#     optionally followed by ":<branch>" (each fragment is a single
+#     whitespace-free token). Checking the top fragment's own bytes keeps a
+#     typed lone "~" above the run from assembling a false "~/" across the
+#     typed-row boundary. A lone "/" (or a run of slashes only) is
+#     deliberately NOT accepted: a composer holding only "/" is the first
+#     keystroke of a slash command and must never read empty. A typed slash
+#     command such as "/exit" starts at the left edge and fails the position
+#     gate above, so only a right-half token is at stake. The string's
+#     final fragment at the right end of the footer row is not read: that
+#     row is already furniture by the footer regex.
+# Anything else - a left-edge token, a multi-word row, a fragment that is
+# not part of such a path - ends the walk and leaves the rows to the
+# ordinary verdict, so a wrong call defers (pending) unless the composer's
+# only content is a lone whitespace-free token that starts in the right
+# half of the region; that residual is accepted and pinned by test. A
+# fragment with no path start (a bare tail
+# continuation, or a rail whose string is too long for the composer's
+# visible rows) fails the check by construction, deferring instead; a
+# truncated rail whose topmost visible fragment happens to begin at a
+# "/<name>" wrap boundary is still furniture and is accepted.
+# The tests operate on the plain row (fm_composer_strip_ansi), so the
+# recognition is styling-independent and holds under any
+# FM_COMPOSER_GHOST_LUMA_MAX.
+_fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
+  local screen=$1 first=$2 last=$3
+  local plain row raw rest frag indent len width=0 top_frag='' start=-1
+  local footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  # The footer row is the region's LAST row (the same rule the classification
+  # loop applies); the furniture run ends on the row above it, and a last row
+  # that is not the footer leaves the region without such furniture.
+  raw=$(_fm_composer_screen_row "$last" "$plain")
+  rest=$(_fm_composer_row_content "$raw" 0)
+  case "$rest" in '┃'*) rest=${rest#┃} ;; *) rest= ;; esac
+  fm_composer_normalize_trim_var rest
+  fm_composer_idle_matches "$rest" "$footer_re" sensitive || return 1
+  # The region's width: the widest trimmed plain row across first..last. The
+  # furniture is right-aligned and the widest rows reach the pane's right
+  # edge in the live captures, so this tracks the composer's real width; a
+  # short token typed into an otherwise empty composer must not clear a
+  # position gate measured against its own short row.
   row=$first
   while [ "$row" -le "$last" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$plain")
+    rest=$raw
+    fm_composer_normalize_trim_var rest
+    len=${#rest}
+    if [ "$len" -gt "$width" ]; then width=$len; fi
+    row=$((row + 1))
+  done
+  row=$((last - 1))
+  while [ "$row" -ge "$first" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$plain")
+    rest=$raw
+    fm_composer_normalize_trim_var rest
+    case "$rest" in
+      '┃'*) rest=${rest#┃} ;;
+      *) break ;;
+    esac
+    fm_composer_normalize_spaces_var rest
+    indent=${rest%%[![:space:]]*}
+    indent=${#indent}
+    frag=$rest
+    frag=${frag#"${frag%%[![:space:]]*}"}
+    frag=${frag%"${frag##*[![:space:]]}"}
+    [ -n "$frag" ] || break
+    case "$frag" in *[[:space:]]*) break ;; esac
+    # Position, not shape alone: typed input starts at the composer's left
+    # edge, so a fragment whose gap after the bar does not exceed half the
+    # region's width is typed text and ends the run. The width is the
+    # region's, not this row's own length: a short space-prefixed token
+    # typed into an otherwise empty composer must not clear a gate measured
+    # against its own short row.
+    [ $((indent * 2)) -gt "$width" ] || break
+    top_frag=$frag
+    start=$row
+    row=$((row - 1))
+  done
+  [ -n "$top_frag" ] || return 1
+  # The prefix is checked on the TOPMOST recognised fragment's own bytes, not
+  # on the concatenation: a typed lone "~" directly above the run must not be
+  # absorbed into the run; it stays an ordinary typed row above it.
+  # A shell case pattern cannot spell a literal "~/" without shellcheck
+  # SC2088 (tilde does not expand in quotes), so the prefix is built once.
+  local tilde tilde_slash
+  tilde=$(printf '~')
+  tilde_slash="$tilde/"
+  case "$top_frag" in
+    "$tilde_slash"*) printf '%s\n' "$start"; return 0 ;;
+    /*[!/]*) printf '%s\n' "$start"; return 0 ;;
+  esac
+  return 1
+}
+
+# _fm_composer_classify_leftbar: opencode's left-bar composer. Blank rows and
+# the idle hint read empty; the run's LAST row may be the mode/model footer
+# (composer furniture, never typed text), and the right-aligned
+# cwd:branch furniture OpenCode draws there since 1.18.0 (the rows
+# immediately above that footer, recognised by
+# _fm_composer_leftbar_cwd_start) is composer furniture too. Real content is
+# pending when styling can prove it real, unknown otherwise.
+_fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
+  local screen=$1 styled=$2 first=$3 last=$4
+  local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0 cwd_start
+  footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
+  cwd_start=$(_fm_composer_leftbar_cwd_start "$screen" "$first" "$last") || cwd_start=-1
+  row=$first
+  while [ "$row" -le "$last" ]; do
+    if [ "$cwd_start" -ge 0 ] && [ "$row" -ge "$cwd_start" ]; then
+      row=$((row + 1)); continue
+    fi
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     case "$content" in
@@ -1428,6 +1619,28 @@ _fm_composer_locate_footer_zone() {  # <plain>
     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_LAST" ]
 }
 
+# _fm_composer_bare_rule_sandwich: 0 when bare agent-glyph <row> sits in its
+# own titled composer: a titled rule directly above it and the screen's only
+# unmatched separator directly below it, which is that composer's closing rule.
+#
+# The cursorless staleness rule reads an unmatched separator BELOW a candidate
+# as proof the candidate is scrollback. A titled top rule never opens the
+# separator pair, so the composer's own closing rule becomes that unmatched
+# separator and a genuinely idle composer read `unknown`. Adjacency on BOTH
+# edges keeps the staleness rule intact everywhere else: a glyph stranded in
+# scrollback has transcript rows, not its own rules, around it.
+_fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
+  local plain=$1 row=$2 above below
+  [ "$row" -ge 1 ] || return 1
+  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$((row + 1))" ] || return 1
+  below=$(_fm_composer_screen_row "$((row + 1))" "$plain")
+  fm_composer_normalize_trim_var below
+  _fm_composer_pi_separator_row "$below" || return 1
+  above=$(_fm_composer_screen_row "$((row - 1))" "$plain")
+  fm_composer_normalize_trim_var above
+  _fm_composer_titled_rule_row "$above" "${below//─/ }"
+}
+
 _fm_composer_select_cursorless() {
   local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
   FM_COMPOSER_SELECTED_KIND=
@@ -1483,8 +1696,14 @@ _fm_composer_select_cursorless() {
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
      && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
+    # Spare only a bare glyph inside its own titled composer rules; see
+    # _fm_composer_bare_rule_sandwich for why that shape is not scrollback.
+    if ! { [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
+           && [ "$generic" = "$FM_COMPOSER_SCAN_BARE_ROW" ] \
+           && _fm_composer_bare_rule_sandwich "$plain" "$FM_COMPOSER_SCAN_BARE_ROW"; }; then
+      FM_COMPOSER_SELECTED_KIND=
+      return 1
+    fi
   fi
   if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
@@ -1538,7 +1757,7 @@ _fm_composer_select_cursorless() {
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
-  local leading_blank=1 placeholder_position=0 prompt_is_shell=0
+  local leading_blank=1 placeholder_position=0 prompt_is_shell=0 cwd_start
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1549,6 +1768,11 @@ EOF
   _fm_composer_scan_screen "$plain" '' 1
   _fm_composer_select_cursorless "$plain" || return 1
   row=$FM_COMPOSER_SELECTED_FIRST
+  cwd_start=-1
+  if [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ]; then
+    cwd_start=$(_fm_composer_leftbar_cwd_start "$screen" \
+      "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST") || cwd_start=-1
+  fi
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
@@ -1595,6 +1819,10 @@ EOF
     # OpenCode's left-bar hint and legacy shell-glyph boxed placeholders have no
     # such styling proof, so their structurally fixed positions remain the two
     # idle-regex exceptions here.
+    if [ "$cwd_start" -ge 0 ] && [ "$row" -ge "$cwd_start" ]; then
+      row=$((row + 1))
+      continue
+    fi
     if [ -z "$content" ] \
        || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
               || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
@@ -1612,9 +1840,80 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# fm_composer_blocking_dialog: name a screen whose next Enter would answer it.
+# Prints the name and returns 0 only for the recorded structure of one dialog:
+# the heading on its own line, then its selected row alone on a row, with the
+# recorded footer as the last non-blank row. A heading buried in a sentence,
+# or a last line that only starts with the same words, is not that dialog.
+# The strings alone are not enough, because a diff, a note, or a test fixture
+# on the pane can quote all of them above a normal composer. A miss returns 1
+# and prints nothing.
+# Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
+# is still running opens this picker, and its selected row is Exit and stop tasks.
+fm_composer_blocking_dialog() {  # <screen> -> dialog name
+  local screen=${1-}
+  [ -n "$screen" ] || return 1
+  if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+    /^[ \t]*Background work is running[ \t\r]*$/ { heading = 1 }
+    heading && /^[ \t]*❯ 1\. Exit and stop tasks[ \t\r]*$/ { selected = 1 }
+    /[^ \t\r]/ { last = $0 }
+    END { exit !(selected && last ~ /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/) }
+  '; then
+    printf '%s' 'Claude background-task exit picker'
+    return 0
+  fi
+  return 1
+}
+
+# A command substitution drops a shell variable, and every composer read runs
+# inside one. The name is therefore written to FM_COMPOSER_DIALOG_SINK when
+# that path is set. The classifier verdict is unchanged. When the sink is
+# unset the name would be discarded, so the match is skipped.
+fm_composer_note_blocking_dialog() {  # <screen>
+  local name=
+  [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ] || return 1
+  if name=$(fm_composer_blocking_dialog "$1"); then
+    printf '%s' "$name" > "$FM_COMPOSER_DIALOG_SINK" || return 1
+    return 0
+  fi
+  : > "$FM_COMPOSER_DIALOG_SINK" || return 1
+  return 1
+}
+
+# fm_composer_blocking_dialog_noted: print the name the latest classify wrote
+# to the sink. Returns 1 when the sink is unset or empty.
+fm_composer_blocking_dialog_noted() {
+  [ -n "${FM_COMPOSER_DIALOG_SINK:-}" ] || return 1
+  [ -s "$FM_COMPOSER_DIALOG_SINK" ] || return 1
+  cat "$FM_COMPOSER_DIALOG_SINK"
+}
+
+# Empty the sink, creating it when the caller has not. Sets
+# FM_COMPOSER_DIALOG_OWNED=1 only for a sink this call created, so a caller
+# that shares the path can still read the name after the release.
+fm_composer_dialog_sink_prepare() {
+  FM_COMPOSER_DIALOG_OWNED=0
+  if [ -z "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    FM_COMPOSER_DIALOG_SINK=$(mktemp "${TMPDIR:-/tmp}/fm-composer-dialog.XXXXXX") || return 1
+    FM_COMPOSER_DIALOG_OWNED=1
+    return 0
+  fi
+  : > "$FM_COMPOSER_DIALOG_SINK"
+}
+
+fm_composer_dialog_sink_release() {
+  if [ "${FM_COMPOSER_DIALOG_OWNED:-}" = 1 ]; then
+    rm -f "$FM_COMPOSER_DIALOG_SINK"
+    FM_COMPOSER_DIALOG_SINK=
+    FM_COMPOSER_DIALOG_OWNED=0
+  fi
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
+  # Note the dialog before any early return so a pending picker is still named.
+  fm_composer_note_blocking_dialog "$screen" || true
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
@@ -1624,6 +1923,16 @@ fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   done <<EOF
 $caps
 EOF
+  # A Command Code identity (`commandcode` from the tmux probe, `cmd` from
+  # Herdr's native agent detection) reads this one screen with Command Code's
+  # placeholder ceiling; see fm_composer_strip_ghost.
+  if [ "$has_identity" = 1 ]; then
+    case "${identity%%$'\t'*}" in
+      commandcode|cmd)
+        local FM_COMPOSER_GHOST_LUMA_MAX=160
+        ;;
+    esac
+  fi
   [ "$cursor" = 1 ] || cy=''
   if [ -n "$cy" ]; then
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
@@ -1736,6 +2045,11 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
     "$send_key_fn" "$target" Enter "$expected_label" || true
     sleep "$sleep_s"
     state=$("$state_fn" "$target" "$expected_label")
+    # The first Enter can open a picker. A later Enter would confirm it.
+    if fm_composer_blocking_dialog_noted >/dev/null; then
+      printf 'unknown'
+      return 0
+    fi
     case "$state" in
       pending|pending-unproven) ;;
       *) printf '%s' "$state"; return 0 ;;

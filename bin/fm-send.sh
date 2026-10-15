@@ -47,15 +47,10 @@
 # instruction. There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
 # "was the message acted on" is, and that is answered asynchronously for an
-# ordinary record by the worker's acknowledgement move into handled/. The
-# watcher re-rings an unacknowledged message while its endpoint remains
-# available, escalates after the bounded ladder, and instead routes a positively
-# dead or missing endpoint directly to recovery without typing. An explicit
-# fire-and-forget record is excluded from that ladder; when config/wait-no-turns
-# is present and its ring here was skipped or failed, the watcher rings it
-# exactly once more.
-# bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
-# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
+# ordinary record by the worker's acknowledgement move into handled/.
+# bin/fm-task-inbox-lib.sh owns the record format, doorbell line, and retry and
+# escalation policy for ordinary and fire-and-forget records.
+# The composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text the ring is skipped with a notice and
 # the watcher re-rings an ordinary record later; no composer verdict is
 # delivery proof on this plane, and a failed ring never fails the send.

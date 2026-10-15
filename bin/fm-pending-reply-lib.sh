@@ -5,8 +5,9 @@
 # to a secondmate, this library records a durable parent-owned pending-reply
 # expectation BEFORE delivery, embeds a privacy-safe correlation id in the
 # outbound message, and later resolves that expectation only from a correlated
-# parent status line or status-pointed document - never from transport success,
-# chat content, or unrelated status activity.
+# line in the asked task's own parent status log, or a document it points to -
+# never from transport success, chat content, unrelated status activity, or
+# another task's line that echoes or quotes the token.
 #
 # Safety property (captain direction 2026-07-22): a secondmate agent may ignore
 # the marker and answer only in its visible conversation. The parent must notice
@@ -93,10 +94,15 @@
 # contract; the remote enqueue deduplicates onto the same record). The resend
 # resets the record to awaiting_report and leaves the published escalation
 # decision open: a confirmed delivery does not settle the request, only a
-# correlated report does. A later missed-report escalation reuses that key
-# rather than opening a duplicate, and only the ordinary resolve close closes
-# it. A delivered record, whatever its phase, is never reset. Without this, a
-# wake retried only through its owner
+# correlated report does. A later escalation reuses that key rather than
+# opening a duplicate while the decision stays open, and only the ordinary
+# resolve close closes it. Once that close is in the log, the next escalation
+# of a record that already escalated and was reset is a new episode: it
+# appends a new blocked line for the same key, even one identical to the
+# first, and the fold opens the decision again. That reopen belongs to this
+# escalation alone; status_event_recorded (bin/fm-classify-lib.sh) stays an
+# idempotent retry check for every caller. A delivered record, whatever its
+# phase, is never reset. Without this, a wake retried only through its owner
 # (bin/fm-backlog-handoff.sh's receiver wake) stayed refused forever once the
 # watcher escalated between the lost transport and the next resume.
 #
@@ -189,14 +195,12 @@ fm_pending_reply_extract_corr() {  # <text>
   printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null | head -1 | cut -d= -f2- | tr 'A-F' 'a-f' || true
 }
 
-# 0 if <text> carries the exact correlation token for <corr_id>.
+# 0 if <text> carries the exact correlation token for <corr_id>, as a whole
+# word: xcorr=<id> or corr=<id>ff is a different token, not this one.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2 token
-  token=$(fm_pending_reply_corr_token "$corr")
-  case "$text" in
-    *"$token"*) return 0 ;;
-  esac
-  return 1
+  local text=$1 corr=$2 re
+  re="(^|[^[:alnum:]_])$(fm_pending_reply_corr_token "$corr")([^[:alnum:]_]|\$)"
+  [[ $text =~ $re ]]
 }
 
 # Sanitize a short request summary: single line, bounded, no control chars.
@@ -684,7 +688,13 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     case "$delivery_state" in attempted|confirmed) ;; *) return 1 ;; esac
     unconfirmed=1
   fi
-  status_file=${status_override:-$(fm_pending_reply_get "$rec" parent_status)}
+  status_file=$(fm_pending_reply_get "$rec" parent_status)
+  # Only the asked task's own status log answers its request: another mate's
+  # line echoing or quoting this corr= token must leave the request open.
+  if [ -n "$status_override" ]; then
+    [ "$status_override" -ef "$status_file" ] || return 1
+    status_file=$status_override
+  fi
   if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
     signature=$(fm_pending_reply_file_signature "$status_file")
     previous=$(fm_pending_reply_get "$rec" parent_status_scan_signature)
@@ -1257,7 +1267,7 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed now payload parent_status line kind first display
-  local delivered task_id meta sm_home remote_host grace age
+  local delivered task_id meta sm_home remote_host grace age key new_episode
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -1318,8 +1328,19 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   fi
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
-  line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
-  if ! status_event_recorded "$parent_status" "$line"; then
+  key=$(fm_pending_reply_escalation_key "$corr")
+  line="blocked [key=$key]: $payload"
+  # A record that already escalated reaches here again only after a reset, so
+  # a closed decision means the operator settled the earlier episode and this
+  # loss is a new one. While the decision is open the identical line is a retry.
+  new_episode=1
+  if [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ]; then
+    case $'\n'"$(status_open_decisions "$parent_status")" in
+      *$'\n'"$key"$'\t'*) ;;
+      *) new_episode=0 ;;
+    esac
+  fi
+  if [ "$new_episode" -eq 0 ] || ! status_event_recorded "$parent_status" "$line"; then
     printf '%s\n' "$(status_stamp_line "$line")" >> "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)

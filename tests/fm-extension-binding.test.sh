@@ -108,6 +108,8 @@ extension_test_cleanup() {
     (
       # worker.pid names the serving child; the copied remote helper stops its
       # known isolated supervisor tree so it cannot respawn during teardown.
+      # Production libraries are linted independently by fm-lint.sh.
+      # shellcheck source=/dev/null
       . "$REMOTE_ROOT/bin/fm-remote-job-lib.sh"
       fm_remote_job_stop_worker_tree "$(cat "$TMP_ROOT/remote-jobs/worker.pid")"
     ) 2>/dev/null || true

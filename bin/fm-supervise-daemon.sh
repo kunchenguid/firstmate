@@ -7,9 +7,9 @@
 # ESCALATES a batched, distilled digest to the supervisor pane on
 # captain-relevant events plus bounded declared-wait rechecks. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
-# signal/stale/heartbeat wakes cost zero firstmate context; only done/
-# needs-decision/blocked/failed/persistent-wedge/check-output events and a
-# declared-wait recheck reach the LLM, and even then as one pre-read digest per
+# signal/stale/heartbeat wakes cost zero firstmate context; routing is owned by
+# .agents/skills/afk/SKILL.md (Classification policy).
+# Escalated events reach the LLM as one pre-read digest per
 # batch window. That digest is byte-bounded (see escalate_flush); when it cuts
 # or omits anything it names a state/.subsuper-digests/ file holding every
 # buffered event verbatim.
@@ -48,7 +48,7 @@
 #     drain and acknowledges it only after routing completes.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane without a declared wait is escalated
+#   - Bounded wedge latency: ordinary pane staleness without a declared wait escalates
 #     only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
@@ -65,9 +65,10 @@
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
 #     alert if submit still cannot be confirmed.
-#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
-#     state/*.status for a captain-relevant line the per-wake classifier might
-#     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
+#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps the
+#     state dir's task status logs for a captain-relevant line the per-wake
+#     classifier might have missed (e.g. a status verb outside CAPTAIN_RE) and
+#     escalates it.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
@@ -520,6 +521,11 @@ unknown_wake_acknowledge_flushed() {  # <state> <buffer>
 
 # --- stale marker + escalation buffer (stateful, but via explicit state dir) -
 # Marker:   state/.subsuper-stale-<key>   contains the epoch first seen idle.
+# Dialog:   state/.subsuper-dialog-<key>   the blocking-dialog name copied off a
+#           self-handled stale wake, so the persistence line can still say it.
+#           A terminal status still clears the stale marker, and this file goes
+#           with it. The watcher also removes it when the pane no longer shows
+#           the dialog.
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last reported file signature and
 #           classified byte offset, so failures and events do not re-fire while
@@ -537,7 +543,21 @@ stale_marker_record() {  # <window> <state>  — create if absent
 stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
-  rm -f "$state/.subsuper-stale-$key"
+  rm -f "$state/.subsuper-stale-$key" "$state/.subsuper-dialog-$key"
+}
+
+# The name a stale detail carried after "blocked-on-prompt: ". The trailing
+# parenthesis from the reason's one parenthetical is not part of the name.
+stale_dialog_name() {  # <stale-detail>
+  local detail=$1 name
+  case "$detail" in
+    *'blocked-on-prompt: '*) ;;
+    *) return 1 ;;
+  esac
+  name=${detail##*blocked-on-prompt: }
+  name=${name%)}
+  [ -n "$name" ] || return 1
+  printf '%s' "$name"
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
@@ -566,6 +586,7 @@ clear_pause_tracking() {  # <window> <state>
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-pause-until-due-$key" "$state/.subsuper-stale-$key" \
+    "$state/.subsuper-dialog-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
     "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key" \
@@ -1184,10 +1205,10 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
 #     -> escalate a recheck digest naming which human the wait is on, and reset
 #     the window (repeating bounded re-surface, never a wedge).
-#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
-#     captain-relevant line the per-wake classifier missed and escalate it.
+#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
+#     the block below and escalate what it finds; that block owns its file set.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1230,7 +1251,7 @@ housekeeping() {  # <state>
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
       # Window gone (task torn down): drop the marker, nothing to escalate.
-      rm -f "$marker"; continue
+      rm -f "$marker" "$state/.subsuper-dialog-$key"; continue
     fi
     task=$(window_to_task "$win" "$state")
     last=$(status_declared_wait_line "$state/$task.status")
@@ -1242,11 +1263,19 @@ housekeeping() {  # <state>
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
-      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
-           stale_marker_remove "$win" "$state"
-         fi ;;
+      0) rm -f "$marker" "$state/.subsuper-dialog-$key" ;;
+      2) rm -f "$marker" "$state/.subsuper-dialog-$key" ;;
+      *)
+        dialog_name=$(cat "$state/.subsuper-dialog-$key" 2>/dev/null || true)
+        if [ -n "$dialog_name" ]; then
+          persisted="stale persisted ${age}s (possible wedge, blocked-on-prompt: $dialog_name): $win"
+        else
+          persisted="stale persisted ${age}s (possible wedge): $win"
+        fi
+        if escalate_add "$state" "$persisted"; then
+          stale_marker_remove "$win" "$state"
+        fi
+        ;;
     esac
   done
 
@@ -1339,11 +1368,17 @@ housekeeping() {  # <state>
   #     because the event this backstop most needs to catch is precisely one a
   #     later routine append has already moved past; fm-classify-lib.sh's span
   #     read decides relevance, and the classified-through offset is the dedup.
+  #     A remote mate's own parent channel is not a self-home task status log,
+  #     so it is excluded here exactly as in the watcher's twin backstop
+  #     (fm-watch.sh heartbeat_scan_finds_actionable); the home-shape-aware
+  #     resolution lives in status_scan_parent_channel_exclude.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local event record rest endpoint ident rc
+    local event record rest endpoint ident rc exclude
+    exclude=$(status_scan_parent_channel_exclude "$state")
     for f in "$state"/*.status; do
       [ -e "$f" ] || [ -L "$f" ] || continue
+      [ "$f" = "$exclude" ] && continue
       task=$(basename "$f"); task="${task%.status}"
       record=$(status_span_first_actionable_record "$f" \
         "$(status_seen_offset "$state" "$task")")
@@ -1538,7 +1573,7 @@ is_wake_reason() {  # <reason>
 # is populated, suppression markers commit, and the digest names the decision
 # instead of "unknown wake:".
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled task last stale_detail
+  local reason=$1 state=$2 decision action distilled task last stale_detail dialog_name=''
   local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest sig marker
   local kind="" arg="" classification_failed=0 span_failure_repeat=0
   : > "$capture" || return 1
@@ -1555,8 +1590,11 @@ handle_wake() {  # <reason> <state>
                 *) arg="${reason#signal: }" ;;
               esac
               decision=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$arg" "$state") ;;
+    stale:*" (unread firstmate instruction: stuck-busy "*|stale:*" (steering-inbox busy bookkeeping unwritable: "*)
+              decision="escalate|${reason#stale: }" ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
+              dialog_name=$(stale_dialog_name "$stale_detail") || dialog_name=''
               task=$(window_to_task "$arg" "$state")
               if [ -n "$task" ]; then
                 span_record=$(status_span_first_actionable_record "$state/$task.status" \
@@ -1611,6 +1649,15 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
+  # A status escalation is built from the status log, which does not carry
+  # the parenthetical, so the name is added to that line here. A self-handled
+  # stale copies the name only when it keeps the persistence marker, below.
+  if [ "$kind" = stale ] && [ "$action" = escalate ] && [ -n "$dialog_name" ]; then
+    case "$distilled" in
+      *"blocked-on-prompt: $dialog_name"*) ;;
+      *) distilled="$distilled (blocked-on-prompt: $dialog_name)" ;;
+    esac
+  fi
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")
@@ -1668,6 +1715,11 @@ handle_wake() {  # <reason> <state>
         else
           pause_marker_remove "$arg" "$state"
           stale_marker_record "$arg" "$state"
+          # The distilled line drops the parenthetical. Housekeeping builds the
+          # persistence line from this file, not from the wake it just absorbed.
+          if [ -n "$dialog_name" ]; then
+            printf '%s' "$dialog_name" > "$state/.subsuper-dialog-$(_stale_key "$task")" || return 1
+          fi
         fi
       fi
       log "self-handle: $reason -> $distilled"
