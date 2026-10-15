@@ -259,15 +259,29 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   return 0
 }
 
+# fm_secondmate_relaunch_lock_acquire [wait-secs]
+# Mutex-only take of the per-home relaunch lock (no ledger, no kill), so
+# parallel supervisors serialize before a guarded spawn. Bounded wait,
+# default 600 seconds. Callers that already hold it (a relaunch that
+# pre-acquired below, with the child skipping its own take) must not call
+# this again: same-process re-acquire drops and recreates the hold.
+fm_secondmate_relaunch_lock_acquire() {  # [wait-secs]
+  fm_sm_live_require_locks || return 1
+  fm_lock_acquire_wait_bounded "$STATE/.secondmate-relaunch.lock" "${1:-600}"
+}
+
 # fm_secondmate_liveness_begin <meta> <id> [lock-wait-secs]
 # Commit an authorized recovery attempt before removing a confirmed-dead
 # endpoint. Takes the per-home relaunch lock (bounded wait, default 600
 # seconds) so relaunches of different mates serialize; the lock is held across
 # the guarded spawn and released by fm_secondmate_liveness_relaunch after it
-# records the outcome. A lock owned by an already-exited spawn child releases
-# as a no-op with ordinary stale-owner recovery. An unreadable or unwritable
-# ledger, or an expired lock wait, leaves the endpoint untouched and sets
-# FM_SM_LIVE_STATUS=skipped with FM_SM_LIVE_REASON.
+# records the outcome. When FM_SECONDMATE_RELAUNCH_PREACQUIRED=1 the caller
+# already holds it across this recovery, so the take is skipped while the
+# ledger commit and the kill below still run. A lock owned by an
+# already-exited spawn child releases as a no-op with ordinary stale-owner
+# recovery. An unreadable or unwritable ledger, or an expired lock wait,
+# leaves the endpoint untouched and sets FM_SM_LIVE_STATUS=skipped with
+# FM_SM_LIVE_REASON.
 # Caller holds the liveness lock.
 fm_secondmate_liveness_begin() {
   local meta=$1 id=$2 wait_seconds=${3:-600} relaunch_lock
@@ -279,7 +293,7 @@ fm_secondmate_liveness_begin() {
   fi
   fm_sm_live_require_locks || return 1
   relaunch_lock="$STATE/.secondmate-relaunch.lock"
-  if ! fm_lock_acquire_wait_bounded "$relaunch_lock" "$wait_seconds"; then
+  if [ "${FM_SECONDMATE_RELAUNCH_PREACQUIRED:-0}" != 1 ] && ! fm_secondmate_relaunch_lock_acquire "$wait_seconds"; then
     FM_SM_LIVE_STATUS=skipped
     FM_SM_LIVE_REASON="another secondmate relaunch still owns the per-home relaunch lock after ${wait_seconds}s; endpoint left $FM_SM_LIVE_STATE"
     FM_SM_LIVE_RC=1
@@ -305,18 +319,21 @@ fm_secondmate_liveness_begin() {
 }
 
 # Acts on a `relaunchable` probe verdict under the caller's liveness lock.
-# Local spawn calls begin only after memory admission and a fresh probe;
-# remote recovery calls begin here before spawning on the recorded host.
-# This function records the spawn outcome. Memory refusal (75) and a changed
+# The per-home relaunch lock is held across the guarded spawn so parallel
+# recoveries of different mates serialize: remote recovery takes it in begin
+# here, local recovery pre-acquires the mutex here (bounded by the spawn
+# timeout when given, 600 seconds otherwise) while its spawn child still runs
+# begin after memory admission for the attempt ledger and the kill. This
+# function records the spawn outcome. Memory refusal (75) and a changed
 # endpoint (73) set FM_SM_LIVE_STATUS=deferred without charging an attempt;
 # ledger refusal (74) sets skipped. FM_SM_LIVE_REASON explains either verdict.
 # A positive timeout bounds spawn via fm_run_timed (124/137 on timeout).
-# The per-home relaunch lock taken by begin is released on every path below;
+# The per-home relaunch lock taken above is released on every path below;
 # a lock owned by an already-exited spawn child releases as a no-op.
 # Returns the spawn status in FM_SM_LIVE_RC and combined output in FM_SM_LIVE_OUT;
 # the caller owns reporting.
 fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
-  local meta=$1 id=$2 timeout=${3:-} recovery=1 relaunch_lock rc=0
+  local meta=$1 id=$2 timeout=${3:-} recovery=1 preacquired=0 relaunch_lock rc=0 wait_seconds
   FM_SM_LIVE_OUT='' FM_SM_LIVE_RC=0
   relaunch_lock="$STATE/.secondmate-relaunch.lock"
   if ! FM_SM_LIVE_OUT=$("$FM_SM_LIVE_LIB_DIR/fm-harness.sh" secondmate "$id" 2>&1); then
@@ -326,11 +343,20 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
   if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
     fm_secondmate_liveness_begin "$meta" "$id" "${timeout:-600}" || return 1
     recovery=0
+  else
+    wait_seconds=${timeout:-600}
+    if ! fm_secondmate_relaunch_lock_acquire "$wait_seconds"; then
+      FM_SM_LIVE_STATUS=skipped
+      FM_SM_LIVE_REASON="another secondmate relaunch still owns the per-home relaunch lock after ${wait_seconds}s; endpoint left $FM_SM_LIVE_STATE"
+      FM_SM_LIVE_RC=1
+      return 1
+    fi
+    preacquired=1
   fi
   if [ -n "$timeout" ]; then
-    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_LIVENESS_RECOVERY=$recovery fm_run_timed "$timeout" "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
+    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_LIVENESS_RECOVERY=$recovery FM_SECONDMATE_RELAUNCH_PREACQUIRED=$preacquired fm_run_timed "$timeout" "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
   else
-    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_LIVENESS_RECOVERY=$recovery "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
+    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_LIVENESS_RECOVERY=$recovery FM_SECONDMATE_RELAUNCH_PREACQUIRED=$preacquired "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
   fi
   FM_SM_LIVE_RC=$rc
   case "$rc" in

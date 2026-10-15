@@ -1853,7 +1853,18 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: could not resolve the task-set lock for $STATE" >&2
     exit 1
   }
-  if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+  # A liveness recovery republishes a task that already exists, so the set
+  # itself is unchanged and waiting (bounded) for a sibling recovery's short
+  # publication hold keeps the teardown guarantee above while sibling
+  # recoveries serialize instead of refusing each other. Every other fresh
+  # spawn still refuses rather than waits.
+  SPAWN_TASK_SET_RC=0
+  if [ "$KIND" = secondmate ] && [ "${FM_SECONDMATE_LIVENESS_RECOVERY:-0}" = 1 ]; then
+    fm_lock_acquire_wait_bounded "$SPAWN_TASK_SET_LOCK" 600 || SPAWN_TASK_SET_RC=$?
+  else
+    fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK" || SPAWN_TASK_SET_RC=$?
+  fi
+  if [ "$SPAWN_TASK_SET_RC" -ne 0 ]; then
     case "$(fm_lock_role "$SPAWN_TASK_SET_LOCK" 2>/dev/null || true)" in
       task-spawn)
         echo "error: this home's task set is locked by another spawn; refusing to create task $ID rather than racing it" >&2
