@@ -37,6 +37,8 @@ FJ_URL="https://$FJ_HOST/$FJ_OWNER/$FJ_REPO/pulls/9"
 FJ_HEAD=cccccccccccccccccccccccccccccccccccccccc
 FJ_STALE_HEAD=dddddddddddddddddddddddddddddddddddddddd
 
+SUITE_BASE=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
@@ -67,6 +69,13 @@ make_case() {
   # The base branch the forge reports by default: unprotected, with no ruleset
   # rule, so nothing is required unless a case says otherwise.
   write_github_required "$case_dir"
+  # The base branch has no required checks, so the merge also reads one forge
+  # compare (head not behind the base tip) and the worker's recorded suite
+  # result: a passing record made against that same tip, by default.
+  printf '%s\n' 'behind_by=0' "base_sha=$SUITE_BASE" > "$case_dir/github-compare"
+  mkdir -p "$case_dir/home/data/task-x1"
+  printf '%s\n' 'suite=pass' "base=$SUITE_BASE" 'ran=fixture suite' \
+    > "$case_dir/home/data/task-x1/suite-result"
   : > "$case_dir/gh.log"
   # The worktree is a git copy whose HEAD is on a remote-tracking ref, as a
   # pushed ship task's is, so fm-pr-check.sh's named-head gate accepts it when
@@ -320,6 +329,11 @@ case "${1:-} ${2:-}" in
         esac
         cat "$FM_TEST_GH_RUNS"
         exit $?
+        ;;
+      *" repos/"*"/compare/"*)
+        [ ! -f "${FM_TEST_GH_COMPARE}-fail" ] || exit 1
+        cat "$FM_TEST_GH_COMPARE"
+        exit 0
         ;;
       *" repos/"*"/rules/branches/"*merge_queue*) ;;
       *" repos/"*"/rules/branches/"*)
@@ -768,6 +782,7 @@ run_pr_merge() {
   FM_TEST_GH_RULES_FAIL_BODY="$case_dir/github-rules-fail-body" \
   FM_TEST_GH_BRANCH="$case_dir/github-branch.json" \
   FM_TEST_GH_BRANCH_FAIL="$case_dir/github-branch-fail" \
+  FM_TEST_GH_COMPARE="$case_dir/github-compare" \
   FM_TEST_GH_REQUIRED_RULES="$case_dir/github-required-rules.json" \
   FM_TEST_GH_REQUIRED_RULES_FAIL="$case_dir/github-required-rules-fail" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
