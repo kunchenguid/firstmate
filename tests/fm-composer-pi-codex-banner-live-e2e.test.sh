@@ -115,8 +115,13 @@ JWT="$(b64url '{"alg":"none","typ":"JWT"}').$(b64url '{"https://api.openai.com/a
 printf '{"providers":{"openai-codex":{"baseUrl":"http://127.0.0.1:%s","apiKey":"%s"}}}\n' "$PORT" "$JWT" > "$WORK/pi/models.json"
 
 tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 120 -y 24 -c "$WORK"
+# Pi's Codex client honors HTTP(S)_PROXY for every host when no_proxy is
+# empty, including 127.0.0.1. CI runners often export a proxy; without a
+# loopback exception the stub never sees the request and no banner appears.
 tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$WIN" -c "$WORK" -- \
-  env PI_CODING_AGENT_DIR="$WORK/pi" pi --model openai-codex/gpt-5.5 --no-session --no-context-files \
+  env PI_CODING_AGENT_DIR="$WORK/pi" \
+      NO_PROXY="127.0.0.1,localhost,::1" no_proxy="127.0.0.1,localhost,::1" \
+      pi --model openai-codex/gpt-5.5 --no-session --no-context-files \
   || fail "pi ($VERSION): could not launch in the isolated tmux server"
 
 # Wait for the idle composer before submitting, so the prompt lands in Pi
