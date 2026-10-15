@@ -1174,7 +1174,7 @@ test_native_effort_validator_keeps_axes_separate() {
 }
 
 test_native_pi_ultra_is_explicit_and_model_scoped() {
-  local rec id out launch harness mode native_profile model
+  local rec id out launch harness mode native_profile model refused_n
   for harness in pi pi-signed; do
     for mode in no-mistakes direct-PR; do
       id="ultra-$harness-$mode"
@@ -1190,8 +1190,14 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
       assert_not_contains "$launch" "'max'" "native Ultra was aliased to max"
     done
   done
+  # Deterministic case names: $RANDOM can collide inside this loop, and a
+  # reused case dir makes fm_git_init_commit print "nothing to commit" on
+  # stdout, which poisons rec=$(make_spawn_case ...) so read_case_record
+  # leaves HOME_DIR empty and the refusal assertion fails on mkdir noise.
+  refused_n=0
   for native_profile in 'claude:codex-native/gpt-6-astra' 'codex:codex-native/gpt-6-astra' 'pi:openai-codex/gpt-6-astra' 'pi:default' 'pi:codex-native/'; do
-    harness=${native_profile%%:*}; model=${native_profile#*:}; id="ultra-refused-$RANDOM"
+    refused_n=$((refused_n + 1))
+    harness=${native_profile%%:*}; model=${native_profile#*:}; id="ultra-refused-$refused_n"
     rec=$(make_spawn_case "$id" "$harness" "$id")
     read_case_record "$rec"
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
