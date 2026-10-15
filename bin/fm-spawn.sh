@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--push-landed-ref <ref>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -48,6 +48,13 @@
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
+#   --push-landed-ref registers the long-lived branch a push-only ship task
+#   delivers to by direct push instead of a pull request. The spawn records it as
+#   push_landed_ref= in state/<id>.meta, which a relaunch reuses and
+#   bin/fm-teardown.sh's landed check reads: HEAD being an ancestor of origin's
+#   copy of the registered ref proves the work landed. It is refused on scouts,
+#   secondmates, relaunches, and mode=local-only, and without it teardown's
+#   landed check is unchanged.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -773,6 +780,8 @@ BASE_BRANCH=
 BASE_BRANCH_SET=0
 UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
+PUSH_LANDED_REF=
+PUSH_LANDED_REF_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
@@ -824,6 +833,10 @@ for a in "$@"; do
     upstream-consent)
       UPSTREAM_CONSENT=$a
       UPSTREAM_CONSENT_SET=1
+      ;;
+    push-landed-ref)
+      PUSH_LANDED_REF=$a
+      PUSH_LANDED_REF_SET=1
       ;;
     traceparent)
       TRACEPARENT_ARG=$a
@@ -892,6 +905,11 @@ for a in "$@"; do
   --upstream-consent=*)
     UPSTREAM_CONSENT=${a#--upstream-consent=}
     UPSTREAM_CONSENT_SET=1
+    ;;
+  --push-landed-ref) want_value="push-landed-ref" ;;
+  --push-landed-ref=*)
+    PUSH_LANDED_REF=${a#--push-landed-ref=}
+    PUSH_LANDED_REF_SET=1
     ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
@@ -991,6 +1009,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded upstream consent; --upstream-consent cannot override it" >&2
     exit 1
   }
+  [ "$PUSH_LANDED_REF_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded push-landed ref; --push-landed-ref cannot override it" >&2
+    exit 1
+  }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -1034,6 +1056,20 @@ else
       }
       UPSTREAM_CONSENT=$(fm_role_scope_norm "$UPSTREAM_CONSENT")
     fi
+    if [ "$PUSH_LANDED_REF_SET" -eq 1 ]; then
+      [ -n "$PUSH_LANDED_REF" ] || {
+        echo "error: --push-landed-ref requires a ref name" >&2
+        exit 1
+      }
+      if [ "${PUSH_LANDED_REF#-}" != "$PUSH_LANDED_REF" ] || ! git check-ref-format --branch "$PUSH_LANDED_REF" >/dev/null 2>&1; then
+        echo "error: --push-landed-ref '$PUSH_LANDED_REF' is not a valid git branch name" >&2
+        exit 1
+      fi
+      [ "$MODE" != local-only ] || {
+        echo "error: --push-landed-ref is meaningless on local-only, which pushes nothing to a remote; drop it" >&2
+        exit 1
+      }
+    fi
   else
     [ "$MODE_SET" -eq 0 ] || {
       echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
@@ -1053,6 +1089,10 @@ else
     }
     [ "$UPSTREAM_CONSENT_SET" -eq 0 ] || {
       echo "error: --upstream-consent applies only to ship spawns; a scout publishes nothing and a secondmate records no delivery contract" >&2
+      exit 1
+    }
+    [ "$PUSH_LANDED_REF_SET" -eq 0 ] || {
+      echo "error: --push-landed-ref applies only to ship spawns; a scout publishes nothing and a secondmate records no delivery contract" >&2
       exit 1
     }
   fi
@@ -1683,6 +1723,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
+  [ "$PUSH_LANDED_REF_SET" -eq 0 ] || shared_args+=(--push-landed-ref "$PUSH_LANDED_REF")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -2043,6 +2084,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   UPSTREAM_CONSENT=$(fm_meta_get "$RELAUNCH_META" upstream_consent)
+  PUSH_LANDED_REF=$(fm_meta_get "$RELAUNCH_META" push_landed_ref)
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -5401,7 +5443,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch push_landed_ref upstream_consent model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5419,6 +5461,7 @@ preserve_relaunch_meta() {
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
+  [ -z "$PUSH_LANDED_REF" ] || echo "push_landed_ref=$PUSH_LANDED_REF"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

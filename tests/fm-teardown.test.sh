@@ -5,7 +5,8 @@
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
 # and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# is already in the up-to-date default branch, or the task's meta registers a
+# push-only delivery ref (push_landed_ref=) whose origin copy contains HEAD.
 #
 # Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
@@ -42,6 +43,9 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (p1) direct-PR + push_landed_ref registered, HEAD on that origin ref -> ALLOW
+#   (p2) direct-PR + same direct push, NO registration                    -> REFUSE (unchanged)
+#   (p3) direct-PR + registered ref exists but lacks HEAD                 -> REFUSE (safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -409,6 +413,16 @@ land_equivalent_patch_on_origin_branch() {
   git -C "$case_dir/project" fetch -q origin "$branch"
   rm -rf "$tmp"
   git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
+}
+
+# Push the worktree's HEAD to a long-lived branch on origin by URL, so no
+# refs/remotes/origin/<ref> tracking ref appears in the shared object db: the
+# worktree's own reachability check still reads the commits as unpushed,
+# exactly the push-only delivery shape whose direct push left the local copy's
+# remote-tracking refs stale. Args: case_dir ref
+push_head_to_origin_ref() {
+  local case_dir=$1 ref=$2
+  git -C "$case_dir/wt" push -q "$case_dir/origin.git" HEAD:"refs/heads/$ref"
 }
 
 # Override gh-axi so every call fails, simulating an API/network error.
@@ -1301,6 +1315,70 @@ test_content_fallback_refreshes_stale_origin_ref() {
   expect_code 0 "$rc" "content-stale-ref: teardown should use the freshly fetched default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-stale-ref: teardown printed a REFUSED line"
   pass "content fallback refreshes origin default before comparing trees"
+}
+
+# A push-only task delivers by pushing HEAD directly to a long-lived origin
+# branch and never opens a pull request. With push_landed_ref= recorded in the
+# task meta (bin/fm-spawn.sh --push-landed-ref), teardown fetches that ref and
+# reads HEAD's ancestry as landed even though no local remote-tracking ref ever
+# saw the push; without the record the identical shape refuses exactly as
+# before, and a registered ref that does not contain HEAD refuses too.
+test_push_landed_ref_registration() {
+  local case_dir rc head tmp
+  case_dir=$(make_case push-landed-registered)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "push-only work"
+  push_head_to_origin_ref "$case_dir" integration/main
+  ! git -C "$case_dir/wt" rev-parse --quiet --verify refs/remotes/origin/integration/main >/dev/null 2>&1 \
+    || fail "push-landed-registered: the push leaked a local remote-tracking ref, voiding the fixture"
+  printf 'push_landed_ref=integration/main\n' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "push-landed-registered: teardown should treat HEAD on the registered origin ref as landed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "push-landed-registered: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "push-landed-registered: teardown left task metadata after destructive cleanup"
+
+  case_dir=$(make_case push-landed-unregistered)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "push-only work"
+  push_head_to_origin_ref "$case_dir" integration/main
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "push-landed-unregistered: teardown should keep refusing an unregistered direct push"
+  grep -q REFUSED "$case_dir/stderr" || fail "push-landed-unregistered: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" push-landed-unregistered "$head"
+
+  case_dir=$(make_case push-landed-not-contained)
+  write_meta "$case_dir" direct-PR ship
+  printf 'push_landed_ref=integration/main\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "unlanded follow-up"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # The registered ref exists on origin but stops at the default branch tip, so
+  # it does not contain HEAD.
+  tmp="$case_dir/_longlived"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" push -q origin HEAD:refs/heads/integration/main
+  rm -rf "$tmp"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "push-landed-not-contained: teardown should refuse when the registered ref lacks HEAD"
+  grep -q REFUSED "$case_dir/stderr" || fail "push-landed-not-contained: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" push-landed-not-contained "$head"
+  pass "push_landed_ref lands a registered direct push, stays refused unregistered, and refuses a ref lacking HEAD"
 }
 
 test_dirty_worktree_refuses() {
@@ -5078,6 +5156,7 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_uses_recorded_base_branch
 test_content_fallback_refreshes_stale_origin_ref
+test_push_landed_ref_registration
 test_dirty_worktree_refuses
 test_untracked_only_refusal_diagnostic
 test_tracked_edit_refusal_diagnostic

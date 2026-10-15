@@ -856,6 +856,58 @@ test_prose_base_branch_line_is_ignored() {
   pass "a Base branch line in the captain's intent neither blocks nor redirects a spawn"
 }
 
+# A push-only ship registers the long-lived branch it delivers to by direct
+# push, so teardown can prove that shape landed (bin/fm-teardown.sh reads
+# push_landed_ref= from the task meta). The flag is recorded verbatim, absent
+# without the flag, and refused on scouts, local-only ships, and invalid names.
+test_push_landed_ref_is_recorded_and_validated() {
+  local rec id out status
+  id='pool-push-landed-record-r1'
+  rec=$(make_case push-landed-record "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --push-landed-ref integration/main)
+  status=$?
+  expect_code 0 "$status" "a ship spawn with --push-landed-ref should launch"$'\n'"$out"
+  assert_grep 'push_landed_ref=integration/main' "$HOME_DIR/state/$id.meta" \
+    "the spawn did not record its push-landed ref"
+
+  id='pool-push-landed-absent-r1'
+  rec=$(make_case push-landed-absent "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "a ship spawn without --push-landed-ref should launch"$'\n'"$out"
+  assert_no_grep 'push_landed_ref=' "$HOME_DIR/state/$id.meta" "an unflagged spawn recorded a push-landed ref"
+
+  id='pool-push-landed-scout-r1'
+  rec=$(make_case push-landed-scout "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$id" --scout --push-landed-ref integration/main)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout spawn with --push-landed-ref should refuse"
+  assert_contains "$out" "ship spawns" "the scout refusal did not explain itself"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused scout spawn published task metadata"
+
+  id='pool-push-landed-local-only-r1'
+  rec=$(make_case push-landed-local-only "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$id" --mode local-only --yolo off --push-landed-ref integration/main)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a local-only spawn with --push-landed-ref should refuse"
+  assert_contains "$out" "local-only" "the local-only refusal did not explain itself"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused local-only spawn published task metadata"
+
+  id='pool-push-landed-invalid-r1'
+  rec=$(make_case push-landed-invalid "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --push-landed-ref 'bogus..ref')
+  status=$?
+  [ "$status" -ne 0 ] || fail "an invalid --push-landed-ref should refuse"
+  assert_contains "$out" "not a valid git branch name" "the invalid-ref refusal did not explain itself"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused invalid-ref spawn published task metadata"
+  pass "--push-landed-ref is recorded for teardown, refused on scouts, local-only, and invalid names"
+}
+
 # A named base is validated against the project's registered forge for scouts
 # too, so a scout that promotion could never ship is refused at spawn.
 test_scout_base_branch_refused_on_gerrit_forge() {
@@ -881,6 +933,7 @@ test_stale_pool_base_refreshes_before_branching
 test_named_base_branch_starts_from_that_branch
 test_base_branch_must_agree_with_the_brief
 test_prose_base_branch_line_is_ignored
+test_push_landed_ref_is_recorded_and_validated
 test_scout_base_branch_refused_on_gerrit_forge
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch

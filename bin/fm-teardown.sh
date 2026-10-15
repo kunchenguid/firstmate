@@ -52,6 +52,12 @@
 # on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
 # its base branch instead of the default branch.
+# A task whose meta records push_landed_ref= (bin/fm-spawn.sh --push-landed-ref)
+# instead delivers by direct push to a long-lived branch with no pull request:
+# HEAD being an ancestor of origin's copy of that registered ref proves the work
+# landed. The registration is explicit per task and never guessed; without it the
+# shapes above stand alone, and a direct push the local remote-tracking refs have
+# not seen yet still refuses.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
@@ -1193,6 +1199,7 @@ fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 BASE_BRANCH=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
+PUSH_LANDED_REF=$(grep '^push_landed_ref=' "$META" | cut -d= -f2- || true)
 
 # A record accepted as a legacy incarnation (no spawn_gen, and either
 # --legacy-record given or the record is windowless) may be torn down only
@@ -1640,15 +1647,35 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
+# Has the worktree's HEAD already been pushed to the task's explicitly
+# registered delivery ref on origin? push-only projects deliver by pushing
+# directly to a long-lived branch and never open a pull request, so neither
+# pr_is_merged nor content_in_default can prove that shape landed. The
+# registration is bin/fm-spawn.sh --push-landed-ref's push_landed_ref= meta
+# record; without it this returns non-zero before touching anything and the
+# existing checks stand alone. Fetches the ref first because a direct push
+# leaves this copy's remote-tracking refs stale. Returns non-zero when
+# inconclusive (no origin, fetch failure, missing ref), so the caller refuses
+# rather than guesses.
+pushed_to_registered_ref() {
+  local ref=${PUSH_LANDED_REF:-}
+  [ -n "$ref" ] || return 1
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "+refs/heads/$ref:refs/remotes/origin/$ref" >/dev/null 2>&1 || return 1
+  git -C "$WT" merge-base --is-ancestor HEAD "refs/remotes/origin/$ref" 2>/dev/null
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# default branch (fallback, which also covers the no-PR and gh-error paths), OR
+# the task's registered push-only delivery ref on origin already contains HEAD.
+# False only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
-  content_in_default
+  content_in_default && return 0
+  pushed_to_registered_ref
 }
 
 # The completion links this teardown already holds locally. A scout's
