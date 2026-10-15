@@ -109,6 +109,20 @@ test_absent_or_off_setting_does_nothing() {
   pass "absent or off setting: no plan, no key, and not a single Herdr call"
 }
 
+test_on_with_zero_tasks_plan_is_empty() {
+  local out
+  new_home empty-plan
+  printf 'on\n' > "$HOME_DIR/config/herdr-project-groups"
+  # No *.meta tasks: cmd_plan must exit 0 with no lines even when TASKS stays empty
+  # (Bash 3.2 under set -u rejects an unguarded empty "${TASKS[@]}").
+  out=$(groups plan 2>&1) || fail "plan with zero tasks failed: $out"
+  assert_equals "" "$out" "plan output with zero herdr tasks"
+  out=$(groups sync 2>&1) || fail "sync with zero tasks failed: $out"
+  assert_equals "" "$out" "sync output with zero herdr tasks"
+  assert_equals "" "$(cat "$FAKE_HERDR_LOG")" "herdr calls with zero tasks"
+  pass "on with zero tasks: plan and sync stay quiet and exit 0"
+}
+
 test_on_groups_by_project_and_sorts_by_status_rank() {
   local out sorted
   new_home on
@@ -171,6 +185,23 @@ EOF
   out=$(groups order-key web-new /p/whatever 2>&1) || fail "order-key failed: $out"
   assert_equals "001.Web" "$out" "order-key for a rule group"
   pass "rules: line order sets group order; task prefix beats repo beats catch-all; bad rules warn"
+}
+
+test_all_invalid_rules_leave_empty_rule_group_and_still_plan() {
+  local out
+  new_home all-invalid
+  cat > "$HOME_DIR/config/herdr-project-groups" <<'EOF'
+# every line invalid: RULE_GROUP stays empty after load_setting
+Bad/Name task:x
+!!! task:y
+EOF
+  add_task web-a ship /p/storefront w2 'working: go'
+  out=$(groups plan 2>"$FAKE_DIR/err") || fail "plan after all-invalid rules failed: $out"
+  assert_contains "$(cat "$FAKE_DIR/err")" 'invalid group name "Bad/Name"' "invalid group warning"
+  assert_contains "$(cat "$FAKE_DIR/err")" 'invalid group name "!!!"' "second invalid group warning"
+  assert_contains "$out" $'web-a\tstorefront\trunning\t999.storefront.3.web-a\t999.storefront' \
+    "with no valid rules the task falls back to its project under the unmatched rank"
+  pass "all-invalid rules: empty RULE_GROUP still plans via project fallback"
 }
 
 write_live_lists() {  # <tagged 0|1>
@@ -357,8 +388,10 @@ test_watcher_poll_tags_tasks() {
 }
 
 test_absent_or_off_setting_does_nothing
+test_on_with_zero_tasks_plan_is_empty
 test_on_groups_by_project_and_sorts_by_status_rank
 test_rules_order_groups_and_prefer_task_over_repo_over_catch_all
+test_all_invalid_rules_leave_empty_rule_group_and_still_plan
 test_sync_reports_only_differences_and_sets_the_view
 test_sync_skips_an_unverified_protocol_with_one_warning
 test_clear_removes_tokens_and_the_view_even_when_off
