@@ -2,10 +2,11 @@
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# treehouse return hard-resets the worktree. For a PR-delivered ship task "landed"
+# means the forge proves it: GitHub reports its PR merged at a head that contains
+# the current local work, or its content is already in the up-to-date default
+# branch; a pushed branch is never enough. A local-only task has landed when its
+# work is reachable from a remote or merged into local main.
 #
 # Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
@@ -24,7 +25,9 @@
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
+#   (d) no-mistakes + HEAD pushed to origin: open green PR     -> REFUSE (pushed is not merged)
+#       same, forge reports the PR merged at that head        -> ALLOW
+#       same, GitHub unreadable, content already on main      -> REFUSE
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
@@ -253,16 +256,18 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
-# Override GitHub lookups to report PR 7 as merged with the supplied head.
+# Override GitHub lookups to report PR 7 with the supplied head, merged unless a
+# state (OPEN, CLOSED) is given.
 add_gh_pr_merged_for_head() {
-  local case_dir=$1 head=$2
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  local case_dir=$1 head=$2 state=${3:-MERGED} lower
+  lower=$(printf '%s' "$state" | tr '[:upper:]' '[:lower:]')
+  cat > "$case_dir/fakebin/gh-axi" <<SH
 #!/usr/bin/env bash
-case "${1:-} ${2:-}" in
+case "\${1:-} \${2:-}" in
   "pr list")
-    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,$lower" ; exit 0 ;;
   "pr view")
-    printf '%s\n' "pull_request:" "  number: 7" "  state: merged" '  merged: "2026-06-26T00:00:00Z"' ; exit 0 ;;
+    printf '%s\n' "pull_request:" "  number: 7" "  state: $lower" ; exit 0 ;;
 esac
 exit 0
 SH
@@ -271,7 +276,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
-      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' '$state' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -835,25 +840,67 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
-test_no_mistakes_origin_remote_allows() {
-  local case_dir rc
-  case_dir=$(make_case nm-origin)
-  write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
-  # Push the task branch to origin and fetch so the worktree sees it.
+# The reported failure: a direct-PR or no-mistakes worker pushes its branch and
+# opens a PR, so HEAD is on a remote-tracking branch while the PR is still open and
+# green. A pushed branch is a claim, not a landing; only the forge proves the merge.
+test_pushed_branch_needs_forge_merge_proof() {
+  local case_dir rc head
+  # Open, green PR at the exact pushed head: cleanup refuses and keeps everything.
+  case_dir=$(make_case nm-pushed-open)
+  write_meta "$case_dir" direct-PR ship
+  seed_backlog_in_flight "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
-
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$head" OPEN
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
+  expect_code 1 "$rc" "nm-pushed-open: teardown must refuse while the PR is open"
+  grep -F 'no merge proved on the forge: the forge reports PR https://github.com/example/repo/pull/7 as OPEN, not merged' \
+    "$case_dir/stderr" >/dev/null || fail "nm-pushed-open: refusal does not name the open PR: $(cat "$case_dir/stderr")"
+  assert_refusal_retained_task_state "$case_dir" nm-pushed-open "$head"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "nm-pushed-open: refusal closed the backlog item"
 
-  expect_code 0 "$rc" "nm-origin: teardown should succeed when HEAD is on origin"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
+  # The forge reports that PR merged at the pushed head: cleanup proceeds.
+  case_dir=$(make_case nm-pushed-merged)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "nm-pushed-merged: teardown should succeed once the forge shows the merge"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-pushed-merged: teardown printed a REFUSED line"
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
-    || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+    || fail "nm-pushed-merged: teardown manual prompt did not preserve date-gate check"
+
+  # GitHub cannot be read: cleanup refuses rather than assume, even though the same
+  # content already sits on origin's main, because only the forge proves this PR.
+  case_dir=$(make_case nm-pushed-unreadable)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  land_on_origin_main "$case_dir" feature.txt hello
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_axi_error "$case_dir"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "nm-pushed-unreadable: teardown must refuse when the forge cannot be read"
+  grep -F "no merge proved on the forge: the forge could not be read for PR https://github.com/example/repo/pull/7; and this copy's HEAD is not on origin/main." \
+    "$case_dir/stderr" >/dev/null || fail "nm-pushed-unreadable: refusal does not name the unread forge: $(cat "$case_dir/stderr")"
+  assert_refusal_retained_task_state "$case_dir" nm-pushed-unreadable "$head"
+  pass "pushed branch tears down only when the forge proves the merge (open PR and unreadable forge refuse)"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -3377,10 +3424,10 @@ assert_head_absent_from_worktree() {  # <worktree> <short-sha> <label>
     || fail "$3: fixture broke - the pipeline head resolved in the task copy"
 }
 
-# Land a shippable commit on the task branch and push it to origin, the same
-# "definitely landed, teardown must ALLOW" shape test_no_mistakes_origin_remote_allows
-# uses, so these new cases exercise the abort/reap steps on a real successful
-# teardown rather than a refusal path.
+# Land an empty commit on the task branch and push it to origin: it changes no
+# content, so origin's main already holds it and teardown must ALLOW, so these
+# cases exercise the abort/reap steps on a real successful teardown rather than a
+# refusal path.
 land_shippable_commit() {
   local case_dir=$1
   wt_commit "$case_dir" "shippable work"
@@ -4659,7 +4706,7 @@ test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
+test_pushed_branch_needs_forge_merge_proof
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line

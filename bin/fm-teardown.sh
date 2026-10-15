@@ -42,16 +42,23 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. A task whose meta records
+# hard-resets/removes the worktree, kills its processes, and closes its backlog
+# item. For a PR-delivered ship task (every mode but local-only) work has landed
+# only when the forge proves it: GitHub reports its PR merged at a head that
+# contains the current local work, or its content is already present in origin's
+# up-to-date default branch. A pushed branch is never proof - an open, green PR's
+# branch is pushed too - and neither is a done or merged status line, a pipeline
+# state, or a summary; those are claims, so a supervisor that acts on one still
+# meets this refusal. A PR the forge reports open or closed refuses outright, with
+# no content fallback, and a GitHub forge that cannot be read refuses unless this
+# exact HEAD is already on origin's up-to-date default branch. The content leg
+# recognizes the common squash-merge-then-delete-branch flow, where the branch's
+# own commits live nowhere on a remote yet the change is fully in main, and is the
+# provider-agnostic proof on forges gh cannot read. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch.
+# its base branch instead of the default branch. A local-only task has no PR: its
+# work has landed when it is reachable from any remote-tracking branch (a fork
+# counts as a remote) or merged into the local default branch.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
@@ -65,8 +72,10 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# A gh lookup error on a GitHub forge accepts only that exact-HEAD leg; on any
+# other forge it falls back to the content check, and if that is also inconclusive,
+# teardown refuses rather than risk discarding unlanded work. The refusal names
+# what the forge did not prove.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
@@ -1438,14 +1447,18 @@ remove_pr_poll_artifacts() {
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
-# single match and returns 0; returns non-zero on no match or any lookup failure,
-# so the caller treats it as "no PR found" (fail-safe).
+# single match and returns 0; returns 1 when the forge reports no match and 3 when
+# the lookup fails or its answer is unrecognized, so the caller can tell "no PR"
+# from "forge unreadable".
 pr_number_from_branch() {
   local branch=$1 out n
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
+  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 3
   n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
+  if [ -z "$n" ]; then
+    printf '%s\n' "$out" | grep -q '^count: 0' && return 1
+    return 3
+  fi
   printf '%s' "$n"
 }
 
@@ -1509,28 +1522,74 @@ EOF
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# for both the PR state and head. Returns 0 when proved, 2 when the forge reports
+# the PR open or closed (decisive: no fallback can stand in for that merge), 3 when
+# a GitHub forge cannot be read (only this exact HEAD on origin's default branch can
+# stand in), and 1 when inconclusive - no PR found, an unreadable non-GitHub forge,
+# or a merged head that does not contain the current work - so the caller falls
+# back to the content check.
+# Every non-zero return names the gap in LANDING_GAP for the refusal.
+LANDING_GAP=
+# Must gh be able to read this task's forge? The host of the recorded PR URL, or
+# the origin's host when no PR URL with a host is recorded, decides: any host naming
+# github (github.com, an SSH alias such as github-work) counts as GitHub. Another
+# host (Gerrit, GitLab) or a local path, which no forge serves, falls back to the
+# content check, as before.
+forge_host() {  # <url>
+  local host
+  case "$1" in
+    *://*) host=${1#*://}; host=${host%%/*} ;;
+    /*|.*) return 0 ;;
+    *:*) host=${1%%:*} ;;
+    *) return 0 ;;
+  esac
+  host=${host##*@}
+  printf '%s' "${host%%:*}"
+}
+
+forge_is_github() {
+  local host
+  host=$(forge_host "$PR_URL")
+  [ -n "$host" ] || host=$(forge_host "$(git -C "$WT" remote get-url origin 2>/dev/null || true)")
+  case "$host" in
+    *github*) return 0 ;;
+  esac
+  return 1
+}
+
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
+  local branch=$1 target view state remainder head resolved_url current landed=0 rc=0
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(pr_number_from_branch "$branch") || return 1
+    target=$(pr_number_from_branch "$branch") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      LANDING_GAP="no PR was found on the forge for branch $branch"
+      [ "$rc" = 3 ] || return 1
+      LANDING_GAP="the forge could not be read to find the PR for branch $branch"
+      forge_is_github && return 3
+      return 1
+    fi
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  LANDING_GAP="the forge could not be read for PR $target"
+  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || view=
   state=${view%%$'\t'*}
   remainder=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
   head=${remainder%%$'\t'*}
   resolved_url=${remainder#*$'\t'}
-  [ "$head" != "$remainder" ] || return 1
+  if [ -z "$view" ] || [ "$state" = "$view" ] || [ "$head" = "$remainder" ] || [ -z "$state" ]; then
+    forge_is_github && return 3
+    return 1
+  fi
   case "$state" in
     MERGED|merged) ;;
-    *) return 1 ;;
+    *)
+      LANDING_GAP="the forge reports PR ${resolved_url:-$target} as $state, not merged"
+      return 2
+      ;;
   esac
+  LANDING_GAP="the forge reports PR ${resolved_url:-$target} merged, but its head ${head:-<none>} could not be fetched to check it holds this copy's work"
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
@@ -1539,8 +1598,10 @@ pr_is_merged() {
   elif unpushed_patches_are_in_pr_head "$head"; then
     landed=1
   fi
+  LANDING_GAP="the forge reports PR ${resolved_url:-$target} merged at head $head, which does not contain this copy's HEAD $current"
   [ "$landed" = 1 ] || return 1
   if [ -z "$PR_URL" ]; then
+    LANDING_GAP="the forge reported no URL for merged PR $target"
     [ -n "$resolved_url" ] || return 1
     PR_URL=$resolved_url
   fi
@@ -1552,19 +1613,31 @@ pr_is_merged() {
 # the default branch does not already contain (e.g. its change landed via squash) the
 # merged tree equals the default branch's tree. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# "added". Returns non-zero when inconclusive (no default ref, a failed fetch, or a
+# merge conflict), so the caller refuses rather than guesses, and names that gap in
+# CONTENT_GAP. With "exact", only HEAD itself reachable from origin's freshly
+# fetched branch counts, never a matching tree.
+CONTENT_GAP=
 content_in_default() {
-  local name=${BASE_BRANCH:-} ref default_tree merged_tree
+  local exact=${1:-} name=${BASE_BRANCH:-} ref default_tree merged_tree
+  CONTENT_GAP="the default branch could not be determined"
   [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    CONTENT_GAP="origin's $name could not be fetched"
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif [ -z "$exact" ] && git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
+    CONTENT_GAP="there is no origin remote to check $name against"
     return 1
   fi
+  if [ -n "$exact" ]; then
+    CONTENT_GAP="this copy's HEAD is not on origin/$name"
+    git -C "$WT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null
+    return
+  fi
+  CONTENT_GAP="this copy's content is not in ${ref#refs/remotes/}"
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
@@ -1572,15 +1645,22 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# Has the worktree's committed work actually LANDED? True when a merged PR proves
+# the current local work is contained in the PR head, OR - unless the forge reports
+# the PR open or closed - the default branch already holds it: this exact HEAD when
+# GitHub cannot be read, else its content (the no-PR and non-GitHub fallback).
+# False leaves the reason in LANDING_GAP.
 work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+  local branch=$1 rc=0 exact=
+  pr_is_merged "$branch" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) return 1 ;;
+    3) exact=exact ;;
+  esac
+  content_in_default "$exact" && return 0
+  LANDING_GAP="$LANDING_GAP; and $CONTENT_GAP"
+  return 1
 }
 
 # The completion links this teardown already holds locally. A scout's
@@ -1907,16 +1987,18 @@ validate_worktree_teardown_safety() {
     report_worktree_dirt "$dirty"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
-  elif [ -n "$unpushed" ]; then
+  elif [ "$MODE" != local-only ]; then
+    # A pushed branch is not a landing: the forge must prove the merge.
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "REFUSED: worktree $WT has no merge proved on the forge: $LANDING_GAP." >&2
+      [ -z "$unpushed" ] || printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      echo "A pushed branch, a done or merged status line, a pipeline state, or a summary is a claim, not proof." >&2
+      echo "Check the PR on the forge and re-run once it shows merged at a head containing this copy's HEAD, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
