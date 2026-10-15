@@ -1093,6 +1093,33 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_long_idle_paused_crew_skips_live_probe() {
+  local home fakebin out gen
+  home=$(make_home idle-paused)
+  mkdir -p "$home/projects/idle-wt"
+  fm_write_meta "$home/state/idle-paused.meta" \
+    "window=firstmate:fm-idle-paused" \
+    "worktree=$home/projects/idle-wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" idle-paused)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" idle-paused busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  printf 'paused: holding for the upstream tool release\n' > "$home/state/idle-paused.status"
+  touch -t 202001010000 "$home/state/idle-paused.status" "$home/state/idle-paused.meta"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "idle-paused")
+    | .current_state.state == "paused"
+      and .current_state.source == "status-log"
+      and (.current_state | tostring | contains("not live-probed"))
+  ' >/dev/null || fail "a long-idle paused crew must skip the live probe through the snapshot: $out"
+  pass "a long-idle paused crew skips the live probe through the fleet snapshot"
+}
+
 # Home-summary validity treats persistent secondmates as registered homes, not
 # in-flight children. They have no backlog rows, so they must not produce
 # unowned_current or terminal_in_flight. Ordinary crew/ship metas still do.
@@ -1205,6 +1232,7 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_long_idle_paused_crew_skips_live_probe
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
