@@ -94,6 +94,16 @@ test_no_mistakes_prevalidation_done_is_not_gated() {
   pass "no-mistakes pre-validation done: is not gated"
 }
 
+test_needs_validation_handoff_is_not_gated() {
+  fm_dod_should_gate_ship_done ship no-mistakes \
+    'needs-validation: committed c118078, 706 tests' \
+    && fail "needs-validation was gated as a done claim"
+  accept_done ship no-mistakes /no/such /no/such \
+    'needs-validation [at=1700000000]: committed c118078, 706 tests' \
+    || fail "needs-validation handoff was refused"
+  pass "needs-validation is a handoff and is not gated"
+}
+
 test_local_only_linked_branch_is_accepted() {
   local repo wt
   repo="$TMP_ROOT/local-repo"
@@ -382,6 +392,20 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+test_no_mistakes_dod_uses_generated_status_command() {
+  local forge out
+  for forge in none gerrit; do
+    out="$TMP_ROOT/dod-status-$forge.md"
+    fm_dod_block no-mistakes dod-status-task fm/dod-status-task "$forge" > "$out"
+    # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
+    assert_grep 'use the status command from your brief with state `needs-validation`' "$out" \
+      "$forge: no-mistakes DoD did not route validation through the generated status command"
+    assert_no_grep 'append `needs-validation \[at=<epoch>\]' "$out" \
+      "$forge: no-mistakes DoD still teaches an untagged validation handoff"
+  done
+  pass "no-mistakes DoD uses the generated status command for validation handoffs"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -427,6 +451,7 @@ EOF
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
+test_needs_validation_handoff_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
@@ -442,6 +467,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_no_mistakes_dod_uses_generated_status_command
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the

@@ -48,8 +48,11 @@
 #     lock holder can be identified, the session is not cooling down after
 #     engine errors, and the Pi branch's offer rule
 #     (bin/fm-branch-dispatch.mjs offer) says the branch may take this close,
-#     so main-only classes (check triggers, decision-owned triggers, a scan
-#     that is unsafe or holds nothing for the branch) stay main's. That
+#     so main-only classes (check triggers, decision-owned triggers,
+#     completion-owned triggers, a scan that is unsafe or holds nothing for
+#     the branch) stay main's. A completion-owned row is a newly presented
+#     worker completion that still needs a supervisor; docs/pi-supervision-branch.md
+#     owns that rule. That
 #     pass-through starts the successor watcher cycle and leaves it running
 #     before the close is printed, so supervision continues when the session
 #     drops the handoff. It confirms no handling handoff, so the recovery
@@ -576,10 +579,14 @@ emit() {  # [line...]
 # the host.
 retire_successor() {
   [ -n "$SUCCESSOR_PID" ] || return 0
+  # Stop the watcher before waiting for its arm to reap it.
+  # An arm still confirming its child delays TERM until that child has a
+  # cleanup-ready lock, while the home-scoped stop can end an already verified
+  # successor immediately.
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
 }
 
 # Hand the close to main: stop the successor cycle, print the close, why, and

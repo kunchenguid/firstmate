@@ -36,6 +36,7 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
+WITHHOLD_FILE=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
 RECOVERY_MARKER="$STATE/.watcher-down"
@@ -814,6 +815,7 @@ cleanup() {
   local status=$?
   [ -z "$DRAIN_TMP" ] || rm -f -- "$DRAIN_TMP" 2>/dev/null || true
   [ -z "$DRAIN_VIEW_TMP" ] || rm -f -- "$DRAIN_VIEW_TMP" 2>/dev/null || true
+  [ -z "$WITHHOLD_FILE" ] || rm -f -- "$WITHHOLD_FILE" 2>/dev/null || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
@@ -893,13 +895,28 @@ if [ -n "$ACK_THROUGH" ]; then
   chmod 0600 "$DRAIN_TMP" || exit 1
   if [ "$ACTOR" = branch ]; then
     require_branch_eligible_rows || exit 1
+    # A granted signal whose status span is now a completion the supervisor
+    # must continue is left queued. The dispatch owner decides; this ack does
+    # not reclassify. If that command cannot read the queue, fail closed
+    # rather than retire a row it could not judge.
+    WITHHOLD_FILE=$(mktemp "$STATE/.wake-withhold.XXXXXX") || exit 1
+    if ! node "$SCRIPT_DIR/fm-branch-dispatch.mjs" withhold-acked > "$WITHHOLD_FILE"; then
+      rm -f "$WITHHOLD_FILE"
+      echo "wake drain: completion ownership could not be rechecked; refusing to acknowledge" >&2
+      exit 1
+    fi
     # Delete a row only when its sequence is <= cutoff AND it is named in the
     # extension's eligible snapshot; every other row - including one whose
-    # sequence is below cutoff but not in the snapshot - is kept untouched.
-    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$ELIGIBLE_ROWS_FILE" '
-      BEGIN { while ((getline line < seqs) > 0) if (line ~ /^[0-9]+$/) keep[line] = 1 }
-      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in keep) { print }
-    ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
+    # sequence is below cutoff but not in the snapshot, and one the recheck
+    # withheld - is kept untouched.
+    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$ELIGIBLE_ROWS_FILE" -v withhold="$WITHHOLD_FILE" '
+      BEGIN {
+        while ((getline line < seqs) > 0) if (line ~ /^[0-9]+$/) keep[line] = 1
+        while ((getline line < withhold) > 0) if (line ~ /^[0-9]+$/) held[line] = 1
+      }
+      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in keep) || ($2 in held) { print }
+    ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || { rm -f "$WITHHOLD_FILE"; exit 1; }
+    rm -f "$WITHHOLD_FILE"
     fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" "$ELIGIBLE_ROWS_FILE" || {
       echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
       exit 1

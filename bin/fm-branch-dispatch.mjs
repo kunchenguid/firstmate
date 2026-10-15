@@ -27,6 +27,20 @@
 //     this close at all, trigger class included), then the same five lines
 //     `scope` prints for the scan it judged. --afk judges it under the away
 //     posture.
+//   fm-branch-dispatch.mjs completion-owned --task <id>
+//     Print owned, continued, none, or unreadable for the newly presented
+//     status span of <id>. Exit 0 for owned or unreadable (a routine report
+//     must not retire it), 1 for continued or none.
+//   fm-branch-dispatch.mjs continuation-evidence --proof <proof>
+//     Read one status line from stdin and exit 0 when continuationEvidence
+//     accepts it. <proof> is none, attributed-run, review-started,
+//     verified-delivery, or hold. Exit 1 when the line is not continuation
+//     evidence. The reconciliation path uses this so it does not keep a
+//     second copy of the predicate.
+//   fm-branch-dispatch.mjs withhold-acked
+//     Print, one sequence per line, the granted signal rows a branch
+//     acknowledgement must leave queued. Exit 3 when the queue or an existing
+//     grant cannot be read.
 //   fm-branch-dispatch.mjs wake-prompt --report <surface> [--mirror-file <path>] [--away [--readback-file <path>]]
 //     Read the watcher's wake reason from stdin and print the branch wake
 //     prompt naming <surface> as the report surface. --mirror-file puts the
@@ -49,7 +63,7 @@ const dispatch = await import(pathToFileURL(path.join(root, ".pi", "extensions",
 
 function usage() {
   process.stderr.write(
-    "usage: fm-branch-dispatch.mjs scope [--heartbeat] [--afk] | offer [--afk] | wake-prompt --report <surface> [--mirror-file <path>] [--away [--readback-file <path>]]\n",
+    "usage: fm-branch-dispatch.mjs scope [--heartbeat] [--afk] | offer [--afk] | completion-owned --task <id> | continuation-evidence --proof <proof> | withhold-acked | wake-prompt --report <surface> [--mirror-file <path>] [--away [--readback-file <path>]]\n",
   );
   process.exit(2);
 }
@@ -67,6 +81,7 @@ function scopeLines(scope, heartbeat) {
     `corrupted=${scope.corrupted ? 1 : 0}\n` +
     `rows=${scope.eligibleSeqs.join(" ")}\n` +
     `tasks=${scope.eligibleTasks.join(" ")}\n` +
+    `completion_rows=${scope.completionSeqs.join(" ")}\n` +
     `unscoped=${unscoped ? 1 : 0}\n`
   );
 }
@@ -100,6 +115,45 @@ if (command === "scope") {
   const message = readFileSync(0, "utf8").split(/\r?\n/)[0] ?? "";
   const verdict = dispatch.branchOfferForWake(stateDir(), message, afk, true);
   process.stdout.write(`eligible=${verdict.eligible ? 1 : 0}\n${scopeLines(verdict.scope, verdict.heartbeat)}`);
+} else if (command === "completion-owned") {
+  let task = "";
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--task" && index + 1 < args.length) task = args[++index];
+    else usage();
+  }
+  if (!task) usage();
+  const classification = dispatch.presentedTaskCompletion(stateDir(), task);
+  process.stdout.write(`${classification}\n`);
+  process.exit(classification === "owned" || classification === "unreadable" ? 0 : 1);
+} else if (command === "continuation-evidence") {
+  let proof = "";
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--proof" && index + 1 < args.length) proof = args[++index];
+    else usage();
+  }
+  if (
+    proof !== "none" &&
+    proof !== "attributed-run" &&
+    proof !== "review-started" &&
+    proof !== "verified-delivery" &&
+    proof !== "hold"
+  ) {
+    usage();
+  }
+  const line = readFileSync(0, "utf8").split(/\r?\n/)[0] ?? "";
+  process.exit(dispatch.continuationEvidence(line, proof) ? 0 : 1);
+} else if (command === "withhold-acked") {
+  if (args.length > 0) usage();
+  try {
+    const seqs = dispatch.completionSeqsToWithhold(stateDir());
+    process.stdout.write(seqs.length ? `${seqs.join("\n")}\n` : "");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`fm-branch-dispatch.mjs: ${message}\n`);
+    process.exit(3);
+  }
 } else if (command === "wake-prompt") {
   let report = "";
   let away = false;

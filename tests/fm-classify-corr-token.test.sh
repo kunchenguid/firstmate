@@ -284,6 +284,14 @@ test_captain_relevance_and_pause_are_unchanged_without_a_token() {
 
   status_is_terminal_verb 'done: shipped' || fail "terminal verb regressed"
   status_is_terminal_verb 'working: rebased onto merged #76' && fail "nonterminal terminal-verb regressed"
+  status_is_terminal_verb 'needs-validation: committed c118078, 706 tests' \
+    && fail "needs-validation became a terminal verb"
+  status_is_captain_relevant 'needs-validation: committed c118078, 706 tests' \
+    || fail "needs-validation is not captain-relevant"
+  status_is_validation_handoff 'needs-validation: committed c118078, 706 tests' \
+    || fail "needs-validation is not the validation handoff"
+  status_is_validation_handoff 'done: implementation complete' \
+    && fail "a legacy done was remapped to the validation handoff"
   status_is_paused_or_captain_held 'captain-held [key=r]: tracked' || fail "captain-held regressed"
   status_is_paused_or_captain_held 'resolved [key=r]: answered' && fail "resolved regressed"
 
@@ -684,6 +692,17 @@ test_captain_override_ignores_event_time() {
     printf '%s\n' "$line" > "$dir/state/task.status"
     status_span_has_actionable "$dir/state/task.status" 0 \
       && fail "override surfaced excluded event: $line"
+  done
+  for line in 'needs-validation: committed c118078, 706 tests' \
+    'needs-validation [at=1700000000]: committed c118078, 706 tests'; do
+    status_is_captain_relevant "$line" \
+      || fail "override hid the validation handoff: $line"
+    status_is_terminal_verb "$line" \
+      && fail "override made the validation handoff terminal: $line"
+    printf '%s\n' "$line" > "$dir/state/task.status"
+    event=$(status_span_first_actionable "$dir/state/task.status" 0) \
+      || fail "override hid the validation handoff span: $line"
+    [ "$event" = "$line" ] || fail "override changed the validation handoff bytes: $event"
   done
   for verb in working paused resolved captain-held; do
     for line in "$verb: done: mentioned" "$verb [at=1700000000]: done: mentioned"; do

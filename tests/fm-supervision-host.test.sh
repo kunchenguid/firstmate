@@ -155,6 +155,10 @@ export FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
 # Keep the real engine watchdog/reaping path, but not its production grace in fixtures.
 export FM_SUPERVISION_ENGINE_GRACE=1
 export FM_ARM_CONFIRM_TIMEOUT=30
+# The late-return handoff case covers the host's documented default readiness
+# budget. Pin it so an inherited CI setting cannot outgrow that case's 50s
+# allowance for readiness plus successor retirement.
+export FM_SUPERVISION_HOST_READY_TIMEOUT=25
 unset FM_SUPERVISION_ACTOR FM_BRANCH_REPORT_TURN FM_LEASE_HOLDER_PID PI_CODING_AGENT
 
 # Homes are registered in a file: make_home runs in a command substitution,
@@ -1109,7 +1113,7 @@ SH
 }
 
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
-  local home
+  local home side pi_offer
   home=$(make_home attended-turns-main-only attended)
   turn_main_only_at_second_offer "$home"
   start_host "$home"
@@ -1122,12 +1126,19 @@ test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
   assert_no_re '^supervision-host' "$home/host.out" "the close must reach main exactly as the arm printed it"
   [ "$(engine_calls "$home")" -eq 0 ] || fail "turns-main-only: the engine ran on a stale offer"
   assert_grep 'demo.status' "$home/state/.wake-queue" "the wake must stay queued for main"
-  local pi_offer
+  # Pi treats an unread needs-decision wake as main-owned. The host pass-through
+  # also reads the status file. Judge Pi on the original signal with that
+  # decision wake removed, which is the rule this check guards.
+  side="$home/pi-offer-state"
+  mkdir -p "$side"
+  cp -a "$home/state/." "$side/"
+  grep -v 'needs-decision:' "$side/.wake-queue" > "$side/.wake-queue.pi" || true
+  mv "$side/.wake-queue.pi" "$side/.wake-queue"
   pi_offer=$(node --input-type=module -e '
     const dispatch = await import(process.argv[1]);
     console.log(dispatch.branchOfferForWake(process.argv[2], process.argv[3], false).eligible);
-  ' "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$home/state" "signal: $home/state/demo.status")
-  [ "$pi_offer" = true ] || fail "the host-only transition veto changed Pi's existing offer rule"
+  ' "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$side" "signal: $side/demo.status")
+  [ "$pi_offer" = true ] || fail "the host-only transition veto changed Pi's existing offer rule: [$pi_offer]"
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
   watcher_live "$home" || fail "the pass-through left no successor watcher"
   pass "host: an attended close whose task turns main-only before its turn still reaches main unchanged"
@@ -2136,7 +2147,11 @@ test_return_during_an_engine_turn_hands_its_outcomes_to_main() {
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "return: the host never started a watcher cycle"
   append_status "$home" 'mid-task'
-  wait_until 250 host_exited "$home" || fail "return: the host did not hand the late outcome to main: $(cat "$home/state/.supervision-host.log")"
+  # The successor-ready budget is 25s, and this wait was that same 25s, so a
+  # slow confirm left no time for the turn or for stopping the successor.
+  # The branch acknowledgement rechecks completion ownership before exit.
+  # Cover the ready budget and that stop: 500 polls of 0.1s is 50s.
+  wait_until 500 host_exited "$home" || fail "return: the host did not hand the late outcome to main: $(cat "$home/state/.supervision-host.log")"
   expect_code 0 "$(cat "$home/host.rc")" "a late-outcome handoff must exit 0 for the owner to deliver"
   assert_absent "$home/state/.afk-contract" "fixture: the stub's return did not archive the record"
   assert_re '^signal: .*demo.status' "$home/host.out" "the handoff must carry the close"
@@ -2305,7 +2320,9 @@ test_return_during_a_failed_turn_still_hands_its_outcomes_to_main() {
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "return-fail: the host never started a watcher cycle"
   append_status "$home" 'mid-task, then a crash'
-  wait_until 250 host_exited "$home" || fail "return-fail: the host did not hand the wake to main"
+  # Successor readiness may consume its full 25-second budget before the
+  # failed-turn handoff stops that successor, so leave time for both.
+  wait_until 500 host_exited "$home" || fail "return-fail: the host did not hand the wake to main"
   expect_code 0 "$(cat "$home/host.rc")" "a failed turn's handback must exit 0 for the owner to deliver"
   assert_absent "$home/state/.afk-contract" "fixture: the stub's return did not archive the record"
   assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); .*captain returned during its turn.*store rows 1[,)]' "$home/host.out" \
@@ -2313,6 +2330,7 @@ test_return_during_a_failed_turn_still_hands_its_outcomes_to_main() {
   assert_re '^supervision-host: outcome 1 for demo \[routine\]: stub handled demo$' "$home/host.out" \
     "the handback must carry the failed turn's outcome for main to relay"
   assert_re '	failed	turn=' "$home/state/.supervision-host.log" "the turn itself failed"
+  ! watcher_live "$home" || fail "a failed-turn handback left its successor watcher running"
   pass "host: a captain return during a failed engine turn still hands that turn's outcomes to main"
 }
 
@@ -2323,7 +2341,9 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "emptyresult: the host never started a watcher cycle"
   append_status "$home" 'handled, but the result is empty'
-  wait_until 250 host_exited "$home" || fail "emptyresult: the host counted an empty result handled: $(cat "$home/state/.supervision-host.log")"
+  # Successor readiness may consume its full 25-second budget before the
+  # incomplete-result handoff stops that successor, so leave time for both.
+  wait_until 500 host_exited "$home" || fail "emptyresult: the host counted an empty result handled: $(cat "$home/state/.supervision-host.log")"
   expect_code 0 "$(cat "$home/host.rc")" "a handed-back wake must exit 0 for the owner to deliver"
   assert_grep '"task":"demo"' "$home/state/branch-outcomes.jsonl" "fixture: the stub did not report"
   assert_re '^signal: .*demo.status' "$home/host.out" "the handed-back close must carry the reason line"
@@ -2332,6 +2352,7 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
   assert_re '	failed	turn=.*	error=1 ' "$home/state/.supervision-host.log" "the ledger must record the turn as failed"
   assert_no_re '	handled	turn=' "$home/state/.supervision-host.log" "an incomplete result must never count as handled"
   assert_absent "$home/state/.supervision-host-engine" "a turn that did not handle its wake must not keep its conversation"
+  ! watcher_live "$home" || fail "an incomplete-result handback left its successor watcher running"
   pass "host: an engine turn whose result is incomplete hands its wake to main"
 }
 
@@ -2957,6 +2978,267 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
 test_claude_stop_hook_notifies_when_closed_announced_successor_downtime_restore_fails
+# A newly presented completion stays main's while attended, on a main home and
+# on two secondmate home names, with no project-name condition. Progress and an
+# unchanged stale observation stay the branch's. A completion appended after
+# the branch was granted the row is withheld from that turn's acknowledgement.
+test_completion_handoff_is_main_owned_while_attended() {
+  local name home state out rc seq_busy seq_note seq_intake generation withheld
+  local GRANT="$ROOT/bin/fm-wake-grant.sh" DRAIN="$ROOT/bin/fm-wake-drain.sh"
+
+  scope_field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1; }
+
+  for name in main harbor keel; do
+    home="$TMP_ROOT/completion-$name"
+    state="$home/state"
+    mkdir -p "$state" "$home/projects/approved"
+    for task in intake credential revision progress note; do
+      printf 'project=%s\nwindow=%s-window\nkind=ship\nmode=no-mistakes\n' \
+        "$home/projects/approved" "$task" > "$state/$task.meta"
+    done
+    printf 'kind=scout\nmode=no-mistakes\n' >> "$state/revision.meta"
+    printf 'working: step one\n' > "$state/progress.status"
+    printf 'needs-validation [at=1791534938]: committed c118078, 706 tests\n' > "$state/intake.status"
+    printf 'done [at=1791535311]: committed cc38b3d, 707 tests\n' > "$state/credential.status"
+    printf 'done [at=1791501698]: revision complete and a recheck is next\n' > "$state/revision.status"
+    printf 'note: nothing for the supervisor to continue\n' > "$state/note.status"
+    append_wake "$state" signal progress.status "signal: $state/progress.status"
+    append_wake "$state" signal intake.status "signal: $state/intake.status"
+    append_wake "$state" signal credential.status "signal: $state/credential.status"
+    append_wake "$state" signal revision.status "signal: $state/revision.status"
+    append_wake "$state" stale progress "stale: progress"
+
+    out=$(FM_HOME="$home" node "$DISPATCH" scope)
+    [ "$(scope_field "$out" status)" = safe ] || fail "$name: a mixed queue was not safe: $out"
+    [ "$(scope_field "$out" rows)" = "1 5" ] || fail "$name: progress and the stale observation were not the branch rows: $out"
+    [ "$(scope_field "$out" completion_rows)" = "2 3 4" ] || fail "$name: the three completions were not main-owned: $out"
+    [ "$(scope_field "$out" tasks)" = progress ] || fail "$name: the branch claim named more than the progress task: $out"
+
+    out=$(printf 'signal: %s\n' "$state/intake.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 0 ] || fail "$name: a validation handoff was offered to the branch"
+    out=$(printf 'signal: %s %s\n' "$state/intake.status" "$state/credential.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 0 ] || fail "$name: two coalesced completions stayed on the branch"
+    out=$(printf 'signal: %s\n' "$state/progress.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 1 ] || fail "$name: a progress trigger was bounced by a co-present completion: $out"
+    out=$(printf 'stale: progress\n' | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 1 ] || fail "$name: an unchanged stale observation was treated as a completion: $out"
+    out=$(printf 'signal: %s\n' "$state/intake.status" | FM_HOME="$home" node "$DISPATCH" offer --afk)
+    [ "$(scope_field "$out" eligible)" = 1 ] || fail "$name: away posture did not keep the handoff on the branch"
+    printf '%s\n' "$out" | grep -qx 'completion_rows=' \
+      || fail "$name: away posture still excluded the handoff: $out"
+
+    # A missing or dead lease does not make the completion the branch's.
+    rm -f "$state/intake.lease"
+    out=$(printf 'signal: %s\n' "$state/intake.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 0 ] || fail "$name: a missing lease let the branch take the handoff"
+    printf '99999\n' > "$state/intake.lease"
+    out=$(printf 'signal: %s\n' "$state/intake.status" | FM_HOME="$home" node "$DISPATCH" offer)
+    [ "$(scope_field "$out" eligible)" = 0 ] || fail "$name: an expired lease let the branch take the handoff"
+
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task intake); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: validation handoff classified as $out (exit $rc)"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task credential); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: legacy implementation done classified as $out (exit $rc)"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task revision); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: scout revision classified as $out (exit $rc)"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task progress); rc=$?
+    [ "$rc" -eq 1 ] && [ "$out" = none ] || fail "$name: progress classified as $out (exit $rc)"
+    printf 'note: still waiting on the supervisor\n' >> "$state/intake.status"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task intake); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a trailing note retired the handoff ($out exit $rc)"
+    printf 'working [at=1791535400]: validation started\n' >> "$state/credential.status"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task credential); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a generic working line retired the handoff ($out exit $rc)"
+    printf 'paused [at=1791535450]: waiting on a review\n' >> "$state/revision.status"
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task revision); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a generic paused line retired the handoff ($out exit $rc)"
+    # A second process re-reads the same span. Nothing here is cached across restarts.
+    out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task revision); rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = owned ] || fail "$name: a restarted read lost the scout revision ($out exit $rc)"
+  done
+
+  home="$TMP_ROOT/completion-unreadable"
+  state="$home/state"
+  mkdir -p "$state"
+  printf 'project=%s/projects/approved\nwindow=gone-window\nkind=ship\nmode=no-mistakes\n' "$home" > "$state/gone.meta"
+  ln -s missing.status "$state/gone.status"
+  append_wake "$state" signal gone.status "signal: $state/gone.status"
+  out=$(FM_HOME="$home" node "$DISPATCH" scope)
+  [ "$(scope_field "$out" status)" = unsafe ] || fail "an unreadable status span was not refused: $out"
+  [ "$(scope_field "$out" corrupted)" = 1 ] || fail "an unreadable status span was not a corrupt scan: $out"
+  out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task gone); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = unreadable ] || fail "an unreadable status span classified as $out (exit $rc)"
+  rm -f "$state/.wake-queue"
+  out=$(FM_HOME="$home" node "$DISPATCH" scope)
+  [ "$(scope_field "$out" status)" = unsafe ] || fail "a missing wake queue was treated as readable: $out"
+
+  home="$TMP_ROOT/completion-withhold"
+  state="$home/state"
+  mkdir -p "$state" "$home/projects/approved"
+  for task in busy note intake turn; do
+    printf 'project=%s\nwindow=%s-window\nkind=ship\nmode=no-mistakes\n' \
+      "$home/projects/approved" "$task" > "$state/$task.meta"
+  done
+  printf 'working: step one\n' > "$state/busy.status"
+  printf 'note: routine follow-up\n' > "$state/note.status"
+  printf 'needs-validation [at=1791534938]: committed c118078, 706 tests\n' > "$state/intake.status"
+  printf 'working: step one\n' > "$state/turn.status"
+  : > "$state/turn.turn-ended"
+  append_wake "$state" signal busy.status "signal: $state/busy.status"
+  append_wake "$state" signal note.status "signal: $state/note.status"
+  append_wake "$state" signal intake.status "signal: $state/intake.status"
+  append_wake "$state" signal turn.turn-ended "signal: $state/turn.turn-ended"
+  seq_busy=$(awk -F '\t' '$4 == "busy.status" { print $2; exit }' "$state/.wake-queue")
+  seq_note=$(awk -F '\t' '$4 == "note.status" { print $2; exit }' "$state/.wake-queue")
+  seq_intake=$(awk -F '\t' '$4 == "intake.status" { print $2; exit }' "$state/.wake-queue")
+  seq_turn=$(awk -F '\t' '$4 == "turn.turn-ended" { print $2; exit }' "$state/.wake-queue")
+  [ -n "$seq_busy" ] && [ -n "$seq_note" ] && [ -n "$seq_intake" ] && [ -n "$seq_turn" ] \
+    || fail "fixture: withhold queue did not record its rows"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" handoff-grant || fail "fixture: grant activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish handoff-grant "$seq_busy" "$seq_note" "$seq_turn" \
+    || fail "fixture: grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$home/drain.out" 2> "$home/drain.err" \
+    || fail "branch drain failed: $(cat "$home/drain.err")"
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$home/drain.err")
+  [ -n "$generation" ] || fail "branch drain omitted its recovery generation: $(cat "$home/drain.err")"
+  printf 'needs-validation [at=1791535500]: committed while the branch turn ran\n' >> "$state/busy.status"
+  printf 'needs-validation [at=1791535500]: committed while the branch turn ran\n' >> "$state/turn.status"
+  withheld=$(FM_HOME="$home" node "$DISPATCH" withhold-acked)
+  expected_withheld=$(printf '%s\n%s' "$seq_busy" "$seq_turn")
+  [ "$withheld" = "$expected_withheld" ] \
+    || fail "mid-turn completions were not withheld (got ${withheld:-none}, want $expected_withheld)"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
+    --ack-through "$seq_note" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed"
+  grep -Fq $'\t'"signal"$'\t'"busy.status"$'\t' "$state/.wake-queue" \
+    || fail "acknowledgement consumed the completion appended during the turn"
+  grep -Fq $'\t'"signal"$'\t'"intake.status"$'\t' "$state/.wake-queue" \
+    || fail "acknowledgement consumed a completion the branch was never granted"
+  grep -Fq $'\t'"signal"$'\t'"note.status"$'\t' "$state/.wake-queue" \
+    && fail "acknowledgement left the routine note queued"
+  ln -sfn /tmp "$state/.branch-eligible-rows"
+  rc=0
+  FM_HOME="$home" node "$DISPATCH" withhold-acked >/dev/null 2>"$home/withhold.err" || rc=$?
+  [ "$rc" -eq 3 ] || fail "an unreadable grant snapshot was not refused (exit $rc): $(cat "$home/withhold.err")"
+  pass "completion handoffs stay main-owned while attended, including a line appended during the branch turn"
+}
+
+# A routine report cannot retire a completion the supervisor still has to
+# continue. A generic working or paused line does not. An explicit hold does.
+# While away the upgraded outcome stays in the store and main stays parked.
+test_routine_report_cannot_retire_a_pending_handoff() {
+  local home state out rc real_node fake
+  home="$TMP_ROOT/completion-report"
+  state="$home/state"
+  mkdir -p "$state" "$home/projects/approved" "$state/handoff-continuations"
+  printf 'project=%s\nwindow=intake-window\nkind=ship\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/intake.meta"
+  printf 'project=%s\nwindow=credential-window\nkind=ship\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/credential.meta"
+  printf 'project=%s\nwindow=revision-window\nkind=scout\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/revision.meta"
+  printf 'project=%s\nwindow=harbor-window\nkind=ship\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/harbor.meta"
+  printf 'project=%s\nwindow=opaque-window\nkind=ship\nmode=no-mistakes\n' \
+    "$home/projects/approved" > "$state/opaque.meta"
+  printf 'needs-validation [at=1791534938]: committed c118078, 706 tests\n' > "$state/intake.status"
+  printf 'turn=t1\nrows=1\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: intake.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
+    --task intake --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a routine report on an owned handoff was refused: $out"
+  assert_contains "$out" "[captain]" "a routine report retired a validation handoff: $out"
+  assert_not_contains "$out" "silent" "a retired handoff stayed a silent routine outcome: $out"
+  grep -q '"verdict":"captain"' "$state/branch-outcomes.jsonl" \
+    || fail "the upgraded handoff was not stored as captain: $(cat "$state/branch-outcomes.jsonl")"
+
+  printf 'working [at=1791535400]: validation started\n' >> "$state/intake.status"
+  printf 'turn=t2\nrows=1\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: intake.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t2 "$REPORT" \
+    --task intake --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a generic working line on an owned handoff was refused: $out"
+  assert_contains "$out" "[captain]" "a generic working line retired a validation handoff: $out"
+  assert_not_contains "$out" "silent" "a generic working line stayed a silent routine outcome: $out"
+
+  printf 'done [at=1791535311]: committed cc38b3d, 707 tests\n' > "$state/credential.status"
+  FM_HOME="$home" bash -c '
+    set -e
+    . "$1"
+    ident=$(_fm_open_decisions_file_ident "$2/credential.status")
+    size=$(_fm_status_file_size "$2/credential.status")
+    size=${size//[[:space:]]/}
+    status_commit_presentation_snapshot "$2" "$(printf "%s\t%s\t%s\n" credential "$size" "$ident")"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$state" || fail "fixture: could not commit the presentation cursor"
+  printf 'deadbeef\n' > "$state/handoff-continuations/credential.open"
+  out=$(FM_HOME="$home" node "$DISPATCH" completion-owned --task credential); rc=$?
+  [ "$rc" -eq 1 ] && [ "$out" = none ] || fail "a consumed span was still classified as $out (exit $rc)"
+  printf 'turn=t3\nrows=2\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: credential.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t3 "$REPORT" \
+    --task credential --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a consumed handoff with an open marker was refused: $out"
+  assert_contains "$out" "[captain]" "an open handoff marker let a routine report retire the completion: $out"
+
+  printf 'working [at=1791535600]: validation started\n' >> "$state/credential.status"
+  printf 'turn=t4\nrows=2\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: credential.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t4 "$REPORT" \
+    --task credential --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a generic working line over an open handoff marker was refused: $out"
+  assert_contains "$out" "[captain]" "a generic working line let a routine report retire the open handoff: $out"
+  assert_not_contains "$out" "silent" "a generic working line over an open marker stayed silent: $out"
+
+  printf 'note: nothing pending\n' > "$state/opaque.status"
+  real_node=$(command -v node)
+  fake="$home/fake-node"
+  mkdir -p "$fake"
+  cat > "$fake/node" <<EOF
+#!/usr/bin/env bash
+exit 9
+EOF
+  chmod +x "$fake/node"
+  printf 'turn=t5\nrows=3\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: opaque.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(PATH="$fake:$PATH" FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t5 "$REPORT" \
+    --task opaque --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a report that could not read completion ownership was refused: $out"
+  assert_contains "$out" "[captain]" "a failed ownership read stayed routine: $out"
+  [ -n "$real_node" ] || fail "fixture: node disappeared"
+
+  printf 'needs-validation [at=1791534938]: committed c118078, 706 tests\n' > "$state/harbor.status"
+  printf 'turn=t6\nrows=4\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: harbor.status\nposture=attended\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t6 "$REPORT" \
+    --task harbor --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a second home name's handoff report was refused: $out"
+  assert_contains "$out" "[captain]" "a handoff on another home name stayed routine: $out"
+
+  printf 'turn=t7\nrows=\ntasks=\nunscoped=1\nwake=heartbeat\nposture=attended\n' > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t7 "$REPORT" \
+    --task fleet --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a fleet routine report was refused: $out"
+  assert_contains "$out" "silent" "a fleet review was upgraded as if it were a handoff: $out"
+
+  FM_HOME="$home" "$CONTRACT" enter --words 'watch the fleet' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  printf 'needs-validation [at=1791501698]: revision complete and a recheck is next\n' > "$state/revision.status"
+  printf 'turn=t8\nrows=5\ntasks=intake credential revision harbor opaque\nunscoped=0\nwake=signal: revision.status\nposture=away\n' \
+    > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t8 "$REPORT" \
+    --task revision --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "an away report on an owned handoff was refused: $out"
+  assert_contains "$out" "[captain]" "away posture let a routine report retire the handoff: $out"
+  assert_contains "$out" "it waits in the outcome store for MAIN" "away posture did not leave the outcome for the return: $out"
+  if [ -f "$state/.wake-queue" ] && grep -q 'supervision-host-return' "$state/.wake-queue"; then
+    fail "away posture queued a return wake and would unpark main: $(cat "$state/.wake-queue")"
+  fi
+  pass "a routine report cannot retire a pending handoff, and away posture leaves the obligation without unparking main"
+}
+
+test_completion_handoff_is_main_owned_while_attended
+test_routine_report_cannot_retire_a_pending_handoff
 test_park_exit_probe_uses_half_second_child_sleeps
 test_report_surface_enforces_actor_turn_and_scope
 test_report_after_the_return_is_queued_for_main
