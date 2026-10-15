@@ -675,15 +675,15 @@ During a unit restart or a `server live-handoff`, `status` can briefly report no
 
 The owner opts out by writing marker files into the session directory that `herdr session list --json` reports as `session_dir`:
 
-| Marker | Written by the owner | Firstmate behavior while the server is not running |
+| Marker | Written by the owner | Firstmate behavior |
 | --- | --- | --- |
-| `firstmate-server-owner` | Once, for as long as it owns the server; the first line names the owner | Never starts a server; waits a bounded time for it to report running, then fails naming the owner |
-| `firstmate-server-replacing` | Only for the duration of a restart or handoff | Never starts a server; waits a bounded time for it to report running, or for the marker to clear |
+| `firstmate-server-owner` | Once, for as long as it owns the server; the first line names the owner | Uses a running server; never starts a stopped one, and waits a bounded time for it to report running, then fails naming the owner |
+| `firstmate-server-replacing` | Only for the duration of a restart or handoff | Never starts or uses a server, even one that reports running; waits a bounded time for the marker to clear and the server to report running, then fails naming the marker |
 
-The wait is `FM_BACKEND_HERDR_EXTERNAL_SERVER_POLLS` checks half a second apart, 60 (30 seconds) by default.
+The wait is up to 60 checks half a second apart, 30 seconds in all.
 A replacement marker that clears with no owner marker hands the session back to the default, so Firstmate starts the server if it is still down.
-A replacement marker left behind fails every wait naming its path, so the owner must remove it when the replacement ends.
-A server that reports running is used at once, and the markers are read only when it does not.
+A replacement marker left behind fails every operation naming its path, so the owner must remove it when the replacement ends.
+Every operation reads the session directory once, even when the server reports running, so a replacement marker holds callers off the old server as well as the new one.
 Herdr lists a session's `session_dir` even while its server is stopped ([verification](verification/runtime-backends.md#session-directory)), and a Herdr whose listing omits the field cannot carry the markers and keeps the default behavior.
 
 ### Husks after a server restart

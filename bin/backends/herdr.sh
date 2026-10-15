@@ -1702,38 +1702,38 @@ fm_backend_herdr_server_owner_name() {  # <owner-marker>
 # inherited from whichever agent happened to start it. Bounded poll for the
 # server to report running.
 #
-# A running server returns at once, before any marker is read, so the default
-# path costs nothing extra. Otherwise, while the session directory holds an
-# owner or replacement marker, this never starts a server: it polls the
-# non-starting fm_backend_herdr_server_running_state read
-# FM_BACKEND_HERDR_EXTERNAL_SERVER_POLLS times (default 60, 0.5s apart), and
-# fails naming the owner or the replacement if the server never reports running.
-# A replacement marker that clears with no owner marker hands back to the
-# Firstmate-owned start below.
+# A running server returns after one session-directory read, unless that
+# directory holds a replacement marker. While the session directory holds an
+# owner marker with the server down, or a replacement marker at all, this never
+# starts or releases callers to the server: it polls the non-starting
+# fm_backend_herdr_server_running_state read up to 60 times, 0.5s apart, until
+# the replacement marker is gone and the server reports running, and fails
+# naming the replacement or the owner otherwise. A replacement marker that
+# clears with no owner marker hands back to the Firstmate-owned start below.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i dir owner_marker replacing_marker polls owner
+  local session=$1 running out i dir owner_marker replacing_marker owner polls=60
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
-  [ "$running" = "true" ] && return 0
   dir=$(fm_backend_herdr_session_dir "$session")
-  if [ -n "$dir" ]; then
+  if [ -z "$dir" ]; then
+    [ "$running" = "true" ] && return 0
+  else
     owner_marker="$dir/$FM_BACKEND_HERDR_SERVER_OWNER_MARKER"
     replacing_marker="$dir/$FM_BACKEND_HERDR_SERVER_REPLACING_MARKER"
-    polls=${FM_BACKEND_HERDR_EXTERNAL_SERVER_POLLS:-60}
-    case "$polls" in ''|*[!0-9]*) polls=60 ;; esac
+    [ "$running" = "true" ] && [ ! -e "$replacing_marker" ] && return 0
     i=0
     while [ -e "$owner_marker" ] || [ -e "$replacing_marker" ]; do
       if [ "$i" -ge "$polls" ]; then
-        if [ -e "$owner_marker" ]; then
+        if [ -e "$replacing_marker" ]; then
+          echo "error: herdr server for session '$session' is being replaced ($replacing_marker) and the replacement did not finish after $polls checks; Firstmate will not start or use a server while that marker exists" >&2
+        else
           owner=$(fm_backend_herdr_server_owner_name "$owner_marker")
           echo "error: herdr server for session '$session' is managed by $owner ($owner_marker) and did not report running after $polls checks; Firstmate will not start it - start or repair it through $owner" >&2
-        else
-          echo "error: herdr server for session '$session' is being replaced ($replacing_marker) and did not report running after $polls checks; Firstmate will not start a server while that marker exists" >&2
         fi
         return 1
       fi
       sleep 0.5
       i=$((i + 1))
-      [ "$(fm_backend_herdr_server_running_state "$session")" = running ] && return 0
+      [ ! -e "$replacing_marker" ] && [ "$(fm_backend_herdr_server_running_state "$session")" = running ] && return 0
     done
   fi
   (
