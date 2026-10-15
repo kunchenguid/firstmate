@@ -292,7 +292,7 @@ test_unblock_clears_a_mistaken_edge() {
 
 test_missing_child_remains_a_blocker() {
   local dir action out rc before
-  for action in done close; do
+  for action in 'done' 'close'; do
     dir=$(objective_home "obj-missing-$action" | sed -n 1p)
     obj_w "$dir" "done" study >/dev/null || fail "closing study failed"
     # Simulate a lost child row in the persisted Markdown backlog contract.
@@ -320,7 +320,7 @@ test_closure_command_help() {
   local dir action flag expected expected_rc out rc before
   dir=$(objective_home obj-help | sed -n 1p)
   before=$(cat "$dir/home/data/backlog.md")
-  for action in done close; do
+  for action in 'done' 'close'; do
     for flag in --help -h; do
       expected=$(cd "$dir/home" && tasks-axi "$action" "$flag" 2>&1); expected_rc=$?
       out=$(obj_w "$dir" "$action" "$flag" 2>&1); rc=$?
@@ -340,7 +340,7 @@ test_objective_close_with_relative_directories() {
   local dir mode action out rc child
   local relative_env=()
   for mode in home data root; do
-    for action in done close; do
+    for action in 'done' 'close'; do
       dir=$(objective_home "obj-relative-$mode-$action" | sed -n 1p)
       case "$mode" in
         home) relative_env=(FM_HOME=home FM_ROOT_OVERRIDE="$ROOT") ;;
@@ -381,7 +381,7 @@ SH
   chmod +x "$dir/fakebin/tasks-axi"
   before=$(cat "$dir/home/data/backlog.md")
   for mode in unreadable timeout; do
-    for action in done close; do
+    for action in 'done' 'close'; do
       out=$(PATH="$dir/fakebin:$PATH" FM_REAL_TASKS_AXI="$real_tasks" \
         FM_READ_FAILURE="$mode" FM_BACKLOG_ROW_TIMEOUT_SECS=1 \
         obj_w "$dir" "$action" obj 2>&1); rc=$?
