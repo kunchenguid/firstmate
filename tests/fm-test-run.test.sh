@@ -1203,10 +1203,10 @@ test_portable_serial_hint_coverage_is_reported_and_bounded() {
   budget=$(printf '%s\n' "$out" | sed -n 's/.*serial_budget_ms=\([0-9][0-9]*\).*/\1/p')
   [ -n "$max" ] && [ -n "$budget" ] \
     || fail "coverage summary must carry serial packing and budget: $out"
-  [ "$budget" -eq 1715043 ] || fail "packing budget must match the longest serial script floor"
+  [ "$budget" -eq 1200000 ] || fail "packing must leave ten minutes of the normal CI tier"
   [ "$max" -gt 0 ] && [ "$max" -le "$budget" ] \
     || fail "largest serial shard packs ${max}ms above the ${budget}ms target"
-  pass "coverage guard bounds the unmeasured share and serial packing within the host floor"
+  pass "coverage guard bounds the unmeasured share and serial packing within twenty minutes"
 }
 
 test_portable_serial_packing_budget_boundary() {
@@ -1220,7 +1220,7 @@ test_portable_serial_packing_budget_boundary() {
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
   done < <("$RUNNER" --list --all)
 
-  for weight in 1715043 1715044; do
+  for weight in 1200000 1200001; do
     cp "$RUNNER" "$repo/bin/fm-test-run.sh"
     python3 - "$repo/bin/fm-test-run.sh" "$weight" <<'PY' \
       || fail "could not seed the fixture's measured timing input"
@@ -1228,20 +1228,20 @@ from pathlib import Path
 import re, sys
 runner = Path(sys.argv[1])
 runner.write_text(re.sub(
-    r"(?m)^tests/fm-supervision-host\.test\.sh [0-9]+$",
-    f"tests/fm-supervision-host.test.sh {sys.argv[2]}",
+    r"(?m)^tests/fm-watch-triage\.test\.sh [0-9]+$",
+    f"tests/fm-watch-triage.test.sh {sys.argv[2]}",
     runner.read_text(),
 ))
 PY
     out=$(bash "$repo/bin/fm-test-run.sh" --check-coverage 2>&1) && rc=0 || rc=$?
-    if [ "$weight" -eq 1715043 ]; then
+    if [ "$weight" -eq 1200000 ]; then
       expect_code 0 "$rc" "packing exactly at the budget must be accepted"
       assert_contains "$out" "FM_TEST_COVERAGE ok" "boundary coverage did not pass"
-      assert_contains "$out" "serial_max_ms=1715043" "fixture did not pack exactly at the budget"
-      assert_contains "$out" "serial_budget_ms=1715043" "fixture changed the packing budget"
+      assert_contains "$out" "serial_max_ms=1200000" "fixture did not pack exactly at the budget"
+      assert_contains "$out" "serial_budget_ms=1200000" "fixture changed the packing budget"
     else
       expect_code 1 "$rc" "packing one millisecond above the budget must be refused"
-      assert_contains "$out" "largest portable serial shard packs 1715044ms above the 1715043ms target" \
+      assert_contains "$out" "largest portable serial shard packs 1200001ms above the 1200000ms target" \
         "over-budget refusal did not explain the modeled excess"
       assert_not_contains "$out" "FM_TEST_COVERAGE ok" "over-budget packing reported success"
     fi
