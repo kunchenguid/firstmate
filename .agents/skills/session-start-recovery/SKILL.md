@@ -37,7 +37,7 @@ The locked startup inactive-outcome scan joins that worker so a slow local curre
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the essential launch tools are present and GitHub authentication is good (not probed while every registered project is local-only, per `bin/fm-bootstrap.sh`); presentation availability follows `bootstrap-diagnostics` and does not block nonvisual work.
-Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `lavish-axi` for visual decisions or reports; consult current help rather than memorizing flags.
+Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `sign-off-axi` for visual decisions or reports; consult current help rather than memorizing flags.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
