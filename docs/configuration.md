@@ -1893,7 +1893,7 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 **Resolution record**
 
 Every resolution that reached the API appends one JSON line to the gitignored `state/dispatch-resolve.jsonl` of the effective home.
-The line holds the UTC timestamp, task id, project, status, matched rule and its `when` excerpt, confidence, probabilities, fallback rule when taken, and the chosen profile when clear, and never brief text or the key.
+The line holds the UTC timestamp, task id, project, status, matched rule and its `when` excerpt, confidence, probabilities, fallback rule when taken, the source of the profile (a rule or the default), and the chosen profile when clear, and never brief text or the key.
 The off path and usage errors write nothing, and a failed write prints one stderr warning without changing the output or exit code.
 
 **When firstmate invokes the resolver**

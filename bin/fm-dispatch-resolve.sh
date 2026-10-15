@@ -114,7 +114,7 @@
 #   error after the request) appends one JSON line to $FM_HOME/state/
 #   dispatch-resolve.jsonl: ts, task (the <id> of data/<id>/brief.md, else
 #   null), project, status, rule, rule_when (first 60 characters), confidence,
-#   probabilities, fallback_rule when taken, and profile (harness, model,
+#   probabilities, fallback_rule when taken, profile_source (the rule or "default" that supplied the profile), and profile (harness, model,
 #   effort) when clear. It never holds brief text or the key. The off path and
 #   usage errors write nothing, and a failed write only prints one stderr
 #   warning; stdout and the exit code are unchanged.
@@ -177,9 +177,16 @@ no_rules() {
   exit 0
 }
 REQUEST_SENT=0
+RESPONSE_VALID=0
 emit_error() {
   local reason=$1
-  [ "$REQUEST_SENT" -eq 1 ] && record_resolution '{"status":"error"}'
+  if [ "$REQUEST_SENT" -eq 1 ]; then
+    if [ "$RESPONSE_VALID" -eq 1 ]; then
+      record_resolution "$(jq -c '{status: "error", rule: .answers.rule.choice, confidence: .answers.rule.confidence, probabilities: .answers.rule.probabilities}' "$RESP_FILE")"
+    else
+      record_resolution '{"status":"error"}'
+    fi
+  fi
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
   exit 0
@@ -418,6 +425,7 @@ record_resolution() {
       confidence: ($r.confidence // null),
       probabilities: ($r.probabilities // null),
       fallback_rule: ($r.fallback_rule // null),
+      profile_source: ($r.profile_source // null),
       profile: (if $r.status == "clear" then ($r.chosen.profile | {harness, model: (.model // null), effort: (.effort // null)}) else null end)
     }' 2>/dev/null) || line=''
   if [ -z "$line" ] || ! { mkdir -p "$(dirname "$RECORD_PATH")" && printf '%s\n' "$line" >> "$RECORD_PATH"; } 2>/dev/null; then
@@ -590,6 +598,7 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.input_tokens | type) == "number" and
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
+RESPONSE_VALID=1
 
 # ---- quota evidence: one quota-axi --json snapshot, skipped entirely under the
 # ---- shared-quota opt-out (a stub keeps the slurpfile contract intact) ---------
@@ -725,6 +734,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
     rule: $picked,
     rule_when: when_of($picked),
+    profile_source: ($sel.source // null),
     confidence: $a.confidence, probabilities: $a.probabilities
   }
   + (if $fb.to then {fallback_rule: $choice, fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"} else {} end)

@@ -1901,7 +1901,9 @@ cp "$BRIEF" "$TASK_BRIEF"
 reset_log
 rm -rf "$RECORD"
 write_response "$RESPONSE" rule_4 0.9
-(cd "$HOME_DIR" && TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager)
+pushd "$HOME_DIR" >/dev/null
+TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null
 expect_code 0 "$code" "recorded clear resolution exits 0"
 assert_equals 1 "$(wc -l < "$RECORD" | tr -d ' ')" "a clear resolution appends exactly one line"
 record=$(cat "$RECORD")
@@ -1922,11 +1924,35 @@ cp "$FLOOR_RULES" "$RULES"
 reset_log
 rm -rf "$RECORD"
 write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.18 0.02
-(cd "$HOME_DIR" && TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager)
+pushd "$HOME_DIR" >/dev/null
+TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null
 record=$(cat "$RECORD")
 assert_equals 'rule_2' "$(jq -r .rule <<<"$record")" "a fallback record keeps the model's pick"
 assert_equals 'rule_4' "$(jq -r .fallback_rule <<<"$record")" "a fallback record names the rule that supplied the profile"
+assert_equals 'rule_4' "$(jq -r .profile_source <<<"$record")" "a fallback record names the rule whose profile was used"
 mv "$RULES.bak" "$RULES"
+
+reset_log
+rm -rf "$RECORD"
+write_response "$RESPONSE" rule_1 0.97
+pushd "$HOME_DIR" >/dev/null
+TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null
+record=$(cat "$RECORD")
+assert_equals 'rule_1' "$(jq -r .rule <<<"$record")" "a floor-below record keeps the model's pick"
+assert_equals 'default' "$(jq -r .profile_source <<<"$record")" "a floor-below record marks the default fall-through"
+
+reset_log
+rm -rf "$RECORD"
+write_response "$RESPONSE" rule_4 0.9
+pushd "$HOME_DIR" >/dev/null
+FAKE_QUOTA_FAIL=1 TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null
+record=$(cat "$RECORD")
+assert_equals 'error' "$(jq -r .status <<<"$record")" "a late error is recorded as error"
+assert_equals 'rule_4' "$(jq -r .rule <<<"$record")" "an error after a valid answer keeps the chosen rule"
+assert_equals '0.9' "$(jq -r .confidence <<<"$record")" "an error after a valid answer keeps the confidence"
 
 rm -rf "$RECORD" "$HOME_DIR/.env"
 reset_log
