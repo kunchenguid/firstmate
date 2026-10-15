@@ -269,9 +269,11 @@ reported unreadable with the reason; collection never computes a summary in
 that home.
 Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
 (default 10 seconds); a read that hits the bound reports state unknown. Local task
-observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8);
-each task's status-history fold and row composition run in its own observation
-worker, so neither the task count nor any one long history serializes the rest.
+observations run in batches of up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY tasks
+(default 8), each task's status-history fold and row composition running in its
+own observation worker, and each batch waits for its slowest task before the next
+batch starts. That fold and the bounded current-state read both scan the task's
+whole status history, so collection time still grows with accumulated history.
 Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
@@ -702,10 +704,13 @@ prefetch_task_observations() {  # <meta> <id>
 
 # Each task's observations and row composition are independent of every other
 # task's. Start each task's current-state and endpoint reads together, fold its
-# status history while they run, and compose its row in the same worker, so a
-# fleet pays one slow no-mistakes response window and one long status history
-# rather than each of them in series, while every command bound remains owned
-# by fm-timeout-lib.sh.
+# status history while they run, and compose its row in the same worker. Workers
+# run in batches of up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY tasks and each batch
+# waits for its slowest task, so a fleet pays its slowest task once per batch
+# rather than every task's no-mistakes response window and status history in
+# series, while every command bound remains owned by fm-timeout-lib.sh. The fold
+# still scans each task's whole history, so a batch's cost grows with its longest
+# accumulated history.
 prefetch_task_current_states() {
   local meta captured_meta id active=0 index=0 rc=0
   local -a pids=()
