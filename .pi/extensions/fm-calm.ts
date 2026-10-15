@@ -435,8 +435,8 @@ export default function (pi: ExtensionAPI) {
   // Gate on Calm already being on at load time. This must stay synchronous and
   // unconditional here (see docs/calm-mode-feasibility.md): a foreign-claim check is
   // not reachable at this point, while deferral would make restored rows capture the
-  // wrong definition. A Calm-off session or reload registers nothing and creates no
-  // collision exposure.
+  // wrong definition. A Calm-off session or reload registers no built-in override and
+  // creates no collision exposure.
   if (loadCalmPreference()) {
     for (const tool of wrappedBuiltIns) pi.registerTool(tool);
     builtInsRegistered = true;
