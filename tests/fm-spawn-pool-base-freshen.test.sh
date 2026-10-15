@@ -859,8 +859,7 @@ test_prose_base_branch_line_is_ignored() {
 # A push-only ship registers the long-lived branch it delivers to by direct
 # push, so teardown can prove that shape landed (bin/fm-teardown.sh reads
 # push_landed_ref= from the task meta). The flag is normalized to a short branch
-# name, absent without the flag, and restricted to push-only direct-PR/local-only
-# tasks.
+# name, absent without the flag, and restricted to push-only direct-PR tasks.
 test_push_landed_ref_is_recorded_and_validated() {
   local rec id out status
   id='pool-push-landed-record-r1'
@@ -873,6 +872,12 @@ test_push_landed_ref_is_recorded_and_validated() {
   expect_code 0 "$status" "a ship spawn with --push-landed-ref should launch"$'\n'"$out"
   assert_grep 'push_landed_ref=integration/main' "$HOME_DIR/state/$id.meta" \
     "the spawn did not normalize and record its push-landed ref"
+  assert_grep 'shape=registered-direct-push push-landed-ref=integration/main' "$HOME_DIR/data/$id/launch-brief.md" \
+    "the launched worker did not receive the registered direct-push contract"
+  assert_grep 'git push origin HEAD:refs/heads/integration/main' "$HOME_DIR/data/$id/launch-brief.md" \
+    "the launched worker did not receive the registered branch push command"
+  assert_no_grep 'open a PR' "$HOME_DIR/data/$id/launch-brief.md" \
+    "the registered direct-push launch still tells the worker to open a PR"
 
   id='pool-push-landed-absent-r1'
   rec=$(make_case push-landed-absent "$id")
@@ -900,9 +905,9 @@ test_push_landed_ref_is_recorded_and_validated() {
   printf '%s\n' 'Delivery contract: mode=local-only forge=push-only' >> "$HOME_DIR/data/$id/brief.md"
   out=$(run_spawn "$id" --mode local-only --yolo off --push-landed-ref integration/main)
   status=$?
-  expect_code 0 "$status" "a push-only local-only spawn with --push-landed-ref should launch"$'\n'"$out"
-  assert_grep 'push_landed_ref=integration/main' "$HOME_DIR/state/$id.meta" \
-    "the local-only spawn did not record its push-landed ref"
+  [ "$status" -ne 0 ] || fail "a local-only spawn with --push-landed-ref should refuse"
+  assert_contains "$out" "requires mode=direct-PR" "the local-only refusal did not preserve local-main delivery"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused local-only spawn published task metadata"
 
   id='pool-push-landed-invalid-r1'
   rec=$(make_case push-landed-invalid "$id")
@@ -935,7 +940,7 @@ test_push_landed_ref_is_recorded_and_validated() {
   [ "$status" -ne 0 ] || fail "a non-push-only spawn with --push-landed-ref should refuse"
   assert_contains "$out" "registered forge=push-only" "the forge refusal did not explain itself"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused non-push-only spawn published task metadata"
-  pass "--push-landed-ref normalizes the ref and requires push-only direct-PR/local-only delivery"
+  pass "--push-landed-ref normalizes the ref and requires push-only direct-PR delivery"
 }
 
 # A named base is validated against the project's registered forge for scouts

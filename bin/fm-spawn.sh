@@ -53,8 +53,8 @@
 #   push_landed_ref= in state/<id>.meta, which a relaunch reuses and
 #   bin/fm-teardown.sh's landed check reads: HEAD being an ancestor of origin's
 #   copy of the registered ref proves the work landed. It is refused on scouts,
-#   secondmates, relaunches, no-mistakes, and projects not registered
-#   forge=push-only. It accepts direct-PR and local-only tasks, persists a
+#   secondmates, relaunches, local-only, no-mistakes, and projects not registered
+#   forge=push-only. It accepts only direct-PR tasks, persists a
 #   short branch name, and leaves teardown's landed check unchanged without it.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
@@ -3468,6 +3468,15 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      elif [ "$KIND" = ship ] && [ "$MODE" = direct-PR ] && [ -n "$PUSH_LANDED_REF" ]; then
+        cat <<EOF
+
+# Registered direct-push delivery contract
+This registered contract supersedes every earlier instruction to open a pull request or to push only the ship branch.
+EOF
+        fm_ship_rule_one "$MODE" "$ID" "$BRANCH" push-only "$BASE_BRANCH" "$PUSH_LANDED_REF" &&
+          printf '\n' &&
+          fm_dod_block "$MODE" "$ID" "$BRANCH" push-only "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PUSH_LANDED_REF"
       fi
   } >"$BRIEF_TMP" || {
     rm -f -- "$BRIEF_TMP"
@@ -3509,8 +3518,9 @@ if [ "$KIND" = ship ]; then
   fi
   [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
-  BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
-  BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_CONTRACT=$(sed -n '/^Delivery contract: mode=/ { p; q; }' "$BRIEF")
+  BRIEF_MODE=$(printf '%s\n' "$BRIEF_CONTRACT" | sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p')
+  BRIEF_FORGE=$(printf '%s\n' "$BRIEF_CONTRACT" | sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p')
   [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
   BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$BRIEF" | head -n 1)
   if [ -n "$BRIEF_BRANCH" ]; then
@@ -3541,7 +3551,7 @@ if [ "$KIND" = ship ]; then
   # as an upstream-consent= token on that same line; like mode and forge, the
   # brief and the spawn flag must agree so the worker's contract and the task
   # record carry the same authority.
-  BRIEF_CONSENT=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]upstream-consent=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_CONSENT=$(printf '%s\n' "$BRIEF_CONTRACT" | sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]upstream-consent=\([^ ]*\).*$/\1/p')
   if [ "$BRIEF_CONSENT" != "$UPSTREAM_CONSENT" ]; then
     echo "error: upstream-consent mismatch for $ID: $BRIEF records upstream-consent=${BRIEF_CONSENT:-none} but this spawn passed ${UPSTREAM_CONSENT:-none}; correct the flag or re-scaffold the brief so the worker's contract and the task record agree" >&2
     exit 1
@@ -3565,9 +3575,12 @@ if [ "$KIND" = ship ]; then
       exit 1
     }
     case "$MODE" in
-      direct-PR|local-only) ;;
-      *)
+      direct-PR) ;;
+      no-mistakes)
         echo "error: --push-landed-ref is refused for mode=$MODE; no-mistakes owns publication through its pipeline" >&2
+        exit 1 ;;
+      *)
+        echo "error: --push-landed-ref requires mode=direct-PR; local-only has its own local-main delivery contract" >&2
         exit 1 ;;
     esac
   fi

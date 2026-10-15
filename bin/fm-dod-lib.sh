@@ -6,7 +6,7 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>] [<consent>] [<push-landed-ref>]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
 # contract.
@@ -59,7 +59,7 @@
 # design). In the Definition of done, forgejo changes only the CLI a direct-PR
 # worker opens its pull request with: tea instead of gh-axi. `push-only` is the
 # exception that permits direct-PR and local-only, while no-mistakes remains
-# pipeline-owned. Other forge bindings compose with the two modes that publish
+# pipeline-owned; a registered direct-push ref is accepted only on direct-PR. Other forge bindings compose with the two modes that publish
 # and are refused on local-only, which publishes nothing. On gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
 # that straight away, and no-mistakes first runs the pipeline with its three
@@ -151,15 +151,7 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
       echo "error: $caller: unknown forge '$forge' (expected none, gerrit, forgejo, or push-only)" >&2
       return 1 ;;
   esac
-  if [ "$forge" = push-only ]; then
-    case "$mode" in
-      direct-PR|local-only) return 0 ;;
-      *)
-        echo "error: $caller: forge=push-only can ship only mode=direct-PR or mode=local-only" >&2
-        return 1 ;;
-    esac
-  fi
-  if [ "$forge" != none ] && [ "$mode" = local-only ]; then
+  if [ "$forge" != none ] && [ "$forge" != push-only ] && [ "$mode" = local-only ]; then
     echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
     return 1
   fi
@@ -203,14 +195,22 @@ fm_brief_base_branches() {  # <brief>
   ' "$1"
 }
 
-fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-}
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>] [<push-landed-ref>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} push_landed_ref=${6:-}
   local branch=${3:-fm/$id} target='the default branch'
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_ship_rule_one || return 1
   [ -z "$base" ] || target="the base branch \`$base\` or the default branch"
   if [ "$forge" = gerrit ]; then
     printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
+    return 0
+  fi
+  if [ "$forge" = push-only ] && [ "$mode" = direct-PR ]; then
+    if [ -n "$push_landed_ref" ]; then
+      printf '%s\n' "1. Never open or merge a PR. Push only your current HEAD to the registered delivery branch \`$push_landed_ref\`, exactly as the Definition of done directs."
+    else
+      printf '%s\n' "1. Never open or merge a PR. Do not push until firstmate has registered the direct-push delivery branch in the current Definition of done."
+    fi
     return 0
   fi
   case "$mode" in
@@ -415,11 +415,17 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<push-landed-ref>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} push_landed_ref=${7:-}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
+  if [ -n "$push_landed_ref" ]; then
+    if [ "$mode:$forge" != direct-PR:push-only ] || ! push_landed_ref=$(fm_dod_normalize_push_landed_ref "$push_landed_ref"); then
+      echo "error: fm_dod_block: a push-landed ref requires mode=direct-PR forge=push-only" >&2
+      return 1
+    fi
+  fi
   if [ -n "$consent" ]; then
     if [ "$mode" = local-only ]; then
       echo "error: fm_dod_block: upstream consent authorizes a publication that local-only never performs; drop it" >&2
@@ -488,6 +494,28 @@ The squashed change carries only the oldest commit's message, so the pipeline's 
 After publishing and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
 EOF
       fm_gerrit_publish_block
+      ;;
+    direct-PR:push-only)
+      if [ -z "$push_landed_ref" ]; then
+        cat <<EOF
+# Definition of done
+Delivery contract: mode=direct-PR forge=push-only shape=direct-push-registration-required$contract_consent
+Ship branch: $branch
+This push-only task has no pull-request path. Do NOT open a PR and do NOT push until firstmate launches it with a registered \`--push-landed-ref\`.
+EOF
+      else
+        cat <<EOF
+# Definition of done
+Delivery contract: mode=direct-PR forge=push-only shape=registered-direct-push push-landed-ref=$push_landed_ref$contract_consent
+Ship branch: $branch
+This task ships by direct push to the registered long-lived branch \`$push_landed_ref\`, without a pull request or the no-mistakes pipeline.
+The task is complete only when committed on your branch.
+When it is implemented and committed, push your current HEAD with \`git push origin HEAD:refs/heads/$push_landed_ref\`.
+Read origin back with \`git fetch origin +refs/heads/$push_landed_ref:refs/remotes/origin/$push_landed_ref\` and confirm your HEAD is an ancestor of \`refs/remotes/origin/$push_landed_ref\` with \`git merge-base --is-ancestor HEAD refs/remotes/origin/$push_landed_ref\`.
+Then append \`done [at=<epoch>]: branch $push_landed_ref pushed to origin\` to the status file and stop.
+Do NOT open or merge a PR. Do NOT run /no-mistakes.
+EOF
+      fi
       ;;
     direct-PR:*)
       cat <<EOF
@@ -624,7 +652,7 @@ fm_dod_normalize_push_landed_ref() {  # <ref>
 fm_dod_registered_ref_contains_named_head() {  # <worktree> <meta> <mode> <sha>
   local wt=$1 meta=$2 mode=$3 sha=$4 ref
   case "$mode" in
-    direct-PR|local-only) ;;
+    direct-PR) ;;
     *) return 1 ;;
   esac
   [ -n "$meta" ] && [ -f "$meta" ] || return 1

@@ -39,7 +39,7 @@
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
-#   direct-PR              push + PR via gh-axi, no pipeline
+#   direct-PR              push + PR via gh-axi, or registered push-only direct push, no pipeline
 #   local-only             local branch, no remote/PR, guarded local merge
 #   no-mistakes-prod-only  a conditional policy, not a task mode: firstmate
 #                          classifies each task's surface at intake (the
@@ -68,7 +68,7 @@
 #   account of the host, and the captain's confirmation is what this record holds.
 #   `push-only` marks the direct-push shape whose completion may register its
 #   long-lived target branch. Its registration is accepted only for direct-PR
-#   and local-only tasks, while no-mistakes remains pipeline-owned. Other forge bindings compose with
+#   tasks, while no-mistakes remains pipeline-owned. Other forge bindings compose with
 #   no-mistakes and direct-PR and are REFUSED on local-only, which publishes nothing: that mode
 #   lands by fast-forwarding local main, which on a review-server project
 #   advances it with content the server has never seen

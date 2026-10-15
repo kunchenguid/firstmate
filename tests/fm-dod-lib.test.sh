@@ -90,6 +90,22 @@ test_registered_push_ref_is_fetched_for_done_gate() {
   pass "the shared done gate fetches a registered direct-push ref only outside no-mistakes"
 }
 
+test_registered_push_dod_requires_no_pr() {
+  local out
+  out="$TMP_ROOT/registered-push-dod.md"
+  fm_dod_block direct-PR registered-push fm/registered-push push-only '' '' refs/heads/integration/main > "$out" \
+    || fail "a registered push-only direct-PR Definition of done did not render"
+  assert_grep 'shape=registered-direct-push push-landed-ref=integration/main' "$out" \
+    "the registered direct-push Definition of done did not name its delivery shape"
+  assert_grep 'git push origin HEAD:refs/heads/integration/main' "$out" \
+    "the registered direct-push Definition of done did not direct the registered push"
+  assert_no_grep 'open a PR' "$out" \
+    "the registered direct-push Definition of done still directs a pull request"
+  fm_dod_block no-mistakes pipeline-push fm/pipeline-push push-only > "$TMP_ROOT/pipeline-push-dod.md" \
+    || fail "an unregistered push-only no-mistakes Definition of done was refused"
+  pass "push-only direct delivery requires a registered branch while no-mistakes remains valid"
+}
+
 test_moved_branch_without_named_head_is_refused() {
   local repo wt main_sha fix_sha reason rc
   repo="$TMP_ROOT/moved-repo"
@@ -457,6 +473,7 @@ test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_registered_push_ref_is_fetched_for_done_gate
+test_registered_push_dod_requires_no_pr
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
