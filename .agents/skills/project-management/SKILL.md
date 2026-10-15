@@ -53,10 +53,11 @@ The optional `+yolo` posture changes merge authority only and does not change th
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the merge-authority contract.
 
-The optional `forge=` token records which forge the project's remote actually is; its one value is `forge=gerrit`.
+The optional `forge=` token records which forge the project's remote actually is; its values are `forge=gerrit` and `forge=forgejo`.
 It is orthogonal to the mode and to `+yolo`, so it is never derived from either, and it is never inferred at use time from a remote name, host, port, or push target.
 At add or create intake, run `bin/fm-forge-detect.sh projects/<name>` once the clone exists and propose its answer alongside the posture; the captain's confirmation is what binds it, and the registry token is the durable record of that confirmation.
 Never register the binding from detection alone, and never re-derive it later from the clone.
+`bin/fm-forge-detect.sh` never proposes `forge=forgejo`, so for a remote that may be Forgejo or Gitea ask the captain and register `forge=forgejo` only on that confirmation.
 A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only`, and the registry refuses it on `local-only`, which publishes nothing; a Gerrit-hosted project kept local registers `local-only` with no forge token.
 `yolo` is inactive on a `forge=gerrit` project, so never propose `+yolo` alongside it.
 `bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-dod-lib.sh` owns what it changes for a worker.
@@ -68,6 +69,7 @@ Clone into `projects/<name>` and add the registry entry only after the destinati
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
+Confirm the matching CLI is authenticated for a non-GitHub host: `glab auth login` for a GitLab project, whose merge watch and merge use glab, or a `tea login add` for a `forge=forgejo` project, whose merge watch, merge, and generated ship brief use tea.
 
 ## Create a project
 

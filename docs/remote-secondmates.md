@@ -574,7 +574,9 @@ An SSH exit status of 255 while fetching a referenced document leaves the delta 
 
 The process-event runner applies each captured delta through this adapter as soon as it is captured.
 So a mirrored reply reaches the primary status channel without depending on the wake handler running the adapter itself.
-A mirrored line that carries a correlation token settles its pending-reply record and closes that request's own open escalation decision.
+A mirrored line that carries a correlation token settles the pending-reply record only when the mate it came from is the task that request was sent to.
+Another mate echoing the token leaves it open.
+A settled record also closes that request's own open escalation decision.
 
 A remote reply reaches the primary only through this asynchronous mirror.
 Because of that, the primary treats a missing correlated report as a missed report only once the mirror has been read through the end of the remote log after that turn ended.

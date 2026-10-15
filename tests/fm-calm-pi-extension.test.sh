@@ -2956,7 +2956,7 @@ TS
 }
 
 test_working_ship_geometry_and_lifecycle() {
-  local fixture out status version
+  local fixture out status version standalone_ship
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "skip: node or npm not found for Pi Calm working-ship test"
     return 0
@@ -2967,6 +2967,17 @@ test_working_ship_geometry_and_lifecycle() {
   fi
   version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
   record_pi_version_evidence "$version" "Pi Calm working-ship assumptions"
+
+  # The standalone Pi Calm extension is a separate project that installs its own boat
+  # in the same Pi working-row slot, so the dual-install check below reads its real
+  # module when it is installed: a rename on either side then renders two boats and
+  # fails there, instead of passing against a key this test invented. The pinned slot
+  # contract inside the program covers a machine without that extension.
+  standalone_ship=${FM_STANDALONE_CALM_SHIP:-}
+  if [ -z "$standalone_ship" ] && [ -f "${HOME:-}/.pi/agent/extensions/calm/lib/working-ship.ts" ]; then
+    standalone_ship=${HOME:-}/.pi/agent/extensions/calm/lib/working-ship.ts
+  fi
+  [ -f "$standalone_ship" ] || standalone_ship=
 
   fixture="$TMP_ROOT/working-ship"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
@@ -2984,7 +2995,7 @@ test_working_ship_geometry_and_lifecycle() {
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
 
-  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" STANDALONE_CALM_SHIP="$standalone_ship" node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
@@ -3642,6 +3653,39 @@ const reset = () => {
 };
 const shipWidget = () => ui.widgets.get(CALM_WORKING_SHIP_WIDGET_KEY);
 
+let standaloneDisposed = false;
+const standaloneWidget = {
+  render: () => ["standalone boat"],
+  dispose: () => { standaloneDisposed = true; },
+};
+const firstmateWidget = {
+  render: () => ["firstmate boat"],
+  dispose: () => {},
+};
+// The standalone Pi Calm extension installs its boat in the same Pi working-row
+// widget slot. Where that extension is installed, the slot key comes from its own
+// module, so a rename on either side registers two widgets and fails here rather
+// than passing against a key this test invented; the pinned slot is the shared
+// contract both implementations must keep.
+const STANDALONE_SLOT = "calm-working-ship";
+let standaloneSlot = STANDALONE_SLOT;
+if (process.env.STANDALONE_CALM_SHIP) {
+  const standaloneShip = await import(
+    `${pathToFileURL(process.env.STANDALONE_CALM_SHIP).href}?standalone=${Date.now()}`
+  );
+  standaloneSlot = standaloneShip.CALM_WORKING_SHIP_WIDGET_KEY;
+}
+ui.setWidget(standaloneSlot, () => standaloneWidget);
+ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, () => firstmateWidget);
+const renderedDualInstallWidgets = [...ui.widgets.values()].map((widget) => widget.render(80));
+check(
+  standaloneDisposed &&
+    renderedDualInstallWidgets.length === 1 &&
+    renderedDualInstallWidgets[0][0] === "firstmate boat",
+  `dual Calm install rendered ${renderedDualInstallWidgets.length} working widgets instead of one`,
+);
+ui.setWidget(standaloneSlot, undefined);
+
 // --- Calm off leaves Pi's stock working behavior completely untouched -------------
 await fire("session_start", { reason: "startup" });
 reset();
@@ -3849,6 +3893,25 @@ check(liveTimers === 1, "a later run did not use the boat after an idle Calm tog
 await fire("agent_settled");
 check(liveTimers === 0, "the later run did not clean up");
 
+await fire("agent_start");
+let survivingStandaloneDisposed = false;
+const survivingStandaloneWidget = {
+  render: () => ["standalone boat"],
+  dispose: () => { survivingStandaloneDisposed = true; },
+};
+ui.setWidget(standaloneSlot, () => survivingStandaloneWidget);
+reset();
+await calmCommand.handler("", ctx);
+check(
+  !survivingStandaloneDisposed &&
+    ui.widgets.size === 1 &&
+    ui.widgets.get(standaloneSlot) === survivingStandaloneWidget &&
+    ui.widgetOps.length === 0 &&
+    ui.workingVisible.length === 0,
+  "turning Firstmate Calm off cleared or exposed the standalone working ship",
+);
+ui.setWidget(standaloneSlot, undefined);
+
 // --- The visual-only widget never touches session, transcript, or export data ------
 check(
   sessionWrites.length === 0,
@@ -3863,6 +3926,11 @@ JS
   [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
   pass "Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, paints all water standard blue and the whole boat standard yellow with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
+  if [ -n "$standalone_ship" ]; then
+    pass "Pi Calm dual-install coverage read the installed standalone Pi Calm extension's own working-ship slot from $standalone_ship"
+  else
+    pass "SKIP: no standalone Pi Calm extension is installed, so dual-install coverage used the pinned shared-slot contract; set FM_STANDALONE_CALM_SHIP to check one"
+  fi
 }
 
 # The rendered-DOM assertions below depend on a real browser, so the render step

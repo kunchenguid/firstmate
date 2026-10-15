@@ -13,6 +13,8 @@
 #   4. Second missed turn escalates once and remains durable
 #   5. Transport success cannot masquerade as reply success
 #   6. Unrelated events and stale correlation ids cannot resolve a request
+#      - including another mate's line that echoes the request's token, or a
+#        token embedded in a longer word
 #   7. Restart/compaction preserves the expectation and exact parent destination
 #   8. Wrong-home reports are detected but do not silently acknowledge
 #   9. Direct unmarked captain input creates no expectation
@@ -1067,6 +1069,37 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   pass "unrelated events and stale correlation ids cannot resolve"
 }
 
+test_another_mates_echo_cannot_resolve() {
+  local home state corr_a corr_b
+  home=$(setup_parent two-mates)
+  state="$home/state"
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=6100
+  corr_a=$(fm_pending_reply_create "$home" "$state" "alpha" "need alpha's answer")
+  corr_b=$(fm_pending_reply_create "$home" "$state" "beta" "need beta's answer")
+  fm_pending_reply_mark_delivered "$state" "$corr_a"
+  fm_pending_reply_mark_delivered "$state" "$corr_b"
+  # Beta's reply echoes alpha's token; remote reply ingest hands every corr= in
+  # beta's payload over together with beta's own status log.
+  printf 'done [corr=%s]: answered, and alpha still owes corr=%s\n' "$corr_b" "$corr_a" \
+    > "$state/beta.status"
+  if fm_pending_reply_try_resolve "$state" "$corr_a" "$state/beta.status"; then
+    fail "another mate's line echoing the token must not resolve the request"
+  fi
+  [ "$(phase_of "$state" "$corr_a")" = awaiting_report ] || fail "alpha's request must stay open"
+  fm_pending_reply_try_resolve "$state" "$corr_b" "$state/beta.status" \
+    || fail "beta's own correlated line should resolve beta's request"
+  printf 'done corr=%sff: a longer token is a different token\n' "$corr_a" > "$state/alpha.status"
+  printf 'done xcorr=%s: so is a prefixed one\n' "$corr_a" >> "$state/alpha.status"
+  if fm_pending_reply_try_resolve "$state" "$corr_a"; then
+    fail "a token embedded in a longer word must not resolve"
+  fi
+  printf 'done [corr=%s]: alpha answered\n' "$corr_a" >> "$state/alpha.status"
+  fm_pending_reply_try_resolve "$state" "$corr_a" "$state/alpha.status" \
+    || fail "alpha's own correlated line should resolve alpha's request"
+  pass "another mate's echoed token cannot resolve a request"
+}
+
 test_restart_preserves_expectation_and_parent_destination() {
   local home state corr rec parent_status parent_home
   home=$(setup_parent restart)
@@ -2093,6 +2126,7 @@ test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles
 test_delivery_confirmation_serializes_with_reconciliation
 test_unrelated_and_stale_corr_cannot_resolve
+test_another_mates_echo_cannot_resolve
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_unmarked_captain_input_creates_no_expectation
