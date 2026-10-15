@@ -55,8 +55,8 @@
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
 # a direct child) with a three-second margin. Every read is capped at five
-# seconds. A read a bound stopped answered nothing and is unmeasured, never a
-# forge failure: that is the statuses fm-timeout-lib.sh reports as its own
+# seconds. A read stopped by a bound or by a signal aimed at it alone answered
+# nothing and is unmeasured, never a forge failure: that is the statuses fm-timeout-lib.sh reports as its own
 # bound, 124 and the kill's 137, plus TERM's 143, INT's 130 and HUP's 129,
 # which reach the poll when the signal hit the read alone - possible because
 # every bounding mechanism runs the read in its own process group. Every other
