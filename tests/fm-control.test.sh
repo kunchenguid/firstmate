@@ -1068,23 +1068,6 @@ test_pi_parked_on_codex_usage_limit_banner_still_exits() {
   pass "fm-control exit: a pi parked on the Codex usage-limit banner with a stale working status still receives /quit on a pinned pi release, while any other error text or an unpinned release keeps the refusal"
 }
 
-test_exit_drops_meta_busy_gen_with_the_sidecar() {
-  local dir out rc gen changed
-  dir=$(new_case codex-retire)
-  add_task "$dir" t1 codex
-  alive_as "$dir" codex
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
-  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
-  grep -v '^busy_gen=' "$dir/home/state/t1.meta" > "$dir/expected.meta"
-  out=$(run_control "$dir" t1 exit); rc=$?
-  expect_code 0 "$rc" "exiting a codex agent should succeed"$'\n'"$out"
-  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
-    || fail "exit should retire the busy sidecar and record"
-  changed=$(diff "$dir/expected.meta" "$dir/home/state/t1.meta") \
-    || fail "exit should drop only busy_gen from the task record:"$'\n'"$changed"
-  pass "fm-control exit: retiring a codex incarnation drops busy_gen with the sidecar"
-}
-
 test_interrupt_without_acknowledgement_preserves_busy_state() {
   local dir gen before after out rc
   dir=$(new_case unconfirmed)
@@ -1339,7 +1322,6 @@ test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
 test_exit_drops_meta_busy_gen_with_the_sidecar
 test_pi_parked_on_codex_usage_limit_banner_still_exits
-test_exit_drops_meta_busy_gen_with_the_sidecar
 test_exit_refuses_an_open_background_picker
 test_exit_refuses_the_confirming_enter
 test_exit_names_a_picker_that_renders_after_the_submit
