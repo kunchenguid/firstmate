@@ -2998,3 +2998,58 @@ The full run's native Ahoy cases depend on the model's own choices and failed wi
 
 A real `bin/fm-spawn.sh --scout --harness opencode --model opencode-go/deepseek-v4.1-flash` in a private tmux server recorded `opencode_version=1.18.20` (and `1.18.31` on the second release), launched the worker as `opencode --model opencode-go/deepseek-v4.1-flash --prompt <brief>` with no `--standalone`, and the worker answered its brief.
 `bin/fm-control.sh <task> exit` then resolved the typed `/exit` from that recorded major and returned both panes to the shell.
+## Treehouse worktree pools
+
+Treehouse is the worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
+Verified on 2026-09-19 with treehouse v2.3.0 on macOS.
+
+Treehouse keys a pool by the repository's resolved origin, not by the clone, so separate clones of one repository share one pool under one root.
+Two clones of one origin, each acquiring under the same root, land in the same pool directory, and a slot returned by one clone is handed to the other while its checkout is still a linked worktree of the first:
+
+```sh
+git clone -q origin home-a/projects/proj
+git clone -q origin home-b/projects/proj
+(cd home-a/projects/proj && treehouse --root "$BASE" get --lease --lease-holder a)
+# .../base/.treehouse/proj-1bfb7a/1/proj
+(cd home-a/projects/proj && treehouse return --force .../base/.treehouse/proj-1bfb7a/1/proj)
+(cd home-b/projects/proj && treehouse --root "$BASE" get --lease --lease-holder b)
+# .../base/.treehouse/proj-1bfb7a/1/proj
+cat .../base/.treehouse/proj-1bfb7a/1/proj/.git
+# gitdir: .../home-a/projects/proj/.git/worktrees/proj
+```
+
+That last state is the one that blocks work: the slot reads free, its checkout belongs to another home's clone, and `bin/fm-spawn.sh`'s isolation assertion refuses it.
+
+Passing each home its own root removes the shared namespace.
+Both homes then take slot `1` of an identically named pool inside their own roots, each linked to its own clone, acquiring concurrently with no contention:
+
+```sh
+(cd home-a/projects/proj && treehouse --root "$ROOT_A" get --lease --lease-holder home-a) &
+(cd home-b/projects/proj && treehouse --root "$ROOT_B" get --lease --lease-holder home-b) &
+wait
+# .../base/.firstmate-worktrees/home-a-c4139d9ae160/.treehouse/proj-1bfb7a/1/proj
+# .../base/.firstmate-worktrees/home-b-06c78f9deddf/.treehouse/proj-1bfb7a/1/proj
+# gitdir: .../home-a/projects/proj/.git/worktrees/proj
+# gitdir: .../home-b/projects/proj/.git/worktrees/proj
+```
+
+`bin/fm-spawn.sh` does not lease; it sends the interactive form into the worker's shell, and that form honors the same flag:
+
+```sh
+(cd home-a/projects/proj && printf 'pwd -P\nexit\n' | treehouse --root "$ROOT_A" get)
+# 🌳 Entered worktree at .../base/.firstmate-worktrees/home-a-c4139d9ae160/.treehouse/clone-3ecf41/1/clone. Type 'exit' to return.
+```
+
+A return resolves its pool from the worktree path it is given and ignores the configured root, which is what leaves every worktree leased under a previously shared root returnable after its home moves to its own root:
+
+```sh
+(cd home-a/projects/proj && treehouse --root "$ROOT_A" return --force "$LEGACY_SHARED_ROOT_WORKTREE")
+# 🌳 Worktree returned to pool.
+```
+
+The global `--root` flag is the capability this rests on, and it is a floor rather than a preference: `treehouse --help` on v2.0.1 lists only `--help` and `--version`, so acquisition on that build cannot be separated per home at all.
+`bin/fm-bootstrap.sh` probes the capability instead of a version and reports `OUTDATED: treehouse` when either it or the durable lease is absent; `bin/fm-install-treehouse.sh` owns the exact CI pin.
+
+`bin/fm-wake-lib.sh`'s `fm_treehouse_home_root` owns the root derivation and the reason only acquisition carries it.
+`tests/fm-treehouse-pool-isolation-live-e2e.test.sh` is the guard that refreshes this record; it accepts either the historical foreign-slot collision or a vendor that relinks the returned slot to the acquirer, and always requires per-home roots to acquire without contention.
+`tests/fm-treehouse-home-root.test.sh` pins the firstmate half - the derivation, the real spawn's acquisition command, and the real seed's lease - with no provider installed; `tests/fm-bootstrap.test.sh` owns the bootstrap capability gate alongside every other tool gate.
