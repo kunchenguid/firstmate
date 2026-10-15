@@ -1945,6 +1945,16 @@ assert_equals 'default' "$(jq -r .profile_source <<<"$record")" "a floor-below r
 
 reset_log
 rm -rf "$RECORD"
+write_response "$RESPONSE" rule_4 0.2
+pushd "$HOME_DIR" >/dev/null
+TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
+popd >/dev/null
+record=$(cat "$RECORD")
+assert_equals 'ambiguous' "$(jq -r .status <<<"$record")" "a low-confidence record is ambiguous"
+assert_equals 'null' "$(jq -r .profile_source <<<"$record")" "a record without a profile has no profile source"
+
+reset_log
+rm -rf "$RECORD"
 write_response "$RESPONSE" rule_4 0.9
 pushd "$HOME_DIR" >/dev/null
 FAKE_QUOTA_FAIL=1 TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager

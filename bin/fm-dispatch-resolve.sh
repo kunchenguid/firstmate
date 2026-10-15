@@ -425,7 +425,7 @@ record_resolution() {
       confidence: ($r.confidence // null),
       probabilities: ($r.probabilities // null),
       fallback_rule: ($r.fallback_rule // null),
-      profile_source: ($r.profile_source // null),
+      profile_source: (if $r.status == "clear" then ($r.profile_source // null) else null end),
       profile: (if $r.status == "clear" then ($r.chosen.profile | {harness, model: (.model // null), effort: (.effort // null)}) else null end)
     }' 2>/dev/null) || line=''
   if [ -z "$line" ] || ! { mkdir -p "$(dirname "$RECORD_PATH")" && printf '%s\n' "$line" >> "$RECORD_PATH"; } 2>/dev/null; then
