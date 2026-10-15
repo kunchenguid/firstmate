@@ -53,7 +53,7 @@ The installed pi-signed 0.82.0 wrapper repeated the shared Pi primary extension 
 The omp Run-tier adapter was verified on 2026-09-05 with omp 18.1.11 and the openai-codex `gpt-6-astra` model through `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh`, which drives a real omp in its JSON-RPC stdio mode inside an isolated lab clone.
 Both tracked `.omp/extensions/*.ts` files loaded by auto-discovery alone (no `-e`, no trust dialog), `before_agent_start` returned the digest as a persistent context message, the model quoted the lab's `SESSION START -` heading back on its first turn, `state/.session-start-complete` was recorded, and `state/.lock` named the omp process, so ancestry detection identified the markerless binary.
 omp's `session_start` payload carries no reason field, so the adapter derives the source: the first start of the process is `startup` (or `resume` from a `--continue`/`--resume` launch line) and a later in-process start is `clear`; `tests/fm-omp-harness.test.sh` pins that mapping over a fake omp API.
-A file named both by `-e` and by auto-discovery loads twice (two factory calls, doubled `session_stop` continuations), which is why the secondmate launch names no `-e` and the per-task worker extension lives in `state/`.
+A file named both by `-e` and by auto-discovery loads twice (two factory calls, doubled `session_stop` continuations), which is why a secondmate launch never names its auto-discovered primary extensions with `-e` and the per-task busy extension lives in `state/`.
 
 ### Run-tier source vocabulary and context-reset injection
 
@@ -578,6 +578,74 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+The Codex foreground-checkpoint behavior was exercised hermetically on 2026-09-14 with real watcher processes and isolated home state.
+That run observed an announced recovery remain announced through a quiet checkpoint, a never-announced generation surface once, and a durable wake appended during a live checkpoint resurface.
+Its announced-recovery fixture had no unacknowledged durable queue row, so it did not establish that the old behavior reproduced the regression; the revised counterfactual fixture and result are recorded separately below.
+This state transition depends on Firstmate's checkpoint wrapper rather than vendor output, so no live Codex prompt was required.
+
+```sh
+bin/fm-test-run.sh tests/fm-watch-checkpoint.test.sh
+```
+
+Observed output:
+
+```text
+ok - an announced recovery is not reannounced by the next foreground checkpoint
+ok - a never-announced recovery still surfaces once from a foreground checkpoint
+ok - a queue append during a foreground checkpoint still resurfaces
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=11750
+```
+
+On 2026-10-07 the announced-recovery fixture was revised so it reproduces the original failure.
+It appends a durable queue row, lets a first checkpoint announce that recovery generation while the row stays unacknowledged, then runs a second checkpoint and asserts it supervises for its full bound with the generation and row unchanged.
+The fixture was run on its own in an isolated copy of the test file, once with the checkpoint wrapper as committed and once with its `FM_WATCH_FOREGROUND_CHECKPOINT=1` export removed.
+From the repository root, this command isolates that test function, runs it against the committed wrapper, then runs it against a temporary control wrapper with the checkpoint export removed:
+
+```sh
+set -eu
+root=$PWD
+runner=$(mktemp tests/.fm-watch-checkpoint.XXXXXX)
+control_bin=$(mktemp -d tests/.fm-watch-checkpoint-bin.XXXXXX)
+trap 'rm -rf "$runner" "$control_bin"' EXIT
+for source in "$root"/bin/*; do
+  [ -f "$source" ] || continue
+  name=${source##*/}
+  [ "$name" = fm-watch-checkpoint.sh ] || ln -s "$source" "$control_bin/$name"
+done
+sed '/^export FM_WATCH_FOREGROUND_CHECKPOINT=1$/d' \
+  "$root/bin/fm-watch-checkpoint.sh" > "$control_bin/fm-watch-checkpoint.sh"
+chmod +x "$control_bin/fm-watch-checkpoint.sh"
+awk '
+  /^test_quiet_checkpoint_exits_124_cleanly$/ { exit }
+  /^CHECKPOINT=/ {
+    print "CHECKPOINT=\"${FM_TEST_CHECKPOINT:-$ROOT/bin/fm-watch-checkpoint.sh}\""
+    next
+  }
+  { print }
+' "$root/tests/fm-watch-checkpoint.test.sh" > "$runner"
+printf '%s\n' 'test_announced_recovery_is_not_reannounced_by_next_checkpoint' >> "$runner"
+FM_TEST_CHECKPOINT= bash "$runner"
+status=0
+FM_TEST_CHECKPOINT="$control_bin/fm-watch-checkpoint.sh" bash "$runner" \
+  > "$control_bin/control.out" 2>&1 || status=$?
+cat "$control_bin/control.out"
+[ "$status" -eq 1 ] \
+  && grep -Fqx 'not ok - announced recovery checkpoint exit: expected exit 124, got 0' \
+    "$control_bin/control.out"
+```
+
+Observed output with the checkpoint distinction:
+
+```text
+ok - an announced recovery is not reannounced by the next foreground checkpoint
+```
+
+Observed output without the checkpoint distinction:
+
+```text
+not ok - announced recovery checkpoint exit: expected exit 124, got 0
+```
+
 Deterministic entry points:
 
 ```sh
@@ -586,6 +654,7 @@ tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-watch-arm.test.sh
 tests/fm-watch-recovery-loop.test.sh
+tests/fm-watch-checkpoint.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
@@ -715,7 +784,17 @@ ok - cursor 2026.09.23-86fc751: the tracked registrations mirrored the captain p
 ok - host mirror live: 2 harness(es) proved their writers
 ```
 
-The run above exercised these payload fields:
+On 2026-10-07, the Claude path passed again on Linux 7.0.0-34-generic x86_64 with Claude Code 2.1.293 (`haiku`) and a managed policy that displayed `auto mode on` at its idle composer.
+The guard ran in its private tmux socket and required both an idle verdict from the Claude-scoped rendered busy-state check and an empty composer before submitting its prompt.
+
+```text
+$ FM_HOST_MIRROR_LIVE_E2E=1 FM_HOST_MIRROR_LIVE_HARNESSES=claude bash tests/fm-host-mirror-live-e2e.test.sh
+ok - claude 2.1.293 (Claude Code): a turn the harness started itself was not mirrored as the captain's words
+ok - claude 2.1.293 (Claude Code): the tracked registrations mirrored the captain prompt and main reply
+ok - host mirror live: 1 harness(es) proved their writers
+```
+
+The runs above exercised these payload fields:
 
 | Primary | Captain text | Main text |
 | --- | --- | --- |

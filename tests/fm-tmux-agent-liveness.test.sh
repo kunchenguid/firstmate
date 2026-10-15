@@ -17,13 +17,13 @@
 # property that the verdict itself is correct.
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -33,6 +33,7 @@ SESSION=liveness
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
   [ -n "${LAB:-}" ] && rm -rf "$LAB"
+  fm_test_cleanup
 }
 trap cleanup_all EXIT
 
@@ -47,45 +48,16 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. Each is a SYMLINK whose name is the harness name
-# and whose target is a real long-running native process, never a copy: a copied
-# platform binary fails code-signing validation and is killed on macOS arm64.
+# Stand-in "harness" binaries: each is a symlink named after the harness whose
+# target is fm_agent_standin's long-running native process (tests/lib.sh owns
+# why it is never a copy and never a host `sleep` that dispatches on its name).
 # The symlink name is what the kernel records as the executable identity, which
 # is exactly the signal under test.
-#
-# The target must not dispatch on its own argv[0]. The host's `sleep` used to be
-# a single-purpose binary, but a multicall coreutils binary (uutils or busybox)
-# resolves the applet from argv[0]: invoked through a symlink named after a
-# harness it runs the wrong applet and exits immediately, so no foreground
-# process exists and every positive case reads as not-alive. Build a dedicated
-# spinner the same way the version-string case below builds its executable, and
-# fall back to the host's `sleep` only when it demonstrably survives the rename.
-standin_alive() {  # <path>
-  local pid
-  "$1" 60 >/dev/null 2>&1 &
-  pid=$!
-  sleep 0.2
-  kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 1; }
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-}
-
-STANDIN_BIN=
-CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
-if [ -n "$CC_BIN" ] &&
-  printf '%s\n' '#include <unistd.h>' 'int main(void){int i;for(i=0;i<600;i++)sleep(1);return 0;}' > "$LAB/standin.c" &&
-  "$CC_BIN" -o "$LAB/bin/standin" "$LAB/standin.c" 2>/dev/null &&
-  standin_alive "$LAB/bin/standin"; then
-  STANDIN_BIN="$LAB/bin/standin"
-else
-  rm -f "$LAB/bin/standin"
-  ln -s "$SLEEP_BIN" "$LAB/bin/standin" 2>/dev/null || true
-  standin_alive "$LAB/bin/standin" && STANDIN_BIN="$LAB/bin/standin"
-fi
-if [ -z "$STANDIN_BIN" ]; then
+STANDIN_BIN=$(fm_agent_standin "$LAB/standin") || {
   echo "skip: no long-running stand-in binary survives a rename (multicall coreutils, no C compiler)"
   exit 0
-fi
+}
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 ln -s "$STANDIN_BIN" "$LAB/bin/claude-link"
 ln -s "$STANDIN_BIN" "$LAB/bin/pi"
 ln -s "$STANDIN_BIN" "$LAB/bin/notaharness"
@@ -94,6 +66,10 @@ ln -s "$STANDIN_BIN" "$LAB/bin/notaharness"
 ln -s "$STANDIN_BIN" "$LAB/bin/omp"
 ln -s "$STANDIN_BIN" "$LAB/bin/ompd"
 ln -s "$STANDIN_BIN" "$LAB/bin/comp"
+# Command Code sets its process title to the bare word `command-code`; the decoy
+# merely contains it.
+ln -s "$STANDIN_BIN" "$LAB/bin/command-code"
+ln -s "$STANDIN_BIN" "$LAB/bin/command-code-helper"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -236,6 +212,14 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+new_window command-code "$LAB/bin/command-code" 900
+wait_for_state "$SESSION:command-code" alive \
+  || fail "Command Code's anchored process name must classify alive"
+new_window decoy-command-code-helper "$LAB/bin/command-code-helper" 900
+wait_for_state "$SESSION:decoy-command-code-helper" ambiguous \
+  || fail "'command-code-helper' merely contains Command Code's name and must not classify as a live agent pane"
+pass "tmux liveness: Command Code's anchored process name classifies alive; a containing name stays ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that
@@ -413,6 +397,59 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:cursor-exited")" != empty ] \
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
+
+# Command Code parks its terminal cursor below its footer and draws its own
+# reverse-video cursor cell, with its placeholder in a truecolor too bright for
+# the fleet-wide ghost ceiling (verified live, Command Code 1.74.1).
+commandcode_screen() {  # <composer-row-kind idle|typed>
+  local rule e
+  e=$(printf '\033')
+  rule=$(printf '\342\224\200%.0s' $(seq 1 40))
+  printf '\n  done\n\n%s[38;2;138;148;168m%s\n' "$e" "$rule"
+  if [ "$1" = idle ]; then
+    printf '%s[39m\342\235\257 %s[7mA%s[0m%s[38;2;138;148;168msk your question...%s[39m\n' "$e" "$e" "$e" "$e" "$e"
+  else
+    printf '%s[39m\342\235\257 half typed captain text%s[7m %s[0m\n' "$e" "$e" "$e"
+  fi
+  printf '%s[38;2;138;148;168m%s\n%s[39m  ? for shortcuts\n\n\n' "$e" "$rule" "$e"
+}
+open_commandcode_pane() {  # <window> <binary> <idle|typed>
+  local window=$1 binary=$2 kind=$3 i=0
+  new_window "$window" bash -c "$(declare -f commandcode_screen); commandcode_screen '$kind'; exec '$binary' 900"
+  while [ "$i" -lt 100 ]; do
+    case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
+      *'? for shortcuts'*) return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "pane $window never rendered its composer"
+}
+
+open_commandcode_pane cc-idle "$LAB/bin/command-code" idle
+[ "$(cursor_anchored_verdict "$SESSION:cc-idle")" = unknown ] \
+  || fail "the cursor-anchored source must be blind on a Command Code screen, or this case proves nothing about the fallback"
+case "$(fm_tmux_composer_identity "$SESSION:cc-idle")" in
+  commandcode$'\t'*) ;;
+  *) fail "a pane whose foreground process is command-code must identify as Command Code" ;;
+esac
+[ "$(fm_tmux_composer_state "$SESSION:cc-idle")" = empty ] \
+  || fail "an idle Command Code composer must read empty, or no steer can ever be delivered"
+pass "commandcode composer: an idle pane reads empty although its cursor row is blind and its placeholder is bright"
+
+open_commandcode_pane cc-typed "$LAB/bin/command-code" typed
+[ "$(fm_tmux_composer_state "$SESSION:cc-typed")" = pending ] \
+  || fail "real unsubmitted text in a Command Code composer must read pending"
+pass "commandcode composer: typed text still reads pending"
+
+# The SAME idle screen, with only the foreground process identity changed.
+open_commandcode_pane cc-decoy "$LAB/bin/command-code-helper" idle
+if fm_tmux_composer_identity "$SESSION:cc-decoy" >/dev/null; then
+  fail "a pane running command-code-helper must not identify as Command Code"
+fi
+[ "$(fm_tmux_composer_state "$SESSION:cc-decoy")" = unknown ] \
+  || fail "the reclassification and its ceiling must be gated on Command Code's own process identity"
+pass "commandcode composer: an identical screen stays unknown when the pane is not Command Code"
 
 cleanup_all
 trap - EXIT
