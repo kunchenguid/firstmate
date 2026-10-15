@@ -2719,6 +2719,77 @@ EOF
   pass "a co-present needs-decision row neither vetoes nor falsely settles routine branch delivery"
 }
 
+test_idle_custom_before_agent_start_never_reads_prompt() {
+  local repo home out status
+  repo="$TMP_ROOT/idle-custom-root"
+  home="$TMP_ROOT/idle-custom-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, sentToMain, mainUserMessages, defaultSessionCtx, home }; })()`);
+const { dispatch, fire, sentToMain, mainUserMessages, defaultSessionCtx, home } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+await fire("session_start", {}, defaultSessionCtx);
+
+// Pi 1.2.0 fires before_agent_start for an idle custom-message run with a
+// trigger message and no prompt (installed docs/extensions.md, Events and
+// concurrency). The handler must neither touch event.prompt for that run,
+// stage a captain mirror from it, nor open a processing request.
+const unrelatedCustom = { role: "custom", customType: "other-watch-note", display: true, content: "watcher posted a routine note" };
+await fire("before_agent_start", { messageType: "custom", message: unrelatedCustom }, defaultSessionCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+await fire("agent_end", {}, defaultSessionCtx);
+await fire("agent_settled", {});
+await fire("turn_end", {}, defaultSessionCtx);
+if (mainUserMessages.length !== 0) {
+  throw new Error(`a custom run without a prompt produced a main user prompt: ${JSON.stringify(mainUserMessages)}`);
+}
+if (sentToMain.some((sent) => sent.message.customType === "fm-branch-process")) {
+  throw new Error(`an unrelated custom run opened a processing request: ${JSON.stringify(sentToMain)}`);
+}
+
+// An ordinary user run keeps its prompt on the ordinary path only.
+await fire("before_agent_start", { messageType: "user", prompt: "captain asks: run the tests" }, defaultSessionCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+await fire("agent_end", {}, defaultSessionCtx);
+await fire("agent_settled", {});
+let mirroredDialog;
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  mirroredDialog = session.ops
+    .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+    .map((op) => op.message.content);
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const result = await report.execute(
+    "idle-custom-mirror",
+    { task: "branch-driver", verdict: "routine", summary: "mirror checked" },
+    undefined,
+    undefined,
+    {},
+  );
+  if (result.isError) throw new Error(`branch report failed: ${JSON.stringify(result)}`);
+};
+const offer = dispatch("signal: check prompt mirroring");
+if (!offer.accepted) throw new Error("branch refused the prompt-mirroring wake");
+await offer.settlement;
+if (mirroredDialog?.length !== 1 || mirroredDialog[0] !== "[captain] captain asks: run the tests") {
+  throw new Error(`expected only the ordinary user prompt in the branch mirror: ${JSON.stringify(mirroredDialog)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an idle custom-run before_agent_start event must not throw: $out"
+  if grep -qi "reading 'trim'" "$TMP_ROOT/node-output"; then
+    fail "the idle custom run still hit the prompt.trim error: $out"
+  fi
+  pass "an idle custom-run before_agent_start event neither throws, mirrors, nor opens a processing request"
+  pass "a user-type before_agent_start event keeps handling its ordinary prompt"
+}
+
 test_settled_branch_prompt_releases_unacknowledged_grant() {
   local repo home out status
   repo="$TMP_ROOT/settled-grant-root"
@@ -5972,6 +6043,7 @@ test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible
 test_settled_branch_prompt_releases_unacknowledged_grant
+test_idle_custom_before_agent_start_never_reads_prompt
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown
 test_selection_change_does_not_corrupt_inflight_provider_state
 test_main_owned_grant_result_falls_back_to_main
