@@ -45,7 +45,7 @@
 #                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, codebuddy-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
@@ -69,7 +69,7 @@
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
-#      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
+#      Grok/Rovo/AGY/CodeBuddy temporary regex fallbacks classify a grok, rovo, agy, or codebuddy
 #      task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 #
@@ -901,6 +901,15 @@ fm_busy_agy_tail_busy() {
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
 }
 
+# fm_busy_codebuddy_tail_busy: the CodeBuddy-only temporary rendered-tail fallback.
+# Consumes the tail on stdin; 0 when CodeBuddy's verified busy signature matches:
+# rotating spinner frames with elapsed time like `… ([0-9]+s · ` (verified live on codebuddy 2.164.0:
+# e.g. `✶ Waking… (0s · waiting for model)`, `✹ Cleaning… (8s · waiting for model · ↑ 34 tokens)`).
+fm_busy_codebuddy_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qiE "${FM_BUSY_CODEBUDDY_REGEX:-…[[:space:]]*\([0-9]+[smh]}"
+}
+
 # --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------
 #
 # Each function consumes a captured pane tail on stdin (the caller's whole
@@ -1162,6 +1171,25 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         printf 'busy agy-regex'
       else
         printf 'unknown agy-regex'
+      fi
+      return 0
+      ;;
+    codebuddy)
+      if [ -z "$tail40" ]; then
+        if command -v fm_backend_capture >/dev/null 2>&1; then
+          tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+            printf 'unknown capture-failed'
+            return 0
+          }
+        else
+          printf 'unknown capture-failed'
+          return 0
+        fi
+      fi
+      if printf '%s' "$tail40" | fm_busy_codebuddy_tail_busy; then
+        printf 'busy codebuddy-regex'
+      else
+        printf 'unknown codebuddy-regex'
       fi
       return 0
       ;;

@@ -50,7 +50,7 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # unrelated commands containing that fragment. devin is anchored the same
     # way (verified, devin 3000.11.1: comm=devin), so a `*devin*` glob never
     # claims an unrelated command.
-    agy|devin) printf 'agent' ;;
+    agy|devin|codebuddy) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -108,6 +108,16 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     printf 'agent'
     return 0
   fi
+  case "$args" in
+    *codebuddy*)
+      case "$name" in
+        node*|MainThread)
+          printf 'agent'
+          return 0
+          ;;
+      esac
+      ;;
+  esac
   if [ "$by_name" = shell ] && [ "$by_argv0" = shell ]; then
     printf 'shell'
   else

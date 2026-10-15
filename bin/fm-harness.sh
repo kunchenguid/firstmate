@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|codebuddy|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -128,6 +128,12 @@ harness_marker() {
     echo omp
     return
   fi
+  # CodeBuddy CLI (@tencent-ai/codebuddy-code) sets CODEBUDDY_SESSION_ID in
+  # child tool / bash processes (verified live, codebuddy 2.164.0). It does not
+  # set an identity variable in the TUI process itself, but child processes receive
+  # CODEBUDDY_SESSION_ID and retain any inherited CLAUDECODE, so this must be
+  # checked before CLAUDECODE.
+  [ -n "${CODEBUDDY_SESSION_ID:-}" ] && { echo codebuddy; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -239,6 +245,11 @@ harness_process_verdict() {  # <pid>
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
     devin) echo "comm devin"; return ;;
+    # codebuddy (Tencent CodeBuddy CLI) is a Node bundle (@tencent-ai/codebuddy-code).
+    # On Linux with Node v22.22.2, `ps -o comm=` reports node (or codebuddy when
+    # wrapped/symlinked directly), and `ps -o args=` reports
+    # `node .../codebuddy ...` (verified live, codebuddy 2.164.0).
+    codebuddy) echo "comm codebuddy"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -247,6 +258,7 @@ harness_process_verdict() {  # <pid>
         return
       fi
       case "$args" in
+        *codebuddy*) echo "args codebuddy"; return ;;
         *claude*) echo "args claude"; return ;;
         *codex*) echo "args codex"; return ;;
         *opencode*) echo "args opencode"; return ;;
@@ -397,7 +409,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|codebuddy)
       printf '%s\n' "$pin"
       ;;
     *)
