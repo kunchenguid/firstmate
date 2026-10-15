@@ -25,8 +25,8 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -1058,7 +1058,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -1092,6 +1092,25 @@ test_portable_shard_union_and_coverage_guard() {
 # measured hint and the packing over those hints stays even. Both halves went
 # unchecked until one lane grew past its CI job cap and was cancelled on every
 # run, so assert them through the guard's own reported numbers.
+# The coverage guard sorts membership with LC_ALL=C then diffs with comm. Bare
+# comm inherits LC_COLLATE, so under en_US.UTF-8 it rejects C-sorted input and
+# the guard fails even when the partition is correct. Prove the executable
+# interface still reports ok when the process locale is a non-C UTF-8 collation.
+test_coverage_guard_survives_en_us_utf8_collation() {
+  local out rc
+  if ! LC_ALL=en_US.UTF-8 true 2>/dev/null; then
+    printf 'skip: en_US.UTF-8 locale is not available on this host\n'
+    return 0
+  fi
+  out=$(LC_ALL=en_US.UTF-8 "$RUNNER" --check-coverage 2>&1) && rc=0 || rc=$?
+  expect_code 0 "$rc" "coverage guard must succeed under en_US.UTF-8 collation: $out"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" \
+    "coverage guard under en_US.UTF-8 did not report success: $out"
+  assert_not_contains "$out" "not in sorted order" \
+    "coverage guard leaked a locale-sensitive comm failure under en_US.UTF-8: $out"
+  pass "coverage guard succeeds under en_US.UTF-8 collation"
+}
+
 test_portable_parallel_lanes_stay_duration_balanced() {
   local out max imbalance unhinted
   out=$("$RUNNER" --check-coverage)
@@ -1851,6 +1870,7 @@ test_exclude_family
 test_list_scheduled_proven_isolated_uses_serial_weights
 test_list_scheduled_non_lane_selections_use_serial_weights
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_survives_en_us_utf8_collation
 test_portable_parallel_lanes_stay_duration_balanced
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
