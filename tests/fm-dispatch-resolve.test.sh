@@ -1917,6 +1917,17 @@ assert_not_contains "$record" 'off-by-one' "record holds no brief text"
 assert_not_contains "$record" "$KEY" "record holds no key"
 assert_not_contains "$record" 'SECRET-WHY-TEXT' "record holds no rule why text"
 
+cp "$RULES" "$RULES.bak"
+cp "$FLOOR_RULES" "$RULES"
+reset_log
+rm -rf "$RECORD"
+write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.18 0.02
+(cd "$HOME_DIR" && TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager)
+record=$(cat "$RECORD")
+assert_equals 'rule_2' "$(jq -r .rule <<<"$record")" "a fallback record keeps the model's pick"
+assert_equals 'rule_4' "$(jq -r .fallback_rule <<<"$record")" "a fallback record names the rule that supplied the profile"
+mv "$RULES.bak" "$RULES"
+
 rm -rf "$RECORD" "$HOME_DIR/.env"
 reset_log
 run code out err "$BRIEF" --project pager

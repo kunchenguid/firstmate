@@ -727,7 +727,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     rule_when: when_of($picked),
     confidence: $a.confidence, probabilities: $a.probabilities
   }
-  + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"} else {} end)
+  + (if $fb.to then {fallback_rule: $choice, fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"} else {} end)
   as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
   elif $fb.below and $fb.global then
