@@ -1026,7 +1026,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         selected_detail=
         if [ -n "$reported_id" ] && [ "$reported_branch" = "$CREW_BRANCH" ] \
           && [ "$reported_id" != "$selected_id" ] \
-          && { [ "$selected_status" = completed ] || [ "$selected_status" = cancelled ]; } \
+          && { [ "$selected_status" = completed ] || [ "$selected_status" = cancelled ] || [ "$selected_status" = failed ]; } \
           && fm_nm_run_is_active "$RUN_OUT"; then
           case ",$candidate_ids," in
             *,"$reported_id",*|*,\ "$reported_id",*)

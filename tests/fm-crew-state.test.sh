@@ -5649,6 +5649,39 @@ branch_sync:
   pass 'active current run beats a stale overview row'
 }
 
+# Same historical-first overview shape as above, but the stale row is failed
+# rather than completed. failed is a terminal overview status and must yield to
+# a newer live bare status the same way completed does.
+test_current_active_run_beats_stale_failed_overview_row() {
+  reset_fakes
+  local d old_head new_head out
+  d=$(new_case stale-failed-overview-row)
+  make_repo_on_branch "$d/wt" fm/reused-branch
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  new_head=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/reused.meta" "window=fm:fm-reused" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating the current run\n' > "$d/state/reused.status"
+  FM_FAKE_AXI_HOME="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"01OLD\",fm/reused-branch,failed,$old_head,\"\"
+  \"01NEW\",fm/reused-branch,running,$new_head,\"\""
+  FM_FAKE_RUN_HEAD=$new_head
+  FM_FAKE_AXI_STATUS="$(run_running fm/reused-branch | sed 's/01RUN/01NEW/')
+branch_sync:
+  state: pipeline_owned"
+  FM_FAKE_AXI_STATUS_RUN_01OLD="$(FM_FAKE_RUN_HEAD=$old_head run_failed fm/reused-branch | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_STATUS_RUN_01NEW="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  running fm/reused-branch ${new_head:0:7} 2026-09-28 12:00
+  failed fm/reused-branch ${old_head:0:7} 2026-09-28 12:00"
+  out=$(run_crew_state "$d" reused)
+  assert_contains "$out" 'state: working' 'the active current run remains authoritative'
+  assert_contains "$out" '01NEW' 'the active run identity is reported'
+  assert_not_contains "$out" 'state: failed' 'a stale failed overview row is not attributed'
+  unset FM_FAKE_AXI_STATUS_RUN_01OLD FM_FAKE_AXI_STATUS_RUN_01NEW
+  pass 'active current run beats a stale failed overview row'
+}
+
 # Overview order B (recorded newer-first): a bare AXI status can lag the
 # creation-ordered overview and name an older live run. That historical
 # identity must not hide the overview's newer completed result, including when
@@ -6052,6 +6085,7 @@ test_coarse_live_rebased_row_is_not_attributed
 test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
 test_current_active_run_beats_stale_overview_row
+test_current_active_run_beats_stale_failed_overview_row
 test_older_live_status_does_not_hide_newer_completed_run
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
