@@ -234,6 +234,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
@@ -1731,7 +1734,7 @@ reconcile_note() {
 
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc transfers=() resolved
-  local resolved_how attested_by_prefix='' origin_state unrecorded_origin=''
+  local resolved_how attested_by_prefix='' origin_state unrecorded_origin='' meta_tmp
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -1786,7 +1789,12 @@ EOF
 
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      meta_tmp="$STATE/.$origin.meta.captain.$$"
+      if ! (umask 077; fm_pr_metadata_print_with "$meta" decisions_reviewed=1 "decision_keys=$keys" >"$meta_tmp") ||
+        ! fm_backlog_atomic_transition publish "$meta_tmp" "$meta" "task record" "$STATE"; then
+        rm -f -- "$meta_tmp"
+        fail "could not record the decision attestation on task $origin"
+      fi
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
