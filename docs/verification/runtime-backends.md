@@ -936,7 +936,7 @@ The cursorless backends still defer: on a cursorless read (Herdr and Zellij) a f
 
 ## Steering-inbox doorbell
 
-The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
+The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (read the inbox's records in order, act on each, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
 
 ```sh
 FM_SEND_INBOX_LIVE_E2E=1 tests/fm-send-inbox-doorbell-live-e2e.test.sh
@@ -953,6 +953,18 @@ ok - pi (0.84.1): the doorbell reached a real worker, which acted and acked with
 ok - grok (grok 1.0.5 (5115b46bc909) [stable]): the doorbell reached a real worker, which acted and acked with the mv
 # harness absent, not verified here: kimi
 ok - muse (Muse Code 0.2.1 (0.2.1-R1215.1)): the doorbell reached a real worker, which acted and acked with the mv
+```
+
+The current 90-character line, which drops the inbox name so its length is fixed, was re-verified on 2026-10-15 against the harnesses installed on that machine, on tmux 3.4, Linux x86_64:
+
+```sh
+FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES="claude pi" tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+```text
+ok - claude (2.1.300 (Claude Code)): the doorbell reached a real worker, which acted and acked with the mv
+ok - pi (1.2.0): the doorbell reached a real worker, which acted and acked with the mv
+ok - live steering-inbox doorbell guard: 2 harness(es) honored the doorbell contract
 ```
 
 All six installed harnesses honored the doorbell contract with real model turns: each listed the inbox named by the doorbell, read its record, executed the instruction inside it, and acknowledged with the atomic `mv`.

@@ -78,7 +78,7 @@ case "${1:-}" in
           printf 'zsh' > "$D/command.$target"
           ;;
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) cat "$D/becomes" > "$D/command.$target" ;;
-        ': Firstmate instruction waiting: list '*)
+        ': Firstmate instruction waiting: read '*)
           printf 'doorbell\n' >> "$D/rings"
           if [ -x "$D/on-doorbell" ]; then
             "$D/on-doorbell" "$payload"
