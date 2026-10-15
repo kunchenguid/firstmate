@@ -361,7 +361,10 @@ test_large_stdin_payload_is_classified_promptly() {
     : > "$OUT"
     : > "$ERR"
     start=$SECONDS
-    jq -cn --arg tool "$tool" --arg body "$filler" '{tool_name: $tool, tool_input: {content: $body}}' \
+    # The filler goes through stdin, not --arg: Linux caps one argv string at
+    # 128KB, so a --arg this large never reaches jq there.
+    printf '%s' "$filler" \
+      | jq -cRs --arg tool "$tool" '{tool_name: $tool, tool_input: {content: .}}' \
       | env FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
         "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
     elapsed=$((SECONDS - start))
