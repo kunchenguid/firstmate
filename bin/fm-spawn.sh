@@ -3019,7 +3019,7 @@ model_flag_for_harness() {  # <harness> <model> [opencode model-flag support: 1|
 # The fragment lands inside the launch's single-quoted assignment, so a literal
 # quote in the model id must close and reopen that quoting.
 opencode_agent_config_fragment() {  # <model> <effort> <model-flag-supported: 0|1>
-  local model=$1 effort=$2 model_flag_supported=$3 variant model_json
+  local model=$1 effort=$2 model_flag_supported=$3 variant='' model_json
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "${model%%/*}:$effort" in
   anthropic:high | anthropic:max) variant=$effort ;;
