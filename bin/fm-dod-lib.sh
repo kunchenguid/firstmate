@@ -161,8 +161,8 @@ fm_dod_receipt_accept() {  # <state> <id> <meta> <candidate-head>
 # The optional home merge gate (docs/configuration.md "Merge gate"). When
 # <config>/merge-gate exists and is executable, both landing entrypoints run
 # `merge-gate <task-id> <worktree> <head> <pr-url|->` with FM_HOME set, after
-# their own live checks and before the merge command; a nonzero exit refuses
-# the merge with the gate's output. An absent file changes nothing; a file that
+# their own live checks and before the merge command, and print its output; a
+# nonzero exit refuses the merge. An absent file changes nothing; a file that
 # exists but is not executable refuses the merge, naming it. The gate runs under
 # FM_MERGE_GATE_TIMEOUT seconds (default 600) because it runs inside the task's
 # control lock; a gate that outlives the bound is killed and refuses the merge.
@@ -175,8 +175,8 @@ fm_dod_merge_gate() {  # <config-dir> <home> <id> <meta> <candidate-head> <pr-ur
   esac
   worktree=$(fm_dod_meta_value "$4" worktree)
   out=$(fm_run_timed "$seconds" env FM_HOME="$2" "$gate" "$3" "${worktree:--}" "$5" "$6" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || return 0
   [ -z "$out" ] || printf '%s\n' "$out"
+  [ "$rc" -ne 0 ] || return 0
   if fm_timed_out "$rc"; then
     echo "merge refused: merge gate timed out after ${seconds}s or exited $rc"
     return 1

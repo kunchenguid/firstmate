@@ -498,16 +498,31 @@ EOF
     && fail "local landing ignored a timed-out merge gate"
   assert_grep 'merge refused: merge gate timed out after 1s' "$home/merge.out" "timed-out merge gate was not named"
   [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] || fail "timed-out gate landing changed main"
-  rm "$home/config/merge-gate"
+  # A passing gate's output is shown too, and the optional post-merge hook runs
+  # once after the fast-forward; its failure leaves the landing standing.
+  printf '#!/usr/bin/env bash\necho "done-done: inconclusive"\n' > "$home/config/merge-gate"
+  # shellcheck disable=SC2016  # the hook script expands its own arguments
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$FM_HOME/post.args"\nexit 5\n' > "$home/config/post-merge"
+  chmod +x "$home/config/merge-gate" "$home/config/post-merge"
   fm_run_timed 60 env FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
     || fail "valid local landing failed after a timed-out merge gate released the lock: $(cat "$home/merge.out")"
   [ "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$wt" rev-parse HEAD)" ] \
     || fail "valid local landing did not land proved candidate"
+  assert_grep 'done-done: inconclusive' "$home/merge.out" "passing merge gate output was not shown"
+  [ "$(cat "$home/post.args")" = "receipt $wt $(git -C "$wt" rev-parse HEAD) -" ] \
+    || fail "post-merge hook got wrong arguments or ran more than once: $(cat "$home/post.args")"
+  assert_grep 'post-merge hook failed (exit 5); the merge stands' "$home/merge.out" "post-merge hook failure was not named"
+  # Repeating the landing is a fast-forward no-op, so the hook must not rerun.
+  fm_run_timed 60 env FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
+    || fail "repeat local landing of an unchanged default branch failed: $(cat "$home/merge.out")"
+  [ "$(cat "$home/post.args")" = "receipt $wt $(git -C "$wt" rev-parse HEAD) -" ] \
+    || fail "repeat landing reran the post-merge hook: $(cat "$home/post.args")"
+  rm "$home/config/merge-gate" "$home/config/post-merge"
   # Legacy tasks remain compatible when no receipt exists.
   grep -v '^receipt_required=' "$meta" > "$home/state/legacy.meta"
   fm_dod_receipt_accept "$home/state" legacy "$home/state/legacy.meta" "$head" \
     || fail "legacy absent receipt refused"
-  pass "durable completion evidence and the optional merge gate bind candidate, mode and incarnation and gate local landing"
+  pass "durable completion evidence and the optional merge gate bind candidate, mode and incarnation and gate local landing, and the post-merge hook runs after it"
 }
 
 

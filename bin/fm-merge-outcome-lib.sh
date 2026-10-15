@@ -30,6 +30,8 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-timeout-lib.sh"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -111,5 +113,24 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   fm_lock_release "$lock"
   # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
   [ ! -e "${FM_CONFIG_OVERRIDE:-$home/config}/fleet-ledger" ] || [ "$status" -ne 0 ] || FM_HOME=$home FM_STATE_OVERRIDE=$state "$_FM_MERGE_OUTCOME_LIB_DIR/fm-fleet-ledger.sh" merged "$id" pr "$FM_PR_URL" || true
+  [ "$status" -ne 0 ] || fm_merge_post_hook "${FM_CONFIG_OVERRIDE:-$home/config}" "$home" "$id" "$state/$id.meta" - "$FM_PR_URL" >&2
   return "$status"
+}
+
+# The optional home post-merge hook (docs/configuration.md "Post-merge hook").
+# When <config>/post-merge exists and is executable, a confirmed merge runs
+# `post-merge <task-id> <worktree|-> <head|-> <pr-url|->` once with FM_HOME set,
+# under FM_POST_MERGE_TIMEOUT seconds (default 120). The merge has already
+# landed, so the hook never changes the caller's result: its output is printed
+# and a failure or timeout is reported, never returned.
+fm_merge_post_hook() {  # <config-dir> <home> <id> <meta> <head|-> <pr-url|->
+  local hook=$1/post-merge worktree out rc=0 seconds=${FM_POST_MERGE_TIMEOUT:-120}
+  [ -e "$hook" ] || [ -L "$hook" ] || return 0
+  [ -x "$hook" ] || { echo "post-merge hook skipped: $hook is not executable"; return 0; }
+  case $seconds in ''|0*|*[!0-9]*) seconds=120 ;; esac
+  worktree=$(sed -n 's/^worktree=//p' "$4" 2>/dev/null | tail -1)
+  out=$(fm_run_timed "$seconds" env FM_HOME="$2" "$hook" "$3" "${worktree:--}" "$5" "$6" 2>&1) || rc=$?
+  [ -z "$out" ] || printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] || echo "post-merge hook failed (exit $rc); the merge stands"
+  return 0
 }
