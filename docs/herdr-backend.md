@@ -23,6 +23,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
+| Keeping Firstmate from starting a server a service manager owns | [Externally managed servers](#externally-managed-servers) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
 | Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
 | Stopping or deleting Herdr sessions during verification | [Destructive lab safety](#destructive-lab-safety) |
@@ -665,6 +666,25 @@ Claude Code itself then removes it from the submitted prompt, so a Claude Code p
 No Herdr-specific copy of that protocol exists.
 
 ## Restart and liveness behavior
+
+### Externally managed servers
+
+By default Firstmate starts a session's Herdr server itself, headless, whenever an operation finds it not running.
+That is wrong when a service manager, such as a systemd user unit, owns the server.
+During a unit restart or a `server live-handoff`, `status` can briefly report not running, and a server Firstmate started would race the owner and split panes across two servers.
+
+The owner opts out by writing marker files into the session directory that `herdr session list --json` reports as `session_dir`:
+
+| Marker | Written by the owner | Firstmate behavior while the server is not running |
+| --- | --- | --- |
+| `firstmate-server-owner` | Once, for as long as it owns the server; the first line names the owner | Never starts a server; waits a bounded time for it to report running, then fails naming the owner |
+| `firstmate-server-replacing` | Only for the duration of a restart or handoff | Never starts a server; waits a bounded time for it to report running, or for the marker to clear |
+
+The wait is `FM_BACKEND_HERDR_EXTERNAL_SERVER_POLLS` checks half a second apart, 60 (30 seconds) by default.
+A replacement marker that clears with no owner marker hands the session back to the default, so Firstmate starts the server if it is still down.
+A replacement marker left behind fails every wait naming its path, so the owner must remove it when the replacement ends.
+A server that reports running is used at once, and the markers are read only when it does not.
+Herdr lists a session's `session_dir` even while its server is stopped ([verification](verification/runtime-backends.md#session-directory)), and a Herdr whose listing omits the field cannot carry the markers and keeps the default behavior.
 
 ### Husks after a server restart
 

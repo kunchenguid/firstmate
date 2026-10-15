@@ -1657,6 +1657,42 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
   return 0
 }
 
+# fm_backend_herdr_session_dir: the on-disk directory Herdr reports for
+# <session> in `session list --json`'s `.session_dir` (default ->
+# ~/.config/herdr, named -> ~/.config/herdr/sessions/<name>), so any XDG
+# override is Herdr's to resolve, not ours. Listed whether or not that
+# session's server is running (docs/verification/runtime-backends.md "Session
+# directory"). Empty on any failure, including a Herdr whose listing omits the
+# field.
+fm_backend_herdr_session_dir() {  # <session>
+  local session=$1
+  "$(fm_backend_herdr_bin)" session list --json 2>/dev/null \
+    | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .session_dir // empty' 2>/dev/null \
+    | head -1
+}
+
+# External server ownership (issue #7320). A service manager such as a systemd
+# user unit can own a session's server, and then only it may start one: a
+# Firstmate-started server races the owner during a unit restart or a
+# `server live-handoff`, while `status` briefly reports not running, and splits
+# panes across two servers. The owner declares itself with marker files in the
+# session directory above, shared by every Firstmate home on that session:
+#   firstmate-server-owner      persistent; first line names the owner
+#   firstmate-server-replacing  present only while the owner replaces the server
+# docs/herdr-backend.md "Externally managed servers" owns the operator contract.
+FM_BACKEND_HERDR_SERVER_OWNER_MARKER=firstmate-server-owner
+FM_BACKEND_HERDR_SERVER_REPLACING_MARKER=firstmate-server-replacing
+
+# fm_backend_herdr_server_owner_name: the owner named by <owner-marker>'s first
+# line, or a generic name when it names none.
+fm_backend_herdr_server_owner_name() {  # <owner-marker>
+  local name
+  name=$(head -n 1 "$1" 2>/dev/null | tr -d '[:cntrl:]' | cut -c1-200)
+  name=${name#"${name%%[![:space:]]*}"}
+  name=${name%"${name##*[![:space:]]}"}
+  printf '%s' "${name:-an external service manager}"
+}
+
 # fm_backend_herdr_server_ensure: start the herdr server for <session>
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
@@ -1665,10 +1701,41 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # every later pane, so remove home, harness identity, and supervision selection
 # inherited from whichever agent happened to start it. Bounded poll for the
 # server to report running.
+#
+# A running server returns at once, before any marker is read, so the default
+# path costs nothing extra. Otherwise, while the session directory holds an
+# owner or replacement marker, this never starts a server: it polls the
+# non-starting fm_backend_herdr_server_running_state read
+# FM_BACKEND_HERDR_EXTERNAL_SERVER_POLLS times (default 60, 0.5s apart), and
+# fails naming the owner or the replacement if the server never reports running.
+# A replacement marker that clears with no owner marker hands back to the
+# Firstmate-owned start below.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i
+  local session=$1 running out i dir owner_marker replacing_marker polls owner
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
+  dir=$(fm_backend_herdr_session_dir "$session")
+  if [ -n "$dir" ]; then
+    owner_marker="$dir/$FM_BACKEND_HERDR_SERVER_OWNER_MARKER"
+    replacing_marker="$dir/$FM_BACKEND_HERDR_SERVER_REPLACING_MARKER"
+    polls=${FM_BACKEND_HERDR_EXTERNAL_SERVER_POLLS:-60}
+    case "$polls" in ''|*[!0-9]*) polls=60 ;; esac
+    i=0
+    while [ -e "$owner_marker" ] || [ -e "$replacing_marker" ]; do
+      if [ "$i" -ge "$polls" ]; then
+        if [ -e "$owner_marker" ]; then
+          owner=$(fm_backend_herdr_server_owner_name "$owner_marker")
+          echo "error: herdr server for session '$session' is managed by $owner ($owner_marker) and did not report running after $polls checks; Firstmate will not start it - start or repair it through $owner" >&2
+        else
+          echo "error: herdr server for session '$session' is being replaced ($replacing_marker) and did not report running after $polls checks; Firstmate will not start a server while that marker exists" >&2
+        fi
+        return 1
+      fi
+      sleep 0.5
+      i=$((i + 1))
+      [ "$(fm_backend_herdr_server_running_state "$session")" = running ] && return 0
+    done
+  fi
   (
     unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
       CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL

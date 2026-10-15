@@ -1324,6 +1324,26 @@ rc=1
 The refusal is a JSON error on stderr with exit 1 and empty stdout, and both client generations report `.server.compatible` and `.server.protocol` per named session, which is what the selection in `bin/backends/herdr.sh` reads.
 `tests/fm-backend-herdr.test.sh` pins the bypass, same-process same-session caching, cross-session isolation, forced reselection, and both status shapes against fakes; `tests/fm-backend-herdr-smoke.test.sh` refreshes the real status normalization against the installed binary's running lab server.
 
+### Session directory
+
+Measured 2026-10-15 on Linux x86_64 with Herdr 0.9.5, reading only session listings: an empty `sessions/probe` directory under a fresh `XDG_CONFIG_HOME` with no server, then the host's two running sessions.
+
+```sh
+herdr --version
+d=$(mktemp -d /tmp/hx.XXXXXX); mkdir -p "$d/herdr/sessions/probe"
+XDG_CONFIG_HOME="$d" herdr session list --json | jq -c --arg d "$d" '[.sessions[] | {name, running, session_dir: (.session_dir | sub("^" + $d; "$XDG_CONFIG_HOME"))}]'
+herdr session list --json | jq -c --arg h "$HOME" '[.sessions[] | {name, running, session_dir: (.session_dir | sub("^" + $h; "~"))}]'
+```
+
+```text
+herdr 0.9.5
+[{"name":"default","running":false,"session_dir":"$XDG_CONFIG_HOME/herdr"},{"name":"probe","running":false,"session_dir":"$XDG_CONFIG_HOME/herdr/sessions/probe"}]
+[{"name":"default","running":true,"session_dir":"~/.config/herdr"},{"name":"firstmate","running":true,"session_dir":"~/.config/herdr/sessions/firstmate"}]
+```
+
+A session whose server is stopped is still listed with its `session_dir`, and the directory follows `XDG_CONFIG_HOME`, so the [externally managed server](../herdr-backend.md#externally-managed-servers) markers stay readable through a restart.
+`tests/fm-backend-herdr.test.sh` pins the marker behavior against fakes.
+
 ### Submit confirmation
 
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.
