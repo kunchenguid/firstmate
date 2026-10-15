@@ -1152,6 +1152,69 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# The dead-site case the gate exists for: a declared http: target that accepts
+# the connection and then never answers must surface at the snapshot boundary
+# as blocked with the declared-verification refusal, not as a killed read
+# folded to unknown, under the snapshot's real crew-state bound.
+test_blackholing_declared_check_reads_blocked_in_snapshot() {
+  local home fakebin out port pid i state_view
+  if ! command -v python3 >/dev/null 2>&1; then
+    fail "python3 is required to stand up the blackholing listener"
+  fi
+  home=$(make_home declared-blackhole)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/verify-worktree"
+  fm_write_meta "$home/state/verify-task.meta" \
+    "window=firstmate:fm-verify-task" \
+    "worktree=$home/projects/verify-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'done: PR https://example.test/o/r/pull/9 checks green\n' \
+    > "$home/state/verify-task.status"
+  record_claude_idle "$home/state" verify-task
+
+  python3 -u -c '
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0))
+s.listen(16)
+sys.stdout.write("port %d\n" % s.getsockname()[1])
+sys.stdout.flush()
+held = []
+while True:
+    conn, _ = s.accept()
+    held.append(conn)
+' > "$home/blackhole.log" 2>&1 &
+  pid=$!
+  port=
+  for i in $(seq 1 40); do
+    port=$(sed -n 's/^port \([0-9][0-9]*\)$/\1/p' "$home/blackhole.log" | head -1)
+    [ -n "$port" ] && break
+    sleep 0.25
+  done
+  [ -n "$port" ] || { kill "$pid" 2>/dev/null; fail "could not start the blackholing listener"; }
+
+  printf 'http: http://127.0.0.1:%s/ 200 the live fix is deployed\n' "$port" \
+    > "$home/state/verify-task.verify"
+  chmod 600 "$home/state/verify-task.verify"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+
+  state_view=$(printf '%s' "$out" | jq -c '.tasks[] | select(.id == "verify-task") | .current_state')
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "verify-task")
+    | .current_state.state == "blocked"
+      and (.current_state.detail | contains("declared verification failed"))
+  ' >/dev/null \
+    || fail "a blackholing declared check did not read blocked under the snapshot crew-state bound: $state_view"
+  pass "a blackholing declared check reads blocked, not unknown, at the snapshot boundary"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1170,3 +1233,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_blackholing_declared_check_reads_blocked_in_snapshot
