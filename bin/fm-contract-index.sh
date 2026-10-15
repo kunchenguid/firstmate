@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
 # fm-contract-index.sh - markdown index of deferred contract topics.
-#
-# render (default) prints the table.
-# --check with no table argument also compares the AGENTS.md marker block
-# to that table and enforces a 3200-word ceiling (wc -w).
-# --check with a table argument validates that table only.
-# --write replaces the marker block in AGENTS.md.
-# FM_CONTRACT_AGENTS, when set, is the file those two modes read.
-# Tests point it at a copy so a drifted index or a fat file can fail
-# without editing the tracked contract.
-#
-# Usage: fm-contract-index.sh [render]
-#        fm-contract-index.sh --check [tsv]
-#        fm-contract-index.sh --write
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

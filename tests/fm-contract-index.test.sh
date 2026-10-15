@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Topic index path refusal, AGENTS.md marker match, and the 3200-word ceiling.
 set -u
 
 # shellcheck source=tests/lib.sh

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # fm-session-start.sh - one command for the whole session start.
 #
-# Collapses session-start bootstrap and recovery into ONE script
+# Collapses AGENTS.md sections 3 (bootstrap) and 5 (recovery) into ONE script
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
 # data/captain.md, data/captain-shared.md, data/learnings.md, then run
 # fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
 # and every state/*.status.
-# Every one of those reads is UNCONDITIONAL at every session start, so they
-# belong in a script, not in N agent turns.
+# The load profile decides which of those reads emit bodies on a given open.
+# The script still owns the sequencing so the model does not reimplement it.
 #
 # COMPOSITION, NOT DUPLICATION: this script calls fm-lock.sh, fm-bootstrap.sh,
 # fm-wake-drain.sh, and fm-startup-network.sh as real subprocesses and prints
@@ -48,22 +48,13 @@
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       the away posture (state/.afk-contract and the legacy
-#                       state/.afk daemon flag), and a cheap per-task
-#                       endpoint-liveness read, each bounded and crash-
-#                       isolated so one task's read can never abort the
-#                       digest: read-only, always runs. The per-task reads
-#                       run serially, so with a wedged backend the stage's
-#                       ceiling is tasks x the per-read bound
-#                       (FM_SESSION_START_ENDPOINT_TIMEOUT, default 10s) and
-#                       can itself reach the digest's runtime bound.
-#   7. network checks - the result of the deferred network stage started back at
-#                       step 1, harvested WITHOUT waiting for it.
-#   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing and
+#                       every state/*.meta. Full depth also prints status tails
+#                       and per-task endpoint reads (bounded and crash-isolated).
+#                       Slim depth stops at identity.
+#   7. network checks - full harvests the deferred worker; slim prints a pointer.
+#   8. context digest - full cats the memory files; slim prints PRESENT/ABSENT
+#                       and byte size only.
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -173,7 +164,7 @@
 # STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
 # tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
 # may be. Both bounds are safe because the section prints every task's full
-# status log path, and `.agents/contract/supervision-wake.md` treats a status line as a wake EVENT
+# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed through a native session-open
@@ -283,7 +274,7 @@ done
 
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 BACKEND=$(fm_backend_name)
-if ! fm_load_profile_bind "$FM_HOME" "$PRIMARY_HARNESS" "$BACKEND"; then
+if ! fm_digest_profile_bind "$FM_HOME" "$PRIMARY_HARNESS" "$BACKEND"; then
   printf 'LOAD PROFILE: bind failed\n'
   exit 1
 fi
@@ -312,8 +303,7 @@ stage_runs() {  # <stage-id>
 }
 
 # A non-positive or non-numeric budget is not a budget (`timeout 0` disables
-# the deadline outright). The bound profile already keeps a usable
-# FM_SESSION_START_TIMEOUT and otherwise the table's session_timeout_sec.
+# the deadline outright).
 session_start_budget() {
   local policy timeout
   policy=$(fm_load_profile_policy lock) || return 1
@@ -628,6 +618,7 @@ EOF
   esac
   printf '%s\n' 'Do NOT re-read the sources this digest printed in full.'
   printf '%s\n' 'A STARTUP TRUNCATED banner names a stage that never ran. Reconcile that stage before acting on what it would have shown.'
+  printf '%s\n' 'A context re-emit may open with a read cue when the harness cut the digest short.'
 }
 
 print_backlog_pointer() {
@@ -1003,7 +994,7 @@ fi
 # separate 900-second cadence remains unchanged.
 # Presented records are this turn's first work queue and remain durable until
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
-# remains actionable even when that queue is empty (AGENTS.md session start and .agents/contract/supervision-wake.md).
+# remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
 # The drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
 # below. The read-only path never touches the queue because it lacks mutation

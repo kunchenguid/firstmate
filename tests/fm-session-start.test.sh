@@ -21,8 +21,6 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
-#   - pi + herdr homes follow the slim load profile unless config/load-profile
-#     says full
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -557,16 +555,8 @@ SH
 }
 
 # run_session_start <home> <root> <path>
-# Drop every harness env marker from bin/fm-harness.sh detect_own so the
-# surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok), and the markers harness_marker checks
-# before Pi (CURSOR_AGENT, CURSOR_INVOKED_AS, GEMINI_CLI, rovo, omp).
-# codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok/cursor session fails cases that pin a different fake harness
-# while CI (no ambient markers) still passes. Ancestry collapses pi-signed to
-# the pi family, so a forced pi-signed identity has to be the marker, and a
-# cursor marker checked first would hide it.
+# Drop harness env markers from bin/fm-harness.sh detect_own so the host shell
+# cannot leak past the suite's fake ps harness.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
@@ -3049,10 +3039,7 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
-# seed_pi_herdr_world <name>
-# Harness is Pi (FM_PI_HARNESS via run_pi_session_start plus a fake ps).
-# Backend is herdr via config/backend, the same token fm_backend_name reads.
-# Echoes root|home|fakebin|bytes for the seeded projects.md.
+# seed_pi_herdr_world <name> -> root|home|fakebin|projects.md-bytes
 seed_pi_herdr_world() {
   local name=$1 rec root home fakebin body bytes
   rec=$(new_world "$name")

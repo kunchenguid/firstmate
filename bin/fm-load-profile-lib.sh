@@ -1,10 +1,4 @@
 # shellcheck shell=bash
-# Load-profile registry. Session start asks this file what to run.
-# Usage: . bin/fm-load-profile-lib.sh
-#
-# Profiles name digest stages only. Binding one does not disable Pi primary
-# extensions and does not add skill files to the always-on prefix.
-#
 # ponytail: FM_LOAD_PROFILES_TSV points bind at another table.
 # Ceiling: a bad path fails the bind. Upgrade path: a second product table, if one is ever real.
 #
@@ -477,7 +471,7 @@ _fm_lp_config_token() {  # <home>
   _FM_LP_CFG_TOKEN=$token
 }
 
-fm_load_profile_bind() {  # <home> <harness> <backend>
+fm_digest_profile_bind() {  # <home> <harness> <backend>
   local home=${1-} harness=${2-} backend=${3-}
   local id='' source='' diag='' which=''
   _fm_lp_clear

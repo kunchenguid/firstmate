@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Load-profile bind plans, parser rejections, and the Pi-extension graft.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -68,7 +67,7 @@ new_home() {  # <name>
 
 bind_home() {  # <home> <harness> <backend>
   unset FM_LOAD_PROFILES_TSV
-  fm_load_profile_bind "$1" "$2" "$3" >"$TMP_ROOT/bind.out" 2>"$TMP_ROOT/bind.err"
+  fm_digest_profile_bind "$1" "$2" "$3" >"$TMP_ROOT/bind.out" 2>"$TMP_ROOT/bind.err"
   FM_LP_CODE=$?
 }
 
@@ -208,7 +207,7 @@ test_reject_illegal_rows() {
   printf '%s\n' $'profile\tstage\trun\temit\textra\tsession_timeout_sec' >"$bad"
   printf '%s\n' $'slim\tlock\tno\tbody\t\t30' >>"$bad"
   FM_LOAD_PROFILES_TSV=$bad
-  fm_load_profile_bind "$home" pi herdr >"$TMP_ROOT/bind.out" 2>"$TMP_ROOT/bind.err"
+  fm_digest_profile_bind "$home" pi herdr >"$TMP_ROOT/bind.out" 2>"$TMP_ROOT/bind.err"
   code=$?
   unset FM_LOAD_PROFILES_TSV
   assert_not_equals 0 "$code" "run=no emit=body was accepted"
@@ -222,7 +221,7 @@ test_reject_illegal_rows() {
   printf '%s\n' $'profile\tstage\trun\temit\textra\tsession_timeout_sec' >"$bad"
   printf '%s\n' $'slim\tfleet-state\tyes\tbody\tidentity:tail=5,queued=20,endpoint=10\t30' >>"$bad"
   FM_LOAD_PROFILES_TSV=$bad
-  fm_load_profile_bind "$home" pi herdr >"$TMP_ROOT/bind.out" 2>"$TMP_ROOT/bind.err"
+  fm_digest_profile_bind "$home" pi herdr >"$TMP_ROOT/bind.out" 2>"$TMP_ROOT/bind.err"
   code=$?
   unset FM_LOAD_PROFILES_TSV
   assert_not_equals 0 "$code" "identity fleet with tail, queued, and endpoint was accepted"
@@ -236,8 +235,6 @@ test_reject_illegal_rows() {
 }
 
 test_pi_extensions_and_prefix_stay() {
-  # Graft: this unit does not turn off Pi primary extensions or inject skills
-  # into the always-on prefix. Bind reads the profile table and the config token.
   local home stages after
   home=$(new_home pi-ext)
   printf 'enabled\n' >"$home/.pi/extensions/sample.js"
