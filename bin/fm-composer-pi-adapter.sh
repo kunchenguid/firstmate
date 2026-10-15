@@ -141,9 +141,3 @@ fm_composer_pi_adapter_terminal_banner_above() {  # <screen>
   done
   return 1
 }
-
-# 0 when a stale (non-idle/done) pi status may still read empty because the
-# pinned adapter recognized the terminal banner above the pair.
-fm_composer_pi_adapter_settles_stale_status() {  # <screen>
-  fm_composer_pi_adapter_terminal_banner_above "$1"
-}
