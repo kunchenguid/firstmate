@@ -255,6 +255,44 @@ test_fixture_snapshot_json() {
   pass "fixture snapshot covers task rows, backlog rows, pointers, stable ordering, and emission-time event age"
 }
 
+# task_json_lines builds each crew's row through a single jq pass instead of
+# the one-jq-call-per-field sequence it used before; this fixture exercises the
+# trickiest branch that collapse touched - a remote secondmate's recorded home,
+# whose presence is a literal null (home exists on ITS host, never locally
+# checked), not the local existence boolean every other path/home case uses.
+test_remote_secondmate_home_present_is_null() {
+  local home fakebin out remote_home
+  home=$(make_home remote-secondmate)
+  remote_home=$TMP_ROOT/remote-secondmate-home
+  mkdir -p "$remote_home"
+  fm_write_meta "$home/state/remote-sm.meta" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "harness=pi" \
+    "remote_host=host-fake" \
+    "remote_root=/remote/root" \
+    "home=$remote_home" \
+    "remote_backend=tmux" \
+    "remote_target=remote:pane"
+  printf 'working: delegated\n' > "$home/state/remote-sm.status"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/fake-ssh"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e --arg home "$remote_home" '
+    .tasks[] | select(.id == "remote-sm")
+    | .remote.host == "host-fake"
+      and .backend == "tmux"
+      and .paths.home.path == $home
+      and (.paths.home.present == null)
+  ' >/dev/null || fail "a remote secondmate home must report present:null, never a local existence boolean: $out"
+  pass "a remote secondmate's recorded home reports present:null rather than a local existence check"
+}
+
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
 test_hold_buckets_are_total_and_text_blind() {
@@ -1154,6 +1192,7 @@ EOF
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_remote_secondmate_home_present_is_null
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
