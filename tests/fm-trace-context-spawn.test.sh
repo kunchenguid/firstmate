@@ -317,6 +317,27 @@ test_disabled_writes_and_injects_neither() {
   pass "disabled: neither traceparent= in meta nor a TRACEPARENT export is produced"
 }
 
+# The same default-off fresh spawn records the task's incarnation start beside its
+# first spawn generation (bin/fm-spawn.sh header), which bin/fm-crew-state.sh uses
+# so a validation run created before the task existed is never the task's result.
+test_fresh_spawn_records_the_task_start() {
+  local rec out status meta before after started gen
+  rec=$(make_spawn_case task-start)
+  read_case_record "$rec"
+  before=$(date +%s)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+  status=$?
+  after=$(date +%s)
+  expect_code 0 "$status" "fresh spawn should succeed"$'\n'"$out"
+  meta="$HOME_DIR/state/$CASE_ID.meta"
+  started=$(grep '^task_started=' "$meta" | cut -d= -f2-)
+  gen=$(grep '^spawn_gen=' "$meta" | cut -d= -f2-)
+  case "$started" in ''|*[!0-9]*) fail "a fresh spawn did not record task_started: '$started'" ;; esac
+  [ "$started" -ge "$before" ] && [ "$started" -le "$after" ] || fail "task_started $started is not the spawn time"
+  [ "${gen#s"$started".}" != "$gen" ] || fail "task_started and spawn_gen disagree on a fresh spawn: $started vs $gen"
+  pass "fresh spawn: the task start is recorded with the first spawn generation"
+}
+
 test_failed_delivery_omits_metadata_and_still_launches() {
   local rec out status meta
   rec=$(make_spawn_case tc-send-failure)
@@ -603,6 +624,7 @@ test_secondmate_carrier_and_snapshot_share_one_decision() {
 
 test_enabled_records_and_injects_identical_carrier_before_launch
 test_disabled_writes_and_injects_neither
+test_fresh_spawn_records_the_task_start
 test_failed_delivery_omits_metadata_and_still_launches
 test_unsafe_delivery_refuses_to_append_launch
 test_failed_metadata_append_unsets_carrier_and_still_launches

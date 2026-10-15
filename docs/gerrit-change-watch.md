@@ -128,6 +128,6 @@ The server permitting self-approval is what makes this a policy boundary rather 
 - A no-mistakes done naming a Gerrit change is also refused unless the copy holds a passed pipeline's result: refused when the run's outcome is missing or not a pass, while the run reports `recover_custody` or `continue_active_run`, when HEAD's tree differs from the pipeline head's, or when the run cannot be read, and accepted once recovered even after the Change-Id stamp rewrote the branch's messages.
 - A `published for review` done whose URL is not a canonical Gerrit change URL is refused, even when a remote-tracking ref holds HEAD.
 
-`tests/fm-crew-state.test.sh` pins the crew-state read with no server either: a passed run whose change is open reports `PR open`, an abandoned one `PR closed`, a merged one `PR merged`, and an unreadable record or one naming another change reports an honest unknown rather than a merge.
+`tests/fm-crew-state.test.sh` pins the crew-state read with no server either: a passed run whose recorded change is open reports `recorded PR open`, an abandoned one `recorded PR closed`, a merged one `recorded PR merged`, and an unreadable record or one naming another change reports an honest unknown rather than a merge.
 
 Refresh this record by rerunning those suites, and rerun the transcripts above after a `gerrit-axi` upgrade.
