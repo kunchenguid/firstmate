@@ -58,18 +58,17 @@
 # seconds. A read stopped by a bound or by a signal aimed at it alone answered
 # nothing and is unmeasured, never a forge failure: those are the statuses
 # fm-timeout-lib.sh reports as its own bound, 124 and the kill's 137, plus
-# TERM's 143, INT's 130 and HUP's 129,
-# which reach the poll when the signal hit the read alone - possible because
-# every bounding mechanism runs the read in its own process group. Every other
-# status is unavailable evidence, including a client death by some other
-# signal such as SIGSEGV's 139. A pull observation has three
-# dependent waves: core, six independent reads, then the closing head read;
-# an issue has two waves. Before starting a URL, poll reserves the smaller of
-# the effective budget and 15 seconds for those waves. URLs needing forge
-# reads are sorted by URL and rotated by the current five-minute epoch bucket
-# modulo their count, without stored scheduling state or freshness-based
-# reordering. Terminal URLs settle separately before the forge budget starts
-# and consume no rotation slots.
+# TERM's 143, INT's 130 and HUP's 129, which reach the poll when the signal
+# hit the read alone - possible because every bounding mechanism runs the read
+# in its own process group. Every other status is unavailable evidence,
+# including a client death by some other signal such as SIGSEGV's 139. A pull
+# observation has three dependent waves: core, six independent reads, then the
+# closing head read; an issue has two waves. Before starting a URL, poll
+# reserves the smaller of the effective budget and 15 seconds for those waves.
+# URLs needing forge reads are sorted by URL and rotated by the current
+# five-minute epoch bucket modulo their count, without stored scheduling state
+# or freshness-based reordering. Terminal URLs settle separately before the
+# forge budget starts and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct supported
 # URL is attempted at most once per poll and its observation applied to every owner.
