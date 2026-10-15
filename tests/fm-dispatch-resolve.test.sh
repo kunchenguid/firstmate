@@ -1901,9 +1901,9 @@ cp "$BRIEF" "$TASK_BRIEF"
 reset_log
 rm -rf "$RECORD"
 write_response "$RESPONSE" rule_4 0.9
-pushd "$HOME_DIR" >/dev/null
+pushd "$HOME_DIR" >/dev/null || exit
 TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
-popd >/dev/null
+popd >/dev/null || exit
 expect_code 0 "$code" "recorded clear resolution exits 0"
 assert_equals 1 "$(wc -l < "$RECORD" | tr -d ' ')" "a clear resolution appends exactly one line"
 record=$(cat "$RECORD")
@@ -1924,9 +1924,9 @@ cp "$FLOOR_RULES" "$RULES"
 reset_log
 rm -rf "$RECORD"
 write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.18 0.02
-pushd "$HOME_DIR" >/dev/null
+pushd "$HOME_DIR" >/dev/null || exit
 TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
-popd >/dev/null
+popd >/dev/null || exit
 record=$(cat "$RECORD")
 assert_equals 'rule_2' "$(jq -r .rule <<<"$record")" "a fallback record keeps the model's pick"
 assert_equals 'rule_4' "$(jq -r .fallback_rule <<<"$record")" "a fallback record names the rule that supplied the profile"
@@ -1936,9 +1936,9 @@ mv "$RULES.bak" "$RULES"
 reset_log
 rm -rf "$RECORD"
 write_response "$RESPONSE" rule_1 0.97
-pushd "$HOME_DIR" >/dev/null
+pushd "$HOME_DIR" >/dev/null || exit
 TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
-popd >/dev/null
+popd >/dev/null || exit
 record=$(cat "$RECORD")
 assert_equals 'rule_1' "$(jq -r .rule <<<"$record")" "a floor-below record keeps the model's pick"
 assert_equals 'default' "$(jq -r .profile_source <<<"$record")" "a floor-below record marks the default fall-through"
@@ -1946,9 +1946,9 @@ assert_equals 'default' "$(jq -r .profile_source <<<"$record")" "a floor-below r
 reset_log
 rm -rf "$RECORD"
 write_response "$RESPONSE" rule_4 0.2
-pushd "$HOME_DIR" >/dev/null
+pushd "$HOME_DIR" >/dev/null || exit
 TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
-popd >/dev/null
+popd >/dev/null || exit
 record=$(cat "$RECORD")
 assert_equals 'ambiguous' "$(jq -r .status <<<"$record")" "a low-confidence record is ambiguous"
 assert_equals 'null' "$(jq -r .profile_source <<<"$record")" "a record without a profile has no profile source"
@@ -1956,9 +1956,9 @@ assert_equals 'null' "$(jq -r .profile_source <<<"$record")" "a record without a
 reset_log
 rm -rf "$RECORD"
 write_response "$RESPONSE" rule_4 0.9
-pushd "$HOME_DIR" >/dev/null
+pushd "$HOME_DIR" >/dev/null || exit
 FAKE_QUOTA_FAIL=1 TYPESAFE_API_KEY=$KEY run code out err data/pager-fix/brief.md --project pager
-popd >/dev/null
+popd >/dev/null || exit
 record=$(cat "$RECORD")
 assert_equals 'error' "$(jq -r .status <<<"$record")" "a late error is recorded as error"
 assert_equals 'rule_4' "$(jq -r .rule <<<"$record")" "an error after a valid answer keeps the chosen rule"
