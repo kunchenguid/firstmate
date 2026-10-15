@@ -885,6 +885,18 @@ test_push_landed_ref_is_recorded_and_validated() {
   assert_no_grep 'open a PR' "$HOME_DIR/data/$id/launch-brief.md" \
     "the registered direct-push launch still tells the worker to open a PR"
 
+  id='pool-push-landed-base-absent-r1'
+  rec=$(make_case push-landed-base-absent "$id")
+  read_case_record "$rec"
+  publish_feature_branch integration/main
+  printf '%s\n' '- project [direct-PR forge=push-only] - fixture (added 2026-01-01)' > "$HOME_DIR/data/projects.md"
+  printf '%s\n' 'Delivery contract: mode=direct-PR forge=push-only' >> "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --push-landed-ref integration/main)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a registered push-only delivery without a base branch should refuse"
+  assert_contains "$out" "requires --base-branch 'integration/main'" "the missing direct-push base refusal did not name the required branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused missing direct-push base published task metadata"
+
   id='pool-push-landed-base-mismatch-r1'
   rec=$(make_case push-landed-base-mismatch "$id")
   read_case_record "$rec"

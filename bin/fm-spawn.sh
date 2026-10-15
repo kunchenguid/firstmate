@@ -42,8 +42,8 @@
 #   to start from and target instead of origin's default branch. A fresh launch
 #   resets its pooled copy to origin/<branch>, refusing when the project has no
 #   origin or origin lacks that branch, or when the project's registered forge
-#   cannot carry it. For registered push-only direct-PR delivery it must equal
-#   --push-landed-ref. It must agree with every Setup "Base branch:" line in the
+#   cannot carry it. Registered push-only direct-PR delivery requires it to
+#   equal --push-landed-ref. It must agree with every Setup "Base branch:" line in the
 #   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
 #   and a brief with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
@@ -3458,6 +3458,37 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF records a Base branch line but the spawn has no --base-branch; pass the brief's base with --base-branch or re-scaffold the brief without one" >&2
     exit 1
   fi
+  if [ "$KIND" = ship ]; then
+    PROJ_NAME=$(basename "$PROJ_ABS")
+    if ! STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" 2>/dev/null); then
+      "$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" >/dev/null || true
+      echo "error: $ID cannot launch: the registry entry for $PROJ_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
+      exit 1
+    fi
+    [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
+    if [ -n "$PUSH_LANDED_REF" ]; then
+      [ "$STANDING_FORGE" = push-only ] || {
+        echo "error: --push-landed-ref requires $PROJ_NAME to be registered forge=push-only; it is registered forge=$STANDING_FORGE" >&2
+        exit 1
+      }
+      case "$MODE" in
+        direct-PR) ;;
+        no-mistakes)
+          echo "error: --push-landed-ref is refused for mode=$MODE; no-mistakes owns publication through its pipeline" >&2
+          exit 1 ;;
+        *)
+          echo "error: --push-landed-ref requires mode=direct-PR; local-only has its own local-main delivery contract" >&2
+          exit 1 ;;
+      esac
+    fi
+    if [ "$RELAUNCH" -eq 0 ] && [ "$STANDING_FORGE" = push-only ] && [ "$MODE" = direct-PR ] && [ -z "$PUSH_LANDED_REF" ]; then
+      echo "error: forge=push-only direct-PR requires --push-landed-ref <ref>; without the registered direct-push branch this task has no delivery path" >&2
+      exit 1
+    fi
+    if [ "$STANDING_FORGE" = push-only ] && [ "$MODE" = direct-PR ] && [ -n "$PUSH_LANDED_REF" ]; then
+      fm_dod_push_landed_base_valid "$BASE_BRANCH" "$PUSH_LANDED_REF" "fm-spawn.sh --base-branch" || exit 1
+    fi
+  fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
@@ -3506,18 +3537,11 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 # would launch a worker whose instructions and whose recorded task delivery
 # differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
   # The parser's own refusal reaches the operator here rather than being
   # discarded: an entry it refuses (an unknown forge token, or a forge on
   # local-only) resolves to no posture at all, and launching on the silent
   # default is how a mistyped forge would hand a Gerrit project the
   # pull-request contract.
-  if ! STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" 2>/dev/null); then
-    "$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" >/dev/null || true
-    echo "error: $ID cannot launch: the registry entry for $PROJ_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
-    exit 1
-  fi
-  [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   BRIEF_CONTRACT=$(sed -n '/^Delivery contract: mode=/ { p; q; }' "$BRIEF")
   BRIEF_MODE=$(printf '%s\n' "$BRIEF_CONTRACT" | sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p')
@@ -3569,28 +3593,6 @@ if [ "$KIND" = ship ]; then
     fi
     echo "error: forge mismatch for $ID: $PROJ_NAME is registered forge=$STANDING_FORGE but $SOURCE_BRIEF records forge=$BRIEF_FORGE; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $forge_scaffold, then re-fill those two subsections, so the worker's publication matches the project's forge" >&2
     exit 1
-  fi
-  if [ -n "$PUSH_LANDED_REF" ]; then
-    [ "$STANDING_FORGE" = push-only ] || {
-      echo "error: --push-landed-ref requires $PROJ_NAME to be registered forge=push-only; it is registered forge=$STANDING_FORGE" >&2
-      exit 1
-    }
-    case "$MODE" in
-      direct-PR) ;;
-      no-mistakes)
-        echo "error: --push-landed-ref is refused for mode=$MODE; no-mistakes owns publication through its pipeline" >&2
-        exit 1 ;;
-      *)
-        echo "error: --push-landed-ref requires mode=direct-PR; local-only has its own local-main delivery contract" >&2
-        exit 1 ;;
-    esac
-  fi
-  if [ "$RELAUNCH" -eq 0 ] && [ "$STANDING_FORGE" = push-only ] && [ "$MODE" = direct-PR ] && [ -z "$PUSH_LANDED_REF" ]; then
-    echo "error: forge=push-only direct-PR requires --push-landed-ref <ref>; without the registered direct-push branch this task has no delivery path" >&2
-    exit 1
-  fi
-  if [ "$STANDING_FORGE" = push-only ] && [ "$MODE" = direct-PR ] && [ -n "$PUSH_LANDED_REF" ]; then
-    fm_dod_push_landed_base_valid "$BASE_BRANCH" "$PUSH_LANDED_REF" "fm-spawn.sh --base-branch" || exit 1
   fi
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
   # the captain's decision of 2026-09-15: a Code-Review+2 is a positive

@@ -93,7 +93,7 @@ test_registered_push_ref_is_fetched_for_done_gate() {
 test_registered_push_dod_requires_no_pr() {
   local out
   out="$TMP_ROOT/registered-push-dod.md"
-  fm_dod_block direct-PR registered-push fm/registered-push push-only '' '' refs/heads/integration/main > "$out" \
+  fm_dod_block direct-PR registered-push fm/registered-push push-only integration/main '' refs/heads/integration/main > "$out" \
     || fail "a registered push-only direct-PR Definition of done did not render"
   assert_grep 'shape=registered-direct-push push-landed-ref=integration/main' "$out" \
     "the registered direct-push Definition of done did not name its delivery shape"

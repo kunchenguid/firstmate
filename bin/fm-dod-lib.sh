@@ -658,7 +658,11 @@ fm_dod_normalize_push_landed_ref() {  # <ref>
 
 fm_dod_push_landed_base_valid() {  # <base> <push-landed-ref> <caller>
   local base=$1 ref=$2 caller=$3
-  [ -z "$base" ] || [ "$base" = "$ref" ] || {
+  [ -n "$base" ] || {
+    echo "error: $caller: forge=push-only direct-PR with a registered push-landed ref requires --base-branch '$ref'" >&2
+    return 1
+  }
+  [ "$base" = "$ref" ] || {
     echo "error: $caller: --base-branch '$base' must match the registered push-landed ref '$ref' for forge=push-only direct-PR" >&2
     return 1
   }
