@@ -4233,6 +4233,21 @@ test_capped_competing_live_runs_report_both_ids() {
   pass 'capped overview retains both competing same-branch run ids'
 }
 
+# A repository line the overview quotes but cannot be decoded names the overview
+# as what could not be read, not the state database it never reached.
+test_capped_overview_bad_repo_line_names_the_overview() {
+  make_capped_runs_case capped-bad-repo-line running running
+  local d=$TMP_ROOT/capped-bad-repo-line out
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's|^repo: .*|repo: "/abs\\q"|')
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unreadable' 'an undecodable repository line cannot establish a verdict'
+  assert_contains "$out" "the run overview's repository line is not valid JSON" \
+    'the verdict names the overview line it could not decode'
+  assert_not_contains "$out" 'state database could not be read' \
+    'the database the reader never opened is not blamed'
+  pass 'an undecodable overview repository line names the overview as its cause'
+}
+
 test_capped_overview_without_branch_rows_reports_both_ids() {
   make_capped_runs_case capped-absent running pending hidden
   local d=$TMP_ROOT/capped-absent out
@@ -6044,6 +6059,7 @@ test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
 test_capped_competing_live_runs_report_both_ids
+test_capped_overview_bad_repo_line_names_the_overview
 test_capped_overview_without_branch_rows_reports_both_ids
 test_capped_overview_with_no_branch_runs_reports_absent
 test_no_branch_run_beside_a_live_run_elsewhere_reads_absent

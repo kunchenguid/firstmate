@@ -341,7 +341,10 @@ try:
     repos = [line[6:].strip() for line in overview.splitlines() if line.startswith("repo: ")]
     if len(repos) != 1:
         raise Unreadable("the run overview does not name exactly one repository to look up")
-    repo_path = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
+    try:
+        repo_path = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
+    except ValueError:
+        raise Unreadable("the run overview's repository line is not valid JSON")
     if not isinstance(repo_path, str) or not os.path.isabs(repo_path):
         raise Unreadable("the run overview's repository path is not an absolute path")
     try:
