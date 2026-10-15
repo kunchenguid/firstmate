@@ -284,6 +284,61 @@ test_handling_successor_recovers_generation_opened_after_start() {
   pass "a handling successor skips its inherited generation and recovers one opened after it started"
 }
 
+# T4: the supervision host hands the inherited generation back to main by
+# republishing it as pending downtime (fm-supervision-host.sh, attended
+# acceptor failed); the still-live successor must neither re-announce that
+# in-flight wake nor exit.
+test_handling_successor_skips_host_handback_of_inherited_generation() {
+  local dir home state fakebin child now out
+  dir=$(make_case recovery-successor-host-handback)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  : > "$state/crew.meta"
+  printf 'pending:downtime:inherited.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watcher-down")" = "announced:downtime:inherited.1.aaa" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watcher-down")" = "announced:downtime:inherited.1.aaa" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "start-up arm check did not retire the inherited generation: $(cat "$state/.watcher-down")"; }
+  printf 'pending:downtime:inherited.1.aaa\n' > "$state/.watcher-down.tmp"
+  chmod 600 "$state/.watcher-down.tmp"
+  mv -f "$state/.watcher-down.tmp" "$state/.watcher-down"
+  sleep 4
+  if grep -F 'check: rearm-resurface' "$out" >/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "handling successor re-announced the inherited generation the host handed back: $(cat "$out")"
+  fi
+  if ! kill -0 "$child" 2>/dev/null; then
+    fail "handling successor stopped supervising after the host hand-back: $(cat "$out")"
+  fi
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  [ "$(cat "$state/.watcher-down")" = "pending:downtime:inherited.1.aaa" ] \
+    || fail "the handed-back generation was consumed by the successor: $(cat "$state/.watcher-down")"
+  pass "a handling successor skips the host hand-back of its inherited generation and keeps supervising"
+}
+
 test_handling_successor_does_not_go_blind
 test_handling_successor_recovers_generation_opened_after_start
+test_handling_successor_skips_host_handback_of_inherited_generation
 test_unacknowledged_recovery_is_announced_once_per_generation
