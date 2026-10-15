@@ -1741,7 +1741,10 @@ test_reply_rules() {
   jq -n --arg head "$HEAD_A" '[
     {id:60,user:{login:"maintainer"},author_association:"MEMBER",state:"APPROVED",body:"LGTM",html_url:"https://github.com/o/r/pull/8#pullrequestreview-60",submitted_at:"2026-09-16T05:00:00Z",commit_id:$head},
     {id:61,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"",html_url:"https://github.com/o/r/pull/8#pullrequestreview-61",submitted_at:"2026-09-16T05:00:00Z",commit_id:$head},
-    {id:62,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"Needs a test",html_url:"https://github.com/o/r/pull/8#pullrequestreview-62",submitted_at:"2026-09-16T06:45:00Z",commit_id:$head}]' \
+    {id:62,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"Needs a test",html_url:"https://github.com/o/r/pull/8#pullrequestreview-62",submitted_at:"2026-09-16T06:45:00Z",commit_id:$head},
+    {id:63,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"",html_url:"https://github.com/o/r/pull/8#pullrequestreview-63",submitted_at:"2026-09-16T07:30:00Z",commit_id:$head},
+    {id:64,user:{login:"reviewer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"Rename this",html_url:"https://github.com/o/r/pull/8#pullrequestreview-64",submitted_at:"2026-09-16T07:00:00Z",commit_id:$head},
+    {id:65,user:{login:"reviewer"},author_association:"MEMBER",state:"APPROVED",body:"",html_url:"https://github.com/o/r/pull/8#pullrequestreview-65",submitted_at:"2026-09-16T07:40:00Z",commit_id:$head}]' \
     > "$home/forge/reviews.json"
   jq -n --arg head "$HEAD_A" '[
     {id:70,user:{login:"maintainer"},author_association:"OWNER",body:"Root",html_url:"https://github.com/o/r/pull/8#discussion_r70",created_at:"2026-09-16T04:00:00Z",updated_at:"2026-09-16T04:00:00Z",commit_id:$head},
@@ -1759,7 +1762,7 @@ test_reply_rules() {
     'unanswered https://github.com/o/r/pull/8#discussion_r70' 'unanswered https://github.com/o/r/pull/8#discussion_r74' \
     'unanswered https://github.com/o/r/pull/8#pullrequestreview-62')" ] \
     || fail "a plain comment was raised again, or a tracked thread was not: $out"
-  pass 'only inline threads and reviews requesting changes with no author reply or resolution are tracked as unanswered'
+  pass 'only inline threads and reviews requesting changes with text, no author reply, resolution or later verdict are tracked as unanswered'
 }
 
 test_reply_age_is_configurable_and_validated() {

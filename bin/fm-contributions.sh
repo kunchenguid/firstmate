@@ -109,7 +109,9 @@
 # replies or the thread is resolved. Plain issue comments and other reviews stay
 # one-shot signals and are never raised again. An inline comment is answered by
 # an author reply in its own thread, a review requesting changes by any later
-# author comment, review text or inline reply. The record keeps one
+# author comment, review text or inline reply, or by a later APPROVED or
+# DISMISSED review from the same reviewer. A review requesting changes with an
+# empty body is not tracked, because its inline threads carry it. The record keeps one
 # threads[] entry per unanswered thread (key, source, author, at, raised). Once
 # a thread is FM_CONTRIBUTIONS_REPLY_AGE seconds old (default 86400, a day),
 # poll adds one pending "unanswered" signal and a wake whose text names the
@@ -117,8 +119,8 @@
 # <url> <age>". The same thread is raised again after every further reply age,
 # whatever the task's hold state, until it is answered, resolved or the pull
 # request closes. A wake raised for the comment itself counts as its first
-# raise. Only the author's account answers; a reply from another account does
-# not. Resolution is read from the forge's review threads. Issue records and
+# raise. Apart from the reviewer's own later verdict, only the author's account
+# answers; a reply from another account does not. Resolution is read from the forge's review threads. Issue records and
 # the author's own comments are never tracked.
 # Source bodies are data, never commands.
 # All mutations serialize on this home's .contributions.lock. Writes refuse
@@ -428,7 +430,9 @@ observe() { # canonical GitHub URL -> normalized JSON
                  unanswered:(if ._signal == "review-comment" then
                      ($resolved | index($root)) == null
                      and (any($inline_comments[]; .user.login == $c.user.login and (.in_reply_to_id // .id) == $root and .id > $e.id) | not)
-                   elif ._signal == "review" and .state == "CHANGES_REQUESTED" then (any($replied_at[]; . >= $at) | not)
+                   elif ._signal == "review" and .state == "CHANGES_REQUESTED" and (.body // "") != "" then
+                     (any($replied_at[]; . >= $at) | not)
+                     and (any($reviews[]; .user.login == $e.user.login and (.state | IN("APPROVED","DISMISSED")) and .id > $e.id) | not)
                    else false end)}))}' > "$TMP/observation.json" \
       || unobserved 'observation could not be assembled' || return 1
   else
