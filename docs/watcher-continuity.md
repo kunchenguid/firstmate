@@ -225,7 +225,8 @@ Every owner above runs inside the agent runtime, so a killed Herdr server takes 
 `bin/fm-sentinel.sh` is the one piece that must run outside the runtime, as a systemd user service:
 `mkdir -p ~/.config/systemd/user && FM_HOME="/absolute/home" bin/fm-sentinel.sh unit > ~/.config/systemd/user/fm-sentinel.service && systemctl --user enable --now fm-sentinel`.
 While the service is inactive, session start on a primary Herdr home with a systemd user bus prints a `SENTINEL:` line carrying the install command with shell-quoted absolute home and executable paths.
-On a server restart it reconciles the home's direct reports, orders each live secondmate to do the same in its own home, and types an operational-input doorbell into the primary, so that turn's end re-arms through the primary's own owner.
+On a server restart it reconciles the home's direct reports, orders each live secondmate to run its own session start, and types an operational-input doorbell into the primary, so that turn's end re-arms through the primary's own owner.
+Session start runs the same reconcile once in the background, so every home resumes its own lanes: a dead lane is relaunched, a lane whose turn was lost gets one resume nudge, and a mid-turn or properly waiting lane is left alone.
 It also wakes the primary when supervision is needed and the beacon has been stale beyond the guard grace with no turn running.
 Its header owns the exact rules.
 

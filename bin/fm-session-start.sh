@@ -727,6 +727,13 @@ if [ "$READ_ONLY" -eq 0 ]; then
   [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
   "$SCRIPT_DIR/fm-startup-network.sh" start \
     --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
+  # A full locked start resumes this home's own lanes that an agent-runtime
+  # restart left idle or dead (bin/fm-sentinel.sh owns the rules). Detached in
+  # its own process group for the same reasons as the network stage above. It
+  # reads FM_HOME's own state/, so a state override (a test) never reaches it.
+  if [ "$REEMIT" -eq 0 ] && [ "$STATE" = "$FM_HOME/state" ]; then
+    (set -m; FM_HOME="$FM_HOME" nohup "$SCRIPT_DIR/fm-sentinel.sh" reconcile >/dev/null 2>&1 </dev/null &) || true
+  fi
 fi
 
 # --- 2. bootstrap --------------------------------------------------------
