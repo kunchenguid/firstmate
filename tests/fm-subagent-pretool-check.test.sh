@@ -350,6 +350,30 @@ test_builtin_prefilter_is_a_strict_superset() {
   pass "the builtin prefilter is a strict superset of the real stem match, including through punctuation and case"
 }
 
+test_large_stdin_payload_is_classified_promptly() {
+  # A big Write or Edit carries a large, punctuation-heavy tool_input. Such a
+  # payload must still reach the right verdict, and must do so in roughly
+  # linear time rather than stalling the tool call.
+  local filler tool rc start elapsed
+  filler=$(printf '%.0s{[(\\";:,.)]}-+=*&^%%$#@!~ ' $(seq 1 8192))
+  for tool in Write Agent; do
+    rc=0
+    : > "$OUT"
+    : > "$ERR"
+    start=$SECONDS
+    jq -cn --arg tool "$tool" --arg body "$filler" '{tool_name: $tool, tool_input: {content: $body}}' \
+      | env FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+        "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+    elapsed=$((SECONDS - start))
+    [ "$elapsed" -le 5 ] || fail "a large $tool payload took ${elapsed}s to classify"
+    case "$tool" in
+      Write) [ "$rc" -eq 0 ] && [ ! -s "$ERR" ] || fail "a large Write payload must allow, got exit $rc: $(cat "$ERR")" ;;
+      Agent) [ "$rc" -eq 2 ] || fail "a large Agent payload must deny with exit 2, got $rc" ;;
+    esac
+  done
+  pass "a large stdin payload is classified correctly without a superlinear stall"
+}
+
 test_guard_denies_every_currently_known_delegation_tool
 test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
@@ -365,3 +389,4 @@ test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
 test_builtin_prefilter_preserves_stdin_classification
 test_builtin_prefilter_is_a_strict_superset
+test_large_stdin_payload_is_classified_promptly
