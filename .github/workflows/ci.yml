@@ -23,8 +23,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Timeout policy: docs/fm-test-portable-shards.md "Timeouts" owns the three
-# tiers and their rationale; tests/fm-ci-workflow.test.sh guards this workflow.
+# tiers, their rationale, and the portable-parallel measured-drift wall guard;
+# tests/fm-ci-workflow.test.sh guards this workflow.
 # Each job comment identifies the tier implemented by its executable value.
+
+env:
+  FM_TEST_PORTABLE_PARALLEL_MAX_WALL_MS: 1080000
 
 jobs:
   lint:
@@ -123,6 +127,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane portable-parallel-1 \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
+            --max-wall-ms "$FM_TEST_PORTABLE_PARALLEL_MAX_WALL_MS" \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
@@ -161,6 +166,7 @@ jobs:
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane portable-parallel-2 \
+            --max-wall-ms "$FM_TEST_PORTABLE_PARALLEL_MAX_WALL_MS" \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()

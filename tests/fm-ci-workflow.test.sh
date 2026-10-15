@@ -219,6 +219,66 @@ puts steps[index].fetch("timeout-minutes", "none")
   pass "Herdr keeps a $step minute step tripwire under a $heavy minute job backstop"
 }
 
+# The portable parallel lanes carry the measured-drift wall guard: the workflow
+# env value must be the exact evidence-derived bound documented in
+# docs/fm-test-portable-shards.md, and each lane's run step must pass the guard
+# exactly once, wired to that exact env value. Changing the value, deleting
+# either argument, renaming the env, or duplicating the guard fails this test.
+test_portable_parallel_lanes_carry_the_wall_guard() {
+  ruby -ryaml -rshellwords - "$CI_WORKFLOW" <<'RUBY' || fail "portable parallel wall guard contract"
+doc = YAML.load_file(ARGV[0])
+max_wall = doc.fetch("env").fetch("FM_TEST_PORTABLE_PARALLEL_MAX_WALL_MS")
+expected_max_wall = 1080000
+raise "FM_TEST_PORTABLE_PARALLEL_MAX_WALL_MS must be the evidence-derived bound " \
+      "#{expected_max_wall} documented in docs/fm-test-portable-shards.md, got #{max_wall.inspect}" \
+  unless max_wall == expected_max_wall
+
+drop_comment = lambda do |line|
+  line.gsub(/('[^']*'|"[^"]*")|#.*/) { |m| m.start_with?("#") ? "" : m }
+end
+
+fm_test_run_argv = lambda do |run|
+  commands = []
+  run.to_s.gsub(/\\\n/, " ").each_line do |line|
+    stripped = drop_comment.call(line).strip
+    next if stripped.empty?
+    argv = Shellwords.split(stripped)
+    commands << argv if argv[0] == "bin/fm-test-run.sh"
+  end
+  raise "run step must invoke bin/fm-test-run.sh once, found #{commands.length}" unless commands.length == 1
+  commands.fetch(0)
+end
+
+max_wall_operands = lambda do |argv|
+  operands = []
+  i = 1
+  while i < argv.length
+    arg = argv.fetch(i)
+    if arg == "--max-wall-ms"
+      operands << argv[i + 1]
+      i += 2
+    elsif arg.start_with?("--max-wall-ms=")
+      operands << arg.delete_prefix("--max-wall-ms=")
+      i += 1
+    else
+      i += 1
+    end
+  end
+  operands
+end
+
+%w[tests-portable-parallel-1 tests-portable-parallel-2].each do |job_name|
+  step = doc.fetch("jobs").fetch(job_name).fetch("steps")
+              .find { |s| s["name"].to_s.start_with?("Run portable parallel shard") }
+  raise "#{job_name} has no portable parallel run step" unless step
+  operands = max_wall_operands.call(fm_test_run_argv.call(step.fetch("run")))
+  raise "#{job_name} must pass --max-wall-ms exactly once wired to the env value, got #{operands.inspect}" \
+    unless operands == ["$FM_TEST_PORTABLE_PARALLEL_MAX_WALL_MS"]
+end
+RUBY
+  pass "both portable parallel lanes pass one --max-wall-ms wired to the workflow env value"
+}
+
 test_ci_matrices_match_executable_partitions() {
   ruby -ryaml -ropen3 - "$CI_WORKFLOW" "$ROOT" <<'RUBY' || fail "CI partition contract"
 jobs = YAML.load_file(ARGV[0]).fetch("jobs")
@@ -258,3 +318,4 @@ test_every_job_belongs_to_exactly_one_timeout_tier
 test_fast_tier_shares_one_short_tripwire
 test_normal_tier_shares_one_budget
 test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop
+test_portable_parallel_lanes_carry_the_wall_guard

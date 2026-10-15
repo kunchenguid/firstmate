@@ -32,7 +32,7 @@ The two parallel lanes use longest-processing-time assignment over those hints, 
 [`bin/fm-test-run.sh`](../bin/fm-test-run.sh) holds the duration values in `portable_parallel_weight_hints` and the ordered memberships and lane-specific prerequisite constraints beside `list_portable_parallel_1` and `list_portable_parallel_2`.
 Read the derived packing estimates with that runner's `--check-coverage`; its header and `--help` own the output fields and the selection-specific `--list-scheduled` weight rules.
 The largest individual hint sets a lower bound on the estimated duration of any split, regardless of how evenly the remaining work is assigned.
-The CI cap follows the three-tier timeout policy in [Timeouts](#timeouts) below.
+CI hang tripwires and the portable-parallel measured-drift wall guard are owned by [Timeouts](#timeouts) below.
 
 [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_parallel_lanes_stay_duration_balanced`, requires every parallel member to have a hint and the lane sums to differ by no more than five percent of the larger sum.
 Its scheduling regressions also check stored parallel lane order and preserve serial-weight scheduling for other selections.
@@ -100,7 +100,9 @@ Its hint-coverage and modeled-budget checks are described in [Portable serial CI
 ## Timing artifacts
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
-`bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
+`bin/fm-test-run.sh --aggregate-json` creates the combined JSON summary artifact.
+Its header owns the stdout `FM_TEST_AGGREGATE` line, including measured portable-parallel wall imbalance when both artifacts are present.
+That measured-wall observation does not fail the aggregate job because the available green-run evidence does not support a stable imbalance threshold across independent runners.
 `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
 ## Lint partitions and end-to-end latency
@@ -127,13 +129,40 @@ The workflow retains per-PR supersession without cancelling main pushes or chang
 CI job timeouts follow one three-tier policy, so the workflow reads as a policy rather than as a collection of per-job numbers.
 Every tier is a hang tripwire with headroom above the healthy duration, never a packing estimate or a runtime target.
 A lane that reaches its tier bound needs investigation and a distribution or runtime fix, not a larger timeout to fit the same work.
+The portable parallel shards also pass `--max-wall-ms` wired to the workflow env `FM_TEST_PORTABLE_PARALLEL_MAX_WALL_MS` (1080000), so a shard that completes but exceeds eighteen minutes of wall time fails as measured drift, separately from the tier's hang tripwire.
+The bound is one and a half times the slowest wall observed across the twenty complete green portable-parallel lane walls sampled from ten recent main runs on 2026-09-26 (about 11.9 minutes), rounded up to the next whole minute, and it must stay well under the normal tier's 30-minute tripwire.
+That 2026-09-26 sample is reproducible read-only:
+
+```sh
+# List recent main CI runs and keep the complete green ones.
+gh-axi run list -R kunchenguid/firstmate --workflow ci.yml --branch main --limit 12
+for id in \
+  36262708277 36262238062 36262225411 36247859338 36247856048 \
+  36247837567 36235477153 36228924444 36227970074 36223945234; do
+  for n in 1 2; do
+    gh-axi run download "$id" -R kunchenguid/firstmate \
+      --name "fm-test-timing-portable-parallel-$n" \
+      --dir "/tmp/fm-wall-evidence/$id"
+  done
+done
+# Each artifact's summary.duration_ms is exactly what --max-wall-ms measures.
+python3 -c 'import glob, json, sys
+walls = [json.load(open(p))["summary"]["duration_ms"] for p in glob.glob(sys.argv[1])]
+print("samples=%d min_ms=%d max_ms=%d" % (len(walls), min(walls), max(walls)))' \
+  "/tmp/fm-wall-evidence/*/*.json"
+```
+
+The command printed `samples=20 min_ms=401362 max_ms=711864` on 2026-09-26, and `1.5 x 711864 = 1067796` rounded up to the next whole minute is `1080000`.
+The ten runs contributed lane 1 walls from 535521 ms to 711864 ms and lane 2 walls from 401362 ms to 591096 ms.
+Re-derive the bound from fresh lane timing artifacts when the shard composition or suite materially changes.
 
 | Tier | Jobs | Bound | Rationale |
 |---|---|---|---|
 | Fast | coverage guard, repo invariants, timing aggregate | 5 minutes | Seconds-long local work, so the tripwire only catches a hung runner. |
-| Normal | lint partitions, portable parallel shards, portable serial shards, macOS stock Bash | 30 minutes, one value shared by every job in the tier | One shared hang tripwire keeps every ordinary test and lint lane on the same policy instead of allowing per-lane packing estimates or one-off caps to set the bound. |
+| Normal | lint partitions, portable parallel shards, portable serial shards, macOS stock Bash | 30 minutes, one value shared by every job in the tier | One shared hang tripwire keeps every ordinary test and lint lane on the same job-timeout policy instead of allowing per-lane packing estimates or one-off caps to set that tripwire. |
 | Heavy | Herdr | family-run step 20 minutes under a 75-minute job-level last-resort backstop | Healthy runs finish in about 7-10 minutes, so the step tripwire fails a wedged suite while the `always()` cleanup and timing upload still run, and the job cap only catches a hang outside that step. |
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) holds the executable values and names each job's tier beside its `timeout-minutes`.
 [`tests/fm-ci-workflow.test.sh`](../tests/fm-ci-workflow.test.sh) holds the policy against the parsed workflow: every job belongs to exactly one tier, the workflow carries exactly three distinct job-level values, the fast tier stays within 5-10 minutes, the normal jobs share one 30-minute budget, and the Herdr family-run step is the 20-minute tripwire below its job backstop with an `always()` teardown after it.
+The same file pins both portable parallel run steps to exactly one `--max-wall-ms` wired to `FM_TEST_PORTABLE_PARALLEL_MAX_WALL_MS` at the evidence-derived bound above.
 A passing coverage guard does not establish a healthy job duration; refresh the healthy figures above from the lanes' uploaded timing artifacts.
