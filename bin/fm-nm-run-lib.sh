@@ -267,22 +267,23 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
       }
       return n
     }
+    function fail(r) { if (!bad) reason = r; bad = 1 }
     /^count: / {
-      if (counts++) bad = 1
+      if (counts++) fail("it has more than one count line")
       count = scalar(substr($0, 8))
-      if (count !~ /^[0-9]+ of [0-9]+ total$/) bad = 1
+      if (count !~ /^[0-9]+ of [0-9]+ total$/) fail("its count line is malformed")
       split(count, c, " "); shown = c[1]; total = c[3]
     }
     /^runs\[[0-9]+\]\{id,branch,status,head,pr\}:$/ {
-      if (found++) bad = 1
+      if (found++) fail("its runs header repeats")
       expected = $0; sub(/^runs\[/, "", expected); sub(/\].*$/, "", expected)
       inrows = 1; next
     }
-    /^runs\[/ { bad = 1; found = 1 }
+    /^runs\[/ { fail("its runs header is not one this reader recognizes"); found = 1 }
     inrows && /^[ \t]+/ {
       seen++
       n = row_fields($0, f)
-      if (n != 5) bad = 1
+      if (n != 5) fail("a row does not have five fields")
       id = f[1]; br = f[2]; st = f[3]; head = f[4]
       if (br != branch) next
       if (id ~ /^[A-Za-z0-9_-]+$/) {
@@ -301,9 +302,12 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
     }
     inrows { inrows = 0 }
     END {
+      if (!counts) fail("it has no count line")
+      if ((seen+0) != (expected+0)) fail("its rows contradict the row count in its own runs header")
+      if ((seen+0) != (shown+0)) fail("its rows contradict its own count line")
+      if ((total+0) < (shown+0)) fail("its count line shows more rows than its total")
       if (!found) print "unavailable"
-      else if (bad || counts != 1 || (seen+0) != (expected+0) || (seen+0) != (shown+0) || (total+0) < (shown+0))
-        print "unknown|could not read the runs table: its rows contradict its own count header; run ids: " ids
+      else if (bad) print "unknown|could not read the runs table: " reason "; run ids: " ids
       else if ((shown+0) < (total+0)) print "incomplete|" ids
       else if (invalid_run) print "unknown|could not read the runs table: a same-branch row is malformed or repeats a run id; run ids: " ids
       else if (unknown_status) print "unknown|could not settle the run status for this branch: the runs table lists a word this reader does not recognize; run ids: " ids

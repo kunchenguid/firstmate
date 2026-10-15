@@ -4190,10 +4190,17 @@ test_unreadable_run_step_names_its_own_cause() {
   FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/runs\[2\]/runs[3]/')
   out=$(run_crew_state "$d" competing)
   assert_contains "$out" 'state: unreadable' 'a table that contradicts its own header is also unreadable'
-  assert_contains "$out" 'its rows contradict its own count header' \
+  assert_contains "$out" 'its rows contradict the row count in its own runs header' \
     'a malformed table names the malformation, not the ambiguity'
   assert_not_contains "$out" 'could not tell which run' \
     'two different read failures do not share one reason'
+
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed -e 's/runs\[3\]/runs[2]/' -e 's/^  "01OLD",/  "01OLD",extra,/')
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'a row does not have five fields' \
+    'a row with an extra field names the row, not the count header'
+  assert_not_contains "$out" 'count line' \
+    'a well-formed count line is not blamed for a malformed row'
   pass 'an unreadable run-step verdict names the specific thing it could not read'
 }
 
