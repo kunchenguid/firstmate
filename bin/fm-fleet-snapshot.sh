@@ -699,7 +699,7 @@ prefetch_task_observations() {  # <meta> <id>
   fi
   printf 'endpoint_exists=%s\nagent_alive=%s\n' "$endpoint_exists" "$agent_alive" > "$endpoint_file" || current_rc=1
   [ "$current_rc" -eq 0 ] || return "$current_rc"
-  task_json_row "$meta" "$id" > "$SNAPSHOT_TASK_DIR/$id.row.json"
+  task_json_row "$meta" "$id" > "$SNAPSHOT_TASK_DIR/$id.row"
 }
 
 # Each task's observations and row composition are independent of every other
@@ -949,7 +949,7 @@ task_json_lines() {
   local -a row_files=()
   [ "$SNAPSHOT_TASK_META_COUNT" -gt 0 ] || { jq -n '[]'; return; }
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
-    row_files[index]="$SNAPSHOT_TASK_DIR/$(basename "${SNAPSHOT_TASK_METAS[index]}" .meta).row.json"
+    row_files[index]="$SNAPSHOT_TASK_DIR/$(basename "${SNAPSHOT_TASK_METAS[index]}" .meta).row"
     index=$((index + 1))
   done
   jq -s 'sort_by(.id)' "${row_files[@]}"
