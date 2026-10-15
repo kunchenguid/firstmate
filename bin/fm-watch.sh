@@ -3074,9 +3074,9 @@ EOF
       done <<EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
-      # shellcheck disable=SC2086  # files is a space-separated status-path list
-      auto_exit_terminal_workers $files
       wake "$reason"
+      # shellcheck disable=SC2086  # files is a space-separated status-path list
+      ( auto_exit_terminal_workers $files ) </dev/null >/dev/null 2>&1 &
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
