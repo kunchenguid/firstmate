@@ -43,20 +43,19 @@
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. For a normal ship task,
-# work whose branch is pushed but has no PR recorded or found, or whose recorded
-# PR is confirmed closed without merging, is refused. A pushed branch with an open
-# PR (including an upstream-contribution PR from a fork) may be cleaned up. Unpushed work has landed only when its PR is merged and the
-# forge (GitHub, Forgejo, or - only when config/park-on-review or config/auto-land
-# opts this home in - GitLab) reports a PR head that contains the current local
-# work, or its content is already present in the up-to-date default branch.
-# This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. A task whose meta records
+# work whose branch is pushed but has no PR recorded or found, or whose recorded PR
+# is confirmed closed without merging, is refused, while a pushed branch with an
+# open PR (including an upstream-contribution PR from a fork) may be cleaned up.
+# Unpushed work has landed only when its PR is merged and the forge (GitHub,
+# Forgejo, or - only when config/park-on-review or config/auto-land opts this home
+# in - GitLab) reports a PR head that contains the current local work, or its
+# content is already present in the
+# up-to-date default branch. This recognizes the common squash-merge-then-delete-
+# branch flow, where the branch's own commits live nowhere on a remote yet the
+# change is fully in main. Local-only delivery retains its existing boundary where
+# publishing the branch to a remote is sufficient. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch. Local-only delivery retains its
-# existing boundary where publishing the branch to a remote is sufficient.
-# A task whose meta records base_branch= (bin/fm-spawn.sh) runs that content
-# check against origin's copy of its base branch instead of the default branch.
+# its base branch instead of the default branch.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
