@@ -142,7 +142,7 @@ test_standalone_local_only_needs_project_ref() {
 }
 
 test_free_text_sha_is_not_the_named_head() {
-  local repo wt old new reason rc
+  local repo wt old new reason rc url_reason url_rc
   repo="$TMP_ROOT/hex-repo"
   wt="$TMP_ROOT/hex-wt"
   fm_git_worktree "$repo" "$wt" fm/hex
@@ -150,12 +150,23 @@ test_free_text_sha_is_not_the_named_head() {
   git -C "$wt" update-ref refs/remotes/origin/main "$old"
   git -C "$wt" commit -q --allow-empty -m 'actual fix'
   new=$(git -C "$wt" rev-parse HEAD)
-  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: reverted $old and fixed the retry")
+  reason=$(accept_done ship direct-PR "$wt" "$repo" \
+    "done: PR https://example.test/o/r/pull/1 - reverted $old and fixed the retry")
   rc=$?
   [ "$rc" -eq 1 ] || fail "free-text SHA on origin/main made an unpushed HEAD accept"
   case "$reason" in
     *"named head $new is unreachable outside the worker copy") ;;
     *) fail "free-text SHA scan still selected the old commit: $reason" ;;
+  esac
+  # The same direct-PR completion without a pull-request URL is refused before
+  # any reachability reading, because bin/fm-done-url-lib.sh owns that refusal
+  # and a completion naming no pull request is not a delivery firstmate can read.
+  url_reason=$(accept_done ship direct-PR "$wt" "$repo" "done: reverted $old and fixed the retry")
+  url_rc=$?
+  [ "$url_rc" -eq 1 ] || fail "direct-PR done with no pull-request URL was accepted (exit $url_rc)"
+  case "$url_reason" in
+    *"no pull-request URL"*) ;;
+    *) fail "the URL-less direct-PR refusal did not name what is missing: $url_reason" ;;
   esac
   pass "a 40-hex token in the note is not the named head"
 }
