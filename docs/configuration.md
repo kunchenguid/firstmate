@@ -616,6 +616,16 @@ The optional local, gitignored `config/pipeline-spend` presence flag opts this h
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
 An existing ledger is left untouched while recording is disabled.
 
+## Forgejo PR comment wake (config/forgejo-pr-comment-wake, config/forgejo-pr-comment-wake-users)
+
+The optional local, gitignored `config/forgejo-pr-comment-wake` presence flag opts this home into the Forgejo PR command-comment poll, so feedback left as a "/fm " comment on a task's Forgejo pull request wakes the owning crew.
+With the flag absent, arming and scanning are both silent no-ops, so an unconfigured home gains no new observer and no new wake class, exactly as before the feature existed.
+
+Who may trigger is never inferred from the repository: the companion allowlist `config/forgejo-pr-comment-wake-users` lists the logins whose "/fm " comments wake the crew, one login per non-empty, non-comment line, the captain plus any trusted devs.
+A missing, empty, or invalid allowlist means nobody can trigger; arming under a present flag refuses loudly on such an allowlist instead of arming a poll that could never legitimately wake.
+The allowlist is re-read on every scan, so an edit applies without re-arming, and removing the flag silences every already-armed poll.
+[`bin/fm-pr-comment-poll.sh`](../bin/fm-pr-comment-poll.sh)'s header owns the full contract, including the seen-marker and error-silence semantics, and [architecture.md](architecture.md) places the poll beside the merge poll.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
