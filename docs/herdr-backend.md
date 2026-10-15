@@ -300,7 +300,7 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 ### Cleanup and focus safety
 
 Normal task metadata remains the sole endpoint authority after creation.
-Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+Cleanup closes only the exact recorded task pane or, when that pane is already gone, the exact bound empty projected tab, and never calls `workspace close`.
 For a leased task copy, cleanup confirms that exact pane is gone before it reaps worktree processes or returns the copy.
 If the pane remains or its absence is ambiguous, cleanup retains the task records and copy for a retry.
 When Herdr leaves the exact projected tab empty after that pane disappears, locked session-start cleanup may close that exact empty tab, but never an ambiguous or non-empty tab.
@@ -485,7 +485,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 - Existing layouts are not force-renamed or rearranged.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces.
-  Session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
+  Session start removes only the exact home-local, uniquely journal-correlated one-pane idle-shell or bound empty-tab shape above.
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
