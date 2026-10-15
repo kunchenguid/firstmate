@@ -150,6 +150,7 @@ fm_backend_herdr_cli() {
   title=$(cat "$FIXTURE_DIR/title")
   tabs=$(cat "$FIXTURE_DIR/tabs")
   panes=$(cat "$FIXTURE_DIR/panes")
+  [ ! -e "$FIXTURE_DIR/empty-tab" ] || panes=0
   case "$first $second" in
     "workspace list")
       printf '{"result":{"workspaces":'; fixture_workspaces; printf '}}\n'
