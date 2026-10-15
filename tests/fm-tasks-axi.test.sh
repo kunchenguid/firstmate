@@ -290,6 +290,26 @@ test_unblock_clears_a_mistaken_edge() {
   pass "an explicitly unblocked objective closes; there is no other override"
 }
 
+test_closure_command_help() {
+  local dir action flag expected expected_rc out rc before
+  dir=$(objective_home obj-help | sed -n 1p)
+  before=$(cat "$dir/home/data/backlog.md")
+  for action in done close; do
+    for flag in --help -h; do
+      expected=$(cd "$dir/home" && tasks-axi "$action" "$flag" 2>&1); expected_rc=$?
+      out=$(obj_w "$dir" "$action" "$flag" 2>&1); rc=$?
+      expect_code "$expected_rc" "$rc" "$action $flag"
+      if [ "$flag" = --help ]; then
+        expect_code 0 "$rc" "$action $flag"
+        assert_contains "$out" "usage:" "$action $flag did not return command help"
+      fi
+      assert_equals "$expected" "$out" "$action $flag did not pass through the CLI help"
+      assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "$action $flag changed the backlog"
+    done
+  done
+  pass "done and close pass both command-help flags through without changing the backlog"
+}
+
 test_objective_close_with_relative_directories() {
   local dir mode action out rc child
   local relative_env=()
@@ -366,6 +386,7 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_single_home
   test_objective_close_refused_while_children_open
   test_unblock_clears_a_mistaken_edge
+  test_closure_command_help
   test_objective_close_with_relative_directories
   test_objective_close_refused_when_parent_read_fails
 else

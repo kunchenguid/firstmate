@@ -152,7 +152,7 @@ case "${1:-}" in
   done|close)
     # An objective is not done while a task it is blocked-by is not. A mistaken
     # edge is cleared with `unblock`; there is no override.
-    if [ -n "${2:-}" ]; then
+    if [ -n "${2:-}" ] && [ "$2" != --help ] && [ "$2" != -h ]; then
       open_blockers=$(fm_backlog_open_blockers "$DATA" "$2")
       open_status=$?
       if [ "$open_status" -eq 1 ]; then
