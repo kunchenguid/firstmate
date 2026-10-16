@@ -27,14 +27,34 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
+# A drain whose acknowledgement is missing is re-presented for a few attempts -
+# a loaded machine can hold the queue lock or settle the stopped watcher's
+# downtime marker past one presentation - and every missed attempt prints its
+# number, the drain's exit status, both output streams, and the downtime-marker
+# token to stderr, so a rare CI miss names which silent path fired - and which
+# retry healed it - instead of only "could not acknowledge".
 ack_stopped_cycle() {  # <state>
-  local state=$1 err sequence generation
+  local state=$1 out err rc=0 sequence generation attempt
+  out="$state/.test-cycle-drain.out"
   err="$state/.test-cycle-drain.err"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  rm -f "$err"
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  for attempt in 1 2 3 4 5; do
+    rc=0
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || rc=$?
+    sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+    generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+    [ "$rc" -eq 0 ] && [ -n "$sequence" ] && [ -n "$generation" ] && break
+    {
+      printf 'ack_stopped_cycle: attempt %s missed: drain exit=%s, no usable WAKE_ACK_REQUIRED\n' "$attempt" "$rc"
+      printf -- '--- drain stdout\n'; cat "$out"
+      printf -- '--- drain stderr\n'; cat "$err"
+      printf -- '--- downtime marker: %s\n' "$(cat "$state/.watcher-down" 2>/dev/null || echo absent)"
+    } >&2
+    [ "$attempt" -eq 5 ] || sleep 0.2
+  done
+  rm -f "$out" "$err"
+  if [ "$rc" -ne 0 ] || [ -z "$sequence" ] || [ -z "$generation" ]; then
+    return 1
+  fi
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
     --recovery-generation "$generation"
 }
@@ -6516,7 +6536,7 @@ test_heartbeat_wakes_an_idle_lead_with_ready_work() {
   grep -Fx "$expected" "$out" >/dev/null || fail "the ready-work wake did not name the ready ids: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the ready-work wake failed"
   grep -F "$(printf '\tcheck\t')" "$drain_out" >/dev/null || fail "the ready-work wake was not queued as a check row: $(cat "$drain_out")"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the ready-work wake"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the ready-work wake"
 
   # The same ready set wakes once only.
   rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat"
@@ -6525,7 +6545,7 @@ test_heartbeat_wakes_an_idle_lead_with_ready_work() {
   wait_absorbed_heartbeat "$state" "$pid" || { reap "$pid"; fail "the same ready set woke the lead again: $(cat "$out")"; }
   reap "$pid"
   [ ! -s "$out" ] || fail "the same ready set printed a wake reason: $(cat "$out")"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the stopped absorbing cycle"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the stopped absorbing cycle"
 
   # A new ready set while a worker is provably working stays absorbed.
   FM_HOME="$dir" "$tasks" add delta "third ready item" >/dev/null || fail "fixture: could not queue delta"
@@ -6576,7 +6596,7 @@ test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a home under its lane floor with working lanes was not woken: $(cat "$out")"; }
   grep -Fx "$expected" "$out" >/dev/null || fail "the lane-floor wake did not name the open/target counts and the ready ids: $(cat "$out")"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the lane-floor wake"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the lane-floor wake"
 
   # The same still-holding condition is absorbed inside the resurface window.
   rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat"
@@ -6586,7 +6606,7 @@ test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
   wait_absorbed_heartbeat "$state" "$pid" || { reap "$pid"; fail "the same lane-floor condition woke again inside the resurface window: $(cat "$out")"; }
   reap "$pid"
   [ ! -s "$out" ] || fail "the lane-floor wake repeated inside the resurface window: $(cat "$out")"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the absorbing cycle"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the absorbing cycle"
 
   # Four open lanes is the floor: no wake, however much ready work waits.
   printf 'window=test:fm-busythree\nkind=ship\n' > "$state/busythree.meta"
@@ -6598,7 +6618,7 @@ test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
   wait_absorbed_heartbeat "$state" "$pid" || { reap "$pid"; fail "a home at its lane floor was woken: $(cat "$out")"; }
   reap "$pid"
   [ ! -s "$out" ] || fail "a home at its lane floor printed a wake reason: $(cat "$out")"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the absorbing cycle at the floor"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the absorbing cycle at the floor"
 
   # Still holding after the window elapses, the same condition re-raises.
   printf 'window=test:fm-busythree\n%b' "$spare" > "$state/busythree.meta"
@@ -6610,7 +6630,7 @@ test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a still-holding lane-floor condition never re-raised: $(cat "$out")"; }
   grep -Fx "$expected" "$out" >/dev/null || fail "the re-raised lane-floor wake changed its reason: $(cat "$out")"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the re-raised lane-floor wake"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the re-raised lane-floor wake"
 
   # A malformed target is reported once and falls back to the older rule, which
   # these working lanes satisfy, so the heartbeat stays absorbed.
@@ -6653,7 +6673,7 @@ test_ready_work_check_absorbs_a_transient_empty_inside_the_window() {
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "the ready-work check did not surface: $(cat "$out")"; }
   grep -Fx "$expected" "$out" >/dev/null || fail "the ready-work check used the wrong reason: $(cat "$out")"
   before=$(cat "$state/.ready-work-surfaced") || fail "the check did not record its surfacing"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the ready-work wake"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the ready-work wake"
 
   # Round 2: every named item is held, so the ready set is briefly empty; the
   # resurface record must survive a transient empty.
@@ -6669,7 +6689,7 @@ test_ready_work_check_absorbs_a_transient_empty_inside_the_window() {
   [ ! -s "$out" ] || fail "an empty ready set still woke: $(cat "$out")"
   [ "$(cat "$state/.ready-work-surfaced" 2>/dev/null)" = "$before" ] \
     || fail "the empty ready set erased the resurface record (got: $(cat "$state/.ready-work-surfaced" 2>&1))"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+  ack_stopped_cycle "$state" >/dev/null || true
 
   # Round 3: the same set returns inside the window and must stay absorbed.
   FM_HOME="$dir" "$tasks" unhold alpha-one >/dev/null 2>&1 || true
@@ -6735,7 +6755,7 @@ test_ready_work_check_withdraws_a_stale_row_and_never_names_a_held_item() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "the drain failed"
   ! grep -F "ready work waiting" "$drain_out" >/dev/null \
     || fail "the drain re-presented the withdrawn ready-work row: $(cat "$drain_out")"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+  ack_stopped_cycle "$state" >/dev/null || true
 
   # Round 3: a shrunk set (beta held, alpha ready) fires a notification that
   # names only the still-ready item; a held item is never named.
@@ -6774,7 +6794,7 @@ test_heartbeat_full_lanes_with_no_worker_working_wake() {
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a home whose four open lanes all wait was not woken: $(cat "$out")"; }
   grep -Fx "check: ready work waiting with no worker working: alpha-one - start each or record why it waits" "$out" >/dev/null \
     || fail "the full-but-idle wake did not use the no-worker-working reason: $(cat "$out")"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the full-but-idle wake"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the full-but-idle wake"
   pass "a home with every lane slot open but no worker working is woken"
 }
 
@@ -7468,7 +7488,7 @@ test_own_queue_redelivers_without_churning_successors() {
   pid=$!
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "re-delivery immediately closed the next successor"; }
   reap "$pid"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the local wake"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the local wake"
   watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_WATCH_HANDLING_SUCCESSOR=1 FM_SECONDMATE_WAKE_STALL_SECS=1
   pid=$!
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "an acknowledged wake was re-delivered"; }
@@ -7493,7 +7513,7 @@ test_own_queue_redelivers_without_churning_successors() {
   grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$drain_out" >/dev/null \
     || fail "the drain lost the decision marker"
   [ "$(cat "$state/.wake-queue")" = "$decision_original" ] || fail "draining consumed the unacknowledged decision"
-  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the decision reminder"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the decision reminder"
   [ ! -s "$state/.wake-queue" ] || fail "the acknowledged decision remained queued"
   pass "local queue reminders preserve decision markers and end on acknowledgement"
 }
