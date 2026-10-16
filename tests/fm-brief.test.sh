@@ -288,14 +288,70 @@ test_forge_selection_renders_correct_cli() {
     assert_contains "$out" "$expect" "$label was refused without its reason"
     [ ! -e "$home/data/brief-forge-bad/brief.md" ] || fail "$label left a brief behind"
   done <<'ROWS'
-a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, or forgejo
-the removed github value|--mode direct-PR --forge github|expected none, gerrit, or forgejo
+a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, forgejo, or external
+the removed github value|--mode direct-PR --forge github|expected none, gerrit, forgejo, or external
 forgejo on local-only|--mode local-only --forge forgejo|cannot ship mode=local-only
 a shape on forgejo|--mode direct-PR --forge forgejo --shape squash|--shape applies only with --forge gerrit
 forgejo on a scout|--scout --forge forgejo|apply only to ship briefs
 ROWS
 
   pass "fm-brief.sh: --forge forgejo names tea in Rule 3, the direct-PR DOD, and the draft read-back, marks the delivery contract, and the closed set refuses everything else"
+}
+
+# --forge external renders the external review rail from bin/fm-dod-lib.sh: a
+# first rule that forbids every task push, the review-tool contract, and the
+# home's adapter body. It is direct-PR only, carries no base branch, and needs
+# config/external-review.md; an adapter that tries to carry its own delivery
+# contract line is refused.
+test_forge_external_renders_the_review_rail() {
+  local home brief out rc
+  home="$TMP_ROOT/forge-external-home"
+  mkdir -p "$home/data" "$home/config"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ext-noadapter some-proj --mode direct-PR --forge external 2>&1); rc=$?
+  expect_code 1 "$rc" "--forge external without an adapter must be refused"
+  assert_contains "$out" "external-review.md" "the missing-adapter refusal did not name the file"
+  [ ! -e "$home/data/brief-ext-noadapter/brief.md" ] || fail "a refused external scaffold left a brief behind"
+
+  printf '%s\n' 'Delivery contract: mode=direct-PR' > "$home/config/external-review.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ext-contract some-proj --mode direct-PR --forge external 2>&1); rc=$?
+  expect_code 1 "$rc" "an adapter carrying a delivery contract line must be refused"
+  assert_contains "$out" "must not carry a 'Delivery contract: mode=' line" "the adapter contract refusal did not say why"
+
+  # shellcheck disable=SC2016 # Backticks are literal adapter text.
+  printf '%s\n' 'Run `review-tool upload --draft`.' > "$home/config/external-review.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ext some-proj --mode direct-PR --forge external >/dev/null 2>&1 \
+    || fail "--forge external should scaffold a direct-PR ship brief"
+  brief="$home/data/brief-ext/brief.md"
+  grep -qx "Delivery contract: mode=direct-PR forge=external" "$brief" \
+    || fail "--forge external must mark the delivery contract line for the spawn's registry check"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep '1. Never push to `origin`' "$brief" "--forge external must forbid the origin push in rule 1"
+  assert_grep "Publish only through the review tool your Definition of done names" "$brief" \
+    "--forge external must not send the worker to a forge CLI in rule 3"
+  assert_grep "## Review tool instructions (home configuration)" "$brief" "--forge external must render the adapter section"
+  assert_grep "review-tool upload --draft" "$brief" "--forge external must render the adapter body"
+  assert_no_grep "personal backup remote" "$brief" "--forge external offered a backup nobody configured"
+
+  printf 'backup\n' > "$home/config/external-review-backup"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ext-backup some-proj --mode direct-PR --forge external >/dev/null 2>&1 \
+    || fail "--forge external with a backup should scaffold"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep '`git push backup HEAD:refs/heads/backup/brief-ext-backup`' "$home/data/brief-ext-backup/brief.md" \
+    "--forge external with a backup must name the durable copy"
+
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086 # The row's arguments must split into words.
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ext-bad some-proj $args 2>&1); rc=$?
+    expect_code 1 "$rc" "$label must be refused"
+    assert_contains "$out" "$expect" "$label was refused without its reason"
+    [ ! -e "$home/data/brief-ext-bad/brief.md" ] || fail "$label left a brief behind"
+  done <<'ROWS'
+external on no-mistakes|--mode no-mistakes --forge external|ships direct-PR only for now
+external on local-only|--mode local-only --forge external|cannot ship mode=local-only
+external with a base branch|--mode direct-PR --forge external --base-branch release|not supported on forge=external
+ROWS
+  pass "fm-brief.sh: --forge external renders the no-push rule, the review contract, and the adapter, and refuses every impossible shape"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -1547,6 +1603,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_forge_selection_renders_correct_cli
+test_forge_external_renders_the_review_rail
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

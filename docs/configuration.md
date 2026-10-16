@@ -1503,6 +1503,24 @@ A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered
 A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 
+A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.
+[`docs/external-review-forge.md`](external-review-forge.md) is the design.
+
+## External review tool (config/external-review.md, config/external-review-url, config/external-review-backup)
+
+These optional local, gitignored files configure a home's `forge=external` projects; a home with no such project needs none of them.
+
+| File | Required | Meaning |
+| --- | --- | --- |
+| `config/external-review.md` | yes, for any `forge=external` scaffold or spawn | Worker instructions for the home's review tool: how to validate, upload, and read review state, and which state is the stopping point. `bin/fm-dod-lib.sh` appends it verbatim to the Definition of done under `## Review tool instructions (home configuration)`. |
+| `config/external-review-url` | no | One extended regular expression a ready review URL must match in full. Without it, any `https://` URL with no whitespace, control characters, query, or fragment that is not a forge pull request URL is accepted. |
+| `config/external-review-backup` | no | Line 1 names a git remote in the project clone that is the captain's personal backup remote; an optional line 2, `prefix=<ref-prefix>`, sets the backup ref prefix, default `backup/`. |
+
+A missing, unreadable, or empty adapter stops the scaffold or spawn, as does an adapter carrying its own `Delivery contract: mode=` line, because a worker with no upload instructions would otherwise improvise a push.
+A backup remote named `origin`, absent from the project clone, or pointing at one of origin's URLs stops the spawn, as does a backup prefix that is empty, invalid, or equal to or starting with the task branch prefix.
+The files are static, never executed, and local to each home rather than part of secondmate inherited configuration.
+`bin/fm-external-review-lib.sh`'s header owns the readers, and [`docs/external-review-forge.md`](external-review-forge.md) owns the backup rule and its teardown consequence.
+
 ## Watched tool updates (config/watched-tools.json)
 
 `config/watched-tools.json` is an optional local, gitignored list of the tools this home depends on.

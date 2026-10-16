@@ -15,8 +15,13 @@
 #   The project's forge IS read from data/projects.md, because it is the
 #   captain's confirmed project fact rather than a per-task choice: a spawn
 #   refuses a brief whose `forge=` disagrees with the registered binding in
-#   either direction, and refuses --yolo on for a forge=gerrit project, where
-#   yolo is inactive (bin/fm-project-mode.sh's header carries that decision). A
+#   either direction, and refuses --yolo on for a forge=gerrit or
+#   forge=external project, where yolo is inactive (bin/fm-project-mode.sh's
+#   header carries that decision). A forge=external ship also refuses a missing
+#   review tool adapter and an unusable personal backup remote, installs the
+#   per-task pre-push guard (bin/fm-git-push-guard.sh) even when the home keeps
+#   AI trailers, and records forge=external, backup_remote=, and backup_prefix=
+#   in the task metadata for bin/fm-dod-lib.sh's ready-report gate. A
 #   registry entry the parser refuses stops the spawn rather than launching on a
 #   guessed posture. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
@@ -541,7 +546,8 @@
 # runtime, Claude included as defense in depth. bin/fm-git-strip-ai-trailers.sh
 # owns the identities, the hook install, and chaining the repository git is
 # actually running in so a project husky hook still runs. Author identity is
-# not rewritten.
+# not rewritten. A forge=external ship installs that directory even under
+# config/keep-ai-trailers, because its pre-push wrapper carries the push guard.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -701,6 +707,10 @@ fi
 if ! KEEP_AI_TRAILERS=$(fm_config_source_present "$CONFIG/keep-ai-trailers"); then
   exit 1
 fi
+# Set by the forge agreement below for a forge=external ship.
+EXTERNAL_REVIEW=0
+EXTERNAL_BACKUP_REMOTE=
+EXTERNAL_BACKUP_PREFIX=
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
@@ -3524,6 +3534,34 @@ if [ "$KIND" = ship ]; then
     echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=gerrit, where yolo is inactive because a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); spawn with --yolo off" >&2
     exit 1
   fi
+  # An external review tool uploads its own snapshot, so this task must never
+  # push a task branch to the shared origin (docs/external-review-forge.md).
+  # Every protection the captain configured is validated before any endpoint
+  # exists, so a worker never launches without it.
+  if [ "$STANDING_FORGE" = external ]; then
+    if [ "$YOLO" = on ]; then
+      echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=external, where firstmate can neither observe nor perform the review tool's approval or merge; spawn with --yolo off" >&2
+      exit 1
+    fi
+    fm_external_review_adapter_body "$CONFIG" >/dev/null || exit 1
+    fm_external_review_backup "$CONFIG" || exit 1
+    EXTERNAL_REVIEW=1
+    EXTERNAL_BACKUP_REMOTE=$FM_REVIEW_BACKUP_REMOTE
+    EXTERNAL_BACKUP_PREFIX=$FM_REVIEW_BACKUP_PREFIX
+    if [ -n "$EXTERNAL_BACKUP_REMOTE" ]; then
+      fm_external_review_prefix_disjoint "$EXTERNAL_BACKUP_PREFIX" "$(fm_ship_branch_prefix "$BRANCH" "$ID")" || exit 1
+      backup_urls=$(fm_external_review_remote_urls "$PROJ_ABS" "$EXTERNAL_BACKUP_REMOTE")
+      if [ -z "$backup_urls" ]; then
+        echo "error: $ID cannot launch: config/external-review-backup names the remote $EXTERNAL_BACKUP_REMOTE, which $PROJ_ABS does not have; add it with git remote add, or remove the file to ship without a backup" >&2
+        exit 1
+      fi
+      shared_urls=$(fm_external_review_remote_urls "$PROJ_ABS" origin)
+      if [ -n "$shared_urls" ] && printf '%s\n' "$backup_urls" | grep -Fqx -f <(printf '%s\n' "$shared_urls"); then
+        echo "error: $ID cannot launch: the backup remote $EXTERNAL_BACKUP_REMOTE points at the project's shared origin; a durable copy must go to storage only the captain controls" >&2
+        exit 1
+      fi
+    fi
+  fi
   # Self-repository publication gate (bin/fm-role-lib.sh): a ship task whose
   # project is firstmate's own repository may launch a publishing contract only
   # under an explicit grant - this home's maintainer scope in
@@ -5330,12 +5368,30 @@ EOF
 # chains the previous hooks so they still run. Real secondmate
 # homes are firstmate clones; a launch whose worktree is not git fails closed
 # rather than shipping a runtime that cannot strip.
+# A forge=external ship always gets this directory, because its pre-push
+# wrapper carries the guard that keeps task branches off the shared origin; a
+# home that keeps trailers gets a commit-msg wrapper that only chains.
 GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
-if [ "$KEEP_AI_TRAILERS" = 0 ]; then
+GIT_HOOKS_INSTALLED=0
+if [ "$EXTERNAL_REVIEW" = 1 ]; then
+  PUSH_GUARD_FILE="$STATE_REAL/$ID.push-guard"
+  guard_args=("$PUSH_GUARD_FILE" "$WT" "$BRANCH" "$(fm_ship_branch_prefix "$BRANCH" "$ID")")
+  [ -z "$EXTERNAL_BACKUP_REMOTE" ] || guard_args+=("$EXTERNAL_BACKUP_REMOTE" "$EXTERNAL_BACKUP_PREFIX")
+  strip_args=()
+  [ "$KEEP_AI_TRAILERS" = 0 ] || strip_args=(--no-strip)
+  { "$FM_ROOT/bin/fm-git-push-guard.sh" write "${guard_args[@]}" \
+    && "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "${strip_args[@]+"${strip_args[@]}"}" \
+      --push-guard "$PUSH_GUARD_FILE" "$GIT_HOOKS_DIR" "$WT"; } || {
+    echo "error: could not install the external-review push guard hooks for $ID" >&2
+    exit 1
+  }
+  GIT_HOOKS_INSTALLED=1
+elif [ "$KEEP_AI_TRAILERS" = 0 ]; then
   "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "$GIT_HOOKS_DIR" "$WT" || {
     echo "error: could not install the AI-trailer strip hooks for $ID" >&2
     exit 1
   }
+  GIT_HOOKS_INSTALLED=1
 fi
 
 # Delivery posture recorded in meta so fm-teardown's safety check and the
@@ -5401,7 +5457,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5420,6 +5476,10 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
+  # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
+  [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
+  [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"
+  [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # The worker account pin, only when this home declares one, so an unpinned
@@ -5748,7 +5808,7 @@ LAUNCH_DIR="/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
 # command, &&, || and that export list. A bad inherited count returns from the
 # sourced launch file before the worker runs, preserving the interactive pane
 # and its visible error for inspection.
-if [ "$KEEP_AI_TRAILERS" = 0 ]; then
+if [ "$GIT_HOOKS_INSTALLED" = 1 ]; then
   GIT_CONFIG_ENV_FILE=$(shell_quote "$LAUNCH_DIR/git-config.$SPAWN_GEN.sh")
   LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh") env-file $(shell_quote "$GIT_HOOKS_DIR") $GIT_CONFIG_ENV_FILE && . $GIT_CONFIG_ENV_FILE || return 1 2>/dev/null || exit 1; $LAUNCH"
 fi

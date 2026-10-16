@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -72,10 +72,12 @@
 # registry binding, read from data/projects.md at intake and passed here; this
 # script never infers a forge and never looks the binding up, and bin/fm-spawn.sh
 # refuses a brief whose forge disagrees with the registry. bin/fm-project-mode.sh's
-# header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`
-# and `forgejo` change in the Definition of done. On `forgejo` this script also
-# names tea instead of gh-axi in the ship brief's forge-CLI rule. A forge on
-# --mode local-only is refused, because that mode publishes nothing.
+# header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`,
+# `forgejo`, and `external` change in the Definition of done. On `forgejo` this
+# script also names tea instead of gh-axi in the ship brief's forge-CLI rule, and
+# on `external` that rule names no forge CLI, because the home's review tool is
+# the only publishing tool. A forge on --mode local-only is refused, because that
+# mode publishes nothing, and `external` also refuses no-mistakes.
 # --shape names how a forge=gerrit task is published, and only `squash` - one
 # change - is accepted: `stack` is refused until a stack can be watched by its
 # membership pinned when its watch is armed, because the merge watch follows one
@@ -96,7 +98,8 @@
 # bin/fm-spawn.sh repeats the check at launch regardless.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
-# on Gerrit or " forge=forgejo" on Forgejo. bin/fm-spawn.sh reads that line and
+# on Gerrit, " forge=forgejo" on Forgejo, or " forge=external" on an external
+# review tool. bin/fm-spawn.sh reads that line and
 # refuses to launch a ship task whose explicit --mode or registered forge
 # disagrees, so an adjusted brief and the recorded task metadata cannot drift
 # apart.
@@ -317,9 +320,12 @@ if [ "$KIND" = ship ]; then
     exit 1
   fi
   # A Forgejo project's pull requests are handled with tea, so the ship brief's
-  # forge-CLI rule names it instead of gh-axi; every other forge keeps gh-axi.
+  # forge-CLI rule names it instead of gh-axi; an external review tool has no
+  # forge CLI at all; every other forge keeps gh-axi.
   if [ "$FORGE" = forgejo ]; then
     FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
+  elif [ "$FORGE" = external ]; then
+    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations."
   else
     FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
   fi

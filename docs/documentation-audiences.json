@@ -381,6 +381,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/external-review-forge.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/gerrit-forge-integration.md",
       "audience": "maintainer-architecture"
     },

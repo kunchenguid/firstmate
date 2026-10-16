@@ -19,10 +19,10 @@
 // queued while main is streaming joins the running run without ever raising
 // before_agent_start, so waiting on that event stalls every later close.
 // Consumption is tracked only so a replacement can replay a follow-up Pi had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
+// not consumed. An idle main consumes at a user before_agent_start; a streaming main
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// replacement handoff. Custom-message events cannot consume a user wake.
 //
 // Postures (stated once here; docs/pi-supervision-branch.md "Postures"):
 // the away-posture record state/.afk-contract is read as a file at every

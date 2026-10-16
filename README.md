@@ -229,6 +229,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - the current blocked Codex App backend boundary and rollout contract.
 - [docs/verification/runtime-backends.md](docs/verification/runtime-backends.md) - active maintainer verification for runtime backend guarantees.
 - [docs/gerrit-forge-integration.md](docs/gerrit-forge-integration.md) - maintainer architecture for the forge axis: why change-shaped review is not a forge variant, the mode/forge/shape composition test, and where responsibility for forge mechanics sits.
+- [docs/external-review-forge.md](docs/external-review-forge.md) - maintainer architecture for `forge=external`, where a review tool uploads its own snapshot: the no-push invariant and its three layers, the personal backup remote, and the accepted residual.
 - [docs/gitlab-merge-watch.md](docs/gitlab-merge-watch.md) - maintainer verification for watching and merging GitLab merge requests on arbitrary instances.
 - [docs/gerrit-change-watch.md](docs/gerrit-change-watch.md) - maintainer verification for watching Gerrit changes read-only, and why the merge path refuses one.
 - [docs/forgejo-tea-integration.md](docs/forgejo-tea-integration.md) - maintainer verification for watching and merging Forgejo/Gitea pull requests via `tea`.
