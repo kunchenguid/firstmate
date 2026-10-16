@@ -314,7 +314,13 @@ action_check() {
   while IFS=$'\t' read -r id threshold; do
     [ -n "$id" ] || continue
     pct=$(lookup_value "$windows_out" "$id")
-    [ -n "$pct" ] || continue
+    if [ -z "$pct" ]; then
+      if id_in_list "$RECORD_NOTIFIED" "${id}:${threshold}"; then
+        notified_new="${notified_new}${id}:${threshold}
+"
+      fi
+      continue
+    fi
     if awk -v p="$pct" -v t="$threshold" 'BEGIN{exit !(p+0>=t+0)}'; then
       notified_new="${notified_new}${id}:${threshold}
 "
