@@ -44,7 +44,7 @@ A fresh polytoken spawn that fails and leaves no task record also closes the end
 `../../../../../bin/fm-composer-lib.sh` owns the verified separated composer shape: a full-width separator pair over one blank or pending content row with a footer below.
 The shared classifier reaches it through the Pi-shape identity conjunction, with polytoken as the second verified owner of that shape: an idle pane proves an empty composer and a working pane keeps the strict `unknown` so the busy-queue conversion stays honest.
 The busy footer token is the pinned `Running for <elapsed>` row with a leading space (verified live); `Completed in`, `Errored after`, and `Canceled after` are the distinct turn-end rows and never match it.
-The token is read only under the recorded polytoken harness and the polytoken composer identity, never through the harness-less default union, so a pane with no recorded harness never reads it as busy.
+The token is read only under the recorded polytoken harness and the polytoken composer identity, never through the harness-less default union, so a pane with no recorded harness never reads it as busy; the submit cores scope their idle-to-busy and busy-queue reads to polytoken only when the pane's composer identity (tmux) or native identity (herdr) names polytoken.
 The delivery guard is never a busy-state source; recorded state comes from the polytoken-hook fold.
 
 ## Primary integration

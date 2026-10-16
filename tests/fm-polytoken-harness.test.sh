@@ -280,6 +280,64 @@ test_polytoken_busy_queued_enter_converts_like_opencode() {
   pass "fm-composer-lib: the queued-Enter conversion covers polytoken's verified queue behavior"
 }
 
+# make_polytoken_submit_pane <dir> <pane-command>: a fake tmux serving one
+# separated-shape pane whose foreground command is <pane-command>. Typing puts
+# the text in the composer; Enter starts a turn, rendering the pinned
+# `Running for` row above an emptied composer, exactly as polytoken does.
+make_polytoken_submit_pane() {  # <dir> <pane-command>
+  local dir=$1 comm=$2 footer
+  mkdir -p "$dir/bin"
+  footer=' /w  facet: firstmate-worker   model: zai/glm-5.3-flash(high)   perms: bypass'
+  printf 'conversation line\n%s\n\n%s\n\n%s\n' "$RULE" "$RULE" "$footer" > "$dir/screen"
+  printf 'conversation line\n%s\n%s\n%s\n\n%s\n' "$RULE" 'hello' "$RULE" "$footer" > "$dir/typed"
+  printf ' Running for 1.02s\n%s\n\n%s\n\n%s\n' "$RULE" "$RULE" "$footer" > "$dir/running"
+  cat > "$dir/bin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  display-message)
+    case "\$*" in
+      *cursor_y*) printf '2\n' ;;
+      *pane_current_command*) printf '%s\n' '$comm' ;;
+      *pane_tty*) printf 'notty\n' ;;
+    esac ;;
+  capture-pane) cat '$dir/screen' ;;
+  send-keys)
+    case "\$*" in
+      *' -l '*) cp '$dir/typed' '$dir/screen' ;;
+      *Enter*) cp '$dir/running' '$dir/screen' ;;
+    esac ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/bin/tmux"
+}
+
+in_polytoken_submit_pane() (  # <dir> <command...>
+  PATH="$1/bin:$PATH"
+  shift
+  . "$ROOT/bin/fm-tmux-lib.sh"
+  "$@"
+)
+
+test_polytoken_tmux_submit_is_acknowledged_by_its_running_row() {
+  local dir out
+  dir="$TMP_ROOT/submit-polytoken"
+  make_polytoken_submit_pane "$dir" polytoken
+  out=$(in_polytoken_submit_pane "$dir" fm_tmux_submit_core win hello 3 0.01 0)
+  [ "$out" = empty ] \
+    || fail "a polytoken pane that starts its Running-for turn after Enter must confirm the submit, got '$out'"
+  dir="$TMP_ROOT/submit-harnessless"
+  make_polytoken_submit_pane "$dir" zsh
+  cp "$dir/running" "$dir/screen"
+  out=$(in_polytoken_submit_pane "$dir" fm_pane_busy_state win)
+  [ "$out" = idle ] || fail "a harness-less pane must not read Running for as busy, got '$out'"
+  printf 'conversation line\n%s\n\n%s\n' "$RULE" "$RULE" > "$dir/screen"
+  out=$(in_polytoken_submit_pane "$dir" fm_tmux_submit_core win hello 3 0.01 0)
+  [ "$out" = unknown ] \
+    || fail "a pane without polytoken identity must not confirm a submit from Running for, got '$out'"
+  pass "fm-tmux-lib: only a polytoken-identity pane confirms a submit from its Running-for row"
+}
+
 # ---------------------------------------------------------------------------
 # Generated wiring (the real generation, asserted on its outputs)
 
@@ -1121,6 +1179,7 @@ test_polytoken_busy_sources_are_the_verified_pair
 test_polytoken_busy_footer_needs_the_pinned_running_row
 test_polytoken_composer_is_the_verified_separated_shape
 test_polytoken_busy_queued_enter_converts_like_opencode
+test_polytoken_tmux_submit_is_acknowledged_by_its_running_row
 test_polytoken_write_config_enforces_the_unattended_posture
 test_polytoken_write_facet_carries_the_role_contract_without_a_model_pin
 test_polytoken_busy_writer_dispatches_without_argv_and_never_fails
