@@ -159,9 +159,22 @@ load_lab() {  # <root>: refuse anything up did not build, then load its record
   TREEHOUSE_DIR=$(rec_get "$ROOT" treehouse_dir)
 }
 
+# lab_socket: the lab server's explicit socket path, creating its tmux-<uid>
+# parent the way tmux would. tmux treats a TMUX_TMPDIR that does not exist as
+# unset and falls back to /tmp, the user's default server, so every lab tmux
+# call names this socket with -S and none is made once the directory is gone.
+lab_socket() {
+  local dir
+  [ -n "${TMUX_DIR:-}" ] && [ -d "$TMUX_DIR" ] || return 1
+  dir="$TMUX_DIR/tmux-$(id -u)"
+  [ -d "$dir" ] || mkdir -m 700 "$dir" || return 1
+  printf '%s/default\n' "$dir"
+}
+
 lab_tmux() {
-  [ -n "${TMUX_DIR:-}" ] || return 1
-  env -u TMUX TMUX_TMPDIR="$TMUX_DIR" tmux "$@"
+  local socket
+  socket=$(lab_socket) || return 1
+  env -u TMUX TMUX_TMPDIR="$TMUX_DIR" tmux -S "$socket" "$@"
 }
 
 # The empty-environment base every lab process starts from.
@@ -455,7 +468,7 @@ spawn_mate() {
 
 cmd_up() {
   local harness="" mate=no worker=no model="" effort=medium host_line=__default__ expect_host="" source="$BUILDER_ROOT" ref=HEAD timeout=600
-  local root=""
+  local root="" socket
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --harness) harness=${2:-}; shift 2 ;;
@@ -541,7 +554,8 @@ cmd_up() {
 
   TMUX_DIR=$("$LAB_HOME_HELPER" tmux-dir "$LAB") || die "cannot create the private tmux directory"
   echo "tmux_dir=$TMUX_DIR" >> "$ROOT/$RECORD_NAME"
-  lab_run tmux -f /dev/null new-session -d -s firstmate -n lab -x 220 -y 60 -c "$ROOT" || die "cannot start the lab tmux server"
+  socket=$(lab_socket) || die "cannot prepare the private tmux socket"
+  lab_run tmux -S "$socket" -f /dev/null new-session -d -s firstmate -n lab -x 220 -y 60 -c "$ROOT" || die "cannot start the lab tmux server"
   record_launch_pid "$(lab_tmux display-message -p '#{pid}')"
 
   if [ "$mate" = yes ]; then
