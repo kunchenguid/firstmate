@@ -213,12 +213,13 @@ A fixed 300-second grace default stops correctly bounding staleness once a home'
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.
 That is exactly what a long-poll home (`FM_POLL=300`) hit against the Claude Stop-hook auto-arm (`bin/fm-claude-stop-autoarm.sh`).
 
-Two readers derive their default grace from the configured poll instead of a bare constant:
+Three readers derive their default grace from the configured poll instead of a bare constant:
 
 - That hook.
 - `bin/fm-watch.sh`'s own pre-acquisition staleness check (the "lock held by live pid but heartbeat is stale" refusal).
+- The OpenCode primary watcher plugin's beacon watchdog.
 
-Both use `max(300, FM_POLL + 60)`.
+They use `max(300, FM_POLL + 60)`.
 The default never drops below the historical 300-second floor for the common short-poll case, but grows with the poll cadence once that cadence would otherwise outrun it.
 `fm_poll_derived_grace` in `bin/fm-wake-lib.sh` is the single owner of that formula.
 
