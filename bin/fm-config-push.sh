@@ -145,16 +145,22 @@ while IFS='|' read -r id home _window meta; do
       fm_lock_release "$remote_lock" || true
       continue
     fi
-    if remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
-      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
-      printf '%s\n' "$remote_out" | sed 's/^/  /'
-      remote_nudge=0
-      if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then
-        remote_nudge=1
-        [ "$remote_pending" -eq 1 ] || fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
-          "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || echo "  config-reread: retry marker update failed"
-      fi
-      [ "$remote_pending" -eq 0 ] || remote_nudge=1
+    remote_nudge=$remote_pending
+    trap '[ "${remote_nudge:-0}" -eq 1 ] && fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 143' TERM
+    trap '[ "${remote_nudge:-0}" -eq 1 ] && fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 130' INT
+    remote_rc=0
+    remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1) || remote_rc=$?
+    [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
+    if [ "$remote_rc" -eq 255 ] || printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then
+      remote_nudge=1
+    fi
+    if [ "$remote_nudge" -eq 1 ] && [ "$remote_pending" -eq 0 ]; then
+      fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
+        "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || echo "  config-reread: retry marker update failed"
+    fi
+    trap - TERM INT
+    if [ "$remote_rc" -eq 0 ]; then
       if [ "$remote_nudge" -eq 1 ]; then
         if FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
           "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1; then
@@ -168,7 +174,6 @@ while IFS='|' read -r id home _window meta; do
         rm -f -- "$remote_marker"
       fi
     else
-      [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
       errors=1
     fi
     fm_lock_release "$remote_lock" || true

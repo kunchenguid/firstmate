@@ -162,7 +162,7 @@ wait
 
 # Replay in allowlist order, so the output reads exactly as one sequential push
 # would: each sent item's own stdout and stderr, and a session-scoped item's
-# unchanged line. The first failed item sets the exit status.
+# unchanged line.
 status=0
 i=1
 while [ "$i" -le "$launched" ]; do
@@ -171,8 +171,9 @@ while [ "$i" -le "$launched" ]; do
   else
     cat "$TMP/item.$i.out"
     cat "$TMP/item.$i.err" >&2
-    if [ "$status" -eq 0 ] && item_failed "$i"; then
-      status=$(cat "$TMP/item.$i.rc")
+    if item_failed "$i"; then
+      item_rc=$(cat "$TMP/item.$i.rc")
+      if [ "$status" -eq 0 ] || [ "$item_rc" -eq 255 ]; then status=$item_rc; fi
     fi
   fi
   i=$((i + 1))

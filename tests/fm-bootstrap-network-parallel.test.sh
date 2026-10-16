@@ -436,12 +436,17 @@ case "$command_name:$subcommand" in
       sleep 120
     fi
     printf 'END %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
+    [ "${FM_FAKE_SYNC_UNKNOWN:-0}" != 1 ] || exit 255
     printf 'current: test\n'
     exit 0
     ;;
   fm-remote-secondmate-control.sh:state) printf 'END %s\n' "$host" >> "$log"; printf 'alive\n'; exit 0 ;;
   fm-remote-secondmate-control.sh:route) printf 'END %s\n' "$host" >> "$log"; printf 'backend=herdr\n'; exit 0 ;;
   fm-remote-inherit.sh:*)
+    if [ "$item_rel" = "${FM_FAKE_ITEM_UNKNOWN:-none}" ]; then
+      sleep 0.2
+      exit 255
+    fi
     # The failing item answers at once, so it settles before any sibling.
     if [ "$item_rel" = "${FM_FAKE_ITEM_FAIL:-none}" ]; then
       printf 'END %s %s %s %s\n' "$host" "$command_name" "$subcommand" "$item_rel" >> "$log"
@@ -630,6 +635,73 @@ test_partial_push_failure_keeps_the_reread_owed() {
   pass "a push that fails after applying an item keeps the mate's re-read owed"
 }
 
+run_nudge_convergence() {
+  PATH="$CF_FAKEBIN:$BASE_PATH" \
+    FM_HOME="$CF_HOME" FM_ROOT_OVERRIDE="$CF_PRIMARY" \
+    FM_BOOTSTRAP_NETWORK=only FM_SSH_BIN="$CF_FAKEBIN/fake-ssh" \
+    FM_FAKE_SSH_LOG="$CF_LOG" FM_INHERITABLE_CONFIG='item-a item-b' \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+    FM_BOOTSTRAP_VERBOSE_FACTS=1 \
+    "$ROOT/bin/$1" 2>&1
+}
+
+assert_owed_reread_survives_unchanged_retry() {  # <script> <why>
+  local script=$1 why=$2 marker out
+  marker="$CF_HOME/state/.secondmate-nudge-pending/sm.pending"
+  assert_grep 'owed=1' "$marker" "$why"
+  out=$(run_nudge_convergence "$script")
+  if [ "$script" = fm-config-push.sh ]; then
+    assert_contains "$out" 'config-reread:' "unchanged retry must deliver the owed reread: $out"
+  else
+    case "$out" in
+      *NUDGE_SECONDMATES*) ;;
+      *'BOOTSTRAP_INFO: nudged remote fm-sm'*) ;;
+      *) fail "unchanged retry must attempt the owed reread: $out" ;;
+    esac
+  fi
+}
+
+test_config_push_partial_failure_keeps_the_reread_owed() {
+  local out rc
+  convergence_fixture "$TMP_ROOT/config-push-partial-owed" sm:host-sm
+  out=$(FM_REMOTE_INHERIT_PUSH_JOBS=1 FM_FAKE_ITEM_PUSHED=config/item-a \
+    FM_FAKE_ITEM_FAIL=config/item-b run_nudge_convergence fm-config-push.sh); rc=$?
+  expect_code 1 "$rc" "a push that fails after applying an item must fail: $out"
+  assert_contains "$out" 'pushed: config/item-a' "the applied item must still be reported: $out"
+  assert_owed_reread_survives_unchanged_retry fm-config-push.sh \
+    "an item the failed config-push already applied changed the home, so the re-read must stay owed"
+  pass "config-push: a push that fails after applying an item keeps the mate's re-read owed"
+}
+
+test_unknown_completion_keeps_the_reread_owed() {
+  local out rc
+  convergence_fixture "$TMP_ROOT/bootstrap-sync-unknown" sm:host-sm
+  out=$(FM_FAKE_SYNC_UNKNOWN=1 run_nudge_convergence fm-bootstrap.sh); rc=$?
+  assert_owed_reread_survives_unchanged_retry fm-bootstrap.sh \
+    "an unknown-completion sync must keep the re-read owed: $out"
+
+  convergence_fixture "$TMP_ROOT/bootstrap-push-unknown" sm:host-sm
+  out=$(FM_FAKE_ITEM_UNKNOWN=config/item-a run_nudge_convergence fm-bootstrap.sh); rc=$?
+  assert_owed_reread_survives_unchanged_retry fm-bootstrap.sh \
+    "an unknown-completion push must keep the re-read owed: $out"
+
+  convergence_fixture "$TMP_ROOT/config-push-unknown" sm:host-sm
+  out=$(FM_FAKE_ITEM_UNKNOWN=config/item-a run_nudge_convergence fm-config-push.sh); rc=$?
+  expect_code 1 "$rc" "config-push must report unknown completion as failure: $out"
+  assert_owed_reread_survives_unchanged_retry fm-config-push.sh \
+    "an unknown-completion config-push must keep the re-read owed: $out"
+  pass "unknown-completion sync or push keeps the mate's re-read owed across an unchanged retry"
+}
+
+test_parallel_unknown_completion_overrides_known_failure() {
+  local out rc
+  convergence_fixture "$TMP_ROOT/mixed-failure" sm:host-sm
+  out=$(FM_FAKE_ITEM_UNKNOWN=config/item-b FM_FAKE_ITEM_SLEEP=1 \
+    FM_FAKE_ITEM_FAIL=config/item-a run_inherit_push sm 1); rc=$?
+  expect_code 255 "$rc" "unknown completion must survive another item's refusal: $out"
+  pass "parallel push preserves unknown completion status"
+}
+
 test_remote_probe_scheduling_keeps_per_mate_lines parallel
 test_remote_probe_scheduling_keeps_per_mate_lines fallback
 test_remote_inheritance_failure_names_its_own_error_not_an_unchanged_item
@@ -638,4 +710,7 @@ test_inherit_push_failure_stops_new_sends
 test_inherit_push_local_refusal_sends_nothing
 test_convergence_budget_isolates_a_hung_mate
 test_partial_push_failure_keeps_the_reread_owed
+test_config_push_partial_failure_keeps_the_reread_owed
+test_unknown_completion_keeps_the_reread_owed
+test_parallel_unknown_completion_overrides_known_failure
 echo "# all fm-bootstrap-network-parallel tests passed"
