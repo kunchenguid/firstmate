@@ -612,6 +612,21 @@ With it present, ship and scout briefs gain the `# Waiting` section and the fore
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Temporary worker exit before cleanup (config/auto-exit-temporary-workers)
+
+The optional local, gitignored `config/auto-exit-temporary-workers` presence flag opts this home into stopping terminal temporary workers before their ordinary safe artifact cleanup.
+With the flag absent, worker lifetime and safe artifact cleanup keep their existing independent behavior.
+The default flag covers current `done` and `failed` states only.
+`config/auto-exit-blocked-workers` and `config/auto-exit-parked-workers` are separate presence flags for homes that also choose to stop blocked or parked workers.
+Persistent secondmates are excluded, and a remotely placed worker is never controlled from the parent home.
+The watcher starts it detached after delivering the wake, so cleanup never delays the wake.
+The supervision path uses [`bin/fm-control.sh`](../bin/fm-control.sh) `exit` first, so every uncommitted change and every uncertain artifact remains preserved.
+It then invokes [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) without `--force`.
+A dirty, unlanded, uncertain, or unsupported cleanup leaves one durable follow-up under `state/terminal-worker-cleanup/` naming the preserved copy and the action needed to resume it.
+The follow-up is retried by the bounded inactive reconciliation and is removed only after safe cleanup succeeds.
+The three flags are inherited by secondmate homes so their own local or remote children receive the same home choice.
+The exact executable composition and refusal boundaries are owned by [`bin/fm-terminal-worker-cleanup.sh`](../bin/fm-terminal-worker-cleanup.sh).
+
 ## No-mistakes pipeline spend (config/pipeline-spend)
 
 The optional local, gitignored `config/pipeline-spend` presence flag opts this home into recording per-task no-mistakes pipeline spend in `data/pipeline-spend.jsonl` during teardown.

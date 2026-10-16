@@ -59,6 +59,11 @@ A stopped agent whose pane still shows the dialog text is not refused.
 `exit` stops an agent and preserves everything else.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
+The opt-in [`bin/fm-terminal-worker-cleanup.sh`](../bin/fm-terminal-worker-cleanup.sh) composition stops a terminal temporary worker through `exit` before it asks teardown to inspect the artifact.
+A teardown refusal therefore preserves the stopped endpoint's local copy and writes one follow-up record for the next reconciliation rather than forcing or discarding it.
+A later retry reruns the idempotent `exit` and ordinary teardown, while a successful cleanup retires the follow-up with the task record.
+Persistent secondmates stay alive, and remotely placed workers are never controlled from the parent home; their artifacts are preserved with a follow-up.
+
 **`resume` is not a verb.**
 It is not deterministic across the verified adapters: codex, grok, gemini, devin, and commandcode resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
 `relaunch` uses the brief on disk - not a harness-private session - as the durable instruction when the backend can prove the old agent stopped and the composer is empty; Devin on Herdr currently fails that composer check and refuses.

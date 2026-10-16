@@ -2331,6 +2331,27 @@ signal_files_actionable() {  # <status-file> ...
   return "$found"
 }
 
+# The status signal path owns the immediate opt-in lifecycle handoff. The
+# executable helper rechecks the current state, excludes persistent secondmates,
+# and composes exit before ordinary safe cleanup; this loop only supplies the
+# changed task ids so quiet homes pay no lifecycle cost.
+auto_exit_terminal_workers() {  # <status-file> ...
+  local f task
+  local flag enabled=0
+  for flag in temporary blocked parked; do
+    if [ -f "$CONFIG/auto-exit-$flag-workers" ] && [ ! -L "$CONFIG/auto-exit-$flag-workers" ]; then
+      enabled=1
+    fi
+  done
+  [ "$enabled" -eq 1 ] || return 0
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    task=$(basename "$f" .status)
+    "$SCRIPT_DIR/fm-terminal-worker-cleanup.sh" "$task" >/dev/null 2>&1 || \
+      triage_log "automatic terminal worker cleanup could not run for $task"
+  done
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark each actionable status log through the endpoint captured by the heartbeat
@@ -3068,6 +3089,8 @@ EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
       wake "$reason"
+      # shellcheck disable=SC2086  # files is a space-separated status-path list
+      ( auto_exit_terminal_workers $files ) </dev/null >/dev/null 2>&1 &
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue

@@ -317,7 +317,8 @@ family_for_basename() {
     fm-turnend-foreign-owner-arm-fix.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
-    fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
+    fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|\
+    fm-terminal-worker-cleanup.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
@@ -2371,6 +2372,13 @@ declare -a WORKER_SCRIPTS=()
 # Invoked indirectly by the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup_run() {
+  # Some fixture suites intentionally leave read-only git-hook directories to
+  # exercise teardown. Restore directory write permission before removing the
+  # runner's private tree so cleanup does not turn an otherwise green aggregate
+  # into a false failure on macOS.
+  if [ -d "$RUN_TMP" ] && [ ! -L "$RUN_TMP" ]; then
+    find "$RUN_TMP" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+  fi
   rm -rf "$RUN_TMP"
 }
 
