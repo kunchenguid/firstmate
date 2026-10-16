@@ -1732,6 +1732,60 @@ test_run_timeout_bounds_the_whole_invocation() {
   pass "--run-timeout-secs bounds the whole invocation, scripts and selection alike"
 }
 
+# A bound runs each script in a process group of its own, which a terminal's
+# Ctrl-C never reaches, so an interrupted run must still end the script it was
+# running and every helper that script moved out of its group. The runner is
+# started in a process group of its own and interrupted the two ways a caller
+# does it: an INT to that whole group, as a terminal sends it, and a TERM to
+# the runner's pid alone, as a supervisor sends it.
+test_interrupted_run_leaves_no_fixture_process() {
+  local tmp repo script how parts flags sig status runner_pid rc waited
+  command -v perl >/dev/null 2>&1 || fail "perl is required to start the escaped helper"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-interrupt.XXXXXX")
+  repo="$tmp/repo"
+  script=tests/fm-interrupt-fixture.test.sh
+  {
+    cat <<'SH'
+#!/usr/bin/env bash
+echo "$$" >"$FIXTURE_PID"
+SH
+    escaped_helper_hang_fixture | sed 1d
+  } | init_bound_fixture_repo "$repo" "$script"
+  for how in "group INT" "pid TERM --run-timeout-secs 0"; do
+    read -r -a parts <<<"$how"
+    sig=${parts[1]}
+    flags=("${parts[@]:2}")
+    rm -f "$tmp/fixture.pid" "$tmp/escaped.pid"
+    set -m
+    (cd "$repo" && FIXTURE_PID="$tmp/fixture.pid" ESCAPED_PID="$tmp/escaped.pid" \
+      exec bin/fm-test-run.sh "${flags[@]+"${flags[@]}"}" "$script") >"$tmp/out" 2>"$tmp/err" &
+    runner_pid=$!
+    set +m
+    waited=0
+    while { [ ! -s "$tmp/fixture.pid" ] || [ ! -s "$tmp/escaped.pid" ]; } && [ "$waited" -lt 100 ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if [ "${parts[0]}" = group ]; then
+      kill -s "$sig" -- "-$runner_pid"
+    else
+      kill -s "$sig" "$runner_pid"
+    fi
+    set +e
+    wait "$runner_pid"
+    rc=$?
+    set -e
+    status=$((128 + $(kill -l "$sig")))
+    [ "$rc" -eq "$status" ] || fail "a run interrupted by $how must exit $status, got $rc: $(cat "$tmp/out" "$tmp/err")"
+    grep -Fq "fm-test-run: FAIL: run interrupted by SIG$sig while running $script; swept" "$tmp/err" \
+      || fail "a run interrupted by $how did not name the signal, script, and sweep: $(cat "$tmp/err")"
+    assert_recorded_pid_gone "$tmp/fixture.pid" "the script of a run interrupted by $how"
+    assert_recorded_pid_gone "$tmp/escaped.pid" "the escaped helper of a run interrupted by $how"
+  done
+  rm -rf "$tmp"
+  pass "an interrupted run leaves none of its script's processes running"
+}
+
 # The duration regression this guard exists for: a suite whose scripts are all
 # green but whose wall clock outgrew its caller's invocation budget. The caller
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
@@ -2094,6 +2148,7 @@ test_per_script_timeout_bounds_a_hang
 test_default_per_script_bound_applies_in_every_mode
 test_tripped_bound_sweeps_escaped_descendants
 test_run_timeout_bounds_the_whole_invocation
+test_interrupted_run_leaves_no_fixture_process
 test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation

@@ -90,8 +90,9 @@
 #                   reports its complete results; the two timeout flags above
 #                   are what stop a hang. Pathological output sinks that block
 #                   finalization are explicitly out of scope.
-#                   External interruption cleanup is outside this runner's
-#                   guarantee; the configured bounds remain authoritative.
+#                   An INT, TERM, or HUP that interrupts a bounded run is
+#                   forwarded to it and then sweeps every process its scripts
+#                   left behind, as a tripped bound does; a SIGKILL cannot.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -140,8 +141,11 @@
 # descendants inherit wherever they move, and a tripped bound TERMs, then KILLs,
 # every process still carrying that marker. A descendant that scrubs its own
 # environment escapes the sweep. The sweep reads /proc where it exists and
-# `ps -E` otherwise. Only a tripped bound sweeps: a script that exits on its own
-# owns its cleanup.
+# `ps -E` otherwise. Only a tripped bound or an interrupted run sweeps: a script
+# that exits on its own owns its cleanup. A bound runs each script in a process
+# group of its own, out of reach of a terminal's Ctrl-C, so whenever either
+# bound is on the run executes under a supervising parent that forwards an INT,
+# TERM, or HUP to it, waits for it to stop, and then sweeps the whole run.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -189,8 +193,8 @@ RUN_STARTED_MS=$(now_ms)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
-# The whole-run bound re-runs this script under fm_exec_timed with these two
-# set (see run_under_whole_run_bound). Read and unset them at once, so a nested
+# The supervising parent re-runs this script with these two set (see
+# run_under_supervisor). Read and unset them at once, so a nested
 # runner started by one of the scripts below never mistakes itself for the
 # bounded inner run.
 ORIG_ARGS=("$@")
@@ -2370,36 +2374,63 @@ sweep_fixture_processes() {  # <needle>
   printf '%s\n' "$count"
 }
 
-# Append one progress record for the whole-run bound's report: "phase <name>",
+# Append one progress record for the supervising parent's report: "phase <name>",
 # "fixture-begin <script>", "fixture-end <script>", or "run-tmp <dir>".
 note_run_phase() {
   [ -n "$RUN_PHASE_FILE" ] || return 0
   printf '%s\n' "$*" >>"$RUN_PHASE_FILE" 2>/dev/null || true
 }
 
-# Re-run this invocation as a child bounded by fm_exec_timed, which TERMs the
-# child's process group at the deadline and KILLs it after the grace. The bound
-# covers selection, scheduling, every script, and finalization alike. When it
-# trips, this parent - which is not itself bounded - sweeps every process the
-# run's scripts left behind, names where the run was from the child's progress
-# records, and exits 124. A child that finishes inside the bound exits with its
-# own status.
-run_under_whole_run_bound() {
-  local phase_file rc began elapsed where in_flight last_phase run_tmp swept
+# Re-run this invocation as a child of this unbounded parent, under
+# fm_exec_timed when --run-timeout-secs is on, which TERMs the child's process
+# group at the deadline and KILLs it after the grace. The bound covers
+# selection, scheduling, every script, and finalization alike. The child runs
+# in the background so an INT, TERM, or HUP reaches this parent's trap at once;
+# the trap forwards it to the child. When the bound trips, the parent sweeps
+# every process the run's scripts left behind, names where the run was from the
+# child's progress records, and exits 124. When the run is interrupted, or its
+# child dies by a signal, the parent waits for the child, sweeps the same way,
+# and exits with the signal's status. A child that finishes on its own exits
+# with its own status.
+run_under_supervisor() {
+  local phase_file rc began elapsed where in_flight last_phase run_tmp swept child sig
   RUN_MARK="fmtr-$$-$(now_ms)"
   phase_file=$(mktemp "${TMPDIR:-/tmp}/fm-test-run-phase.XXXXXX") \
     || die "could not create the whole-run progress file"
   began=$(date +%s)
-  set +e
   (
+    # A background child starts with INT and QUIT ignored; restore them so the
+    # run and its scripts answer a terminal's Ctrl-C as a foreground run does.
+    trap - INT QUIT
     export FM_TEST_RUN_MARK="$RUN_MARK" FM_TEST_RUN_PHASE_FILE="$phase_file"
-    fm_exec_timed "$RUN_TIMEOUT_SECS" "$RUN_TIMEOUT_GRACE_SECS" \
-      bash "$ROOT/bin/fm-test-run.sh" "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"
-  )
+    if [ "$RUN_TIMEOUT_SECS" -gt 0 ]; then
+      fm_exec_timed "$RUN_TIMEOUT_SECS" "$RUN_TIMEOUT_GRACE_SECS" \
+        bash "$ROOT/bin/fm-test-run.sh" "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"
+    fi
+    exec bash "$ROOT/bin/fm-test-run.sh" "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"
+  ) <&0 &
+  child=$!
+  SUPERVISED_CHILD=$child
+  INTERRUPTED_BY=
+  for sig in INT TERM HUP; do
+    # shellcheck disable=SC2064
+    trap "INTERRUPTED_BY=$sig; kill -s $sig \"\$SUPERVISED_CHILD\" 2>/dev/null || true" "$sig"
+  done
+  set +e
+  wait "$child"
   rc=$?
+  while kill -0 "$child" 2>/dev/null; do
+    wait "$child"
+    rc=$?
+  done
   set -e
+  trap - INT TERM HUP
   elapsed=$(($(date +%s) - began))
-  if ! fm_timed_out "$rc" || [ "$elapsed" -lt "$RUN_TIMEOUT_SECS" ]; then
+  if [ -n "$INTERRUPTED_BY" ]; then
+    rc=$((128 + $(kill -l "$INTERRUPTED_BY")))
+  elif [ "$RUN_TIMEOUT_SECS" -gt 0 ] && fm_timed_out "$rc" && [ "$elapsed" -ge "$RUN_TIMEOUT_SECS" ]; then
+    rc=124
+  elif [ "$rc" -le 128 ]; then
     rm -f "$phase_file"
     exit "$rc"
   fi
@@ -2418,12 +2449,16 @@ run_under_whole_run_bound() {
     where="during the ${last_phase:-startup} phase"
   fi
   swept=$(sweep_fixture_processes ";$RUN_MARK/")
+  if [ "$rc" -ne 124 ]; then
+    log "FAIL: run interrupted by SIG$(kill -l "$rc") $where; swept $swept leftover fixture process(es)"
+    exit "$rc"
+  fi
   log "FAIL: whole-run bound tripped: this run exceeded --run-timeout-secs ${RUN_TIMEOUT_SECS}s $where and was terminated; swept $swept leftover fixture process(es)"
   exit 124
 }
 
-if [ "$RUN_TIMEOUT_SECS" -gt 0 ] && [ -z "$RUN_MARK" ]; then
-  run_under_whole_run_bound
+if [ -z "$RUN_MARK" ] && { [ "$RUN_TIMEOUT_SECS" -gt 0 ] || [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; }; then
+  run_under_supervisor
 fi
 [ -n "$RUN_MARK" ] || RUN_MARK="fmtr-$$-$(now_ms)"
 note_run_phase phase selection
