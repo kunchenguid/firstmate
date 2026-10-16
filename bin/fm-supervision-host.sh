@@ -588,7 +588,7 @@ exit_to_main() {  # <why> [further lines]
   local lines=${2:-} rc=0
   retire_successor
   if [ -n "$SUCCESSOR_GENERATION" ] \
-    && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+    && ! fm_recovery_marker_publish "$FM_WATCHER_DOWN" downtime >/dev/null 2>&1; then
     log_line "to-main	downtime-unrestored	$1"
     lines=${lines:+$lines$'\n'}"supervision-host: watcher downtime could not be restored for the main hand-back"
     rc=1
@@ -1143,7 +1143,7 @@ while :; do
     # above consumed: the re-arm owner delivers the close only while the
     # recovery marker reads downtime (leave_successor_for_main).
     if [ -n "$SUCCESSOR_GENERATION" ] \
-      && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+      && ! fm_recovery_marker_publish "$FM_WATCHER_DOWN" downtime >/dev/null 2>&1; then
       log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
       exit 1
     fi

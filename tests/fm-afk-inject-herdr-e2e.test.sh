@@ -308,9 +308,9 @@ stop_daemon() {
 reset_state() {
   rm -f "$STATE_DIR"/*.status \
          "$STATE_DIR"/.subsuper-* \
-         "$STATE_DIR"/.wake-queue* \
+         "$STATE_DIR"/wake/queue* \
          "$STATE_DIR"/.watch.lock* \
-         "$STATE_DIR"/.watcher-down* \
+         "$STATE_DIR"/wake/watcher-down* \
          "$STATE_DIR"/.last-* \
          "$STATE_DIR"/.hash-* \
          "$STATE_DIR"/.count-* \

@@ -95,7 +95,7 @@ settled_at_least() {  # <turns>: handled or failed engine turns
 }
 diagnose() {
   printf -- '--- host.out\n%s\n--- host log\n%s\n--- queue\n%s\n' "$(cat "$LAB/host.out" 2>/dev/null)" \
-    "$(cat "$FM/state/.supervision-host.log" 2>/dev/null)" "$(cat "$FM/state/.wake-queue" 2>/dev/null)"
+    "$(cat "$FM/state/.supervision-host.log" 2>/dev/null)" "$(cat "$FM/state/wake/queue" 2>/dev/null)"
 }
 
 wait_until 300 watcher_live || fail "the host never started a watcher cycle ($CLAUDE_VERSION)"$'\n'"$(diagnose)"
@@ -108,7 +108,7 @@ grep -q '	handled	turn=' "$FM/state/.supervision-host.log" \
 [ ! -s "$LAB/host.rc" ] || fail "a handled away wake reached main ($CLAUDE_VERSION)"$'\n'"$(diagnose)"
 grep -q '"task":"demo"' "$FM/state/branch-outcomes.jsonl" \
   || fail "the engine's outcome did not reach the store ($CLAUDE_VERSION)"$'\n'"$(diagnose)"
-! grep -q 'demo.status' "$FM/state/.wake-queue" 2>/dev/null \
+! grep -q 'demo.status' "$FM/state/wake/queue" 2>/dev/null \
   || fail "the engine did not acknowledge its wake ($CLAUDE_VERSION)"$'\n'"$(diagnose)"
 [ ! -e "$FM/state/.claude-autoarm-epoch" ] || fail "a lab Stop hook fired inside the engine ($CLAUDE_VERSION)"
 [ "$(cat "$FM/state/.lock")" = "$lock_before" ] || fail "the engine rewrote the session lock ($CLAUDE_VERSION)"

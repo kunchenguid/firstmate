@@ -77,13 +77,13 @@ test_predicate_healthy_fresh_beacon() {
 
 test_predicate_queue_pending_flag() {
   local state="$TMP_ROOT/pred-queue/state"
-  mkdir -p "$state"
+  mkdir -p "$state/wake"
   fm_supervision_status "$state" 300
   [ "$FM_SUP_QUEUE_PENDING" = false ] || fail "empty/absent wake queue must not read as pending"
-  printf 'record\n' > "$state/.wake-queue"
+  printf 'record\n' > "$state/wake/queue"
   fm_supervision_status "$state" 300
   [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "a non-empty wake queue must read as pending"
-  pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
+  pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/wake/queue"
 }
 
 test_predicate_x_mode_needs_supervision() {

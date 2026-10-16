@@ -293,7 +293,7 @@ clear_stale_recorded_watcher_lock() {
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
-  fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
+  fm_recovery_transition "$FM_WATCHER_DOWN" clear-stale-lock "$WATCH_LOCK" downtime
 }
 
 # A watcher is "healthy" iff the lock names a live process that is genuinely THIS
@@ -467,7 +467,7 @@ print_watch_output() {
 
 handling_successor_generation() {
   [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] || return 0
-  fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
+  fm_recovery_marker_snapshot "$FM_WATCHER_DOWN" || return 1
   case "$FM_RECOVERY_MARKER_TOKEN" in
     pending:downtime:*|pending:handling:*|announced:downtime:*|announced:handling:*) printf '%s' "${FM_RECOVERY_MARKER_TOKEN##*:}" ;;
     acked:*|'') ;;
@@ -504,7 +504,7 @@ esac
 if [ "$mode" = handling-delivered ]; then
   fm_pid_alive "$handling_watcher_pid" \
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
-    && fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation"
+    && fm_recovery_marker_begin_handling "$FM_WATCHER_DOWN" "$handling_generation"
   exit $?
 fi
 
@@ -556,7 +556,7 @@ fi
 take_over_cycle() {  # <watcher-pid> <identity>
   local pid=$1 i owner_signal
   cycle_begin "$pid" attached "$2"
-  fm_recovery_marker_handover_snapshot "$STATE/.watcher-down" || return 1
+  fm_recovery_marker_handover_snapshot "$FM_WATCHER_DOWN" || return 1
   if attached_holder_live "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
   fi
@@ -587,7 +587,7 @@ take_over_cycle() {  # <watcher-pid> <identity>
     i=$((i + 1))
   done
   if [ "$owner_signal" = TERM ]; then
-    fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
+    fm_recovery_marker_handover_restore "$FM_WATCHER_DOWN" \
       "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
     cycle_log_append unknown unknown taken-over none
   else

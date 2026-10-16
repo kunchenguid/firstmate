@@ -28,7 +28,7 @@ when() { FM_HOME="$1" "$ROOT/bin/fm-procevent-when.sh" "${@:2}"; }
 # fires cannot survive the run.
 new_home() { mkdir -p "$1/state"; fm_test_track_procevent_home "$1"; }
 
-wake_payloads() { awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null; }
+wake_payloads() { awk -F '\t' '{print $5}' "$1/state/wake/queue" 2>/dev/null; }
 
 first_result() {  # <home> <source-id>
   local g

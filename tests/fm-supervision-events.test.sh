@@ -32,8 +32,8 @@ wake() { printf '%s\n' "$1" >> "$WAKE_LOG"; return 0; }
 sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 
 reset_state() {
-  rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
-    "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
+  rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/wake/queue \
+    "$STATE_DIR"/wake/queue.seq "$STATE_DIR"/.watch-triage.log \
     "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
@@ -51,10 +51,10 @@ mkrec() {  # <pane_id> <status>
 reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
-[ -e "$STATE_DIR/.wake-queue" ] || fail "handle_push_transition should enqueue a wake for a blocked crew"
-grep -q 'stale' "$STATE_DIR/.wake-queue" || fail "the enqueued wake must be a stale record: $(cat "$STATE_DIR/.wake-queue")"
-grep -q 'default:wG:pQ' "$STATE_DIR/.wake-queue" || fail "the stale record must name the crew's window"
-grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the stale payload must name the herdr-blocked cause"
+[ -e "$STATE_DIR/wake/queue" ] || fail "handle_push_transition should enqueue a wake for a blocked crew"
+grep -q 'stale' "$STATE_DIR/wake/queue" || fail "the enqueued wake must be a stale record: $(cat "$STATE_DIR/wake/queue")"
+grep -q 'default:wG:pQ' "$STATE_DIR/wake/queue" || fail "the stale record must name the crew's window"
+grep -q 'herdr: agent blocked' "$STATE_DIR/wake/queue" || fail "the stale payload must name the herdr-blocked cause"
 [ -s "$WAKE_LOG" ] || fail "handle_push_transition must wake the supervisor for a blocked crew"
 [ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "handle_push_transition must commit dedupe only after enqueue"
 pass "handle_push_transition: a blocked crew enqueues a stale wake naming its window and wakes the supervisor"
@@ -75,8 +75,8 @@ reset_state
 fm_write_meta "$STATE_DIR/tk2.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 printf 'paused: waiting on the upstream release\n' > "$STATE_DIR/tk2.status"
 handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
-if [ -e "$STATE_DIR/.wake-queue" ] && grep -q 'stale' "$STATE_DIR/.wake-queue"; then
-  fail "a declared-pause crew must NOT be fast-escalated: $(cat "$STATE_DIR/.wake-queue")"
+if [ -e "$STATE_DIR/wake/queue" ] && grep -q 'stale' "$STATE_DIR/wake/queue"; then
+  fail "a declared-pause crew must NOT be fast-escalated: $(cat "$STATE_DIR/wake/queue")"
 fi
 [ ! -s "$WAKE_LOG" ] || fail "a declared-pause crew must not wake the supervisor from the event fast-path"
 grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the paused absorb should be logged to the triage log"
@@ -88,8 +88,8 @@ reset_state
 fm_write_meta "$STATE_DIR/tk2h.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$STATE_DIR/tk2h.status"
 handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
-if [ -e "$STATE_DIR/.wake-queue" ] && grep -q 'stale' "$STATE_DIR/.wake-queue"; then
-  fail "a captain-held crew must NOT be fast-escalated: $(cat "$STATE_DIR/.wake-queue")"
+if [ -e "$STATE_DIR/wake/queue" ] && grep -q 'stale' "$STATE_DIR/wake/queue"; then
+  fail "a captain-held crew must NOT be fast-escalated: $(cat "$STATE_DIR/wake/queue")"
 fi
 [ ! -s "$WAKE_LOG" ] || fail "a captain-held crew must not wake the supervisor from the event fast-path"
 grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the captain-held absorb should be logged to the triage log"

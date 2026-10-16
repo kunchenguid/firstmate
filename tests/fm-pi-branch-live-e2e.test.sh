@@ -47,7 +47,7 @@ repo="$TMP_ROOT/repo"
 home="$TMP_ROOT/home"
 agentdir="$TMP_ROOT/agent-dir"
 mkdir -p "$repo/.pi/extensions/lib" "$repo/node_modules/@earendil-works" \
-  "$home/state" "$home/config" "$agentdir"
+  "$home/state/wake" "$home/config" "$agentdir"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$repo/.pi/extensions/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
@@ -100,7 +100,7 @@ const home = resolve(process.env.FM_HOME);
 const approvedProject = `${home}/projects/live-probe`;
 mkdirSync(approvedProject, { recursive: true });
 writeFileSync(`${home}/state/live-probe.meta`, `project=${approvedProject}\nwindow=fm-live-probe\n`);
-writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-probe.status\tsignal: live-sdk probe\n");
+writeFileSync(`${home}/state/wake/queue`, "1\t1\tsignal\tlive-probe.status\tsignal: live-sdk probe\n");
 const busHandlers = new Map();
 const offers = [];
 const bus = {
@@ -229,7 +229,7 @@ for (const handler of piHandlers.get("session_start") ?? []) {
   await handler({ type: "session_start", reason: "new" }, sessionCtx);
 }
 await waitFor(() => armCount() >= 3, "replacement watcher arm");
-writeFileSync(`${home}/state/.wake-queue`, "1\t2\tsignal\tlive-probe.status\tsignal: live pin probe\n");
+writeFileSync(`${home}/state/wake/queue`, "1\t2\tsignal\tlive-probe.status\tsignal: live pin probe\n");
 writeFileSync(process.env.FM_LIVE_WATCH_TRIGGER, "signal: live pin probe\n");
 await waitFor(() => mainUserMessages.length === 2, "pinned watcher-owned main delivery");
 if (offers.length !== 2 || !offers[1].accepted) {
@@ -267,7 +267,7 @@ pass "real Pi SDK $PI_VERSION accepts the branch session construction and preser
 # assistant message and resolves session.prompt() through its production loop.
 errorhome="$TMP_ROOT/error-home"
 erroragentdir="$TMP_ROOT/error-agent-dir"
-mkdir -p "$errorhome/state" "$errorhome/config" "$erroragentdir"
+mkdir -p "$errorhome/state/wake" "$errorhome/config" "$erroragentdir"
 cat > "$erroragentdir/models.json" <<'JSON'
 {
   "providers": {
@@ -296,7 +296,7 @@ const home = resolve(process.env.FM_HOME);
 const approvedProject = `${home}/projects/live-error-probe`;
 mkdirSync(approvedProject, { recursive: true });
 writeFileSync(`${home}/state/live-error-probe.meta`, `project=${approvedProject}\nwindow=fm-live-error-probe\n`);
-writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-error-probe.status\tsignal: c1 429 probe\n");
+writeFileSync(`${home}/state/wake/queue`, "1\t1\tsignal\tlive-error-probe.status\tsignal: c1 429 probe\n");
 let providerRequests = 0;
 globalThis.fetch = async (input) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -402,7 +402,7 @@ if (existsSync(`${home}/state/.branch-eligible-rows`)) {
 if (existsSync(`${home}/state/branch-outcomes.jsonl`)) {
   throw new Error("real-SDK provider error fabricated a durable branch outcome");
 }
-const queue = readFileSync(`${home}/state/.wake-queue`, "utf8");
+const queue = readFileSync(`${home}/state/wake/queue`, "utf8");
 if (!queue.includes("\tsignal\tlive-error-probe.status\t")) {
   throw new Error(`real-SDK provider-error fallback lost the durable wake row: ${queue}`);
 }

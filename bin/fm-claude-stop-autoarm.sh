@@ -268,7 +268,7 @@ autoarm_commit() {  # <outcome> [marker-file]
   if [ "$outcome" = rewake ]; then
     fm_session_lock_owned_by_self "$STATE" || return 2
     session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
-    fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 2
+    fm_recovery_marker_snapshot "$FM_WATCHER_DOWN" || return 2
     case "$FM_RECOVERY_MARKER_TOKEN" in
       pending:downtime:*|announced:downtime:*) recovery=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
       *) return 2 ;;
@@ -538,7 +538,7 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     exit 2
   fi
   if [ "$HOST_MODE" -eq 1 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN" \
-    && fm_recovery_marker_snapshot "$STATE/.watcher-down" \
+    && fm_recovery_marker_snapshot "$FM_WATCHER_DOWN" \
     && [[ "$FM_RECOVERY_MARKER_TOKEN" == pending:handling:* || "$FM_RECOVERY_MARKER_TOKEN" == announced:handling:* ]] \
     && ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
     LOST_HANDBACK_COMMITTED=0

@@ -88,7 +88,7 @@ if [ "$N" -ge 3 ]; then
   printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
   exit 0
 fi
-printf 'pending:downtime:fixture-generation-%s\n' "$N" > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation-%s\n' "$N" > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-rapid-%s\n' "$N"
