@@ -90,16 +90,16 @@ codemode_capture() {
   fi | node -e 'let text=""; process.stdin.on("data", part => text += part); process.stdin.on("end", () => process.stdout.write(text.replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "")));'
 }
 
-# Await one expected settled rendering with a bounded wait and a diagnostic snapshot.
+# Await one expected settled rendering, optionally with a stale needle gone, using a bounded wait and a diagnostic snapshot.
 codemode_wait() {
-  local file=$1 needle=$2 attempt=0
+  local file=$1 needle=$2 stale=${3:-} attempt=0
   while [ "$attempt" -lt 100 ]; do
     codemode_capture > "$file"
-    grep -Fq "$needle" "$file" && return 0
+    if grep -Fq "$needle" "$file" && { [ -z "$stale" ] || ! grep -Fq "$stale" "$file"; }; then return 0; fi
     sleep 0.1
     attempt=$((attempt + 1))
   done
-  fail "Pi Codemode did not render $needle: $(< "$file")"
+  fail "Pi Codemode did not render $needle${stale:+ without $stale}: $(< "$file")"
 }
 
 # Await the gapless Calm-hidden rendering, reporting the last failed assertion on timeout.
@@ -187,7 +187,8 @@ test_codemode_terminal_e2e() {
   codemode_wait "$fixture/stock-expanded.txt" OUTCOME_EXPANDED_TAIL
   assert_contains "$(< "$fixture/stock-expanded.txt")" 'tools.fm_branch_outcomes' 'Calm off did not restore the original script'
   codemode_expand
-  codemode_wait "$fixture/stock-collapsed.txt" 'more lines'
+  # A partial redraw can show the first collapse hint while a later result is still expanded.
+  codemode_wait "$fixture/stock-collapsed.txt" 'more lines' OUTCOME_EXPANDED_TAIL
   assert_contains "$(< "$fixture/stock-collapsed.txt")" OUTCOME_PRIVATE_RAW 'collapse lost the stock Codemode output'
   assert_not_contains "$(< "$fixture/stock-collapsed.txt")" OUTCOME_EXPANDED_TAIL 'collapse kept the expanded Codemode output'
   codemode_submit /calm
