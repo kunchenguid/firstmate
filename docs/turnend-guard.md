@@ -46,8 +46,7 @@ When the guard acts, the harness integration must do one of two things:
 The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
 
 Away and quiet mode are the one place the turn-end guard accepts a different supervisor.
-While `state/.afk` exists, in either mode (`bin/fm-wake-lib.sh`'s `fm_afk_mode`), the daemon owns supervision.
-A live identity-matched daemon with a fresh beacon then satisfies that boundary in place of a watcher process holding the lock.
+During away or quiet mode, the daemon may satisfy this boundary in place of a watcher process holding the lock; its ownership proof and the no-daemon result are defined under [Away and quiet mode daemon ownership](#away-and-quiet-mode-daemon-ownership).
 
 The guard remains a backstop.
 [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
@@ -170,11 +169,13 @@ It keys the once-per-episode dedup on that condition rather than the beacon mtim
 
 ### Away and quiet mode daemon ownership
 
-While `state/.afk` exists the daemon (`bin/fm-supervise-daemon.sh`) owns supervision and runs the watcher one-shot, in either away or quiet mode.
+When `state/.afk` exists and the daemon (`bin/fm-supervise-daemon.sh`) is running, it owns supervision and runs the watcher one-shot, in either away or quiet mode.
 The watcher exits on every wake and the daemon starts its replacement.
 A turn boundary therefore regularly lands in a hand-off where no watcher process holds the lock and nothing is wrong.
 
-The turn-end guard therefore accepts `fm_afk_daemon_owns_supervision` from `bin/fm-wake-lib.sh` as proof of supervision on that path.
+The guard allows a turn with no supervision need and accepts a healthy ordinary watcher before checking daemon ownership, even while `state/.afk` exists.
+An away flag left after daemon startup refusal therefore does not by itself block a turn; the guard blocks only when work needs supervision and neither a healthy watcher nor the daemon proof below satisfies the boundary.
+The turn-end guard accepts `fm_afk_daemon_owns_supervision` from `bin/fm-wake-lib.sh` as proof of supervision on the daemon path.
 The proof requires both of these:
 
 - `state/.afk` must exist; the predicate does not distinguish away from quiet mode.
@@ -184,7 +185,7 @@ That is the same identity discipline the watcher lock uses.
 A recycled pid, a lock left behind by a killed daemon, and a daemon that never recorded its identity all fail it.
 
 A daemon that cannot record its own identity at startup logs a warning and keeps running, because a supervisor must not refuse to run over an unreadable `ps`.
-That warning is what names the cause when the guard then keeps blocking away/quiet-mode turn boundaries for the rest of that daemon's life.
+The warning explains why the daemon cannot satisfy the ownership proof; a healthy ordinary watcher can still allow the turn.
 
 The proof covers ownership only, never freshness.
 The guard still requires a fresh beacon, with these results:

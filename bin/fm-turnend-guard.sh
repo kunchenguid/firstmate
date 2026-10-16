@@ -32,20 +32,9 @@
 # primary checkout - the main home or a genuinely marked secondmate home - and
 # stay a silent, fast no-op inside child task worktrees.
 #
-# Away mode (state/.afk): the away-mode daemon owns supervision and runs the
-# watcher one-shot, restarting it after every wake, so the watch lock is
-# regularly unheld at a turn boundary with nothing wrong. A live
-# identity-matched daemon holding this home, plus a fresh beacon, is what
-# proves supervision there - see fm_afk_daemon_owns_supervision in
-# bin/fm-wake-lib.sh. The beacon freshness test there uses AFK_GRACE
-# (fm_poll_derived_grace, docs/turnend-guard.md "Guard grace and the poll
-# cadence"), not the flat $GRACE every other check on this page uses: the
-# daemon starts a fresh one-shot watcher only after it finishes handling the
-# previous wake, and that handling can legitimately run past a flat 300s
-# window under load (a slow registered check, a busy supervisor pane) with the
-# daemon perfectly healthy throughout. The strict watcher predicate and $GRACE
-# are unchanged everywhere else, including for a dead daemon pid or a beacon
-# older than AFK_GRACE, which still block.
+# Away/quiet mode can satisfy the boundary through daemon ownership when the
+# ordinary watcher check fails; docs/turnend-guard.md "Away and quiet mode
+# daemon ownership" owns that proof and its beacon grace.
 #
 # Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
