@@ -27,7 +27,7 @@ cat > "$DATA/projects.md" <<'EOF'
 - lead [forge=forgejo direct-PR +yolo] - forge token first, order must not matter (added 2026-01-01)
 - kept [local-only forge=forgejo] - a forge on a mode that publishes nothing (added 2026-01-01)
 - colon [no-mistakes forge:forgejo] - a colon-spelled token is not a forge binding (added 2026-01-01)
-- glabbed [no-mistakes forge=gitlab] - gitlab is not a forge value (added 2026-01-01)
+- glabbed [no-mistakes forge=bitbucket] - bitbucket is not a forge value (added 2026-01-01)
 - reviewed [direct-PR forge=external] - a review tool uploads its own snapshot (added 2026-01-01)
 - reviewed-yolo [direct-PR +yolo forge=external] - +yolo cannot apply to an external review (added 2026-01-01)
 - reviewed-local [local-only forge=external] - an external review on a mode that publishes nothing (added 2026-01-01)
@@ -76,12 +76,13 @@ for flag in "" --forge; do
   # shellcheck disable=SC2086 # An empty flag must expand to nothing.
   out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" $flag glabbed 2>/dev/null)
   status=$?
-  [ "$status" -eq 3 ] || fail "forge=gitlab did not refuse${flag:+ under $flag} (status $status, got '$out')"
-  [ -z "$out" ] || fail "a refused forge=gitlab still handed the caller a posture: '$out'"
+  [ "$status" -eq 3 ] || fail "forge=bitbucket did not refuse${flag:+ under $flag} (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused forge=bitbucket still handed the caller a posture: '$out'"
 done
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" glabbed 2>&1 >/dev/null) || true
 assert_contains "$err" 'forge=forgejo' "the unknown-forge refusal did not name forge=forgejo as an accepted value"
 assert_contains "$err" 'forge=external' "the unknown-forge refusal did not name forge=external as an accepted value"
+assert_contains "$err" 'forge=gitlab' "the unknown-forge refusal did not name forge=gitlab as an accepted value"
 pass "fm-project-mode: a value outside none|gerrit|forgejo|external is refused and the refusal names the accepted values"
 
 [ "$(run_forge reviewed)" = "external" ] || fail "forge=external did not resolve: $(run_forge reviewed)"
