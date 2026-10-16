@@ -234,6 +234,15 @@ Text for a worker to read and commands that drive a worker's process are separat
 `bin/fm-control.sh` is the control plane: an allowlisted `interrupt`, `exit`, and transactional `relaunch` addressed to an exact task id, with per-harness mechanics owned by `bin/fm-control-lib.sh`, a verified postcondition per verb, and no arbitrary-text or raw-key entry point.
 [`docs/agent-control.md`](agent-control.md) owns the verb contract, the capability matrix, the relaunch transaction, and the fail-closed boundaries.
 
+### Task status archives
+
+When [status archival is enabled](configuration.md#task-status-archive-configstatus-archive), teardown preserves the complete status stream in `data/<task>/status.log`, using a separate `status.<N>.log` for reused IDs without overwriting earlier histories.
+Forced secondmate retirement stores descendant logs under the surviving parent's `data/<secondmate>/children/<child>/` tree.
+These archives are cold evidence: presentation, wake classification, and fleet snapshots consume live `state/` records and never read archived logs.
+Ordinary child teardown uses its own home's configuration; retiring a whole home still removes older archives stored inside that home.
+[`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns publication, retirement, path safety, and retention mechanics.
+[`tests/fm-teardown.test.sh`](../tests/fm-teardown.test.sh) and [`tests/fm-remote-secondmate-lifecycle-e2e.test.sh`](../tests/fm-remote-secondmate-lifecycle-e2e.test.sh) cover archival and isolation across local, nested, and remote retirement.
+
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
