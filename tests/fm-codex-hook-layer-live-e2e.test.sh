@@ -28,42 +28,10 @@ fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE codex
 CODEX_VERSION=$(codex --version 2>&1)
 TMP_ROOT=$(fm_test_tmproot fm-codex-hook-layer-live)
 
-# capture_codex_launch <name> <extra fm-spawn args...>: spawns a codex crewmate
-# against a fake pane and echoes the literal launch command firstmate sent.
-capture_codex_launch() {
-  local name=$1
-  shift
-  local case_dir home proj wt fakebin launchlog id
-  case_dir="$TMP_ROOT/$name"
-  home="$case_dir/home"
-  proj="$case_dir/project"
-  wt="$case_dir/wt"
-  launchlog="$case_dir/launch.log"
-  id="codex-hook-layer-$name"
-  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
-  fm_test_spawn_home "$home" codex
-  fm_test_spawn_brief "$home" "$id"
-  fm_git_worktree "$proj" "$wt" "wt-$name"
-  : > "$launchlog"
-  FM_FAKE_LAUNCH_LOG="$launchlog" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" "$@" >/dev/null 2>&1 ||
-    fail "codex $CODEX_VERSION: fm-spawn could not build a crewmate launch"
-  cat "$launchlog"
-}
-
-# codex_global_flags <launch command>: the flags between the codex executable
-# and the positional brief, which is everything codex itself is configured by.
-codex_global_flags() {
-  local launch=$1 flags
-  flags=${launch#*codex }
-  flags=${flags%%\"\$(*}
-  printf '%s' "$flags"
-}
-
 test_installed_codex_disables_hooks_for_the_captured_crewmate_launch() {
   local launch flags state
-  launch=$(capture_codex_launch ship --mode no-mistakes --yolo off)
-  flags=$(codex_global_flags "$launch")
+  launch=$(fm_test_capture_codex_launch "$TMP_ROOT/ship" --mode no-mistakes --yolo off)
+  flags=$(fm_test_codex_global_flags "$launch")
 
   # The whole point: every flag firstmate will launch with, handed to the real
   # codex, must leave the hook layer off. `features list` reports the effective
