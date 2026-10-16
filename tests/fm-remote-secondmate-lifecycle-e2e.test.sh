@@ -1658,6 +1658,25 @@ cmp -s "$TMP_ROOT/remote-cursor.expected" "$PARENT/state/.status-presentation-cu
 assert_present "$PARENT/state/.status-presentation-lock" "remote no-op acquired another presenter's lock"
 assert_absent "$PARENT/data/ios" "remote no-op created an empty archive directory"
 assert_absent "$PARENT/state/ios.meta" "remote no-op retained stale parent metadata"
+assert_absent "$REMOTE_HOME" "remote no-op recreated the retired remote home"
 pass "remote missing-status retirement remains lock-free with archival enabled"
+
+# An absent home accepts exactly the retire dispatcher's arguments, and an
+# invalid option still fails with usage instead of reporting a retirement.
+remote_control_retire() { # <args...>
+  FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+    "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" retire "$@"
+}
+retired_rc=0
+remote_control_retire ios --force > "$TMP_ROOT/retired-force.out" 2>&1 || retired_rc=$?
+[ "$retired_rc" -eq 0 ] || fail "forced retirement of an absent home failed ($retired_rc): $(cat "$TMP_ROOT/retired-force.out")"
+assert_grep 'already-retired: ios' "$TMP_ROOT/retired-force.out" "forced retirement of an absent home was not a no-op"
+bogus_rc=0
+remote_control_retire ios --bogus > "$TMP_ROOT/retired-bogus.out" 2>&1 || bogus_rc=$?
+[ "$bogus_rc" -eq 2 ] || fail "an invalid retire option on an absent home did not fail with usage (exit $bogus_rc)"
+assert_grep 'fm-remote-secondmate-control.sh retire <id> [--force]' "$TMP_ROOT/retired-bogus.out" "an invalid retire option did not print usage"
+assert_no_grep 'already-retired' "$TMP_ROOT/retired-bogus.out" "an invalid retire option reported a retirement"
+assert_absent "$REMOTE_HOME" "retiring an absent home recreated it"
+pass "an absent remote home retires only with the dispatcher's arguments and is never recreated"
 
 echo "ALL TESTS PASSED"
