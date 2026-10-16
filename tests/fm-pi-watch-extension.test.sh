@@ -4518,7 +4518,7 @@ writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 if (rows.some((row) => row.startsWith("plain-arm="))) throw new Error(`an opted-in home ran the plain arm: ${rows.join(" | ")}`);
 const hosts = rows.filter((row) => row.startsWith("host="));
 if (hosts.length !== 2) throw new Error(`expected the host and one successor host, got: ${rows.join(" | ")}`);
-if (!hosts.every((row) => / args=park --restart primary=opencode /.test(row))) throw new Error(`the host must run as 'park --restart' with the opencode pin: ${hosts.join(" | ")}`);
+if (!hosts.every((row) => / args=park primary=opencode /.test(row))) throw new Error(`the host must run as 'park' with the opencode pin: ${hosts.join(" | ")}`);
 if (!/predecessor=[0-9]+$/.test(hosts[1])) throw new Error(`the successor host did not receive the closed host as its predecessor: ${hosts[1]}`);
 if (!rows.some((row) => row === "confirmed generation=fixture-generation watcher=" + hosts[1].replace(/^host=([0-9]+).*/, "$1"))) {
   throw new Error(`the handling handoff was not confirmed against the successor host's cycle: ${rows.join(" | ")}`);
@@ -5049,8 +5049,115 @@ EOF
 )
   status=$?
   expect_code 0 "$status" "OpenCode close handler must verify session-lock ownership before successor launch"
-  [ -z "$out" ] || fail "OpenCode close lock test printed output: $out"
+  case "$out" in
+    *"watcher: OpenCode wake owner unresolved; falling back to arming session session-test"*) ;;
+    *) fail "OpenCode close lock test did not log its unresolved-owner fallback: $out" ;;
+  esac
   pass "OpenCode close handler verifies session-lock ownership before successor launch"
+}
+
+test_opencode_wake_delivery_tracks_the_current_lock_owner() {
+  local plugin repo home log release out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-owner-target-root"
+  home="$TMP_ROOT/opencode-owner-target-home"
+  log="$TMP_ROOT/opencode-owner-target.log"
+  release="$TMP_ROOT/opencode-owner-target.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$release"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$$"
+while [ ! -e "${FM_RELEASE_DIR:?}/$$" ]; do sleep 0.02; done
+printf 'signal: owner target wake %s\n' "$$"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_DIR="$release" node 2>&1 <<'EOF'
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const url = pathToFileURL(process.env.PLUGIN).href;
+const modA = await import(url);
+const modB = await import(`${url}?owner-target`);
+const prompts = [];
+const makeClient = (tag) => ({
+  session: {
+    promptAsync: async (request) => prompts.push({ tag, id: request.path.id, text: request.body.parts[0].text }),
+  },
+});
+const clientA = makeClient("A");
+const clientB = makeClient("B");
+const hooksA = await modA.FmPrimaryWatchArm({ client: clientA, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+await modB.FmPrimaryWatchArm({ client: clientB, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const release = (pid) => writeFileSync(`${process.env.FM_RELEASE_DIR}/${pid}`, "release\n");
+const rows = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean) : []);
+const pids = () => rows().map((row) => Number(row.slice("arm=".length)));
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+writeFileSync(lock, `${process.pid}\n`);
+const idle = (sessionID) => ({ event: { type: "session.idle", properties: { sessionID } } });
+const otherOwner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  await hooksA.event(idle("session-A"));
+  await waitFor(() => pids().length === 1, "session A did not start the shared arm");
+  writeFileSync(lock, `${otherOwner.pid}\n`);
+  const nonOwnerStatus = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-B", clientB);
+  if (nonOwnerStatus !== "read-only") throw new Error(`non-owner load returned ${nonOwnerStatus}`);
+  writeFileSync(lock, `${process.pid}\n`);
+  release(pids()[0]);
+  await waitFor(() => prompts.length === 1 && pids().length === 2, "first wake was not delivered after successor readiness");
+  if (prompts[0].tag !== "A" || prompts[0].id !== "session-A") {
+    throw new Error(`non-owner load changed delivery target to ${prompts[0].tag}/${prompts[0].id}`);
+  }
+  const ownerStatus = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-B", clientB);
+  if (ownerStatus !== "armed") throw new Error(`new owner load returned ${ownerStatus}`);
+  release(pids()[1]);
+  await waitFor(() => prompts.length === 2 && pids().length === 3, "updated owner did not receive the next wake");
+  if (prompts[1].tag !== "B" || prompts[1].id !== "session-B") {
+    throw new Error(`updated owner target was not used: ${prompts[1].tag}/${prompts[1].id}`);
+  }
+  writeFileSync(lock, `${otherOwner.pid}\n`);
+  release(pids()[2]);
+  await waitFor(() => prompts.length === 3, "wake with unresolved owner was not delivered");
+  if (prompts[2].tag !== "A" || prompts[2].id !== "session-A") {
+    throw new Error(`unresolved wake did not fall back to its arming session: ${prompts[2].tag}/${prompts[2].id}`);
+  }
+  if (!prompts[2].text.includes("no longer owns the lock")) {
+    throw new Error(`unresolved-owner wake omitted the restoration failure: ${prompts[2].text}`);
+  }
+} finally {
+  for (const pid of pids()) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // Already exited.
+    }
+  }
+  otherOwner.kill("SIGTERM");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode wake delivery must follow the current lock owner and log fallback"
+  case "$out" in
+    *"watcher: OpenCode wake owner unresolved; falling back to arming session session-A"*) ;;
+    *) fail "OpenCode owner-target test did not log its unresolved-owner fallback: $out" ;;
+  esac
+  pass "OpenCode wake delivery follows the current owner and logs unresolved fallback"
 }
 
 test_opencode_watch_arm_coordinates_with_turnend_guard() {
@@ -5185,8 +5292,8 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run");
   process.exit(1);
 }
-if (!readFileSync(process.env.FM_ARM_LOG, "utf8").includes("args=--restart")) {
-  console.error("watch arm was not asked to restart into an owned child");
+if (!readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").includes("args=")) {
+  console.error("watch arm was not asked to attach-or-start the owned child");
   process.exit(1);
 }
 if (!existsSync(process.env.FM_GUARD_LOG)) {
@@ -5203,6 +5310,503 @@ EOF
   expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
   [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
+}
+
+# A wake burst is the live churn case: session.idle storms deliver wakes in
+# overlapping batches, and the host can hold more than one load of this plugin
+# in one process. Both deliveries and both loads must resolve to one arm child,
+# every successor must be launched attach-or-start (never --restart), delivery
+# must move through exactly one live cycle at a time, and each predecessor arm
+# must exit before its successor is established.
+test_opencode_overlapping_deliveries_keep_one_live_cycle() {
+  local plugin repo home log release stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-burst-root"
+  home="$TMP_ROOT/opencode-burst-home"
+  log="$TMP_ROOT/opencode-burst.log"
+  release="$TMP_ROOT/opencode-burst.release"
+  stop="$TMP_ROOT/opencode-burst.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$release"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'handling-delivered gen=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s args=%s\n' "$$" "$*" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$$"
+printf 'ready=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+trap 'printf "exit=%s\n" "$$" >> "${FM_ARM_LOG:?}"; exit 0' TERM INT
+while [ ! -e "${FM_RELEASE_DIR:?}/$$" ]; do sleep 0.02; done
+printf 'exit=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+trap - TERM INT
+printf 'signal: burst wake %s\n' "$$"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_DIR="$release" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=50 FM_WATCH_REARM_RETRY_MAX_MS=100 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const url = pathToFileURL(process.env.PLUGIN).href;
+// Two independent loads in one host process: a host reload or per-session
+// loads are what let paired successors appear in production.
+const modA = await import(url);
+const modB = await import(`${url}?load-burst`);
+const prompts = [];
+const makeClient = (tag) => ({
+  session: {
+    promptAsync: async (request) => {
+      prompts.push({ tag, text: request.body.parts[0].text });
+    },
+  },
+});
+const hooksA = await modA.FmPrimaryWatchArm({ client: makeClient("A"), directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const hooksB = await modB.FmPrimaryWatchArm({ client: makeClient("B"), directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const idle = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+const rows = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean) : []);
+const armRows = () => rows().filter((row) => row.startsWith("arm="));
+const pids = () => armRows().map((row) => Number(row.match(/^arm=(\d+)/)?.[1]));
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+try {
+  // One overlapping delivery burst across both subscriptions and the
+  // coordinator entry the turn-end guard uses.
+  await Promise.all([
+    hooksA.event(idle),
+    hooksB.event(idle),
+    globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test"),
+    globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test"),
+    hooksA.event(idle),
+    hooksB.event(idle),
+  ]);
+  await waitFor(() => armRows().length >= 1, "the burst did not start an arm");
+  await waitFor(() => rows().some((row) => row === `ready=${pids()[0]}`), "the first arm never reported ready");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  if (armRows().length !== 1) throw new Error(`overlapping deliveries spawned ${armRows().length} arms: ${rows().join(" | ")}`);
+  if (armRows().some((row) => !/^arm=\d+ args=$/.test(row))) throw new Error(`a successor was launched as a restart: ${rows().join(" | ")}`);
+  // Deliver the first wake: one successor must be established before its
+  // prompt, and the predecessor must be gone.
+  writeFileSync(`${process.env.FM_RELEASE_DIR}/${pids()[0]}`, "release\n");
+  await waitFor(() => armRows().length >= 2 && prompts.length >= 1, "the first delivery did not establish exactly one successor");
+  await waitFor(() => rows().some((row) => row === `ready=${pids()[1]}`), "the successor never reported ready");
+  if (alive(pids()[0])) throw new Error(`the predecessor arm ${pids()[0]} survived its successor`);
+  // The turn-end storm that follows the wake must reuse the live cycle.
+  await Promise.all([hooksA.event(idle), hooksB.event(idle), hooksA.event(idle), hooksB.event(idle)]);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (armRows().length !== 2) throw new Error(`the turn-end storm spawned extra successors: ${rows().join(" | ")}`);
+  // The second delivery moves to one successor the same way.
+  writeFileSync(`${process.env.FM_RELEASE_DIR}/${pids()[1]}`, "release\n");
+  await waitFor(() => armRows().length >= 3 && prompts.length >= 2, "the second delivery did not establish exactly one successor");
+  await waitFor(() => rows().some((row) => row === `ready=${pids()[2]}`), "the second successor never reported ready");
+  if (alive(pids()[1])) throw new Error(`the predecessor arm ${pids()[1]} survived its successor`);
+  if (armRows().length !== 3) throw new Error(`the burst produced colliding successors: ${rows().join(" | ")}`);
+  if (prompts.filter((entry) => entry.text.includes("burst wake")).length !== 2) {
+    throw new Error(`expected one prompt per delivered wake: ${prompts.map((entry) => entry.text).join(" || ")}`);
+  }
+  if (prompts.some((entry) => entry.text.includes("could not restore watcher continuity"))) {
+    throw new Error(`continuity restoration failed under the burst: ${prompts.map((entry) => entry.text).join(" || ")}`);
+  }
+  if (rows().filter((row) => row.startsWith("handling-delivered gen=gen-")).length < 2) {
+    throw new Error(`successor handling delivery was not confirmed: ${rows().join(" | ")}`);
+  }
+} finally {
+  for (let round = 0; round < 4; round += 1) {
+    const armPids = rows().filter((row) => row.startsWith("arm=")).map((row) => Number(row.match(/^arm=(\d+)/)?.[1]));
+    for (const pid of armPids) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // Already exited.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  const survivors = rows()
+    .filter((row) => row.startsWith("arm="))
+    .map((row) => Number(row.match(/^arm=(\d+)/)?.[1]))
+    .filter((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  if (survivors.length) {
+    console.error(`arm processes survived the burst cleanup: ${survivors.join(",")}`);
+    process.exit(1);
+  }
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "an overlapping wake burst must keep one live cycle with attach-or-start successors: $out"
+  [ -z "$out" ] || fail "OpenCode burst test printed output: $out"
+  pass "OpenCode overlapping deliveries keep one live cycle and retire predecessors"
+}
+
+# A successor must never stop a healthy identity-matched cycle it did not
+# start: launched attach-or-start, it attaches to the live cycle (or waits for
+# one) and overlapping deliveries reuse that one attached arm.
+test_opencode_successor_attaches_without_stopping_a_healthy_cycle() {
+  local plugin repo home log cycle stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-attach-root"
+  home="$TMP_ROOT/opencode-attach-home"
+  log="$TMP_ROOT/opencode-attach.log"
+  cycle="$TMP_ROOT/opencode-attach.cycle"
+  stop="$TMP_ROOT/opencode-attach.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+printf 'arm=%s args=%s\n' "$$" "$*" >> "${FM_ARM_LOG:?}"
+holder=$(cat "${FM_CYCLE_FILE:?}" 2>/dev/null || true)
+if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+  case " $* " in
+    *" --restart "*)
+      printf 'stopped-cycle=%s\n' "$holder" >> "${FM_ARM_LOG:?}"
+      kill -TERM "$holder" 2>/dev/null || true
+      ;;
+  esac
+  printf 'watcher: attached pid=%s (beacon 0s)\n' "$holder"
+  printf 'ready=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+  trap 'printf "exit=%s\n" "$$" >> "${FM_ARM_LOG:?}"; exit 0' TERM INT
+  while kill -0 "$holder" 2>/dev/null; do sleep 0.02; done
+  printf 'exit=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'ready=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+trap 'printf "exit=%s\n" "$$" >> "${FM_ARM_LOG:?}"; exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+printf 'exit=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_CYCLE_FILE="$cycle" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=50 FM_WATCH_REARM_RETRY_MAX_MS=100 node 2>&1 <<'EOF'
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const idle = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+// A healthy cycle this plugin did not start: the state an orphaned successor or
+// a peer cycle presents to a fresh delivery.
+const holder = spawn("sleep", ["60"], { stdio: "ignore" });
+writeFileSync(process.env.FM_CYCLE_FILE, `${holder.pid}\n`);
+const rows = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean) : []);
+try {
+  const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+  if (status !== "armed") throw new Error(`expected the successor to attach to the live cycle, got ${status}`);
+  // Overlapping deliveries reuse the attached arm instead of spawning another.
+  await Promise.all([hooks.event(idle), hooks.event(idle), globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test")]);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const armRows = rows().filter((row) => row.startsWith("arm="));
+  if (armRows.length !== 1) throw new Error(`overlapping deliveries spawned ${armRows.length} arms: ${rows().join(" | ")}`);
+  if (!/^arm=\d+ args=$/.test(armRows[0])) throw new Error(`the successor was launched as a restart: ${armRows[0]}`);
+  if (rows().some((row) => row.startsWith("stopped-cycle="))) throw new Error(`the successor stopped the healthy cycle: ${rows().join(" | ")}`);
+  if (readFileSync(process.env.FM_CYCLE_FILE, "utf8").trim() !== String(holder.pid)) {
+    throw new Error("the healthy cycle claim was replaced");
+  }
+  try {
+    process.kill(holder.pid, 0);
+  } catch {
+    throw new Error("the healthy cycle was stopped by a successor");
+  }
+} finally {
+  try {
+    process.kill(holder.pid, "SIGTERM");
+  } catch {
+    // Already exited.
+  }
+  for (let round = 0; round < 4; round += 1) {
+    const armPids = rows().filter((row) => row.startsWith("arm=")).map((row) => Number(row.match(/^arm=(\d+)/)?.[1]));
+    for (const pid of armPids) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // Already exited.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  const survivors = rows()
+    .filter((row) => row.startsWith("arm="))
+    .map((row) => Number(row.match(/^arm=(\d+)/)?.[1]))
+    .filter((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  if (survivors.length) {
+    console.error(`attached arms outlived their cycle: ${survivors.join(",")}`);
+    process.exit(1);
+  }
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "an OpenCode successor must attach to a healthy cycle without stopping it: $out"
+  [ -z "$out" ] || fail "OpenCode attach test printed output: $out"
+  pass "OpenCode successors attach to a healthy cycle without stopping it"
+}
+
+# Exercise the OpenCode host launch against a real supervision host and watcher.
+# An unready host pass-through leaves a healthy detached cycle; the next
+# OpenCode host must take it over without opening another downtime episode.
+test_opencode_host_takes_over_healthy_detached_cycle() {
+  local plugin repo home fakebin launch_log host_output hold release node_script out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-host-takeover-root"
+  home="$TMP_ROOT/opencode-host-takeover-home"
+  fakebin="$TMP_ROOT/opencode-host-takeover-fakebin"
+  launch_log="$TMP_ROOT/opencode-host-takeover-launch.log"
+  host_output="$TMP_ROOT/opencode-host-takeover-output.log"
+  hold="$TMP_ROOT/opencode-host-takeover-hold"
+  release="$TMP_ROOT/opencode-host-takeover-release"
+  node_script="$TMP_ROOT/watch-cycle-fixture.mjs"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$fakebin"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  for source in "$ROOT"/bin/*; do
+    name=${source##*/}
+    [ "$name" = fm-supervision-host.sh ] && continue
+    ln -s "$source" "$repo/bin/$name"
+  done
+  printf 'project=demo\nwindow=fm-demo\nharness=opencode\n' > "$home/state/demo.meta"
+  : > "$home/config/supervision-host"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  ln -s /bin/bash "$fakebin/claude"
+  ln -s /bin/bash "$fakebin/opencode"
+  printf 'claude\n' > "$home/config/supervision-host"
+  printf '{"hook_event_name":"UserPromptSubmit","prompt_id":"p0","prompt":"watch the fleet for me"}' > "$home/mirror-seed.0"
+  cat > "$repo/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'argc=%s args=' "$#" >> "${FM_HOST_LAUNCH_LOG:?}"
+printf '<%s>' "$@" >> "$FM_HOST_LAUNCH_LOG"
+printf '\n' >> "$FM_HOST_LAUNCH_LOG"
+if [ "$(wc -l < "$FM_HOST_LAUNCH_LOG" | tr -d '[:space:]')" -eq 1 ]; then
+  : > "$FM_HOST_HOLD"
+  while [ ! -e "$FM_HOST_RELEASE" ]; do sleep 0.02; done
+fi
+  exec "$FM_REAL_HOST" "$@" > >(tee -a "$FM_HOST_OUTPUT_LOG") 2> >(tee -a "$FM_HOST_OUTPUT_LOG" >&2)
+SH
+  chmod +x "$repo/bin/fm-supervision-host.sh"
+  cat > "$node_script" <<'EOF'
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const state = `${process.env.FM_HOME}/state`;
+const pidFile = `${state}/.watch.lock/pid`;
+const hostFile = `${state}/.supervision-host`;
+const leftFile = `${state}/.supervision-host-left`;
+const launchLog = process.env.FM_HOST_LAUNCH_LOG;
+const knownPids = new Set();
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const alive = (pid) => {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const read = (path) => (existsSync(path) ? readFileSync(path, "utf8") : "");
+const rows = (path) => read(path).trim().split("\n").filter(Boolean);
+const watcherPid = () => Number(read(pidFile).trim());
+const hostRows = () => rows(hostFile).map((row) => row.split("\t"));
+const hostPid = () => Number(hostRows().find((row) => row[0] === "host")?.[1] ?? 0);
+const armPid = () => Number(hostRows().find((row) => row[0] === "arm")?.[1] ?? 0);
+const parentPid = (pid) => spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 1000; i += 1) {
+    if (predicate()) return;
+    await sleep(10);
+  }
+  throw new Error(message);
+}
+
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+let sourceHost;
+try {
+  const sourceEnv = { ...process.env, FM_SUPERVISION_HOST_PRIMARY: "claude" };
+  const mirror = spawnSync("bash", [`${process.env.WORKTREE}/bin/fm-host-mirror.sh`, "hook", "claude"], {
+    input: readFileSync(`${process.env.FM_HOME}/mirror-seed.0`),
+    encoding: "utf8",
+    env: sourceEnv,
+  });
+  if (mirror.status !== 0) throw new Error(`the source session mirror could not be seeded: ${mirror.stderr}`);
+  sourceHost = spawn("bash", [process.env.FM_REAL_HOST, "park"], {
+    cwd: process.env.WORKTREE,
+    env: sourceEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  knownPids.add(sourceHost.pid);
+  let sourceOutput = "";
+  sourceHost.stdout.on("data", (chunk) => { sourceOutput += chunk.toString(); });
+  sourceHost.stderr.on("data", (chunk) => { sourceOutput += chunk.toString(); });
+  const sourceClosed = new Promise((resolve) => sourceHost.once("close", (code, signal) => resolve({ code, signal })));
+  await waitFor(
+    () => sourceOutput.includes("watcher: started pid=") || sourceHost.exitCode !== null,
+    `the source host did not start a watcher: ${sourceOutput}; host=${read(hostFile)}; log=${read(`${state}/.supervision-host.log`)}`,
+  );
+  if (!sourceOutput.includes("watcher: started pid=")) {
+    throw new Error(`the source host exited before watcher readiness: ${sourceHost.exitCode}/${sourceHost.signalCode}; output=${sourceOutput}; log=${read(`${state}/.supervision-host.log`)}`);
+  }
+  const sourceWatcher = watcherPid();
+  knownPids.add(sourceWatcher);
+  if (hostPid() !== sourceHost.pid) throw new Error("the source host did not own the initial watcher cycle");
+  writeFileSync(`${state}/demo.status`, `needs-decision [at=${Math.floor(Date.now() / 1000)}]: which export format?\n`);
+  const sourceExit = await sourceClosed;
+  if (sourceExit.code !== 0) throw new Error(`the source host exited before leaving its cycle: ${sourceExit.code}/${sourceExit.signal}: ${sourceOutput}`);
+  await waitFor(() => existsSync(leftFile), `the source host did not leave a detached cycle: ${read(`${state}/.supervision-host.log`)}`);
+  const detachedArm = Number(rows(leftFile)[0]?.split("\t")[0] ?? 0);
+  const detachedWatcher = watcherPid();
+  knownPids.add(detachedArm);
+  knownPids.add(detachedWatcher);
+  const beat = `${state}/.last-watcher-beat`;
+  const sourceLog = read(`${state}/.supervision-host.log`);
+  if (!sourceLog.includes("pass-through\tattended\tmain-only")) {
+    throw new Error(`the source close was not main-only: ${sourceLog}`);
+  }
+  if (!detachedArm || !alive(detachedArm) || !detachedWatcher || !alive(detachedWatcher)) {
+    throw new Error(`the source host did not leave a live detached cycle: arm=${detachedArm}, watcher=${detachedWatcher}, output=${sourceOutput}, log=${sourceLog}`);
+  }
+  if (!existsSync(beat) || Date.now() - statSync(beat).mtimeMs > 5000) {
+    throw new Error("the detached watcher did not have a fresh health beat before adoption");
+  }
+  const drain = spawnSync(process.env.FM_FAKE_CLAUDE, ["-c", '"$0" "$@"', `${process.env.WORKTREE}/bin/fm-wake-drain.sh`], {
+    encoding: "utf8",
+    env: process.env,
+  });
+  const drainOutput = `${drain.stdout}\n${drain.stderr}`;
+  const ack = drainOutput.match(/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh (.*)$/m)?.[1];
+  if (drain.status !== 0 || !ack) throw new Error(`the main-only wake could not be acknowledged: ${drainOutput}`);
+  if (!alive(detachedArm) || !alive(detachedWatcher) || watcherPid() !== detachedWatcher) {
+    throw new Error(`the healthy detached cycle changed after drain: arm=${detachedArm}/${alive(detachedArm)} watcher=${detachedWatcher}/${alive(detachedWatcher)} current=${watcherPid()} drain=${drainOutput} log=${read(`${state}/.supervision-host.log`)}`);
+  }
+  const ackResult = spawnSync(process.env.FM_FAKE_CLAUDE, ["-c", '"$0" "$@"', `${process.env.WORKTREE}/bin/fm-wake-drain.sh`, ...ack.trim().split(/\s+/)], {
+    encoding: "utf8",
+    env: process.env,
+  });
+  if (ackResult.status !== 0) throw new Error(`the main-only wake acknowledgement failed: ${ackResult.stdout}\n${ackResult.stderr}`);
+  if (!alive(detachedArm) || !alive(detachedWatcher) || watcherPid() !== detachedWatcher) {
+    throw new Error(`the healthy detached cycle changed after acknowledgement: arm=${detachedArm}/${alive(detachedArm)} watcher=${detachedWatcher}/${alive(detachedWatcher)} current=${watcherPid()} ack=${ackResult.stdout}\n${ackResult.stderr} log=${read(`${state}/.supervision-host.log`)}`);
+  }
+
+  const ready = globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+  await waitFor(() => existsSync(process.env.FM_HOST_HOLD), "the OpenCode successor host was not launched");
+  const launches = rows(launchLog);
+  if (launches.length !== 1 || launches[0] !== "argc=1 args=<park>") {
+    throw new Error(`OpenCode did not launch the successor host without --restart: ${launches.join(" | ")}`);
+  }
+
+  // The OpenCode launch pauses at the executable boundary, so the detached
+  // predecessor cycle can be checked while it is still healthy.
+  if (!alive(detachedArm) || !alive(detachedWatcher) || watcherPid() !== detachedWatcher) {
+    throw new Error(`the healthy detached cycle changed before adoption: arm=${detachedArm}/${alive(detachedArm)} watcher=${detachedWatcher}/${alive(detachedWatcher)} current=${watcherPid()} launches=${launches.join(" | ")} log=${read(`${state}/.supervision-host.log`)}`);
+  }
+
+  writeFileSync(process.env.FM_HOST_RELEASE, "continue\n");
+  const status = await ready;
+  if (status !== "armed") throw new Error(`the OpenCode successor host did not arm: ${status}; output=${read(process.env.FM_HOST_OUTPUT_LOG)}`);
+  await waitFor(
+    () => hostPid() > 0 && alive(watcherPid()) && hostPid() !== sourceHost.pid,
+    "the OpenCode host did not adopt the detached cycle",
+  );
+  await waitFor(() => !alive(detachedArm), `the detached predecessor arm ${detachedArm} was not retired`);
+  const currentHost = hostPid();
+  const currentArm = armPid();
+  const currentWatcher = watcherPid();
+  const supervisionLog = read(`${state}/.supervision-host.log`);
+  if (!supervisionLog.includes(`take-over\tarm=${detachedArm}`)) {
+    throw new Error(`the next host did not take over the recorded arm ${detachedArm}: ${supervisionLog}`);
+  }
+  if (currentHost === sourceHost.pid || !currentArm || parentPid(currentWatcher) !== String(currentArm)) {
+    throw new Error(`the adopted cycle is not owned by the new host: host=${currentHost} arm=${currentArm} watcher=${currentWatcher}`);
+  }
+  if (supervisionLog.includes("rearm-resurface")) {
+    throw new Error(`takeover resurfaced a redundant downtime wake: ${supervisionLog}`);
+  }
+  if (!read(`${state}/.watcher-down`).startsWith("acked:")) {
+    throw new Error(`takeover reopened the handled downtime episode: ${read(`${state}/.watcher-down`)}`);
+  }
+} finally {
+  // Revoking the fixture lock intentionally makes the plugin's final host
+  // close read-only; its expected warning is cleanup noise, not test output.
+  console.warn = () => {};
+  writeFileSync(process.env.FM_HOST_RELEASE, "continue\n");
+  writeFileSync(`${state}/.lock`, "1\n");
+  if (sourceHost && sourceHost.exitCode === null) sourceHost.kill("SIGTERM");
+  for (let round = 0; round < 10; round += 1) {
+    const pids = new Set([...knownPids, hostPid(), armPid(), watcherPid(), Number(rows(leftFile)[0]?.split("\t")[0] ?? 0)]);
+    for (const pid of pids) {
+      if (pid > 1) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          // Already exited.
+        }
+      }
+    }
+    await sleep(100);
+  }
+  const survivors = [...new Set([...knownPids, hostPid(), armPid(), watcherPid()])].filter((pid) => pid > 1 && alive(pid));
+  if (survivors.length) throw new Error(`fixture processes survived cleanup: ${survivors.join(",")}`);
+}
+EOF
+  # shellcheck disable=SC2016 # The fake OpenCode command must remain literal.
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_HOST_LAUNCH_LOG="$launch_log" FM_HOST_OUTPUT_LOG="$host_output" FM_HOST_HOLD="$hold" \
+    FM_HOST_RELEASE="$release" FM_REAL_HOST="$ROOT/bin/fm-supervision-host.sh" FM_NODE_SCRIPT="$node_script" \
+    FM_FAKE_CLAUDE="$fakebin/claude" PATH="$fakebin:$PATH" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=30 FM_SUPERVISION_HOST_POLL=1 FM_WATCH_REARM_RETRY_LIMIT=1 \
+    FM_WATCH_REARM_RETRY_BASE_MS=50 FM_WATCH_REARM_RETRY_MAX_MS=100 \
+    "$fakebin/opencode" -c '
+      exec -a opencode node "$FM_NODE_SCRIPT"
+    ' 2>&1)
+  status=$?
+  expect_code 0 "$status" "an opted-in OpenCode host must take over a healthy detached cycle without a redundant restart: $out"
+  [ -z "$out" ] || fail "OpenCode host takeover test printed output: $out"
+  pass "OpenCode host takes over a healthy detached cycle without a downtime resurface"
 }
 
 test_pi_extension_reports_external_healthy_watcher
@@ -5263,5 +5867,9 @@ test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
 test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
+test_opencode_wake_delivery_tracks_the_current_lock_owner
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+test_opencode_overlapping_deliveries_keep_one_live_cycle
+test_opencode_successor_attaches_without_stopping_a_healthy_cycle
+test_opencode_host_takes_over_healthy_detached_cycle

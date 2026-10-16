@@ -242,6 +242,66 @@ test_attached_arm_reports_the_delivered_wake_after_drain() {
   pass "watch-arm: a delivered wake consumed by the handling turn still closes the attached arm cleanly"
 }
 
+# A wake burst makes the owner re-arm while a cycle is already live; every
+# re-arm must attach to that cycle rather than stop it, and each attached arm
+# must resolve the one delivered wake and exit. This is the arm-layer half of
+# the OpenCode successor fix: the plugin now launches this attach path instead
+# of --restart on every delivery.
+test_concurrent_attached_arms_share_one_live_cycle() {
+  local dir state fakebin out arm1out arm2out status pid1 pid2 seed_pid seed_identity i
+  dir=$(make_case concurrent-attached-arms)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  arm1out="$dir/arm1.out"
+  arm2out="$dir/arm2.out"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  seed_pid=$SEED_PID
+  seed_identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$arm1out" 2>&1 &
+  pid1=$!
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$arm2out" 2>&1 &
+  pid2=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$seed_pid" "$arm1out" 2>/dev/null \
+      && grep -qF "watcher: attached pid=$seed_pid" "$arm2out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$seed_pid" "$arm1out" \
+    || fail "the first concurrent arm did not attach: $(cat "$arm1out")"
+  grep -qF "watcher: attached pid=$seed_pid" "$arm2out" \
+    || fail "the second concurrent arm did not attach: $(cat "$arm2out")"
+  is_live_non_zombie "$seed_pid" || fail "an attached arm stopped the live cycle"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$seed_pid" ] \
+    || fail "the live cycle lost its lock to an attached arm"
+  [ "$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)" = "$seed_identity" ] \
+    || fail "the live cycle identity changed under concurrent attachments"
+
+  # The one live cycle delivers its one wake; both attached arms resolve it.
+  printf 'done: concurrent attach fixture\n' > "$state/demo.status"
+  wait_for_exit "$seed_pid" 120 || fail "the seed watcher never delivered its wake"
+  wait_for_exit "$pid1" 200
+  status=$?
+  expect_code 0 "$status" "an attached arm in a concurrent pair must close on the delivered wake"
+  wait_for_exit "$pid2" 200
+  status=$?
+  expect_code 0 "$status" "the second attached arm must close on the delivered wake"
+  grep -q '^signal:' "$arm1out" || fail "the first arm did not report the delivered wake: $(cat "$arm1out")"
+  grep -q '^signal:' "$arm2out" || fail "the second arm did not report the delivered wake: $(cat "$arm2out")"
+  ! grep -qF 'watcher: FAILED' "$arm1out" "$arm2out" \
+    || fail "a concurrent attached arm reported a failed cycle"
+  [ "$(grep -c 'reason=attached-delivered-wake' "$state/.watch-cycle-exits.log")" -eq 2 ] \
+    || fail "concurrent attached closes were not ledgered: $(cat "$state/.watch-cycle-exits.log")"
+  ! grep -q 'reason=signal-exit' "$state/.watch-cycle-exits.log" \
+    || fail "an attached arm stopped the live cycle instead of following it"
+  pass "watch-arm: concurrent re-arms attach to the one live cycle and resolve together"
+}
+
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   local dir state fakebin out armout status
   dir=$(make_case attached-no-delivery)
@@ -1715,6 +1775,7 @@ EOF
 
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
+test_concurrent_attached_arms_share_one_live_cycle
 test_arm_refuses_an_unusable_launch_confirm_window
 test_arm_refuses_a_disposable_validation_checkout
 test_watcher_exits_when_its_state_directory_is_removed
