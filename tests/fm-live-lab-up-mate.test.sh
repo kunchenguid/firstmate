@@ -39,6 +39,9 @@ chmod +x "$TMP_ROOT/source/bin/"{fm-home-seed,fm-spawn}.sh "$TMP_ROOT/fakebin/cl
 git -C "$TMP_ROOT/source" init -q -b main
 git -C "$TMP_ROOT/source" add -A
 git -C "$TMP_ROOT/source" -c user.name=t -c user.email=t@example.invalid commit -qm stub
+# The worker block below re-stubs the spawn in its own checkout and leaves
+# fm-brief.sh, fm-tasks-axi.sh, and the project seeding real.
+cp -R "$TMP_ROOT/source" "$TMP_ROOT/source-worker"
 
 cleanup_labs() {
   local root
@@ -67,3 +70,49 @@ for mode in off on; do
   fi
   pass "up --mate with supervision host $mode reaches readiness"
 done
+
+# A gated-worker lab: the real project seeding runs, with only the worker
+# launch stubbed. Treehouse resolves its pool root from a treehouse.toml inside
+# the repo and never from TREEHOUSE_ROOT (v2.0.1 has no such variable), so up
+# must wire that config into the lab home and the lab project; a lab copy that
+# lands anywhere else is this test's failure, because the default root is $HOME
+# and HOME here is the test user's real-feeling home treehouse.
+cat > "$TMP_ROOT/source-worker/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+# Stubbed worker launch: the same observable window, metadata, and parked
+# status as a real gated worker, without contacting a model. kind=secondmate
+# is the suite's fixture convention (make_lab uses it too): it routes
+# crew-state to the status log instead of harness busy detection a sleep pane
+# cannot answer.
+tmux new-window -d -t firstmate: -n "fm-$1" -c "$2" 'exec sleep 45' || exit 1
+pid=$(tmux display-message -p -t "firstmate:=fm-$1" '#{pane_pid}')
+printf 'window=firstmate:fm-%s\nworktree=%s\nkind=secondmate\ntasktmp=/tmp/fm-%s\n' "$1" "$2" "$1" > "$FM_HOME/state/$1.meta"
+printf 'paused [at=1]: waiting on gate file %s to exist\n' "$FM_HOME/data/$1/gate" > "$FM_HOME/state/$1.status"
+SH
+chmod +x "$TMP_ROOT/source-worker/bin/fm-spawn.sh"
+git -C "$TMP_ROOT/source-worker" add -A
+git -C "$TMP_ROOT/source-worker" -c user.name=t -c user.email=t@example.invalid commit -qm 'worker spawn stub'
+
+wlab="$TMP_ROOT/lab-worker"
+home_treehouse_before=$(find "$HOME/.treehouse" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort)
+out=$(PATH="$TMP_ROOT/fakebin:$PATH" SHELL=/bin/sh "$ROOT/bin/fm-live-lab.sh" up --harness claude --worker --model claude-haiku-5-5 --supervision-host none --expect-host no --timeout 0 --source "$TMP_ROOT/source-worker" "$wlab" 2>&1)
+rc=$?
+expect_code 1 "$rc" "unanswered probe leaves the worker lab for inspection"
+assert_contains "$out" 'ok worker:' "up checks the launched gated worker"
+assert_contains "$out" 'ok treehouse:' "up sees no home treehouse growth"
+assert_contains "$(cat "$wlab/home/treehouse.toml")" "root = \"$wlab/treehouse\"" "up wires the lab home's treehouse root"
+assert_contains "$(cat "$wlab/home/projects/notes/treehouse.toml")" "root = \"$wlab/treehouse\"" "up wires the lab project's treehouse root"
+if command -v treehouse >/dev/null 2>&1; then
+  allocated=$(cd "$wlab/home/projects/notes" && TREEHOUSE_NO_UPDATE_CHECK=1 treehouse get --lease --lease-holder "labt$$-worker-probe" 2>/dev/null)
+  case "$allocated" in
+    "$wlab/treehouse/"*) ;;
+    *) fail "lab copy landed outside the lab treehouse root: ${allocated:-none}" ;;
+  esac
+  home_treehouse_after=$(find "$HOME/.treehouse" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort)
+  [ "$home_treehouse_after" = "$home_treehouse_before" ] \
+    || fail "the lab copy leaked into the home treehouse: $(comm -13 <(printf '%s\n' "$home_treehouse_before") <(printf '%s\n' "$home_treehouse_after") | tr '\n' ' ')"
+  pass "lab treehouse copy allocates under the lab root only"
+else
+  echo "ok - treehouse not installed; the allocation probe is capability-skipped"
+fi
+pass "up --worker keeps every copy under the lab treehouse root"

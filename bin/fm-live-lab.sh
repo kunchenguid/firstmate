@@ -39,8 +39,14 @@
 #                    tmux-dir, with no user tmux config (its plugins never run
 #                    in a lab), started from an empty environment so no inherited
 #                    TMUX, Herdr, or Pi marker reaches a lab process.
-#                    TREEHOUSE_ROOT points into <lab-root>, so a worker's pool
-#                    never lands in ~/.treehouse, and DISABLE_AUTOUPDATER=1
+#                    treehouse pool: up writes a treehouse.toml (root =
+#                    <lab-root>/treehouse) into the lab home and every lab
+#                    project, because Treehouse resolves its pool root from
+#                    that in-repo config file alone - it never reads the
+#                    TREEHOUSE_ROOT environment variable - so this is what
+#                    keeps a worker's pool out of ~/.treehouse. The
+#                    TREEHOUSE_ROOT export stays as the lab's declared root
+#                    pointer. DISABLE_AUTOUPDATER=1
 #                    keeps Claude Code from replacing the shared binary under
 #                    a running lab, as every live run does (tests/lib.sh).
 #                    A set CLAUDE_CONFIG_DIR (absolute) is passed to every lab
@@ -377,6 +383,15 @@ say_text() {  # <window> <text>
   lab_tmux send-keys -t "$id" Enter
 }
 
+# Treehouse v2.0.1 resolves its pool root exclusively from a treehouse.toml
+# found inside the repository of its working directory (default root $HOME) and
+# never from the TREEHOUSE_ROOT environment variable, so the lab writes that
+# config into every repo a lab treehouse call can run from. The file stays
+# untracked: only the get that allocates a copy reads it, never the copies.
+wire_treehouse_root() {  # <repo-root>
+  printf 'root = "%s"\n' "$ROOT/treehouse" > "$1/treehouse.toml"
+}
+
 make_notes_project() {
   local seed="$ROOT/origins/notes-seed" origin="$ROOT/origins/notes.git"
   mkdir -p "$seed/notes" "$seed/tests"
@@ -424,6 +439,7 @@ MD
   git clone -q --bare "$seed" "$origin"
   rm -rf "$seed"
   git clone -q "$origin" "$LAB/projects/notes"
+  wire_treehouse_root "$LAB/projects/notes"
   printf '# Projects\n\n- notes [local-only +yolo] - tiny lab notes library\n' > "$LAB/data/projects.md"
 }
 
@@ -528,6 +544,7 @@ cmd_up() {
   git -C "$LAB" checkout -q -f -B main FETCH_HEAD || die "cannot check out $ref"
   git -C "$LAB" config user.name lab && git -C "$LAB" config user.email lab@example.invalid
   mkdir -p "$LAB/state" "$LAB/data" "$LAB/config" "$LAB/projects" "$ROOT/treehouse"
+  wire_treehouse_root "$LAB"
   printf 'tmux\n' > "$LAB/config/backend"
   printf 'claude\n' > "$LAB/config/crew-harness"
   printf 'claude claude-haiku-5-5 low\n' > "$LAB/config/secondmate-harness"
