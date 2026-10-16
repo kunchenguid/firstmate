@@ -24,7 +24,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-skill-stats.sh`      | Read per-skill fleet read counts as JSON ([skill statistics](fleet-ledger.md#skill-statistics)) |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
-| `fm-dashboard.sh`        | Build fleet dashboard data and reference pages, or serve the read-only fleet app |
+| `fm-dashboard.sh`        | Shim for the firstmate-addons fleet-dashboard add-on: build its data and reference pages, or serve its read-only fleet app |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |
 | `fm-update.sh`           | Guarded self-update of firstmate and local or remote secondmate homes, reconciling redundant divergence and classifying every live mate left on the target commit for restart or fallback nudge |
 | `fm-secondmate-restart.sh` | Persist open conversational work, then restart eligible second mates or report the fallback outcome |

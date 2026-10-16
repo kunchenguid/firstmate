@@ -1,4 +1,2 @@
 # Bash parses shell scripts with LF line endings on every supported platform.
 *.sh text eol=lf
-# The vendored three.js bundle is generated from upstream (its first line says how): skip whitespace checks and fold it in review diffs.
-bin/fm-dashboard/vendor/three-*.min.js -whitespace linguist-generated

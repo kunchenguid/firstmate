@@ -77,8 +77,8 @@ Example:
 ## Reading lifecycle metrics
 
 [`fm-flow.sh`](../bin/fm-flow.sh) reads retained fleet records into lifecycle, queue-reason, and bottleneck metrics, with optional live capacity observations; its header owns usage, output interpretation, timestamp provenance, and uncertainty limits.
-The dashboard's Insights view consumes its output: `fm-dashboard.sh` runs the reader at each build and embeds the result as the `flow` key of `board.json`.
-`fm-dashboard.sh`'s header owns that embedding and its scrubbing.
+The dashboard's Insights view consumes its output: the firstmate-addons fleet-dashboard add-on (reached through the `fm-dashboard.sh` shim) runs the reader at each build and embeds the result as the `flow` key of `board.json`.
+The add-on's header owns that embedding and its scrubbing.
 The real CLI regression journey is [`tests/fm-flow.test.sh`](../tests/fm-flow.test.sh).
 
 ## Per-model statistics
