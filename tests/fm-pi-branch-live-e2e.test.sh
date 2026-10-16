@@ -12,7 +12,8 @@
 # proven to refuse the build rather than silently running the branch on main's
 # model. A second branch probe intercepts the incident's post-construction 429
 # in-process and proves that Pi's normally settled error turn returns ownership
-# to the watcher. The model-precedence probe pins the vendor contract that the
+# to the watcher and releases its task reservation while the holder stays alive.
+# The model-precedence probe pins the vendor contract that the
 # model pin rests on:
 # an explicit model must beat the model a reopened session recorded, proven
 # against a local, never-contacted fake provider. The effort-precedence probe
@@ -290,6 +291,7 @@ BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
   node --input-type=module > "$TMP_ROOT/error-output" 2>&1 <<'EOF'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const home = resolve(process.env.FM_HOME);
@@ -304,6 +306,16 @@ globalThis.fetch = async (input) => {
     throw new Error(`unexpected network request in provider-free guard: ${url}`);
   }
   providerRequests += 1;
+  const leaseEnv = { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_LEASE_HOLDER_PID: String(process.pid) };
+  const leaseScript = `${process.env.FM_REAL_ROOT}/bin/fm-lease.sh`;
+  const claimed = spawnSync("bash", [leaseScript, "claim", "live-error-probe"], {
+    encoding: "utf8", env: { ...leaseEnv, FM_SUPERVISION_ACTOR: "branch" },
+  });
+  if (claimed.status !== 0) throw new Error(`live turn claim failed: ${claimed.stderr}`);
+  const contended = spawnSync("bash", [leaseScript, "claim", "live-error-probe"], {
+    encoding: "utf8", env: { ...leaseEnv, FM_SUPERVISION_ACTOR: "main" },
+  });
+  if (contended.status !== 6) throw new Error("main stole the live provider turn's reservation");
   return new Response(
     JSON.stringify({ error: { message: "Monthly usage limit reached", type: "insufficient_quota" } }),
     { status: 429, headers: { "content-type": "application/json" } },
@@ -396,6 +408,10 @@ if (mainUserMessages[0].options.deliverAs !== "followUp") {
   throw new Error("real-SDK provider-error watcher delivery was not a follow-up");
 }
 if (providerRequests !== 1) throw new Error(`non-retryable 429 made ${providerRequests} provider attempts instead of one`);
+if (existsSync(`${home}/state/.lease-live-error-probe`)) {
+  throw new Error("real-SDK settled provider error retained its live-PID task lease");
+}
+process.kill(process.pid, 0);
 if (existsSync(`${home}/state/.branch-eligible-rows`)) {
   throw new Error("real-SDK provider-error fallback left the claimed row grant active");
 }
@@ -429,7 +445,7 @@ out=$(cat "$TMP_ROOT/error-output")
 if [ "$status" -ne 0 ] || [ "$out" != "ERROR_FALLBACK_OK" ]; then
   fail "real-SDK Pi settled-provider-error guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION rejects a post-construction 429 to watcher-owned main delivery without losing its durable row"
+pass "real Pi SDK $PI_VERSION rejects a post-construction 429 to watcher-owned main delivery without losing its durable row or retaining its live-PID lease"
 
 # Third probe: the vendor contract the supervision-branch model pin rests on.
 # An explicit model must beat the model a reopened session recorded, or a pin

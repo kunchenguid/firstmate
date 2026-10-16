@@ -36,10 +36,12 @@
 #     unmarked main honors a live branch lease exactly as a Pi main does. The
 #     one residual is a recorded pid recycled onto the next session-lock holder
 #     itself; the host that owns a branch conversation releases that actor's
-#     leases when it activates a new one (the Pi branch extension's
-#     generation-activation cleanup; the supervision host also releases them
-#     after every engine turn), which also recovers a lease held by the live
-#     session but an abandoned branch conversation.
+#     leases when it activates a new one and after each settled turn (Pi's
+#     awaited prompt-finally cleanup; the supervision host's engine-turn
+#     cleanup), which also recovers a lease held by the live session but an
+#     abandoned branch conversation. Pi serializes cleanup with generation
+#     activation and subsequent turns and binds it to the expected lock pid;
+#     a report alone never releases a still-running turn's reservations.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
 # CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents
