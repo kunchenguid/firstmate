@@ -884,6 +884,7 @@ test_undelivered_records_are_scan_immutable() {
     fm_backend_busy_state() { fail "undelivered watcher tick must not probe the backend"; }
     fm_backend_capture() { fail "undelivered watcher tick must not capture the backend"; }
     fm_pending_reply_tick "$state" || fail "undelivered watcher tick should succeed"
+    # shellcheck disable=SC2030 # fixture state is deliberately scoped to this subshell, like the clock above
     after=$(cat "$rec")
     [ "$after" = "$before" ] || fail "scan paths must not mutate an undelivered record"
     fm_pending_reply_mark_delivered "$state" "$corr" || fail "delivery marker should succeed"
