@@ -69,3 +69,20 @@ REST cancellation did not emit `stop`, which is why the interrupt owner closes t
 A root `--config-dir` supplied a complete runtime config, while hook and facet discovery used the cwd's `.polytoken/` layer.
 The session tree used the versioned `<root>-v1` sibling of `--sessions-dir`.
 The 2026-10-14 lifecycle run exercised those same generated config, hook, facet, session discovery, and interrupt paths on the installed binary.
+
+## Task-directory file access
+
+On 2026-10-15, macOS arm64 with `polytoken 0.9.0`, Polytoken offered no launch-time grant that lets its file tools reach a directory outside the session's project root.
+Each run below used `polytoken --config-dir <cfg> --working-dir <project> exec --model zai/glm-5.3-flash`, where `<cfg>` mirrored the operator config with `default_permission_matcher: bypass`, and read a file in a sibling directory outside `<project>`.
+A direct `file_read` and `file_write` on that outside path succeeded with no rules configured.
+A `tool_flow` script calling `file_read` on the same path failed with:
+
+```text
+[ToolCallError] path is outside this session's allowed paths: <outside>/in.txt. This session is anchored at <project>; file access is confined to the project root and paths the user has granted.
+```
+
+That refusal held after adding `<cfg>/permissions.yaml` with `filesystem.allow` access `[read, write]` (and, separately, `[read, write, chdir]`) for `<outside>{,/**}` or `<outside>/**`, under the `bypass`, `bypass_plus`, and `standard` matchers, and after a successful `pushd` into the directory followed by `popd`.
+`polytoken doctor` with a deliberately invalid key in that file failed its permissions check, so the file was loaded in every run; under `standard` the rule did let a direct `file_read` through.
+`tool_flow` refuses `file_write` outright (`tool 'file_write' is not eligible for tool_flow`).
+`polytoken new --help`, `polytoken print schema app-config`, `polytoken print schema facet-frontmatter`, and `polytoken print openapi` expose no other session path grant.
+The worker facet therefore tells the model to use the direct file tools or the shell for the Firstmate task directory.

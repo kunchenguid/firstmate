@@ -30,6 +30,7 @@ A project hook that negates a global hook by name fails daemon startup (the scou
 Enter while a turn runs queues the text for the next agent pause - `Queued for the next agent pause` - exactly like OpenCode (verified live), and the queued text renders above the composer separator.
 There is no verified composer-clear key: Ctrl+Shift+Y copies the prompt but leaves it in the composer (verified live), so text is only ever typed into a composer proven empty and pending text is never typed onto.
 Ctrl+C ends the session; Escape Escape opens the rewind picker; neither is ever sent by firstmate.
+File tools are confined to the worktree plus session-granted paths, and no launch-time grant exists ([evidence](../../../../../docs/verification/polytoken.md#task-directory-file-access)): direct `file_read` and `file_write` reach the Firstmate task directory under the generated `bypass` matcher, but `tool_flow` cannot, so the worker facet points the model at the direct tools or the shell for that directory.
 A TUI-attached daemon stays alive while idle (verified minutes-scale) and exits on its own after its session ends, so the pane design needs no daemon-lifetime supervision.
 The daemon imposes no cap on consecutive `stop`-hook `continue` outcomes (verified live: five forced continuations all ran), so any future primary turn-end integration would need its own bounded latch.
 
