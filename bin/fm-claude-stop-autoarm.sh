@@ -30,9 +30,10 @@
 #     claim, and a stuck, dead, identity-mismatched, or finished claim is
 #     superseded by taking the next generation instead of being unlocked or
 #     revoked. A deferring firing parks on the open claim rather than exiting,
-#     because Claude turns only the latest Stop's exit 2 into a rewake: an
-#     owner whose Stop a later turn superseded hands its close to the parked
-#     firing, which delivers it, and an owner that ends without handing off
+#     so delivery never rests on the exit 2 of a Stop a later turn superseded,
+#     which the reported incidents lost: an owner whose Stop was superseded
+#     hands its close to the parked firing of the newest Stop, which delivers
+#     it, and an owner that ends without handing off
 #     leaves the parked firing to claim and arm as a later Stop would (issue
 #     #7252). No mutex is ever held across arming or output - the owner lock
 #     survives only as the micro-mutex serializing individual ledger writes -
@@ -250,8 +251,11 @@ fi
 # abandoned.
 #
 # A firing that meets a live open claim parks on it instead of exiting: this
-# Stop is newer than the owner's, and Claude turns only the latest Stop's exit
-# 2 into a rewake. A newer Stop's firing parks in this one's place, and this
+# Stop is newer than the owner's, the reported incidents (issue #7252) lost the
+# exit 2 of a superseded Stop, and so delivery comes from the newest Stop's
+# firing (docs/verification/supervision.md records that a live 2.1.301 lab
+# still delivered the superseded one). A newer Stop's firing parks in this
+# one's place, and this
 # one exits silently. When the owner hands its close over, the ledger names
 # this firing as the owner of the next generation and the close is delivered
 # below. When the owner ends any other way, its claim is no longer open and
@@ -326,8 +330,9 @@ flush_banner() {
 # (cleanup, exit 0) - the harness discards the collected stderr on exit 0, so
 # even an already-printed banner is never delivered by a losing generation.
 #
-# When a newer Stop's firing is parked on this generation, that Stop is the one
-# Claude will turn into a rewake, so the same owned write hands it the held
+# When a newer Stop's firing is parked on this generation, this owner's Stop
+# has been superseded and the newest Stop should deliver, so the same owned
+# write hands it the held
 # banner and the outcome instead of committing; this owner then exits 0 and
 # the parked firing delivers (fm_autoarm_write_owned in bin/fm-wake-lib.sh).
 autoarm_commit() {  # <outcome> [marker-file]

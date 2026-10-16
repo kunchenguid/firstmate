@@ -1699,8 +1699,8 @@ test_host_crash_is_retried_then_reported() {
 }
 
 # --- superseded Stop delivery (issue #7252) -------------------------------------
-# Claude turns only the latest Stop's exit 2 into a rewake. While a supervision
-# host parks for hours under the owner of one Stop, any later turn (an operator
+# The reported incidents lost the exit 2 of a superseded Stop's hook. While a
+# supervision host parks for hours under the owner of one Stop, any later turn (an operator
 # message, or a turn the turn-end guard continued) ends in a newer Stop whose
 # firing defers to that live claim. The close the host later hands to main must
 # then be delivered by the newer firing, not by the superseded owner.

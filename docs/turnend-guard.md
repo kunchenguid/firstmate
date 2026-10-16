@@ -355,8 +355,9 @@ Ownership is re-verified before every arm invocation, episode-state mutation, le
 
 #### Parked deferral
 
-Claude turns only the latest Stop's exit 2 into a rewake, so a firing that defers to an open claim parks on it instead of exiting.
+A firing that defers to an open claim parks on it instead of exiting, so delivery never rests on the exit 2 of a Stop that a later turn superseded.
 Any later turn supersedes the owner's Stop that way, whether an operator message or a turn this guard continued.
+The incidents in issue #7252 lost that superseded exit 2, although a live Claude Code 2.1.301 lab still delivered it ([verification](verification/supervision.md#a-superseded-stops-hand-back-on-a-claude-primary-2026-10-16)).
 `state/.claude-autoarm-parked` names the one parked firing, and a newer Stop's firing replaces it.
 When the owner's exit-2 commit finds a live parked firing, the same owned ledger write transfers the next generation to that firing and publishes the owner's banner and outcome in `state/.claude-autoarm-handoff`.
 The owner then exits 0, and the parked firing commits that outcome and exits 2 with that banner.

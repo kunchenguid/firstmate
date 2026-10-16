@@ -506,6 +506,31 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 | Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
 | Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
 
+### A superseded Stop's hand-back on a Claude primary, 2026-10-16
+
+This supports the parked deferral in [`turnend-guard.md`](../turnend-guard.md#parked-deferral) and records what a live Claude primary does with the exit 2 of a Stop hook whose Stop a later turn superseded.
+It was measured on Claude Code 2.1.301 (`--model haiku --effort low`) on Linux x86_64, in the isolated lab of `tests/fm-supervision-host-attended-live-e2e.test.sh` with the real supervision host, watcher, and engine.
+In each run the setup turn's Stop hook owned the parked host, an operator turn superseded that Stop, the primary sat idle for the stated gap, and a main-only event was handed back to main.
+
+| Code | Gap | Operator turn's Stop hook | Hand-back to rewake | Ledger after |
+| --- | --- | --- | --- | --- |
+| This change | 3s | parked on generation 1 | rewake 2s after the pass-through, which the turn drained and acknowledged | `epoch=2 owner_pid=<parked hook> outcome=rewake` |
+| This change | 1920s | parked on generation 1 | rewake 2s after the pass-through, which the turn drained and acknowledged | `epoch=2 owner_pid=<parked hook> outcome=rewake` |
+| Pre-change (`1a6714f2`) | 5s | exited without parking | the superseded owner's own exit 2 still woke the primary | the woken turn's end claimed generation 2 |
+| Pre-change (`1a6714f2`) | 1925s | exited without parking | the superseded owner's own exit 2 still woke the primary | the woken turn's end claimed generation 2 |
+
+Claude therefore delivered the exit 2 of a Stop hook started under a superseded Stop on this build, so the live lab did not reproduce the lost rewake reported in issue #7252.
+The script-level regression in `tests/fm-claude-stop-autoarm.test.sh` pins the lost delivery, and the live scenario pins that the parked hook's delivery reaches the primary.
+
+```text
+$ FM_SUPERVISION_HOST_ATTENDED_LIVE_E2E=1 FM_SUPERVISION_HOST_ATTENDED_LIVE_SCENARIO=superseded-stop FM_SUPERVISION_HOST_ATTENDED_LIVE_GAP_SECONDS=1920 tests/fm-supervision-host-attended-live-e2e.test.sh
+# 12:15:32 superseded: operator turn's Stop hook pid 3614003 parked on generation 1: epoch=1 parked_pid=3614003 updated_at=1792152932
+# 12:47:35 superseded: host log: 1792154855	pass-through	attended	main-only
+# 12:47:38 superseded: rewake delivered at 1792154857 (2s after the hand-back)
+# 12:47:38   1792154857 epoch=2 owner_pid=3614003 outcome=rewake updated_at=1792154857 session_pid=3537767 recovery_generation=3559687.1792154853.1OC1A6
+ok - superseded-Stop live (2.1.301 (Claude Code)): the operator turn's parked Stop hook delivered the superseded owner's hand-back as a rewake turn
+```
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.

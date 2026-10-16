@@ -1741,9 +1741,11 @@ fm_failure_episode_reset() {
 #     generation N+1 (fm_autoarm_claim_next). Taking a newer generation IS the
 #     reclaim: a steady-state predecessor is never signalled or revoked.
 #   - A deferring firing PARKS on the open claim instead of exiting
-#     (fm_autoarm_park): Claude turns only the latest Stop's exit 2 into a
-#     rewake, so the owner of an older Stop cannot deliver its own close once a
-#     newer Stop fires (issue #7252). The ledger's companion record
+#     (fm_autoarm_park): once a newer Stop fires, the owner's own exit 2 belongs
+#     to a superseded Stop, and the incidents in issue #7252 lost it, so the
+#     newest Stop's firing delivers instead (a live Claude Code 2.1.301 lab
+#     still delivered the superseded exit 2: docs/verification/supervision.md).
+#     The ledger's companion record
 #     state/.claude-autoarm-parked ("epoch=N parked_pid=P updated_at=T" plus the
 #     parker's mandatory pid-identity on line 2) names the one parked firing; a
 #     newer Stop's firing replaces it and the replaced one exits silently. An
