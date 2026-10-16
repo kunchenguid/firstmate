@@ -3092,6 +3092,56 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
+test_parked_stopped_seat_reports_its_declared_wait() {
+  reset_fakes
+  local d; d=$(new_case parked-seat)
+  make_repo_on_branch "$d/wt" fm/feat-parked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-parked.meta" "window=fm:fm-feat-parked" "worktree=$d/wt" "kind=ship"
+  printf 'paused [at=1]: parked by the supervisor with the seat stopped - overnight until 2099-01-01T00:00Z\n' \
+    > "$d/state/feat-parked.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-parked)
+  assert_contains "$out" "state: paused" "a parked stopped seat reports its declared wait"
+  assert_contains "$out" "source: status-log" "the wait is read from the status log"
+  assert_contains "$out" "seat stopped" "the detail says the seat is stopped"
+  # Control: once the declared recheck time has passed, death evidence wins again.
+  printf 'paused [at=1]: parked by the supervisor with the seat stopped - overnight until 2000-01-01T00:00Z\n' \
+    > "$d/state/feat-parked.status"
+  out=$(run_crew_state "$d" feat-parked)
+  assert_contains "$out" "state: unknown" "an expired park falls back to unknown"
+  assert_contains "$out" "backend target gone" "an expired park keeps the gone-class evidence"
+  pass "a parked stopped seat reports paused until its recheck time passes"
+}
+
+# The common park case: `exit` leaves the seat's shell pane open, so the pane is
+# readable but holds no agent (classifier dead). It must still read paused.
+test_parked_stopped_seat_with_readable_shell_pane() {
+  command -v jq >/dev/null 2>&1 || { pass "parked readable-pane test skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case parked-shell-pane)
+  make_repo_on_branch "$d/wt" fm/feat-parked-shell
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-parked-shell.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=pi"
+  printf 'paused [at=1]: parked by the supervisor with the seat stopped - overnight until 2099-01-01T00:00Z\n' \
+    > "$d/state/feat-parked-shell.status"
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_HUSK=1
+  FM_FAKE_HERDR_PROCESS=shell
+  local out; out=$(run_crew_state "$d" feat-parked-shell)
+  assert_contains "$out" "state: paused" "a parked seat with its shell pane open reports its declared wait"
+  assert_contains "$out" "seat stopped" "the detail says the seat is stopped"
+  # Control: an expired park on the same readable shell pane is not paused.
+  printf 'paused [at=1]: parked by the supervisor with the seat stopped - overnight until 2000-01-01T00:00Z\n' \
+    > "$d/state/feat-parked-shell.status"
+  out=$(run_crew_state "$d" feat-parked-shell)
+  assert_not_contains "$out" "state: paused" "an expired park on a readable shell pane is not paused"
+  pass "a parked stopped seat with a readable shell pane reports paused until its recheck time"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -5677,6 +5727,8 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+test_parked_stopped_seat_reports_its_declared_wait
+test_parked_stopped_seat_with_readable_shell_pane
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step

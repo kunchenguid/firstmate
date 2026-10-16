@@ -150,7 +150,9 @@
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log. On tmux and herdr, which own a
+#      than trusting a stale status log, except that a stopped seat whose
+#      declared pause names a recheck time still ahead reports paused ·
+#      status-log (bin/fm-control.sh park). On tmux and herdr, which own a
 #      recovery-grade classifier, only its positive death evidence reads as gone
 #      (the endpoint is authoritatively absent, or its pane holds no agent); an
 #      endpoint that merely failed to answer reports unknown · none as
@@ -1269,6 +1271,22 @@ fi
 # both classifier-backed backends (tmux and herdr) - and every death-class
 # verdict reports unknown rather than trusting a possibly-stale status log as
 # the current state.
+# A confidently stopped seat whose declared pause names a recheck time that has
+# not passed is parked on purpose (bin/fm-control.sh park), the same admission
+# the watcher's pause cadence makes for a dead crew. Report that declared wait
+# rather than unknown; once the stated time passes, the death-class verdicts
+# apply again. The classifier runs only when a live park exists, unless the
+# caller already has its verdict.
+emit_if_parked() {  # [agent-state]
+  local park_line park_until
+  case "$TASK_BACKEND" in tmux|herdr) ;; *) return 0 ;; esac
+  park_line=$(status_declared_wait_line "$LOG")
+  park_until=$(status_paused_until "$park_line") && [ "$(date +%s)" -lt "$park_until" ] || return 0
+  case "${1:-$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")}" in
+    missing|dead) emit paused status-log "$(status_line_note "$park_line")${SEP}seat stopped" ;;
+  esac
+}
+
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
@@ -1301,6 +1319,7 @@ if ! pane_readable "$BACKEND_TARGET"; then
     tmux|herdr) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
     *) AGENT_STATE=none ;;
   esac
+  emit_if_parked "$AGENT_STATE"
   case "$TASK_BACKEND:$AGENT_STATE" in
     tmux:alive|herdr:alive)
       ;;
@@ -1329,7 +1348,11 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *)
+      # A stopped seat's shell pane stays readable after exit (classifier dead).
+      emit_if_parked
+      emit unknown pane "harness state unavailable ($BUSY_VERDICT)"
+      ;;
   esac
 fi
 

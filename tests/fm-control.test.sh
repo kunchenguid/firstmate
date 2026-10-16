@@ -1214,6 +1214,65 @@ EOF
   pass "fm-control-lib: only a runtime's own recorded session has a relaunch resume form"
 }
 
+
+# --- 7. park: a stopped seat recorded as intentionally parked ---------------
+
+test_park_declares_a_wait_and_touches_nothing_else() {
+  local dir out rc wt meta_before last until_epoch
+  dir=$(new_case park)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  wt=$(cat "$dir/fake/cwd")
+  printf 'unlanded\n' > "$wt/unlanded.txt"
+  meta_before=$(cat "$dir/home/state/t1.meta")
+  out=$(run_control "$dir" t1 park --until 2099-01-01T00:00Z --reason "held for a later dispatch"); rc=$?
+  expect_code 0 "$rc" "parking a stopped seat should succeed"$'\n'"$out"
+  assert_contains "$out" "parked t1 until=2099-01-01T00:00Z" "the outcome should name the task and recheck time"
+  last=$(tail -n 1 "$dir/home/state/t1.status")
+  case "$last" in
+    "paused [at="*"]: parked by the supervisor with the seat stopped - held for a later dispatch until 2099-01-01T00:00Z") ;;
+    *) fail "park should append one stamped paused declaration, got: $last" ;;
+  esac
+  until_epoch=$(bash -c '. "$1/bin/fm-classify-lib.sh"; status_paused_until "$2"' _ "$ROOT" "$last") \
+    || fail "the shared classifier should read the park line's recheck time"
+  [ "$until_epoch" = "$(bash -c '. "$1/bin/fm-classify-lib.sh"; fm_utc_iso_to_epoch 2099-01-01T00:00Z' _ "$ROOT")" ] \
+    || fail "the declared recheck time should be the --until time"
+  [ "$(cat "$dir/home/state/t1.meta")" = "$meta_before" ] || fail "park must not change the task record"
+  [ -f "$wt/unlanded.txt" ] || fail "park must leave unlanded work in place"
+  [ -z "$(literals "$dir")" ] && [ -z "$(keys_sent "$dir")" ] || fail "park must send nothing to the endpoint"
+  pass "fm-control park: a stopped seat gets one declared wait and nothing else changes"
+}
+
+test_park_refuses_a_live_or_unbounded_seat() {
+  local dir out rc
+  dir=$(new_case park-refuse)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 park --until 2099-01-01T00:00Z --reason r); rc=$?
+  [ "$rc" -ne 0 ] || fail "parking a live agent should refuse"
+  assert_contains "$out" "still running" "the refusal should say the agent is live"
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 park --reason r); rc=$?
+  [ "$rc" -ne 0 ] || fail "park without --until should refuse"
+  out=$(run_control "$dir" t1 park --until 2000-01-01T00:00Z --reason r); rc=$?
+  [ "$rc" -ne 0 ] || fail "park with a past --until should refuse"
+  assert_contains "$out" "not in the future" "the refusal should name the past time"
+  out=$(run_control "$dir" t1 park --until tomorrow --reason r); rc=$?
+  [ "$rc" -ne 0 ] || fail "park with a malformed --until should refuse"
+  out=$(run_control "$dir" t1 park --until 2099-01-01T00:00Z); rc=$?
+  [ "$rc" -ne 0 ] || fail "park without --reason should refuse"
+  out=$(run_control "$dir" t1 exit --until 2099-01-01T00:00Z); rc=$?
+  [ "$rc" -ne 0 ] || fail "--until on another verb should refuse"
+  [ ! -e "$dir/home/state/t1.status" ] || fail "a refused park must not write a declaration"
+  dir=$(new_case park-mate)
+  add_task "$dir" m1 claude secondmate
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" m1 park --until 2099-01-01T00:00Z --reason r); rc=$?
+  [ "$rc" -ne 0 ] || fail "parking a secondmate should refuse"
+  assert_contains "$out" "secondmate" "the refusal should name the secondmate"
+  pass "fm-control park: refuses a live agent, a missing or past recheck time, and a secondmate"
+}
+
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
@@ -1260,3 +1319,5 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+test_park_declares_a_wait_and_touches_nothing_else
+test_park_refuses_a_live_or_unbounded_seat
