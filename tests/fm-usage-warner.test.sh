@@ -92,6 +92,7 @@ EOF
 # ever block on an inherited terminal.
 run_check() {
   local home=$1 fakebin=$2
+  [ -e "$fakebin/osascript" ] || fake_osascript_recorder "$fakebin" /dev/null
   PATH="$fakebin:$PATH" FM_HOME="$home" QUOTA_AXI_ARGV_LOG="$fakebin/.argv-log" \
     "$WARNER" check </dev/null
 }
@@ -273,6 +274,31 @@ test_check_ignores_a_window_the_account_does_not_return() {
   out=$(run_check "$home" "$fakebin")
   [ -z "$out" ] || fail "a configured window id the account never returns must stay silent: $out"
   pass "fm-usage-warner: a configured but absent window id is silently skipped"
+}
+
+test_check_absent_window_keeps_its_crossing_recorded() {
+  local home fakebin notify_log out
+  home=$(make_home absent-window)
+  fakebin="$TMP_ROOT/absent-window/fakebin"
+  notify_log="$TMP_ROOT/absent-window/notify.log"
+  : > "$notify_log"
+  fake_osascript_recorder "$fakebin" "$notify_log"
+  printf 'model:opus:80\n' > "$home/config/usage-warner"
+
+  fake_quota_axi "$fakebin" '{"id":"model:opus","percentUsed":85}'
+  out=$(run_check "$home" "$fakebin")
+  assert_contains "$out" "model:opus at 85% (>=80%)" "the first crossing is reported"
+
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":10}'
+  out=$(run_check "$home" "$fakebin")
+  [ -z "$out" ] || fail "a read that omits the window must stay quiet: $out"
+
+  : > "$notify_log"
+  fake_quota_axi "$fakebin" '{"id":"model:opus","percentUsed":86}'
+  out=$(run_check "$home" "$fakebin")
+  [ -z "$out" ] || fail "a window absent from one read is not a below-threshold reading, so it must not re-warn: $out"
+  [ ! -s "$notify_log" ] || fail "an absent window must not cause a second notification"
+  pass "fm-usage-warner: a window missing from one read keeps its crossing recorded"
 }
 
 test_check_never_requests_a_refresh() {
@@ -497,6 +523,7 @@ test_check_tiered_thresholds_on_one_window_each_warn
 test_check_reads_a_v1_record_without_rewarning
 test_check_batches_multiple_crossings_into_one_notification
 test_check_ignores_a_window_the_account_does_not_return
+test_check_absent_window_keeps_its_crossing_recorded
 test_check_never_requests_a_refresh
 test_schema6_snapshot_reads_the_default_account_lane
 test_quota_axi_missing_is_reported_once
