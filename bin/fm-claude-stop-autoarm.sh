@@ -273,7 +273,14 @@ if fm_autoarm_claim_open "$STATE" "$GRACE"; then
         HANDOFF_GEN=$((PARKED_GEN + 1))
         break
       fi
-      fm_autoarm_still_parked "$STATE" "$PARKED_GEN" || exit 0
+      if ! fm_autoarm_still_parked "$STATE" "$PARKED_GEN"; then
+        # A handoff landing between the two checks clears the parked record.
+        if fm_autoarm_still_owner "$STATE" "$((PARKED_GEN + 1))"; then
+          HANDOFF_GEN=$((PARKED_GEN + 1))
+          break
+        fi
+        exit 0
+      fi
       fm_autoarm_claim_open "$STATE" "$GRACE" || break
       sleep 1
     done
