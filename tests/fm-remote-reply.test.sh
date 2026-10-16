@@ -104,18 +104,12 @@ stop_reply_listener() {
 # replace the registration while the old listener is exiting, so establish
 # readiness for the current registration rather than sampling process liveness.
 await_reply_result() { # <result-path>
-  local result=$1 handled=${1%.result}.handled _ ensure
+  local result=$1 handled=${1%.result}.handled _
   remote_env "$ROOT/bin/fm-procevent.sh" ensure-listening "$SID" >/dev/null 2>&1 &
-  ensure=$!
   for _ in $(seq 1 800); do
-    if [ -s "$result" ] && [ -f "$handled" ]; then
-      # Reap the launcher so it cannot start a listener after a later stop.
-      wait "$ensure" 2>/dev/null || true
-      return 0
-    fi
+    [ -s "$result" ] && [ -f "$handled" ] && return 0
     sleep 0.05
   done
-  wait "$ensure" 2>/dev/null || true
   return 1
 }
 

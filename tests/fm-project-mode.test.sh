@@ -31,6 +31,10 @@ cat > "$DATA/projects.md" <<'EOF'
 - reviewed [direct-PR forge=external] - a review tool uploads its own snapshot (added 2026-01-01)
 - reviewed-yolo [direct-PR +yolo forge=external] - +yolo cannot apply to an external review (added 2026-01-01)
 - reviewed-local [local-only forge=external] - an external review on a mode that publishes nothing (added 2026-01-01)
+- gl-pr [direct-PR forge=gitlab] - gitlab on direct-PR (added 2026-01-01)
+- gl-nm [no-mistakes forge=gitlab] - gitlab on no-mistakes (added 2026-01-01)
+- gl-yolo [forge=gitlab direct-PR +yolo] - gitlab keeps yolo (added 2026-01-01)
+- gl-local [local-only forge=gitlab] - gitlab on a mode that publishes nothing (added 2026-01-01)
 - near-miss [direct-PR forg=external] - a near miss of the forge key (added 2026-01-01)
 EOF
 
@@ -84,6 +88,25 @@ assert_contains "$err" 'forge=forgejo' "the unknown-forge refusal did not name f
 assert_contains "$err" 'forge=external' "the unknown-forge refusal did not name forge=external as an accepted value"
 assert_contains "$err" 'forge=gitlab' "the unknown-forge refusal did not name forge=gitlab as an accepted value"
 pass "fm-project-mode: a value outside none|gerrit|forgejo|external is refused and the refusal names the accepted values"
+
+[ "$(run_forge gl-pr)" = "gitlab" ] || fail "forge=gitlab on a direct-PR entry did not resolve: $(run_forge gl-pr)"
+[ "$(run_mode gl-pr)" = "direct-PR off" ] || fail "forge=gitlab changed the direct-PR posture: $(run_mode gl-pr)"
+[ "$(run_forge gl-nm)" = "gitlab" ] || fail "forge=gitlab after the no-mistakes mode did not resolve: $(run_forge gl-nm)"
+[ "$(run_mode gl-nm)" = "no-mistakes off" ] || fail "forge=gitlab changed the no-mistakes posture: $(run_mode gl-nm)"
+[ "$(run_forge gl-yolo)" = "gitlab" ] || fail "forge=gitlab placed before the mode token did not resolve: $(run_forge gl-yolo)"
+[ "$(run_mode gl-yolo)" = "direct-PR on" ] || fail "forge=gitlab must keep +yolo: $(run_mode gl-yolo)"
+for name in gl-pr gl-nm gl-yolo; do
+  err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" "$name" 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a registered forge=gitlab entry $name warned or was refused: $err"
+done
+for flag in "" --forge; do
+  # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+  out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" $flag gl-local 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "local-only with forge=gitlab did not refuse${flag:+ under $flag} (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused local-only gitlab forge still handed the caller a posture: '$out'"
+done
+pass "fm-project-mode: forge=gitlab binds on direct-PR and no-mistakes, keeps +yolo, and is refused on local-only"
 
 [ "$(run_forge reviewed)" = "external" ] || fail "forge=external did not resolve: $(run_forge reviewed)"
 [ "$(run_mode reviewed)" = "direct-PR off" ] || fail "forge=external changed the two-word output: $(run_mode reviewed)"
