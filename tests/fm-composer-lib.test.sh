@@ -1217,6 +1217,50 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
+# Oracle: Claude 2.1.299's captured /exit screen places the selected command
+# and descriptions below the composer rule. Those bytes are menu output;
+# only the typed /exit is the payload, and a later live prompt must still win.
+test_selected_slash_menu_is_not_composer_content() {
+  local screen out popup
+  popup=$'────────────────────────\n❯ /exit\n────────────────────────\n  ❯ /exit       Exit the CLI\n    /context    Visualize current context\n                usage as a colored grid'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$popup")
+  [ "$out" = /exit ] || fail "slash menu leaked into payload: '$out'"
+  assert_screen "selected slash menu preserves pending input" pending "$CAPS_STYLED_NOID" "$popup"
+  screen="$popup"$'\n\n❯ lower live draft'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'lower live draft' ] || fail "popup hid a later live prompt: '$out'"
+  screen=$'────────────────────────\n❯ /exit\n────────────────────────\n❯ lower live draft'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'lower live draft' ] || fail "a closing rule hid a lower live prompt: '$out'"
+  pass "selected slash menu descriptions are excluded while lower prompts stay live"
+}
+
+# Claude draws the typed slash command in dark truecolor 38;2;112;112;112.
+# Ghost stripping leaves the glyph, and the slash menu below is furniture, so
+# the row used to read empty while a payload proof that keeps the colour still
+# extracted /exit. Exact empty would authorize injection into that command.
+# An SGR-2 suggestion on the same menu shape stays empty.
+test_dark_truecolor_slash_menu_stays_pending() {
+  local esc grey off dim popup out verdict identity
+  esc=$(printf '\033')
+  grey="${esc}[38;2;112;112;112m"
+  off="${esc}[0m"
+  dim="${esc}[2m"
+  popup=$'────────────────────────\n❯ '"${grey}/exit${off}"$'\n────────────────────────\n  ❯ /exit       Exit the CLI\n    /context    Visualize current context\n                usage as a colored grid'
+  verdict=$(fm_composer_classify_screen $'styled=1\ncursor=0\nidentity=1' "$popup")
+  [ "$verdict" = need-identity ] || fail "grey slash menu should ask for identity, got '$verdict'"
+  identity=$(printf 'claude\tidle')
+  verdict=$(fm_composer_classify_screen $'styled=1\ncursor=0\nidentity=1' "$popup" '' "$identity")
+  [ "$verdict" = pending ] || fail "grey slash menu must stay pending, got '$verdict'"
+  out=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content \
+    $'styled=1\ncursor=0\nidentity=1' "$popup" '' "$identity")
+  [ "$out" = /exit ] || fail "grey slash menu leaked into the payload: '$out'"
+  popup=$'────────────────────────\n❯ '"${dim}/exit${off}"$'\n────────────────────────\n  ❯ /exit       Exit the CLI\n    /context    Visualize current context'
+  verdict=$(fm_composer_classify_screen $'styled=1\ncursor=0\nidentity=1' "$popup" '' "$identity")
+  [ "$verdict" = empty ] || fail "an SGR-2 slash suggestion must stay empty, got '$verdict'"
+  pass "a dark-truecolor slash command behind its menu stays pending and the menu stays out of the payload"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -1257,6 +1301,8 @@ test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
+test_selected_slash_menu_is_not_composer_content
+test_dark_truecolor_slash_menu_stays_pending
 
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out

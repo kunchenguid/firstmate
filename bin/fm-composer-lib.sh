@@ -568,8 +568,9 @@ fm_composer_strip_braille() {
 # for the shared inbox confirmation read. One shared policy (previously three
 # per-backend variables that had drifted to 20/20/200) keeps stale scrollback
 # (startup banners, old transcript boxes) out of those candidate sets. tmux
-# and Herdr adapter composer reads use their visible viewports instead; Herdr
-# also uses this value as the minimum Ctrl+U clear budget after a refused proof.
+# and Herdr adapter composer reads do not use this bound; their capture owners
+# are documented in docs/tmux-backend.md and docs/herdr-backend.md. Herdr also
+# uses this value as the minimum Ctrl+U clear budget after a refused proof.
 FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 
 # Pi allows a multi-line composer between its horizontal separators. Bound the
@@ -1225,6 +1226,22 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
   fi
 }
 
+# _fm_composer_dark_truecolor_slash_row: 0 when <plain> is a Claude ❯ row
+# whose command is a dark truecolor run in <raw> (38;2;...).
+# Ghost stripping drops that luminance and leaves the glyph, which would
+# read empty while a payload proof that keeps the colour still sees the command.
+# An SGR-2 suggestion has no 38;2 run, so it stays ghost text.
+_fm_composer_dark_truecolor_slash_row() {  # <raw-row> <plain-row>
+  local raw=$1 plain=$2 glyph='' body
+  [[ "$raw" == *'38;2;'* ]] || return 1
+  fm_composer_leading_agent_glyph_var glyph "$plain" || return 1
+  [ "$glyph" = '❯' ] || return 1
+  body=${plain#*"$glyph"}
+  fm_composer_normalize_trim_var body
+  [[ "$body" == /* ]] || return 1
+  [ -n "${body#/}" ]
+}
+
 # _fm_composer_classify_bare_row: the bare agent-glyph row verdict, including
 # the styled=0 degradation: without styling, trailing text after the glyph may
 # be the harness's own idle suggestion (claude's rotating dim hint, codex's
@@ -1236,6 +1253,12 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   plain=$(_fm_composer_row_content "$raw" 0)
   _fm_composer_bare_row_strip_furniture_var content
   _fm_composer_bare_row_strip_furniture_var plain
+  if [ "$styled" = 1 ] && _fm_composer_dark_truecolor_slash_row "$raw" "$plain"; then
+    case "$content" in
+      *'/'*) ;;
+      *) printf 'pending'; return 0 ;;
+    esac
+  fi
   state=$(fm_composer_classify_content 0 "$content" \
     "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled")
   if [ "$styled" != 1 ] && [ "$state" = pending ]; then
@@ -1571,7 +1594,8 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
 # when no envelope is glyph-proven, when a blank row sits directly beneath it,
 # or when the run holds no bare candidate at all (nothing to demote).
 _fm_composer_locate_footer_zone() {  # <plain>
-  local plain=$1 close next trimmed proof=''
+  local plain=$1 close next trimmed raw proof='' slash_menu=0
+  local menu_re='^  ❯ /[^[:space:]]+[[:space:]]{2,}[^[:space:]]'
   FM_COMPOSER_FOOTER_AFTER=-1
   FM_COMPOSER_FOOTER_GLYPH=-1
   FM_COMPOSER_FOOTER_LAST=-1
@@ -1607,11 +1631,26 @@ _fm_composer_locate_footer_zone() {  # <plain>
   [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$FM_COMPOSER_FOOTER_AFTER" ] || return 1
   FM_COMPOSER_FOOTER_LAST=$FM_COMPOSER_FOOTER_AFTER
   next=$((FM_COMPOSER_FOOTER_AFTER + 1))
+  # Claude's selected slash-menu row repeats the composer glyph below its
+  # closing rule. It is a two-column menu, not a second input prompt.
+  raw=$(_fm_composer_screen_row "$next" "$plain")
+  trimmed=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$plain")
+  fm_composer_normalize_spaces_var trimmed
+  fm_composer_normalize_trim_var trimmed
+  if [ "$proof" = '❯' ] && [[ "$trimmed" = '❯ /'* ]] \
+     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -eq "$next" ] && [[ "$raw" =~ $menu_re ]]; then
+    slash_menu=1
+    FM_COMPOSER_FOOTER_LAST=$next
+    next=$((next + 1))
+  fi
   while :; do
-    trimmed=$(_fm_composer_screen_row "$next" "$plain")
+    raw=$(_fm_composer_screen_row "$next" "$plain")
+    trimmed=$raw
     fm_composer_normalize_trim_var trimmed
     [ -n "$trimmed" ] || break
-    _fm_composer_row_is_composer_furniture "$trimmed" "$proof" || return 1
+    if ! _fm_composer_row_is_composer_furniture "$trimmed" "$proof"; then
+      [ "$slash_menu" = 1 ] && [[ "$raw" = '    '* ]] || return 1
+    fi
     FM_COMPOSER_FOOTER_LAST=$next
     next=$((next + 1))
   done

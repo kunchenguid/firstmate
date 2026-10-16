@@ -42,6 +42,11 @@ export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 # of calls precisely. A missing response file means "succeed with empty
 # stdout" (mirrors send-text/send-keys/pane close/tab close, which are silent
 # on success in the real CLI - verified in herdr-verification-p2.md).
+# A pane-get.out file, when present, answers `pane get` without consuming a
+# numbered response. Otherwise `pane get` consumes the next numbered response
+# only when that body is JSON or a scripted failure; a capture fixture is left
+# for the following read and the stub answers an unscrolled pane. A visible.out or recent.out
+# file, when present, answers the matching `pane read --source` the same way.
 make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -65,6 +70,49 @@ if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
   reason=${FM_FAKE_HERDR_FOREGROUND_REASON:-no_foreground_client}
   printf '{"result":{"reason":"%s"}}\n' "$reason"
   exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = get ]; then
+  if [ -f "$RESP/pane-get-once.out" ]; then
+    if [ -f "$RESP/.pane-get-once" ]; then
+      exit 1
+    fi
+    : > "$RESP/.pane-get-once"
+    cat "$RESP/pane-get-once.out"
+    exit 0
+  fi
+  if [ -f "$RESP/pane-get.out" ]; then
+    cat "$RESP/pane-get.out"
+    exit 0
+  fi
+  if [ -f "$RESP/pane-get.exit" ]; then
+    [ -f "$RESP/pane-get.err" ] && cat "$RESP/pane-get.err" >&2
+    exit "$(cat "$RESP/pane-get.exit")"
+  fi
+  peek=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
+  if [ -f "$RESP/$peek.exit" ] || { [ -f "$RESP/$peek.out" ] && [ "$(head -c 1 "$RESP/$peek.out")" = "{" ]; }; then
+    :
+  else
+    printf '%s\n' '{"result":{"pane":{"scroll":{"offset_from_bottom":0,"viewport_rows":24}}}}'
+    exit 0
+  fi
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = read ]; then
+  src=visible
+  prev=
+  for a in "$@"; do
+    if [ "$prev" = "--source" ]; then
+      src=$a
+    fi
+    prev=$a
+  done
+  if [ -f "$RESP/$src.exit" ]; then
+    [ -f "$RESP/$src.err" ] && cat "$RESP/$src.err" >&2
+    exit "$(cat "$RESP/$src.exit")"
+  fi
+  if [ -f "$RESP/$src.out" ]; then
+    cat "$RESP/$src.out"
+    exit 0
+  fi
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
@@ -3891,6 +3939,63 @@ test_composer_state_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real composer text reads pending"
 }
 
+# A viewer scrolled into history leaves old transcript in the viewport while
+# the empty composer stays at the bottom of the pane. The viewport fixture is
+# the pending shape; the recent fixture is the empty composer. Reading the
+# viewport would report pending and skip every doorbell.
+test_composer_state_scrolled_history_with_empty_bottom_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-scrolled-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"scroll":{"offset_from_bottom":428,"viewport_rows":56}}}}' > "$resp/pane-get.out"
+  printf '  ╭────────────────────────╮\n  │ ❯ old transcript draft │\n  ╰──────── Composer ──────╯\n' > "$resp/visible.out"
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ──────╯\n\n  Shift+Tab:mode\n' > "$resp/recent.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a scrolled pane with history in the viewport and an empty bottom composer should read empty, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' \
+    "a scrolled composer read did not ask pane get for the scroll offset"
+  assert_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''recent' \
+    "a scrolled composer read did not read the bottom of the pane"
+  assert_not_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''visible' \
+    "a scrolled composer read classified the viewport"
+  pass "fm_backend_herdr_composer_state: scrolled history with an empty bottom composer reads empty"
+}
+
+# Same scroll, but the bottom composer holds real unsubmitted text. The
+# viewport fixture is an empty composer, so a viewport read would hide it.
+test_composer_state_scrolled_bottom_pending_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-scrolled-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"scroll":{"offset_from_bottom":428,"viewport_rows":56}}}}' > "$resp/pane-get.out"
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ──────╯\n' > "$resp/visible.out"
+  printf '  ╭────────────────────────╮\n  │ ❯ hello captain        │\n  ╰──────── Composer ──────╯\n\n  Enter:send\n' > "$resp/recent.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real text at the bottom of a scrolled pane should read pending, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''visible' \
+    "a scrolled composer read classified the viewport instead of the pending bottom"
+  pass "fm_backend_herdr_composer_state: real text at the bottom of a scrolled pane reads pending"
+}
+
+# The bottom read failing must not fall back to the viewport. That viewport
+# holds the pending history shape, which is the false pending this guards.
+test_composer_state_scrolled_unreadable_bottom_is_unknown() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-scrolled-unreadable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"scroll":{"offset_from_bottom":428,"viewport_rows":56}}}}' > "$resp/pane-get.out"
+  printf '  ╭────────────────────────╮\n  │ ❯ old transcript draft │\n  ╰──────── Composer ──────╯\n' > "$resp/visible.out"
+  printf '1\n' > "$resp/recent.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "an unreadable bottom on a scrolled pane should read unknown, never pending, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''visible' \
+    "an unreadable bottom fell back to the scrolled viewport"
+  pass "fm_backend_herdr_composer_state: an unreadable bottom on a scrolled pane reads unknown"
+}
+
 # Issue #3436: Grok 1.0.5's real bottom border is three columns wider than
 # the aligned top and content rows. Herdr has no cursor anchor, so the old
 # geometry verdict was unknown even when this composer was genuinely idle.
@@ -4903,18 +5008,128 @@ herdr_wrapped_composer() {  # <text> <width> <drop>
 # Claude draws it, with the menu rows below the closing rule; the rules are
 # structural edge rows, so the composer's content block ends there and the
 # menu rows never read as typed text.
-herdr_popup_composer_screen() {  # <typed-text>
+# The optional marker models the selected ❯ menu row captured on 2.1.299.
+herdr_popup_composer_screen() {  # <typed-text> [selected-marker]
   local i typed=$1 rule
   rule=$(printf '%0.s\xe2\x94\x80' $(seq 1 60))
   printf ' \xe2\x95\xad\xe2\x94\x80\xe2\x94\x80 Claude Code v2.1.283 \xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n'
   printf '  %s\n' "$rule"
   printf '  \xe2\x9d\xaf %s\n' "$typed"
   printf '  %s\n' "$rule"
-  printf '  %s    Exit the CLI\n' "$typed"
+  printf '  %s%s    Exit the CLI\n' "${2-}" "$typed"
   for ((i = 0; i < 21; i++)); do
-    printf '  /skill-%02d    A skill description long enough to read as a popup row\n' "$i"
+    printf '    /skill-%02d    A skill description long enough to read as a popup row\n' "$i"
   done
   printf '  \xe2\x8f\xb5\xe2\x8f\xb5 bypass permissions on\n'
+}
+
+test_composer_format_fallback_preserves_scrolled_source() {
+  local dir log resp fb out state probe rc
+  for probe in state content submit; do
+    for state in empty pending unreadable; do
+      [ "$probe" != submit ] || [ "$state" = pending ] || continue
+      dir="$TMP_ROOT/fallback-scrolled-$probe-$state"
+      mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+      printf '%s\n' '{"result":{"pane":{"scroll":{"offset_from_bottom":428}}}}' > "$resp/pane-get-once.out"
+      case "$state" in
+        empty) herdr_popup_composer_screen 'old transcript draft' > "$resp/visible.out" ;;
+        *) printf '  ❯\n' > "$resp/visible.out" ;;
+      esac
+      if [ "$probe" = submit ]; then
+        printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' > "$resp/1.out"
+        printf '1\n' > "$resp/2.exit"
+        herdr_popup_composer_screen 'live draft' > "$resp/3.out"
+      else
+        printf '1\n' > "$resp/1.exit"
+        case "$state" in
+          empty) printf '  ❯\n' > "$resp/2.out" ;;
+          pending) printf '  ╭────────────────────────╮\n  │ ❯ live draft           │\n  ╰──────── Composer ──────╯\n\n  Enter:send\n' > "$resp/2.out" ;;
+          unreadable) printf '1\n' > "$resp/2.exit" ;;
+        esac
+      fi
+      fb=$(make_herdr_fakebin "$dir")
+      rc=0
+      out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+        bash -c '. "$0/bin/backends/herdr.sh"; case "$1" in state) fm_backend_herdr_composer_state default:w1:p2 ;; content) fm_backend_herdr_composer_content default:w1:p2 ;; submit) fm_backend_herdr_send_text_submit default:w1:p2 doorbell 1 0 0 ;; esac' "$ROOT" "$probe" ) || rc=$?
+      case "$probe:$state" in
+        state:empty) [ "$out" = empty ] || fail "fallback classified history instead of empty live composer: '$out'" ;;
+        state:pending) [ "$out" = pending ] || fail "fallback lost live draft: '$out'" ;;
+        state:unreadable) [ "$out" = unknown ] || fail "failed bottom fallback must remain unknown: '$out'" ;;
+        content:empty) [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "fallback extracted history instead of empty live content" ;;
+        content:pending) [ "$rc" -eq 0 ] && [ "$out" = 'live draft' ] || fail "fallback lost live content: '$out'" ;;
+        content:unreadable) [ "$rc" -ne 0 ] || fail "failed bottom fallback authorized content extraction" ;;
+        submit:pending)
+          [ "$out" = send-failed ] || fail "live draft must refuse submission: '$out'"
+          assert_not_contains "$(cat "$log")" $'\x1f''send-text' "fallback typed into live draft"
+          assert_not_contains "$(cat "$log")" $'\x1f''send-keys' "fallback changed live draft"
+          ;;
+      esac
+      assert_not_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''visible' "confirmed scrolled fallback read history"
+      assert_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''200'$'\x1f''--format'$'\x1f''ansi' \
+        "a scrolled composer read must stay an ANSI recent read"
+    done
+  done
+  pass "Herdr composer format fallback preserves live-bottom classification, content and draft protection after a transient scroll-probe failure"
+}
+
+test_composer_content_scrolled_live_bottom_or_failure() {
+  local dir log resp fb out state rc
+  for state in empty pending unreadable; do
+    dir="$TMP_ROOT/content-scrolled-$state"
+    mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '%s\n' '{"result":{"pane":{"scroll":{"offset_from_bottom":428}}}}' > "$resp/pane-get.out"
+    herdr_popup_composer_screen 'old transcript draft' > "$resp/visible.out"
+    case "$state" in
+      empty) printf '  ❯\n' > "$resp/recent.out" ;;
+      pending) herdr_popup_composer_screen '/exit' > "$resp/recent.out" ;;
+      unreadable) printf '1\n' > "$resp/recent.exit" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    rc=0
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_content default:w1:p2' "$ROOT" ) || rc=$?
+    case "$state" in
+      empty) [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "empty live composer should yield empty content" ;;
+      pending) [ "$rc" -eq 0 ] && [ "$out" = '/exit' ] || fail "live composer content should retain /exit, got '$out'" ;;
+      unreadable) [ "$rc" -ne 0 ] || fail "unreadable live composer must fail content extraction" ;;
+    esac
+  done
+  pass "fm_backend_herdr_composer_content: scrolled reads return live content or fail on an unreadable bottom"
+}
+
+test_send_text_submit_scrolled_claude_proves_live_composer() {
+  local dir log resp fb out text format baseline enter_count
+  for text in 'doorbell message' '/exit'; do
+    for format in ansi plain; do
+      dir="$TMP_ROOT/submit-scrolled-${text//[[:space:]\/]/}-$format"
+      mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+      printf '%s\n' '{"result":{"pane":{"scroll":{"offset_from_bottom":428}}}}' > "$resp/pane-get.out"
+      herdr_popup_composer_screen 'old transcript draft' > "$resp/visible.out"
+      printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' > "$resp/1.out"
+      if [ "$format" = ansi ]; then
+        printf '  ❯\n' > "$resp/2.out"
+        herdr_popup_composer_screen "$text" > "$resp/4.out"
+        baseline=5
+      else
+        printf '1\n' > "$resp/2.exit"
+        printf '  ❯\n' > "$resp/3.out"
+        printf '1\n' > "$resp/5.exit"
+        herdr_popup_composer_screen "$text" > "$resp/6.out"
+        baseline=7
+      fi
+      printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/$baseline.out"
+      printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/$((baseline + 2)).out"
+      fb=$(make_herdr_fakebin "$dir")
+      out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+        bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+      [ "$out" = empty ] || fail "scrolled Claude $format submission of '$text' should be confirmed, got '$out'"
+      assert_contains "$(cat "$log")" $'\x1f'"$text" "scrolled Claude did not type the payload"
+      enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+      [ "$enter_count" -eq 1 ] || fail "scrolled Claude should submit once, sent $enter_count Enter(s)"
+      [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "scrolled Claude cleared a proven payload"
+    done
+  done
+  pass "fm_backend_herdr_send_text_submit: scrolled Claude proves and submits live doorbell and exit payloads with ANSI or plain captures"
 }
 
 test_send_text_submit_long_literal_submits_when_composer_holds_every_byte() {
@@ -5133,7 +5348,7 @@ test_send_text_submit_claude_slash_popup_composer_is_still_proven_and_submitted(
   herdr_submit_claude_prefix "$resp" "$text"
   printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
-  herdr_popup_composer_screen "$text" > "$resp/4.out"
+  herdr_popup_composer_screen "$text" '❯ ' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
@@ -6023,6 +6238,9 @@ test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
+test_composer_state_scrolled_history_with_empty_bottom_is_empty
+test_composer_state_scrolled_bottom_pending_text_is_pending
+test_composer_state_scrolled_unreadable_bottom_is_unknown
 test_composer_state_grok_oversized_title_preserves_safe_verdicts
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
@@ -6075,6 +6293,9 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_on_composer_capture_failure
+test_composer_format_fallback_preserves_scrolled_source
+test_composer_content_scrolled_live_bottom_or_failure
+test_send_text_submit_scrolled_claude_proves_live_composer
 test_send_text_submit_long_literal_submits_when_composer_holds_every_byte
 test_send_text_submit_refuses_enter_when_composer_holds_only_the_suffix
 test_send_text_submit_refused_suffix_that_will_not_clear_is_unknown
