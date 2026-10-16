@@ -1504,6 +1504,26 @@ test_spawn_secondmate_claude_permission_mode_auto() {
   pass "C2b spawn: config/claude-permission-mode=auto reaches a Claude secondmate launch"
 }
 
+# config/claude-extra-args reaches a Claude SECONDMATE launch too, between the
+# inbox --add-dir grant and the one --settings file, with model untouched.
+test_spawn_secondmate_claude_extra_args() {
+  local w sm launchlog launch out status
+  w="$TMP_ROOT/spawn-claude-extra-args"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus\n' > "$w/home/config/secondmate-harness"
+  printf -- '--setting-sources\nproject,local\n--strict-mcp-config\n' > "$w/home/config/claude-extra-args"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "claude secondmate spawn with claude-extra-args should succeed"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "claude --dangerously-skip-permissions $(sm_claude_add_dir "$w" sm)'--setting-sources' 'project,local' '--strict-mcp-config' --settings '$(sm_claude_settings "$w" sm)' --model 'opus'" \
+    "extra-args: secondmate launch did not carry the quoted arguments before --settings"
+  pass "C2c spawn: config/claude-extra-args reaches a Claude secondmate launch"
+}
+
 # A second mate's steering inbox lives in the PARENT home's
 # state/<id>.inbox - outside the mate's own working directory - so an
 # auto-mode Claude Code (2.1.257+) parks on its one-time "Allow reads outside
@@ -2770,6 +2790,7 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
 test_spawn_secondmate_claude_permission_mode_auto
+test_spawn_secondmate_claude_extra_args
 test_spawn_secondmate_claude_grants_parent_inbox_dir
 test_claude_permission_mode_inheritance_present_and_absent
 test_presentation_inheritance_default_on_and_opt_out

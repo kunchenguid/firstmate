@@ -28,6 +28,9 @@
 # secondmate's own claude crewmates launch on the same permission posture.
 # Primary config/keep-ai-trailers is a home-wide commit-attribution choice, so
 # a secondmate's own crewmates keep AI co-author trailers too.
+# Primary config/claude-extra-args carries the captain's extra claude launch
+# arguments (for example a lean settings-source profile), so a secondmate's
+# own claude crewmates launch with the same arguments.
 # Primary config/supervision-host-off is the fleet's supervision-host opt-out,
 # so a primary that opts out opts every secondmate home out too, while each
 # home's config/supervision-host engine line stays its own.
@@ -87,7 +90,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host keep-ai-trailers supervision-host-off firstmate-role}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode claude-extra-args lavish-axi-host keep-ai-trailers supervision-host-off firstmate-role}"
 
 # firstmate-role additionally carries a proof-of-state receipt: a scoped role
 # grant (or its recorded absence) authorizes a secondmate home only while

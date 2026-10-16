@@ -2254,6 +2254,60 @@ test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata() {
   pass "an unrecognized config/claude-permission-mode token refuses before any endpoint or metadata"
 }
 
+# config/claude-extra-args (bin/fm-spawn.sh header): each line becomes one
+# shell-quoted argument between the --add-dir grant and --settings; the rest of
+# the launch is unchanged, and Firstmate-owned flags refuse before any endpoint.
+test_claude_extra_args_insert_quoted_arguments_only() {
+  local rec id out status launch expected base
+  id=extra-args-z30
+  rec=$(make_spawn_case extra-args claude "$id")
+  read_case_record "$rec"
+  printf '# lean worker\n--setting-sources\nproject,local\n\n--strict-mcp-config\n--plugin-dir\n/tmp/lean plugin & co'"'"'s\n' > "$HOME_DIR/config/claude-extra-args"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with claude-extra-args should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  base=$(claude_expected_launch "$launch" "$HOME_DIR" "$id" --dangerously-skip-permissions)
+  expected=${base/--settings /"'--setting-sources' 'project,local' '--strict-mcp-config' '--plugin-dir' '/tmp/lean plugin & co'\\''s' --settings "}
+  [ "$launch" = "$expected" ] || fail "claude-extra-args changed more than the inserted arguments"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "config/claude-extra-args inserts each line as one quoted argument before --settings"
+}
+
+test_claude_extra_args_reach_scout_launch() {
+  local rec id out status launch
+  id=extra-args-scout-z31
+  rec=$(make_spawn_case extra-args-scout claude "$id")
+  read_case_record "$rec"
+  printf -- '--strict-mcp-config\n' > "$HOME_DIR/config/claude-extra-args"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with claude-extra-args should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'--strict-mcp-config' --settings " "scout launch did not carry the extra argument"
+  pass "config/claude-extra-args reaches scout launches too"
+}
+
+test_claude_extra_args_owned_flags_refuse_before_endpoint_or_metadata() {
+  local rec id out status flag n=0
+  for flag in --settings '--settings={}' --permission-mode --dangerously-skip-permissions $'--tab\tbed'; do
+    n=$((n + 1))
+    id="extra-args-refuse-z3$n"
+    rec=$(make_spawn_case "extra-args-refuse-$n" claude "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$flag" > "$HOME_DIR/config/claude-extra-args"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "claude-extra-args line '$flag' must refuse the spawn"
+    assert_contains "$out" "config/claude-extra-args" "refusal must name the file"
+    [ ! -s "$LAUNCH_LOG" ] || fail "a refused claude-extra-args must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+    assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  done
+  pass "config/claude-extra-args refuses Firstmate-owned flags and control bytes before any endpoint or metadata"
+}
+
 test_non_claude_harness_ignores_claude_permission_mode() {
   local rec id out status launch
   id=permmode-codex-z23
@@ -2332,6 +2386,9 @@ test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
+test_claude_extra_args_insert_quoted_arguments_only
+test_claude_extra_args_reach_scout_launch
+test_claude_extra_args_owned_flags_refuse_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority
