@@ -26,7 +26,8 @@ See [`docs/examples/usage-warner`](examples/usage-warner) for a starting point t
 `check` is the one read with two callers - a human or another script running `fm-usage-warner.sh check` directly (on demand), and the watcher polling the registered shim on its normal `FM_CHECK_INTERVAL` cadence once armed (periodic).
 Both hit the identical function, so this is one program with two callers, not two programs, and there is no daemon and no schedule of its own.
 
-A window that crosses its configured threshold notifies once, stays quiet while it remains at or above that threshold, and re-arms the moment it next reads back below threshold (an account-level window's own reset does exactly this).
+A window that crosses a configured threshold notifies once, stays quiet while it remains at or above that threshold, and re-arms the moment it next reads back below threshold (an account-level window's own reset does exactly this).
+Each directive is tracked on its own, so tiered thresholds on one window such as `five_hour:80` and `five_hour:95` each warn on their own crossing.
 Multiple windows crossing in the same read are batched into one notification rather than one per window.
 A standing read failure (`quota-axi` missing, `jq` missing, a malformed response, or a read that does not finish inside its bound) is reported once until it changes, the same contract `bin/fm-mail-check.sh` and `bin/fm-tool-update-check.sh` already use for their own standing checks.
 The read bound is 10 seconds, or `FM_CHECK_TIMEOUT` minus 3 seconds when that is lower, so the watcher never kills the check first; when that leaves under 1 second the read is skipped and reported as not measured.
@@ -43,9 +44,10 @@ Notification Center is macOS-only, so `arm` refuses on any other platform.
 
 [`bin/fm-procevent-quota.sh`](../bin/fm-procevent-quota.sh) reads the same `quota-axi` snapshot, so the two are worth telling apart.
 That source arms a blocking poll that fires at most once, wakes firstmate with a durable `check:` event, compares a tracked provider's aggregate `effectivePercentRemaining`, and must be re-armed by hand for any further monitoring.
-This warner is the standing, human-facing half of that problem: it compares each named window separately, speaks to the person through Notification Center rather than to the supervisor's queue, and re-arms itself every time a window reads back below its threshold.
+This warner is the standing half of that problem: it compares each named window separately and re-arms itself every time a window reads back below its threshold.
+A crossing raises a macOS notification and, once armed, also reaches firstmate as one `check:` wake per crossing, because the armed shim's report line is what the watcher turns into that wake.
 Naming the window is the point, because the session and weekly windows exhaust at very different times, so an aggregate figure does not say which one is about to run out.
-Neither replaces the other, and arming both is reasonable: one interrupts the person before a window closes, the other routes an exhaustion event into supervision.
+Neither replaces the other, and arming both is reasonable: this one warns per window on every crossing while a window is still closing, and the other fires once on a provider-wide aggregate until it is re-armed by hand.
 
 ## Arming
 
