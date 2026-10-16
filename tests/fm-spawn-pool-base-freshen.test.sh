@@ -911,6 +911,77 @@ test_non_polytoken_refused_launch_keeps_its_window() {
   pass "a non-polytoken launch refused after its slot claim keeps main's abort behavior"
 }
 
+# install_isolation_flip_git <fakebin> <worktree>: a git that answers every
+# command truthfully except `rev-parse --show-toplevel` on <worktree>, which
+# reports a foreign root from its third read on - after the discovery poll's
+# two agreeing reads adopted the slot, so only the post-poll isolation check
+# sees the worktree stop being isolated.
+install_isolation_flip_git() {  # <fakebin> <worktree>
+  local fakebin=$1 wt=$2 real_git
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = -C ] && [ "\$2" = '$wt' ] && [ "\$3" = rev-parse ] && [ "\$4" = --show-toplevel ]; then
+  n=\$(cat '$fakebin/.toplevel-reads' 2>/dev/null || echo 0)
+  n=\$((n + 1))
+  printf '%s\n' "\$n" > '$fakebin/.toplevel-reads'
+  if [ "\$n" -gt 2 ]; then
+    printf '%s\n' '$fakebin'
+    exit 0
+  fi
+fi
+exec '$real_git' "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+# The post-poll treehouse-get isolation refusal points the operator at the
+# window only when that window survives the abort: every harness but polytoken
+# keeps main's `Inspect target <window>`, and a fresh polytoken spawn, whose
+# window is closed on exit, names the worktree and says so instead.
+test_treehouse_isolation_refusal_points_at_what_survives() {
+  local rec id out status
+  id='pool-isolation-codex-r1'
+  rec=$(make_case isolation-codex "$id")
+  read_case_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  install_isolation_flip_git "$FAKEBIN_DIR" "$POOL_DIR"
+  out=$(run_spawn "$id" --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a codex spawn whose slot stopped being isolated should refuse"
+  assert_contains "$out" "treehouse get did not yield an isolated worktree" \
+    "the codex spawn did not refuse on the post-poll isolation check"$'\n'"$out"
+  assert_contains "$out" "refusing to launch to avoid tangling the primary checkout. Inspect target firstmate:fm-$id" \
+    "a non-polytoken isolation refusal must keep main's window pointer"$'\n'"$out"
+  assert_not_contains "$out" "is closed on exit" \
+    "a non-polytoken isolation refusal must not claim its window was closed"
+
+  id='pool-isolation-polytoken-r1'
+  rec=$(make_case isolation-polytoken "$id")
+  read_case_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  install_isolation_flip_git "$FAKEBIN_DIR" "$POOL_DIR"
+  cat > "$FAKEBIN_DIR/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"print models"*) printf 'zai/glm-5.3-flash\nzai/glm-5.3-flash(low)\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/polytoken"
+  out=$(run_spawn "$id" --harness polytoken --model zai/glm-5.3-flash --effort low --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a polytoken spawn whose slot stopped being isolated should refuse"
+  assert_contains "$out" "treehouse get did not yield an isolated worktree" \
+    "the polytoken spawn did not refuse on the post-poll isolation check"$'\n'"$out"
+  assert_contains "$out" "pool (window firstmate:fm-$id is closed on exit" \
+    "a fresh polytoken isolation refusal must name the worktree and the closed window"$'\n'"$out"
+  assert_not_contains "$out" "Inspect target firstmate:fm-$id" \
+    "a fresh polytoken isolation refusal must not point at its closed window"
+  rm -rf "/tmp/fm-$id" "/tmp/fm-$id+"*
+  pass "the treehouse-get isolation refusal points only at what survives the abort"
+}
+
 publish_feature_branch() { # <branch>
   git -C "$CASE_DIR/publisher" checkout --quiet -b "$1"
   printf 'only on %s\n' "$1" > "$CASE_DIR/publisher/feature-only.txt"
@@ -1046,6 +1117,7 @@ test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_non_polytoken_refused_launch_keeps_its_window
+test_treehouse_isolation_refusal_points_at_what_survives
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_named_base_branch_starts_from_that_branch

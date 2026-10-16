@@ -3847,8 +3847,12 @@ spawn_worktree_isolated() { # <path>
 # spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
 # fresh polytoken spawn closes its endpoint on abort, so only it points away
 # from the window; every other harness keeps the plain inspect pointer.
+spawn_endpoint_closes_on_abort() {
+  [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]
+}
+
 spawn_endpoint_hint() {
-  if [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]; then
+  if spawn_endpoint_closes_on_abort; then
     printf 'window %s is closed on exit, returning any pool slot it held' "$T"
   else
     printf 'inspect window %s' "$T"
@@ -5003,7 +5007,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  if spawn_endpoint_closes_on_abort; then
+    validate_spawn_worktree "treehouse get" "$WT ($(spawn_endpoint_hint))"
+  else
+    validate_spawn_worktree "treehouse get" "$T"
+  fi
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable
