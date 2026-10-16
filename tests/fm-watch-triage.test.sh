@@ -3254,6 +3254,101 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   pass "a captain-held lane is rechecked as a hold on the captain, never as an external wait, and never at all while the captain is away"
 }
 
+# The backlog record of the same hold. Once firstmate hands a decision to the
+# captain through bin/fm-captain-hold.sh, the worker's own line stays whatever it
+# was, so a stuck worker on a stable pane reaches the wedge timer with nothing in
+# its status log that reads as a wait. The open captain call must bound the wedge
+# ladder exactly as a `captain-held:` line does.
+backlog_hold_wedge_fixture() {  # <name> <status-age-secs> [<wedge-timer-age-secs>] [<status-log>]
+  local dir
+  dir=$(wedge_threshold_fixture "$1" "${4:-working: answering the dialog}" "$2" "${3-}") || return 1
+  mkdir -p "$dir/data"
+  fm_test_tasks_toml "$dir/.tasks.toml" || return 1
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  (cd "$dir" && tasks-axi add wedge 'stuck at a captain-only dialog' --file data/backlog.md) >/dev/null 2>&1 \
+    || return 1
+  run_hold "$dir" hold wedge --reason 'awaiting the captain on the dialog' || return 1
+  printf '%s\n' "$dir"
+}
+
+test_wedge_threshold_defers_to_a_backlog_captain_hold() {
+  local dir state fakebin out capture window key n queued armed_timer past
+  local working='state: working · source: run-step · ci running'
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (backlog captain hold wedge bound)"; return 0; }
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # A fresh status line is no record of when the hold began, so the first
+  # threshold rechecks it once, as a wait on the captain with no wait age.
+  dir=$(backlog_hold_wedge_fixture backlog-hold-quiet 0) \
+    || fail "could not build a backlog captain-hold wedge fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" \
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a backlog-held lane was never rechecked at the threshold: $(cat "$out")"
+  grep -F 'awaiting the captain' "$out" >/dev/null \
+    || fail "the backlog-hold recheck did not name the captain: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a backlog-held lane was reported as a possible wedge: $(cat "$out")"
+  grep -E ', waiting [0-9]+s' "$out" >/dev/null \
+    && fail "the backlog-hold recheck published the status line's age as the hold's: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the backlog-hold recheck"
+
+  # Inside the recheck cadence the hold is absorbed whole, threshold after threshold.
+  queued=$(wedge_stale_wakes "$state" "$window")
+  n=1
+  while [ "$n" -le 3 ]; do
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" \
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "a backlog-held lane wedge-escalated at threshold $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq "$queued" ] \
+    || fail "a backlog-held lane queued a further wake inside its recheck cadence: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a backlog-held lane counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+
+  # A paused line whose own clearing time has passed explains nothing, so the
+  # hold the worker's line never shows still bounds the ladder.
+  past=$(iso_utc_at "$(( $(date +%s) - 7200 ))")
+  dir=$(backlog_hold_wedge_fixture backlog-hold-elapsed-pause 0 '' \
+    "paused: waiting on the build queue until $past") \
+    || fail "could not build a backlog captain-hold wedge fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" \
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a backlog-held lane behind an elapsed pause was never rechecked: $(cat "$out")"
+  grep -F 'awaiting the captain' "$out" >/dev/null \
+    || fail "a backlog-held lane behind an elapsed pause was not rechecked as a wait on the captain: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a backlog-held lane behind an elapsed pause was reported as a possible wedge: $(cat "$out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a backlog-held lane behind an elapsed pause counted a wedge escalation"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the elapsed-pause backlog-hold recheck"
+
+  # While the away-posture record exists it is never rechecked, and the backlog
+  # read that proves the hold is paced by the idle timer rather than every poll.
+  dir=$(backlog_hold_wedge_fixture backlog-hold-away 2000 2000) \
+    || fail "could not build a backlog captain-hold wedge fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  armed_timer=$(cat "$state/.stale-since-$key")
+  write_away_record "$state"
+  n=1
+  while [ "$n" -le 3 ]; do
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_TEST_PAUSE_RESURFACE=240 \
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "a backlog-held lane was rechecked at threshold $n while the away-posture record existed: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a backlog-held lane woke the away captain: $(cat "$state/.wake-queue")"
+  [ ! -s "$out" ] \
+    || fail "a backlog-held lane printed a recheck while the away-posture record existed: $(cat "$out")"
+  [ "$(cat "$state/.stale-since-$key")" != "$armed_timer" ] \
+    || fail "an away-silenced backlog hold left the idle timer expired, so its backlog read repeats on every poll"
+  pass "a backlog captain hold bounds the wedge ladder like a captain-held line, and stays silent while the captain is away"
+}
+
 # --- the wedge threshold reads the crew's own parked-gate state --------------
 # Upstream kunchenguid/firstmate#3055: a lane parked at a validation gate that is
 # waiting on a HUMAN is correctly quiet, but nothing in the status LINE says so -
@@ -6778,6 +6873,7 @@ test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
+test_wedge_threshold_defers_to_a_backlog_captain_hold
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed

@@ -49,15 +49,16 @@
 # task's done. Teardown's landed-work test remains the complete discard gate.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
-# appends " forge=gerrit shape=squash" to that line and a forge=forgejo block
-# appends " forge=forgejo". The "Ship branch: <branch>"
+# appends " forge=gerrit shape=squash" to that line, and a forge=forgejo or
+# forge=external block appends " forge=forgejo" or " forge=external". The "Ship branch: <branch>"
 # line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
-# forge is none|gerrit|forgejo and defaults to none; bin/fm-project-mode.sh's
-# header owns what the registry binding means, and this file owns what each
-# forge changes for a WORKER (docs/gerrit-forge-integration.md is the gerrit
-# design). In the Definition of done, forgejo changes only the CLI a direct-PR
-# worker opens its pull request with: tea instead of gh-axi. A forge composes with
+# forge is none|gerrit|forgejo|external and defaults to none;
+# bin/fm-project-mode.sh's header owns what the registry binding means, and this
+# file owns what each forge changes for a WORKER (docs/gerrit-forge-integration.md
+# is the gerrit design and docs/external-review-forge.md the external one). In
+# the Definition of done, forgejo changes only the CLI a direct-PR worker opens
+# its pull request with: tea instead of gh-axi. A forge composes with
 # the two modes that publish and is refused on local-only, which publishes
 # nothing. On gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
@@ -71,6 +72,15 @@
 # changes is refused until it can be watched by its membership pinned when its
 # watch is armed, because the merge poll watches one change. No contract here
 # lets a worker submit, vote on, or abandon a change.
+# On external a review tool uploads its own snapshot of the worker's commits,
+# so the worker never pushes to publish: forge=external ships direct-PR only,
+# its first rule forbids any push to the shared origin and any push of a
+# task-prefixed branch, and its Definition of done appends the home's review
+# tool instructions (config/external-review.md, read through
+# bin/fm-external-review-lib.sh) verbatim. Its ready report is
+# `done: review <url> uploaded for review`, accepted on the URL alone, or, when
+# spawn recorded a personal backup remote, only once HEAD is on that remote's
+# backup namespace.
 # The two PR-based blocks require a non-draft pull request before the done
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
@@ -122,6 +132,8 @@
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-external-review-lib.sh
+. "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-external-review-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id> <code-root>
   local state=$1 task_id=$2 root=$3
@@ -144,19 +156,35 @@ EOF
 # caller cannot reach a half-rendered contract. local-only is refused rather than
 # rendered with an inert annotation: it publishes nothing, and its landing
 # fast-forwards local main with content the review server has never seen.
+# forge=external also refuses no-mistakes, because the pipeline's push, pr, and
+# ci steps would push to the shared origin.
 fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   local forge=$1 mode=$2 caller=$3
   case "$forge" in
-    none|gerrit|forgejo) ;;
+    none|gerrit|forgejo|external) ;;
     *)
-      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, or forgejo)" >&2
+      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, forgejo, or external)" >&2
       return 1 ;;
   esac
   if [ "$forge" != none ] && [ "$mode" = local-only ]; then
     echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
     return 1
   fi
+  if [ "$forge" = external ] && [ "$mode" != direct-PR ]; then
+    echo "error: $caller: forge=external ships direct-PR only for now; the pipeline's push, pr, and ci steps would push to the shared origin" >&2
+    return 1
+  fi
   return 0
+}
+
+# The task branch prefix: <branch> with its trailing <task-id> removed, or
+# empty when the branch is the bare task id or does not end with it.
+fm_ship_branch_prefix() {  # <branch> <task-id>
+  local branch=$1 id=$2
+  case "$branch" in
+    *"$id") printf '%s\n' "${branch%"$id"}" ;;
+    *) printf '\n' ;;
+  esac
 }
 
 # A task's optional base branch replaces the repository default as the branch
@@ -204,6 +232,18 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   [ -z "$base" ] || target="the base branch \`$base\` or the default branch"
   if [ "$forge" = gerrit ]; then
     printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
+    return 0
+  fi
+  if [ "$forge" = external ]; then
+    local prefix prefixed=''
+    prefix=$(fm_ship_branch_prefix "$branch" "$id")
+    [ -z "$prefix" ] || prefixed=" or any \`$prefix\`-prefixed branch"
+    fm_external_review_backup || return 1
+    printf '%s' "1. Never push to \`origin\`, or to any remote whose URL is the project's shared server, and never push your \`$branch\` branch$prefixed to any remote. The review tool named in your Definition of done uploads its own snapshot, so publishing needs no push. Never approve, merge, or move the review past the stopping point your Definition of done names; a human does that."
+    if [ -n "$FM_REVIEW_BACKUP_REMOTE" ]; then
+      printf ' %s' "The one push you may make is a durable copy to the personal backup remote \`$FM_REVIEW_BACKUP_REMOTE\`: \`git push $FM_REVIEW_BACKUP_REMOTE HEAD:refs/heads/$FM_REVIEW_BACKUP_PREFIX$id\`."
+    fi
+    printf '\n'
     return 0
   fi
   case "$mode" in
@@ -410,7 +450,7 @@ EOF
 
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check
+  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   if [ -n "$consent" ]; then
@@ -479,6 +519,36 @@ The squashed change carries only the oldest commit's message, so the pipeline's 
 After publishing and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
 EOF
       fm_gerrit_publish_block
+      ;;
+    direct-PR:external)
+      fm_external_review_backup || return 1
+      adapter=$(fm_external_review_adapter_body) || return 1
+      cat <<EOF
+# Definition of done
+Delivery contract: mode=direct-PR forge=external$contract_consent
+Ship branch: $branch
+This task ships **direct-PR** through an external review tool: the tool uploads a snapshot of your local commits itself, so you never push a branch to publish, and there is no pull request to open.
+The task is complete only when committed on your branch.
+EOF
+      if [ -n "$FM_REVIEW_BACKUP_REMOTE" ]; then
+        printf '%s\n' "Before uploading, push a durable copy to the backup remote as your first rule names; your done is accepted only when that copy holds your HEAD."
+      fi
+      cat <<EOF
+Follow the review tool instructions below to validate, upload, and bring the review to the stopping point they name.
+Write the review title and description in plain English for a reviewer who lacks your context, with no direct address.
+Then append \`done [at=<epoch>]: review {url} uploaded for review\` to the status file and stop, with the review's full URL exactly as the tool printed it.
+EOF
+      if [ -n "$FM_REVIEW_BACKUP_REMOTE" ]; then
+        printf '%s\n' "Commit nothing after uploading; if you must change the work, commit it, refresh the backup copy, and upload again before reporting done."
+      else
+        printf '%s\n' "Commit nothing after uploading; if you must change the work, commit it and upload again before reporting done."
+      fi
+      cat <<EOF
+Do NOT run /no-mistakes. A human approves and merges the review; firstmate relays the outcome.
+
+## Review tool instructions (home configuration)
+EOF
+      printf '%s\n' "$adapter"
       ;;
     direct-PR:*)
       cat <<EOF
@@ -564,6 +634,57 @@ fm_dod_note_reports_published_change() {  # <note>
   case "$1" in
     *PR*"published for review"*) return 0 ;;
   esac
+  return 1
+}
+
+# 0 when a done: note reports a review uploaded through an external review tool
+# (`review <url> uploaded for review`), the ready report on forge=external.
+fm_dod_note_reports_uploaded_review() {  # <note>
+  case "$1" in
+    review\ https://*\ uploaded\ for\ review*) return 0 ;;
+  esac
+  return 1
+}
+
+# The review URL from a `done: review <url> uploaded for review` note, or empty.
+fm_dod_review_url_from_done_note() {  # <note>
+  local url
+  fm_dod_note_reports_uploaded_review "$1" || return 1
+  url=${1#review }
+  url=${url%% *}
+  printf '%s\n' "$url"
+}
+
+# The forge=external half of the gate. The snapshot lives in a tool firstmate
+# cannot read, so a URL that passes fm_external_review_url_parse is the whole
+# claim unless spawn recorded a personal backup remote (backup_remote= and
+# backup_prefix= in <meta>); then HEAD must also be on that remote's backup
+# namespace. A PR report is refused, because no pull request exists here.
+fm_dod_accept_external_review_done() {  # <worktree> <project> <line> <meta>
+  local wt=$1 project=$2 line=$3 meta=$4 note url remote prefix sha
+  note=$(status_line_note "$line")
+  if ! url=$(fm_dod_review_url_from_done_note "$note"); then
+    printf '%s\n' "this project ships through an external review tool, so the ready report is \`review <url> uploaded for review\`, never a PR"
+    return 1
+  fi
+  if ! fm_external_review_url_parse "$url"; then
+    printf '%s\n' "the review URL $url is not a canonical https review URL (no query, fragment, or forge pull request), or does not match config/external-review-url"
+    return 1
+  fi
+  remote=$(fm_dod_meta_value "$meta" backup_remote)
+  [ -n "$remote" ] || return 0
+  prefix=$(fm_dod_meta_value "$meta" backup_prefix)
+  if [ -z "$prefix" ]; then
+    printf '%s\n' "the task records backup remote $remote with no backup prefix, so the durable copy cannot be verified"
+    return 1
+  fi
+  if [ -z "$wt" ] || [ ! -d "$wt" ] || ! sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null); then
+    printf '%s\n' "named head cannot be verified: worktree missing or not a git copy"
+    return 1
+  fi
+  fm_dod_ref_contains "$wt" "refs/remotes/$remote/$prefix*" "$sha" && return 0
+  fm_dod_ref_contains "$project" "refs/remotes/$remote/$prefix*" "$sha" && return 0
+  printf '%s\n' "named head $sha is not on the backup remote $remote under $prefix; push the durable copy and fetch it before reporting done"
   return 1
 }
 
@@ -706,9 +827,10 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
-# 0 when <line> is not a ship done: to gate, when it names the task's recorded
-# PR whose head the forge holds, when it names a Gerrit change whose current
-# patch set carries the worker copy's HEAD tree, or otherwise when its named
+# 0 when <line> is not a ship done: to gate, when the task's meta records
+# forge=external and fm_dod_accept_external_review_done accepts it, when it
+# names the task's recorded PR whose head the forge holds, when it names a
+# Gerrit change whose current patch set carries the worker copy's HEAD tree, or otherwise when its named
 # head - the worker copy's HEAD - is reachable outside that disposable copy. A
 # published-for-review report that names no Gerrit change is refused.
 # There is no free-text SHA scan: a SHA that happens to appear in the note is
@@ -720,6 +842,10 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
+  if [ -n "$meta" ] && [ "$(fm_dod_meta_value "$meta" forge)" = external ]; then
+    fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
+    return
+  fi
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0

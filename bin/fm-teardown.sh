@@ -3401,7 +3401,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.polytoken-busy.sh" \
       "$sub_state/.$child_id.branch-outcome-index"
     chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
-    rm -rf "$sub_state/$child_id.git-hooks" \
+    rm -rf "$sub_state/$child_id.git-hooks" "$sub_state/$child_id.push-guard" \
       "$sub_state/$child_id.polytoken-config" \
       "$sub_state/$child_id.polytoken-sessions" \
       "$sub_state/$child_id.polytoken-sessions-v1"
@@ -3896,13 +3896,14 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 # state/<id>.git-hooks is the spawn-owned commit-msg strip directory, left
-# read-only by its installer.
+# read-only by its installer, and state/<id>.push-guard is a forge=external
+# task's read-only push guard record (bin/fm-git-push-guard.sh).
 chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 # A task's polytoken config dir and sessions roots are directory trees (the
 # mirrored worker config and the versioned session tree the launch wrote
 # beside its sessions root), so they are removed recursively with the inbox
 # and the git-hooks dir rather than the flat file list above.
-rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" \
+rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.push-guard" \
   "$STATE/$ID.polytoken-config" \
   "$STATE/$ID.polytoken-sessions" "$STATE/$ID.polytoken-sessions-v1"
 # A presentation journal the close path left behind is orphaned once the

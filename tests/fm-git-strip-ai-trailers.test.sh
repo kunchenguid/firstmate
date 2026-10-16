@@ -450,6 +450,50 @@ test_commandcode_trailer_is_stripped() {
   pass "the Command Code trailer a worker writes into its own message is stripped"
 }
 
+test_no_strip_keeps_the_message_and_still_chains() {
+  local repo hooks orig body
+  repo="$TMP_ROOT/no-strip"
+  make_repo "$repo"
+  orig="$repo/.git/hooks"
+  mkdir -p "$orig"
+  cat >"$orig/commit-msg" <<'SH'
+#!/usr/bin/env bash
+printf 'ran\n' > "$(dirname "$1")/orig-commit-msg.ran"
+SH
+  chmod 700 "$orig/commit-msg"
+  hooks="$TMP_ROOT/hooks-no-strip"
+  "$STRIP" install --no-strip "$hooks" "$repo" || fail "install --no-strip should succeed"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  with_hooks_env "$hooks" git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: kept trailer'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_contains "$body" "cursoragent@cursor.com" "install --no-strip still stripped the trailer"
+  assert_present "$repo/.git/orig-commit-msg.ran" "install --no-strip did not chain the repository's commit-msg hook"
+  pass "install --no-strip leaves commit messages untouched while still chaining"
+}
+
+test_push_guard_install_runs_the_guard_before_chaining() {
+  local repo hooks guard bare out rc
+  repo="$TMP_ROOT/push-guard"
+  make_repo "$repo"
+  bare="$TMP_ROOT/push-guard-origin.git"
+  git init -q --bare "$bare"
+  git -C "$repo" remote add origin "file://$bare"
+  guard="$TMP_ROOT/push-guard-file"
+  "$ROOT/bin/fm-git-push-guard.sh" write "$guard" "$repo" fm/t1 fm/ || fail "guard write failed"
+  hooks="$TMP_ROOT/hooks-push-guard"
+  "$STRIP" install --push-guard "$guard" "$hooks" "$repo" || fail "install --push-guard should succeed"
+  [ ! -w "$hooks/pre-push" ] || fail "the guarded pre-push wrapper is writable"
+  [ ! -w "$hooks/fm-push-guard" ] || fail "the installed guard record is writable"
+  out=$(with_hooks_env "$hooks" git -C "$repo" push origin HEAD:refs/heads/main 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the guarded pre-push let a push to origin through"
+  assert_contains "$out" "fm-git-push-guard: refused:" "the guarded pre-push did not run the guard"
+  "$STRIP" install --push-guard "$TMP_ROOT/no-such-guard" "$TMP_ROOT/hooks-missing-guard" "$repo" 2>/dev/null \
+    && fail "install accepted a missing guard file"
+  pass "install --push-guard writes a read-only pre-push that runs the guard before chaining"
+}
+
 test_cursor_trailer_does_not_reach_the_commit_object
 test_commandcode_trailer_is_stripped
 test_human_coauthor_is_kept
@@ -469,5 +513,7 @@ test_git_c_override_still_strips_and_chains_commit_hooks
 test_repository_hook_keeps_inherited_git_config
 test_env_file_canonicalizes_hooks_dir
 test_strip_msgfile_alone_does_not_rewrite_author_fields
+test_no_strip_keeps_the_message_and_still_chains
+test_push_guard_install_runs_the_guard_before_chaining
 
 echo "# all fm-git-strip-ai-trailers tests passed"

@@ -2499,6 +2499,34 @@ test_moved_remote_branch_without_named_head_is_blocked() {
   pass "moved remote branch without the named head is current-state blocked"
 }
 
+# forge=external: a review tool uploads its own snapshot, so the review ready
+# report is current-state done with HEAD only in the worker copy, and a PR
+# report on that project is blocked with the gate's reason.
+test_external_review_done_reads_ready() {
+  reset_fakes
+  local d out
+  d=$(new_case external-review)
+  make_repo_on_branch "$d/wt" fm/ext
+  git -C "$d/wt" commit -q --allow-empty -m 'change only in the copy'
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/config"
+  fm_write_meta "$d/state/ext.meta" \
+    "window=fm:fm-ext" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=direct-PR" "forge=external" "harness=claude"
+  printf 'done: review https://review.example.test/r/5 uploaded for review\n' > "$d/state/ext.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" ext
+  out=$(FM_CONFIG_OVERRIDE="$d/config" run_crew_state "$d" ext)
+  assert_contains "$out" "state: done" "an uploaded external review must read as done"
+  printf 'done: PR https://github.com/o/r/pull/9\n' > "$d/state/ext.status"
+  out=$(FM_CONFIG_OVERRIDE="$d/config" run_crew_state "$d" ext)
+  assert_contains "$out" "state: blocked" "a PR report on an external project must read as blocked"
+  assert_contains "$out" "never a PR" "the blocked read must carry the gate's reason"
+  pass "forge=external: an uploaded review reads done, and a PR report reads blocked with the gate's reason"
+}
+
 # (f) no run for this crew + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
@@ -5632,6 +5660,7 @@ test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked
+test_external_review_done_reads_ready
 test_no_run_busy_pane
 test_no_run_launch_prompt_parked_is_not_working
 test_no_run_footer_text_alone_is_not_working

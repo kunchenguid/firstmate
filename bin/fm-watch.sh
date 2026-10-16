@@ -50,7 +50,8 @@
 #                          Unless afk is active. A pane about to escalate
 #                          that can account for its quiet - a `paused:` external
 #                          wait or a verified `captain-held` transfer its worker
-#                          declared, or, where config/wedge-defer-parked-gate
+#                          declared, a backlog captain hold on its task, or,
+#                          where config/wedge-defer-parked-gate
 #                          arms it, a validation gate of its own awaiting a
 #                          supervisor decision nobody has answered yet - is
 #                          deferred to that same long recheck cadence instead
@@ -1240,7 +1241,11 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # fire. Two records answer it, and they are independent: the worker's own status
 # line - a declared `paused:` external wait, or a verified `captain-held`
 # transfer - and, when that line explains nothing, the crew's authoritative
-# current state.
+# current state. Between them sits the backlog record of the same captain hold
+# (task_captain_call_open), which a worker's line never shows once firstmate
+# hands the call to the captain; it is read only here, at the threshold. That
+# line predates the hold, so it is no record of when the hold began and the hold
+# publishes no wait age.
 #
 # The generated brief promises that declaring one buys the long recheck cadence
 # instead of a wedge, and the wedge timer is reachable while that declaration
@@ -1252,7 +1257,8 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 #
 # A declared clearing time that has ALREADY passed (`paused: ... until <t>`) is
 # not evidence: the wait the worker described is over, so it no longer explains
-# the silence, and the pane keeps the unchanged schedule. The records are read in
+# the silence, and the pane is judged by the records below as if it had declared
+# nothing - the unchanged schedule unless one of them holds. The records are read in
 # this order rather than pooled because the routing already guarantees it is the
 # right one: a pane whose last line is `paused:` or `captain-held:` reaches this
 # timer only through pause_state_class answering `working`, so its crew state is
@@ -1307,6 +1313,7 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # so it is taken only behind a first fold read that finds some open
 # `needs-decision` at all, and only in the at-threshold branch - at most once per
 # window per STALE_ESCALATE_SECS, never on an ordinary poll.
+WEDGE_BACKLOG_HOLD_KIND='captain hold'
 wedge_wait_evidence() {  # <task> -> one wait_record on stdout
   local task=$1 last until statusf run
   [ -n "$task" ] || return 1
@@ -1317,12 +1324,15 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
       captain 'answer the held decision or release the hold' "$statusf"
     return 0
   fi
-  if status_is_paused "$last"; then
-    if until=$(status_paused_until "$last"); then
-      [ "$(date +%s)" -lt "$until" ] || return 1
-    fi
+  if status_is_paused "$last" \
+    && { ! until=$(status_paused_until "$last") || [ "$(date +%s)" -lt "$until" ]; }; then
     wait_record 'declared wait' 'awaiting external' \
       external 'confirm the wait still holds' "$statusf"
+    return 0
+  fi
+  if task_captain_call_open "$task"; then
+    wait_record "$WEDGE_BACKLOG_HOLD_KIND" 'awaiting the captain - held in the backlog' \
+      captain 'answer the held decision or release the hold' ''
     return 0
   fi
   [ -e "$CONFIG/wedge-defer-parked-gate" ] || return 1
@@ -1359,14 +1369,14 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # exists: the one human who can answer it is away, the return brief already lists
 # it, and every other captain-facing path in this file absorbs it silently for
 # that reason (handle_paused_stale, surface_nonterminal_stale,
-# captain_call_stale_bound). That absorb arms no throttle and deliberately
-# leaves the idle timer alone: a `captain` whom is minted only by the
-# captain-held arm of wedge_wait_evidence, which returns before the
-# wedge-defer-parked-gate flag test and therefore before any decision-fold or
-# current-state read, so the only read that repeats under the away record is the
-# one status-line read that predates this deferral. There is nothing costly to
+# captain_call_stale_bound). That absorb arms no throttle and, for a
+# `captain-held:` line, leaves the idle timer alone: that arm of
+# wedge_wait_evidence returns before any backlog, decision-fold or current-state
+# read, so the only read that repeats under the away record is the one
+# status-line read that predates this deferral. There is nothing costly to
 # throttle there, so the recheck owed on return stays owed in full the moment the
-# record is archived rather than starting a cadence nobody could act on. The
+# record is archived rather than starting a cadence nobody could act on. A
+# backlog-only hold is proven by a backlog read, so its timer is restarted. The
 # costly parked-gate consult is owed to the supervisor instead, never silenced
 # here, and its own deferral restarts the timer below.
 # The escalation counter is left alone, exactly as the write deferral leaves it:
@@ -1403,6 +1413,9 @@ EOF
   fi
   key=$(window_key "$win")
   if [ "$whom" = captain ] && away_record_present; then
+    # The backlog hold alone costs a backlog read to prove, so restart its idle
+    # timer to keep that read at one per STALE_ESCALATE_SECS instead of every poll.
+    [ "$kind" != "$WEDGE_BACKLOG_HOLD_KIND" ] || date +%s > "$since_file"
     triage_log "absorbed $label ($kind, never rechecked while the away-posture record exists): $win"
     return 0
   fi
@@ -1842,8 +1855,9 @@ pause_state_class() {  # <window> <task>
 # a wait this watcher cannot prove is not a wait.
 #
 # The read costs one subprocess and runs only where the watcher is about to
-# alarm, so at most once per distinct stale hash per window, beside the crew-state
-# read the same paths already pay. The secondmate stale gate deliberately runs
+# alarm, so at most once per distinct stale hash per window, or once per
+# STALE_ESCALATE_SECS at the wedge threshold (wedge_wait_evidence), beside the
+# crew-state read the same paths already pay. The secondmate stale gate deliberately runs
 # before this bound and admits only status-declared waits: a backlog-only hold
 # whose mate still says `working:` or `done:` does not reach this read. Reaching
 # it would put backlog reads into windows deliberately skipped on ordinary polls.

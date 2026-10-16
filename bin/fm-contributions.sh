@@ -54,9 +54,13 @@
 # 1..25). A configured value rides the generated check shim into watcher runs
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
-# a direct child) with a three-second margin. Every read is capped at five
-# seconds, and a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
+# a direct child) with a three-second margin. Every read, including one retry,
+# is capped at five seconds. A first attempt killed at that bound or deadline is
+# budget refusal; a killed retry retains the genuine failure that caused it.
+# HTTP 5xx, 429, secondary-rate-limit 403, connection, DNS and TLS failures are
+# retried once when that bound still has time. Other failures are reported
+# immediately, including a 404, which is how a lost login reads on a private
+# repository. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
@@ -224,27 +228,94 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
-forge() {
-  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
-  remaining=$((DEADLINE - $(date +%s)))
-  # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  [ "$remaining" -le 5 ] || remaining=5
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$forge_err" || rc=$?
-  # A kill at the read bound or the deadline is budget refusal too; only the
-  # forge's own nonzero exit is unavailable evidence.
-  if [ "$rc" -eq 124 ]; then
+forge_http_status() { # stderr-file
+  sed -nE 's/^gh: HTTP ([0-9]{3})$/\1/p; s/^HTTP ([0-9]{3})[: ].*/\1/p; s/.*\(HTTP ([0-9]{3})\).*/\1/p' "$1" | head -n 1
+}
+
+forge_error_summary() { # stderr-file
+  local err=$1 status
+  status=$(forge_http_status "$err")
+  if [ -n "$status" ]; then
+    printf 'HTTP %s\n' "$status"
+  elif grep -q '^GraphQL:' "$err"; then
+    printf 'request failed\n'
+  elif grep -Fqi 'error connecting to' "$err" \
+    && grep -Fqi 'check your internet connection or https://githubstatus.com' "$err"; then
+    printf 'DNS error\n'
+  elif grep -Eqi '^Could not resolve host:|name resolution|no such host|dial (tcp|udp): lookup|lookup [^:]+:' "$err"; then
+    printf 'DNS error\n'
+  elif grep -Eqi 'tls: |x509: |TLS handshake|certificate (verify|signed)' "$err"; then
+    printf 'TLS error\n'
+  elif grep -Eqi 'connection (reset|refused|closed|failed|error)|could not connect|failed to connect|error connecting|broken pipe|network is unreachable|dial (tcp|udp)|unexpected EOF' "$err"; then
+    printf 'connection error\n'
+  else
+    printf 'request failed\n'
+  fi
+}
+
+forge_transient_error() { # stderr-file summary
+  case "$2" in
+    'HTTP 5'[0-9][0-9]|'HTTP 429'|'connection error'|'DNS error'|'TLS error') return 0 ;;
+    'HTTP 403') grep -Eqi 'secondary[- ]rate[- ]limit' "$1" && return 0 ;;
+  esac
+  return 1
+}
+
+forge_bound_result() { # failed-rc failed-why fallback-rc
+  FORGE_BOUND_RC=$3
+  if [ "$1" -ne 0 ]; then
+    : > "$TMP/forge-unavailable"
+    printf '%s\n' "$2" >> "$TMP/why"
+    FORGE_BOUND_RC=$1
+  else
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
-  elif [ "$rc" -ne 0 ]; then
-    : > "$TMP/forge-unavailable"
-    # Keep the failing read's own words; cleanup discards its error file.
-    printf '%s read exited %s with %ss of budget left: %s\n' "$(basename "$forge_err" .err)" "$rc" \
-      "$((DEADLINE - $(date +%s)))" "$(sed -n '/[^[:space:]]/{p;q;}' "$forge_err" | tr -d '\000-\037\177' | cut -c1-160)" \
-      >> "$TMP/why"
   fi
-  return "$rc"
+}
+
+forge() {
+  local remaining rc=0 failed_rc=0 failed_why='' now read_deadline
+  local forge_err=${FORGE_ERR:-$TMP/forge.err} out summary why
+  out=$(mktemp "$TMP/forge-output.XXXXXX")
+  now=$(date +%s)
+  read_deadline=$((now + 5))
+  [ "$read_deadline" -le "$DEADLINE" ] || read_deadline=$DEADLINE
+  while :; do
+    now=$(date +%s)
+    remaining=$((read_deadline - now))
+    if [ "$remaining" -le 0 ]; then
+      forge_bound_result "$failed_rc" "$failed_why" 1
+      rm -f -- "$out"
+      return "$FORGE_BOUND_RC"
+    fi
+    rc=0
+    fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      gh "$@" > "$out" 2> "$forge_err" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      cat "$out"
+      rm -f -- "$out"
+      return 0
+    fi
+    # A kill at the read bound or the deadline is budget refusal. If the retry
+    # times out, retain the genuine forge failure that caused that retry.
+    if [ "$rc" -eq 124 ]; then
+      forge_bound_result "$failed_rc" "$failed_why" "$rc"
+      rm -f -- "$out"
+      return "$FORGE_BOUND_RC"
+    fi
+    # Keep the failing read's own words; the retry and cleanup discard its error file.
+    why=$(printf '%s read exited %s with %ss of budget left: %s' "$(basename "$forge_err" .err)" "$rc" \
+      "$((DEADLINE - $(date +%s)))" "$(sed -n '/[^[:space:]]/{p;q;}' "$forge_err" | tr -d '\000-\037\177' | cut -c1-160)")
+    summary=$(forge_error_summary "$forge_err")
+    if [ "$failed_rc" -ne 0 ] || ! forge_transient_error "$forge_err" "$summary"; then
+      : > "$TMP/forge-unavailable"
+      printf '%s\n' "$why" >> "$TMP/why"
+      rm -f -- "$out"
+      return "$rc"
+    fi
+    failed_rc=$rc
+    failed_why=$why
+  done
 }
 
 unobserved() { # why: a structural check, not a forge read, refused the observation

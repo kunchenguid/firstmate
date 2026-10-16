@@ -1676,18 +1676,19 @@ ${context.command}
     if (!(await enqueueDelivery(() => actingAsOwner(promptGeneration)))) return;
     if (promptGeneration !== generation || !currentMainSession || !collectCurrentMainDialog()) return;
 
-    // This event is Pi's authoritative complete current prompt. At this point
+    // For user messages this event is Pi's authoritative complete current prompt. At this point
     // SessionManager still contains only the preceding dialog, so relying on
     // getEntries() here loses the captain request that the next wake may answer.
     // Stage it verbatim and remember the future persisted index for turn_end's
     // duplicate suppression. Operational extension injections are not dialog.
-    processingOpenedThisRun =
-      event.messageType === "custom" &&
-      isProcessingCustomMessage(event.message) &&
-      queuedProcessingContent !== null &&
-      event.message.content === queuedProcessingContent;
-    if (event.messageType !== "user") return;
-    const trimmed = event.prompt.trim();
+    if (event.messageType === "custom") {
+      processingOpenedThisRun = isProcessingCustomMessage(event.message) &&
+        queuedProcessingContent !== null && event.message.content === queuedProcessingContent;
+      return;
+    }
+    const prompt = event.prompt;
+    processingOpenedThisRun = queuedProcessingContent !== null && prompt === queuedProcessingContent;
+    const trimmed = prompt.trim();
     if (!trimmed || isOperationalUserText(trimmed)) return;
     const file = currentMainSession.getSessionFile() ?? "";
     const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
