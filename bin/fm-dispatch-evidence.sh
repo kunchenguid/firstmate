@@ -16,6 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
 if [ "${1:-}" = record ]; then
+  # shellcheck source=bin/fm-pr-lib.sh
   . "$SCRIPT_DIR/fm-pr-lib.sh"
   fm_task_id_creation_valid "${2:-}" || {
     echo "error: invalid task id" >&2

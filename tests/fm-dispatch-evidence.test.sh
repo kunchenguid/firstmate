@@ -125,17 +125,17 @@ printf '%s\n' '{"BackendState":"Running","Peer":{"node-a":{"TailscaleIPs":["100.
 if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/tailnet.json" --expected-url "$tailnet_base" >"$work/out" 2>"$work/err"; then
   fail 'unlisted CGNAT address was accepted as a Tailnet peer'
 fi
-rg -q 'not a verified Tailnet peer' "$work/err" || fail 'unlisted CGNAT address did not fail at identity proof'
+grep -Fq 'not a verified Tailnet peer' "$work/err" || fail 'unlisted CGNAT address did not fail at identity proof'
 printf '%s\n' '{"BackendState":"Running","Peer":{"node-a":{"TailscaleIPs":["100.64.0.42"]}}}' > "$FM_TEST_TS_STATUS"
 if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/tailnet.json" --expected-url "$tailnet_base" >"$work/out" 2>"$work/err"; then
   fail 'unreachable verified peer was accepted as ready'
 fi
-rg -q 'local endpoint unavailable' "$work/err" || fail 'verified peer did not proceed to endpoint health'
+grep -Fq 'local endpoint unavailable' "$work/err" || fail 'verified peer did not proceed to endpoint health'
 rm "$FM_TEST_TS_STATUS"
 if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/tailnet.json" --expected-url "$tailnet_base" >"$work/out" 2>"$work/err"; then
   fail 'unavailable Tailnet proof was accepted'
 fi
-rg -q 'cannot verify local endpoint as a Tailnet peer' "$work/err" || fail 'unavailable proof did not fail closed'
+grep -Fq 'cannot verify local endpoint as a Tailnet peer' "$work/err" || fail 'unavailable proof did not fail closed'
 
 printf '%s\n' '{"task_class":"bounded coding","proposed":"local/local-model","selected":"codex/gpt","confidence":0.9}' \
   | FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" record job shadow >/dev/null
