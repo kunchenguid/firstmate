@@ -1524,11 +1524,11 @@ test_handling_delivered_accepts_already_acked_generation() {
   pass "watch-arm: an already-acknowledged handling confirmation succeeds as a no-op"
 }
 
-# A non-successor arm start mints a fresh generation, and a confirmation for
-# the churned generation reports a mismatch (status 3). The closing arm check
-# without a reopen - the marker step a handling successor runs - keeps the
-# churned generation. This characterizes existing marker behavior that the Pi
-# superseded-delivery path relies on.
+# A genuinely newer episode supersedes an announced generation, and a
+# confirmation for the superseded generation reports a mismatch (status 3). The
+# closing arm check without a reopen - the marker step a handling successor
+# runs - keeps the newer generation. This characterizes marker behavior that
+# the Pi superseded-delivery path relies on.
 test_handling_delivered_rejects_a_superseded_generation() {
   local dir home state pid identity first second status
   dir=$(make_case handling-delivered-superseded)
@@ -1550,38 +1550,26 @@ test_handling_delivered_rejects_a_superseded_generation() {
     announced:downtime:"$first") ;;
     *) fail "announced episode has the wrong shape: $(cat "$state/.watcher-down")" ;;
   esac
-  # Reopening mints a fresh generation only when unrecovered work is queued:
-  # an announced episode with an empty queue must survive untouched, so queue
-  # one wake and re-announce first. Without this the reopen below is a no-op
-  # by design (no idle churn) and the fresh-generation assertion below fails.
-  append_wake "$state" check inbox:fixture 'check: manual-restart churn fixture' \
-    || fail "could not queue the fixture wake for the manual restart"
-  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_arm_check "$2"' \
-    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" \
-    || fail "could not re-announce the queued fixture episode"
-  first=$(recovery_marker_generation "$state/.watcher-down")
-  case "$(cat "$state/.watcher-down")" in
-    announced:downtime:"$first") ;;
-    *) fail "queued episode has the wrong shape: $(cat "$state/.watcher-down")" ;;
-  esac
-  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_reopen_announced "$2"' \
-    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" \
-    || fail "a manual arm start could not reopen the announced episode"
+  # A reopen keeps the announced generation, so supersede it the way a genuinely
+  # newer episode does: a wake appended over an announced downtime episode
+  # starts a fresh pending generation (docs/watcher-continuity.md).
+  append_wake "$state" check inbox:fixture 'check: newer episode fixture' \
+    || fail "could not append the fixture wake over the announced episode"
   second=$(recovery_marker_generation "$state/.watcher-down")
   [ -n "$second" ] && [ "$second" != "$first" ] \
-    || fail "a non-successor arm start did not mint a fresh generation: $(cat "$state/.watcher-down")"
+    || fail "a wake appended over an announced episode did not start a fresh generation: $(cat "$state/.watcher-down")"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$first" \
     --watcher-pid "$pid" 2>/dev/null
-  expect_code 3 "$?" "a confirmation for the churned generation must report a mismatch"
+  expect_code 3 "$?" "a confirmation for the superseded generation must report a mismatch"
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_arm_check "$2"' \
     _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" \
-    || fail "the arm check after the reopen could not run"
+    || fail "the arm check after the newer episode could not run"
   status=$(recovery_marker_generation "$state/.watcher-down")
   [ "$status" = "$second" ] \
-    || fail "an arm check without a reopen minted another generation: $(cat "$state/.watcher-down")"
+    || fail "an arm check over the newer episode minted another generation: $(cat "$state/.watcher-down")"
   kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  pass "watch-arm: a churned generation's handling confirmation reports a mismatch and an arm check keeps it"
+  pass "watch-arm: a superseded generation's handling confirmation reports a mismatch and an arm check keeps the newer one"
 }
 
 # The OpenCode arm plugin must decide whether to arm with the shared supervision

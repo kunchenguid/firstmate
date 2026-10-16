@@ -2073,12 +2073,16 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode() {
     || fail "a row above the acknowledged sequence was consumed"
   grep "$(printf '\tcheck\tthird\t')" "$state/.wake-queue" >/dev/null \
     || fail "the second row above the acknowledged sequence was consumed"
+  # The acknowledgement consumed its own row, so it settled what was presented
+  # and retires the episode even though later rows stay queued; those rows
+  # resurface through their own presentation below rather than by holding the
+  # episode open (docs/watcher-continuity.md "What an acknowledgement retires").
   case "$(cat "$state/.watcher-down")" in
-    pending:*) ;;
-    *) fail "an episode with rows still queued was retired" ;;
+    acked:*) ;;
+    *) fail "an acknowledgement that consumed its presented row left the episode open: $(cat "$state/.watcher-down")" ;;
   esac
 
-  # Retire that episode, then let a genuinely newer one open.
+  # Present the rows still queued, then let a genuinely newer episode open.
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
     || fail "remaining wake could not be re-drained"
   replay_err="$dir/replay.err"
