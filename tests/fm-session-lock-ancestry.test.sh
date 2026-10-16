@@ -273,6 +273,138 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# omp 18.4.4 runs every tool shell of an interactive session under the
+# session's own `omp __omp_worker_daemon_broker` helper (36954), whose parent is
+# the omp session (26445). The session's argv quotes a full helper command line
+# (`/opt/omp __omp_worker_daemon_broker`) inside its prompt, exactly as a launch
+# brief can, so only argv[1] may identify a helper.
+# FM_TEST_BROKER_PARENT reparents the broker: 1 is the orphaned shape, 500 a
+# broker under a process that is a harness but not an omp session.
+test_omp_worker_broker_is_crossed_to_its_session() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/omp-broker"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+omp='/Users/u/.local/bin/omp'
+comm=$omp
+[ "${FM_TEST_OMP_SHAPE:-macos}" = macos ] || comm=omp
+case "$pid:$field" in
+  36954:comm=) printf '%s\n' "$comm" ;;
+  36954:args=) printf '%s\n' "$omp __omp_worker_daemon_broker" ;;
+  36954:ppid=) printf '%s\n' "${FM_TEST_BROKER_PARENT:-26445}" ;;
+  26445:comm=) printf '%s\n' "$comm" ;;
+  26445:args=) printf '%s\n' "$omp --continue brief: the lock recorded /opt/omp __omp_worker_daemon_broker" ;;
+  26445:ppid=) printf '%s\n' 67011 ;;
+  67011:comm=) printf '%s\n' zsh ;;
+  67011:args=) printf '%s\n' -zsh ;;
+  67011:ppid=) printf '%s\n' 1 ;;
+  500:comm=) printf '%s\n' claude ;;
+  500:args=) printf '%s\n' claude ;;
+  500:ppid=) printf '%s\n' 1 ;;
+  1:comm=) printf '%s\n' /sbin/launchd ;;
+  1:args=) printf '%s\n' /sbin/launchd ;;
+  1:ppid=) printf '%s\n' 0 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=)
+    if [ -n "${FM_TEST_FOREIGN:-}" ]; then printf '%s\n' 500; else printf '%s\n' 36954; fi
+    ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  for shape in macos linux; do
+    got=$(FM_TEST_OMP_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+      || fail "$shape: a tool shell under the omp broker found no session in its ancestry"
+    [ "$got" = 26445 ] || fail "$shape: ancestry reported '$got', expected only the omp session 26445"
+    [ "$(FM_TEST_OMP_SHAPE="$shape" lib_eval "$fakebin" 'fm_session_lock_anchor_pid')" = 26445 ] \
+      || fail "$shape: the lock anchor is not the omp session"
+    FM_TEST_OMP_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 26445' \
+      || fail "$shape: an omp session whose prompt contains /opt/omp __omp_worker_daemon_broker was not a live harness"
+    if FM_TEST_OMP_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 36954'; then
+      fail "$shape: a bare omp broker passed the live-session-owner predicate"
+    fi
+  done
+
+  # Linux procps reports the bare executable name in comm while args retains
+  # the full executable path, including spaces.
+  sed -i.bak "s|^omp='/Users/u/.local/bin/omp'$|omp='/Users/u/Install With Spaces/omp'|" "$fakebin/ps"
+  rm -f "$fakebin/ps.bak"
+  got=$(FM_TEST_OMP_SHAPE=linux lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+    || fail "a spaced omp install path found no session in its ancestry"
+  [ "$got" = 26445 ] || fail "a spaced omp install path resolved '$got', expected only the omp session 26445"
+
+  printf '26445\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the omp session did not own the lock recorded with its own pid"
+
+  # A lock a pre-fix session recorded with its broker pid must not block the
+  # owning session: it is neither owned nor held by a live foreign session.
+  printf '36954\n' > "$dir/state/.lock"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a broker-recorded lock was owned through the broker"
+  fi
+  if lib_eval "$fakebin" "fm_session_lock_foreign_owner_live '$dir/state'"; then
+    fail "a broker-recorded lock was reported as held by another live session"
+  fi
+  got=$(lib_eval "$fakebin" "fm_session_lock_inspect '$dir/state'; printf '%s' \"\$FM_LOCK_INSPECT_STATE\"")
+  [ "$got" != held ] || fail "a broker-recorded lock was inspected as held by a live harness"
+
+  # A different session must still refuse while the broker's omp parent is
+  # live, even though the helper itself is deliberately not a session owner.
+  printf '36954\n' > "$dir/state/.lock"
+  FM_TEST_FOREIGN=1 FM_TEST_BROKER_PARENT=26445 lib_eval "$fakebin" \
+    "fm_session_lock_foreign_owner_live '$dir/state'" \
+    || fail "a different session treated a live omp parent of the broker as stale"
+
+  for parent in 1 500; do
+    if FM_TEST_BROKER_PARENT=$parent lib_eval "$fakebin" 'fm_harness_ancestry_pids'; then
+      fail "a broker under pid $parent was accepted as a session anchor"
+    fi
+  done
+  pass "session-lock: an omp worker broker is crossed to its omp session and never owns the lock itself"
+}
+
+# The same shape with real processes and the real bin/fm-lock.sh: a tool shell
+# under the broker finds the lock recorded with that broker's pid and reclaims
+# it for the omp session. Before the fix the broker was the anchor and kept it.
+test_e2e_omp_session_reclaims_a_broker_recorded_lock() {
+  local dir session_pid
+  dir="$TMP_ROOT/e2e-omp-broker"
+  mkdir -p "$dir/state"
+  ln -s /bin/bash "$dir/omp"
+  cat > "$dir/session.sh" <<'SH'
+printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
+cd "$FM_HOME" || exit 1
+"$FM_HOME/omp" __omp_worker_daemon_broker
+exit 0
+SH
+  cat > "$dir/__omp_worker_daemon_broker" <<'SH'
+printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+"$FM_LOCK" > "$FM_HOME/state/lock.out" 2>&1
+printf '%s\n' "$?" > "$FM_HOME/state/lock.rc"
+SH
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
+    "$dir/omp" "$dir/session.sh" "brief: the lock recorded omp __omp_worker_daemon_broker"
+  session_pid=$(tr -d '[:space:]' < "$dir/state/session-pid")
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/lock.rc")" \
+    "the omp session could not reclaim a broker-recorded lock: $(cat "$dir/state/lock.out")"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session_pid" ] \
+    || fail "lock line 1 is $(cat "$dir/state/.lock"), expected the omp session pid $session_pid"
+  pass "session-lock: a real omp session reclaims a lock recorded with its broker's pid"
+}
+
 # A background Claude session's process table. The hook fires inside
 # `claude bg-spare` (710), whose parent is `claude bg-pty-host` (720). With the
 # transient daemon gone the pty-host is reparented to launchd, so the contiguous
@@ -1104,6 +1236,8 @@ test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_omp_worker_broker_is_crossed_to_its_session
+test_e2e_omp_session_reclaims_a_broker_recorded_lock
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_e2e_version_named_session_claims_the_home

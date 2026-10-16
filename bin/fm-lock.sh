@@ -195,7 +195,7 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
     confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
   fi
-  if fm_harness_pid_alive "$old"; then
+  if fm_session_lock_foreign_owner_live "$STATE"; then
     refuse_live_owner "$old"
   fi
 fi
@@ -219,10 +219,10 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ "$old" != "$me" ] && fm_session_lock_foreign_owner_live "$STATE"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+    if [ "$old" != "$me" ] && fm_session_lock_foreign_owner_live "$STATE"; then
       refuse_live_owner "$old"
     fi
   fi

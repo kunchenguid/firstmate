@@ -1,6 +1,6 @@
 # omp (Oh My Pi)
 
-Verified for crew, scout, secondmate, and primary work on Herdr on 2026-09-05 with omp 18.1.11, building on the 2026-09-02 adapter investigation against 18.1.2.
+The original crew, scout, secondmate, and primary adapter matrix was verified on Herdr on 2026-09-05 with omp 18.1.11, building on the 2026-09-02 adapter investigation against 18.1.2.
 omp is a Pi fork, so `references/harness/pi.md` is the nearest relative; every difference from Pi is stated here.
 Cross-harness provider and credential identity is owned by `references/common/model-and-effort.md`.
 
@@ -32,6 +32,8 @@ omp cold start is roughly twenty seconds to the first agent turn, paid once per 
 `../../../bin/fm-harness.sh` tests `FM_OMP_HARNESS=omp` before `CLAUDECODE`, like Cursor's markers, and its ancestry walk matches the anchored process name `omp` above the interpreter fallback.
 The omp template in `../../../bin/fm-spawn.sh` clears every foreign marker at its own launch boundary, and `FM_OMP_HARNESS=omp` counts only under a real `omp` ancestor, so the marker inherited by any other launch is inert: an omp secondmate's workers keep their own identity and an inherited `CLAUDECODE` cannot outrank a worker that omp launched.
 `../../../bin/fm-session-lock-lib.sh` matches the same anchored name for session-lock ownership, and `../../../bin/backends/tmux.sh` classifies it `agent` for liveness.
+From omp 18.4.4 (verified 2026-09-30) a session runs per-project helpers from the same binary under the same `omp` name, identified by argv[1]: `omp __omp_worker_daemon_broker` is a child of the session and the parent of tool processes it hosts (always a named bash service; a primary observed every tool shell there, with or without a PTY), and `__omp_worker_lsp_mux` or `__omp_worker_text_predict` can run beneath it.
+A helper is never the session and can outlive it reparented to pid 1, so the session-lock walk crosses a helper only into an omp session above it and never treats a live helper as a lock owner; `fm_harness_is_omp_worker_helper` in that lib owns the rule, and the primary extensions' lock-liveness check follows it.
 The optional claude-bridge extension runs a nested executable literally named `claude` as a sibling of tool execution, never an ancestor of it, so omp's own tool calls detect as omp; that subtree is never walked by a Firstmate script.
 
 ## Worker posture overlay
