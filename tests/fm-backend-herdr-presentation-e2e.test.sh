@@ -178,6 +178,18 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       ;;
   esac
 fi
+# An abort pane's top-level shell idles in its lease, which would route its
+# cleanup through the pane-death close this audit cannot see. Report a busy
+# foreground so cleanup takes the audited pane close, as a pane still running a
+# command would.
+if [ "$status" -eq 0 ] && [ "${1:-} ${2:-} ${3:-}" = "pane process-info --pane" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+    [ -d "$task_dir" ] || continue
+    [ "${4:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
+    out=$(printf '%s' "$out" | jq '.result.process_info.foreground_process_group_id = ((.result.process_info.shell_pid // 1) + 1)')
+    break
+  done
+fi
 if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
   for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
     [ -d "$task_dir" ] || continue
@@ -210,9 +222,6 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
-fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
 # test. Serialize its calls so simultaneous recovery spawns cannot race for
 # one pool slot before reaching the Herdr session lock exercised below.
@@ -222,6 +231,19 @@ done
 release_treehouse_lock() { rmdir "$TREEHOUSE_LOCK_DIR" 2>/dev/null || true; }
 trap release_treehouse_lock EXIT
 trap 'exit 1' HUP INT TERM
+# Armed abort: lease a throwaway linked worktree outside the pool so the spawn
+# moves its pane, whose forced foreground_cwd then never reaches that path.
+if [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  case "${1:-}" in
+    get)
+      wt=$(mktemp -u "$POST_CREATE_ABORT_CONTROL/lease.XXXXXX")
+      git worktree add --quiet --detach "$wt" >/dev/null 2>&1 || exit 1
+      printf '%s\n' "$wt"
+      exit 0
+      ;;
+    return) exit 0 ;;
+  esac
+fi
 "$REAL_TREEHOUSE" "$@"
 exit $?
 SH
@@ -862,12 +884,12 @@ if wait "$ABORT_A_PID"; then ABORT_A_STATUS=0; else ABORT_A_STATUS=$?; fi
 if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
 finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
 finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
-# The forced foreground_cwd is a plain non-git directory, which the discovery
-# poll now screens out on every read rather than adopting, so the armed failure
-# arrives as the poll's own deadline refusal naming that path.
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+# The forced foreground_cwd is a plain non-git directory that never matches
+# the leased worktree, so the armed failure arrives as the wait's own deadline
+# refusal after the spawn has moved its pane.
+grep -F "did not enter its leased worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+grep -F "did not enter its leased worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
