@@ -55,7 +55,7 @@ case "$1 $2 $3" in
       jq -n --arg state "$state" --arg head "${FM_TEST_TWG_HEAD:-abc123def456}" \
         --arg omit "$FM_TEST_TWG_OMIT" --argjson tasks "${FM_TEST_TWG_TASKS:-0}" \
         --argjson statuses "$statuses" \
-        '{state: $state, source: {commit: {hash: $head}}, task_count: $tasks, statuses: $statuses} | del(.[$omit])'
+        '{state: $state, source: {commit: {hash: $head}}, task_count: $tasks, _statuses: $statuses} | del(.[$omit])'
       exit 0
     fi
     jq -n \
@@ -63,7 +63,7 @@ case "$1 $2 $3" in
       --arg head "${FM_TEST_TWG_HEAD:-abc123def456}" \
       --argjson tasks "${FM_TEST_TWG_TASKS:-0}" \
       --argjson statuses "$statuses" \
-      '{state: $state, source: {commit: {hash: $head}}, task_count: $tasks, statuses: $statuses}'
+      '{state: $state, source: {commit: {hash: $head}}, task_count: $tasks, _statuses: $statuses}'
     exit 0
     ;;
   "bb pull-requests merge")
@@ -291,7 +291,7 @@ test_bitbucket_verify_mergeable_refusals() {
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a pull request with a failing build status"
   grep -qF 'not SUCCESSFUL' "$dir/build.err" || fail "failing-build refusal did not name the status"
 
-  for field in task_count statuses; do
+  for field in task_count _statuses; do
     set +e
     FM_TEST_TWG_OMIT=$field run_merge_entry "$dir" task-a "$url" >/dev/null 2> "$dir/omit.err"
     rc=$?

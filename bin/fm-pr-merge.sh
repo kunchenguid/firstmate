@@ -909,14 +909,14 @@ bitbucket_verify_mergeable() {
   # is "failing" when any reported commit status for the pull request is not
   # SUCCESSFUL, and "clean" otherwise, including when none has reported at all:
   # a repository with no configured pipelines is not thereby unmergeable. A
-  # response that omits task_count or statuses is "unverified", not a pass.
+  # response that omits task_count or _statuses is "unverified", not a pass.
   if ! fields=$(printf '%s' "$json" | jq -r '
       if type == "object" then
         "state=" + ((.state // "") | tostring),
         "head=" + ((.source.commit.hash // "") | tostring),
         "tasks=" + (if (.task_count | type) == "number" then (.task_count | tostring) else "unverified" end),
-        "build_status=" + (if (.statuses | type) != "array" then "unverified"
-          elif ([.statuses[] | select((.state // "") != "SUCCESSFUL")] | length) > 0 then "failing"
+        "build_status=" + (if (._statuses | type) != "array" then "unverified"
+          elif ([._statuses[] | select((.state // "") != "SUCCESSFUL")] | length) > 0 then "failing"
           else "clean" end)
       else
         error("pull request payload is not an object")
@@ -958,7 +958,7 @@ FIELDS
   esac
   case "$build_status" in
     clean) ;;
-    unverified) refusals="$refusals  - the statuses field is missing from the pull request, so the build status is unverified
+    unverified) refusals="$refusals  - the _statuses field is missing from the pull request, so the build status is unverified
 " ;;
     *) refusals="$refusals  - a reported build status is not SUCCESSFUL
 " ;;
