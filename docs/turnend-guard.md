@@ -353,6 +353,16 @@ No mutex is held across arming or output.
 A superseded owner goes completely silent.
 Ownership is re-verified before every arm invocation, episode-state mutation, ledger write, and continuation.
 
+#### Parked deferral
+
+Claude turns only the latest Stop's exit 2 into a rewake, so a firing that defers to an open claim parks on it instead of exiting.
+Any later turn supersedes the owner's Stop that way, whether an operator message or a turn this guard continued.
+`state/.claude-autoarm-parked` names the one parked firing, and a newer Stop's firing replaces it.
+When the owner's exit-2 commit finds a live parked firing, the same owned ledger write transfers the next generation to that firing and publishes the owner's banner and outcome in `state/.claude-autoarm-handoff`.
+The owner then exits 0, and the parked firing commits that outcome and exits 2 with that banner.
+When the owner ends any other way, its claim is no longer open and the parked firing claims and arms as a later Stop would.
+The generation-claim contract comment in `bin/fm-wake-lib.sh` owns the record formats.
+
 #### Exit status as the commit point
 
 The irrevocable commit point of a translation is the exit status, because the harness delivers the collected stderr banner only on exit 2.

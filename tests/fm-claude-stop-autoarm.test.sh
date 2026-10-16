@@ -1201,11 +1201,25 @@ record_autoarm_v2_claim() {
     "$gen" "$owner" "$outcome" "$identity" > "$dir/state/.claude-autoarm-epoch"
 }
 
+# Wait for a firing to park on the open claim; prints the parked hook's pid.
+wait_for_parked_firing() {
+  local dir=$1 i=0 pid
+  while [ "$i" -lt 200 ]; do
+    pid=$(sed -n '1s/^.*parked_pid=\([0-9]*\) .*$/\1/p' "$dir/state/.claude-autoarm-parked" 2>/dev/null || true)
+    [ -z "$pid" ] || { printf '%s\n' "$pid"; return 0; }
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # A live open generation claim needs no lock to keep the gate closed: the
 # ledger alone defers a concurrent firing, however old the entry, while the
-# watcher keeps beating the beacon.
+# watcher keeps beating the beacon. The deferring firing parks without arming,
+# writing the claim, or printing, and once the owner ends without handing a
+# close over it claims the next generation and arms as a later Stop would.
 test_open_generation_claim_defers_without_any_lock() {
-  local dir out status pid
+  local dir out status pid parked
   dir=$(make_primary_dir "$TMP_ROOT/v2-open-claim")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
@@ -1215,14 +1229,23 @@ test_open_generation_claim_defers_without_any_lock() {
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   : > "$dir/state/.last-watcher-beat"
   assert_absent "$dir/state/.claude-autoarm.lock" "this case must start with no owner lock at all"
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  expect_code 0 "$status" "a live open generation claim must keep the single-flight gate closed with no lock held"
-  [ -z "$out" ] || fail "deferring to an open generation claim produced output: $out"
+  out="$dir/state/autoarm.out"
+  run_autoarm_bg "$dir" "$out"
+  parked=$(wait_for_parked_firing "$dir") || fail "a firing meeting a live open generation claim did not park on it"
+  sleep 1.5
+  kill -0 "$parked" 2>/dev/null || fail "the parked firing exited while the claim was still open"
+  [ ! -s "$out" ] || fail "deferring to an open generation claim produced output: $(cat "$out")"
   assert_absent "$dir/state/arm-ran" "an open generation claim was superseded and double-armed"
   [ "$(epoch_field "$dir" epoch)" = 464 ] || fail "deferred firing rewrote the open claim's ledger entry"
-  pass "auto-arm: a live open generation claim defers concurrent firings with no lock held"
+  assert_absent "$dir/state/.claude-autoarm.lock" "a parked firing left the micro-mutex held"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  status=0
+  wait "$RUN_AUTOARM_BG_PID" || status=$?
+  expect_code 2 "$status" "once the owner ends without a handoff, the parked firing must arm and translate as a later Stop would"
+  [ -e "$dir/state/arm-ran" ] || fail "the parked firing never armed after the owner ended"
+  [ "$(epoch_field "$dir" epoch)" = 465 ] || fail "the parked firing did not claim the next generation: $(epoch_field "$dir" epoch)"
+  pass "auto-arm: a live open generation claim parks concurrent firings with no lock held, and they take over once it ends"
 }
 
 # The 2026-08-26 watcher flap in the generation model: a live, identity-matched
@@ -1295,7 +1318,8 @@ test_superseded_owner_never_reinvokes_the_arm() {
 # End-to-end regression for all three concurrency edge classes at once, with a
 # REAL hook process hung mid-arm:
 #   1. no mutex across blocking steps - while owner A is mid-arm, a concurrent
-#      firing B defers promptly instead of queueing on any lock;
+#      firing B parks promptly instead of queueing on any lock (its delivery
+#      is pinned by the superseded-Stop cases below, so it is ended here);
 #   2. stuck-owner supersession - once A's claim and the beacon age past grace
 #      while A is still alive arming, firing C takes the next generation and
 #      translates its own close (exit 2);
@@ -1303,7 +1327,7 @@ test_superseded_owner_never_reinvokes_the_arm() {
 #      superseded and goes completely silent (exit 0, no banner, no ledger
 #      write), so one supersession episode produces exactly one translation.
 test_superseded_owner_goes_silent_and_never_double_translates() {
-  local dir a_out a_pid b_out b_status c_out c_status a_status i count
+  local dir a_out a_pid b_out b_bg b_pid c_out c_status a_status i count
   dir=$(make_primary_dir "$TMP_ROOT/v2-superseded-silence")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" blocking-actionable
@@ -1316,11 +1340,15 @@ test_superseded_owner_goes_silent_and_never_double_translates() {
     sleep 0.1
     i=$((i + 1))
   done
-  b_out=$(run_autoarm "$dir" 2>/dev/null); b_status=$?
-  expect_code 0 "$b_status" "a firing during a live open claim must defer promptly (no mutex is held across arming)"
-  [ -z "$b_out" ] || fail "deferring firing produced output: $b_out"
+  b_out="$dir/state/b.out"
+  run_autoarm_bg "$dir" "$b_out"
+  b_bg=$RUN_AUTOARM_BG_PID
+  b_pid=$(wait_for_parked_firing "$dir") || fail "a firing during a live open claim must park promptly (no mutex is held across arming)"
+  [ ! -s "$b_out" ] || fail "deferring firing produced output: $(cat "$b_out")"
   count=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
   [ "$count" -eq 1 ] || fail "deferring firing must not arm, saw $count arms"
+  kill -KILL "$b_pid" 2>/dev/null || true
+  wait "$b_bg" 2>/dev/null || true
   # A is still alive mid-arm; make its claim stuck-shaped.
   kill -0 "$a_pid" 2>/dev/null || fail "owner A finished before the supersession could be exercised"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
@@ -1440,6 +1468,19 @@ SH
         ;;
       crash)
         printf 'kill -KILL "$$"\n'
+        ;;
+      gated-pass-through)
+        # The first host run parks until state/host-release exists, the way a
+        # live host keeps handling wakes itself; every run then passes its
+        # close through to main.
+        cat <<'SH'
+if [ "$(wc -l < "$FM_HOME/state/host-ran" | tr -d ' ')" -eq 1 ]; then
+  while [ ! -e "$FM_HOME/state/host-release" ]; do sleep 0.05; done
+fi
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'check: rearm-resurface\n'
+SH
         ;;
     esac
     printf 'exit 0\n'
@@ -1657,6 +1698,103 @@ test_host_crash_is_retried_then_reported() {
   pass "auto-arm: a host that died without a close is retried, then reported as a failure"
 }
 
+# --- superseded Stop delivery (issue #7252) -------------------------------------
+# Claude turns only the latest Stop's exit 2 into a rewake. While a supervision
+# host parks for hours under the owner of one Stop, any later turn (an operator
+# message, or a turn the turn-end guard continued) ends in a newer Stop whose
+# firing defers to that live claim. The close the host later hands to main must
+# then be delivered by the newer firing, not by the superseded owner.
+
+# Drive two Stop firings of ONE fake Claude session in <dir>: owner A starts,
+# and once its host is running, firing B meets A's open claim. <between> runs
+# inside the session once B has parked, and must end A's park one way or
+# another. A firing B that exits instead of parking is left to the caller's
+# delivery assertions, which is how the unparked shape shows its lost wake.
+# Leaves state/rc-a, state/rc-b, state/a.out, state/b.out, and the hooks' pids
+# in state/pid-a and state/pid-b.
+run_superseded_stop_pair() {
+  local dir=$1 between=$2
+  FM_HOME="$dir" FM_TEST_BETWEEN="$between" "$FAKE_CLAUDE" -c '
+    s=$FM_HOME/state
+    printf "%s\n" "$$" > "$s/.lock"
+    printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$s/a.out" 2>&1 &
+    a=$!
+    echo "$a" > "$s/pid-a"
+    i=0
+    until [ -s "$s/host-ran" ] && grep -q "outcome=arming" "$s/.claude-autoarm-epoch" 2>/dev/null; do
+      [ "$i" -lt 200 ] || { echo "owner A never started its host" > "$s/pair-error"; break; }
+      sleep 0.05; i=$((i + 1))
+    done
+    printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$s/b.out" 2>&1 &
+    b=$!
+    echo "$b" > "$s/pid-b"
+    i=0
+    until grep -q "parked_pid=$b " "$s/.claude-autoarm-parked" 2>/dev/null; do
+      [ "$i" -lt 200 ] || { echo "firing B never parked on the open claim" >> "$s/pair-error"; break; }
+      kill -0 "$b" 2>/dev/null || break
+      sleep 0.05; i=$((i + 1))
+    done
+    eval "$FM_TEST_BETWEEN"
+    wait "$a"; echo $? > "$s/rc-a"
+    wait "$b"; echo $? > "$s/rc-b"
+  '
+}
+
+# The second report's trace: the owner is still live (its host parked), a newer
+# Stop's firing defers to it, then the owner's host passes a close through to
+# main and the owner exits. The newer firing must deliver that close, because
+# its Stop is the one Claude still turns into a rewake.
+test_superseded_owner_close_is_delivered_by_the_newer_stop() {
+  local dir b_pid
+  dir=$(make_primary_dir "$TMP_ROOT/superseded-stop-handoff")
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" gated-pass-through
+  run_superseded_stop_pair "$dir" ': > "$s/host-release"'
+  [ ! -e "$dir/state/pair-error" ] || fail "$(cat "$dir/state/pair-error")"
+  b_pid=$(cat "$dir/state/pid-b")
+  expect_code 2 "$(cat "$dir/state/rc-b")" "the newer Stop's firing must deliver the superseded owner's close as a rewake"
+  assert_contains "$(cat "$dir/state/b.out")" "firstmate watcher wake" "the delivered rewake must carry the wake banner"
+  assert_contains "$(cat "$dir/state/b.out")" "check: rearm-resurface" "the delivered rewake must carry the owner's close"
+  expect_code 0 "$(cat "$dir/state/rc-a")" "the superseded owner must hand its close over instead of exiting 2 itself"
+  [ ! -s "$dir/state/a.out" ] || fail "the superseded owner emitted output after handing its close over: $(cat "$dir/state/a.out")"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 1 ] || fail "the delivering firing ran another host instead of delivering the handed-over close"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the delivered close must be committed as a rewake: $(sed -n '1p' "$dir/state/.claude-autoarm-epoch")"
+  [ "$(epoch_field "$dir" owner_pid)" = "$b_pid" ] || fail "the rewake must be committed by the delivering firing: $(sed -n '1p' "$dir/state/.claude-autoarm-epoch")"
+  [ "$(epoch_field "$dir" epoch)" = 2 ] || fail "the handoff must advance exactly one generation: $(sed -n '1p' "$dir/state/.claude-autoarm-epoch")"
+  [ "$(epoch_field "$dir" session_pid)" = "$(cat "$dir/state/.lock")" ] || fail "the delivered rewake must stay bound to the session lock"
+  assert_absent "$dir/state/.claude-autoarm-parked" "the handoff left its parked record behind"
+  assert_absent "$dir/state/.claude-autoarm-handoff" "the delivery left its handoff record behind"
+  pass "auto-arm: a close owned by a superseded Stop is delivered by the newer Stop's parked firing"
+}
+
+# The first report's ledger shape: the owner of the superseded Stop is gone and
+# its generation still reads outcome=arming, with no delivery and no failure
+# record (there the superseder was a turn the turn-end guard continued). The
+# parked firing must notice the owner ended without handing off and claim and
+# arm as a later Stop would, so the close is not stranded until another turn.
+test_parked_firing_takes_over_when_the_owner_ends_without_delivering() {
+  local dir b_pid host_a
+  dir=$(make_primary_dir "$TMP_ROOT/superseded-stop-takeover")
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" gated-pass-through
+  run_superseded_stop_pair "$dir" \
+    'host_a=$(sed -n 1p "$s/host-ran"); kill -KILL "$a" "$host_a" 2>/dev/null; wait "$a" 2>/dev/null; echo "$host_a" > "$s/host-a"'
+  [ ! -e "$dir/state/pair-error" ] || fail "$(cat "$dir/state/pair-error")"
+  : > "$dir/state/host-release"
+  b_pid=$(cat "$dir/state/pid-b")
+  host_a=$(cat "$dir/state/host-a")
+  ! kill -0 "$host_a" 2>/dev/null || fail "the fixture did not end the owner's host"
+  expect_code 2 "$(cat "$dir/state/rc-b")" "the parked firing must take over a generation whose owner ended without delivering"
+  assert_contains "$(cat "$dir/state/b.out")" "check: rearm-resurface" "the take-over cycle must deliver its close"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 2 ] || fail "the parked firing did not run its own host cycle after the owner ended"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the take-over must commit its rewake: $(sed -n '1p' "$dir/state/.claude-autoarm-epoch")"
+  [ "$(epoch_field "$dir" owner_pid)" = "$b_pid" ] || fail "the take-over generation must belong to the parked firing"
+  [ "$(epoch_field "$dir" epoch)" = 2 ] || fail "the take-over must claim exactly the next generation: $(sed -n '1p' "$dir/state/.claude-autoarm-epoch")"
+  pass "auto-arm: a parked firing takes over and delivers when the superseded owner ends without delivering"
+}
+
 # A model running the hook by hand mid-turn (for example to read its help) is a
 # tool process under the lock-owning session with no Stop payload. Any argument
 # must print help or refuse before anything is armed, since the host or arm it
@@ -1764,6 +1902,8 @@ test_host_benign_rewake_refusal_opens_no_failure_episode
 test_host_lost_handback_notifies_once_per_episode
 test_host_lost_announced_handback_notifies_once_per_episode
 test_host_crash_is_retried_then_reported
+test_superseded_owner_close_is_delivered_by_the_newer_stop
+test_parked_firing_takes_over_when_the_owner_ends_without_delivering
 test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib
 test_stands_down_only_on_pi_code_transcript_path
