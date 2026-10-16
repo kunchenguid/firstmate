@@ -45,6 +45,11 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # Every spawn below states its own launcher identity, so a pane inherited from
 # the terminal this suite was started in must not leak into any of them.
 herdr_forget_inherited_pane
+# The presentation home below asserts the projection's launcher-bound parent. On
+# Herdr 0.9.2 and newer native worktree groups supersede the projection for every
+# clean fresh spawn, so the worktree-group test seam keeps that path under test
+# here (docs/herdr-backend.md "Worktree groups").
+export FM_TEST_SEAM=1 FM_TEST_HERDR_WORKTREE_GROUPS=off
 
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-launcher-e2e.XXXXXX")
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"

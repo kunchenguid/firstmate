@@ -87,7 +87,11 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 # --- scratch world: a primary-shaped home, a secondmate-shaped home, two projects ---
 
 # This test asserts the per-home FLAT workspace shape, so both homes opt out of
-# the default-on presentation projection rather than depending on that default.
+# the default-on presentation projection rather than depending on that default,
+# and the worktree-group test seam keeps native grouping, which supersedes both
+# on Herdr 0.9.2 and newer, out of the way (docs/herdr-backend.md "Worktree
+# groups").
+export FM_TEST_SEAM=1 FM_TEST_HERDR_WORKTREE_GROUPS=off
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
 printf 'off\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"

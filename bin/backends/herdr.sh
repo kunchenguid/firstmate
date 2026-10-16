@@ -60,6 +60,473 @@
 # through fm_backend_required_tools only when herdr is the resolved backend;
 # this adapter also gates them again before spawning.
 
+# --- native worktree groups: gate, parent, child, cleanup ----------------------
+
+# fm_backend_herdr_worktree_group_release_supported <session>: run the native
+# worktree-group floor against the installed client and the running server of
+# <session>. Both must report a release core at or above
+# FM_BACKEND_HERDR_MIN_WORKTREE_GROUP_VERSION, and the running server's API
+# schema must list worktree.list and worktree.open. Return codes: 0 supported,
+# 1 provably below the floor, 2 indeterminate (no running server, an unreadable
+# status, version, or schema, or a schema without the worktree surface). Sets
+# FM_BACKEND_HERDR_WORKTREE_GROUP_RELEASE to the identifier a warning names.
+# The caller ensures the server first: the surface that answers an open is the
+# server's, so a client-only verdict is deliberately never enough here.
+fm_backend_herdr_worktree_group_release_supported() {  # <session>
+  local session=$1 status running client_version server_version schema verdict=0
+  FM_BACKEND_HERDR_WORKTREE_GROUP_RELEASE="an unreadable release"
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 2
+  client_version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
+  running=$(printf '%s' "$status" | jq -r '.server.running // empty' 2>/dev/null)
+  server_version=$(printf '%s' "$status" | jq -r '.server.version // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_WORKTREE_GROUP_RELEASE="version ${client_version:-unknown}"
+  fm_backend_herdr_version_at_least "$client_version" "$FM_BACKEND_HERDR_MIN_WORKTREE_GROUP_VERSION" || verdict=$?
+  [ "$verdict" -eq 0 ] || return "$verdict"
+  [ "$running" = true ] || return 2
+  FM_BACKEND_HERDR_WORKTREE_GROUP_RELEASE="server version ${server_version:-unknown} (client version ${client_version:-unknown})"
+  fm_backend_herdr_version_at_least "$server_version" "$FM_BACKEND_HERDR_MIN_WORKTREE_GROUP_VERSION" || verdict=$?
+  [ "$verdict" -eq 0 ] || return "$verdict"
+  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || return 2
+  printf '%s' "$schema" | jq -e '
+    any(.schemas.request.oneOf[]?; .properties.method.const == "worktree.open")
+    and any(.schemas.request.oneOf[]?; .properties.method.const == "worktree.list")
+  ' >/dev/null 2>&1 || return 2
+  return 0
+}
+
+# fm_backend_herdr_worktree_group_floor_warn <state-dir> <verdict>: emit the
+# one warning per home per detected release for a below-floor or unreadable
+# native worktree-group verdict, keyed exactly like the projection's marker.
+fm_backend_herdr_worktree_group_floor_warn() {  # <state-dir> <verdict>
+  local state_dir=${1:-} verdict=${2:-2} release=${FM_BACKEND_HERDR_WORKTREE_GROUP_RELEASE:-an unreadable release} key marker reason tmp=""
+  if [ "$verdict" -eq 1 ]; then
+    reason="herdr $release is older than the $FM_BACKEND_HERDR_MIN_WORKTREE_GROUP_VERSION floor for native worktree groups, below which worktree open can turn a project's own workspace into a worktree's (upstream issue #4293)"
+  else
+    reason="the selected herdr release or its worktree surface could not be read, so the $FM_BACKEND_HERDR_MIN_WORKTREE_GROUP_VERSION floor for native worktree groups cannot be verified"
+  fi
+  if [ -n "$state_dir" ] && [ -d "$state_dir" ]; then
+    key=$(printf '%s' "$release" | tr -c 'A-Za-z0-9.+-' '_')
+    marker="$state_dir/$FM_BACKEND_HERDR_WORKTREE_GROUP_FLOOR_MARKER_PREFIX$key"
+    [ -e "$marker" ] && return 0
+    tmp=$(umask 077; mktemp "$state_dir/.herdr-worktree-group-floor.XXXXXX" 2>/dev/null) || tmp=""
+    if [ -n "$tmp" ]; then
+      printf '%s\n' "$reason" > "$tmp" 2>/dev/null || true
+      mv -f "$tmp" "$marker" 2>/dev/null || rm -f "$tmp"
+    fi
+  fi
+  echo "warning: $reason; grouping task workspaces under their project is unavailable, so the presentation projection or the ordinary flat layout is used instead. Upgrade herdr to $FM_BACKEND_HERDR_MIN_WORKTREE_GROUP_VERSION or newer (herdr update) to restore native worktree groups." >&2
+}
+
+# fm_backend_herdr_worktree_group_enabled <config-dir> <state-dir> <session>:
+# the one gate deciding whether a clean fresh crewmate or scout, or a reclaimed
+# endpoint, is placed as a native linked-worktree child under its project's
+# parent workspace in <session>. Native grouping is the default layout on every
+# supported release, and config/herdr-presentation-spaces "off" is its one real
+# opt-out: it opts the home out of every one-task-workspace layout, native
+# grouping included, so a home that already said off keeps its flat layout and
+# is never regrouped without consent; it is decided before any Herdr call. An
+# absent file or any other value leaves the floor to decide. There is
+# deliberately no "on" that forces native grouping below the floor: below it
+# the open itself is unsafe (see the header), so the projection's opt-in
+# semantics apply to the projection only. FM_TEST_HERDR_WORKTREE_GROUPS=off,
+# read only alongside the FM_TEST_SEAM marker, is the test seam that keeps the
+# pre-0.9.2 layouts' regression suites running on a supported release; it is
+# not configuration. Returns 0 to place natively, 1 to fall through to the
+# projection decision or the flat layout, after the one-per-release warning
+# for a below-floor or unreadable release.
+fm_backend_herdr_worktree_group_enabled() {  # <config-dir> <state-dir> <session>
+  local config_dir=$1 state_dir=$2 session=$3 preference verdict=0
+  if [ "${FM_TEST_SEAM:-}" = 1 ] && [ "${FM_TEST_HERDR_WORKTREE_GROUPS:-}" = off ]; then
+    return 1
+  fi
+  preference=$(fm_backend_herdr_presentation_preference "$config_dir")
+  [ "$preference" != off ] || return 1
+  fm_backend_herdr_worktree_group_release_supported "$session" || verdict=$?
+  [ "$verdict" -ne 0 ] || return 0
+  fm_backend_herdr_worktree_group_floor_warn "$state_dir" "$verdict"
+  return 1
+}
+
+# fm_backend_herdr_canonical_dir <path>: the physical path of a readable
+# directory, or failure. Herdr canonicalizes checkout paths the same way, and a
+# Treehouse slot or a project under a symlinked parent (macOS /tmp) must compare
+# equal in either spelling.
+fm_backend_herdr_canonical_dir() {  # <path>
+  local real
+  real=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  printf '%s' "$real"
+}
+
+# fm_backend_herdr_worktree_parent_label <project-dir>: the cosmetic label of a
+# project's parent workspace. The primary home labels it with the project's
+# basename; a secondmate home prefixes its own home label so two homes' parents
+# for same-named projects read differently. A basename that would spell a home
+# workspace label (firstmate, 2ndmate-<id>) gets a " repo" suffix, because the
+# per-home label lookup (fm_backend_herdr_workspace_find_all) matches labels
+# exactly and a colliding parent would make that lookup ambiguous. Labels are
+# never placement authority: the parent is found by checkout path.
+fm_backend_herdr_worktree_parent_label() {  # <project-dir>
+  local project=${1%/} base home_label
+  base=${project##*/}
+  [ -n "$base" ] || base=project
+  home_label=$(fm_backend_herdr_workspace_label)
+  if [ "$home_label" != firstmate ]; then
+    printf '%s/%s' "$home_label" "$base"
+    return 0
+  fi
+  case "$base" in
+    firstmate|2ndmate-*) printf '%s repo' "$base" ;;
+    *) printf '%s' "$base" ;;
+  esac
+}
+
+# fm_backend_herdr_worktree_parent_find <session> <project-dir>: the one
+# workspace in <session> that Herdr itself records as the project's primary
+# checkout - explicit `worktree` membership with is_linked_worktree false and a
+# checkout_path canonically equal to <project-dir>. Echoes its id on 0. Returns
+# 1 when none matches (the caller may create one), 2 when the list is unreadable
+# or more than one matches, which is an ambiguous parent the caller must not
+# guess at. A workspace without that membership is never adopted, even when its
+# shell sits in the project: that is how a captain's own workspace stays theirs.
+fm_backend_herdr_worktree_parent_find() {  # <session> <project-dir>
+  local session=$1 project=$2 project_real list rows wsid path real matches="" count
+  project_real=$(fm_backend_herdr_canonical_dir "$project") || return 2
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 2
+  printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 2
+  rows=$(printf '%s' "$list" | jq -r '
+    .result.workspaces[]?
+    | select((.worktree | type) == "object"
+        and .worktree.is_linked_worktree == false
+        and (.worktree.checkout_path | type) == "string"
+        and (.workspace_id | type) == "string")
+    | "\(.workspace_id)\t\(.worktree.checkout_path)"
+  ' 2>/dev/null) || return 2
+  while IFS=$'\t' read -r wsid path; do
+    [ -n "$wsid" ] && [ -n "$path" ] || continue
+    real=$(fm_backend_herdr_canonical_dir "$path") || continue
+    [ "$real" = "$project_real" ] || continue
+    matches="${matches}${wsid}"$'\n'
+  done <<EOF
+$rows
+EOF
+  count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
+  case "$count" in
+    0) return 1 ;;
+    1) printf '%s' "${matches%%$'\n'*}"; return 0 ;;
+  esac
+  echo "warning: $count herdr workspaces in session '$session' are recorded as the primary workspace of '$project_real' (${matches//$'\n'/ }); refusing to guess which one groups its tasks" >&2
+  return 2
+}
+
+# fm_backend_herdr_session_has_workspaces <session>: 0 when the session holds
+# at least one workspace, 1 when it positively holds none, 2 when unreadable.
+fm_backend_herdr_session_has_workspaces() {  # <session>
+  local list count
+  list=$(fm_backend_herdr_cli "$1" workspace list 2>/dev/null) || return 2
+  count=$(printf '%s' "$list" | jq -r 'select((.result.workspaces | type) == "array") | .result.workspaces | length' 2>/dev/null)
+  case "$count" in
+    '') return 2 ;;
+    0) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# fm_backend_herdr_worktree_parent_ensure <session> <project-dir> <label>: find
+# the project's parent workspace or create it in <project-dir> with --no-focus.
+# Must be called as a PLAIN STATEMENT (it communicates through globals):
+#   FM_BACKEND_HERDR_PARENT_WS_ID            the parent's workspace id
+#   FM_BACKEND_HERDR_PARENT_CREATED          1 only when THIS call created it
+#   FM_BACKEND_HERDR_PARENT_SEEDED_TAB_ID    } the seeded default tab and pane
+#   FM_BACKEND_HERDR_PARENT_SEEDED_PANE_ID   } from the create response, else empty
+# Returns 0 on success and 2 for every refusal, which leaves nothing of this
+# call's behind: an ambiguous or unreadable parent, a failed create, or a create
+# whose focus or ids could not be verified (that workspace is closed again
+# through its exact seeded pane when the ids are known). The seeded tab is the
+# parent row's own shell in the project's primary checkout; it is never pruned
+# and never typed into. A brand-new session has no focus to preserve, and its
+# first workspace is focused by Herdr regardless of --no-focus.
+fm_backend_herdr_worktree_parent_ensure() {  # <session> <project-dir> <label>
+  local session=$1 project=$2 label=$3 status wsid focus_before="" out populated
+  FM_BACKEND_HERDR_PARENT_WS_ID=""
+  FM_BACKEND_HERDR_PARENT_CREATED=0
+  FM_BACKEND_HERDR_PARENT_SEEDED_TAB_ID=""
+  FM_BACKEND_HERDR_PARENT_SEEDED_PANE_ID=""
+  wsid=$(fm_backend_herdr_worktree_parent_find "$session" "$project") && status=0 || status=$?
+  case "$status" in
+    0)
+      FM_BACKEND_HERDR_PARENT_WS_ID=$wsid
+      return 0
+      ;;
+    1) ;;
+    *) return 2 ;;
+  esac
+  fm_backend_herdr_session_has_workspaces "$session" && populated=0 || populated=$?
+  case "$populated" in
+    0)
+      focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+        echo "warning: herdr worktree group could not capture exact active workspace and tab before creating a parent; refusing a focus-unsafe create" >&2
+        return 2
+      }
+      ;;
+    1) ;;
+    *)
+      echo "warning: herdr worktree group could not read session '$session' before creating a parent" >&2
+      return 2
+      ;;
+  esac
+  if ! out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$project" --label "$label" --no-focus 2>/dev/null); then
+    [ -z "$focus_before" ] || fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "parent workspace create" || true
+    echo "warning: herdr worktree group could not create the parent workspace for '$project'" >&2
+    return 2
+  fi
+  wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_PARENT_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_PARENT_SEEDED_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if [ -z "$wsid" ] || [ -z "$FM_BACKEND_HERDR_PARENT_SEEDED_TAB_ID" ] || [ -z "$FM_BACKEND_HERDR_PARENT_SEEDED_PANE_ID" ]; then
+    echo "warning: herdr worktree group parent create returned incomplete ids; leaving that workspace for manual inspection" >&2
+    FM_BACKEND_HERDR_PARENT_SEEDED_TAB_ID=""
+    FM_BACKEND_HERDR_PARENT_SEEDED_PANE_ID=""
+    return 2
+  fi
+  if [ -n "$focus_before" ] && ! fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "parent workspace create"; then
+    echo "warning: herdr worktree group parent create did not preserve exact active focus; closing it again" >&2
+    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$FM_BACKEND_HERDR_PARENT_SEEDED_PANE_ID" || true
+    FM_BACKEND_HERDR_PARENT_SEEDED_TAB_ID=""
+    FM_BACKEND_HERDR_PARENT_SEEDED_PANE_ID=""
+    return 2
+  fi
+  # shellcheck disable=SC2034  # caller consumes the response-derived globals
+  FM_BACKEND_HERDR_PARENT_WS_ID=$wsid
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_PARENT_CREATED=1
+  return 0
+}
+
+# fm_backend_herdr_worktree_child_matches <session> <workspace-id> <checkout-real>:
+# read-only: 0 when <workspace-id> carries explicit linked-worktree membership
+# for exactly that canonical checkout, 1 otherwise.
+fm_backend_herdr_worktree_child_matches() {  # <session> <workspace-id> <checkout-real>
+  local session=$1 wsid=$2 checkout_real=$3 info path real
+  info=$(fm_backend_herdr_cli "$session" workspace get "$wsid" 2>/dev/null) || return 1
+  path=$(printf '%s' "$info" | jq -r --arg ws "$wsid" '
+    .result.workspace
+    | select(.workspace_id == $ws and (.worktree | type) == "object" and .worktree.is_linked_worktree == true)
+    | .worktree.checkout_path // empty
+  ' 2>/dev/null)
+  [ -n "$path" ] || return 1
+  real=$(fm_backend_herdr_canonical_dir "$path") || return 1
+  [ "$real" = "$checkout_real" ]
+}
+
+# fm_backend_herdr_worktree_child_open <session> <parent-ws> <checkout> <workspace-label> <task-label>:
+# place one task as a native linked-worktree child of <parent-ws>: open the
+# task's existing Treehouse <checkout> as a grouped workspace (or adopt the one
+# already open on exactly that checkout), create the normal fm-<id> task tab in
+# it, prune the seeded tab the open response supplied, and verify the workspace
+# converged to that one task pane. Must be called as a PLAIN STATEMENT; it sets:
+#   FM_BACKEND_HERDR_GROUP_WORKSPACE_ID      the child workspace holding the task
+#   FM_BACKEND_HERDR_GROUP_CREATED           1 when THIS call opened the child
+#   FM_BACKEND_HERDR_GROUP_SEEDED_TAB_ID     } the open response's seeded tab and
+#   FM_BACKEND_HERDR_GROUP_SEEDED_PANE_ID    } pane, empty when adopted
+#   FM_BACKEND_HERDR_GROUP_TAB_ID            } the task tab and pane
+#   FM_BACKEND_HERDR_GROUP_PANE_ID           }
+#   FM_BACKEND_HERDR_GROUP_CLEANUP_SAFE      1 once response-derived exact ids
+#                                            exist for same-process abort cleanup
+# Returns 0 on success; 2 for a refusal made BEFORE any mutation, so the caller
+# may fall back to the projection or flat layout; 1 for a failure, after which
+# the caller runs fm_backend_herdr_worktree_group_cleanup_exact when
+# CLEANUP_SAFE is 1. The pre-open hijack guard and the adoption rule are in the
+# adapter header; Herdr's seeded tab is pruned only through the exact id its
+# own open response returned, and a workspace this call did not open never
+# enters the prune path.
+fm_backend_herdr_worktree_child_open() {  # <session> <parent-ws> <checkout> <workspace-label> <task-label>
+  local session=$1 parent=$2 checkout=$3 workspace_label=$4 task_label=$5
+  local checkout_real list rows path linked bare prunable open_ws real found=0 focus_before out
+  local already_open wsid child_path child_linked ids tabs panes
+  FM_BACKEND_HERDR_GROUP_WORKSPACE_ID=""
+  FM_BACKEND_HERDR_GROUP_CREATED=0
+  FM_BACKEND_HERDR_GROUP_SEEDED_TAB_ID=""
+  FM_BACKEND_HERDR_GROUP_SEEDED_PANE_ID=""
+  FM_BACKEND_HERDR_GROUP_TAB_ID=""
+  FM_BACKEND_HERDR_GROUP_PANE_ID=""
+  FM_BACKEND_HERDR_GROUP_CLEANUP_SAFE=0
+  checkout_real=$(fm_backend_herdr_canonical_dir "$checkout") || {
+    echo "error: herdr worktree group: checkout '$checkout' is not a readable directory" >&2
+    return 1
+  }
+  list=$(fm_backend_herdr_cli "$session" worktree list --workspace "$parent" 2>/dev/null) || {
+    echo "warning: herdr worktree group could not list the worktrees of parent workspace $parent; not grouping this task" >&2
+    return 2
+  }
+  rows=$(printf '%s' "$list" | jq -r '
+    select((.result.worktrees | type) == "array")
+    | .result.worktrees[]
+    | select((.path | type) == "string")
+    | [.path, (.is_linked_worktree // false | tostring), (.is_bare // false | tostring), (.is_prunable // false | tostring), (.open_workspace_id // "")]
+    | @tsv
+  ' 2>/dev/null) || rows=
+  while IFS=$'\t' read -r path linked bare prunable open_ws; do
+    [ -n "$path" ] || continue
+    real=$(fm_backend_herdr_canonical_dir "$path") || continue
+    [ "$real" = "$checkout_real" ] || continue
+    found=1
+    break
+  done <<EOF
+$rows
+EOF
+  if [ "$found" -ne 1 ]; then
+    echo "warning: herdr does not list '$checkout_real' as a worktree of parent workspace $parent's repository; not grouping this task" >&2
+    return 2
+  fi
+  if [ "$linked" != true ] || [ "$bare" = true ] || [ "$prunable" = true ]; then
+    echo "warning: herdr lists '$checkout_real' as a bare, prunable, or primary checkout rather than an openable linked worktree; not grouping this task" >&2
+    return 2
+  fi
+  if [ -n "$open_ws" ]; then
+    if [ "$open_ws" = "$parent" ]; then
+      echo "warning: herdr reports the project's own workspace $parent as already open on '$checkout_real' (its first tab is sitting inside that checkout); refusing an open that would turn the parent into the task's workspace, not grouping this task" >&2
+      return 2
+    fi
+    if ! fm_backend_herdr_worktree_child_matches "$session" "$open_ws" "$checkout_real"; then
+      echo "warning: herdr reports workspace $open_ws as already open on '$checkout_real' without recording it as that checkout's worktree workspace; refusing to adopt or relabel it, not grouping this task" >&2
+      return 2
+    fi
+    ids=$(fm_backend_herdr_create_task "$session:$open_ws" "$task_label" "$checkout" "") || return 1
+    FM_BACKEND_HERDR_GROUP_WORKSPACE_ID=$open_ws
+    FM_BACKEND_HERDR_GROUP_TAB_ID=${ids%% *}
+    FM_BACKEND_HERDR_GROUP_PANE_ID=${ids#* }
+    if [ -z "$FM_BACKEND_HERDR_GROUP_TAB_ID" ] || [ -z "$FM_BACKEND_HERDR_GROUP_PANE_ID" ]; then
+      echo "error: herdr worktree group adoption returned incomplete task ids" >&2
+      return 1
+    fi
+    FM_BACKEND_HERDR_GROUP_CLEANUP_SAFE=1
+    return 0
+  fi
+  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+    echo "warning: herdr worktree group could not capture exact active workspace and tab; refusing a focus-unsafe open, not grouping this task" >&2
+    return 2
+  }
+  if ! out=$(fm_backend_herdr_cli "$session" worktree open --workspace "$parent" --path "$checkout" --no-focus 2>/dev/null); then
+    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "worktree open" || true
+    echo "error: herdr worktree open failed for '$checkout_real' under parent workspace $parent" >&2
+    return 1
+  fi
+  already_open=$(printf '%s' "$out" | jq -r '.result.already_open // empty' 2>/dev/null)
+  wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
+  child_path=$(printf '%s' "$out" | jq -r '.result.workspace.worktree.checkout_path // empty' 2>/dev/null)
+  child_linked=$(printf '%s' "$out" | jq -r '.result.workspace.worktree.is_linked_worktree // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_GROUP_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_GROUP_SEEDED_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if [ "$already_open" = true ]; then
+    # The pre-open read saw nothing open; something joined in between. Herdr
+    # has already marked membership on whatever it returned, so adopt it only
+    # when that record is exactly this checkout's and it is not the parent;
+    # nothing of this call's exists to clean up either way.
+    FM_BACKEND_HERDR_GROUP_SEEDED_TAB_ID=""
+    FM_BACKEND_HERDR_GROUP_SEEDED_PANE_ID=""
+    if [ -z "$wsid" ] || [ "$wsid" = "$parent" ] \
+       || ! fm_backend_herdr_worktree_child_matches "$session" "$wsid" "$checkout_real"; then
+      echo "error: herdr worktree open returned already_open for workspace '${wsid:-unknown}', which is not a worktree workspace of '$checkout_real'; refusing to place the task there" >&2
+      return 1
+    fi
+    ids=$(fm_backend_herdr_create_task "$session:$wsid" "$task_label" "$checkout" "") || return 1
+    FM_BACKEND_HERDR_GROUP_WORKSPACE_ID=$wsid
+    FM_BACKEND_HERDR_GROUP_TAB_ID=${ids%% *}
+    FM_BACKEND_HERDR_GROUP_PANE_ID=${ids#* }
+    if [ -z "$FM_BACKEND_HERDR_GROUP_TAB_ID" ] || [ -z "$FM_BACKEND_HERDR_GROUP_PANE_ID" ]; then
+      echo "error: herdr worktree group adoption returned incomplete task ids" >&2
+      return 1
+    fi
+    FM_BACKEND_HERDR_GROUP_CLEANUP_SAFE=1
+    return 0
+  fi
+  if [ -z "$wsid" ] || [ -z "$FM_BACKEND_HERDR_GROUP_SEEDED_TAB_ID" ] || [ -z "$FM_BACKEND_HERDR_GROUP_SEEDED_PANE_ID" ]; then
+    echo "error: herdr worktree open returned incomplete ids for '$checkout_real'; leaving that workspace for manual inspection" >&2
+    FM_BACKEND_HERDR_GROUP_SEEDED_TAB_ID=""
+    FM_BACKEND_HERDR_GROUP_SEEDED_PANE_ID=""
+    return 1
+  fi
+  # shellcheck disable=SC2034  # caller consumes the response-derived globals
+  FM_BACKEND_HERDR_GROUP_WORKSPACE_ID=$wsid
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_GROUP_CREATED=1
+  # shellcheck disable=SC2034  # same-process abort-cleanup gate
+  FM_BACKEND_HERDR_GROUP_CLEANUP_SAFE=1
+  real=$(fm_backend_herdr_canonical_dir "$child_path" 2>/dev/null) || real=
+  if [ "$wsid" = "$parent" ] || [ "$child_linked" != true ] || [ "$real" != "$checkout_real" ]; then
+    echo "error: herdr worktree open did not return a fresh linked-worktree workspace for '$checkout_real' (got workspace '$wsid', checkout '${child_path:-none}', linked '${child_linked:-unknown}')" >&2
+    # shellcheck disable=SC2034
+    [ "$wsid" != "$parent" ] || FM_BACKEND_HERDR_GROUP_CLEANUP_SAFE=0
+    return 1
+  fi
+  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "worktree open" || {
+    echo "error: herdr worktree open did not preserve exact active focus; closing the child again" >&2
+    return 1
+  }
+  fm_backend_herdr_cli "$session" workspace rename "$wsid" "$workspace_label" >/dev/null 2>&1 \
+    || echo "warning: herdr worktree group could not label child workspace $wsid as '$workspace_label'; leaving Herdr's own label" >&2
+  ids=$(fm_backend_herdr_create_task "$session:$wsid" "$task_label" "$checkout" "$FM_BACKEND_HERDR_GROUP_SEEDED_TAB_ID") || return 1
+  FM_BACKEND_HERDR_GROUP_TAB_ID=${ids%% *}
+  FM_BACKEND_HERDR_GROUP_PANE_ID=${ids#* }
+  if [ -z "$FM_BACKEND_HERDR_GROUP_TAB_ID" ] || [ -z "$FM_BACKEND_HERDR_GROUP_PANE_ID" ]; then
+    echo "error: herdr worktree group task-tab create returned incomplete ids" >&2
+    return 1
+  fi
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+    echo "error: could not verify the herdr worktree child workspace shape" >&2
+    return 1
+  }
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
+    echo "error: could not verify the herdr worktree child pane shape" >&2
+    return 1
+  }
+  if ! printf '%s' "$tabs" | jq -e --arg tab "$FM_BACKEND_HERDR_GROUP_TAB_ID" '
+       (.result.tabs | type) == "array" and (.result.tabs | length) == 1 and .result.tabs[0].tab_id == $tab
+     ' >/dev/null 2>&1 \
+     || ! printf '%s' "$panes" | jq -e --arg pane "$FM_BACKEND_HERDR_GROUP_PANE_ID" --arg tab "$FM_BACKEND_HERDR_GROUP_TAB_ID" '
+       (.result.panes | type) == "array" and (.result.panes | length) == 1
+       and .result.panes[0].pane_id == $pane and .result.panes[0].tab_id == $tab
+     ' >/dev/null 2>&1; then
+    echo "error: herdr worktree child workspace $wsid did not converge to exactly one task pane" >&2
+    return 1
+  fi
+  # The seeded tab is gone (the shape above proved it), so abort cleanup has
+  # only the task pane left to close.
+  FM_BACKEND_HERDR_GROUP_SEEDED_TAB_ID=""
+  FM_BACKEND_HERDR_GROUP_SEEDED_PANE_ID=""
+  return 0
+}
+
+# fm_backend_herdr_worktree_group_cleanup_exact <session> <task-pane> <seeded-pane> <parent-ws> <parent-seeded-pane>:
+# same-process abort cleanup for a native placement whose create calls returned
+# complete exact ids. Closes only the exact task and seeded panes (which removes
+# the child workspace through Herdr's last-pane path) and then, only for a
+# parent THIS process created, the parent's exact seeded pane - and only while
+# that parent still holds nothing but that pane and no linked child of its
+# repository exists, because closing a parent's last tab closes its whole
+# group. It performs no lookup by label and never calls workspace close.
+fm_backend_herdr_worktree_group_cleanup_exact() {  # <session> <task-pane> <seeded-pane> <parent-ws> <parent-seeded-pane>
+  local session=$1 task_pane=$2 seeded_pane=$3 parent_ws=$4 parent_pane=$5 tabs panes list key
+  fm_backend_herdr_projection_cleanup_exact "$session" "$task_pane" "$seeded_pane"
+  [ -n "$parent_ws" ] && [ -n "$parent_pane" ] || return 0
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$parent_ws" 2>/dev/null) || return 0
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$parent_ws" 2>/dev/null) || return 0
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array" and (.result.tabs | length) == 1' >/dev/null 2>&1 || return 0
+  printf '%s' "$panes" | jq -e --arg pane "$parent_pane" '
+    (.result.panes | type) == "array" and (.result.panes | length) == 1 and .result.panes[0].pane_id == $pane
+  ' >/dev/null 2>&1 || return 0
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
+  key=$(printf '%s' "$list" | jq -r --arg ws "$parent_ws" '
+    .result.workspaces[]? | select(.workspace_id == $ws) | .worktree.repo_key // empty
+  ' 2>/dev/null)
+  if [ -n "$key" ]; then
+    printf '%s' "$list" | jq -e --arg key "$key" '
+      ([.result.workspaces[]? | select((.worktree | type) == "object" and .worktree.repo_key == $key and .worktree.is_linked_worktree == true)] | length) == 0
+    ' >/dev/null 2>&1 || return 0
+  fi
+  fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$parent_pane" || true
+}
+
 # FM_HOME fallback: every real caller (fm-spawn.sh, fm-peek.sh, fm-send.sh,
 # fm-teardown.sh, fm-watch.sh, fm-crew-state.sh) already sets FM_HOME as a
 # global before sourcing fm-backend.sh (which sources this file), so this
@@ -152,6 +619,58 @@ FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 # The config item a home writes to opt out of, or explicitly in to, the
 # projection.
 FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
+
+# --- native worktree groups --------------------------------------------------
+#
+# Herdr natively groups linked Git worktree workspaces under their repository's
+# parent workspace: `worktree open --workspace <parent> --path <checkout>` opens
+# an existing checkout as a child workspace carrying explicit `worktree`
+# provenance (checkout_path, repo_key, is_linked_worktree), the sidebar renders
+# the parent row with its children indented, and `workspace close` on the parent
+# refuses without --group while children are open (measured 2026-10-07 on
+# Herdr 0.9.3 - docs/verification/runtime-backends.md "Worktree groups"). On a
+# supported release that native grouping REPLACES the presentation projection
+# below for every clean fresh crewmate or scout: the task's Treehouse checkout is
+# opened as one child workspace under ONE parent workspace per project (the
+# project's primary checkout, found by exact checkout path and created on
+# demand), the normal fm-<id> task tab is created inside it, and its seeded tab
+# is pruned by the same response-id gate the flat path uses. Treehouse stays the
+# worktree provider: this adapter never runs `worktree create` or `worktree
+# remove`, and cleanup never runs `workspace close`, so Herdr never creates,
+# moves, or deletes a checkout and a parent row is never closed from here.
+#
+# Version floor. `worktree open` has existed since protocol 10, but through
+# Herdr 0.9.1 it could take over a repository's OWN workspace whenever that
+# workspace's first tab was sitting inside the linked checkout (upstream issue
+# #4293, fixed in 0.9.2): the open returned already_open with the parent's id,
+# flipped the parent to is_linked_worktree, and a later removal closed the
+# parent with everything running in it. A flat per-home workspace whose first
+# task tab sits in a Treehouse slot is exactly that shape, so the native path
+# is floored at 0.9.2. Releases 0.9.0 through 0.9.3 all report protocol 22, so
+# the protocol number cannot carry this verdict and the release core of the
+# version string decides for both the client and the running server. The
+# server's `api schema` must additionally list worktree.list and worktree.open,
+# which is the structural proof that the surface exists on the server actually
+# answering. Below the floor, or when the gate cannot read a verdict, placement
+# falls back to the projection (its own 0.8.0 floor) or the flat layout exactly
+# as before, with one warning per detected release.
+#
+# Hijack guard, independent of the version. Herdr resolves "already open" for a
+# checkout by explicit membership first, then by a workspace's cached Git
+# metadata or its first tab's live cwd, and `worktree open` MARKS membership on
+# whichever workspace it returns. So before any open, the parent's `worktree
+# list` is read: a checkout reported open in a workspace that is the parent
+# itself, or that carries no explicit linked-worktree membership for exactly
+# that checkout, refuses native placement without mutating anything (the caller
+# falls back). A workspace that does carry that exact membership is a prior
+# child for the same Treehouse slot and is adopted through the ordinary
+# husk-aware task-tab create. Labels are cosmetic here: the parent is found by
+# canonical checkout path, never by label, and the child is renamed only after
+# the open response proves it is a fresh workspace.
+FM_BACKEND_HERDR_MIN_WORKTREE_GROUP_VERSION=0.9.2
+# One-warning-per-release dedupe marker prefix for the native floor, keyed like
+# the projection's marker so an upgrade or downgrade is announced again.
+FM_BACKEND_HERDR_WORKTREE_GROUP_FLOOR_MARKER_PREFIX=".herdr-worktree-group-floor-"
 
 # fm_backend_herdr_presentation_preference <config-dir>: the single owner of
 # config/herdr-presentation-spaces parsing. Echoes exactly one of "off", "on"
