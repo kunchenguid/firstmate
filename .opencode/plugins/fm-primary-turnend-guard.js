@@ -2,15 +2,14 @@ import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { subscribeFirstmateEvents, TURN_END_EVENTS, watchArmCoordinatorKey } from "./lib/fm-events.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
-let skipNextIdle = false;
-
-function runProcess(command, args, input = "") {
+function runProcess(command, args, input) {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
@@ -20,9 +19,10 @@ function runProcess(command, args, input = "") {
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
+    child.stdin?.on("error", (error) => resolve({ code: 127, stdout, stderr: String(error?.message ?? error) }));
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
-    child.stdin.end(input);
+    child.stdin?.end(input);
   });
 }
 
@@ -48,28 +48,22 @@ function runGuard(root) {
 }
 
 async function letWatchArmRun(sessionID, client) {
-  const coordinator = globalThis[COORDINATOR_KEY];
+  const coordinator = globalThis[COORDINATOR_KEY]?.get(watchArmCoordinatorKey(client));
   if (!coordinator?.ensureArmed) return false;
   const status = await coordinator.ensureArmed(sessionID, client);
   return status === "armed" || status === "wake" || status === "failed";
 }
 
-export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
+export default {
+  id: "firstmate.primary.turnend-guard",
+  async setup(ctx) {
+    const root = await resolveRoot(ctx.location.directory);
+    const skipNextIdle = new Set();
+    return subscribeFirstmateEvents(ctx, TURN_END_EVENTS, async (event) => {
+      const sessionID = event.data?.sessionID;
+      if (!sessionID || skipNextIdle.delete(sessionID)) return;
 
-  return {
-    event: async ({ event }) => {
-      if (event.type !== "session.idle") return;
-
-      if (skipNextIdle) {
-        skipNextIdle = false;
-        return;
-      }
-
-      const sessionID = event.properties?.sessionID;
-      if (!sessionID) return;
-
-      if (await letWatchArmRun(sessionID, client)) return;
+      if (await letWatchArmRun(sessionID, ctx)) return;
 
       const result = await runGuard(root);
       if (result.code !== 2) return;
@@ -82,16 +76,11 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
             "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
             result.stderr,
         );
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text }],
-          },
-        });
-        skipNextIdle = true;
+        await ctx.session.prompt({ sessionID, text, delivery: "queue" });
+        skipNextIdle.add(sessionID);
       } catch {
-        skipNextIdle = false;
+        skipNextIdle.delete(sessionID);
       }
-    },
-  };
+    });
+  },
 };

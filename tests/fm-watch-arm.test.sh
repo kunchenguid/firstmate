@@ -15,6 +15,7 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+export FM_OPENCODE_TEST_CONTEXT="$ROOT/tests/opencode-plugin-context.mjs"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
@@ -874,7 +875,6 @@ SH
     "$ROOT/bin/fm-procevent.sh" register lavish idle-lavish -- "$source" "$trigger" \
     >/dev/null || fail "could not register the Lavish fixture source"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
     "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
     || fail "could not start the Lavish fixture source"
   printf 'pending:downtime:idle-lavish.1.fixture\n' > "$state/.watcher-down"
@@ -1663,10 +1663,11 @@ if (existsSync(`${state}/.afk`)) {
 }
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const client = { session: { prompt: async () => {} } };
+await loadOpenCodePlugin(mod.default, client, process.env.WORKTREE);
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
-const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+const status = await globalThis.__firstmateOpenCodeWatchArm.get(JSON.stringify([process.env.WORKTREE, ""])).ensureArmed("session-test", client);
 if (expected === "no-arm") {
   if (status !== "not-needed") {
     console.error(`expected a not-needed decline, got ${status}`);

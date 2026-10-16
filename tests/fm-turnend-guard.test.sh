@@ -12,6 +12,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+export FM_OPENCODE_TEST_CONTEXT="$ROOT/tests/opencode-plugin-context.mjs"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervision-lib.sh"
@@ -1002,14 +1003,13 @@ EOF
 }
 
 test_opencode_plugin_anchors_guard_to_worktree() {
-  local plugin parent worktree_dir wrong_dir out status
+  local plugin parent worktree_dir out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
   [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
   parent="$TMP_ROOT/opencode-plugin-parent"
-  git init -q "$parent"
   worktree_dir="$parent/nested/opencode-plugin-worktree"
-  wrong_dir="$TMP_ROOT/opencode-plugin-cwd/subdir"
-  mkdir -p "$worktree_dir/bin" "$wrong_dir"
+  mkdir -p "$worktree_dir/bin" "$worktree_dir/nested"
+  git init -q "$worktree_dir"
   cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -1018,24 +1018,34 @@ exit 2
 EOF
   chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
   # Runtime module-format warnings are host noise; this assertion owns plugin output only.
-  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$worktree_dir/nested" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let promptBody = "";
+const prompts = [];
 const client = {
   session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
+    prompt: async (request) => {
+      promptBody = request.text;
+      prompts.push(request);
     },
   },
 };
-const hooks = await mod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.DIRECTORY,
-  worktree: process.env.WORKTREE,
-});
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+const { loadOpenCodePlugin } = await import(pathToFileURL(process.env.FM_OPENCODE_TEST_CONTEXT).href);
+const hooks = await loadOpenCodePlugin(mod.default, client, process.env.DIRECTORY);
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
+for (let i = 0; i < 500 && !promptBody; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+await hooks.emit({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
+await hooks.emit({ type: "session.execution.failed", data: { sessionID: "failed-session" } });
+for (let i = 0; i < 500 && prompts.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+await hooks.emit({ type: "session.execution.interrupted", data: { sessionID: "failed-session" } });
+await hooks.emit({ type: "session.execution.interrupted", data: { sessionID: "interrupted-session" } });
+for (let i = 0; i < 500 && prompts.length < 3; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+await hooks.dispose();
+if (prompts.map((request) => request.sessionID).join(",") !== "session-test,failed-session,interrupted-session") {
+  throw new Error("follow-up recursion suppression crossed session boundaries or omitted a V2 terminal event");
+}
 if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
   console.error(`untyped operational prompt: ${promptBody}`);
   process.exit(1);
@@ -1055,9 +1065,9 @@ if (promptBody.includes("Resume supervision according to the session-start opera
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode plugin must run the guard from worktree even when directory is elsewhere"
+  expect_code 0 "$status" "OpenCode plugin must resolve the guard from the location's git root"
   [ -z "$out" ] || fail "OpenCode plugin worktree-root test printed output: $out"
-  pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
+  pass ".opencode primary plugin: guard path is anchored to the location's git root"
 }
 
 test_pi_extension_injects_once_per_logical_agent_run() {
