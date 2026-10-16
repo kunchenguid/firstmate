@@ -2633,19 +2633,32 @@ warn_invalid_lane_target_once() {
 # working, so open lanes that only wait never hide an idle home. A condition
 # that still holds re-raises on READY_WORK_RESURFACE_SECS; a new ready set
 # fires at once. Sets
-# READY_WORK_IDS and READY_WORK_REASON. An empty ready set forgets the last one so
-# the same work surfaces again if it returns. Intake is independent of the
-# heartbeat's idle backoff and runs before an away heartbeat can exit.
+# READY_WORK_IDS and READY_WORK_REASON. An empty ready set withdraws any queued
+# ready-work notification so a stale prompt stops being presented, while its
+# resurface record is kept so a transient empty set (every ready item briefly
+# held or in flight) cannot reset the re-raise window. Intake is independent of
+# the heartbeat's idle backoff and runs before an away heartbeat can exit.
 ready_work_waits_idle() {
-  local meta task target open now surfaced surfaced_at surfaced_ids
+  local meta task target open now surfaced surfaced_at surfaced_ids ready_out ready_rc
   READY_WORK_IDS=
   READY_WORK_REASON=
   [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] || return 1
-  READY_WORK_IDS=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null \
+  ready_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null)
+  ready_rc=$?
+  READY_WORK_IDS=$(printf '%s\n' "$ready_out" \
     | awk '/^ready\[[0-9]+\]/ { on = 1; next } on && /^  / { sub(/^  /, ""); split($0, f, ","); print f[1]; next } { on = 0 }' \
     | sort | paste -sd ' ' -)
   if [ -z "$READY_WORK_IDS" ]; then
-    rm -f "$STATE/.ready-work-surfaced"
+    # A non-zero status means the backlog could not be read, not that the
+    # condition is false, so leave the queued row for the next cycle instead of
+    # withdrawing a valid notification on a transient read failure.
+    [ "$ready_rc" -eq 0 ] || return 1
+    # The condition no longer holds: withdraw any queued ready-work notification
+    # so it stops being presented instead of naming items since held or put in
+    # flight until an acknowledgement that may never come. Keep the resurface
+    # record so this transient empty set cannot reset the re-raise window and
+    # let the identical set fire again the moment it returns.
+    fm_wake_withdraw check ready-work || true
     return 1
   fi
   target=$(lane_target_value) || target=

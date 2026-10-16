@@ -2246,6 +2246,51 @@ fm_wake_queued_keys_locked() {
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
+# fm_wake_withdraw <kind> <key>
+# Remove every queued, unacknowledged row for exactly <kind>/<key> under the
+# append lock. Atomic and idempotent: an absent key or an empty queue is a no-op
+# success. A producer whose check has just re-evaluated to "condition no longer
+# holds" uses this so a stale notification stops being presented - including one
+# that still names rows since held or put in flight - instead of waiting for an
+# acknowledgement that may never come. The producer re-raises from scratch when
+# its condition holds again, so no work is lost; a row another actor already
+# consumed is simply absent from the queue and removes nothing.
+fm_wake_withdraw() {
+  local kind=$1 key=$2 clean_key status=0 tmp
+  case "$kind" in
+    signal|stale|check|heartbeat) ;;
+    *) printf 'fm_wake_withdraw: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
+  esac
+  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if [ ! -f "$FM_WAKE_QUEUE" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  # Nothing to do without a matching row, so an idle producer never rewrites the
+  # queue on a cadence.
+  if ! awk -F '\t' -v kind="$kind" -v key="$clean_key" \
+    'NF >= 5 && $3 == kind && $4 == key { found = 1 } END { exit(found ? 0 : 1) }' \
+    "$FM_WAKE_QUEUE"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  if tmp=$(mktemp "$STATE/.wake-queue.withdraw.XXXXXX") && chmod 0600 "$tmp"; then
+    if awk -F '\t' -v kind="$kind" -v key="$clean_key" \
+      '!(NF >= 5 && $3 == kind && $4 == key) { print }' "$FM_WAKE_QUEUE" > "$tmp" \
+      && _fm_atomic_replace "$tmp" "$FM_WAKE_QUEUE"; then
+      tmp=
+    else
+      status=1
+    fi
+  else
+    status=1
+  fi
+  [ -z "$tmp" ] || rm -f -- "$tmp"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
 fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-key>
   local task=$1 observed_at=$2 oldest_row_key=$3 marker tmp
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac

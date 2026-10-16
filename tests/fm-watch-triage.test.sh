@@ -6625,6 +6625,133 @@ test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
   pass "a home under its lane floor wakes with free lane slots, stays quiet at the floor, and re-raises while held"
 }
 
+# A ready-work notification must not replay after a transient empty ready set.
+# The check surfaces once; while every named item is briefly held or in flight
+# the ready set is empty, and before this fix that erased the resurface record
+# so the identical set fired again the moment it returned - the same "ready work
+# waiting" notification shown four times inside one READY_WORK_RESURFACE_SECS
+# window. Keeping the record absorbs the return until the window really elapses.
+test_ready_work_check_absorbs_a_transient_empty_inside_the_window() {
+  local dir state fakebin out pid tasks expected before after
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "ready-work transient empty # skip: tasks-axi not found"
+    return 0
+  fi
+  dir=$(make_case ready-work-transient-empty); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  tasks="$ROOT/bin/fm-tasks-axi.sh"
+  printf 'sm-ready-empty\n' > "$dir/.fm-secondmate-home"
+  mkdir -p "$dir/data" "$dir/config"
+  printf '4\n' > "$dir/config/lane-target"
+  FM_HOME="$dir" "$tasks" add alpha-one "first ready item" >/dev/null || fail "fixture: could not queue alpha-one"
+  FM_HOME="$dir" "$tasks" add beta-two "second ready item" >/dev/null || fail "fixture: could not queue beta-two"
+  FM_HOME="$dir" "$tasks" add gamma-three "third ready item" >/dev/null || fail "fixture: could not queue gamma-three"
+  expected="check: ready work waiting with free lane slots (0/4 open): alpha-one beta-two gamma-three - start the top ready item now, or record why it waits"
+
+  # Round 1: the check surfaces once and records the set.
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the ready-work check did not surface: $(cat "$out")"; }
+  grep -Fx "$expected" "$out" >/dev/null || fail "the ready-work check used the wrong reason: $(cat "$out")"
+  before=$(cat "$state/.ready-work-surfaced") || fail "the check did not record its surfacing"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || fail "could not acknowledge the ready-work wake"
+
+  # Round 2: every named item is held, so the ready set is briefly empty; the
+  # resurface record must survive a transient empty.
+  FM_HOME="$dir" "$tasks" hold alpha-one --reason "wait" >/dev/null || fail "could not hold alpha-one"
+  FM_HOME="$dir" "$tasks" hold beta-two --reason "wait" >/dev/null || fail "could not hold beta-two"
+  FM_HOME="$dir" "$tasks" hold gamma-three --reason "wait" >/dev/null || fail "could not hold gamma-three"
+  rm -f "$state/.last-ready-work-check"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 FM_WATCH_HANDLING_SUCCESSOR=1
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; fail "the empty-set cycle did not complete"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "an empty ready set still woke: $(cat "$out")"
+  [ "$(cat "$state/.ready-work-surfaced" 2>/dev/null)" = "$before" ] \
+    || fail "the empty ready set erased the resurface record (got: $(cat "$state/.ready-work-surfaced" 2>&1))"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+
+  # Round 3: the same set returns inside the window and must stay absorbed.
+  FM_HOME="$dir" "$tasks" unhold alpha-one >/dev/null 2>&1 || true
+  FM_HOME="$dir" "$tasks" unhold beta-two >/dev/null 2>&1 || true
+  FM_HOME="$dir" "$tasks" unhold gamma-three >/dev/null 2>&1 || true
+  rm -f "$state/.last-ready-work-check"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 FM_WATCH_HANDLING_SUCCESSOR=1
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 300 || reap "$pid"
+  reap "$pid"
+  ! grep -Fx "$expected" "$out" >/dev/null \
+    || fail "the identical ready-work check replayed inside the resurface window: $(cat "$out")"
+  after=$(cat "$state/.ready-work-surfaced" 2>/dev/null)
+  [ "$after" = "$before" ] || fail "the absorbed set re-recorded its surfacing timestamp"
+  pass "a transient empty ready set does not replay the ready-work notification inside the window"
+}
+
+# When the ready set empties - every named item held or in flight - the queued
+# ready-work notification must be withdrawn so it stops being presented instead
+# of naming items that are no longer dispatchable until an acknowledgement that
+# may never come. A shrunk set (some items held) fires a new notification that,
+# by same-key dedup, supersedes the stale one and names no held item.
+test_ready_work_check_withdraws_a_stale_row_and_never_names_a_held_item() {
+  local dir state fakebin out drain_out pid tasks expected
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "ready-work withdraw # skip: tasks-axi not found"
+    return 0
+  fi
+  dir=$(make_case ready-work-withdraw); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  tasks="$ROOT/bin/fm-tasks-axi.sh"
+  printf 'sm-ready-withdraw\n' > "$dir/.fm-secondmate-home"
+  mkdir -p "$dir/data" "$dir/config"
+  printf '4\n' > "$dir/config/lane-target"
+  FM_HOME="$dir" "$tasks" add alpha-one "first ready item" >/dev/null || fail "fixture: could not queue alpha-one"
+  FM_HOME="$dir" "$tasks" add beta-two "second ready item" >/dev/null || fail "fixture: could not queue beta-two"
+  expected="check: ready work waiting with free lane slots (0/4 open): alpha-one beta-two - start the top ready item now, or record why it waits"
+
+  # Round 1: surface and leave the durable row unacknowledged.
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the ready-work check did not surface: $(cat "$out")"; }
+  grep -Fx "$expected" "$out" >/dev/null || fail "the ready-work check used the wrong reason: $(cat "$out")"
+  grep -F "$(printf '\tcheck\tready-work\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the ready-work row was not queued: $(cat "$state/.wake-queue")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "the drain failed"
+  grep -F "alpha-one" "$drain_out" >/dev/null || fail "the drain did not present the unacknowledged ready row"
+
+  # Round 2: both named items become held, so the condition no longer holds and
+  # the stale row must be withdrawn.
+  FM_HOME="$dir" "$tasks" hold alpha-one --reason "wait" >/dev/null || fail "could not hold alpha-one"
+  FM_HOME="$dir" "$tasks" hold beta-two --reason "wait" >/dev/null || fail "could not hold beta-two"
+  rm -f "$state/.last-ready-work-check"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 FM_WATCH_HANDLING_SUCCESSOR=1
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; fail "the empty-set cycle did not complete"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "an empty ready set still woke: $(cat "$out")"
+  ! grep -F "$(printf '\tcheck\tready-work\t')" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "the stale ready-work row was not withdrawn: $(cat "$state/.wake-queue")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "the drain failed"
+  ! grep -F "ready work waiting" "$drain_out" >/dev/null \
+    || fail "the drain re-presented the withdrawn ready-work row: $(cat "$drain_out")"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+
+  # Round 3: a shrunk set (beta held, alpha ready) fires a notification that
+  # names only the still-ready item; a held item is never named.
+  FM_HOME="$dir" "$tasks" unhold alpha-one >/dev/null 2>&1 || true
+  rm -f "$state/.last-ready-work-check"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 FM_WATCH_HANDLING_SUCCESSOR=1
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the shrunk ready set did not re-fire: $(cat "$out")"; }
+  grep -F "alpha-one" "$out" >/dev/null || fail "the shrunk ready set did not name the still-ready item: $(cat "$out")"
+  ! grep -F "beta-two" "$out" >/dev/null || fail "the ready-work check named a held item: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "the drain failed"
+  ! grep -F "beta-two" "$drain_out" >/dev/null || fail "the drain presented a held item: $(cat "$drain_out")"
+  pass "a stale ready-work row is withdrawn and the check never names a held item"
+}
+
 # Every lane slot open but none working still leaves an idle home: at or above
 # config/lane-target the heartbeat falls back to the no-worker-working rule
 # (the 6 Oct TakeOne stall: four parked lanes, nine ready items, no wake 3 h).
@@ -7517,6 +7644,8 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_heartbeat_wakes_an_idle_lead_with_ready_work
 test_heartbeat_lane_floor_wakes_with_free_lane_slots
+test_ready_work_check_absorbs_a_transient_empty_inside_the_window
+test_ready_work_check_withdraws_a_stale_row_and_never_names_a_held_item
 test_heartbeat_full_lanes_with_no_worker_working_wake
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint

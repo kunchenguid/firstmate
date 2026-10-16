@@ -85,7 +85,8 @@ rows_file_valid() { fm_wake_grant_rows_valid "$1"; }
 rotate_scratch_locked() {
   local scratch
   for scratch in "$STATE"/.main-eligible-rows.tmp.* "$STATE"/.wake-rows.consume.* \
-    "$STATE"/.wake-queue.retire.* "$STATE"/.wake-queue.ack.* "$STATE"/.wake-queue.actor-view.*; do
+    "$STATE"/.wake-queue.retire.* "$STATE"/.wake-queue.ack.* "$STATE"/.wake-queue.actor-view.* \
+    "$STATE"/.wake-queue.withdraw.*; do
     [ -e "$scratch" ] || [ -L "$scratch" ] || continue
     rm -f -- "$scratch"
   done

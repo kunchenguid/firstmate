@@ -1151,6 +1151,8 @@ An open lane is a `state/<task>.meta` whose `kind` is `ship` or `scout`; a secon
 
 In a secondmate home, a scan whose home sits below the floor with `fm-tasks-axi.sh ready` work raises one check wake naming the open and target counts and the first ready ids, re-raised while the condition holds every `FM_READY_WORK_RESURFACE_SECS` (1800 by default).
 Ready intake uses the base heartbeat interval independently of idle-heartbeat backoff and runs before an away heartbeat can end the cycle; held and future-dated work stays excluded by the backlog's ready query.
+When the ready set empties on a successful read - every named item since held or in flight - the check withdraws the queued ready-work row, so a notification whose condition no longer holds stops being presented instead of repeating until an acknowledgement that may never come, and it re-raises from scratch only when the condition holds again.
+That empty observation keeps the resurface record, so a transient empty set cannot reset the `FM_READY_WORK_RESURFACE_SECS` window and replay the identical set inside it.
 At or above the floor, or without the file, a home wakes when no worker is provably working, so open lanes that only wait never hide an idle home.
 A malformed value is reported once in the watcher's triage log and then treated as absent, never as a number; `bin/fm-watch.sh`'s header owns the exact reason lines.
 
