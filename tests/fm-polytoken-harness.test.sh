@@ -239,7 +239,7 @@ test_polytoken_busy_footer_needs_the_pinned_running_row() {
   printf 'Running for 3.03s\n' | fm_busy_lines_match claude \
     && fail "harness=claude must never borrow polytoken's token" || true
   printf 'Running for 3.03s\n' | fm_busy_lines_match '' \
-    || fail "the harness-less union must acknowledge a polytoken busy row"
+    && fail "the harness-less union must not carry polytoken's busy row" || true
   pass "fm-composer-lib: only the pinned Running-for row carries the polytoken busy verdict"
 }
 

@@ -385,12 +385,7 @@ fm_composer_strip_ghost() {
 # tmux agy endpoint reaches the submit core with no recorded harness, and its
 # bare `>` composer verdict is `unknown`, so the busy footer is the only
 # turn-started acknowledgement that path can read.
-# polytoken's `Running for` row is part of the union for the same reason: a
-# polytoken submit lands while the turn renders, so the composer reads blank
-# and the strict separated-shape verdict reads `unknown`, and only the busy
-# footer - read through this union by the submit cores' baseline transition
-# and busy-queue fallbacks - acknowledges the submit.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$|^[[:space:]]*Running for [0-9]+([.][0-9]+)?s'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 # Devin 3000.11.1: the working composer and interrupt hint are independent
 # delivery signals. Neither is used as semantic worker-state evidence.
@@ -446,6 +441,8 @@ FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
 # worker state comes from the polytoken-hook fold in bin/fm-busy-lib.sh, and
 # echoed worker output naming the token can fake only this acknowledgement,
 # never a busy-state verdict.
+# It is deliberately not part of the harness-less union above, so a pane with
+# no recorded harness never reads it as busy.
 FM_DELIVERY_POLYTOKEN_BUSY_REGEX_DEFAULT='^[[:space:]]*Running for [0-9]+([.][0-9]+)?s'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 

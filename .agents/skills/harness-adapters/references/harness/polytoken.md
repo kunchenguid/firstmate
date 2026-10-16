@@ -35,6 +35,7 @@ A TUI-attached daemon stays alive while idle (verified minutes-scale) and exits 
 The daemon imposes no cap on consecutive `stop`-hook `continue` outcomes (verified live: five forced continuations all ran), so any future primary turn-end integration would need its own bounded latch.
 
 `../../../../../bin/fm-spawn.sh` owns autonomy (the generated config dir), the worktree hook and facet wiring, session discovery into task metadata (`polytoken sessions --format json` with the launch's `--config-dir` and `--sessions-dir`), the foreign-marker clearing (the fixed `env -u` set, including the generic `AGENT`, plus the ORCA_*/FM_ loop), and the readiness gate.
+A fresh polytoken spawn that fails and leaves no task record also closes the endpoint it opened before launch, removes its wiring, task temp root, and staged launch file, and drops its slot claim even after metadata publication; every other harness keeps the shared abort behavior.
 `../../../../../bin/fm-polytoken-lib.sh` owns every generated artifact and the REST control core.
 `../../../../../bin/fm-control-lib.sh` owns the REST interrupt transport (`fm_control_interrupt_transport`), the `/quit` exit command, and the wiring tables.
 
@@ -43,7 +44,7 @@ The daemon imposes no cap on consecutive `stop`-hook `continue` outcomes (verifi
 `../../../../../bin/fm-composer-lib.sh` owns the verified separated composer shape: a full-width separator pair over one blank or pending content row with a footer below.
 The shared classifier reaches it through the Pi-shape identity conjunction, with polytoken as the second verified owner of that shape: an idle pane proves an empty composer and a working pane keeps the strict `unknown` so the busy-queue conversion stays honest.
 The busy footer token is the pinned `Running for <elapsed>` row with a leading space (verified live); `Completed in`, `Errored after`, and `Canceled after` are the distinct turn-end rows and never match it.
-The token is also part of the harness-less default union, for the same reason agy's is: a submit's only turn-started acknowledgement on this pane is the busy footer.
+The token is read only under the recorded polytoken harness and the polytoken composer identity, never through the harness-less default union, so a pane with no recorded harness never reads it as busy.
 The delivery guard is never a busy-state source; recorded state comes from the polytoken-hook fold.
 
 ## Primary integration
