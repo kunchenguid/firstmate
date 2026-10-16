@@ -3803,10 +3803,18 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
-validate_spawn_worktree() { # <source> <inspect-target>
-  local source=$1 inspect_target=$2
+spawn_endpoint_hint() {
+  if [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]; then
+    printf 'window %s is closed on exit, returning any pool slot it held' "$T"
+  else
+    printf 'inspect window %s' "$T"
+  fi
+}
+
+validate_spawn_worktree() { # <source> <hint>
+  local source=$1 hint=$2
   if ! spawn_worktree_isolated "$WT"; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout; $hint" >&2
     exit 1
   fi
 }
@@ -4374,7 +4382,7 @@ EOF
       echo "error: orca did not return a worktree id/path for $W" >&2
       exit 1
     fi
-    validate_spawn_worktree "orca worktree create" "$W"
+    validate_spawn_worktree "orca worktree create" "inspect target $W"
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -4857,7 +4865,7 @@ polytoken_spawn_fail() {  # <detail>
 }
 
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
-  [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+  [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "inspect target $T"
 elif [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -4890,7 +4898,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     fi
   fi
-  [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+  [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "inspect target $T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -4947,11 +4955,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "treehouse get" "$(spawn_endpoint_hint)"
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable
@@ -4967,7 +4975,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
-      echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
+      echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1
     fi
     SPAWN_SLOT_CLAIMED=1
@@ -5017,7 +5025,7 @@ claude*)
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
-    echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
+    echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
     exit 1
   fi
   ;;

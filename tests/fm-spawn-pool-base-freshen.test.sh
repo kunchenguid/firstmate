@@ -722,6 +722,10 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
   assert_contains "$out" "could not claim Treehouse pool slot" \
     "spawn did not name the unclaimable slot as the reason"
+  assert_not_contains "$out" "inspect window" \
+    "the unclaimable-slot refusal pointed at a window its abort cleanup closes"
+  assert_contains "$out" "is closed on exit, returning any pool slot it held" \
+    "the unclaimable-slot refusal did not say its window was closed"
   [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
