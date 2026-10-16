@@ -5,7 +5,16 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 work=$(fm_test_tmproot dispatch-evidence)
-mkdir -p "$work/home/data/job" "$work/pi"
+mkdir -p "$work/home/data/job" "$work/pi" "$work/bin"
+export FM_TEST_TS_STATUS="$work/tailscale-status"
+cat > "$work/bin/tailscale" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = status ] && [ "${2:-}" = --json ] || exit 2
+[ -f "$FM_TEST_TS_STATUS" ] || exit 1
+cat "$FM_TEST_TS_STATUS"
+SH
+chmod +x "$work/bin/tailscale"
+export PATH="$work/bin:$PATH"
 port_file="$work/port"
 mode_file="$work/mode"
 cat > "$work/server.py" <<'PY'
@@ -74,18 +83,21 @@ cat > "$work/pi/models.json" <<JSON
 {"providers":{"local":{"baseUrl":"$base","api":"openai-completions","models":[{"id":"local-model","contextWindow":32768,"maxTokens":8192}]}}}
 JSON
 
-check=$(FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/models.json" --expected-url "$base" --canary)
+check=$(FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/models.json" --expected-url "$base")
 printf '%s' "$check" | jq -e '.selector == "local/local-model" and .served_model == "local-model" and .served_revision == "pinned-revision" and .served_context_window == 32768 and .tool_canary == "passed"' >/dev/null || fail 'exact local canary evidence missing'
-printf 'loading\n' > "$mode_file"
 if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/models.json" --expected-url "$base" --canary >"$work/out" 2>"$work/err"; then
+  fail 'optional non-canary interface remained available'
+fi
+printf 'loading\n' > "$mode_file"
+if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/models.json" --expected-url "$base" >"$work/out" 2>"$work/err"; then
   fail 'loading endpoint was accepted'
 fi
 printf 'redirect\n' > "$mode_file"
-if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/models.json" --expected-url "$base" --canary >"$work/out" 2>"$work/err"; then
+if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/models.json" --expected-url "$base" >"$work/out" 2>"$work/err"; then
   fail 'redirecting endpoint was accepted'
 fi
 printf 'bad-tool\n' > "$mode_file"
-if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/models.json" --expected-url "$base" --canary >"$work/out" 2>"$work/err"; then
+if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/models.json" --expected-url "$base" >"$work/out" 2>"$work/err"; then
   fail 'incorrect tool arguments were accepted'
 fi
 : > "$mode_file"
@@ -107,6 +119,23 @@ sed "s@127.0.0.1:$port@8.8.8.8:8000@" "$work/pi/models.json" > "$work/pi/public.
 if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/public.json" --expected-url http://8.8.8.8:8000/v1 >"$work/out" 2>"$work/err"; then
   fail 'public endpoint was accepted as local'
 fi
+tailnet_base='http://100.64.0.42:1/v1'
+sed "s@127.0.0.1:$port@100.64.0.42:1@" "$work/pi/models.json" > "$work/pi/tailnet.json"
+printf '%s\n' '{"BackendState":"Running","Peer":{"node-a":{"TailscaleIPs":["100.64.0.43"]}}}' > "$FM_TEST_TS_STATUS"
+if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/tailnet.json" --expected-url "$tailnet_base" >"$work/out" 2>"$work/err"; then
+  fail 'unlisted CGNAT address was accepted as a Tailnet peer'
+fi
+rg -q 'not a verified Tailnet peer' "$work/err" || fail 'unlisted CGNAT address did not fail at identity proof'
+printf '%s\n' '{"BackendState":"Running","Peer":{"node-a":{"TailscaleIPs":["100.64.0.42"]}}}' > "$FM_TEST_TS_STATUS"
+if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/tailnet.json" --expected-url "$tailnet_base" >"$work/out" 2>"$work/err"; then
+  fail 'unreachable verified peer was accepted as ready'
+fi
+rg -q 'local endpoint unavailable' "$work/err" || fail 'verified peer did not proceed to endpoint health'
+rm "$FM_TEST_TS_STATUS"
+if FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" check-local local/local-model --catalog "$work/pi/tailnet.json" --expected-url "$tailnet_base" >"$work/out" 2>"$work/err"; then
+  fail 'unavailable Tailnet proof was accepted'
+fi
+rg -q 'cannot verify local endpoint as a Tailnet peer' "$work/err" || fail 'unavailable proof did not fail closed'
 
 printf '%s\n' '{"task_class":"bounded coding","proposed":"local/local-model","selected":"codex/gpt","confidence":0.9}' \
   | FM_HOME="$work/home" "$ROOT/bin/fm-dispatch-evidence.sh" record job shadow >/dev/null

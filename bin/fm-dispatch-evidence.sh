@@ -2,13 +2,13 @@
 # fm-dispatch-evidence.sh - inspect a declared local Pi lane and append task-scoped routing evidence.
 #
 # Usage:
-#   fm-dispatch-evidence.sh check-local <provider/model> --expected-url <base-url> [--catalog <models.json>] [--canary]
+#   fm-dispatch-evidence.sh check-local <provider/model> --expected-url <base-url> [--catalog <models.json>]
 #   fm-dispatch-evidence.sh record <task-id> <shadow|outcome> < <one JSON object>
 #
-# check-local is read-only, refuses non-loopback/non-Tailnet URLs, and checks the
-# exact Pi catalog tuple, /health, and /v1/models. --canary additionally asks
-# for a forced tool call and refuses a plain-text answer. It emits one JSON
-# object for the dispatch evidence row; it never picks a model or retries.
+# check-local is read-only, proves non-loopback Tailnet peer identity with
+# tailscale status, and checks the exact Pi catalog tuple, /health, /v1/models,
+# and a forced tool call. It emits one JSON object for the dispatch evidence
+# row; it never picks a model or retries.
 # record appends one bounded, allow-listed JSON object to the existing task's
 # private data/<id>/dispatch-evidence.jsonl and fsyncs it. No prompt, source
 # content, key, or raw response is accepted. This is evidence, not a router.
@@ -30,6 +30,7 @@ import json
 import math
 import os
 import pathlib
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -73,7 +74,30 @@ def local_url(url):
     tailnet = ipaddress.ip_network("100.64.0.0/10")
     if not (address.is_loopback or address in tailnet) or not port or parsed.path.rstrip("/") != "/v1":
         die("local base URL must be loopback or Tailnet IP:port ending in /v1")
-    return url.rstrip("/")
+    return url.rstrip("/"), address
+
+
+def require_tailnet_peer(address):
+    if address.is_loopback:
+        return
+    try:
+        result = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5, check=True)
+        status = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        die("cannot verify local endpoint as a Tailnet peer")
+    if not isinstance(status, dict) or status.get("BackendState") != "Running" or not isinstance(status.get("Peer"), dict):
+        die("cannot verify local endpoint as a Tailnet peer")
+    matches = 0
+    for peer in status["Peer"].values():
+        if not isinstance(peer, dict) or not isinstance(peer.get("TailscaleIPs"), list):
+            continue
+        for value in peer["TailscaleIPs"]:
+            try:
+                matches += ipaddress.ip_address(value) == address
+            except ValueError:
+                continue
+    if matches != 1:
+        die("local endpoint is not a verified Tailnet peer")
 
 
 def check_local(args):
@@ -82,7 +106,6 @@ def check_local(args):
     selector = args.pop(0)
     catalog = pathlib.Path.home() / ".pi/agent/models.json"
     expected = None
-    canary = False
     while args:
         flag = args.pop(0)
         if flag in ("--catalog", "--expected-url"):
@@ -93,8 +116,6 @@ def check_local(args):
                 catalog = pathlib.Path(value)
             else:
                 expected = value
-        elif flag == "--canary":
-            canary = True
         else:
             die(f"unknown flag {flag}")
     provider, model = selector.split("/", 1)
@@ -108,9 +129,10 @@ def check_local(args):
         die(f"Pi catalog unavailable or malformed: {exc}")
     if len(matches) != 1 or lane.get("api") != "openai-completions":
         die("Pi catalog does not contain exactly one OpenAI-completions model tuple")
-    base = local_url(lane.get("baseUrl", ""))
-    if local_url(expected) != base:
+    base, address = local_url(lane.get("baseUrl", ""))
+    if local_url(expected)[0] != base:
         die("Pi catalog base URL differs from expected URL")
+    require_tailnet_peer(address)
     try:
         health = get_json(base[:-3] + "/health")
         listing = get_json(base + "/models")
@@ -131,28 +153,27 @@ def check_local(args):
     configured_context = matches[0].get("contextWindow")
     if not isinstance(served_context, int) or isinstance(served_context, bool) or not isinstance(configured_context, int) or isinstance(configured_context, bool) or served_context < configured_context:
         die("local endpoint context is absent or below the Pi catalog window")
-    if canary:
-        request = {
-            "model": model,
-            "messages": [{"role": "user", "content": "Call the probe tool with value ready."}],
-            "tools": [{"type": "function", "function": {"name": "probe", "description": "Readiness probe", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}}],
-            "tool_choice": {"type": "function", "function": {"name": "probe"}},
-            "max_tokens": 256,
-            "stream": False,
-        }
-        try:
-            response = get_json(base + "/chat/completions", timeout=120, payload=request)
-        except (OSError, urllib.error.URLError, ValueError) as exc:
-            die(f"local tool canary failed: {exc}")
-        choice = (response.get("choices") or [{}])[0]
-        calls = (choice.get("message") or {}).get("tool_calls") or []
-        function = calls[0].get("function", {}) if calls else {}
-        try:
-            arguments = json.loads(function.get("arguments", ""))
-        except (TypeError, ValueError):
-            arguments = None
-        if choice.get("finish_reason") != "tool_calls" or function.get("name") != "probe" or arguments != {"value": "ready"}:
-            die("local endpoint did not return a complete structured tool call")
+    request = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Call the probe tool with value ready."}],
+        "tools": [{"type": "function", "function": {"name": "probe", "description": "Readiness probe", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}}],
+        "tool_choice": {"type": "function", "function": {"name": "probe"}},
+        "max_tokens": 256,
+        "stream": False,
+    }
+    try:
+        response = get_json(base + "/chat/completions", timeout=120, payload=request)
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        die(f"local tool canary failed: {exc}")
+    choice = (response.get("choices") or [{}])[0]
+    calls = (choice.get("message") or {}).get("tool_calls") or []
+    function = calls[0].get("function", {}) if calls else {}
+    try:
+        arguments = json.loads(function.get("arguments", ""))
+    except (TypeError, ValueError):
+        arguments = None
+    if choice.get("finish_reason") != "tool_calls" or function.get("name") != "probe" or arguments != {"value": "ready"}:
+        die("local endpoint did not return a complete structured tool call")
     result = {
         "selector": selector,
         "base_url": base,
@@ -162,7 +183,7 @@ def check_local(args):
         "health": health["status"],
         "served_model": listed[0].get("id"),
         "served_revision": listed[0].get("revision") or (listed[0].get("meta") or {}).get("revision"),
-        "tool_canary": "passed" if canary else "not_run",
+        "tool_canary": "passed",
     }
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 

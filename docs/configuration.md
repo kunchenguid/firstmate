@@ -1267,8 +1267,9 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 
 **Local Pi readiness and task outcome evidence**
 
-The `check-local` subcommand in [`bin/fm-dispatch-evidence.sh`](../bin/fm-dispatch-evidence.sh) checks one explicit Pi catalog tuple against its loopback or Tailnet OpenAI-compatible endpoint; its header owns the exact command syntax.
-It requires `/health`, an exact `/v1/models` alias with at least the Pi catalog's context window, and, with `--canary`, a complete structured tool call.
+The `check-local` subcommand in [`bin/fm-dispatch-evidence.sh`](../bin/fm-dispatch-evidence.sh) checks one explicit Pi catalog tuple against its loopback or verified Tailnet peer OpenAI-compatible endpoint; its header owns the exact command syntax.
+For a non-loopback address, Tailscale's running peer status must list that exact IP before the endpoint is contacted; absent or ambiguous proof refuses the route.
+It requires `/health`, an exact `/v1/models` alias with at least the Pi catalog's context window, and a complete structured tool call on every check.
 It neither starts a server nor chooses another model; a refusal keeps the local route out of service until the operator resolves the mismatch.
 The optional `--catalog <models.json>` selects a specific worker account's catalog instead of the current user's `~/.pi/agent/models.json`.
 The JSON output gives the endpoint and advertised model, plus a served revision only if the server exposes one; retain the checkpoint/runtime digest separately when it does not.

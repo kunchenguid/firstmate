@@ -41,7 +41,7 @@ The log is private `data/<task-id>/dispatch-evidence.jsonl`; the script accepts 
 An unmeasured local route may shadow while the current specific rule or Codex default still executes.
 
 Before an actual local Pi spawn, run the script's `check-local` canary against the expected endpoint using the worker account's Pi catalog.
-The check requires a loopback or Tailnet IP, the exact Pi catalog model, `/health`, `/v1/models`, and a complete structured tool call.
+The check accepts loopback or an address proven in the current Tailscale peer list, then requires the exact Pi catalog model, `/health`, `/v1/models`, and a complete structured tool call.
 Save its JSON result beside the task's outcome evidence.
 Also record the server's checkpoint and runtime revision from the deployment manifest or image digest; an endpoint that does not advertise those revisions cannot prove them by `/v1/models` alone.
 If any check fails, leave the local route unselected and state the failure; never silently forward the same request to a cloud endpoint.
