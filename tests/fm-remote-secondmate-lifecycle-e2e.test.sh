@@ -366,19 +366,14 @@ if [ "\${1:-}" = clone ]; then
 fi
 if [ "\${1:-}" = clone ] && [ -n "\${FM_FAKE_CLONE_HOLD_DIR:-}" ] \
   && [ "\$(dirname "\${!#}")" = "\$FM_FAKE_CLONE_HOLD_DIR" ]; then
-  # Launch the clone already stopped: signalling it after it starts loses the
-  # hold whenever the local clone finishes first on a loaded runner.
-  ( kill -STOP "\$BASHPID"; exec "$REAL_GIT" "\$@" ) &
-  hold_git=\$!
-  while :; do
-    case "\$(ps -o stat= -p "\$hold_git" 2>/dev/null | tr -d '[:space:]')" in T*) break ;; esac
-    sleep 0.005
-  done
+  printf -v hold_upload_pack '%q upload-pack' "$FAKEBIN/git"
+  FM_FAKE_CLONE_HOLD_DEST="\${!#}" exec "$REAL_GIT" clone --no-local --upload-pack="\$hold_upload_pack" "\${@:2}"
+fi
+if [ "\${1:-}" = upload-pack ] && [ -n "\${FM_FAKE_CLONE_HOLD_DEST:-}" ]; then
+  [ -d "\$FM_FAKE_CLONE_HOLD_DEST/.git/objects" ] || exit 1
+  if "$REAL_GIT" -C "\$FM_FAKE_CLONE_HOLD_DEST" rev-parse --verify HEAD >/dev/null 2>&1; then exit 1; fi
   touch "$TMP_ROOT/race-clone.held"
   while [ ! -f "$TMP_ROOT/race-clone.release" ] && [ -d "$TMP_ROOT" ]; do sleep 0.02; done
-  kill -CONT "\$hold_git" 2>/dev/null || true
-  wait "\$hold_git"
-  exit \$?
 fi
 exec "$REAL_GIT" "\$@"
 SH

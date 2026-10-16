@@ -229,7 +229,7 @@ test_ship_modes_generate_clean_briefs() {
 # with no --forge renders the unchanged gh-axi wording. The forge is a ship
 # input only, and the closed set refuses anything else.
 test_forge_selection_renders_correct_cli() {
-  local home brief out rc
+  local home brief out rc endpoint
   home="$TMP_ROOT/forge-home"
   mkdir -p "$home/data"
 
@@ -279,6 +279,21 @@ test_forge_selection_renders_correct_cli() {
     "a no-mistakes --forge forgejo DOD must not send the worker to gh-axi for the draft read-back"
   assert_no_grep 'gh-axi pr ready' "$brief" \
     "a no-mistakes --forge forgejo DOD must not send the worker to gh-axi to clear a draft"
+  assert_no_grep 'gh-axi pr checks' "$brief" \
+    "a no-mistakes --forge forgejo DOD must not send the worker to GitHub for CI checks"
+  for endpoint in \
+    '/pulls/<n>' \
+    '/commits/<head.sha>/status' \
+    '/pulls/<n>/reviews' \
+    '/pulls/<n>/reviews/<review-id>/comments' \
+    '/issues/<n>/comments'; do
+    assert_grep "tea api --repo <owner>/<repo> /repos/{owner}/{repo}$endpoint\`" "$brief" \
+      "a no-mistakes --forge forgejo DOD must name the Forgejo polling read $endpoint"
+  done
+  assert_grep 'for each review' "$brief" \
+    "a no-mistakes --forge forgejo DOD must read inline comments for every review"
+  assert_grep 'reading every page of these API lists and commit statuses' "$brief" \
+    "a no-mistakes --forge forgejo DOD must not truncate feedback or CI statuses"
 
   while IFS='|' read -r label args expect; do
     [ -n "$label" ] || continue

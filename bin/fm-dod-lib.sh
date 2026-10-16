@@ -465,7 +465,7 @@ EOF
 
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
+  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter ci_checks ci_feedback
   # Same declared-wait verb the brief renders (bin/fm-brief.sh PAUSED_VERB), so
   # an override still classifies; falls back to the literal when this library is
   # sourced without bin/fm-classify-lib.sh.
@@ -480,10 +480,14 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
     contract_consent=" upstream-consent=$consent"
   fi
   draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
+  ci_checks="\`gh-axi pr checks <n>\`"
+  ci_feedback="\`gh-axi pr view <n> --comments --reviews\`"
   if [ "$forge" = forgejo ]; then
     contract_forge=' forge=forgejo'
     forge_cli=tea
     draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
+    ci_checks="\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<n>\` for \`head.sha\`, then \`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/commits/<head.sha>/status\`"
+    ci_feedback="\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<n>/reviews\`, \`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<n>/reviews/<review-id>/comments\` for each review, and \`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/issues/<n>/comments\`, reading every page of these API lists and commit statuses"
   fi
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"
@@ -613,7 +617,7 @@ EOF
       cat <<EOF
 
 At the CI gate, poll about once a minute with one poll per command, and never put a single wait longer than your harness's command bound into one command.
-Every poll reads the PR itself, not only its checks: \`gh-axi pr checks <n>\`, then the PR's review submissions, inline review comments, and issue comments with \`gh-axi pr view <n> --comments --reviews\`.
+Every poll reads the PR itself, not only its checks: $ci_checks, then the PR's review submissions, inline review comments, and issue comments with $ci_feedback.
 A failing review-bot check, a review-bot finding, or a maintainer comment asking for a change is work for the gate, never a non-required check to dismiss: when \`no-mistakes axi status\` shows a parked gate, feed each item to it with \`no-mistakes axi respond --action fix\`, adding any finding the gate does not list yet as \`no-mistakes axi respond --help\` describes, and let the fix round commit and push.
 When review feedback arrives and \`no-mistakes axi status\` shows no parked gate, escalate it inline in a keyed status line - append \`needs-decision [at=<epoch>] [key=pr-<n>-<comment-id>]: review feedback: {comment URL} {what it asks for}\` - then, for this decision only in place of rule 6's stop, keep polling about once a minute and wait for firstmate's reply instead of stopping, processing and acknowledging your Firstmate instruction inbox on each poll as that section describes, since the reply arrives there; on dismiss, reply on the PR; on fix, feed it to the next parked gate or CI-ready decision point as above when one comes, and when the run reaches CI green or its final outcome first, bring this branch up to the run's pushed head first by following \`branch_sync.next_action\` from \`no-mistakes axi status\` and running the \`no-mistakes axi sync\` command it prints when it names one (an already synchronized branch needs none), then commit it as post-pipeline follow-up work on top of this same branch so every pipeline fix commit remains present, then drive a new \`no-mistakes\` run with the same \`--intent\` to its outcome before \`done:\`.
 Before appending \`done:\`, re-read the PR's reviews and comments and route any unactioned feedback through those paths first; never append \`done:\` while a \`pr-<n>-<comment-id>\` decision you opened is still unanswered.
