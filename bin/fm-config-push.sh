@@ -146,8 +146,8 @@ while IFS='|' read -r id home _window meta; do
       continue
     fi
     remote_nudge=$remote_pending
-    trap '[ "${remote_nudge:-0}" -eq 1 ] && fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 143' TERM
-    trap '[ "${remote_nudge:-0}" -eq 1 ] && fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 130' INT
+    trap 'fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 143' TERM
+    trap 'fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 130' INT
     remote_rc=0
     remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1) || remote_rc=$?

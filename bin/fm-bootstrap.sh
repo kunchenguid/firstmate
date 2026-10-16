@@ -657,8 +657,8 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
       fi
     }
-    trap '[ "${nudge_needed:-0}" -eq 1 ] && secondmate_write_nudge_marker "$id" "$_home" "" remote "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 143' TERM
-    trap '[ "${nudge_needed:-0}" -eq 1 ] && secondmate_write_nudge_marker "$id" "$_home" "" remote "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 130' INT
+    trap 'secondmate_write_nudge_marker "$id" "$_home" "" remote "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 143' TERM
+    trap 'secondmate_write_nudge_marker "$id" "$_home" "" remote "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1 || true; exit 130' INT
     converged=1
     sync_rc=0
     left=$(( deadline - $(date +%s) ))

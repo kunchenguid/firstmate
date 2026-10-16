@@ -702,6 +702,50 @@ test_parallel_unknown_completion_overrides_known_failure() {
   pass "parallel push preserves unknown completion status"
 }
 
+test_kill_during_remote_call_keeps_the_reread_owed() {
+  local script pid marker waited started
+  for script in fm-bootstrap.sh fm-config-push.sh; do
+    convergence_fixture "$TMP_ROOT/kill-$script" sm:host-sm
+    marker="$CF_HOME/state/.secondmate-nudge-pending/sm.pending"
+    if [ "$script" = fm-bootstrap.sh ]; then
+      started='fm-remote-secondmate-control.sh sync'
+      cat > "$CF_FAKEBIN/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in *fm-bootstrap-par.XXXXXX*) exit 1 ;; esac
+exec '$REAL_MKTEMP' "\$@"
+SH
+      chmod +x "$CF_FAKEBIN/mktemp"
+    else
+      started='fm-remote-inherit.sh'
+    fi
+    set -m
+    PATH="$CF_FAKEBIN:$BASE_PATH" \
+      FM_HOME="$CF_HOME" FM_ROOT_OVERRIDE="$CF_PRIMARY" \
+      FM_BOOTSTRAP_NETWORK=only FM_SSH_BIN="$CF_FAKEBIN/fake-ssh" \
+      FM_FAKE_SSH_LOG="$CF_LOG" FM_INHERITABLE_CONFIG='item-a item-b' \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+      FM_BOOTSTRAP_VERBOSE_FACTS=1 \
+      FM_FAKE_SYNC_HANG_HOST=host-sm FM_FAKE_ITEM_SLEEP=120 \
+      "$ROOT/bin/$script" >/dev/null 2>&1 &
+    pid=$!
+    set +m
+    waited=0
+    while ! grep -q "$started" "$CF_LOG" && [ "$waited" -lt 200 ]; do
+      sleep 0.05
+      waited=$((waited + 1))
+    done
+    grep -q "$started" "$CF_LOG" \
+      || fail "$script never started a remote mutation"$'\n'"$(cat "$CF_LOG")"
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    assert_grep 'owed=1' "$marker" \
+      "$script killed mid-mutation must keep the re-read owed"
+    assert_owed_reread_survives_unchanged_retry "$script" \
+      "$script killed mid-mutation must keep the re-read owed"
+  done
+  pass "a kill during the remote call keeps the mate's re-read owed"
+}
+
 test_remote_probe_scheduling_keeps_per_mate_lines parallel
 test_remote_probe_scheduling_keeps_per_mate_lines fallback
 test_remote_inheritance_failure_names_its_own_error_not_an_unchanged_item
@@ -713,4 +757,5 @@ test_partial_push_failure_keeps_the_reread_owed
 test_config_push_partial_failure_keeps_the_reread_owed
 test_unknown_completion_keeps_the_reread_owed
 test_parallel_unknown_completion_overrides_known_failure
+test_kill_during_remote_call_keeps_the_reread_owed
 echo "# all fm-bootstrap-network-parallel tests passed"
