@@ -743,6 +743,143 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# A stateful terminal and pool stand-in for the refused-launch sequence. Each
+# window is a file recording its stable id and the path its shell sits in; a
+# `treehouse get` typed into a window moves it into the lowest slot no live
+# window sits in, and a slot stays leased exactly while that window lives -
+# the process lease real Treehouse keeps for an interactive acquire.
+install_pool_world_tmux() {  # <fakebin> <world-dir> <slot-root>
+  local fakebin=$1 world=$2 slots=$3
+  mkdir -p "$world"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+world='$world'
+slots='$slots'
+SH
+  cat >> "$fakebin/tmux" <<'SH'
+window_name() {  # <target>
+  local t=${1#=}
+  t=${t#*:}
+  t=${t#=}
+  case "$t" in
+    @*) grep -lxF -- "$t" "$world"/*.id 2>/dev/null | head -n 1 | sed 's|.*/||; s|\.id$||' ;;
+    *) printf '%s' "$t" ;;
+  esac
+}
+target= name= cwd= fmt= text=
+cmd=${1:-}
+[ "$#" -eq 0 ] || shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -t) target=$2; shift 2 ;;
+    -n) name=$2; shift 2 ;;
+    -c) cwd=$2; shift 2 ;;
+    -F) fmt=$2; shift 2 ;;
+    -*) shift ;;
+    *) text="$text${text:+ }$1"; shift ;;
+  esac
+done
+case "$cmd" in
+  display-message)
+    case "$text" in
+      *pane_current_path*) cat "$world/$(window_name "$target").path" 2>/dev/null ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    ;;
+  list-windows)
+    for f in "$world"/*.id; do [ -e "$f" ] || continue; f=${f##*/}; printf '%s\n' "${f%.id}"; done
+    ;;
+  new-window)
+    n=$(( $(cat "$world/.next" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$n" > "$world/.next"
+    printf '@%s\n' "$n" > "$world/$name.id"
+    printf '%s\n' "$cwd" > "$world/$name.path"
+    printf '@%s\n' "$n"
+    ;;
+  kill-window)
+    w=$(window_name "$target")
+    rm -f "$world/$w.id" "$world/$w.path"
+    ;;
+  send-keys)
+    if [ "$text" = "treehouse get Enter" ]; then
+      w=$(window_name "$target")
+      for slot in "$slots"/*/project; do
+        grep -qxF -- "$slot" "$world"/*.path 2>/dev/null && continue
+        printf '%s\n' "$slot" > "$world/$w.path"
+        break
+      done
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+# A launch refused after it claimed its slot must leave the pool and the task
+# records exactly as it found them, so a retry of the same task and a later
+# second task each land on a slot of their own. The refusal here is a polytoken
+# launch into a project that tracks its own .polytoken/hooks.json.
+test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task() {
+  local rec id other out status slot_root world claim1 claim2
+  id='pool-refused-retry-r1'
+  other='pool-refused-second-r1'
+  rm -rf "/tmp/fm-$id" "/tmp/fm-$other"
+  rec=$(make_case refused-retry "$id")
+  read_case_record "$rec"
+  fm_test_spawn_brief "$HOME_DIR" "$other"
+  mkdir -p "$CASE_DIR/publisher/.polytoken"
+  printf '[]\n' > "$CASE_DIR/publisher/.polytoken/hooks.json"
+  git -C "$CASE_DIR/publisher" add .polytoken/hooks.json
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm project-hooks
+  git -C "$CASE_DIR/publisher" push --quiet origin "$DEFAULT_BRANCH"
+  slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1" "$slot_root/2"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$slot_root/2/project" "$INITIAL_SHA"
+  printf '{"worktrees":[{"name":"1","path":"%s"},{"name":"2","path":"%s"}]}\n' \
+    "$slot_root/1/project" "$slot_root/2/project" > "$slot_root/treehouse-state.json"
+  claim1="$slot_root/1/.fm-slot-owner"
+  claim2="$slot_root/2/.fm-slot-owner"
+  world="$CASE_DIR/tmux-world"
+  install_pool_world_tmux "$FAKEBIN_DIR" "$world" "$slot_root"
+  cat > "$FAKEBIN_DIR/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"print models"*) printf 'zai/glm-5.3-flash\nzai/glm-5.3-flash(low)\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/polytoken"
+
+  out=$(run_spawn "$id" --harness polytoken --model zai/glm-5.3-flash --effort low --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a polytoken launch into a project with its own hook layer should refuse"
+  assert_contains "$out" "not firstmate's to clobber" "the refusal message changed"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused launch published a task record"
+  [ ! -e "$world/fm-$id.id" ] \
+    || fail "the refused launch left its window open, still leasing $(cat "$world/fm-$id.path")"
+  [ ! -e "$claim1" ] && [ ! -e "$claim2" ] || fail "the refused launch left a slot claim behind"
+  [ ! -e "/tmp/fm-$id" ] || fail "the refused launch left its task temp root behind"
+
+  out=$(run_spawn "$id" --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the retry of the refused task should launch"$'\n'"$out"
+  assert_grep "worktree=$slot_root/1/project" "$HOME_DIR/state/$id.meta" \
+    "the retry did not land on the slot the refused launch returned"
+
+  out=$(run_spawn "$other" --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a second task spawned after the retry should launch"$'\n'"$out"
+  assert_grep "worktree=$slot_root/2/project" "$HOME_DIR/state/$other.meta" \
+    "the second task was handed the retried task's slot"
+  grep -Fxq -- "task=$id" "$claim1" || fail "slot 1 is not claimed by the retried task: $(cat "$claim1" 2>/dev/null)"
+  grep -Fxq -- "task=$other" "$claim2" || fail "slot 2 is not claimed by the second task: $(cat "$claim2" 2>/dev/null)"
+  rm -rf "/tmp/fm-$id" "/tmp/fm-$other" "/tmp/fm-$id+"* "/tmp/fm-$other+"*
+  pass "a launch refused after its slot claim leaves the pool for a retry and a second task"
+}
+
 publish_feature_branch() { # <branch>
   git -C "$CASE_DIR/publisher" checkout --quiet -b "$1"
   printf 'only on %s\n' "$1" > "$CASE_DIR/publisher/feature-only.txt"
@@ -876,6 +1013,7 @@ test_scout_base_branch_refused_on_gerrit_forge() {
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_named_base_branch_starts_from_that_branch

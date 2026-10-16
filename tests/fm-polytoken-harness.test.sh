@@ -356,6 +356,10 @@ test_polytoken_write_facet_carries_the_role_contract_without_a_model_pin() {
   assert_contains "$body" 'transclude("polytoken://system_prompts/facet.md")' \
     "the facet must transclude the shipped base prompt to keep the tool-use framing"
   assert_contains "$body" "You are a crewmate" "the facet must carry the crewmate identity"
+  assert_contains "$body" "The tool_flow tool cannot read the Firstmate task directory" \
+    "the facet must warn that tool_flow cannot reach the task directory"
+  assert_contains "$body" "call file_read and file_write directly or use the shell" \
+    "the facet must point the model at the direct file tools or the shell for the task directory"
   assert_contains "$body" "$case_dir/state/task.inbox" \
     "the facet must name this task's instruction inbox path"
   assert_contains "$body" "does not grant merge, destructive, security-sensitive" \
@@ -998,6 +1002,9 @@ test_polytoken_existing_project_hook_layer_refuses() {
     "the refusal must not leave a mirrored config dir in state"
   [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
     || fail "the refusal must leave the worktree clean: $(git -C "$WT_DIR" status --porcelain)"
+  grep -q "^kill-window .*fm-$id" "$CASE_DIR/tmux-calls.log" \
+    || fail "the refusal must close the window it opened so its slot returns to the pool"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refusal must not leave a task record"
   pass "fm-spawn: a project's own polytoken hook layer is refused, not clobbered"
 }
 
@@ -1058,6 +1065,32 @@ test_polytoken_readiness_failure_fails_loudly_and_cleans_up() {
   pass "fm-spawn: a failed readiness gate fails loudly, reaps, and retires its wiring"
 }
 
+# A gate failure after the task record is published rolls that record back, so
+# the slot claim the spawn took must go with it rather than name a task no
+# record describes.
+test_polytoken_post_launch_failure_drops_its_slot_claim() {
+  local id rec out rc slot_root claim
+  id="pt-noready-slot-z9-$$"
+  rec=$(make_polytoken_spawn_case noready-slot "$id")
+  read_polytoken_spawn_record "$rec"
+  slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJ_DIR" worktree move "$WT_DIR" "$slot_root/1/project"
+  WT_DIR="$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$WT_DIR" > "$slot_root/treehouse-state.json"
+  claim="$slot_root/1/.fm-slot-owner"
+  rc=0
+  out=$(PTFAKE_NO_HOOK=1 FM_POLYTOKEN_READY_POLLS=2 FM_POLYTOKEN_POLL_INTERVAL=0 \
+    run_polytoken_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a launch that never starts processing its brief must fail the spawn"
+  assert_contains "$out" "did not start processing its brief" "the readiness failure message changed"
+  assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "the failed gate must close the endpoint holding the slot"
+  assert_absent "$HOME_DIR/state/$id.meta" "the failed launch must not leave its task record"
+  [ ! -e "$claim" ] || fail "the failed launch left a slot claim naming a task with no record: $(cat "$claim")"
+  pass "fm-spawn: a gate failure after publication drops the slot claim with the record"
+}
+
 test_polytoken_spawn_arms_the_busy_contract() {
   local id rec out rc statedir
   id="pt-busy-z7-$$"
@@ -1105,4 +1138,5 @@ test_polytoken_secondmate_is_refused
 test_polytoken_existing_project_hook_layer_refuses
 test_polytoken_whitespace_state_dir_refuses
 test_polytoken_readiness_failure_fails_loudly_and_cleans_up
+test_polytoken_post_launch_failure_drops_its_slot_claim
 test_polytoken_spawn_arms_the_busy_contract

@@ -176,10 +176,13 @@
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
-#   could later be released out from under its successor. A spawn that aborts
-#   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   could later be released out from under its successor. A fresh spawn that
+#   fails and leaves no task record restores the pool as it found it: it drops
+#   its own claim under that lock (retaken once after metadata publication, and
+#   left for the next spawn's claim to replace only while another operation
+#   holds it), and before its launch is delivered it also closes the endpoint
+#   whose `treehouse get` shell leases the slot and removes the wiring, task
+#   temp root, and staged launch file it wrote.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -1396,6 +1399,9 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_FRESH_ENDPOINT_OPENED=0
+SPAWN_FRESH_WIRING_PENDING=0
+SPAWN_TASK_TMP_CREATED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1546,21 +1552,62 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
-  # A spawn that aborts after claiming its slot but before its record survives
-  # must not leave a claim naming a task no record describes. The release is a
-  # read-then-remove, so it runs only while the project lock that wrote the
-  # claim is still held (aborts before metadata publication); a later abort has
-  # already released that lock and leaves the claim for the next spawn's
-  # atomic replacement rather than racing it. The release itself never removes
-  # another task's claim.
+  # A fresh spawn that fails and leaves no record must leave the pool as it found
+  # it. Before its launch is delivered, the endpoint it opened holds nothing but
+  # the shell whose `treehouse get` leases the slot, so closing it returns the
+  # slot to the pool and leaves no window or tab for a retry to trip over; the
+  # Firstmate wiring, task temp root, and staged launch file it wrote go with it.
+  # Once a launch was delivered into an endpoint still open, a worker may be
+  # running there, so those stay for the operator, as the refusal says.
+  if [ "$status" -ne 0 ] &&
+    { [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] || [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] ||
+      [ "$SPAWN_TASK_TMP_CREATED" = 1 ] || [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; } &&
+    [ "$RELAUNCH" -eq 0 ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    if [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ] && [ -n "${T:-}" ]; then
+      SPAWN_FRESH_ENDPOINT_OPENED=0
+      local abort_tab_id=
+      [ "$BACKEND" != zellij ] || abort_tab_id=${ZELLIJ_TAB_ID:-}
+      if fm_backend_kill "$BACKEND" "$T" "$abort_tab_id" "fm-$ID" 2>/dev/null; then
+        SPAWN_ENDPOINT_CLOSED=1
+      else
+        echo "warning: could not close endpoint $T after the failed spawn of $ID; close it by hand so its slot returns to the pool" >&2
+      fi
+    fi
+    if [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
+      if [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] && [ -n "${WT:-}" ] && [ -n "${STATE_REAL:-}" ]; then
+        SPAWN_FRESH_WIRING_PENDING=0
+        clear_relaunch_harness_wiring "$HARNESS" "$WT" "$STATE_REAL" "$ID" "$KIND" ||
+          echo "warning: could not remove $HARNESS wiring after the failed spawn of $ID" >&2
+      fi
+      if [ "$SPAWN_TASK_TMP_CREATED" = 1 ] && [ -n "${TASK_TMP:-}" ]; then
+        SPAWN_TASK_TMP_CREATED=0
+        rm -rf -- "$TASK_TMP" 2>/dev/null || true
+      fi
+      if [ -n "$SPAWN_STAGED_LAUNCH_FILE" ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" != 1 ]; then
+        rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
+        rmdir -- "$(dirname "$SPAWN_STAGED_LAUNCH_FILE")" 2>/dev/null || true
+      fi
+    fi
+  fi
+  # A spawn that fails after claiming its slot must not leave a claim naming a
+  # task no record describes. The release is a read-then-remove, so it runs
+  # under the project lock that wrote the claim: still held for an abort before
+  # metadata publication, and retaken once for a later failure whose record was
+  # rolled back. Only when another operation holds that lock is the claim left
+  # for the next spawn's atomic replacement rather than raced. The release
+  # itself never removes another task's claim.
   if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
     fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
+    elif [ -n "$SPAWN_TREEHOUSE_PROJECT_LOCK" ] && fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+      fm_treehouse_slot_owner_release "$WT" "$ID" || true
+      fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
     else
-      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+      echo "warning: leaving task $ID's slot claim on $WT in place; another operation holds the Treehouse project lock, so the next spawn's claim replaces it" >&2
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
@@ -4334,6 +4381,12 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
   esac
+  # Orca and the Herdr projection own their own abort cleanup above; every other
+  # endpoint this fresh spawn opened is closed by spawn_abort_cleanup when the
+  # spawn ends with no record before its launch is delivered.
+  if [ "$BACKEND" != orca ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
+    SPAWN_FRESH_ENDPOINT_OPENED=1
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
@@ -4990,7 +5043,9 @@ esac
 # can plant or swap a file in it. The staged launch command lives in a sibling
 # directory namespaced by home identity, not in this shared per-id root.
 TASK_TMP="/tmp/fm-$ID"
-if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
+if (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
+  SPAWN_TASK_TMP_CREATED=1
+else
   if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
     [ -n "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
     ! chmod 700 "$TASK_TMP"; then
@@ -5036,6 +5091,7 @@ if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   fm_polytoken_require_hooks_free "$WT" || exit 1
   fm_polytoken_require_handler_path "$(fm_polytoken_busy_script "$STATE_REAL" "$ID")" || exit 1
 fi
+[ "$RELAUNCH" -eq 1 ] || SPAWN_FRESH_WIRING_PENDING=1
 if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=1
   RELAUNCH_REPLACEMENT_HARNESS=$HARNESS
