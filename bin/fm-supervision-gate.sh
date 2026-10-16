@@ -77,7 +77,7 @@ verdict() {  # <decision> <why> [summary]
   exit 0
 }
 
-# Rule 2: every granted row is a queued plain stale row.
+# Rule 1: every granted row is a queued plain stale row.
 rows_plain_stale() {
   [ -f "$FM_WAKE_QUEUE" ] || return 1
   awk -F '\t' -v seqs="$ROWS" '
