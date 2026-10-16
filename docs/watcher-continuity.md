@@ -192,7 +192,7 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce.
-It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+It enters its poll loop immediately and keeps scanning signals, stale panes, checks, and queued captain inbox notes.
 
 ### Manual recovery and other harnesses
 
