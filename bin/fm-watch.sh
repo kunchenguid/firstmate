@@ -1864,8 +1864,9 @@ pause_state_class() {  # <window> <task>
 STALE_WAIT_DECLARATION=
 
 CAPTAIN_CALL_IDENTITY=
-# The last `open` exit, kept so a later bound can tell "no call" (1) from
-# "could not be established" (2).
+# The last `open` exit, kept so a later bound can tell a proven "no call" (1)
+# from any exit that could not prove the open-call state (2, a 124 read bound,
+# an unrunnable helper).
 CAPTAIN_CALL_OPEN_RC=1
 
 task_captain_call_open() {  # <task>
@@ -1930,13 +1931,15 @@ stale_wait_record() {  # <window-key>
 # change already has its own wake (the .seen signature is current). Absorbs the first
 # sighting and every one inside PAUSE_RESURFACE_SECS, then lets one alarm through.
 # A new status line changes the signature and the declaration, so it wakes again.
-# Runs right after captain_call_stale_bound declined: when that read could not
-# establish whether a captain call is open, a hidden call's first sight may be
-# what is alarming, so this bound steps aside and the alarm goes through.
+# Runs right after captain_call_stale_bound declined: only a proven "no call"
+# admits it. Any `open` exit that cannot prove the open-call state (2, 124, or
+# anything else) may hide a call whose first sight is what is alarming; such a
+# wait this watcher cannot prove is not a wait, so the bound steps aside and
+# the alarm goes through.
 # Returns 0 to absorb, 1 to alarm.
 surfaced_blocked_stale_bound() {  # <window-key> <task> <status-line>
   local key=$1 task=$2 line=$3
-  [ "$CAPTAIN_CALL_OPEN_RC" != 2 ] || return 1
+  case "$CAPTAIN_CALL_OPEN_RC" in 0|1) ;; *) return 1 ;; esac
   status_is_blocked "$line" || return 1
   fm_wake_signal_seen_current "$STATE" "$STATE/$task.status" || return 1
   STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")

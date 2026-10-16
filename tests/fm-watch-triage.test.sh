@@ -4305,6 +4305,37 @@ test_blocked_line_with_unreadable_backlog_still_alarms() {
 }
 
 
+# An open captain call whose record read hits its bound makes `open` exit 124:
+# the call IS open, but its identity could not be read. That exit proves nothing
+# about a wait either, so the blocked bound must still let the alarm through
+# rather than treat any non-2 exit as "no call". The stub keeps the row probe
+# real and wedges only the identity read (the `--full` show).
+test_blocked_line_with_wedged_identity_read_still_alarms() {
+  local dir state out capture wakes rc real
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (blocked + wedged identity read)"; return 0; }
+  real=$(command -v tasks-axi)
+  dir=$(make_hold_home blocked-wedged-read 'blocked [key=push-rejected]: push rejected with 403' hold) \
+    || fail "could not build a blocked + held fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf '#!/usr/bin/env bash\ncase " $* " in *" --full "*) exit 124 ;; esac\nexec %q "$@"\n' "$real" \
+    > "$dir/fakebin/tasks-axi"
+  chmod +x "$dir/fakebin/tasks-axi"
+  if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-captain-hold.sh" open held-merge --identity >/dev/null 2>&1
+  then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 124 ]; then
+    echo "skip: a wedged identity read did not make the open exit 124 here (rc=$rc)"
+    return 0
+  fi
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "a blocked line with a wedged identity read did not surface: $(cat "$out")"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "a blocked line with a wedged identity read produced $wakes stale wakes instead of one"
+  pass "a blocked line still alarms when the open captain call's record read hits its bound"
+}
+
+
 # The cadence marker may never outlive the wake it claims to record. Recording it
 # before publishing the durable wake turned a delayed alarm into a lost one: the
 # append fails, the watcher exits with nothing queued, and the next sighting
@@ -6976,6 +7007,7 @@ test_surfaced_blocked_line_bounds_stale_wakes
 test_blocked_line_under_open_call_first_sight_still_alarms
 test_unsurfaced_blocked_line_still_wakes
 test_blocked_line_with_unreadable_backlog_still_alarms
+test_blocked_line_with_wedged_identity_read_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode
