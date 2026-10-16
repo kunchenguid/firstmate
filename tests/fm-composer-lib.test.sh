@@ -990,6 +990,49 @@ test_matrix_claude_titled_top_rule() {
   pass "matrix: claude's titled top rule proves an idle composer empty and a draft pending (#5601, #5558)"
 }
 
+test_matrix_claude_fast_mode_and_wrapped_titled_rule() {
+  # Claude Code 2.1.296 with fast mode on draws an orange `↯` into the
+  # composer's top rule, alone (`──── ↯ ─`) or before the session name
+  # (`──── ↯  <name> ─`), captured live on Herdr 2026-10-11. A doorbell line is
+  # wider than most panes, so after the send it wraps onto continuation rows
+  # between the glyph row and the closing rule. Both shapes read `unknown`,
+  # so every composer read and Claude payload proof refused the pane.
+  local rule bottom footer gray orange fast named idle typed wrapped out
+  local claude_idle blankgap toolong other
+  claude_idle=$(printf 'claude\tidle')
+  rule='────────────────────────────────────────'
+  bottom="${rule}────"
+  footer='  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  gray="${ESC}[38;2;138;138;138m"
+  orange="${ESC}[38;2;255;106;0m"
+  fast="${ESC}[0m${gray}${rule}${ESC}[0m ${ESC}[0m${orange}↯ ${ESC}[0m${gray}─${ESC}[0m"
+  named="${ESC}[0m${gray}${rule:0:18} ${ESC}[0m${orange}↯${ESC}[0m${gray}  Dispatch second mate ─${ESC}[0m"
+  idle=$'\n❯'"${NBSP}${ESC}[0m${ESC}[2mTry \"fix lint errors\"${ESC}[0m"$'\n'"${gray}${bottom}${ESC}[0m"$'\n'"$footer"
+  assert_screen "fast-mode rule idle on herdr" empty "$CAPS_STYLED" "${fast}${idle}" '' "$claude_idle"
+  assert_screen "fast-mode named rule idle on herdr" empty "$CAPS_STYLED" "${named}${idle}" '' "$claude_idle"
+  assert_screen "fast-mode named rule idle on zellij" empty "$CAPS_STYLED_NOID" "${named}${idle}"
+  assert_screen "fast-mode rule idle on tmux" empty "$CAPS_TMUX" "${fast}${idle}" 1 probe-absent
+  typed="${named}"$'\n❯ draft not sent\n'"${bottom}"$'\n'"$footer"
+  assert_screen "fast-mode named rule typed on herdr" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  # A wrapped draft is pending, and its full text is the selected content.
+  wrapped="${named}"$'\n❯ : Firstmate instruction waiting: list\n  the steering inbox, then mv each\n  into its handled/.\n'"${bottom}"$'\n'"$footer"
+  assert_screen "wrapped draft under a titled rule" pending "$CAPS_STYLED" "$wrapped" '' "$claude_idle"
+  assert_screen "wrapped draft under a titled rule on zellij" pending "$CAPS_STYLED_NOID" "$wrapped"
+  out=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$wrapped")
+  [ "$out" = ': Firstmate instruction waiting: list the steering inbox, then mv each into its handled/.' ] \
+    || fail "wrapped titled draft should extract every continuation row, got '$out'"
+  # The allowance is bounded: a blank gap, or more continuation rows than a
+  # composer may hold, is not that composer's own draft.
+  blankgap="${named}"$'\n❯ first row\n\n  later row\n'"${bottom}"
+  assert_screen "titled rule with a blank gap above its closing rule" unknown "$CAPS_STYLED_NOID" "$blankgap"
+  toolong="${named}"$'\n❯ row\n  r1\n  r2\n  r3\n  r4\n  r5\n  r6\n  r7\n  r8\n'"${bottom}"
+  assert_screen "titled rule over too many continuation rows" unknown "$CAPS_STYLED_NOID" "$toolong"
+  # Only the fast-mode glyph joins the ASCII title boundary.
+  other="${rule} ✳  Dispatch second mate ─"$'\n❯'"$NBSP"$'\n'"${bottom}"
+  assert_screen "other non-ASCII glyph in a titled rule" unknown "$CAPS_STYLED_NOID" "$other"
+  pass "matrix: claude's fast-mode rule reads idle empty, and a wrapped draft under a titled rule reads pending (#6244)"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -1244,6 +1287,7 @@ test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
+test_matrix_claude_fast_mode_and_wrapped_titled_rule
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence

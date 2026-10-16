@@ -795,6 +795,41 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### 2026-10-11 claude 2.1.296 fast-mode and wrapped titled top rule through Herdr
+
+Verified on 2026-10-11 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.296 in Herdr 0.7.0 panes of a named lab session, read through Herdr's ANSI capture with its capability descriptor (`styled=1`, `cursor=0`, `identity=1`) and the pane's real `claude<TAB>idle` identity.
+With fast mode on (an Opus session under `fastMode: true`), Claude draws a one-column orange `↯` (`ESC[38;2;255;106;0m`) into the composer's top rule, alone (`──── ↯ ─`) or before a session name set by `-n` or `/rename` (`──── ↯  <name> ─`).
+Remote Control alone draws no glyph, and `--remote-control <name>` names the session without titling the rule.
+The titled-rule check accepted only ASCII title text, so the `↯` left residue and every such idle composer read `unknown`, which refused every steering-inbox doorbell and re-ring to that pane.
+Separately, a doorbell line is wider than most panes, so once typed it wraps onto continuation rows between the glyph row and the closing rule; the titled-composer check required the closing rule directly below the glyph row, so the doorbell's payload proof read `unknown` under any titled rule, ASCII or not, and the ring cleared what it had typed.
+
+```sh
+bin/fm-herdr-lab.sh run <lab> pane read <pane> --source visible --format ansi > <capture>.ansi
+bash -c '. bin/fm-composer-lib.sh
+  caps=$(printf "styled=1\ncursor=0\nidentity=1")
+  cap=$(cat <capture>.ansi)
+  v=$(fm_composer_classify_screen "$caps" "$cap")
+  [ "$v" != need-identity ] || v=$(fm_composer_classify_screen "$caps" "$cap" "" "$(printf "claude\tidle")")
+  printf "%s\n" "$v"'
+```
+
+Observed output per capture, before the fix and after it:
+
+```text
+capture                                  before   after
+fast mode, no name, idle                 unknown  empty
+fast mode and name, idle                 unknown  empty
+fast mode and name, draft typed          unknown  pending
+Remote Control name and /rename, idle    empty    empty
+fast mode and name, doorbell wrapped     unknown  pending
+ASCII name, doorbell wrapped             unknown  pending
+```
+
+For both wrapped-doorbell captures the fixed classifier extracts the whole doorbell line as the composer content, which is the text the payload proof compares.
+The real `fm_task_inbox_ring` against the live lab panes agreed: before the fix it returned 2 (send failed) on both the fast-mode named pane and the ASCII-named pane, and after it returned 0 on both, with Claude acting on the doorbell.
+`test_matrix_claude_fast_mode_and_wrapped_titled_rule` in `tests/fm-composer-lib.test.sh` carries both shapes and pins the bounds that keep the change toward refusing everywhere else: a blank gap above the closing rule, more continuation rows than `FM_COMPOSER_PI_MAX_LINES`, and any other non-ASCII glyph in the rule all still read `unknown`.
+The live composer-matrix guard does not launch Claude with fast mode or a session name, so these Herdr captures are this entry's live evidence.
+
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
 
 Verified on 2026-09-20 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.236 running as Firstmate workers in Herdr 0.8.0 panes, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
