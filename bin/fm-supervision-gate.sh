@@ -142,7 +142,10 @@ run_judge() {  # <previous-outcome-json>
     JUDGE=other
     return 0
   fi
-  fm_run_timed "$JUDGE_TIMEOUT" "$JUDGE_BIN" < "$input" > "$output" 2>/dev/null || rc=$?
+  # The redirect lives inside the timed command: an external timeout runs as a
+  # background job, whose stdin a non-interactive shell points at /dev/null.
+  # shellcheck disable=SC2016  # Expanded by the child shell.
+  fm_run_timed "$JUDGE_TIMEOUT" bash -c 'exec "$1" < "$2"' _ "$JUDGE_BIN" "$input" > "$output" 2>/dev/null || rc=$?
   answer=$(head -n 1 "$output" 2>/dev/null | head -c 64 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   rm -f "$input" "$output"
   if fm_timed_out "$rc"; then
