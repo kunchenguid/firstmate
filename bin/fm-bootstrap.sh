@@ -636,8 +636,8 @@ secondmate_sync() {
       return 0
     fi
     remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
-    # Only a reread a previous attempt left owed carries over; a record that
-    # merely covered an interrupted or failed attempt owes nothing.
+    # Only a reread a previous attempt left owed carries over; owed=0 only
+    # covered an attempt in progress and does not itself owe a nudge.
     remote_pending=0
     if fm_secondmate_remote_nudge_owed "$STATE" "$id"; then remote_pending=1; fi
     if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \

@@ -7,9 +7,10 @@
 # A remote route writes its record before each convergence attempt, so the
 # record's owed= field says whether a reread is actually owed: 1 once that
 # attempt (or an earlier one) changed the home's instructions or inherited
-# material, 0 while it only covers an attempt in progress. An attempt that is
-# cut off or fails before changing anything therefore leaves a record that owes
-# nothing, and the next attempt does not nudge for it.
+# material, or when completion is unknown (transport 255, a per-mate budget
+# cut-off, or a kill during the remote mutation); 0 while it only covers an
+# attempt in progress. Clear it only after confirmed unchanged execution or a
+# successful send; the next attempt then does not nudge an unchanged home.
 
 FM_SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
 FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE='Firstmate instructions or inherited config changed on this host. Re-read AGENTS.md and the inherited config files before further work.'
