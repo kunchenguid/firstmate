@@ -5,13 +5,12 @@
 #   fm-dispatch-evidence.sh check-local <provider/model> --expected-url <base-url> [--catalog <models.json>]
 #   fm-dispatch-evidence.sh record <task-id> <shadow|outcome> < <one JSON object>
 #
-# check-local is read-only, proves non-loopback Tailnet peer identity with
-# tailscale status, and checks the exact Pi catalog tuple, /health, /v1/models,
-# and a forced tool call. It emits one JSON object for the dispatch evidence
-# row; it never picks a model or retries.
+# check-local emits one readiness JSON object; it never picks a model or retries.
+# docs/configuration.md#local-pi-readiness-and-task-outcome-evidence owns
+# readiness requirements and the evidence record contract.
 # record appends one bounded, allow-listed JSON object to the existing task's
-# private data/<id>/dispatch-evidence.jsonl and fsyncs it. No prompt, source
-# content, key, or raw response is accepted. This is evidence, not a router.
+# private data/<id>/dispatch-evidence.jsonl and fsyncs it.
+# This is evidence, not a router.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
