@@ -188,6 +188,64 @@ test_check_crosses_notifies_stays_quiet_then_rearms() {
   pass "fm-usage-warner: edge-triggered de-dupe crosses once, stays quiet, and re-arms on drop"
 }
 
+test_check_tiered_thresholds_on_one_window_each_warn() {
+  local home fakebin notify_log out
+  home=$(make_home tiered)
+  fakebin="$TMP_ROOT/tiered/fakebin"
+  notify_log="$TMP_ROOT/tiered/notify.log"
+  : > "$notify_log"
+  fake_osascript_recorder "$fakebin" "$notify_log"
+  printf 'five_hour:80\nfive_hour:95\n' > "$home/config/usage-warner"
+
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":85}'
+  out=$(run_check "$home" "$fakebin")
+  assert_contains "$out" "five_hour at 85% (>=80%)" "the lower tier warns at its own crossing"
+  assert_not_contains "$out" ">=95%" "the higher tier stays quiet below its threshold"
+
+  : > "$notify_log"
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":96}'
+  out=$(run_check "$home" "$fakebin")
+  assert_contains "$out" "five_hour at 96% (>=95%)" "the higher tier warns on its own later crossing"
+  assert_not_contains "$out" ">=80%" "the already-reported lower tier stays quiet"
+  assert_grep "Firstmate: Claude usage" "$notify_log" "the higher-tier crossing posts a notification"
+
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":97}'
+  out=$(run_check "$home" "$fakebin")
+  [ -z "$out" ] || fail "staying above both tiers must stay quiet: $out"
+
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":90}'
+  out=$(run_check "$home" "$fakebin")
+  [ -z "$out" ] || fail "dropping below only the higher tier must stay quiet: $out"
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":96}'
+  out=$(run_check "$home" "$fakebin")
+  assert_contains "$out" "five_hour at 96% (>=95%)" "the higher tier re-arms after reading back below it"
+  assert_not_contains "$out" ">=80%" "the lower tier never re-armed, so it stays quiet"
+  pass "fm-usage-warner: tiered thresholds on one window each warn on their own crossing"
+}
+
+test_check_reads_a_v1_record_without_rewarning() {
+  local home fakebin notify_log out
+  home=$(make_home v1-record)
+  fakebin="$TMP_ROOT/v1-record/fakebin"
+  notify_log="$TMP_ROOT/v1-record/notify.log"
+  : > "$notify_log"
+  fake_osascript_recorder "$fakebin" "$notify_log"
+  printf 'five_hour:80\nfive_hour:95\n' > "$home/config/usage-warner"
+  printf '%s\n' fm-usage-warner-v1 'reported=usage-warner: five_hour at 85% (>=80%)' \
+    notified-begin five_hour notified-end > "$home/state/.usage-warner"
+
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":88}'
+  out=$(run_check "$home" "$fakebin")
+  [ -z "$out" ] || fail "a window already reported under a v1 record must not warn again: $out"
+  [ ! -s "$notify_log" ] || fail "a v1 record must not cause a second notification"
+
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":96}'
+  out=$(run_check "$home" "$fakebin")
+  assert_contains "$out" "five_hour at 96% (>=95%)" "after migrating a v1 record, a new higher-tier crossing still warns"
+  assert_not_contains "$out" ">=80%" "the migrated lower tier stays quiet"
+  pass "fm-usage-warner: a v1 de-dupe record is read without crashing or re-warning"
+}
+
 test_check_batches_multiple_crossings_into_one_notification() {
   local home fakebin notify_log out
   home=$(make_home batch)
@@ -435,6 +493,8 @@ test_help_and_usage
 test_unconfigured_home_stays_silent
 test_config_parses_comments_whitespace_and_model_ids
 test_check_crosses_notifies_stays_quiet_then_rearms
+test_check_tiered_thresholds_on_one_window_each_warn
+test_check_reads_a_v1_record_without_rewarning
 test_check_batches_multiple_crossings_into_one_notification
 test_check_ignores_a_window_the_account_does_not_return
 test_check_never_requests_a_refresh
