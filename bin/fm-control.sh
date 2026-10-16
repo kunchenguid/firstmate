@@ -5,7 +5,7 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--account <id|next>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -84,6 +84,18 @@
 #              (bin/fm-account-pool-lib.sh), here, so an account source that
 #              cannot supply a signed-in account refuses before the old agent
 #              stops.
+#              --account <id|next> moves the worker between pool accounts
+#              while relaunching it: 'next' rests the account the running
+#              worker launched on and launches it on another, and an explicit
+#              id selects that account for this launch, which is the only way
+#              to select an OpenCode Go one. The choice, the rest, and a
+#              proving pick are all taken on the pre-stop side of the
+#              transaction; the launch owner re-picks at launch, so a pool
+#              state that changed in between refuses there rather than
+#              launching a wrong account. A home pin still wins and refuses
+#              the flag rather than ignoring it, and the replacement records
+#              the selected account as account=. The isolated copy, its
+#              commits, and its uncommitted work are untouched.
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
@@ -217,6 +229,7 @@ CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
+RELAUNCH_POOL_MOVE=0
 
 control_cleanup() {
   local status=$?
@@ -262,6 +275,8 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+ACCOUNT_CHOICE=
+ACCOUNT_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -277,6 +292,7 @@ for control_arg in "$@"; do
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      account) ACCOUNT_CHOICE=$control_arg; ACCOUNT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -294,6 +310,8 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --account) control_want_value=account ;;
+    --account=*) ACCOUNT_CHOICE=${control_arg#--account=}; ACCOUNT_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -311,12 +329,13 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$ACCOUNT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --account, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
+[ "$ACCOUNT_SET" = 0 ] || [ -n "$ACCOUNT_CHOICE" ] || die "--account requires a non-empty value"
 case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max|ultra) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max, ultra" ;;
@@ -1082,12 +1101,25 @@ resolve_relaunch_profile() {
   # The launch owner applies this home's worker account pin or pool pick too,
   # but only after the old agent has been stopped, so an account source that
   # cannot supply a signed-in account must refuse here, while nothing has
-  # changed yet. A pin always wins, exactly as it does in the launch owner.
+  # changed yet. A pin always wins, exactly as it does in the launch owner, so
+  # an --account that contradicts it refuses here too rather than being
+  # silently ignored. The relaunch-time pool hook (bin/fm-account-pool-lib.sh)
+  # reads its whole choice gate on this pre-stop side; its rest and pick run
+  # last, in do_relaunch, after every cheaper refusal below has passed.
   local account_model=$TARGET_MODEL account_selection
   [ "$account_model" != default ] || account_model=
   account_selection=$(fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_model" "$TARGET_HARNESS") || return 1
-  if [ -z "$account_selection" ]; then
+  if [ -n "$account_selection" ]; then
+    [ "$ACCOUNT_SET" = 0 ] || {
+      echo "error: this home pins $TARGET_HARNESS workers to one account, and the pin wins over --account '$ACCOUNT_CHOICE'; change or remove the pin file, or relaunch without --account" >&2
+      return 1
+    }
+  elif [ "$ACCOUNT_SET" = 1 ]; then
+    fm_account_pool_relaunch_pre "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+      "$ACCOUNT_CHOICE" "$(fm_meta_get "$META" account)" "$PRIOR_MODEL" "$account_model" "$ID" || return 1
+    RELAUNCH_POOL_MOVE=1
+  else
     fm_account_pool_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" >/dev/null || return 1
   fi
   # Likewise config/crew-exclude-tools: a malformed file, or a replacement
@@ -1245,6 +1277,15 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
+  # The account move's one mutation - resting the recorded account - and the
+  # pick that proves the replacement launch can answer without it are the last
+  # pre-stop steps: every cheaper refusal above has already passed, so the
+  # pool changes only when this verb can no longer refuse.
+  if [ "$RELAUNCH_POOL_MOVE" = 1 ]; then
+    fm_account_pool_relaunch_commit "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+      "$ACCOUNT_CHOICE" "$(fm_meta_get "$META" account)" || return 1
+  fi
+
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
@@ -1256,6 +1297,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ "$ACCOUNT_SET" = 0 ] || spawn_args+=(--account "$ACCOUNT_CHOICE")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1

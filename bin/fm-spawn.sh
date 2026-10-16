@@ -61,7 +61,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <id|next>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -89,6 +89,15 @@
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
+#   --account <id|next> is the control plane's relaunch axis, carried here to
+#   the launch owner: an explicit id selects that account, and 'next' is
+#   honored only on an fm-control-driven relaunch, whose pre-stop gate has
+#   already rested the recorded account, so here it just picks plainly; a
+#   direct relaunch refuses 'next' rather than silently re-picking the same
+#   account. A fresh spawn refuses it, an explicit id whose answer is a
+#   different account refuses rather than launching the wrong one, and a home
+#   whose pool cannot answer it at all refuses rather than launching on the
+#   ambient login.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
@@ -396,7 +405,9 @@
 #   folder as an `env -u <name> ... <VAR>=<folder>` prefix, folder paths only and
 #   never a secret; a failed pick refuses before anything exists, naming the login
 #   to do. Raw launch commands refuse while config/account-pool exists; use a
-#   named harness. The pick is recorded as account=. bin/fm-account-pool-lib.sh owns it.
+#   named harness. A relaunch's --account <id> prefers that account in the pick
+#   and refuses when the pool answers with a different one. The pick is recorded
+#   as account=. bin/fm-account-pool-lib.sh owns it.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -756,6 +767,8 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+ACCOUNT_ARG=
+ACCOUNT_SET=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
@@ -809,6 +822,10 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    account)
+      ACCOUNT_ARG=$a
+      ACCOUNT_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -879,11 +896,24 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --account) want_value=account ;;
+  --account=*)
+    ACCOUNT_ARG=${a#--account=}
+    ACCOUNT_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || {
   echo "error: --$want_value requires a value" >&2
+  exit 1
+}
+[ "$ACCOUNT_SET" -eq 0 ] || [ -n "$ACCOUNT_ARG" ] || {
+  echo "error: --account requires a non-empty value" >&2
+  exit 1
+}
+[ "$ACCOUNT_SET" -eq 0 ] || fm_account_pool_want_valid "$ACCOUNT_ARG" || {
+  echo "error: --account takes 'next' or one pool account id, not '$ACCOUNT_ARG'" >&2
   exit 1
 }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || {
@@ -972,11 +1002,19 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded upstream consent; --upstream-consent cannot override it" >&2
     exit 1
   }
+  [ "$ACCOUNT_SET" -eq 0 ] || [ "$ACCOUNT_ARG" != next ] || [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ] || {
+    echo "error: --account next rests the recorded account only in fm-control's pre-stop gate; a direct relaunch would ignore it and may re-pick the same account - use 'bin/fm-control.sh <task-id> relaunch --account next'" >&2
+    exit 1
+  }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
   # here rather than resolved from the project registry. Scouts deliver a report
   # and record no delivery posture; secondmate spawns hardcode theirs.
+  [ "$ACCOUNT_SET" -eq 0 ] || {
+    echo "error: --account applies to a relaunch only; a fresh launch picks its pool account on its own" >&2
+    exit 1
+  }
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
       echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
@@ -2731,9 +2769,17 @@ fi
 # before any endpoint, worktree, or record exists, and only when no pin applies.
 # A picked Claude root is exported here because the trust registration below
 # writes the store the worker will actually read.
+[ -z "$WORKER_ACCOUNT" ] || [ "$ACCOUNT_SET" -eq 0 ] || {
+  echo "error: this home pins $HARNESS workers to one account, and the pin wins over --account '$ACCOUNT_ARG'; change or remove the pin file, or relaunch without it" >&2
+  exit 1
+}
 POOL_ACCOUNT=
 if [ -z "$WORKER_ACCOUNT" ]; then
-  POOL_ACCOUNT=$(fm_account_pool_select "$HARNESS" "$CONFIG") || exit 1
+  POOL_ACCOUNT=$(fm_account_pool_select "$HARNESS" "$CONFIG" "$ACCOUNT_ARG") || exit 1
+  [ "$ACCOUNT_SET" -eq 0 ] || [ -n "$POOL_ACCOUNT" ] || {
+    echo "error: this home has no account pool for $HARNESS workers (no config/account-pool, or $HARNESS has no pool tool), so --account '$ACCOUNT_ARG' cannot be honored; add config/account-pool or relaunch without it" >&2
+    exit 1
+  }
 fi
 POOL_ACCOUNT_ID=
 POOL_ACCOUNT_VAR=
