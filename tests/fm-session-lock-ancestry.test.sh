@@ -45,7 +45,7 @@ lib_eval() {  # <fakebin> <expression>
   [ -z "${FM_TEST_SESSION_ID:-}" ] || session_env+=("CLAUDE_CODE_SESSION_ID=$FM_TEST_SESSION_ID")
   [ -z "${FM_TEST_CLAUDE_PID:-}" ] || session_env+=("CLAUDE_PID=$FM_TEST_CLAUDE_PID")
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
-    PATH="$fakebin:$PATH" bash -c "
+    FM_PROC_PLATFORM="${FM_TEST_PROC_PLATFORM:-posix}" PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return \${FM_TEST_KILL_RC:-0}; }
     $expr
@@ -138,6 +138,130 @@ SH
   lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "the session holding the lock at namespace pid 1 did not recognize itself as the owner"
   pass "session-lock: a harness that is pid 1 of its own namespace is examined, not skipped"
+}
+
+# On native Windows the harness is a native process that MSYS ps cannot see, so
+# the library reads the Windows process table (one PowerShell snapshot) instead.
+# The fake powershell.exe stands in for that snapshot: the shell running the
+# expression sits under a Git Bash launcher, under claude.exe, under herdr's
+# pwsh. FM_TEST_SELF is the pid the walk starts from, read from the library
+# itself so the table matches on any host.
+test_windows_process_table_finds_the_native_harness() {
+  local dir fakebin got
+  dir="$TMP_ROOT/windows-table"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+row() { printf '%s\t%s\t%s\t%s\r\n' "$@"; }
+row "$FM_TEST_SELF" 900 'C:\Program Files\Git\usr\bin\bash.exe' '"C:\Program Files\Git\usr\bin\bash.exe" -c fm-lock'
+row 900 800 'C:\Program Files\Git\bin\bash.exe' '"C:\Program Files\Git\bin\bash.exe" -c -l "export CLAUDE_X=1"'
+row 800 "${FM_TEST_CLAUDE_PARENT:-700}" "${FM_TEST_CLAUDE_EXE:-C:\\Users\\u\\.local\\bin\\claude.exe}" '"C:\Users\u\.local\bin\claude.exe"'
+row 700 600 'C:\Users\u\scoop\apps\pwsh\current\pwsh.exe' 'pwsh.exe -NoExit'
+row 650 600 'C:\Users\u\.claude\hooks\notify.exe' 'notify.exe'
+row 640 600 'C:\Users\u\bin\pi.exe' 'pi.exe'
+row 4 0 'System' ''
+SH
+  chmod +x "$fakebin/powershell.exe"
+  win_eval() {  # <expression>
+    FM_TEST_PROC_PLATFORM=windows lib_eval "$fakebin" "FM_TEST_SELF=\$(fm_proc_self_pid); export FM_TEST_SELF; $1"
+  }
+
+  got=$(win_eval 'fm_harness_ancestry_pids') \
+    || fail "the native claude.exe ancestor was not found through the Windows process table"
+  [ "$got" = 800 ] || fail "the Windows ancestry resolved '$got', expected claude.exe pid 800"
+
+  # Non-vacuity: the same table with an ordinary executable in claude's place
+  # must find nothing, so the walk is not matching everything it reaches.
+  if FM_TEST_CLAUDE_EXE='C:\Windows\explorer.exe' win_eval 'fm_harness_ancestry_pids' >/dev/null 2>&1; then
+    fail "an ordinary native executable was read as a harness process"
+  fi
+
+  win_eval 'fm_harness_pid_alive 800' || fail "the live native claude.exe was not a live harness"
+  win_eval 'fm_harness_pid_alive 640' || fail "an anchored harness name with a .exe suffix (pi.exe) was not recognized"
+  if win_eval 'fm_harness_pid_alive 650'; then
+    fail "a hook executable under a .claude directory was read as a harness"
+  fi
+  if win_eval 'fm_harness_pid_alive 4242'; then
+    fail "a pid absent from the Windows process table was reported alive"
+  fi
+  got=$(FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=800 win_eval 'fm_session_lock_anchor_pid') \
+    || fail "no anchor pid resolved for a trusted Windows Claude session"
+  [ "$got" = 800 ] || fail "the trusted Windows anchor resolved '$got', expected CLAUDE_PID 800"
+  printf '800\n' > "$dir/state/.lock"
+  win_eval "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the Windows session holding the lock as claude.exe pid 800 did not recognize itself as the owner"
+  pass "session-lock: on native Windows the harness is found through the Windows process table"
+}
+
+# A Windows snapshot that cannot be read is uncertainty, never a dead owner. The
+# fake powershell.exe answers the first FM_TEST_SNAPSHOTS_OK snapshots (the
+# acquiring session's own anchor walk) and fails every later one, so the real
+# fm-lock.sh resolves itself as claude.exe pid 800 and then cannot read whether
+# the recorded owner, the live pi.exe pid 640, still runs.
+test_windows_unreadable_snapshot_never_reclaims_a_live_lock() {
+  local dir fakebin out
+  dir="$TMP_ROOT/windows-snapshot-fails"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+n=$(( $(cat "$FM_TEST_SNAPSHOT_COUNT" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$FM_TEST_SNAPSHOT_COUNT"
+[ "$n" -le "${FM_TEST_SNAPSHOTS_OK:-0}" ] || exit 1
+row() { printf '%s\t%s\t%s\t%s\r\n' "$@"; }
+row "$FM_TEST_SELF" 800 'C:\Program Files\Git\usr\bin\bash.exe' '"C:\Program Files\Git\usr\bin\bash.exe" -c fm-lock'
+row 800 700 'C:\Users\u\.local\bin\claude.exe' '"C:\Users\u\.local\bin\claude.exe"'
+row 700 600 'C:\Users\u\scoop\apps\pwsh\current\pwsh.exe' 'pwsh.exe -NoExit'
+row 640 600 'C:\Users\u\bin\pi.exe' 'pi.exe'
+SH
+  chmod +x "$fakebin/powershell.exe"
+  run_lock() {  # <snapshots-ok> <recorded-pid> [fm-lock-arg]
+    printf '%s\n' "$2" > "$dir/state/.lock"
+    rm -f "$dir/state/.lock-session" "$dir/count"
+    env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_PROC_PLATFORM=windows \
+      FM_TEST_SNAPSHOT_COUNT="$dir/count" FM_TEST_SNAPSHOTS_OK="$1" \
+      FM_STATE_OVERRIDE="$dir/state" PATH="$fakebin:$PATH" bash -c '
+        . "$0/bin/fm-session-lock-lib.sh"
+        FM_TEST_SELF=$(fm_proc_self_pid)
+        export FM_TEST_SELF
+        exec "$0/bin/fm-lock.sh" "$@"
+      ' "$ROOT" "${@:3}"
+  }
+
+  if out=$(run_lock 1 640 2>&1); then
+    fail "fm-lock.sh acquired a lock whose live owner it could not read: $out"
+  fi
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = 640 ] \
+    || fail "an unreadable process table reclaimed the live owner's lock as $(cat "$dir/state/.lock")"
+  FM_TEST_SNAPSHOT_COUNT="$dir/count" FM_TEST_SNAPSHOTS_OK=0 FM_TEST_PROC_PLATFORM=windows \
+    lib_eval "$fakebin" "fm_session_lock_inspect '$dir/state'; printf '%s %s\n' \"\$FM_LOCK_INSPECT_STATE\" \"\$FM_LOCK_INSPECT_LIVE_HARNESS\"" \
+    > "$dir/inspect.out"
+  [ "$(cat "$dir/inspect.out")" = "unknown unknown" ] \
+    || fail "an unreadable process table classified the lock as '$(cat "$dir/inspect.out")', expected unknown"
+  out=$(run_lock 0 640 status 2>&1)
+  [ "$out" = "lock: unknown (pid 640)" ] \
+    || fail "an unreadable process table printed lock status '$out', expected unknown"
+
+  # A trusted Claude session whose trust check cannot read the table must not
+  # fall back to the outermost pid of its run as the lock anchor.
+  if out=$(FM_TEST_SNAPSHOT_COUNT="$dir/count.anchor" FM_TEST_SNAPSHOTS_OK=1 FM_TEST_PROC_PLATFORM=windows \
+    FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=800 \
+    lib_eval "$fakebin" 'FM_TEST_SELF=$(fm_proc_self_pid); export FM_TEST_SELF; fm_session_lock_anchor_pid' 2>&1); then
+    fail "an unreadable trust check still resolved lock anchor '$out'"
+  fi
+  out=$(FM_TEST_SNAPSHOT_COUNT="$dir/count.anchor-ok" FM_TEST_SNAPSHOTS_OK=99 FM_TEST_PROC_PLATFORM=windows \
+    FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=800 \
+    lib_eval "$fakebin" 'FM_TEST_SELF=$(fm_proc_self_pid); export FM_TEST_SELF; fm_session_lock_anchor_pid') \
+    || fail "a readable trust check resolved no lock anchor"
+  [ "$out" = 800 ] || fail "the trusted Windows anchor resolved '$out', expected CLAUDE_PID 800"
+
+  # Non-vacuity: with every snapshot readable the same fixture reclaims a dead
+  # owner, so the refusal above came from the unreadable table alone.
+  out=$(run_lock 99 4242 2>&1) || fail "fm-lock.sh did not reclaim a dead owner's lock: $out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = 800 ] \
+    || fail "the dead owner's lock was recorded as $(cat "$dir/state/.lock"), expected claude.exe pid 800"
+  pass "session-lock: an unreadable Windows process table never reclaims a live lock"
 }
 
 test_ordinary_paths_are_never_harness_processes() {
@@ -1101,6 +1225,8 @@ test_verified_reclaim_keeps_new_sidecar() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
+test_windows_process_table_finds_the_native_harness
+test_windows_unreadable_snapshot_never_reclaims_a_live_lock
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live

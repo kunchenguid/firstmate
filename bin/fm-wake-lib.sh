@@ -593,7 +593,10 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  # Git Bash's default `ln -s` silently copies the target instead of linking,
+  # which never verifies as a lock and makes every acquirer spin; nativestrict
+  # makes MSYS create a real Windows symlink or fail. Other platforms ignore MSYS.
+  if MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
