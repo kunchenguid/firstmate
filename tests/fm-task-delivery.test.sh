@@ -1039,6 +1039,7 @@ forge beside a mode|- fp [no-mistakes forge=gerrit] - fixture (added 2026-01-01)
 forge as the only token leaves the default mode|- fp [forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
 forge before yolo on a direct-PR project|- fp [direct-PR forge=gerrit +yolo] - fixture (added 2026-01-01)|direct-PR off|gerrit
 forge under the conditional policy|- fp [no-mistakes-prod-only forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
+an external review forge on direct-PR|- fp [direct-PR forge=external] - fixture (added 2026-01-01)|direct-PR off|external
 a project with no forge keeps yolo|- fp [direct-PR +yolo] - fixture (added 2026-01-01)|direct-PR on|none
 a keyed token that is not the forge is ignored|- fp [direct-PR owner=me] - fixture (added 2026-01-01)|direct-PR off|none
 an unregistered project|- other [direct-PR] - fixture (added 2026-01-01)|no-mistakes off|none
@@ -1189,6 +1190,25 @@ EOF
   assert_contains "$out" "--yolo on is refused" "the promotion refusal did not name the refused flag"
   grep -qx 'kind=scout' "$meta" || fail "the refused promotion still flipped the task record"
   pass "forge=gerrit: yolo is refused with its reason, never silently dropped"
+}
+
+# A scout launches without the push guard and task record a forge=external
+# ship carries, so promoting one onto such a project is refused outright rather
+# than handing it a contract nothing enforces.
+test_forge_external_refuses_promotion() {
+  local rec home proj fakebin meta out status
+  rec=$(make_home forge-external-promote "- proj [direct-PR forge=external] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  meta="$home/state/forge-ext-p1.meta"
+  printf 'window=fm-forge-ext-p1\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$proj" > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" forge-ext-p1 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a promotion onto a forge=external project was accepted"
+  assert_contains "$out" "promotion is refused for forge=external" "the promotion refusal did not say why"
+  grep -qx 'kind=scout' "$meta" || fail "the refused promotion still flipped the task record"
+  pass "forge=external: promoting a scout is refused because only a ship spawn installs the push guard"
 }
 
 # The point of binding the forge is that it changes what no-mistakes MEANS for the
@@ -1693,6 +1713,7 @@ test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally
 test_project_mode_refuses_only_a_malformed_forge_binding
 test_forge_gerrit_refuses_yolo
+test_forge_external_refuses_promotion
 test_forge_gerrit_changes_what_no_mistakes_means
 test_forge_gerrit_direct_pr_publishes_one_change
 test_spawn_requires_the_brief_to_carry_the_registered_forge

@@ -127,11 +127,14 @@ It excludes the row when any `needs-decision` remains open or the current meanin
 An unreadable or symlinked status log fails the scope closed rather than influencing routing.
 
 Before cross-referencing them, the dispatcher resolves trigger keys and every currently unread excluded decision row to task identity.
+If a task key or endpoint alias names more than one task, including a record with a missing or empty project, the metadata scan is corrupt and the entire wake stays on main rather than selecting an owner by record order.
+Exact keys take precedence over the `fm-` prefix fallback, and project context comes only from the resolved task's own metadata.
+A projectless owner cannot borrow another alias's project or grant routing authority.
 The cross-reference then applies two rules:
 
 - Any signal or stale trigger containing a decision-owned task goes wholly to main, including a batch that also contains routine rows.
 - An unread decision for one task keeps every later signal or stale trigger for that same task on main until the decision row is read.
-  This holds regardless of whether the rows use its status-file key or window alias.
+  This holds regardless of which key a row carries for that task: its status-file key, its `window=` alias, or its `terminal=` handle, which is what `bin/fm-watch.sh` keys an Orca task's stale rows by.
 
 Other tasks remain independently eligible.
 The wake message itself retains its existing shape, so other harness-arm scripts remain unchanged.
@@ -359,7 +362,7 @@ The mirror never carries tool calls, tool results, operational injections, or th
 Mirroring happens at two points:
 
 - The idle path mirrors at main's turn end.
-- At `before_agent_start`, Pi's authoritative prompt is staged verbatim before SessionManager persists that user entry.
+- At a user `before_agent_start`, Pi's authoritative prompt is staged verbatim before SessionManager persists that user entry; custom-message events do not stage captain dialog.
   The complete current captain message therefore precedes any branch wake accepted after that boundary.
   The later persisted copy is suppressed, and older dialog entries remain bounded.
 
@@ -566,7 +569,7 @@ A leftover `state/.afk` flag declines nothing.
 - Every actionable row is branch-eligible.
   Check rows, decision-owned signal and stale rows, and heartbeat rows are claimed by the branch on whatever wake finds them unread.
   The trigger class no longer forces a batch to main.
-  The two vetoes that describe a broken queue, an unresolvable task-local row and a structurally invalid row, stay vetoes in both postures.
+  The fail-closed scope checks in [Decision-owned rows](#decision-owned-rows), including ambiguous metadata ownership, still apply, as does structural queue validation.
   A prompt that claims a check row is not scoped by task, so the branch may report it as `fleet`.
 - Main is parked, and reachable only for the classes only main can act on:
   - A watcher-failure alarm is delivered to main as always, because `fm_watch_arm_pi` lives there.
@@ -625,11 +628,10 @@ It sets these limits:
 - A red merge is refused in this posture whatever the words say.
 - No relocation survives the return, because an archived record validates as absent and the words die with it.
 
-### Cleanup after a landed pull request
+### Cleanup after task completion
 
-The ordinary cleanup of a task whose pull request has landed needs no relocation, because it is the branch's own job in both postures.
-`bin/fm-branch-prompt.sh` names the `check: merge landed:` wake, and any later stale or inactive-outcome row on that task, as the moment to attempt `bin/fm-teardown.sh` without `--force`.
-At that moment the branch reports any refusal instead of concluding there is "nothing to recover".
+Ordinary cleanup of landed ships and completed scouts needs no authority relocation; [`bin/fm-branch-prompt.sh`](../bin/fm-branch-prompt.sh) owns the branch's cleanup instructions in both postures, including lease acquisition and refusal reporting.
+The generated prompt includes the [scout-completion](../.agents/skills/scout-completion/SKILL.md) and [captain-hold-lifecycle](../.agents/skills/captain-hold-lifecycle/SKILL.md) policies verbatim so their completion gate reaches hosts without automatic skill loading.
 
 ## Verification
 
@@ -650,10 +652,12 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Cache key, and model and effort selection.
 - In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
 - In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and crewmate routing.
+- In `test_branch_dispatch_resolves_terminal_keyed_orca_stale_row`: a unique Orca `terminal=` handle resolving to its task and project in routine and heartbeat scans, and conflicting terminal, window, or task aliases refusing the whole scan in either record order.
 
 `tests/fm-branch-supervision.test.sh` covers:
 
 - Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
+- The emitted completed-scout cleanup instructions and verbatim completion policies, including incomplete-work boundaries and refusal reporting; these assertions verify prompt delivery, not a model's adherence.
 - Store append-only behavior, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
