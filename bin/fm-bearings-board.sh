@@ -125,9 +125,11 @@ validate_payload() {  # <data.json>
     # the broken-down fields verbatim and strftime formats straight back out of
     # them, which is identical under TZ=UTC, Europe/Berlin, America/New_York and
     # Asia/Kolkata. strptime range-checks each field on its own, so it catches
-    # month 13, day 32 and hour 99 but accepts 2026-02-29 and 2026-04-31; the
-    # month length is therefore checked here rather than inherited from the
-    # normalizing conversion this no longer performs.
+    # month 13, day 32, hour 99 and minute 61 but accepts 2026-02-29,
+    # 2026-04-31 and second 60 or 61 (strftime then echoes those seconds
+    # back unchanged); the month length and second are therefore checked here
+    # rather than inherited from the normalizing conversion this no longer
+    # performs.
     def days_in_month($year; $month):
       if $month == 2
       then (if ($year % 4 == 0 and $year % 100 != 0) or $year % 400 == 0 then 29 else 28 end)
@@ -141,7 +143,8 @@ validate_payload() {  # <data.json>
       and ((if test("T") then "%Y-%m-%dT%H:%M:%SZ" else "%Y-%m-%d" end) as $format
         | try (strptime($format) as $parts
           | ($parts | strftime($format)) == $filed
-            and $parts[2] <= days_in_month($parts[0]; $parts[1] + 1))
+            and $parts[2] <= days_in_month($parts[0]; $parts[1] + 1)
+            and $parts[5] <= 59)
           catch false);
     def optional_filed:
       (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
