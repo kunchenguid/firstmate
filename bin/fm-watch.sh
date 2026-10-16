@@ -32,7 +32,20 @@
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's latest recognized status event decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
+#                          both surfaced at once. One terminal exception: a
+#                          `blocked:` line whose own status wake already surfaced
+#                          it (the .seen signature is current) and whose backlog
+#                          proves no open captain call bounds further NEW pane
+#                          hashes to that same long cadence
+#                          (surfaced_blocked_stale_bound), because the status
+#                          wake was the alarm and a stale wake would only repeat
+#                          it; a new status line is a new declaration and wakes
+#                          again, an open call keeps the call's own first-sight
+#                          alarm, and an `open` exit that cannot prove the call
+#                          state (2, 124, anything but 0 or 1) still alarms, since
+#                          a wait this watcher cannot prove is not a wait. Away
+#                          mode does not use this bound.
+#                          A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
