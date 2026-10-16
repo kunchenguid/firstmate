@@ -145,27 +145,35 @@ presentations.push({
     return component;
   },
 });
-for (const original of presentations) {
-  for (const outputPad of [0, 1]) {
-    const wrapped = row(calm.resolver("codemode", () => original), undefined, { outputPad });
-    const stock = row(original, undefined, { outputPad });
-    for (const partial of [true, false]) {
-      for (const expanded of [false, true, false]) {
-        visibility.setCalmPresentation(false);
-        stock.updateResult(result, partial);
-        wrapped.updateResult(result, partial);
-        stock.setExpanded(expanded);
-        wrapped.setExpanded(expanded);
-        for (const width of [24, 80, 160]) assert.deepEqual(wrapped.render(width), stock.render(width), `stock parity width=${width} expanded=${expanded} partial=${partial}`);
-        visibility.setCalmPresentation(true);
-        wrapped.invalidate();
-        assert.deepEqual(wrapped.render(80), [], "Calm left a row or gap");
-        visibility.setCalmPresentation(false);
-        wrapped.invalidate();
-        assert.deepEqual(wrapped.render(80), stock.render(80), "toggle changed stock restoration");
+// Both rows render Pi's elapsed timer, so they share one frozen clock instead of depending on host speed.
+const systemNow = Date.now;
+const frozenNow = systemNow();
+Date.now = () => frozenNow;
+try {
+  for (const original of presentations) {
+    for (const outputPad of [0, 1]) {
+      const wrapped = row(calm.resolver("codemode", () => original), undefined, { outputPad });
+      const stock = row(original, undefined, { outputPad });
+      for (const partial of [true, false]) {
+        for (const expanded of [false, true, false]) {
+          visibility.setCalmPresentation(false);
+          stock.updateResult(result, partial);
+          wrapped.updateResult(result, partial);
+          stock.setExpanded(expanded);
+          wrapped.setExpanded(expanded);
+          for (const width of [24, 80, 160]) assert.deepEqual(wrapped.render(width), stock.render(width), `stock parity width=${width} expanded=${expanded} partial=${partial}`);
+          visibility.setCalmPresentation(true);
+          wrapped.invalidate();
+          assert.deepEqual(wrapped.render(80), [], "Calm left a row or gap");
+          visibility.setCalmPresentation(false);
+          wrapped.invalidate();
+          assert.deepEqual(wrapped.render(80), stock.render(80), "toggle changed stock restoration");
+        }
       }
     }
   }
+} finally {
+  Date.now = systemNow;
 }
 assert.equal(JSON.stringify(result), serialized, "presentation mutated results or nested calls");
 if (presentations.length > 1) {
