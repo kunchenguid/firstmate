@@ -570,7 +570,7 @@ Herdr keeps neither tokens nor the agents view across a server restart, so the n
 Agents without an `fm_sort` token, such as Firstmate itself or another tool's agents, sort after the tagged ones.
 Herdr exposes no CLI for the agents view, so `bin/backends/herdr-agent-view.py` sends only those two whitelisted requests over the named session socket.
 
-Tags and the agents view need Herdr protocol 22 (Herdr 0.9.3), the only verified release.
+Tags and the agents view need Herdr protocol 22, verified with Herdr 0.9.5; the wire schema comes from Herdr 0.9.3, which speaks the same protocol.
 An older client warns once per protocol and the feature stays inactive.
 
 `bin/fm-herdr-groups.sh` owns the commands, including `plan` to preview groups and statuses without touching Herdr and `clear` to remove this home's tags and the agents view after turning the feature off.
@@ -607,8 +607,8 @@ A task whose group changes later keeps its position until it ends.
 ### Verification status
 
 The tags, the agents view, and the placement are covered by offline tests against a scripted Herdr CLI and socket helper (`tests/fm-herdr-groups.test.sh` and the ordering cases in `tests/fm-backend-herdr.test.sh`).
-They have not been exercised against a real Herdr server in a guarded lab, so how Herdr renders the tokens, applies the agents view, and handles the placement move is unverified.
-To check it by hand on a live session, turn the feature on, wait one watcher poll, and confirm that `herdr pane list` shows the `fm_*` tokens on each task pane, that the agents list header reads `projects` with tasks ordered by group and then status, and that a newly spawned projected task appears after the other tasks of its group without any other workspace moving or focus changing.
+They were also exercised against a real Herdr 0.9.5 server (protocol 22) in a guarded lab session: after one watcher poll `herdr pane list` showed the `fm_*` tokens on each task pane, the agents list header read `projects` with tasks ordered by group and then status, a newly spawned projected task landed after the other tasks of its group with only that workspace moving and no focus change, and `fm-herdr-groups.sh clear` removed the tokens and the view.
+To repeat the check on a live session, turn the feature on, wait one watcher poll, and confirm the same four results.
 
 ## Default-tab prune safety
 
