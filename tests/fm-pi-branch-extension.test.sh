@@ -3216,6 +3216,19 @@ if (mirrored.some((m) => m.content.includes("operational injection") || m.conten
   throw new Error("mirror leaked operational, tool, or merge-note traffic");
 }
 
+// A run that pi.sendCustomMessage starts carries a custom message and no
+// prompt, so reading the prompt here threw and every such run surfaced the
+// failure instead of starting. It is not captain input either, so nothing of
+// it reaches the mirror.
+const mirroredBeforeCustomRun = session.ops.filter((op) => op.kind === "custom").length;
+await fire("before_agent_start", {
+  messageType: "custom",
+  message: { role: "custom", customType: "fm-branch-merge", content: "merge note that starts its own run" },
+}, ctx);
+if (session.ops.filter((op) => op.kind === "custom").length !== mirroredBeforeCustomRun) {
+  throw new Error("a custom-message run was mirrored as captain dialog");
+}
+
 // The durable cursor advances: a second turn_end mirrors only NEW dialog.
 entries.push({ type: "message", message: { role: "user", content: "actually, task-7 may merge when green" } });
 await fire("turn_end", {}, ctx);
