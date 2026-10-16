@@ -6,7 +6,6 @@
 # Usage:
 #   fm-supervision-gate.sh decide --task <id> --posture attended|away \
 #       --rows "<seq> ..." [--mirror-file <feed>]
-#   fm-supervision-gate.sh record-skip --task <id> --seq <outcome-seq> --skips <n>
 #
 # decide prints key=value lines and exits 0 for every decision (2 for usage):
 #   decision=skip|turn
@@ -17,24 +16,22 @@
 #
 # THE BOUND. decision=skip only when every one of these holds, checked in this
 # order; the first that fails is the why of a turn:
-#   1. FM_SUPERVISION_GATE_SKIPS (the cap, default 5) is not 0, which turns
-#      the bound off.
-#   2. Every granted row is still queued, is a stale row, and carries the
+#   1. Every granted row is still queued, is a stale row, and carries the
 #      watcher's plain reason "stale: <window>" with no detail: any wedge,
 #      escalation, deep-inspection, prompt, dead-record, inbox, or declared-wait
 #      recheck wording means a turn. Signal, check, and heartbeat rows are never
 #      skipped, so a status append - a decision, blocker, or result included -
 #      always reaches a turn.
-#   3. Attended, the dialog-mirror feed the turn would carry (--mirror-file)
+#   2. Attended, the dialog-mirror feed the turn would carry (--mirror-file)
 #      holds no [captain] entry, because the engine never judges without the
 #      captain's words; a missing or unreadable feed means a turn.
-#   4. The task has a previous outcome (bin/fm-branch-outcome.sh latest), it
-#      was a silent routine outcome, it was recorded at most
-#      FM_SUPERVISION_GATE_WINDOW seconds ago (default 3600), and the task's
-#      status log has not changed since it was recorded.
-#   5. Fewer than the cap of skips in a row: the count is the one record-skip
-#      stored for the task, and counts only while it names the task's previous
-#      outcome, so any real turn's outcome resets it.
+#   3. The task has a previous outcome (bin/fm-branch-outcome.sh latest), it
+#      was a silent routine outcome, it was recorded at most WINDOW (3600)
+#      seconds ago, and the task's status log has not changed since it was
+#      recorded.
+#   4. Fewer than CAP (5) skips in a row: the count is the one the previous
+#      outcome's summary carries when that outcome is a skip's, and 0 for any
+#      other outcome, so any real turn's outcome resets it.
 #
 # THE JUDGE. config/supervision-judge (docs/configuration.md "Pre-turn judge"
 # owns its format and modes) is consulted only for a wake the bound would
@@ -42,14 +39,9 @@
 # object: {version: 1, mode, task, posture, wake: {kind: "stale", rows: [{seq,
 # key, reason}]}, previousOutcome: {seq, verdict, silent, ageSeconds, summary},
 # consecutiveSkips, latestStatusLine}. Only a first stdout line of exactly
-# "skip", within FM_SUPERVISION_JUDGE_TIMEOUT seconds (default 10) and with
-# exit 0, is a skip; judge= reports any other answer as turn or other, a
+# "skip", within JUDGE_TIMEOUT (10) seconds and with exit 0, is a skip; judge= reports any other answer as turn or other, a
 # nonzero exit as exit-<n>, the bound as timeout, and an unusable file as
 # invalid. A shadow judge's why carries what it would have decided.
-#
-# record-skip stores the count after a skip was recorded as <outcome-seq>, in
-# $STATE/.supervision-gate-skips (one "<task>\t<seq>\t<skips>" line per task),
-# dropping lines for tasks with neither a meta nor a status log.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,7 +55,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
-SKIPS_FILE="$STATE/.supervision-gate-skips"
 JUDGE_FILE="$CONFIG/supervision-judge"
 
 usage() {
@@ -71,16 +62,12 @@ usage() {
   exit 2
 }
 
-count_or() {  # <value> <default>: a whole number, 0 allowed
-  case "$1" in ''|*[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$((10#$1))" ;; esac
-}
+CAP=5
+WINDOW=3600
+JUDGE_TIMEOUT=10
+SKIP_SUMMARY_RE='^No supervision turn: the repeat bound found .*, skip (?<n>[0-9]+) of at most [0-9]+ in a row;'
 
-CAP=$(count_or "${FM_SUPERVISION_GATE_SKIPS:-}" 5)
-WINDOW=$(count_or "${FM_SUPERVISION_GATE_WINDOW:-}" 3600)
-JUDGE_TIMEOUT=$(count_or "${FM_SUPERVISION_JUDGE_TIMEOUT:-}" 10)
-[ "$JUDGE_TIMEOUT" -gt 0 ] || JUDGE_TIMEOUT=10
-
-TASK='' POSTURE='' ROWS='' MIRROR='' MIRROR_SET=0 SEQ='' SKIPS=''
+TASK='' POSTURE='' ROWS='' MIRROR='' MIRROR_SET=0
 JUDGE=none
 PRIOR_SKIPS=0
 
@@ -104,14 +91,6 @@ rows_plain_stale() {
       for (s in want) if (!(s in found)) exit 1
     }
   ' "$FM_WAKE_QUEUE"
-}
-
-# The task's consecutive skips, counted only while they end at <outcome-seq>.
-prior_skips() {  # <outcome-seq>
-  awk -F '\t' -v task="$TASK" -v seq="$1" '
-    $1 == task && $2 == seq && $3 ~ /^[0-9]+$/ { n = $3 }
-    END { print n + 0 }
-  ' "$SKIPS_FILE" 2>/dev/null || printf '0\n'
 }
 
 # Sets JUDGE_MODE and JUDGE_BIN from config/supervision-judge; 1 when the file
@@ -176,8 +155,7 @@ run_judge() {  # <previous-outcome-json>
 }
 
 decide() {
-  local previous fields seq epoch prev_verdict silent unchanged age now summary
-  [ "$CAP" -gt 0 ] || verdict turn "the repeat bound is off"
+  local previous fields seq epoch prev_verdict silent unchanged skips age now summary
   rows_plain_stale || verdict turn "not only plain stale rows"
   if [ "$POSTURE" = attended ]; then
     [ "$MIRROR_SET" -eq 1 ] && [ -f "$MIRROR" ] && [ -r "$MIRROR" ] \
@@ -187,9 +165,10 @@ decide() {
   previous=$("$SCRIPT_DIR/fm-branch-outcome.sh" latest --task "$TASK" 2>/dev/null) \
     || verdict turn "the outcome store could not be read"
   [ -n "$previous" ] || verdict turn "no previous outcome"
-  fields=$(printf '%s\n' "$previous" | jq -r '[.seq, .epoch, .verdict, (.silent // false), .statusUnchanged] | @tsv' 2>/dev/null) \
+  fields=$(printf '%s\n' "$previous" | jq -r --arg re "$SKIP_SUMMARY_RE" '[.seq, .epoch, .verdict, (.silent // false),
+      .statusUnchanged, ((.summary // "" | capture($re).n) // "0")] | @tsv' 2>/dev/null) \
     || verdict turn "the previous outcome could not be read"
-  IFS=$(printf '\t') read -r seq epoch prev_verdict silent unchanged <<EOF
+  IFS=$(printf '\t') read -r seq epoch prev_verdict silent unchanged skips <<EOF
 $fields
 EOF
   [ "$unchanged" = true ] || verdict turn "the status log changed since the previous outcome"
@@ -197,7 +176,7 @@ EOF
   now=$(date +%s)
   age=$((now - epoch))
   [ "$age" -le "$WINDOW" ] || verdict turn "the previous outcome is older than ${WINDOW}s"
-  PRIOR_SKIPS=$(prior_skips "$seq")
+  PRIOR_SKIPS=$((10#$skips))
   [ "$PRIOR_SKIPS" -lt "$CAP" ] || verdict turn "the cap of $CAP skips in a row is reached"
   summary="No supervision turn: the repeat bound found $TASK unchanged since outcome $seq ($((age / 60)) min ago), skip $((PRIOR_SKIPS + 1)) of at most $CAP in a row; still the same situation, no action."
   [ -e "$JUDGE_FILE" ] || verdict skip "unchanged since outcome $seq" "$summary"
@@ -216,25 +195,6 @@ EOF
   verdict skip "unchanged since outcome $seq; the judge agreed" "$summary"
 }
 
-record_skip() {
-  local tmp line task
-  case "$SEQ:$SKIPS" in *[!0-9:]*|:*|*:) usage ;; esac
-  tmp=$(mktemp "$SKIPS_FILE.tmp.XXXXXX") || exit 1
-  if [ -f "$SKIPS_FILE" ]; then
-    while IFS= read -r line; do
-      task=${line%%$'\t'*}
-      [ "$task" != "$TASK" ] || continue
-      case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
-      [ -e "$STATE/$task.meta" ] || [ -e "$STATE/$task.status" ] || continue
-      printf '%s\n' "$line"
-    done < "$SKIPS_FILE" > "$tmp"
-  fi
-  if ! printf '%s\t%s\t%s\n' "$TASK" "$SEQ" "$SKIPS" >> "$tmp" || ! mv -f "$tmp" "$SKIPS_FILE"; then
-    rm -f "$tmp"
-    exit 1
-  fi
-}
-
 CMD=${1:-}
 [ "$#" -eq 0 ] || shift
 while [ "$#" -gt 0 ]; do
@@ -243,8 +203,6 @@ while [ "$#" -gt 0 ]; do
     --posture) POSTURE=${2:-}; shift 2 || usage ;;
     --rows) ROWS=${2:-}; shift 2 || usage ;;
     --mirror-file) MIRROR=${2:-}; MIRROR_SET=1; shift 2 || usage ;;
-    --seq) SEQ=${2:-}; shift 2 || usage ;;
-    --skips) SKIPS=${2:-}; shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -256,7 +214,6 @@ case "$CMD" in
     case "$ROWS" in *[!0-9\ ]*) usage ;; esac
     decide
     ;;
-  record-skip) record_skip ;;
   -h|--help) usage ;;
   *) usage ;;
 esac

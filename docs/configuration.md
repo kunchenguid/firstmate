@@ -346,7 +346,7 @@ It holds one line `<mode> <executable>`, where the executable is an absolute pat
 - `on` skips the turn only when the bound would skip it and the judge answers `skip`.
 - `shadow` asks the judge and records its answer in `state/.supervision-host.log`, but never skips, so its answers can be compared with what the engine then decides.
 
-The judge reads one JSON object on stdin describing the wake and must print `skip` or `turn` as its first line within `FM_SUPERVISION_JUDGE_TIMEOUT` seconds (default 10).
+The judge reads one JSON object on stdin describing the wake and must print `skip` or `turn` as its first line within 10 seconds.
 Any other answer, a nonzero exit, a timeout, or a file that names no runnable judge means the engine turn runs.
 The judge is never consulted for a wake the bound already sends to a turn, so it can only remove skips, never add them.
 `bin/fm-supervision-gate.sh` owns the input fields and the decision order.
@@ -2631,9 +2631,6 @@ FM_SUPERVISION_HOST_PARK_SECONDS=27000   # the host ends its park with a cycle-b
 FM_SUPERVISION_HOST_TURN_TIMEOUT=1200    # bound on one engine turn; a turn that hits it hands its wake to main
 FM_SUPERVISION_HOST_ROTATE_TURNS=20      # the engine conversation starts fresh after this many turns (and at every main session start)
 FM_SUPERVISION_ENGINE_GRACE=30           # seconds between TERM and KILL when an engine turn is stopped
-FM_SUPERVISION_GATE_SKIPS=5              # the repeat bound's cap on engine turns skipped in a row for one task; 0 turns the bound off (docs/supervision-host.md "The repeat bound")
-FM_SUPERVISION_GATE_WINDOW=3600          # seconds a task's previous silent outcome stays recent enough for the repeat bound to skip a repeat of it
-FM_SUPERVISION_JUDGE_TIMEOUT=10          # seconds the config/supervision-judge executable may take; past it the wake takes its engine turn
 # spoken interface and captain inbox; see "Spoken interface and captain inbox" above
 FM_VOICE_REGION=        # overrides config/voice-region for one relay run
 FM_VOICE_MODEL=         # overrides config/voice-model for one relay run

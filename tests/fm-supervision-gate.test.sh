@@ -15,7 +15,6 @@ OUTCOME="$ROOT/bin/fm-branch-outcome.sh"
 command -v jq >/dev/null 2>&1 || { printf 'skip: jq absent\n'; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-supervision-gate)
-unset FM_SUPERVISION_GATE_SKIPS FM_SUPERVISION_GATE_WINDOW FM_SUPERVISION_JUDGE_TIMEOUT
 
 # A home whose task "demo" is idle: a status log, one silent outcome recorded
 # after it, and one plain stale wake queued since.
@@ -50,12 +49,15 @@ expect_decision() {  # <gate-output> <decision> <msg>
   [ "$(field "$1" decision)" = "$2" ] || fail "$3"$'\n'"$1"
 }
 
-latest_seq() {  # <home>
-  FM_HOME="$1" "$OUTCOME" latest --task demo | jq -r .seq
+# Records a skip's outcome the way the host does: the gate's own summary as a
+# silent routine outcome.
+record_skip() {  # <home> <gate-output>
+  FM_HOME="$1" "$OUTCOME" append --task demo --verdict routine --silent true \
+    --summary "$(field "$2" summary)" >/dev/null || fail "the skip's outcome was not recorded"
 }
 
 # A judge that records its input next to itself and answers with its name's
-# behavior: skip, turn, garbage, slow (sleeps past a 1s bound), or fail.
+# behavior: skip, turn, garbage, slow (sleeps past the 10s bound), or fail.
 make_judge() {  # <home> <behavior>
   local judge="$1/judge-$2"
   {
@@ -64,7 +66,7 @@ make_judge() {  # <home> <behavior>
       skip) printf 'echo skip\n' ;;
       turn) printf 'echo turn\n' ;;
       garbage) printf 'echo "skip it, probably"\n' ;;
-      slow) printf 'sleep 5\necho skip\n' ;;
+      slow) printf 'sleep 30\necho skip\n' ;;
       fail) printf 'echo skip\nexit 3\n' ;;
     esac
   } > "$judge"
@@ -133,43 +135,28 @@ test_only_plain_stale_rows_are_ever_skipped() {
 
   home=$(make_gate_home missing)
   expect_decision "$(decide "$home" 999)" turn "a granted row no longer queued must take a turn"
-
-  home=$(make_gate_home off)
-  expect_decision "$(FM_SUPERVISION_GATE_SKIPS=0 decide "$home")" turn "a cap of 0 must turn the bound off"
-  pass "gate: signal, decision, detailed stale, missing, and mixed rows always take a turn, and a cap of 0 turns the bound off"
+  pass "gate: signal, decision, detailed stale, missing, and mixed rows always take a turn"
 }
 
 test_skips_in_a_row_stop_at_the_cap() {
-  local home seq out
+  local home out n
   home=$(make_gate_home cap)
-  seq=$(latest_seq "$home")
-  FM_HOME="$home" "$GATE" record-skip --task demo --seq "$seq" --skips 4 || fail "record-skip failed"
+  for n in 0 1 2 3 4; do
+    out=$(decide "$home")
+    expect_decision "$out" skip "wake $((n + 1)) after $n skips in a row must skip"
+    [ "$(field "$out" skips)" = "$n" ] || fail "the gate must report $n prior skips: $out"
+    assert_contains "$(field "$out" summary)" "skip $((n + 1)) of at most 5" "the skip's outcome must carry its place in the run"
+    record_skip "$home" "$out"
+  done
   out=$(decide "$home")
-  expect_decision "$out" skip "four skips in a row must allow a fifth"
-  [ "$(field "$out" skips)" = 4 ] || fail "the gate must report four prior skips: $out"
-  FM_HOME="$home" "$GATE" record-skip --task demo --seq "$seq" --skips 5 || fail "record-skip failed"
-  out=$(decide "$home")
-  expect_decision "$out" turn "five skips in a row must force a turn"
+  expect_decision "$out" turn "the sixth wake after five skips in a row must take a turn"
   assert_contains "$(field "$out" why)" "cap of 5" "the turn must name the cap"
-  expect_decision "$(FM_SUPERVISION_GATE_SKIPS=6 decide "$home")" skip "a raised cap must allow another skip"
-  # A real turn's outcome ends the run: the count names an older outcome.
+  # A real turn's outcome ends the run.
   FM_HOME="$home" "$OUTCOME" append --task demo --verdict routine --silent true --summary 'engine: still idle' >/dev/null
   out=$(decide "$home")
   expect_decision "$out" skip "a real turn's silent outcome must restart the count"
-  [ "$(field "$out" skips)" = 0 ] || fail "a count that names an older outcome must read as no skips: $out"
+  [ "$(field "$out" skips)" = 0 ] || fail "a real turn's outcome must read as no skips: $out"
   pass "gate: consecutive skips stop at the cap, and a real turn's outcome resets the count"
-}
-
-test_record_skip_drops_retired_tasks() {
-  local home
-  home=$(make_gate_home prune)
-  printf 'gone\t3\t2\ndemo\t1\t1\n' > "$home/state/.supervision-gate-skips"
-  printf 'working [at=1]: x\n' > "$home/state/other.status"
-  FM_HOME="$home" "$GATE" record-skip --task other --seq 7 --skips 1 || fail "record-skip failed"
-  assert_no_grep 'gone' "$home/state/.supervision-gate-skips" "a retired task's count must be dropped"
-  assert_grep "$(printf 'demo\t1\t1')" "$home/state/.supervision-gate-skips" "a live task's count must be kept"
-  assert_grep "$(printf 'other\t7\t1')" "$home/state/.supervision-gate-skips" "the new count must be recorded"
-  pass "gate: record-skip keeps live tasks' counts and drops retired ones"
 }
 
 test_attended_skip_needs_a_feed_without_the_captain() {
@@ -218,7 +205,7 @@ test_judge_on_decides_only_a_bound_skip() {
   home=$(make_gate_home judge-slow)
   make_judge "$home" slow >/dev/null
   printf 'on judge-slow\n' > "$home/config/supervision-judge"
-  out=$(FM_SUPERVISION_JUDGE_TIMEOUT=1 decide "$home")
+  out=$(decide "$home")
   expect_decision "$out" turn "a judge past its bound must take a turn"
   [ "$(field "$out" judge)" = timeout ] || fail "a judge past its bound must be reported as a timeout: $out"
   pass "gate: an on judge decides only wakes the bound would skip, and any answer but skip, a failure, or a timeout takes a turn"
@@ -261,7 +248,6 @@ test_unchanged_repeat_of_a_silent_outcome_is_skipped
 test_any_new_evidence_takes_a_turn
 test_only_plain_stale_rows_are_ever_skipped
 test_skips_in_a_row_stop_at_the_cap
-test_record_skip_drops_retired_tasks
 test_attended_skip_needs_a_feed_without_the_captain
 test_judge_on_decides_only_a_bound_skip
 test_unusable_judge_file_takes_a_turn

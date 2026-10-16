@@ -205,7 +205,7 @@ An idle worker's pane often changes only cosmetically, such as a clock or a toke
 Without a bound each one costs an engine turn that usually concludes "unchanged, no action", and such repeats are most of a host's silent outcomes.
 
 So before an engine turn the host asks `bin/fm-supervision-gate.sh` whether the turn is needed.
-It skips only an unchanged repeat of a situation the engine itself already called a silent no-op, and a small cap of skips in a row still forces a real turn; the gate's header owns the exact rules.
+It skips only an unchanged repeat, under 60 minutes old, of a situation the engine itself already called a silent no-op, and at most 5 skips in a row before a real turn; the gate's header owns the exact rules.
 A signal, check, or heartbeat wake is never skipped, so a status append, a decision, a blocker, a finished result, and a merge always reach a turn.
 
 A skip is recorded and acknowledged exactly as a turn would be.
@@ -213,8 +213,8 @@ The host, as the branch actor of the turn it opened, records one silent routine 
 Any failure along that path runs the engine turn instead.
 A skip neither counts toward nor clears [the broken-session latch](#the-broken-session-latch), and it leaves the dialog-mirror cursor and the engine conversation as they were, so the next real turn still receives the captain's words.
 The host ledger records each skip as a `skipped` line, and the next real turn sees the skip's outcome as the task's previous outcome.
+Each skip's outcome carries its place in the run of skips, so the count lives in the outcome store with nothing beside it.
 
-[configuration.md](configuration.md#environment-variables) lists the tunables, including the cap of 0 that turns the bound off.
 An optional [pre-turn judge](configuration.md#pre-turn-judge-configsupervision-judge) may veto a skip, or in shadow mode only record what it would have decided.
 
 ## Captain outcomes

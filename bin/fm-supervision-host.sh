@@ -844,7 +844,7 @@ health_record() {  # <engine-error 0|1> <reports>
 # runs as before. A skip neither counts toward nor clears the latch, and
 # leaves the dialog-mirror cursor and engine conversation untouched.
 skip_by_repeat_bound() {  # <turn> <rows> <task> <mirror> <first-reason-line>
-  local turn=$1 rows=$2 task=$3 mirror=$4 first=$5 gate decision judge why skips summary out seq unacked
+  local turn=$1 rows=$2 task=$3 mirror=$4 first=$5 gate decision judge why skips summary unacked
   set -- decide --task "$task" --posture "$TURN_POSTURE" --rows "$rows"
   [ "$TURN_POSTURE" != attended ] || set -- "$@" --mirror-file "$mirror"
   gate=$("$SCRIPT_DIR/fm-supervision-gate.sh" "$@" 2>/dev/null) || return 1
@@ -857,15 +857,14 @@ skip_by_repeat_bound() {  # <turn> <rows> <task> <mirror> <first-reason-line>
     [ "${judge:-none}" = none ] || log_line "gate	turn	task=$task	judge=$judge	$why	$first"
     return 1
   fi
-  out=$(FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN="$turn" "$SCRIPT_DIR/fm-branch-report.sh" \
-    --task "$task" --verdict routine --silent true --summary "$summary" 2>/dev/null) || return 1
-  seq=$(printf '%s\n' "$out" | sed -n 's/^recorded seq \([0-9][0-9]*\) .*/\1/p')
-  FM_SUPERVISION_ACTOR=branch "$SCRIPT_DIR/fm-wake-drain.sh" --consume-granted >/dev/null 2>&1 || return 1
+  FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN="$turn" "$SCRIPT_DIR/fm-branch-report.sh" \
+    --task "$task" --verdict routine --silent true --summary "$summary" >/dev/null 2>&1 || { : > "$RECEIPTS"; return 1; }
   # shellcheck disable=SC2086 # rows is a space-separated list of sequence numbers.
-  unacked=$(fm_wake_rows_queued $rows) || return 1
-  [ -z "$unacked" ] || return 1
-  [ -z "$seq" ] || "$SCRIPT_DIR/fm-supervision-gate.sh" record-skip --task "$task" --seq "$seq" --skips $((skips + 1)) \
-    >/dev/null 2>&1 || true
+  if ! FM_SUPERVISION_ACTOR=branch "$SCRIPT_DIR/fm-wake-drain.sh" --consume-granted >/dev/null 2>&1 \
+    || ! unacked=$(fm_wake_rows_queued $rows) || [ -n "$unacked" ]; then
+    : > "$RECEIPTS"
+    return 1
+  fi
   log_line "skipped	turn=$turn	posture=$TURN_POSTURE	task=$task	skips=$((skips + 1))	judge=$judge	$why	$first"
   return 0
 }
