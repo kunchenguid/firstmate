@@ -619,6 +619,60 @@ The real pane renders this inside a bordered box, omitted here for readability; 
 That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
 None of these three runs ever answered its dialog (Escape only, never Enter), so no credential store was written to and no model tokens were spent.
 
+## OpenCode launch-flag generation check
+
+The operator-facing model-delivery contract is owned by [configuration](../configuration.md#model-effort-and-fallback-behavior), and the agent-runtime pointer is [the OpenCode adapter reference](../../.agents/skills/harness-adapters/references/harness/opencode.md).
+This record verifies the resolved executable's help probe and configuration fallback against real binaries on 2026-10-14 on macOS arm64:
+
+```sh
+# opencode 2.0.28, the installed TUI
+opencode --version                      # opencode v2.0.28
+opencode --help | grep -- --model       # no match, the flag is gone
+opencode --model bogus/nope --prompt hi; echo $?   # 1
+# the last line of that output is the refusal the spawn used to miss:
+#   Unrecognized flag: --model in command opencode
+OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"},"agent":{"build":{"model":"opencode/big-pickle","variant":"high"}}}' \
+  opencode debug config
+# the launch config resolves to agents.build.model {providerID: opencode, model: big-pickle, variant: high}
+
+# opencode 1.18.32 (npm opencode-ai@1.18.32), the generation that still accepts the flag
+opencode --help | grep -- --model       # -m, --model  model to use in the format of provider/model [string]
+OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"},"agent":{"build":{"model":"anthropic/claude-sonnet-4-5","variant":"high"}}}' \
+  opencode debug config
+# the same config key resolves on 1.x: agent.build.model "anthropic/claude-sonnet-4-5", variant "high"
+```
+
+Two live facts back the launch-readiness gate the spawn now runs on every canonical OpenCode launch, both measured with the real 2.0.28 TUI in a tmux pane on that machine:
+
+```sh
+# a healthy launch takes over the pane's foreground process group immediately
+# opencode 2.0.28: `opencode` in the pane, fm_backend_agent_state reads 'alive' within one poll
+# the rejected-flag launch this gate exists for
+# 0.08s alive (the process is up), 0.31s dead (it exited), then 'dead' on every later read
+```
+
+The same two shapes were measured on Herdr 0.9.3 through an isolated `fm-lab-` session (`bin/fm-herdr-lab.sh`), because Herdr's classifier reaches its verdict through its own agent registry rather than the foreground process group:
+
+```sh
+# a healthy launch: no-agent for the first ~0.4s, unknown for ~3s while Herdr
+# notices the process, live at ~3.8s
+fm_backend_herdr_pane_agent_state <lab-session> w1:p1   # no-agent ... unknown ... live
+fm_backend_agent_state herdr <lab-session>:w1:p1        # dead        ... unreadable ... alive
+# the rejected-flag launch: no-agent on every read, so the shared verdict stays 'dead'
+# 0.16s dead, 0.81s dead, ... 8.45s dead
+```
+
+The measured pre-registration window supports the initial sustained-dead threshold of 12 consecutive checks at the 0.5s default poll; a `dead` reading after `alive` is the separate confirmed-exit pattern, and inconclusive readings do not create a verdict.
+On zellij, orca, and cmux, the classifier is unverified, and `missing`, `unverified`, `ambiguous`, `unreadable`, and `unknown` readings remain inconclusive, so an immediately dead canonical OpenCode launch may still report success.
+This is the supported liveness boundary; extending verified support or refusing launches on those backends requires an explicit runtime-contract change.
+
+The portable regressions are `tests/fm-spawn-dispatch-profile.test.sh`'s OpenCode launch-shape cases (one per generation, plus a model that can ride neither channel and therefore refuses the spawn before any worktree, endpoint, or record exists) and its dead-launch readiness cases (a pane that never had an agent, a pane that had one and lost it, and both harmless shapes: a live TUI and an unattributable pane).
+The process fact the gate reads is the shared agent-state classifier, which the default-on drift guard above already exercises against every installed harness:
+
+```sh
+FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
 ## Worker account pin sign-in check
 
 `bin/fm-worker-account-lib.sh` decides whether a pinned account is signed in from vendor output: the exit status of `claude auth status`, the JSON of `pi auth check`, and the provider column of `pi --list-models`.

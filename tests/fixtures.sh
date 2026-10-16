@@ -99,7 +99,22 @@ fm_test_fake_gh_axi() {
 # carry no -l) is appended there instead, one per line in send order. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 #
-# The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
+# Agent liveness knobs, for suites that exercise a launch-readiness gate:
+#   FM_FAKE_WINDOW_STATE      a file the fake appends each created window name
+#                             to from new-window and prints from list-windows,
+#                             so a window exists in the inventory only AFTER the
+#                             spawn created it, exactly as real tmux behaves.
+#   FM_FAKE_PANE_CURRENT_COMMAND  #{pane_current_command} for the window, the
+#                             foreground command the agent-liveness classifier
+#                             names (an agent name for a live pane, a shell for
+#                             one whose launch already exited).
+#   FM_FAKE_PANE_CURRENT_COMMANDS with FM_FAKE_PANE_COMMAND_COUNTER  a
+#                             comma-separated command sequence advanced once per
+#                             pane_current_command read, so a suite can drive a
+#                             pane that starts an agent and then loses it.
+#
+# The pane path defaults to empty when FM_FAKE_PANE_PATH is unset, and
+# #{pane_current_command} answers 'firstmate' when neither knob is set. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
 # suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
 fm_test_fake_tmux_spawn() {
@@ -111,14 +126,53 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *"#{pane_current_command}"*)
+        if [ -n "${FM_FAKE_PANE_CURRENT_COMMANDS:-}" ] && [ -n "${FM_FAKE_PANE_COMMAND_COUNTER:-}" ]; then
+          index=$(cat "$FM_FAKE_PANE_COMMAND_COUNTER" 2>/dev/null) || index=0
+          case "$index" in ''|*[!0-9]*) index=0 ;; esac
+          printf '%s\n' "$((index + 1))" > "$FM_FAKE_PANE_COMMAND_COUNTER" || true
+          IFS=, read -r -a commands <<<"$FM_FAKE_PANE_CURRENT_COMMANDS"
+          last=$((${#commands[@]} - 1))
+          if [ "$last" -lt 0 ]; then
+            printf '%s\n' "${FM_FAKE_PANE_CURRENT_COMMAND:-firstmate}"
+          else
+            [ "$index" -le "$last" ] || index=$last
+            printf '%s\n' "${commands[$index]}"
+          fi
+        else
+          printf '%s\n' "${FM_FAKE_PANE_CURRENT_COMMAND:-firstmate}"
+        fi
+        exit 0
+        ;;
+    esac
+    printf 'firstmate\n'
+    exit 0
+    ;;
   list-windows)
+    if [ -n "${FM_FAKE_WINDOW_STATE:-}" ] && [ -f "$FM_FAKE_WINDOW_STATE" ]; then
+      cat "$FM_FAKE_WINDOW_STATE"
+    fi
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_WINDOW_STATE:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-n" ]; then
+          printf '%s\n' "$a" >> "$FM_FAKE_WINDOW_STATE" || true
+          break
+        fi
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+  has-session|new-session|kill-window|set-window-option) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

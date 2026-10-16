@@ -101,7 +101,16 @@
 #   OpenCode has no interactive effort flag, so its effort is written as the
 #   build agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
-#   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   verified on opencode 1.18.32, and on 2.0.28 for the model-and-variant shape
+#   below); without a model the axis is recorded but omitted. The model itself
+#   rides that same JSON whenever the installed TUI does not accept --model:
+#   OpenCode 2.x dropped the flag from the interactive launch, so a spawn
+#   probes its resolved executable's own help (opencode_supports_model_flag)
+#   and composes --model only on a 1.x surface, where the flag exists. A
+#   selection that can ride neither channel - an unproven or absent --model
+#   flag on the installed TUI, and not a provider/model pair - refuses the
+#   spawn before any worktree, endpoint, or record exists, rather than
+#   launching a different model than the task records.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -457,6 +466,9 @@
 #                  this -e and still does not name its auto-discovered primary extensions)
 #     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __OPENCODEAGENTJSON__ OpenCode launch-config agent fragment: the resolved model,
+#                  and the effort as its variant, inside OPENCODE_CONFIG_CONTENT
+#                  (empty when the launch carries its model on --model or has none)
 #     __BRIEFDOORBELL__ quoted printable doorbell naming the launch-brief record this
 #                  script published into the receiving home's operational inbox
 #     __WORKTREE__  absolute path to the task worktree
@@ -493,6 +505,11 @@
 # each ready and dialog-free before the ordinary readiness gates can pass. A
 # blank viewport read proves nothing either way: it costs the poll and restarts
 # that count. A viewport read that fails outright fails readiness at once.
+# opencode needs no viewport read: its launch carries the brief, and its
+# readiness gate asks the backend's own agent-state classifier whether the
+# launched TUI is the pane's foreground process, refusing only on a sustained
+# dead pane (the 2026-10-13 shape: OpenCode 2.x rejected the 1.x --model flag
+# and the TUI exited within a second while the spawn reported success).
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -2162,6 +2179,63 @@ pi_supports_approve() {
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--approve([^[:alnum:]_-]|$)'
 }
 
+# OpenCode's interactive CLI surface changed between generations: 1.x advertises
+# `--model` on the TUI launch's own help (verified on 1.18.32), while 2.x dropped
+# the flag entirely and exits 1 with "Unrecognized flag: --model in command
+# opencode" (verified on 2.0.28). Same help-probe shape as the Pi probes above
+# with the bounded-probe discipline bin/fm-cursor-lib.sh uses: only a positive
+# probe keeps the flag, so an absent runner, a timeout, a non-zero exit, or help
+# without the flag all omit it rather than composing a launch the installed TUI
+# refuses before it starts. That is the safe direction, because the model is
+# never lost with the flag: it rides the launch's OPENCODE_CONFIG_CONTENT JSON
+# (opencode_agent_config_fragment below) on both generations.
+opencode_positive_integer_or_default() {
+  local value=${1-} fallback=$2
+  if [[ "$value" =~ ^[0-9]{1,7}$ ]]; then
+    while [ "${value#0}" != "$value" ]; do value=${value#0}; done
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+    else
+      printf '%s\n' "$fallback"
+    fi
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
+opencode_nonnegative_number_or_default() {
+  local value=${1-} fallback=$2 integer_part fractional_part
+  if [[ "$value" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+    integer_part=${value%%.*}
+    while [ "${integer_part#0}" != "$integer_part" ]; do integer_part=${integer_part#0}; done
+    [ -n "$integer_part" ] || integer_part=0
+    [ "${#integer_part}" -le 2 ] || { printf '%s\n' "$fallback"; return; }
+    [ "$integer_part" -le 60 ] || { printf '%s\n' "$fallback"; return; }
+    fractional_part=
+    case "$value" in *.*) fractional_part=${value#*.} ;; esac
+    if [ "$integer_part" -eq 60 ] && [[ "$fractional_part" == *[!0]* ]]; then
+      printf '%s\n' "$fallback"
+      return
+    fi
+    printf '%s\n' "$value"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
+opencode_supports_model_flag() {  # <executable>
+  local executable=$1 help runner bound
+  bound=$(opencode_positive_integer_or_default "${FM_OPENCODE_PROBE_TIMEOUT:-}" 10)
+  runner=
+  [ -n "$executable" ] && [ -x "$executable" ] || return 1
+  if command -v timeout >/dev/null 2>&1; then runner=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
+  fi
+  [ -n "$runner" ] || return 1
+  help=$("$runner" "$bound" "$executable" --help 2>&1) || return 1
+  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--model([^[:alnum:]_-]|$)'
+}
+
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
 # {"models":[{"provider","id","selector":"<provider>/<id>",...}]} for built-in and
 # auto-discovered providers only; it never lists a provider an extension
@@ -2317,7 +2391,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__OPENCODEAGENTJSON__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIEXCLUDE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2604,6 +2678,20 @@ commandcode)
     exit 1
   }
   ;;
+opencode)
+  # The TUI's --model flag is generation-dependent (opencode_supports_model_flag
+  # above), so probe the executable this spawn would launch. A missing or
+  # unreadable one never refuses the spawn: the pane resolves `opencode` on its
+  # own PATH, and an unproven flag surface simply leaves the model to the
+  # launch's config fragment. resolve_pi_executable is a plain PATH resolver
+  # despite its pi name; omp and agy already reuse it.
+  OPENCODE_MODEL_FLAG_SUPPORTED=0
+  if OPENCODE_BIN=$(resolve_pi_executable opencode); then
+    if opencode_supports_model_flag "$OPENCODE_BIN"; then
+      OPENCODE_MODEL_FLAG_SUPPORTED=1
+    fi
+  fi
+  ;;
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
     echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
@@ -2683,6 +2771,24 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+# An OpenCode model the launch cannot pin refuses here, before any worktree,
+# endpoint, or record exists. When the installed TUI takes no --model flag, the
+# only remaining channel is OPENCODE_CONFIG_CONTENT's build-agent model, which
+# needs a provider/model pair: launching anyway would silently run a different
+# model than the one recorded for this task. This runs after the secondmate
+# config tokens above so every source of MODEL is covered. A raw launch command
+# is exempt, exactly as it is for the readiness gate: it is the operator's own
+# escape hatch and fm-spawn does not compose its launch at all.
+if [ "$HARNESS" = opencode ] && [ "$RAW_LAUNCH" -eq 0 ] && [ "${OPENCODE_MODEL_FLAG_SUPPORTED:-0}" != 1 ]; then
+  case "$MODEL" in
+  '' | default) ;;
+  ?*/*?) ;;
+  *)
+    echo "error: the installed opencode's --model support could not be proven and '$MODEL' is not a provider/model id that OPENCODE_CONFIG_CONTENT can pin, so this launch cannot carry the model the task records; pass a provider/model id (or omit --model to run opencode's own default model)" >&2
+    exit 1
+    ;;
+  esac
 fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
@@ -2877,14 +2983,80 @@ relaunch_resume_args() {  # <harness> <backend> <target>
   printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
 }
 
-model_flag_for_harness() {
-  local harness=$1 model=$2
+# --model emission per harness. OpenCode is the one adapter whose TUI flag
+# surface is generation-dependent, so its third argument carries the probe
+# verdict from opencode_supports_model_flag: 1 keeps the 1.x flag, and anything
+# else (2.x, no executable to probe, an inconclusive probe) leaves the model to
+# the launch's OPENCODE_CONFIG_CONTENT JSON instead.
+model_flag_for_harness() {  # <harness> <model> [opencode model-flag support: 1|0]
+  local harness=$1 model=$2 opencode_model_flag=${3:-0}
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
+  opencode)
+    [ "$opencode_model_flag" = 1 ] || return 0
+    printf -- '--model %s ' "$(shell_quote "$model")"
+    ;;
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
+}
+
+# The OpenCode launch's OPENCODE_CONFIG_CONTENT agent fragment: the JSON tail
+# that pins the default `build` agent to the resolved model, with the resolved
+# effort as that model's `variant`.
+#
+# Why the config is the model's channel on 2.x: OpenCode 2.x accepts no --model
+# on the TUI at all, so OPENCODE_CONFIG_CONTENT is the only place a resolved
+# model can reach the worker; on 1.x (opencode_supports_model_flag above) the
+# flag still carries the model and this fragment stays exactly what it was, the
+# variant-only tail verified on 1.18.32 (`opencode debug config` / config.json:
+# agent.<name>.variant, "Default model variant for this agent (applies only when
+# using the agent's configured model)"). The 2.x shape was verified the same way
+# on 2.0.28, where `opencode debug config` reports this JSON's
+# agent.build.model as agents.build.model {providerID, model, variant}.
+#
+# Those variant lists are per-provider (anthropic/* expose high|max, openai/*
+# expose low|medium|high|xhigh), so the variant is emitted only when the
+# resolved model's provider is known to expose that effort; any other provider,
+# or an effort outside its family's list, keeps the model-only (or
+# permission-only) launch and omits the variant (record-and-omit, as codex and
+# grok do). A model the launch cannot pin - the flag surface is gone and the id
+# is not a provider/model pair the config can resolve - refuses the spawn in the
+# launch path before any worktree, endpoint, or record exists, rather than
+# launching a different model than the task records.
+#
+# The fragment lands inside the launch's single-quoted assignment, so a literal
+# quote in the model id must close and reopen that quoting.
+opencode_agent_config_fragment() {  # <model> <effort> <model-flag-supported: 0|1>
+  local model=$1 effort=$2 model_flag_supported=$3 variant='' model_json
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  case "${model%%/*}:$effort" in
+  anthropic:high | anthropic:max) variant=$effort ;;
+  openai:low | openai:medium | openai:high | openai:xhigh) variant=$effort ;;
+  esac
+  # 1.x: --model carries the model, so the config tail exists only to key the
+  # variant to it, and a model with no mappable variant leaves it unchanged.
+  if [ "$model_flag_supported" = 1 ] && [ -z "$variant" ]; then
+    return 0
+  fi
+  case "$model" in
+  ?*/*?) ;;
+  *)
+    # The preflight refusal in the launch path owns this rule's message and the
+    # spawn refusal (a model this fragment cannot pin must never be replaced by
+    # opencode's own default silently); this is only the invariant that keeps a
+    # bare id out of the config.
+    return 1
+    ;;
+  esac
+  model_json=$(json_escape "$model")
+  model_json=${model_json//\'/\'\\\'\'}
+  if [ -n "$variant" ]; then
+    printf ',"agent":{"build":{"model":"%s","variant":"%s"}}' "$model_json" "$variant"
+  else
+    printf ',"agent":{"build":{"model":"%s"}}' "$model_json"
+  fi
 }
 
 effort_flag_for_harness() {
@@ -2954,33 +3126,11 @@ effort_flag_for_harness() {
     esac
     ;;
   opencode)
-    # opencode's interactive `opencode --prompt` launch has no effort flag
-    # (`opencode run --variant` is a different, non-interactive mode). Its
-    # config schema (opencode 1.18.32, `opencode debug config` / config.json)
-    # carries per-model reasoning effort as agent.<name>.variant, "Default model
-    # variant for this agent (applies only when using the agent's configured
-    # model)", so the effort rides the OPENCODE_CONFIG_CONTENT JSON the launch
-    # already writes: the default build agent is pinned to the resolved model
-    # and the effort named as its variant, which OpenCode resolves against that
-    # model's own variant list. Those lists are per-provider (anthropic/* expose
-    # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
-    # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
-    # permission-only launch and omits the variant (record-and-omit, as codex
-    # and grok do). Without a resolved model the variant has nothing to key to
-    # and is likewise omitted. The fragment lands inside the launch's
-    # single-quoted assignment, so a literal quote in the model id must close and
-    # reopen that quoting.
-    [ -n "$model" ] && [ "$model" != default ] || return 0
-    case "${model%%/*}:$effort" in
-    anthropic:high | anthropic:max) ;;
-    openai:low | openai:medium | openai:high | openai:xhigh) ;;
-    *) return 0 ;;
-    esac
-    local model_json
-    model_json=$(json_escape "$model")
-    model_json=${model_json//\'/\'\\\'\'}
-    printf ',"agent":{"build":{"model":"%s","variant":"%s"}}' "$model_json" "$effort"
+    # OpenCode's effort has no launch flag: it rides the config fragment
+    # opencode_agent_config_fragment above composes, which owns the model,
+    # the variant mapping, and why (interactive `opencode --prompt` has no
+    # effort flag, and `opencode run --variant` is a different, non-interactive
+    # mode). Nothing to emit here.
     ;;
   muse)
     # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
@@ -4652,6 +4802,97 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# OpenCode launch readiness. The gap this closes: OpenCode 2.x refuses the
+# `--model` the 1.x TUI accepted ("Unrecognized flag: --model in command
+# opencode"), so the launched TUI exited within a second on 2026-10-13 while
+# the spawn still reported success and the task was left with no worker. Unlike
+# kimi, rovo, and agy, an OpenCode launch carries its brief inside the launch
+# command, so there is no later delivery step to confirm; what must be proven
+# here is that the launched TUI actually stays up.
+#
+# The verdict is the backend's own agent-state classifier
+# (fm_backend_agent_state), the same structural fact supervision and lifecycle
+# control read: is the launched agent the pane's foreground process. That
+# classifier is the live-guarded one (tests/fm-harness-liveness-drift-live-e2e.test.sh
+# launches every installed harness for real and requires opencode to classify
+# alive), so this gate adds no new vendor-name dependency.
+#
+# Only a positive verdict refuses:
+#   - `dead` on enough consecutive checks to outlast any launch prelude that
+#     never once read `alive` (the pane is a bare shell, so the launch exited);
+#   - `dead` again after the first `alive` (the TUI exited right after it
+#     started, which is exactly the rejected-flag shape: the process lives just
+#     long enough to be seen once).
+# Every inconclusive reading - `missing`, `unverified`, `ambiguous`,
+# `unreadable`, `unknown` - yields no verdict, so the gate steps aside and the
+# spawn keeps the behavior it had before this gate existed. A slow prelude
+# never refuses on its own either: any non-`dead` reading resets the streak.
+# The accepted consequence, and the boundary of this gate's coverage: a backend
+# whose runtime exposes no recovery-grade agent-state classifier answers
+# `unverified` (zellij, orca, and cmux today), so a canonical OpenCode launch
+# that dies immediately there is still reported successful. Extending verified
+# liveness support to those backends, or refusing OpenCode launches on them,
+# would change the supported runtime contract and is deliberately out of scope.
+OPENCODE_READY_FAILURE_DETAIL=
+
+opencode_wait_for_ready() {
+  local state i=0 saw_alive=0 dead_streak=0
+  local polls interval confirm settle
+  polls=$(opencode_positive_integer_or_default "${FM_OPENCODE_READY_POLLS:-}" 16)
+  interval=$(opencode_nonnegative_number_or_default "${FM_OPENCODE_POLL_INTERVAL:-}" 0.5)
+  confirm=$(opencode_positive_integer_or_default "${FM_OPENCODE_READY_DEAD_CONFIRM:-}" 12)
+  settle=$(opencode_positive_integer_or_default "${FM_OPENCODE_SETTLE_POLLS:-}" 3)
+  if [ "$confirm" -gt "$polls" ]; then
+    polls=16
+    confirm=12
+  fi
+  while [ "$i" -lt "$polls" ]; do
+    state=$(fm_backend_agent_state "$BACKEND" "$T") || state=unknown
+    case "$state" in
+    alive)
+      saw_alive=1
+      break
+      ;;
+    dead)
+      dead_streak=$((dead_streak + 1))
+      if [ "$dead_streak" -ge "$confirm" ]; then
+        OPENCODE_READY_FAILURE_DETAIL="the opencode launch exited immediately: the pane reads 'dead' (a bare shell with no agent process) on $dead_streak consecutive checks after launch, so this task has no worker"
+        return 1
+      fi
+      ;;
+    missing | unverified)
+      # Nothing on this backend can speak to this pane's agent (no classifier,
+      # or a window its runtime does not list): no verdict, so step aside.
+      return 0
+      ;;
+    *) dead_streak=0 ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -ge "$polls" ] || sleep "$interval"
+  done
+  [ "$saw_alive" = 1 ] || return 0
+  # The TUI started; confirm it stays up for one short settle window.
+  i=0
+  while [ "$i" -lt "$settle" ]; do
+    sleep "$interval"
+    state=$(fm_backend_agent_state "$BACKEND" "$T") || state=unknown
+    if [ "$state" = dead ]; then
+      OPENCODE_READY_FAILURE_DETAIL="the opencode TUI exited right after it started: the pane read 'alive' and then 'dead' again within $((settle + 1)) checks, so this task has no worker"
+      return 1
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+opencode_spawn_fail() {  # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  if ! "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" --gen "$BUSY_GEN"; then
+    echo "warning: could not retire busy generation after failed opencode spawn of $ID" >&2
+  fi
+}
+
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
@@ -5621,12 +5862,19 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "${OPENCODE_MODEL_FLAG_SUPPORTED:-0}")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+# OpenCode's model and effort ride its launch config rather than flags; the
+# fragment is empty for every other harness, so no other launch is touched.
+OPENCODE_AGENT_JSON=
+if [ "$HARNESS" = opencode ]; then
+  OPENCODE_AGENT_JSON=$(opencode_agent_config_fragment "$MODEL" "$EFFORT" "${OPENCODE_MODEL_FLAG_SUPPORTED:-0}")
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__OPENCODEAGENTJSON__/$OPENCODE_AGENT_JSON}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.
@@ -6098,6 +6346,20 @@ if [ "$HARNESS" = agy ]; then
     else
       agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
     fi
+    exit 1
+  fi
+fi
+# The canonical OpenCode template is the one launch shape whose TUI can reject
+# its own arguments and die before the brief is ever read, so it gets the
+# launch-readiness gate above. A raw launch command is exempt: it is the
+# operator's own escape hatch with unverified semantics (it may legitimately be
+# a headless one-shot), and this gate's interactive-worker assumption does not
+# apply to it. No endpoint cleanup here, deliberately: the evidence is that no
+# agent is running, and if the verdict were ever wrong, closing the window
+# would destroy a live worker instead of leaving it inspectable.
+if [ "$HARNESS" = opencode ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! opencode_wait_for_ready; then
+    opencode_spawn_fail "$OPENCODE_READY_FAILURE_DETAIL"
     exit 1
   fi
 fi
