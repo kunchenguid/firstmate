@@ -49,11 +49,13 @@
 #
 # Edge-triggered with a de-dupe record (state/.usage-warner): a window that
 # crosses a threshold notifies once, stays quiet while it remains at or above
-# it, and re-arms the moment it next reads back below. The record keys each
-# entry on the "<window-id>:<percent>" directive, so tiered thresholds on one
-# window each warn on their own crossing. A v1 record keyed on the bare window
-# id is still read: its entry stands for every threshold of that window, so an
-# upgrade never re-warns a window that was already reported. The record also
+# it, and re-arms the moment it next reads back below. A window missing from
+# an otherwise good read is not a below reading, so its entry is kept. The
+# record keys each entry on the "<window-id>:<percent>" directive, so tiered
+# thresholds on one window each warn on their own crossing. A v1 record keyed
+# on the bare window id is still read: its entry stands for every threshold
+# of that window, so an upgrade never re-warns a window that was already
+# reported. The record also
 # remembers the last reported check line so a standing read failure is reported
 # once until it changes - the same contract bin/fm-mail-check.sh and
 # bin/fm-tool-update-check.sh already use, and whose arm/disarm/shim-write
