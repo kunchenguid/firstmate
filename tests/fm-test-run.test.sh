@@ -519,7 +519,7 @@ PY
   cp "$ROOT/bin/fm-timeout-lib.sh" "$timeout_repo/bin/fm-timeout-lib.sh"
   cat >>"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
-  [ "$1" -eq 1500 ] || return 99
+  [ "$1" -eq 3600 ] || return 99
   return 124
 }
 SH
@@ -1646,8 +1646,8 @@ SH
     rm -f "$repo/bound-secs"
     (cd "$repo" && bin/fm-test-run.sh "$mode") >"$tmp/out" 2>"$tmp/err" \
       || fail "a healthy script must pass under $mode: $(cat "$tmp/out" "$tmp/err")"
-    [ "$(cat "$repo/bound-secs" 2>/dev/null)" = 1500 ] \
-      || fail "$mode did not run its script under the 1500s default bound: $(cat "$repo/bound-secs" 2>/dev/null)"
+    [ "$(cat "$repo/bound-secs" 2>/dev/null)" = 3600 ] \
+      || fail "$mode did not run its script under the 3600s default bound: $(cat "$repo/bound-secs" 2>/dev/null)"
   done
   rm -f "$repo/bound-secs"
   (cd "$repo" && bin/fm-test-run.sh --per-script-timeout-secs 0 "$script") >"$tmp/out" 2>"$tmp/err" \
@@ -1829,10 +1829,10 @@ SH
   [ "$rc" -eq 0 ] || fail "healthy changed watcher script must pass, got $rc: $(cat "$tmp/out" "$tmp/err")"
   [ -s "$repo/bound-secs" ] || fail "changed watcher script did not run under the automatic bound: $(cat "$tmp/out")"
   bound=$(cat "$repo/bound-secs")
-  [ "$bound" -ge 1500 ] \
-    || fail "automatic --changed bound for $script must be at least 1500s, got ${bound}s"
+  [ "$bound" -ge 3600 ] \
+    || fail "automatic --changed bound for $script must be at least 3600s, got ${bound}s"
   rm -rf "$tmp"
-  pass "the automatic --changed bound gives the slow watcher suite at least 1500s"
+  pass "the automatic --changed bound gives the slow watcher suite at least 3600s"
 }
 
 test_max_wall_ms_is_a_result_not_advice() {
