@@ -9,6 +9,8 @@ When this session owns supervision and away mode is not active:
    Use `/fm-watch-arm-omp` only as a human-entered fallback.
    Never run `bin/fm-watch-arm.sh` through omp's bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
 4. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock, then call `fm_watch_arm_omp` again.
+   Run `bin/fm-session-start.sh`, and anything else that takes the session lock, as an ordinary bash call without `name`.
+   A `name`d call runs under omp's daemon broker, which every omp in this directory shares, so its ancestry does not identify this session; `bin/fm-lock.sh` refuses it and says so.
 5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live omp process, and owns every later successor launch.
 6. Ordinary same-process session replacement (`/new`, `/resume`, `/fork`) retires only the prior generation; when the replacement owns the fleet lock, its `session_start` arms the new generation without a model turn or another `fm_watch_arm_omp` call.
    The generation-owner contract and in-flight actionable-close handoff live in `.omp/extensions/fm-primary-omp-watch.ts`; because omp reports no shutdown reason, every shutdown with a pending actionable close persists the handoff, and the next owning `session_start` in any process replays it.

@@ -32,6 +32,8 @@ omp cold start is roughly twenty seconds to the first agent turn, paid once per 
 `../../../bin/fm-harness.sh` tests `FM_OMP_HARNESS=omp` before `CLAUDECODE`, like Cursor's markers, and its ancestry walk matches the anchored process name `omp` above the interpreter fallback.
 The omp template in `../../../bin/fm-spawn.sh` clears every foreign marker at its own launch boundary, and `FM_OMP_HARNESS=omp` counts only under a real `omp` ancestor, so the marker inherited by any other launch is inert: an omp secondmate's workers keep their own identity and an inherited `CLAUDECODE` cannot outrank a worker that omp launched.
 `../../../bin/fm-session-lock-lib.sh` matches the same anchored name for session-lock ownership, and `../../../bin/backends/tmux.sh` classifies it `agent` for liveness.
+omp's daemon workers (`omp __omp_worker_daemon_broker`, `omp __omp_worker_mnemopi_embed`, ...) carry the same name but are never a session: the lock library rejects them and stops its ancestry walk at one (verified 18.8.0-18.8.4).
+The broker hosts the bash tool's `name`d calls and is shared by every omp in one project directory, so its parent is whichever omp started it; run `../../../bin/fm-session-start.sh` and other lock-taking scripts as ordinary bash calls without `name`.
 The optional claude-bridge extension runs a nested executable literally named `claude` as a sibling of tool execution, never an ancestor of it, so omp's own tool calls detect as omp; that subtree is never walked by a Firstmate script.
 
 ## Worker posture overlay
