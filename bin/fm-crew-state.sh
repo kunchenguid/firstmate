@@ -189,8 +189,11 @@ ID=${1:-}
 
 # Fleet snapshot composition supplies its captured metadata path here so every
 # state read resolves the same task generation selected by that snapshot.
+# Its captured status log comes with the open-decisions cursor it captured
+# first, which lets the log's fold start from that cursor.
 META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
 LOG=${FM_CREW_STATE_STATUS_OVERRIDE:-"$STATE/$ID.status"}
+LOG_CURSOR=${FM_CREW_STATE_CURSOR_OVERRIDE:-}
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # How many of the most recent `no-mistakes runs` rows each ledger read
@@ -265,7 +268,7 @@ map_log_state() {  # <line>
   esac
 }
 
-LOG_LINE=$(status_current_line "$LOG" "$KIND")
+LOG_LINE=$(status_current_line "$LOG" "$KIND" "$STATE/$ID.status" "$LOG_CURSOR")
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
