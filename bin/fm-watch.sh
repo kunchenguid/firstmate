@@ -1864,13 +1864,18 @@ pause_state_class() {  # <window> <task>
 STALE_WAIT_DECLARATION=
 
 CAPTAIN_CALL_IDENTITY=
+# The last `open` exit, kept so a later bound can tell "no call" (1) from
+# "could not be established" (2).
+CAPTAIN_CALL_OPEN_RC=1
 
 task_captain_call_open() {  # <task>
   local task=$1
   CAPTAIN_CALL_IDENTITY=
+  CAPTAIN_CALL_OPEN_RC=1
   [ -n "$task" ] || return 1
   CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
-    open "$task" --identity 2>/dev/null) || return 1
+    open "$task" --identity 2>/dev/null) || { CAPTAIN_CALL_OPEN_RC=$?; return 1; }
+  CAPTAIN_CALL_OPEN_RC=0
   return 0
 }
 
@@ -1919,6 +1924,27 @@ stale_wait_throttled() {  # <window-key> <declaration>
 stale_wait_record() {  # <window-key>
   [ -n "$STALE_WAIT_DECLARATION" ] || return 0
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
+}
+
+# Bound a stale alarm for a worker whose latest line is `blocked` and whose status
+# change already has its own wake (the .seen signature is current). Absorbs the first
+# sighting and every one inside PAUSE_RESURFACE_SECS, then lets one alarm through.
+# A new status line changes the signature and the declaration, so it wakes again.
+# Runs right after captain_call_stale_bound declined: when that read could not
+# establish whether a captain call is open, a hidden call's first sight may be
+# what is alarming, so this bound steps aside and the alarm goes through.
+# Returns 0 to absorb, 1 to alarm.
+surfaced_blocked_stale_bound() {  # <window-key> <task> <status-line>
+  local key=$1 task=$2 line=$3
+  [ "$CAPTAIN_CALL_OPEN_RC" != 2 ] || return 1
+  status_is_blocked "$line" || return 1
+  fm_wake_signal_seen_current "$STATE" "$STATE/$task.status" || return 1
+  STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+  if [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" != "$STALE_WAIT_DECLARATION" ]; then
+    stale_wait_record "$key"
+    return 0
+  fi
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
 # Bound a due stale alarm for an ordinary crew task held for the captain.
@@ -3199,6 +3225,13 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && surfaced_blocked_stale_bound "$key" "$task" "$(last_status_line "$STATE/$task.status")"; then
+              # A blocker its status wake already surfaced: the stale alarm would
+              # only repeat that question. Same bounded cadence as a pause.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (blocked status already surfaced): $w"
             else
               stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
               fm_wake_append stale "$w" "$stale_reason" || exit 1
