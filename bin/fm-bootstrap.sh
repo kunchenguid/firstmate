@@ -27,6 +27,7 @@
 #                 "invalid config/tool-provenance line <n> - <reason>"),
 #                 "NO_MISTAKES_AGENTS: <config> agent: lists <name>, but <binary> is not installed; ...",
 #                 "CLAUDE_PERMISSIONS: Claude auto mode is on (<file>) but no Bash(...bin/fm-*...) allow rule ...",
+#                 "HERDR_LAUNCHER: <why the launcher pane is unusable> - <consequence>; <fix>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
@@ -93,6 +94,13 @@
 #          firstmate's bin/fm-* scripts, which the auto-mode classifier can then
 #          refuse; it reports a rule's presence only, never that auto mode works.
 #          detect_claude_permissions owns the settings layers it reads.
+#          HERDR_LAUNCHER runs the read-only launcher-identity proof that every
+#          herdr spawn runs (bin/backends/herdr.sh
+#          fm_backend_herdr_launcher_identity) when the backend is herdr and
+#          this process carries HERDR_PANE_ID, so pane ids left stale by a
+#          primary relaunch are reported at session start instead of at the
+#          first spawn. It is bounded by FM_BOOTSTRAP_HERDR_LAUNCHER_TIMEOUT
+#          (default 5 seconds).
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -1599,6 +1607,35 @@ detect_local_config() {
   detect_tool_provenance
   detect_no_mistakes_agents
   detect_claude_permissions
+  detect_herdr_launcher
+}
+
+# Herdr launcher pane. The identity proof only reads (pane get, tab get,
+# workspace list, session list), but a wedged Herdr server could hold it, so it
+# runs in a bounded child that sources the adapter itself.
+detect_herdr_launcher() {
+  local bound rc=0 err reason consequence="every spawn from this session will refuse"
+  [ "$BACKEND" = herdr ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
+  command -v herdr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
+  bound=${FM_BOOTSTRAP_HERDR_LAUNCHER_TIMEOUT:-5}
+  case "$bound" in ''|*[!0-9]*|0) bound=5 ;; esac
+  __fm_timing_stamp=$(fm_timing_now_ms)
+  # shellcheck disable=SC2016 # The bounded child expands its own arguments.
+  err=$(fm_run_timed "$bound" bash -c '
+    . "$1/fm-backend.sh" && fm_backend_source herdr || { echo "error: the herdr adapter could not be loaded" >&2; exit 1; }
+    fm_backend_herdr_launcher_identity "$(fm_backend_herdr_session)"
+  ' _ "$SCRIPT_DIR" 2>&1 >/dev/null) || rc=$?
+  fm_timing_record phase herdr-launcher "$__fm_timing_stamp"
+  case "$rc" in 0 | 2) return 0 ;; esac
+  if fm_timed_out "$rc"; then
+    reason="herdr launcher pane '$HERDR_PANE_ID' could not be confirmed within ${bound}s"
+    consequence="a spawn from this session may stall or refuse"
+  else
+    reason=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
+    reason=${reason%%; refusing *}
+    [ -n "$reason" ] || reason="herdr launcher pane '$HERDR_PANE_ID' could not be verified (exit $rc)"
+  fi
+  echo "HERDR_LAUNCHER: $reason - $consequence; find the live pane with herdr pane list --workspace <workspace> and pass corrected HERDR_PANE_ID, HERDR_WORKSPACE_ID, and HERDR_TAB_ID on the spawn command line, or relaunch the primary inside herdr"
 }
 
 # Claude auto mode without an allow rule for firstmate's own scripts. Settings

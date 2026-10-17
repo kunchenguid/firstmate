@@ -261,6 +261,64 @@ assert_timeout_report() {
   [ "$elapsed" -ge "$timeout" ] || fail "expected elapsed >= timeout, got elapsed=${elapsed}s timeout=${timeout}s"
 }
 
+# add_fake_herdr <fakebin>: a read-only herdr stub answering the launcher
+# identity reads. FM_FAKE_HERDR_MODE selects live (one consistent pane, tab, and
+# workspace), stale (pane get fails), or hang (every read blocks). The session
+# socket is FM_FAKE_HERDR_SOCKET.
+add_fake_herdr() {
+  cat > "$1/herdr" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_FAKE_HERDR_MODE:-live}" != hang ] || exec sleep 30
+case "${1:-} ${2:-}" in
+  "session list")
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"%s"}]}\n' \
+      "${HERDR_SESSION:-default}" "$FM_FAKE_HERDR_SOCKET" ;;
+  "pane get")
+    [ "${FM_FAKE_HERDR_MODE:-live}" = live ] || { echo "pane not found" >&2; exit 1; }
+    printf '{"result":{"pane":{"pane_id":"%s","tab_id":"t1","workspace_id":"w1"}}}\n' "$3" ;;
+  "tab get") printf '{"result":{"tab":{"tab_id":"t1","workspace_id":"w1"}}}\n' ;;
+  "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' ;;
+  "status --json") printf '{}\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$1/herdr"
+}
+
+# The launcher-pane check runs only for a herdr home whose process carries
+# HERDR_PANE_ID. Each row: <label>^<mode>^<pane id or ->^<socket: same|other>^<expect>
+test_herdr_launcher() {
+  local label mode pane socket expect case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label mode pane socket expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/herdr-launcher-$n"
+    mkdir -p "$case_dir/home/config" "$case_dir/sock"
+    printf '%s\n' herdr > "$case_dir/home/config/backend"
+    fakebin=$(make_fake_toolchain_no_tmux "$case_dir" herdr)
+    add_real_jq "$fakebin"
+    add_fake_herdr "$fakebin"
+    out=$(
+      [ "$pane" = - ] || export HERDR_PANE_ID="$pane"
+      if [ "$socket" = other ]; then export HERDR_SOCKET_PATH="$case_dir/sock/other.sock"; else export HERDR_SOCKET_PATH="$case_dir/sock/herdr.sock"; fi
+      PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+        FM_FAKE_HERDR_MODE="$mode" FM_FAKE_HERDR_SOCKET="$case_dir/sock/herdr.sock" \
+        FM_BOOTSTRAP_HERDR_LAUNCHER_TIMEOUT=2 \
+        FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+        "$ROOT/bin/fm-bootstrap.sh")
+    expect=${expect//@CASE@/$case_dir}
+    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
+  done <<'ROWS'
+a live launcher pane is silent^live^w1:p1^same^
+no inherited pane is silent^live^-^same^
+a stale launcher pane is reported^stale^w1:p9^same^HERDR_LAUNCHER: herdr launcher pane 'w1:p9' could not be read in session 'default' - every spawn from this session will refuse; find the live pane with herdr pane list --workspace <workspace> and pass corrected HERDR_PANE_ID, HERDR_WORKSPACE_ID, and HERDR_TAB_ID on the spawn command line, or relaunch the primary inside herdr
+a pane from another server is reported^live^w1:p1^other^HERDR_LAUNCHER: herdr launcher pane 'w1:p1' belongs to the server at '@CASE@/sock/other.sock', not session 'default' at '@CASE@/sock/herdr.sock' - every spawn from this session will refuse; find the live pane with herdr pane list --workspace <workspace> and pass corrected HERDR_PANE_ID, HERDR_WORKSPACE_ID, and HERDR_TAB_ID on the spawn command line, or relaunch the primary inside herdr
+a wedged herdr server is bounded^hang^w1:p1^same^HERDR_LAUNCHER: herdr launcher pane 'w1:p1' could not be confirmed within 2s - a spawn from this session may stall or refuse; find the live pane with herdr pane list --workspace <workspace> and pass corrected HERDR_PANE_ID, HERDR_WORKSPACE_ID, and HERDR_TAB_ID on the spawn command line, or relaunch the primary inside herdr
+ROWS
+  pass "a herdr home reports a stale, foreign, or unanswerable launcher pane at session start"
+}
+
 # Claude auto mode without a bin/fm-* allow rule. Each row:
 # <label>^<local settings or ->^<user settings or ->^<harness pin>^<home kind>^<expect>
 # The harness is pinned through the supervision-branch primary pin so the
@@ -1591,6 +1649,7 @@ test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_tool_provenance_pins
 test_no_mistakes_agents
 test_claude_permissions
+test_herdr_launcher
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version

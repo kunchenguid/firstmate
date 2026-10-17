@@ -91,7 +91,7 @@ test_silent_home_maps_every_line() {
   dir=$(new_case silent)
   doctor "$dir" --json
   for id in doctor/jq doctor/inventory doctor/bootstrap doctor/unmapped-line \
-    tools/missing tools/missing-manual tools/presentation tools/provenance no-mistakes/agents permissions/claude-fm-scripts backend/invalid \
+    tools/missing tools/missing-manual tools/presentation tools/provenance no-mistakes/agents permissions/claude-fm-scripts backend/invalid backend/herdr-launcher \
     config/crew-dispatch fleet/tangle fleet/backlog-reconcile fleet/home-summary \
     fleet/secondmate-handoff fleet/info config/role; do
     assert_status "$DOCTOR_OUT" "$id" ok "silent home"
@@ -169,6 +169,23 @@ test_provoked_lines_render_their_ids() {
     FM_BOOTSTRAP_CLAUDE_USER_SETTINGS="$dir/user-settings.json" \
     FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=claude "$DOCTOR" --json 2>/dev/null) || DOCTOR_RC=$?
   assert_status "$DOCTOR_OUT" permissions/claude-fm-scripts warn "auto mode without a bin/fm-* rule"
+
+  dir=$(new_case herdr-launcher)
+  printf '%s\n' herdr > "$dir/home/config/backend"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "session list") printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s"}]}\n' "$HERDR_SOCKET_PATH" ;;
+  "pane get") exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/herdr"
+  DOCTOR_RC=0
+  DOCTOR_OUT=$(PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+    HERDR_PANE_ID=w1:p9 HERDR_SOCKET_PATH="$dir/herdr.sock" "$DOCTOR" --json 2>/dev/null) || DOCTOR_RC=$?
+  assert_status "$DOCTOR_OUT" backend/herdr-launcher fail "stale launcher pane"
+  [ "$DOCTOR_RC" -eq 1 ] || fail "a stale launcher pane must exit 1, got $DOCTOR_RC"
   assert_status "$DOCTOR_OUT" doctor/unmapped-line ok "provoked lines are all mapped"
   pass "provoked bootstrap lines render under their inventory ids and severities"
 }
