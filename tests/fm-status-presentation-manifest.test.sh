@@ -2,11 +2,11 @@
 # tests/fm-status-presentation-manifest.test.sh - executable regressions for the
 # fleet presentation manifest lookups in bin/fm-classify-lib.sh
 # (status_presentation_cursor_offset / status_outcome_backstop_cursor_offset).
-# Every drain looks each task up several times, so a lookup that costs time
-# proportional to the whole manifest made a drain over a few hundred status logs
-# take minutes. These call the real functions and assert both the exact lookup
-# results (including the rejection rules) and a wall-clock bound on a manifest
-# far larger than any real fleet, so a regression to a per-row shell loop fails.
+# Every drain looks each task up several times, so per-row shell overhead
+# accumulated across repeated manifest scans. These call the real functions and
+# assert exact lookup results, rejection rules, and a 10-second bound for twelve
+# lookups over a 6000-row manifest. This catches the shell-loop regression without
+# asserting constant-time lookup or a live drain speedup.
 set -u
 
 # shellcheck source=tests/lib.sh

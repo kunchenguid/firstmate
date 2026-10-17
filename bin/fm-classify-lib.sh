@@ -1498,9 +1498,10 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
 
 _fm_status_manifest_row() {  # <manifest> <task> <stop-at-first-match:0|1>
   # One awk pass validates the fleet manifest and prints "<ident>\t<presented>\t<backstop>"
-  # for <task> (nothing when absent). Every drain looks up every task several times, so a
-  # bash read loop over all rows made the presentation cost grow with the square of the
-  # fleet. With <stop-at-first-match> 1 rows after the match are not examined.
+  # for <task> (nothing when absent). Every drain looks up every task several times;
+  # awk removes the per-row shell overhead, while full-fleet lookups still examine
+  # quadratically many rows. With <stop-at-first-match> 1 rows after the match are
+  # not examined.
   LC_ALL=C awk -F '\t' -v task="$2" -v first="$3" '
     $1 == "" { next }
     { for (i = 5; i <= NF; i++) if ($i != "") { bad = 1; exit } }
