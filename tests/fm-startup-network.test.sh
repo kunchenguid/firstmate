@@ -27,7 +27,6 @@ set -u
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-startup-network-tests)
-DRAIN="$ROOT/bin/fm-wake-drain.sh"
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
 
@@ -43,6 +42,7 @@ new_world() {
   home="$w/home"
   root="$w/root"
   mkdir -p "$home/state" "$root/bin"
+  fm_test_primary_checkout "$root" || fail "could not mark $root as a plain primary checkout"
   for f in "$ROOT"/bin/*.sh; do
     ln -s "$f" "$root/bin/$(basename "$f")"
   done
@@ -403,12 +403,12 @@ EOF
       "$kind marker fixture unexpectedly depended on the network report"
 
     err="$home/drain.err"
-    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" >/dev/null 2> "$err"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$root/bin/fm-wake-drain.sh" >/dev/null 2> "$err"
     seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
     generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
     [ -n "$seq" ] && [ -n "$generation" ] \
       || fail "$kind marker wake did not issue a durable acknowledgement"
-    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$root/bin/fm-wake-drain.sh" \
       --ack-through "$seq" --recovery-generation "$generation" >/dev/null
     assert_no_grep 'inactive-reconcile-diagnostic:invalid-secondmate-home' "$home/state/.wake-queue" \
       "$kind marker wake could not be acknowledged"

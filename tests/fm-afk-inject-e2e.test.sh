@@ -43,6 +43,7 @@ LOG_FILE=
 DAEMON_PID=
 SUPERVISOR_PANE=
 LOOP_SCRIPT=
+PRIMARY_BASE=
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -58,6 +59,7 @@ cleanup_all() {
   fi
   rm -rf "${TMUX_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
+  rm -rf "${PRIMARY_BASE:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
 
@@ -67,6 +69,18 @@ STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e.XXXXXX")
 mkdir -p "$STATE_DIR"
 LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
+
+# Supervisor-only entrypoints refuse a linked worktree, so run them from a
+# temporary primary checkout (tests/primary-checkout-helpers.sh).
+# shellcheck source=tests/primary-checkout-helpers.sh
+. "$ROOT/tests/primary-checkout-helpers.sh"
+if ! fm_test_plain_checkout "$ROOT"; then
+  if ! PRIMARY_BASE=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e-primary.XXXXXX") ||
+    ! ROOT=$(fm_test_primary_snapshot "$ROOT" "$PRIMARY_BASE"); then
+    fail "could not stage a plain primary checkout for this suite"
+  fi
+fi
+DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
 # Source the daemon to get FM_INJECT_MARK, afk_enter, afk_exit.
 # shellcheck source=/dev/null

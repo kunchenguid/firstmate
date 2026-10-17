@@ -32,6 +32,7 @@ When it is set, scripts still run from this repo's `bin/`, while `state/`, `data
 
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
+It does not grant authority to supervisor-only entrypoints, whose checkout-based guard is documented in [`fm-primary-scope-lib.sh`](../bin/fm-primary-scope-lib.sh).
 
 `bin/fm-send.sh` requires `FM_HOME` to be set before resolving a target.
 Unlike most scripts, it does not use the general fallback, because a steer must not silently resolve against the wrong home.

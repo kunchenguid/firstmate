@@ -22,7 +22,9 @@ TMP_ROOT=$(fm_test_tmproot fm-afk-return-tests)
 install_runner() {  # <case-dir>
   local dir=$1
   mkdir -p "$dir/bin" "$dir/home/state" "$dir/home/data" "$dir/home/config"
+  fm_test_primary_checkout "$dir" || fail "could not make $dir a primary checkout"
   cp "$ROOT/bin/fm-afk-return.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-lock-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/"
@@ -34,6 +36,7 @@ install_runner() {  # <case-dir>
   # store owner, and the backlog reader with its tasks-axi probe.
   cp "$ROOT/bin/fm-afk-contract.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-branch-outcome.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-tasks-axi-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-hold-reason-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-backlog-transition-lib.sh" "$dir/bin/"
