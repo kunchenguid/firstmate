@@ -107,6 +107,63 @@ A single-process harness has no descendant that adds a distinct verdict, which i
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
+## Native Codex task-worker launch boundary
+
+Verified on 2026-10-17 on Linux with codex-cli 0.155.1.
+`bin/fm-spawn.sh` owns the native Codex task-worker launch transport; the [Codex adapter](../../.agents/skills/harness-adapters/references/harness/codex.md#task-worker-launch-input) records its scope.
+The targeted executable regression uses an 83,828-byte synthetic intent, a larger-than-189,321-byte envelope, the generated worker role, and the exact task inbox, without product data:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
+```
+
+The old stock launch reproduced `bash: line 1: /usr/bin/env: Argument list too long` before the receiving executable ran.
+The record-backed launch passes only a bounded doorbell across that same real subprocess boundary and retains the complete encoded envelope byte-for-byte in the canonical record.
+The regression covers ship/scout launches, publication refusal, model/effort and hook/notification retention, and unchanged secondmate transport and identity.
+Other harness templates and backend lifecycle mechanisms are unchanged; the shared staged-command and launch-environment paths remain covered by that named regression.
+
+Both token-free native probes ran inside a fresh `unshare -Urn` namespace without external networking.
+The first executed the stock-generated command with an isolated empty HOME and CODEX_HOME, no terminal, and `TERM=dumb`:
+
+```sh
+env -i HOME="$probe_home" CODEX_HOME="$probe_codex_home" PATH="$PATH" TERM=dumb \
+  bash -c "$launch" < /dev/null
+```
+
+The complete 200,223-byte synthetic record retained `# Current worker role contract` as its first body line.
+The installed native CLI exited 1 with `Refusing to start the interactive TUI because no terminal is available for a confirmation prompt (stdin/stderr is not a TTY)`, not an executable-argument error.
+Its local prompt renderer separately accepted the exact bootstrap configuration and doorbell captured from that stock-generated command:
+
+```sh
+codex debug prompt-input -c "$bootstrap_config" "$doorbell"
+```
+
+The resulting JSON contained the byte-identical bootstrap as developer input and the byte-identical doorbell as user input.
+Those token-free probes establish native configuration parsing and safe refusal only; they are not model-processing evidence.
+
+The credentialed guard extends the existing native hook subject rather than substituting `codex exec` for the interactive worker:
+
+```sh
+FM_CODEX_FULL_BRIEF_LIVE=1 FM_CODEX_FULL_BRIEF_MODEL=gpt-6-sol \
+  bash bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+It requires existing code-assistant authentication and spends model tokens only on a synthetic task in a generated non-default Herdr lab, with the helper's default-session tripwire and guarded cleanup.
+It executes the stock-emitted native command, checks the complete envelope against the canonical encoder, and requires three independently sampled receipt values distributed through an 83,828-byte intent, worker identity, the exact inbox, and the normal native turn-end notification.
+Observed with codex-cli 0.155.1 and `gpt-6-sol`, high effort:
+
+```text
+# native full-record bytes=205256 model=gpt-6-sol effort=high version=codex-cli 0.155.1
+ok - codex codex-cli 0.155.1 consumed beginning/middle/end of the complete synthetic launch record and emitted normal turn-end notification
+```
+
+The default, token-free mode of that same guard replays the actual emitted flags against native `features list` and confirms hooks remain disabled.
+`tests/fm-control-relaunch.test.sh` additionally exercises normal same-task replacement twice, proving each current complete record is fresh while the endpoint, retained copy, HEAD, dirty work, and original intent survive.
+Its existing live/ambiguous-ownership refusal cases remain unchanged.
+The source-version compatibility probe supplied for target codex-cli 0.162.1 accepted the same bootstrap and doorbell with empty temporary HOME/CODEX_HOME; that is target-version parsing evidence, not a target-host model turn.
+The real model-consumption proof above covers local codex-cli 0.155.1 only.
+No business payload, product task recovery, installed-home adoption, or later validation-intent transport was tested or changed.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
