@@ -50,10 +50,10 @@
 #     (bin/fm-branch-dispatch.mjs offer) says the branch may take this close,
 #     so main-only classes (check triggers, decision-owned triggers, a scan
 #     that is unsafe or holds nothing for the branch) stay main's. That
-#     pass-through starts the successor watcher cycle and leaves it running
+#     pass-through leaves a verified successor watcher cycle running
 #     before the close is printed, so supervision continues when the session
-#     drops the handoff. It confirms no handling handoff, so the recovery
-#     marker still reads downtime and the re-arm owner delivers the close to
+#     drops the handoff. It leaves or restores the recovery marker to
+#     downtime so the re-arm owner delivers the close to
 #     main. The host records that successor's arm before relinquishing it
 #     (detach_successor owns the persistence check and failure path). The
 #     session's next park without --restart requests a take-over of its cycle
@@ -66,7 +66,8 @@
 # successor started reaches main exactly as the arm printed it, and that
 # successor cycle stays running.
 # A close the engine takes is handled in one order: it starts and verifies the
-# successor watcher cycle and confirms the handling handoff (the order
+# successor watcher cycle, or adopts the continuing arm's verified successor,
+# and confirms the handling handoff (the order
 # docs/watcher-continuity.md owns), computes the rows the branch may claim in
 # the turn's posture with the dispatch owner, publishes that grant
 # (bin/fm-wake-grant.sh), runs one bounded headless engine turn
@@ -151,6 +152,9 @@
 # .supervision-host-mirror (the dialog-mirror feed while an attended wake is
 # rendered), .supervision-host-left (the pid and identity of the successor arm a
 # pass-through left running for main, until that arm is gone),
+# .supervision-host-busy (present while the host is not waiting on a close) and
+# .supervision-host-spool.* (the closes a continuing successor arm took while
+# the host was busy; bin/fm-watch-arm.sh, "Scheduling continuation"),
 # .supervision-host-health (the latch: errors, cooldown, and probe time, keyed
 # to the main session, engine, and model), and .supervision-host.log (a bounded
 # ledger of where every close went, with each engine turn's usage and
@@ -241,6 +245,7 @@ ENGINE_PID_FILE="$STATE/.supervision-host.engine-pid"
 HEALTH_FILE="$STATE/.supervision-host-health"
 MIRROR_FEED="$STATE/.supervision-host-mirror"
 LEFT_RECORD="$STATE/.supervision-host-left"
+BUSY_FILE="$STATE/.supervision-host-busy"
 
 HOST_PID=$$
 HOST_STARTED_SECONDS=$SECONDS
@@ -254,13 +259,19 @@ HEALTH_NOTE=
 GRANT_ACTIVE=0
 ARM_PID=
 ARM_OUT=
+ARM_SPOOL=
 ARM_TEXT=
+PRESTARTED=0
+SPOOL_TEXT=
+SPOOL_WATCHER=
+SPOOL_GENERATION=
 CLOSED_ARM_PID=
 HANDLE_WHY=
 HANDLE_RC=0
 ENGINE_SUBSHELL=
 SUCCESSOR_PID=
 SUCCESSOR_OUT=
+SUCCESSOR_SPOOL=
 SUCCESSOR_WATCHER=
 SUCCESSOR_GENERATION=
 ENGINE_RUNNING=0
@@ -376,7 +387,8 @@ activate() {
     [ -f "$ledger" ] && _fm_engine_reap "$ledger"
   done
   rm -f "$STATE"/.supervision-host-arm.* "$STATE"/.supervision-host-descendants.* "$STATE"/.supervision-host-result.* \
-    "$STATE"/.supervision-host-errors.* "$STATE"/.supervision-host-readback.* "$TURN_FILE" "$MIRROR_FEED" 2>/dev/null || true
+    "$STATE"/.supervision-host-errors.* "$STATE"/.supervision-host-readback.* "$STATE"/.supervision-host-spool.* \
+    "$TURN_FILE" "$MIRROR_FEED" "$BUSY_FILE" 2>/dev/null || true
   # The successor a pass-through left for main: the first cycle takes it over
   # while it still answers to its recorded identity, and its record goes only
   # once it does not.
@@ -418,8 +430,9 @@ cleanup() {
   if [ "$ENGINE_RUNNING" -eq 1 ]; then
     stop_engine_turn
   fi
-  retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
-  retire_arm "$ARM_PID" "$ARM_OUT"
+  rm -f "$BUSY_FILE" 2>/dev/null || true
+  retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT" "$SUCCESSOR_SPOOL"
+  retire_arm "$ARM_PID" "$ARM_OUT" "$ARM_SPOOL"
   if [ "$GRANT_ACTIVE" -eq 1 ]; then
     "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
     "$SCRIPT_DIR/fm-wake-grant.sh" deactivate "$HOST_PID" "$GEN" >/dev/null 2>&1 || true
@@ -435,9 +448,9 @@ cleanup() {
   exit "$rc"
 }
 # Stop one arm this host started (its TERM handler stops the watcher it owns)
-# and drop its output file.
-retire_arm() {  # <pid> <output-file>
-  local pid=${1:-} out=${2:-} i
+# and drop its output and spool files.
+retire_arm() {  # <pid> <output-file> [spool-file]
+  local pid=${1:-} out=${2:-} spool=${3:-} i
   if [ -n "$pid" ] && fm_pid_alive "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
     i=0
@@ -450,6 +463,7 @@ retire_arm() {  # <pid> <output-file>
   fi
   [ -z "$pid" ] || forget_process "$pid"
   [ -z "$out" ] || rm -f "$out" 2>/dev/null || true
+  [ -z "$spool" ] || rm -f "$spool" 2>/dev/null || true
 }
 
 host_still_owner() {
@@ -461,14 +475,27 @@ host_still_owner() {
 }
 
 start_arm() {  # <predecessor-arm-pid or empty> [--restart]; sets the started pid/output
-  local predecessor=$1 out pid
+  local predecessor=$1 out pid spool=
+  local -a cont_env=()
   shift
   out=$(mktemp "$STATE/.supervision-host-arm.XXXXXX") || return 1
   # An arm left for main outlives this host, and Claude tears the hook's
   # process group down after the exit-2 rewake, so it gets a group of its own
   # (the shape start_handling_successor in bin/fm-claude-stop-autoarm.sh uses).
-  [ "${ARM_OWN_GROUP:-0}" -ne 1 ] || set -m 2>/dev/null || true
-  if [ -n "$predecessor" ]; then
+  # That arm is also the scheduling owner of the cycle it leaves running: it
+  # restarts its own watcher after a close nobody is waiting on, handing a busy
+  # host those closes through a spool (bin/fm-watch-arm.sh, "Scheduling
+  # continuation").
+  if [ "${ARM_OWN_GROUP:-0}" -eq 1 ]; then
+    spool=$(mktemp "$STATE/.supervision-host-spool.XXXXXX") || { rm -f "$out"; return 1; }
+    : > "$spool"
+    set -m 2>/dev/null || true
+  fi
+  if [ -n "$spool" ]; then
+    cont_env=(FM_WATCH_ARM_CONTINUE_READER="$HOST_PID" FM_WATCH_ARM_CONTINUE_SPOOL="$spool" FM_WATCH_ARM_CONTINUE_BUSY="$BUSY_FILE")
+    [ -z "$predecessor" ] || cont_env+=(FM_WATCH_PREDECESSOR_ARM_PID="$predecessor")
+    env "${cont_env[@]}" FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
+  elif [ -n "$predecessor" ]; then
     FM_WATCH_PREDECESSOR_ARM_PID=$predecessor FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
   else
     FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" "$@" >"$out" 2>&1 </dev/null &
@@ -478,6 +505,7 @@ start_arm() {  # <predecessor-arm-pid or empty> [--restart]; sets the started pi
   record_process arm "$pid"
   STARTED_ARM_PID=$pid
   STARTED_ARM_OUT=$out
+  STARTED_ARM_SPOOL=$spool
 }
 
 park_elapsed() {  # Sets PARK_ELAPSED without a production clock/helper fork.
@@ -504,12 +532,14 @@ turn_crosses_boundary() {
 # home's watcher, print any close already read so main drains it, then the
 # boundary line.
 boundary_exit() {
-  retire_arm "$ARM_PID" "$ARM_OUT"
-  retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
+  retire_arm "$ARM_PID" "$ARM_OUT" "$ARM_SPOOL"
+  retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT" "$SUCCESSOR_SPOOL"
   ARM_PID=
   ARM_OUT=
+  ARM_SPOOL=
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
+  SUCCESSOR_SPOOL=
   "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   park_elapsed
   log_line "boundary	after ${PARK_ELAPSED}s"
@@ -529,20 +559,86 @@ stream_ready_line() {
   READY_PENDING=0
 }
 
-# Wait for the current arm to close. Returns 0 with ARM_TEXT set,
-# or 1 when the park boundary arrives first.
+# True once a continuing arm's spool holds a hand-off it verified: the closes
+# it took while this host was busy, then the restarted watcher (an S line).
+spool_ready() {  # <spool-file>
+  [ -n "${1:-}" ] && [ -s "$1" ] || return 1
+  case "$(tail -n 1 "$1" 2>/dev/null)" in S$'\t'*) return 0 ;; esac
+  return 1
+}
+
+# Take the spool's hand-off: sets SPOOL_TEXT to the close lines, and
+# SPOOL_WATCHER and SPOOL_GENERATION to the last restart. Returns 1 when
+# nothing complete is waiting or the hand-off carries no close. Confirm the
+# current watcher and, when close lines are present, become busy before clearing
+# the batch under the arm's continuation lock, so a close cannot mistake this
+# consumer for an idle reader handling a wake.
+take_spool() {  # <spool-file>
+  local spool=${1:-} line rest tab=$'\t'
+  SPOOL_TEXT=
+  SPOOL_WATCHER=
+  SPOOL_GENERATION=
+  spool_ready "$spool" || return 1
+  fm_lock_try_acquire "$spool.lock" || return 1
+  if ! spool_ready "$spool"; then
+    fm_lock_release "$spool.lock"
+    return 1
+  fi
+  while IFS= read -r line; do
+    rest=${line#*"$tab"}
+    case "$line" in
+      C"$tab"*) SPOOL_TEXT=${SPOOL_TEXT:+$SPOOL_TEXT$'\n'}$rest ;;
+      S"$tab"*)
+        SPOOL_WATCHER=${rest%%"$tab"*}
+        SPOOL_GENERATION=
+        case "$rest" in *"$tab"*) SPOOL_GENERATION=${rest#*"$tab"} ;; esac
+        ;;
+    esac
+  done < "$spool"
+  if ! fm_pid_alive "$SPOOL_WATCHER" \
+    || ! fm_watcher_lock_matches_pid "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$SPOOL_WATCHER" "$FM_HOME"; then
+    fm_lock_release "$spool.lock"
+    return 1
+  fi
+  if [ -n "$SPOOL_GENERATION" ]; then
+    if ! "$SCRIPT_DIR/fm-watch-arm.sh" --handling-delivered "$SPOOL_GENERATION" --watcher-pid "$SPOOL_WATCHER" >/dev/null 2>&1; then
+      fm_lock_release "$spool.lock"
+      return 1
+    fi
+  fi
+  if [ -n "$SPOOL_TEXT" ] && ! printf '%s\n' "$HOST_PID" > "$BUSY_FILE"; then
+    fm_lock_release "$spool.lock"
+    return 1
+  fi
+  : > "$spool"
+  fm_lock_release "$spool.lock"
+  [ -n "$SPOOL_TEXT" ]
+}
+
+# Wait for the current arm to close. Returns 0 with ARM_TEXT set, or 1 when the
+# park boundary arrives first. A continuing arm that took closes while this
+# host was busy is still alive: they arrive through its spool with PRESTARTED=1,
+# and that arm is already the successor cycle (take_spool).
 await_close() {
   local i
+  PRESTARTED=0
   while fm_pid_alive "$ARM_PID"; do
     refresh_process "$ARM_PID"
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
+    if take_spool "$ARM_SPOOL"; then
+      ARM_TEXT=$SPOOL_TEXT
+      CLOSED_ARM_PID=$ARM_PID
+      PRESTARTED=1
+      return 0
+    fi
     # Probe the arm's exit twice a second between POLL-cadence checks, without
     # changing the outer identity refresh, readiness, or boundary cadence.
     i=$((POLL * 2))
     while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID"; do
       sleep 0.5
       i=$((i - 1))
+      spool_ready "$ARM_SPOOL" && break
     done
   done
   wait "$ARM_PID" 2>/dev/null || true
@@ -552,12 +648,18 @@ await_close() {
     ARM_TEXT=$(printf '%s\n' "$ARM_TEXT" | awk -v line="$READY_LINE" '!dropped && $0 == line { dropped = 1; next } { print }')
     READY_LINE=
   fi
+  # Closes the arm took before it ended are this close's earlier reasons.
+  if [ -n "$ARM_SPOOL" ] && [ -s "$ARM_SPOOL" ]; then
+    SPOOL_TEXT=$(awk -F '\t' '$1 == "C" { sub(/^C\t/, ""); print }' "$ARM_SPOOL" 2>/dev/null || true)
+    [ -z "$SPOOL_TEXT" ] || ARM_TEXT=$SPOOL_TEXT${ARM_TEXT:+$'\n'$ARM_TEXT}
+  fi
   READY_PENDING=0
   forget_process "$ARM_PID"
-  rm -f "$ARM_OUT" 2>/dev/null || true
+  rm -f "$ARM_OUT" ${ARM_SPOOL:+"$ARM_SPOOL"} 2>/dev/null || true
   CLOSED_ARM_PID=$ARM_PID
   ARM_PID=
   ARM_OUT=
+  ARM_SPOOL=
   return 0
 }
 
@@ -576,9 +678,10 @@ emit() {  # [line...]
 # the host.
 retire_successor() {
   [ -n "$SUCCESSOR_PID" ] || return 0
-  retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
+  retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT" "$SUCCESSOR_SPOOL"
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
+  SUCCESSOR_SPOOL=
   "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
 }
 
@@ -653,20 +756,39 @@ stand_down() {  # <why>
 # Start the successor cycle and wait until it proves a live watcher. Sets
 # SUCCESSOR_WATCHER and SUCCESSOR_GENERATION (empty when the arm attached).
 start_successor() {  # <predecessor-arm-pid>
-  local deadline line
+  local deadline line handling=${2:-} ready locked
   SUCCESSOR_WATCHER=
   SUCCESSOR_GENERATION=
   start_arm "$1" || return 1
   SUCCESSOR_PID=$STARTED_ARM_PID
   SUCCESSOR_OUT=$STARTED_ARM_OUT
+  SUCCESSOR_SPOOL=$STARTED_ARM_SPOOL
   deadline=$(( $(date +%s) + READY_TIMEOUT ))
   while :; do
     line=$(grep -E '^watcher: (started|attached) pid=[0-9]+' "$SUCCESSOR_OUT" 2>/dev/null | head -n 1)
-    if [ -n "$line" ]; then
-      SUCCESSOR_WATCHER=$(printf '%s\n' "$line" | sed -E 's/^watcher: (started|attached) pid=([0-9]+).*/\2/')
-      case "$line" in
-        *' recovery-generation='*) SUCCESSOR_GENERATION=${line##* recovery-generation=} ;;
-      esac
+    locked=0
+    ready=0
+    if [ -z "$SUCCESSOR_SPOOL" ] || fm_lock_try_acquire "$SUCCESSOR_SPOOL.lock"; then
+      [ -z "$SUCCESSOR_SPOOL" ] || locked=1
+      if spool_ready "$SUCCESSOR_SPOOL"; then
+        IFS=$'\t' read -r _ SUCCESSOR_WATCHER SUCCESSOR_GENERATION < <(tail -n 1 "$SUCCESSOR_SPOOL")
+      elif [ -n "$line" ]; then
+        SUCCESSOR_WATCHER=$(printf '%s\n' "$line" | sed -E 's/^watcher: (started|attached) pid=([0-9]+).*/\2/')
+        SUCCESSOR_GENERATION=
+        case "$line" in
+          *' recovery-generation='*) SUCCESSOR_GENERATION=${line##* recovery-generation=} ;;
+        esac
+      fi
+      if fm_pid_alive "$SUCCESSOR_WATCHER" \
+        && fm_watcher_lock_matches_pid "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$SUCCESSOR_WATCHER" "$FM_HOME"; then
+        if [ "$handling" != --handling ] || [ -z "$SUCCESSOR_GENERATION" ] \
+          || "$SCRIPT_DIR/fm-watch-arm.sh" --handling-delivered "$SUCCESSOR_GENERATION" --watcher-pid "$SUCCESSOR_WATCHER" >/dev/null 2>&1; then
+          ready=1
+        fi
+      fi
+      [ "$locked" -eq 0 ] || fm_lock_release "$SUCCESSOR_SPOOL.lock"
+    fi
+    if [ "$ready" -eq 1 ]; then
       refresh_process "$SUCCESSOR_PID"
       return 0
     fi
@@ -685,8 +807,12 @@ start_successor() {  # <predecessor-arm-pid>
 # stays tracked so the EXIT trap unlinks it; the arm already holds that
 # descriptor and keeps waiting on the watcher.
 detach_successor() {
-  local identity tmp=
+  local identity tmp='' locked=0
   [ -n "${SUCCESSOR_PID:-}" ] || return 0
+  if [ -n "$SUCCESSOR_SPOOL" ]; then
+    fm_lock_acquire_wait "$SUCCESSOR_SPOOL.lock"
+    locked=1
+  fi
   identity=$(identity_of "$SUCCESSOR_PID")
   if [ -z "$identity" ] || ! tmp=$(mktemp "$LEFT_RECORD.tmp.XXXXXX" 2>/dev/null) \
     || ! printf '%s\t%s\n' "$SUCCESSOR_PID" "$identity" > "$tmp" 2>/dev/null \
@@ -695,8 +821,16 @@ detach_successor() {
     || [ "$(cat "$LEFT_RECORD" 2>/dev/null)" != "$SUCCESSOR_PID"$'\t'"$identity" ]; then
     [ -z "$tmp" ] || rm -f "$tmp" "$LEFT_RECORD/${tmp##*/}" 2>/dev/null || true
     log_line "pass-through	successor-unrecorded	$(printf '%s\n' "$REASON" | head -n 1)"
+    [ "$locked" -eq 0 ] || fm_lock_release "$SUCCESSOR_SPOOL.lock"
     return 1
   fi
+  if [ "$PRESTARTED" -eq 1 ] && [ -n "$SUCCESSOR_GENERATION" ]; then
+    if ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+      [ "$locked" -eq 0 ] || fm_lock_release "$SUCCESSOR_SPOOL.lock"
+      return 1
+    fi
+  fi
+  [ "$locked" -eq 0 ] || fm_lock_release "$SUCCESSOR_SPOOL.lock"
   disown "$SUCCESSOR_PID" 2>/dev/null || true
   forget_process "$SUCCESSOR_PID"
   SUCCESSOR_PID=
@@ -713,6 +847,20 @@ leave_successor_for_main() {
     return 1
   fi
   detach_successor
+}
+
+# The parked arm that handed this host a close through its spool is already
+# the successor cycle, scanning on: take it over as the successor instead of
+# starting another.
+adopt_parked_successor() {
+  SUCCESSOR_PID=$ARM_PID
+  SUCCESSOR_OUT=$ARM_OUT
+  SUCCESSOR_SPOOL=$ARM_SPOOL
+  SUCCESSOR_WATCHER=$SPOOL_WATCHER
+  SUCCESSOR_GENERATION=$SPOOL_GENERATION
+  ARM_PID=
+  ARM_OUT=
+  ARM_SPOOL=
 }
 
 # The engine conversation for this turn: the recorded one while it belongs to
@@ -850,11 +998,11 @@ handle_wake() {  # <reason-lines>
   ! fm_afk_contract_away_present "$STATE" || TURN_POSTURE=away
   first=$(printf '%s\n' "$reason" | head -n 1)
   if [ "$TURN_POSTURE" = attended ]; then
-    attended_acceptor "$first" || return 2
+    attended_acceptor "$reason" || return 2
     scope=$ATTENDED_OFFER
   else
     set --
-    case "$first" in heartbeat*) set -- --heartbeat ;; esac
+    if printf '%s\n' "$reason" | grep -Eq '^heartbeat($|:)'; then set -- --heartbeat; fi
     if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" --afk 2>/dev/null); then
       HANDLE_WHY="branch eligibility could not be computed"
       return 1
@@ -1024,11 +1172,12 @@ turn_captain_seqs() {  # <turn>
   awk -F '\t' -v turn="$1" '$1 == turn && $3 == "captain" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
 }
 
-# Why an attended close stays with main exactly as the plain arm delivers it,
+# Why an attended batch stays with main exactly as the plain arm delivers it,
 # or nothing when the supervision session may take it. Sets ATTENDED_WHY, and
-# ATTENDED_OFFER to the offer's verdict and the scope it judged.
-attended_acceptor() {  # <first-reason-line>
-  local offer=
+# ATTENDED_OFFER to the accepted scope; docs/supervision-host.md "Attended"
+# owns batch routing and heartbeat scope.
+attended_acceptor() {  # <reason-lines>
+  local offer='' heartbeat_offer='' line
   ATTENDED_WHY=
   ATTENDED_OFFER=
   if ! fm_supervision_host_attended_ready "$CONFIG" "$PRIMARY"; then
@@ -1037,12 +1186,19 @@ attended_acceptor() {  # <first-reason-line>
     ATTENDED_WHY="the main session could not be identified"
   elif health_cooling; then
     ATTENDED_WHY="the supervision session is cooling down after engine errors"
-  elif ! offer=$(printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer 2>/dev/null); then
-    ATTENDED_WHY="branch eligibility could not be computed"
-  elif [ "$(printf '%s\n' "$offer" | sed -n 's/^eligible=//p')" != 1 ]; then
-    ATTENDED_WHY="main-only"
+  else
+    while IFS= read -r line; do
+      if ! offer=$(printf '%s\n' "$line" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer 2>/dev/null); then
+        ATTENDED_WHY="branch eligibility could not be computed"
+        break
+      elif [ "$(printf '%s\n' "$offer" | sed -n 's/^eligible=//p')" != 1 ]; then
+        ATTENDED_WHY="main-only"
+        break
+      fi
+      case "$line" in heartbeat|heartbeat:*) heartbeat_offer=$offer ;; esac
+    done <<< "$1"
   fi
-  ATTENDED_OFFER=$offer
+  ATTENDED_OFFER=${heartbeat_offer:-$offer}
   [ -z "$ATTENDED_WHY" ]
 }
 
@@ -1071,8 +1227,14 @@ ARM_PID=$STARTED_ARM_PID
 ARM_OUT=$STARTED_ARM_OUT
 
 while :; do
+  # Idle while waiting: a continuing arm's close exits to this wait instead of
+  # going to its spool (bin/fm-watch-arm.sh, "Scheduling continuation").
+  [ -z "$ARM_SPOOL" ] || fm_lock_acquire_wait "$ARM_SPOOL.lock"
+  rm -f "$BUSY_FILE" 2>/dev/null || true
+  [ -z "$ARM_SPOOL" ] || fm_lock_release "$ARM_SPOOL.lock"
   boundary_reached && boundary_exit
   await_close || boundary_exit
+  printf '%s\n' "$HOST_PID" > "$BUSY_FILE" 2>/dev/null || true
   REASON=$(printf '%s\n' "$ARM_TEXT" | grep -E '^(signal:|stale:|check:|heartbeat($|:))' || true)
 
   # The away daemon owns triage while its flag exists; the owner stands down.
@@ -1092,10 +1254,15 @@ while :; do
   # Attended: the close reaches main exactly as the plain arm delivers it,
   # unless the supervision session may take it (attended_acceptor).
   if ! fm_afk_contract_away_present "$STATE"; then
-    if ! attended_acceptor "$(printf '%s\n' "$REASON" | head -n 1)"; then
+    if ! attended_acceptor "$REASON"; then
       log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
       if [ "$ATTENDED_WHY" = main-only ]; then
-        leave_successor_for_main || true
+        if [ "$PRESTARTED" -eq 1 ]; then
+          adopt_parked_successor
+          detach_successor || true
+        else
+          leave_successor_for_main || true
+        fi
       fi
       emit
       exit 0
@@ -1121,14 +1288,12 @@ while :; do
 
   # A turn that could outlive the boundary would outlive the hook registration.
   turn_crosses_boundary && boundary_exit
-  if ! ARM_OWN_GROUP=1 start_successor "$CLOSED_ARM_PID"; then
+  if [ "$PRESTARTED" -eq 1 ]; then
+    adopt_parked_successor
+  elif ! ARM_OWN_GROUP=1 start_successor "$CLOSED_ARM_PID" --handling; then
     exit_to_main "the successor watcher cycle could not be verified before handling; this wake is yours"
   fi
-  if [ -n "$SUCCESSOR_GENERATION" ]; then
-    if ! "$SCRIPT_DIR/fm-watch-arm.sh" --handling-delivered "$SUCCESSOR_GENERATION" --watcher-pid "$SUCCESSOR_WATCHER" >/dev/null 2>&1; then
-      exit_to_main "the handling handoff to the successor watcher could not be confirmed; this wake is yours"
-    fi
-  fi
+
 
   # The captain returned during that turn: the return brief was rendered
   # before its visible outcomes existed, so main relays them now, handled or not.
@@ -1185,7 +1350,9 @@ while :; do
   # Handled: park on the successor.
   ARM_PID=$SUCCESSOR_PID
   ARM_OUT=$SUCCESSOR_OUT
+  ARM_SPOOL=$SUCCESSOR_SPOOL
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
+  SUCCESSOR_SPOOL=
   ARM_TEXT=
 done

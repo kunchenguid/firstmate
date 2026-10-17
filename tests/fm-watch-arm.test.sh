@@ -1609,6 +1609,218 @@ SH
   printf '%s\n' "$dir"
 }
 
+# Scheduling continuation (header, "Scheduling continuation"): a continuing arm
+# restarts its own watcher after EVERY actionable close of the child it owns,
+# including a child that closes before its health was ever observed, instead of
+# ending supervision with it. The stand-in watcher closes with a check wake on
+# its first three runs without ever taking the singleton, then stays alive; the
+# host stand-in is alive and busy, so the arm hands each close to its spool.
+test_continuing_arm_restarts_after_every_actionable_close_even_before_health() {
+  local dir state bindir f reader polls rows runs
+  dir=$(make_case continuing-arm)
+  state="$dir/state"
+  bindir="$dir/bin"
+  mkdir -p "$bindir"
+  for f in "$ROOT"/bin/*; do
+    [ "$(basename "$f")" = fm-watch.sh ] || ln -s "$f" "$bindir/$(basename "$f")"
+  done
+  cat > "$bindir/fm-watch.sh" <<SH
+#!/usr/bin/env bash
+n=\$(( \$(cat "$dir/runs" 2>/dev/null || echo 0) + 1 ))
+printf '%s\\n' "\$n" > "$dir/runs"
+if [ "\$n" -le 3 ]; then
+  echo "check: stub: event-\$n"
+  exit 0
+fi
+. "$ROOT/bin/fm-wake-lib.sh"
+mkdir -p "$state/.watch.lock"
+printf '%s\\n' "\$$" > "$state/.watch.lock/pid"
+printf '%s\\n' "$dir" > "$state/.watch.lock/fm-home"
+printf '%s\\n' "$bindir/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+fm_pid_identity "\$$" > "$state/.watch.lock/pid-identity"
+date +%s > "$state/.last-watcher-beat"
+trap 'exit 0' TERM
+while :; do sleep 1; done
+SH
+  chmod +x "$bindir/fm-watch.sh"
+  sleep 120 &
+  reader=$!
+  printf '%s\n' "$reader" > "$state/.lock"
+  : > "$dir/busy"
+  : > "$dir/spool"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=40 \
+    FM_WATCH_ARM_CONTINUE_READER="$reader" FM_WATCH_ARM_CONTINUE_SPOOL="$dir/spool" FM_WATCH_ARM_CONTINUE_BUSY="$dir/busy" \
+    "$bindir/fm-watch-arm.sh" > "$dir/arm.out" 2>&1 &
+  ARM_PID=$!
+  polls=0
+  while [ "$polls" -lt 100 ] && [ "$(cat "$dir/runs" 2>/dev/null || echo 0)" -lt 4 ]; do
+    sleep 0.1
+    polls=$((polls + 1))
+  done
+  polls=0
+  while [ "$polls" -lt 150 ] && ! grep -q '^watcher: started pid=' "$dir/arm.out"; do
+    sleep 0.1
+    polls=$((polls + 1))
+  done
+  runs=$(cat "$dir/runs" 2>/dev/null || echo 0)
+  kill -0 "$ARM_PID" 2>/dev/null || { kill "$reader" 2>/dev/null; fail "the arm ended at the first actionable close instead of restarting its watcher: runs=$runs out=$(cat "$dir/arm.out")"; }
+  kill -TERM "$ARM_PID" 2>/dev/null; wait "$ARM_PID" 2>/dev/null; kill "$reader" 2>/dev/null
+  grep -q '^watcher: started pid=' "$dir/arm.out" || fail "initial readiness must survive an early close and restart"
+  [ "$runs" -ge 4 ] || fail "the arm restarted its watcher only $runs time(s) for three actionable closes"
+  for f in 1 2 3; do
+    rows=$(grep -c "^C	check: stub: event-$f\$" "$dir/spool")
+    [ "$rows" -eq 1 ] || fail "close $f reached the spool $rows time(s), not once: $(cat "$dir/spool")"
+  done
+  [ "$(grep -c 'actionable-check' "$state/.watch-cycle-exits.log")" -ge 3 ] || fail "the cycle ledger did not record the three closes: $(cat "$state/.watch-cycle-exits.log")"
+  pass "watch-arm: a continuing arm restarts its one watcher after every actionable close, including one before health, and hands each close over once"
+}
+
+test_continuing_arm_replaces_a_watcher_killed_by_a_signal_but_not_one_it_was_asked_to_stop() {
+  local dir state bindir f reader polls runs watcher
+  dir=$(make_case continuing-arm-killed)
+  state="$dir/state"
+  bindir="$dir/bin"
+  mkdir -p "$bindir"
+  for f in "$ROOT"/bin/*; do
+    [ "$(basename "$f")" = fm-watch.sh ] || ln -s "$f" "$bindir/$(basename "$f")"
+  done
+  cat > "$bindir/fm-watch.sh" <<SH
+#!/usr/bin/env bash
+n=\$(( \$(cat "$dir/runs" 2>/dev/null || echo 0) + 1 ))
+printf '%s\\n' "\$n" > "$dir/runs"
+. "$ROOT/bin/fm-wake-lib.sh"
+mkdir -p "$state/.watch.lock"
+printf '%s\\n' "\$\$" > "$state/.watch.lock/pid"
+printf '%s\\n' "$dir" > "$state/.watch.lock/fm-home"
+printf '%s\\n' "$bindir/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+fm_pid_identity "\$\$" > "$state/.watch.lock/pid-identity"
+date +%s > "$state/.last-watcher-beat"
+if [ "\$n" -le 2 ]; then
+  sleep 1.5
+  kill -KILL "\$\$"
+fi
+while :; do sleep 1; done
+SH
+  chmod +x "$bindir/fm-watch.sh"
+  sleep 120 &
+  reader=$!
+  printf '%s\n' "$reader" > "$state/.lock"
+  : > "$dir/busy"
+  : > "$dir/spool"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=40 \
+    FM_WATCH_ARM_CONTINUE_READER="$reader" FM_WATCH_ARM_CONTINUE_SPOOL="$dir/spool" FM_WATCH_ARM_CONTINUE_BUSY="$dir/busy" \
+    "$bindir/fm-watch-arm.sh" > "$dir/arm.out" 2>&1 &
+  ARM_PID=$!
+  polls=0
+  while [ "$polls" -lt 300 ] && [ "$(cat "$dir/runs" 2>/dev/null || echo 0)" -lt 3 ]; do
+    sleep 0.1
+    polls=$((polls + 1))
+  done
+  runs=$(cat "$dir/runs" 2>/dev/null || echo 0)
+  kill -0 "$ARM_PID" 2>/dev/null || { kill "$reader" 2>/dev/null; fail "the arm ended when its watcher was killed instead of replacing it: runs=$runs out=$(cat "$dir/arm.out")"; }
+  [ "$runs" -ge 3 ] || { kill "$ARM_PID" "$reader" 2>/dev/null; fail "the arm replaced a killed watcher only $runs time(s)"; }
+  [ "$(grep -c 'signal-exit' "$state/.watch-cycle-exits.log")" -ge 2 ] || fail "the cycle ledger did not record the two killed watchers: $(cat "$state/.watch-cycle-exits.log")"
+  # A watcher the stop path ends with TERM is not replaced: the arm ends. Wait
+  # for the third watcher to hold the lock, since the second one's pid is dead.
+  polls=0
+  watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null)
+  while [ "$polls" -lt 100 ] && { [ -z "$watcher" ] || ! kill -0 "$watcher" 2>/dev/null; }; do
+    sleep 0.1
+    polls=$((polls + 1))
+    watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null)
+  done
+  kill -TERM "$watcher" 2>/dev/null
+  polls=0
+  while [ "$polls" -lt 200 ] && kill -0 "$ARM_PID" 2>/dev/null; do
+    sleep 0.1
+    polls=$((polls + 1))
+  done
+  kill "$reader" 2>/dev/null
+  if kill -0 "$ARM_PID" 2>/dev/null; then
+    kill -TERM "$ARM_PID" 2>/dev/null; wait "$ARM_PID" 2>/dev/null
+    fail "the arm restarted a watcher it was asked to stop (runs=$(cat "$dir/runs"))"
+  fi
+  wait "$ARM_PID" 2>/dev/null
+  [ "$(cat "$dir/runs")" -eq 3 ] || fail "a TERM-stopped watcher was replaced: runs=$(cat "$dir/runs")"
+  pass "watch-arm: a continuing arm replaces a watcher killed by a signal and leaves one it was asked to stop"
+}
+
+# A watcher that dies of a signal every time it starts is not restarted without
+# bound: the fourth death in a row inside a minute ends the arm with the failure.
+test_continuing_arm_stops_replacing_a_watcher_that_keeps_dying() {
+  local dir state bindir f reader polls rc mode=${1:-consecutive}
+  dir=$(make_case "continuing-arm-death-loop-$mode")
+  state="$dir/state"
+  bindir="$dir/bin"
+  mkdir -p "$bindir"
+  for f in "$ROOT"/bin/*; do
+    [ "$(basename "$f")" = fm-watch.sh ] || ln -s "$f" "$bindir/$(basename "$f")"
+  done
+  cat > "$bindir/fm-watch.sh" <<SH
+#!/usr/bin/env bash
+n=\$(( \$(cat "$dir/runs" 2>/dev/null || echo 0) + 1 ))
+printf '%s\\n' "\$n" > "$dir/runs"
+. "$ROOT/bin/fm-wake-lib.sh"
+mkdir -p "$state/.watch.lock"
+printf '%s\\n' "\$\$" > "$state/.watch.lock/pid"
+printf '%s\\n' "$dir" > "$state/.watch.lock/fm-home"
+printf '%s\\n' "$bindir/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+fm_pid_identity "\$\$" > "$state/.watch.lock/pid-identity"
+date +%s > "$state/.last-watcher-beat"
+if [ "$mode" = alternating ]; then
+  if [ "\$n" -gt 8 ]; then
+    while :; do sleep 1; done
+  fi
+  if [ \$((n % 2)) -eq 0 ]; then
+    echo "check: stub: success-\$n"
+    exit 0
+  fi
+fi
+sleep 0.5
+kill -KILL "\$\$"
+SH
+  chmod +x "$bindir/fm-watch.sh"
+  sleep 120 &
+  reader=$!
+  printf '%s\n' "$reader" > "$state/.lock"
+  : > "$dir/busy"
+  : > "$dir/spool"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=40 \
+    FM_WATCH_ARM_CONTINUE_READER="$reader" FM_WATCH_ARM_CONTINUE_SPOOL="$dir/spool" FM_WATCH_ARM_CONTINUE_BUSY="$dir/busy" \
+    "$bindir/fm-watch-arm.sh" > "$dir/arm.out" 2>&1 &
+  ARM_PID=$!
+  polls=0
+  while [ "$polls" -lt 300 ] && kill -0 "$ARM_PID" 2>/dev/null; do
+    [ "$mode" != alternating ] || [ "$(cat "$dir/runs" 2>/dev/null || echo 0)" -lt 9 ] || break
+    sleep 0.1
+    polls=$((polls + 1))
+  done
+  if [ "$mode" = alternating ]; then
+    rc=0
+    kill -0 "$ARM_PID" 2>/dev/null || rc=1
+    kill -TERM "$ARM_PID" 2>/dev/null || true
+    wait "$ARM_PID" 2>/dev/null || true
+    kill "$reader" 2>/dev/null || true
+    [ "$rc" -eq 0 ] && [ "$(cat "$dir/runs")" -eq 9 ] \
+      || fail "successful closes did not reset consecutive deaths: $(cat "$dir/arm.out")"
+    [ "$(grep -c '^C' "$dir/spool")" -eq 4 ] || fail "successful closes were lost"
+    pass "watch-arm: successful closes reset the consecutive death limit"
+    return
+  fi
+  if kill -0 "$ARM_PID" 2>/dev/null; then
+    kill -TERM "$ARM_PID" 2>/dev/null
+    kill "$reader" 2>/dev/null
+    fail "the arm kept replacing a watcher that dies every time (runs=$(cat "$dir/runs"))"
+  fi
+  rc=0
+  wait "$ARM_PID" 2>/dev/null || rc=$?
+  kill "$reader" 2>/dev/null
+  [ "$rc" -ne 0 ] || fail "the arm ended cleanly after a dying watcher"
+  [ "$(cat "$dir/runs")" -eq 4 ] || fail "expected the first watcher and three replacements, got $(cat "$dir/runs") runs"
+  assert_contains "$(cat "$dir/arm.out")" "watcher: FAILED" "the dying watcher's failure was not reported"
+  pass "watch-arm: a continuing arm stops replacing a watcher that dies of a signal every time"
+}
+
 test_opencode_arm_plugin_decides_with_the_shared_predicate() {
   command -v node >/dev/null 2>&1 || { printf 'skip: node not found\n'; return 0; }
   local driver case_name dir state config out status
@@ -1713,6 +1925,15 @@ EOF
   pass "watch-arm: the OpenCode arm plugin decides with the shared supervision predicate"
 }
 
+test_successful_closes_reset_the_death_limit() {
+  test_continuing_arm_stops_replacing_a_watcher_that_keeps_dying alternating
+}
+
+if [ -n "${FM_TEST_CASES:-}" ]; then
+  for test_case in $FM_TEST_CASES; do "$test_case"; done
+  exit 0
+fi
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -1743,4 +1964,8 @@ test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
+test_continuing_arm_restarts_after_every_actionable_close_even_before_health
+test_continuing_arm_replaces_a_watcher_killed_by_a_signal_but_not_one_it_was_asked_to_stop
+test_continuing_arm_stops_replacing_a_watcher_that_keeps_dying
+test_successful_closes_reset_the_death_limit
 test_opencode_arm_plugin_decides_with_the_shared_predicate
