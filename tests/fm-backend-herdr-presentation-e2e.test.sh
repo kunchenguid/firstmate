@@ -503,11 +503,16 @@ session_presentation_lock_path() {
   ' "$ROOT" "$HERDR_LAB_SESSION"
 }
 
+# Ordering and cleanup never close, rename, or delete a workspace, session, or
+# server, and never mutate a label. A projection's own seeded-tab prune and its
+# rollback of the disposable workspace's own tabs are the expected tab closes
+# inside these sections, so the guard forbids only the workspace, session, and
+# server lifecycle calls plus label renames.
 assert_no_ordering_lifecycle_calls_since() {  # <line-count> <case-name>
   local start=$1 name=$2 calls
   calls=$(sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG")
-  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(close|rename)|tab\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
-    fail "$name introduced a workspace/tab/session lifecycle or label mutation call"
+  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(close|rename)|tab\trename|session\t(stop|delete)|server)' >/dev/null 2>&1; then
+    fail "$name introduced a workspace/session lifecycle or label mutation call"
   fi
 }
 
@@ -899,9 +904,7 @@ ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | 
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent post-create abort cleanup"
 assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_A_PANE" "$CAPTAIN_FOCUS" "$ABORT_A_TAB"
 assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_B_PANE" "$CAPTAIN_FOCUS" "$ABORT_B_TAB"
-ABORT_LIFECYCLE=$(sed -n "$((ABORT_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -E $'^(workspace\t(close|rename)|session\t(stop|delete)|server)')
-[ -z "$ABORT_LIFECYCLE" ] \
-  || fail "concurrent post-create abort cleanup introduced a workspace/session lifecycle or label mutation call: $ABORT_LIFECYCLE"
+assert_no_ordering_lifecycle_calls_since "$ABORT_START" "concurrent post-create abort cleanup"
 for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
   if lab pane get "$ABORT_PANE" >/dev/null 2>&1; then
     fail "serialized post-create abort cleanup left exact task pane $ABORT_PANE alive"
