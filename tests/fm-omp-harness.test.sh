@@ -579,6 +579,220 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+# A handling confirmation that exits 3 means the recovery marker already moved
+# past this restoration's generation: a newer pipeline owns the episode, so the
+# wake is delivered plain. Any other refusal is still a typed failure.
+test_watch_extension_superseded_confirmation_is_not_a_failure() {
+  local code repo home out status
+  for code in 3 1; do
+    repo="$TMP_ROOT/watch-confirm-$code/repo"; home="$TMP_ROOT/watch-confirm-$code/home"
+    install_omp_extension_fixture "$repo"
+    mkdir -p "$home/state"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit "${CONFIRM_RC:?}"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+if [ ! -e "${FM_HOME:?}/state/.fired" ]; then
+  : > "$FM_HOME/state/.fired"
+  sleep 1
+  printf 'signal: omp-confirm done\n'
+  exit 0
+fi
+sleep 30
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(CONFIRM_RC="$code" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+      EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m) { sent.push(m); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 80 && sent.length < 1; i += 1) await new Promise((r) => setTimeout(r, 100));
+if (sent.length !== 1) throw new Error(`expected one wake, saw ${sent.length}`);
+const rejected = sent[0].includes("handling delivery confirmation was rejected (status=1 generation=gen-1");
+if (process.env.CONFIRM_RC === "3" && sent[0].includes("FAILED")) throw new Error(`a superseded confirmation was reported as a failure: ${sent[0]}`);
+if (process.env.CONFIRM_RC === "1" && !rejected) throw new Error(`a refused confirmation lost its failure line: ${sent[0]}`);
+await handlers.get("session_shutdown")?.({}, {});
+process.exit(0);
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "omp superseded confirmation (exit $code): $out"
+    [ -z "$out" ] || fail "omp superseded confirmation test printed output (exit $code): $out"
+  done
+  pass ".omp watch extension: a superseded handling confirmation (exit 3) delivers a plain wake, a refused one (exit 1) still reports failure"
+}
+
+# A failed confirmation retires only the arm its own recovery token names. The
+# restored successor exits with its stdout held open (no close), a manual repair
+# starts a newer arm, then the successor reports ready and its confirmation
+# fails with its dead watcher pid: the newer healthy arm must survive.
+test_watch_extension_failed_confirmation_spares_a_newer_arm() {
+  local repo home log stop go retired out status
+  repo="$TMP_ROOT/watch-newer/repo"; home="$TMP_ROOT/watch-newer/home"
+  log="$TMP_ROOT/watch-newer/arm.log"; stop="$TMP_ROOT/watch-newer/stop"
+  go="$TMP_ROOT/watch-newer/go"; retired="$TMP_ROOT/watch-newer/retired"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 1
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: omp-newer done\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  sleep 0 & dead=$!; wait "$dead" 2>/dev/null || true
+  (
+    while [ ! -e "${FM_GO_FILE:?}" ]; do sleep 0.02; done
+    printf 'watcher: started pid=%s (beacon fresh) recovery-generation=stale\n' "$dead"
+    while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.05; done
+  ) &
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=newer\n' "$$"
+trap 'printf "retired\n" > "${FM_RETIRED_FILE:?}"; exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_GO_FILE="$go" FM_RETIRED_FILE="$retired" FM_OMP_ARM_READY_TIMEOUT_MS=20000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const handlers = new Map(); let tool = null; let prompt = "";
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m) { prompt += m; return undefined; },
+};
+const arms = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 250 && arms().length < 2; i += 1) await sleep(20);
+if (arms().length < 2) throw new Error("restoration never started a successor");
+const successorPid = Number(arms()[1].slice("arm=".length));
+let dead = false;
+for (let i = 0; i < 250 && !dead; i += 1) {
+  try { process.kill(successorPid, 0); await sleep(20); } catch { dead = true; }
+}
+if (!dead) throw new Error(`successor pid ${successorPid} never exited`);
+const repair = await tool.execute();
+if (!repair.content[0].text.includes("started omp extension arm child")) throw new Error(`repair did not start a newer arm: ${repair.content[0].text}`);
+for (let i = 0; i < 250 && arms().length < 3; i += 1) await sleep(20);
+if (arms().length !== 3) throw new Error(`expected a newer third arm: ${arms().join(" | ")}`);
+const newerPid = Number(arms()[2].slice("arm=".length));
+writeFileSync(process.env.FM_GO_FILE, "go\n");
+for (let i = 0; i < 250 && !prompt.includes("handling delivery confirmation was rejected"); i += 1) await sleep(20);
+if (!prompt.includes("handling delivery confirmation was rejected")) throw new Error(`the stale successor's confirmation never failed: ${prompt}`);
+await sleep(200);
+if (existsSync(process.env.FM_RETIRED_FILE)) throw new Error("a failed confirmation for a stale successor retired the newer healthy arm");
+process.kill(newerPid, 0);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await handlers.get("session_shutdown")?.({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp failed confirmation must spare a newer arm: $out"
+  [ -z "$out" ] || fail "omp confirm-newer test printed output: $out"
+  pass ".omp watch extension: a failed confirmation for a stale successor spares the newer arm"
+}
+
+# An arm child whose process is gone while a straggler holds its stdio open
+# never fires close. Neither a repair call nor a scheduled continuity retry may
+# treat that dead handle as an occupied slot.
+test_watch_extension_dead_unclosed_child_does_not_hold_the_slot() {
+  local repo home log stop release out status
+  repo="$TMP_ROOT/watch-dead/repo"; home="$TMP_ROOT/watch-dead/home"
+  log="$TMP_ROOT/watch-dead/arm.log"; stop="$TMP_ROOT/watch-dead/stop"; release="$TMP_ROOT/watch-dead/release"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  (while [ ! -e "${FM_RELEASE_FILE:?}" ]; do sleep 0.02; done) &
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  (while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.05; done) &
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  # The script sits in a file: Bash 3.2 cannot parse this quoted heredoc inside $( ).
+  cat > "$TMP_ROOT/omp-dead-arm.mjs" <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const handlers = new Map(); let tool = null;
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage() { return undefined; },
+};
+const arms = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitForExit(count) {
+  for (let i = 0; i < 250 && arms().length < count; i += 1) await sleep(20);
+  if (arms().length < count) throw new Error(`expected ${count} arms: ${arms().join(" | ")}`);
+  const pid = Number(arms()[count - 1].slice("arm=".length));
+  for (let i = 0; i < 250; i += 1) {
+    try { process.kill(pid, 0); } catch { return; }
+    await sleep(20);
+  }
+  throw new Error(`arm pid ${pid} never exited`);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+await waitForExit(1);
+// Repair over the dead first arm starts a second one.
+const repair = await tool.execute();
+if (!repair.content[0].text.includes("started omp extension arm child")) throw new Error(`repair no-opped on a dead child: ${repair.content[0].text}`);
+await waitForExit(2);
+// The first arm's close now fires; its scheduled retry must see the dead second
+// arm as an empty slot and start a third.
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+for (let i = 0; i < 250 && arms().length < 3; i += 1) await sleep(20);
+if (arms().length !== 3) throw new Error(`the first arm's close scheduled no retry over the dead second arm: ${arms().join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await handlers.get("session_shutdown")?.({}, {});
+process.exit(0);
+EOF
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RELEASE_FILE="$release" FM_WATCH_REARM_RETRY_BASE_MS=20 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node "$TMP_ROOT/omp-dead-arm.mjs" 2>&1)
+  status=$?
+  expect_code 0 "$status" "omp dead-but-unclosed arm child must not hold the slot: $out"
+  [ -z "$out" ] || fail "omp dead-child test printed output: $out"
+  pass ".omp watch extension: a dead-but-unclosed arm child frees the slot for repair and scheduled retry"
+}
+
 # An opted-in home spawns the supervision host in the arm's place; its streamed
 # status line drives readiness and the handling handoff, and a handed-back
 # wake is delivered with every host line and the away note.
@@ -830,8 +1044,8 @@ printf '%s\n' "$started"
 sleep 30
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
-    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+  # The script sits in a file: Bash 3.2 cannot parse this quoted heredoc inside $( ).
+  cat > "$TMP_ROOT/omp-split-close.mjs" <<'EOF'
 import { pathToFileURL } from "node:url";
 import { writeFileSync } from "node:fs";
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -854,7 +1068,8 @@ if (!second[0].m.includes("supervision-host: outcome 2 for demo [captain]: fixtu
 await handlers.get("session_shutdown")({}, {});
 process.exit(0);
 EOF
-)
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node "$TMP_ROOT/omp-split-close.mjs" 2>&1)
   status=$?
   expect_code 0 "$status" "omp watch extension split host close: $out"
   [ -z "$out" ] || fail "omp watch extension split host close test printed output: $out"
@@ -872,6 +1087,9 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_superseded_confirmation_is_not_a_failure
+test_watch_extension_failed_confirmation_spares_a_newer_arm
+test_watch_extension_dead_unclosed_child_does_not_hold_the_slot
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off
