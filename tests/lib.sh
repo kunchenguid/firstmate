@@ -26,11 +26,13 @@ if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
 fi
 FM_TEST_LIB_SOURCED=1
 
-# Pin the fixture umask. Firstmate's state-root and process-event contracts
-# refuse group- or world-writable state directories, and a permissive ambient
-# umask (e.g. 0002) makes every `mkdir state` fixture fail that contract before
-# the behavior under test can even run. 022 is the conventional default this
-# suite's fixtures were written against.
+# Pin the fixture umask, the single fixture-umask rule for every suite that
+# sources this library. A permissive ambient umask (e.g. 0002) leaves a
+# `mkdir state` fixture group-writable, which Firstmate's state-directory
+# contracts refuse outright before the behavior under test can even run - the
+# process-event state root is the exception, established private on first use
+# rather than refused (docs/configuration.md owns that contract). 022 is the
+# conventional default this suite's fixtures were written against.
 umask 022
 
 # Fixture Git isolation for every suite that reaches this library; the helper's
