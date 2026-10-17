@@ -1,0 +1,22 @@
+{
+  "schema": "fm-lane-placement.v1",
+  "mode": "advise",
+  "homes": {
+    "main":          {"rank": 3, "captain_machine": true, "tags": ["macos", "macos-signing", "webkit"]},
+    "writeide-ux":   {"rank": 4, "captain_machine": true, "tags": ["macos"]},
+    "pc-lanes":      {"rank": 2, "tags": ["windows-host", "gpu-nvidia"]},
+    "scholar-lanes": {"rank": 1, "tags": ["windows-host", "gpu-nvidia", "laptop"]}
+  },
+  "profiles": {
+    "default":      {"footprint_gb": 1.0},
+    "engine-heavy": {"footprint_gb": 1.5},
+    "macos-app":    {"footprint_gb": 2.0, "requires": ["macos"]},
+    "docs":         {"footprint_gb": 0.5}
+  },
+  "reserve_gb": 2,
+  "facts_max_age_s": 120,
+  "facts_budget_s": 5,
+  "min_uptime_s": 1800,
+  "unstable_window_s": 21600,
+  "pending_ttl_s": 600
+}
