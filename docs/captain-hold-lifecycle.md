@@ -11,6 +11,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 | Question | Section |
 | --- | --- |
 | What is a captain call, and which subcommand does what? | [Mechanism](#mechanism) |
+| How is a call's structured card written or refreshed? | [The raise-time decision card](#the-raise-time-decision-card) |
 | Why does cleanup of finished work leave a captain call open? | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
 | How does a keyed answer from chat or a board reach the call? | [Answer-time resolution](#answer-time-resolution) |
 | How is a call closed when it stopped being a question? | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
@@ -34,6 +35,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | Subcommand | What it does | Details |
 | --- | --- | --- |
 | `hold` | Creates or reuses a task and holds it for the captain. | [Creating a hold](#creating-a-hold-hold) |
+| `card` | Rewrites the structured card for an open captain call. | [The raise-time decision card](#the-raise-time-decision-card) |
 | `answer` | Records the captain's exact words and resolves the call. | [Answering a call](#answering-a-call-answer) |
 | `complete` | Records the reviewed captain-held task ids in the originating task's metadata. | [Recording a reviewed inventory](#recording-a-reviewed-inventory-complete) |
 | `verify` | Read-only check that scout teardown runs before removing source state. | [Checking before scout teardown](#checking-before-scout-teardown-verify) |
@@ -128,6 +130,26 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
+
+## The raise-time decision card
+
+A call is answerable the moment it is raised, but the board and the captain's deck can show options, context, and a recommendation only when a card carries them.
+That structure exists in the agent that raises the call and in nothing later, so `bin/fm-captain-hold.sh hold` accepts card flags - or `--card-file` for a bare card or an `fm-decision-card.v1` envelope - and writes the same record `bin/fm-bearings-board.sh build` persists under `state/decision-cards/<task>.json`.
+The `card <task-id>` form rewrites that record for an open call.
+Validation runs before the hold's first mutation, so a malformed card leaves the task, the backlog, and the store untouched.
+
+**The store is a source as well as a sink, and it wins.**
+For a key the payload also carries, `build` uses the durable record because it was authored where the question was raised and can be newer than the payload's snapshot, while a payload card is used only for a key the store does not hold.
+A record that is not an `fm-decision-card.v1` envelope, fails the stored form of the contract, or whose card names another task is named on stderr as `ignored-store-card:` and skipped rather than failing the build.
+Because the store is authoritative for its keys, refining a card's copy uses `bin/fm-captain-hold.sh card`, not a payload rewrite.
+
+**The deterministic floor.**
+`bin/fm-bearings-board.sh refresh` composes the fleet rows and one card per open call from the canonical snapshot and then builds, so a raised call, a new landed row, or a changed live stage reaches the board without an agent turn.
+A call whose durable store already holds a card keeps that card instead of the composed fallback, so a refresh never publishes a bare duplicate beside the authored options.
+It never invents the richer copy or the dispatch picker a `/bearings lavish` composition owns.
+It composes every Charted Next gate with `dispatchable=false` and classifies warnings only by parenthesized sentinel ids because the snapshot proves neither a cleared blocker-and-time gate nor a richer kind, and prose is never read to guess either.
+
+The authored-card contract is owned once by `bin/fm-decision-card-lib.sh`, so the payload validator, the raise-time writer, and the store reader use the same definition of a valid card.
 
 ## Cleanup never closes a captain call
 
@@ -291,6 +313,8 @@ The binding-checked `reconcile-requests` command is that internal intake rather 
 
 ### Verifying and retiring a request
 
+A pending request also affects snapshot classification; [Fleet snapshot buckets](#fleet-snapshot-buckets) owns the ordering and presentation contract.
+
 Verification retires a request through one of two outcomes.
 Each outcome requires both the pending board-created request and the operator input that supports its claim:
 
@@ -348,9 +372,9 @@ For a main-home call, the reconcile option is the recovery path for whatever sti
 ### Fleet snapshot buckets
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)`, `(hold-kind: ...)`, and `(hold-until: ...)` metadata alongside existing backlog fields.
-It resolves every repeated `blocked-by:` edge against structured Done records and keeps missing blockers unresolved.
+It resolves every repeated `blocked-by:` edge against structured Done records and archived Done ids, while keeping missing blockers unresolved.
 It then assigns every captain hold exactly one `hold_bucket`.
-The bucket is decided only from structured fields: `hold_kind`, `state`, `hold_until`, `unresolved_blocker_ids`, and the machine-written hold-set timestamp.
+The bucket is decided only from structured fields: `hold_kind`, `state`, a validated pending reconcile request, `hold_until`, `unresolved_blocker_ids`, and the machine-written hold-set timestamp.
 Hold reason and body prose are never matched, so no wording can hide, reveal, or reclassify a decision.
 
 The buckets are total and mutually exclusive.
@@ -358,13 +382,15 @@ The first matching row in this order decides the bucket:
 
 | Order | `hold_bucket` | Condition |
 | --- | --- | --- |
-| 1 | `blocked` | Any blocker is unresolved. |
-| 2 | `dated` | `hold_until` is in the future. |
-| 3 | `aged` | An undated hold's hold-set timestamp is at least `FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS` old (default 14, floored elapsed days). |
-| 4 | `live` | None of the above. |
+| 1 | `reconciling` | A board-created reconcile request with matching schema, file-name task, and record task is pending. |
+| 2 | `blocked` | Any blocker is unresolved. |
+| 3 | `dated` | `hold_until` is in the future. |
+| 4 | `aged` | An undated hold's hold-set timestamp is at least `FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS` old (default 14, floored elapsed days). |
+| 5 | `live` | None of the above. |
 
 No captain hold can fall through them and none can match two, which is what keeps a hold from vanishing from every view.
 `captain_actionable` - waiting on the captain now - is exactly `hold_bucket == "live"`.
+A `reconciling` hold leaves Captain's Call because the captain already sent it back for a check, and it appears under Charted Next as `reconcile requested <timestamp>: <hold reason>` until the request is retired.
 
 Existing undated holds without a hold-set stamp fall back to the task's `since` date.
 That aging is a projection safety net only.
@@ -380,6 +406,7 @@ It preserves every captain hold in the bounded queued inventory of the owning ho
 | `hold_bucket` | Where the hold appears |
 | --- | --- |
 | `live` | A default Captain's Call entry. |
+| `reconciling` | Leaves the default Captain's Call, renders as a Charted Next gate stating `reconcile requested <timestamp>: <hold reason>`, and contributes to the concrete `omitted[]` disclosure. |
 | `blocked`, `dated`, or `aged` | Leaves the default Captain's Call, renders as a Charted Next gate stating why - the blocking work, the `until <date>`, or the floored age - and contributes to the concrete `omitted[]` disclosure. |
 
 `--all-decisions` reveals every captain hold available within the remote-summary bound and drops its gate.
@@ -611,6 +638,9 @@ The board's half is pinned in `tests/fm-bearings-board.test.sh`:
 - Every published decision card carries exactly one reconcile option.
 - Authored options reserve that value across every card type.
 - Recommendations name authored options.
+- A build persists one effective card per key and prefers a valid durable record to a payload copy.
+- A malformed durable record is named and skipped without failing the build.
+- A deterministic refresh composes snapshot rows, merges a stored live-call card, keeps deferred cards out of Captain's Call, and refuses a broken snapshot before publishing.
 - A decision card whose structured subject appears in the payload's landed rows is dropped.
   A genuinely open one is kept even when an unrelated landed id contains its key after a newline.
 - A build requires a fresh authoritative listed-open result before binding or arming.
@@ -632,7 +662,7 @@ Projection regressions live in two suites:
 | Suite | What it covers |
 | --- | --- |
 | `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping. |
-| `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, and scout-report precedence over competing pull-request links. |
+| `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, pending-reconcile classification and record validation, archived-blocker resolution, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, and scout-report precedence over competing pull-request links. |
 
 ### Refreshing this record
 

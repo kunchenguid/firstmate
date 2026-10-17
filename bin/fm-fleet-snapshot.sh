@@ -22,21 +22,24 @@
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
-#     and hold_bucket fields.
-#     Repeated blocker tokens remain ordered; a blocker resolves only when its
-#     structured record is Done, and missing ids stay open.
+#     reconcile_requested, and hold_bucket fields.
+#     Repeated blocker tokens remain ordered; a blocker resolves when its
+#     structured record is Done or its id is archived in data/done-archive.md,
+#     and missing ids stay open.
 #     There is no separate decision type: any captain-held task is the same
 #     primitive, whatever kind its row carries.
 #     hold_bucket is the single classification for every captain hold, decided
-#     only from structured fields - state, hold_kind, hold_until,
-#     unresolved_blocker_ids, and the machine-written hold-set timestamp. No
-#     hold reason or body prose is ever matched. The buckets are total and
-#     mutually exclusive, so every captain hold lands in exactly one and none
-#     can fall through: "blocked" when any blocker is unresolved, else "dated"
-#     when hold_until is still in the future, else "aged" when an undated hold
-#     is at least FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; legacy
-#     unstamped holds fall back to `since`), else "live". A non-captain or Done
-#     row carries null.
+#     only from structured fields - state, hold_kind, a validated pending
+#     reconcile request, hold_until, unresolved_blocker_ids, and the
+#     machine-written hold-set timestamp. No hold reason or body prose is ever
+#     matched. The buckets are total and mutually exclusive, so every captain
+#     hold lands in exactly one and none can fall through: "reconciling" while
+#     a board-created reconcile request is pending, else "blocked" when any
+#     blocker is unresolved, else "dated" when hold_until is still in the
+#     future, else "aged" when an undated hold is at least
+#     FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; legacy unstamped
+#     holds fall back to `since`), else "live". A non-captain or Done row
+#     carries null.
 #     captain_actionable means "waiting on the captain now" and is exactly
 #     hold_bucket == "live".
 #     hold_age_days is the hold's age when computable, else null.
@@ -253,9 +256,10 @@ terminal_in_flight; they never have backlog rows.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until,
-hold_bucket, hold_age_days, and plural blocker fields for downstream
-projections. A captain hold is actionable only when every blocker is Done, any
-hold-until date has arrived, and an undated hold remains below the aging threshold.
+hold_bucket, hold_age_days, reconcile_requested, and plural blocker fields for
+downstream projections. A captain hold is actionable only when no reconcile
+request is pending, every blocker is Done, any hold-until date has arrived, and
+an undated hold remains below the aging threshold.
 Cross-home collection uses FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the
 count bound) and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Every sampled remote home's state/home-summary.json is fetched concurrently
@@ -280,7 +284,9 @@ The registered secondmate table uses FM_SNAPSHOT_REGISTRY_LINES,
 FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
 FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
 Every captain hold carries hold_bucket, decided only from structured fields and
-never from hold reason or body prose: "blocked", "dated", "aged", or "live".
+never from hold reason or body prose: "reconciling" while a validated pending
+board-created reconcile request exists, else "blocked", "dated", "aged", or
+"live", in that order.
 An undated hold ages once its hold-set timestamp is at least
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; 0 ages every hold with a
 non-negative computed age); legacy holds without a stamp fall back to their
@@ -383,6 +389,52 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
+# Pending captain-hold reconcile requests (state/reconcile-requests/*.request) as
+# a task-id -> requested-timestamp map. A call the captain sent back for a
+# re-check is no longer waiting on the captain, so the classification below
+# buckets it apart from the live Captain's Call. The file name IS the request's
+# task, exactly as bin/fm-captain-hold.sh reads it, and the record must carry
+# that script's schema and its own task field; an unreadable, incompatible, or
+# misplaced record is ignored, because it can neither create nor hide a call.
+RECONCILE_REQUEST_SCHEMA=fm-reconcile-request.v1
+
+reconcile_requests_json() {
+  local dir="$STATE/reconcile-requests" file task requested
+  if [ ! -d "$dir" ] || [ -L "$dir" ]; then
+    printf '{}\n'
+    return 0
+  fi
+  {
+    for file in "$dir"/*.request; do
+      [ -f "$file" ] && [ ! -L "$file" ] || continue
+      task=$(basename "$file" .request)
+      case "$task" in
+        ''|*[!A-Za-z0-9._-]*) continue ;;
+      esac
+      [ "$(sed -n 's/^schema=//p' "$file" | head -1)" = "$RECONCILE_REQUEST_SCHEMA" ] || continue
+      [ "$(sed -n 's/^task=//p' "$file" | head -1)" = "$task" ] || continue
+      requested=$(sed -n 's/^requested=//p' "$file" | head -1)
+      printf '%s\t%s\n' "$task" "$requested"
+    done
+  } | jq -Rn 'reduce (inputs | split("\t")) as $row ({}; .[$row[0]] = ($row[1] // ""))' \
+    2>/dev/null || printf '{}\n'
+}
+
+# Ids of tasks already landed into data/done-archive.md. A blocker whose task
+# landed is resolved even though it is no longer an in-backlog record, so the
+# classifier folds those ids into its resolved set. A live backlog row still
+# wins: the record reduce overwrites an archived id the backlog mentions.
+archived_ids_json() {
+  local archive="$DATA/done-archive.md"
+  if [ ! -f "$archive" ] || [ -L "$archive" ]; then
+    printf '[]\n'
+    return 0
+  fi
+  sed -n 's/^- \[x\] \([^ ]*\) -.*/\1/p' "$archive" \
+    | jq -Rn '[inputs | select(test("^[A-Za-z0-9._-]{1,128}$"))]' 2>/dev/null \
+    || printf '[]\n'
+}
+
 backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
   if [ ! -f "$backlog" ]; then
@@ -393,7 +445,9 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
   set -o pipefail
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
-    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
+    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" \
+    --argjson reconcile "$(reconcile_requests_json)" \
+    --argjson archived "$(archived_ids_json)" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -545,8 +599,9 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records
-    | (reduce ($records[] | select(.structured)) as $record ({};
-         .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
+    | (($archived | map({(.): true}) | add) // {}) as $archived_ids
+    | ($archived_ids + (reduce ($records[] | select(.structured)) as $record ({};
+         .[$record.id] = ((.[$record.id] // true) and ($record.state == "done"))))) as $resolved_ids
     | .records |= map(
         if .structured then
           . as $record
@@ -563,8 +618,10 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
                else "done" end)
           | .requires_child_metadata = (.current_role == "worker")
           | .hold_age_days = days_between((.hold_set // .since); $now)
+          | .reconcile_requested = ($reconcile[.id] // null)
           | .hold_bucket =
               (if .hold_kind != "captain" or .hold_reason == null or .state == "done" then null
+               elif .reconcile_requested != null then "reconciling"
                elif (.unresolved_blocker_ids | length) > 0 then "blocked"
                elif .hold_until != null and .hold_until > $today then "dated"
                elif .hold_until == null and .hold_age_days != null
@@ -1124,6 +1181,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           hold_bucket:(.hold_bucket // null),
           hold_age_days:(.hold_age_days // null),
+          reconcile_requested:((.reconcile_requested // null) | if . == null then null else trunc(40) end),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
