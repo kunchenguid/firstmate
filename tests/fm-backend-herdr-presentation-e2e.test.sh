@@ -870,6 +870,7 @@ SH
 chmod +x "$FAIL_MOVER"
 FAIL_START=$(log_line_count)
 FAIL_FOCUS_AUDIT_START=$(focus_audit_line_count)
+FAIL_CREATE_START=$(wc -l < "$WORKSPACE_CREATE_LOG" | tr -d '[:space:]')
 FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAIL_MOVER" \
   spawn_task order-fail "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-fail.out" 2> "$TMP_ROOT/order-fail.err" \
   || fail "move-failure projected spawn should still succeed: $(cat "$TMP_ROOT/order-fail.err")"
@@ -881,18 +882,19 @@ ORDER_FAIL_META="$HOME_DIR/state/order-fail.meta"
 remember_meta_worktree "$ORDER_FAIL_META" >/dev/null
 ORDER_FAIL_WSID=$(grep '^herdr_workspace_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
 ORDER_FAIL_PANE=$(grep '^herdr_pane_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
-ORDER_FAIL_TAB=$(grep '^herdr_tab_id=' "$ORDER_FAIL_META" | cut -d= -f2-)
 FAIL_LIST=$(lab workspace list) || fail "could not inspect the move-failure fallback"
 [ "$(printf '%s' "$FAIL_LIST" | jq -r '.result.workspaces[-1].workspace_id')" = "$ORDER_FAIL_WSID" ] \
   || fail "workspace.move failure did not leave the safe worker in Herdr's default appended order"
 lab pane get "$ORDER_FAIL_PANE" >/dev/null 2>&1 \
   || fail "workspace.move failure cleaned up the safely-created task pane"
+ORDER_FAIL_SEEDED_TAB=$(sed -n "$((FAIL_CREATE_START + 1)),\$p" "$WORKSPACE_CREATE_LOG" \
+  | awk -F '\t' '$4 ~ /^└ order-fail/ { print $2 }')
+[ -n "$ORDER_FAIL_SEEDED_TAB" ] \
+  || fail "move-failure spawn did not record its disposable workspace's seeded default tab"
 FAIL_CLOSED_TABS=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "tab" && $2 == "close" { print $3 }')
-[ "$(printf '%s\n' "$FAIL_CLOSED_TABS" | awk 'NF { n += 1 } END { print n + 0 }')" = 1 ] \
-  || fail "move-failure spawn performed a tab close beyond the normal seeded-tab prune"
-[ "$FAIL_CLOSED_TABS" != "$ORDER_FAIL_TAB" ] \
-  || fail "move-failure spawn closed its exact task tab"
-assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering" "$FAIL_CLOSED_TABS"
+[ "$FAIL_CLOSED_TABS" = "$ORDER_FAIL_SEEDED_TAB" ] \
+  || fail "move-failure spawn closed a tab other than its own seeded default tab: $FAIL_CLOSED_TABS"
+assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering" "$ORDER_FAIL_SEEDED_TAB"
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
 
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
