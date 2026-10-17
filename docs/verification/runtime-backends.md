@@ -6,6 +6,12 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Polytoken worker lifecycle
+
+Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.
+[Polytoken verification](polytoken.md) owns the commands, session-model proof, and lifecycle output; its credentialed live guard refreshes the evidence.
+This does not verify a Polytoken primary, secondmate, or native Herdr pane.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
