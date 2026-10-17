@@ -726,8 +726,9 @@ test_grok_threads_model_and_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' --reasoning-effort 'high'" \
+  assert_contains "$launch" "grok --always-approve --no-ask-user --model 'grok-4' --reasoning-effort 'high'" \
     "grok launch did not thread model and reasoning-effort flags"
+  assert_contains "$launch" "--no-ask-user" "grok launch must carry --no-ask-user"
   assert_not_contains "$launch" "--effort" "grok launch must use --reasoning-effort, not --effort"
   pass "grok receives --model and --reasoning-effort profile flags"
 }
@@ -743,8 +744,9 @@ test_grok_omits_invalid_max_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
+  assert_contains "$launch" "grok --always-approve --no-ask-user --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
     "grok launch did not preserve the model flag and typed brief when max effort was omitted"
+  assert_contains "$launch" "--no-ask-user" "grok launch must carry --no-ask-user even when effort is omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported max reasoning effort"
@@ -762,11 +764,60 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
+  assert_contains "$launch" "grok --always-approve --no-ask-user --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
     "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
+  assert_contains "$launch" "--no-ask-user" "grok launch must carry --no-ask-user even when xhigh effort is omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported xhigh reasoning effort"
+}
+
+test_grok_ship_without_profile_carries_no_ask_user() {
+  local rec id out status launch
+  id=profile-grok-noprofile-z6d
+  rec=$(make_spawn_case profile-grok-noprofile grok "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "grok ship without profile should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "grok --always-approve --no-ask-user" \
+    "grok ship launch without profile must carry --no-ask-user"
+  pass "grok ship without profile carries --no-ask-user"
+}
+
+test_grok_scout_carries_no_ask_user() {
+  local rec id out status launch
+  id=profile-grok-scout-z6e
+  rec=$(make_spawn_case profile-grok-scout grok "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness grok)
+  status=$?
+  expect_code 0 "$status" "grok scout spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "grok --always-approve --no-ask-user" \
+    "grok scout launch must carry --no-ask-user"
+  pass "grok scout carries --no-ask-user"
+}
+
+test_grok_secondmate_carries_no_ask_user() {
+  local rec id sm out status launch
+  id=profile-grok-secondmate-z6f
+  rec=$(make_spawn_case profile-grok-secondmate grok "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "grok secondmate spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "grok --always-approve --no-ask-user" \
+    "grok secondmate launch must carry --no-ask-user"
+  pass "grok secondmate carries --no-ask-user"
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
@@ -2309,6 +2360,9 @@ test_codex_secondmate_launch_keeps_the_hook_layer
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
+test_grok_ship_without_profile_carries_no_ask_user
+test_grok_scout_carries_no_ask_user
+test_grok_secondmate_carries_no_ask_user
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
