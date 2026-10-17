@@ -4147,6 +4147,7 @@ test_opencode_plugin_package_boundary_is_explicit_esm() {
   cp "$ROOT/.opencode/plugins/package.json" "$fixture/plugins/package.json"
   cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$fixture/plugins/lib/fm-operational-input.js"
+  cp "$ROOT/.opencode/plugins/lib/fm-opencode2.js" "$fixture/plugins/lib/fm-opencode2.js"
   out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 await import(pathToFileURL(process.env.PLUGIN).href);
@@ -4207,6 +4208,193 @@ EOF
   expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
   [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
+}
+
+test_opencode2_watch_plugin_arms_on_interrupted_turn_but_not_shutdown() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode2-terminal-root"
+  home="$TMP_ROOT/opencode2-terminal-home"
+  log="$TMP_ROOT/opencode2-terminal.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'armed\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  # The OpenCode 2.0.x plugin context carries the project only as
+  # ctx.location.project.directory, so this fixture deliberately omits every
+  # other directory field.
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const queue = [];
+let wake = null;
+const push = (event) => { queue.push(event); if (wake) { wake(); wake = null; } };
+async function* stream() {
+  for (;;) {
+    while (queue.length) yield queue.shift();
+    await new Promise((resolve) => { wake = resolve; });
+  }
+}
+const ctx = {
+  location: { project: { directory: process.env.WORKTREE } },
+  event: { subscribe: () => stream() },
+  session: { prompt: async () => {} },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default.setup(ctx);
+push({ type: "session.execution.interrupted", data: { sessionID: "ses-shutdown", reason: "shutdown" } });
+await sleep(1000);
+if (existsSync(process.env.FM_ARM_LOG)) {
+  console.error("a shutdown terminal event armed the watcher");
+  process.exit(1);
+}
+push({ type: "session.execution.interrupted", data: { sessionID: "ses-root" } });
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) await sleep(20);
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("an interrupted turn did not arm the watcher");
+  process.exit(1);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode 2 watch plugin must arm on an interrupted turn and ignore shutdown: $out"
+  [ -z "$out" ] || fail "OpenCode 2 terminal-event test printed output: $out"
+  pass "OpenCode 2 watch plugin arms on an interrupted turn from the project location and ignores shutdown"
+}
+
+test_opencode2_sessionstart_nudge_prompts_with_flat_session_shape() {
+  local plugin repo home out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js"
+  repo="$TMP_ROOT/opencode2-nudge-root"
+  home="$TMP_ROOT/opencode2-nudge-home"
+  mkdir -p "$repo/bin" "$home/state"
+  git init -q "$repo"
+  cat > "$repo/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'NUDGE_TEXT\n'
+SH
+  chmod +x "$repo/bin/fm-sessionstart-nudge.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const calls = [];
+async function* stream() {
+  yield { type: "session.created", data: { sessionID: "ses-1" } };
+  await new Promise(() => {});
+}
+const ctx = {
+  location: { project: { directory: process.env.WORKTREE } },
+  event: { subscribe: () => stream() },
+  session: { prompt: async (arg) => { calls.push(arg); } },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default.setup(ctx);
+for (let i = 0; i < 250 && calls.length === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
+const first = calls[0];
+if (!first || first.sessionID !== "ses-1" || first.text !== "NUDGE_TEXT") {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode 2 session-start nudge must prompt with { sessionID, text }: $out"
+  pass "OpenCode 2 session-start nudge resolves the project location and prompts with the flat session shape"
+}
+
+test_opencode2_seatbelts_block_only_the_shell_tool() {
+  local repo out status plugin owner
+  repo="$TMP_ROOT/opencode2-seatbelt-root"
+  mkdir -p "$repo/bin"
+  git init -q "$repo"
+  for owner in fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+    cat > "$repo/bin/$owner" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --command ] || exit 0
+case "${2:-}" in
+  *DENY_ME*) printf 'seatbelt denied\n' >&2; exit 2 ;;
+esac
+exit 0
+SH
+    chmod +x "$repo/bin/$owner"
+  done
+  for plugin in fm-primary-cd-check.js fm-primary-pretool-check.js; do
+    out=$(PLUGIN="$ROOT/.opencode/plugins/$plugin" WORKTREE="$repo" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+let hook = null;
+const ctx = {
+  location: { project: { directory: process.env.WORKTREE } },
+  tool: { hook: (name, fn) => { if (name === "execute.before") hook = fn; } },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default.setup(ctx);
+const call = (tool, command) => hook({ tool, sessionID: "ses-1", id: "call-1", input: { command } });
+let blocked = false;
+try {
+  await call("shell", "echo DENY_ME");
+} catch (error) {
+  blocked = String(error.message).includes("seatbelt denied");
+}
+if (!blocked) {
+  console.error("the shell tool was not blocked");
+  process.exit(1);
+}
+await call("shell", "echo allowed");
+await call("mcp_runner", "echo DENY_ME");
+await call("read", "echo DENY_ME");
+process.exit(0);
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "OpenCode 2 $plugin must block the shell tool and never a non-shell tool carrying a command: $out"
+  done
+  pass "OpenCode 2 seatbelts block only the shell tool, never a non-shell or MCP tool carrying a command"
+}
+
+test_opencode2_prompt_session_never_resends_after_a_failed_attempt() {
+  local out status
+  out=$(LIB="$ROOT/.opencode/plugins/lib/fm-opencode2.js" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const { promptSession } = await import(pathToFileURL(process.env.LIB).href);
+const calls = [];
+const ctx = { session: { prompt: async (arg) => { calls.push(["prompt", arg]); throw new Error("timeout after delivery"); } } };
+const client = { session: { promptAsync: async (arg) => { calls.push(["promptAsync", arg]); } } };
+let threw = false;
+try {
+  await promptSession(ctx, client, "ses-1", "wake");
+} catch {
+  threw = true;
+}
+if (!threw || calls.length !== 1 || calls[0][1].sessionID !== "ses-1" || calls[0][1].text !== "wake") {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+calls.length = 0;
+await promptSession(null, client, "ses-2", "wake");
+if (calls.length !== 1 || calls[0][1].path.id !== "ses-2" || calls[0][1].body.parts[0].text !== "wake") {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode promptSession must send once and never retry another shape: $out"
+  pass "OpenCode promptSession sends one prompt shape and never resends after a failed attempt"
 }
 
 test_opencode_primary_watch_plugin_sources_effective_config() {
@@ -5314,6 +5502,10 @@ test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
+test_opencode2_watch_plugin_arms_on_interrupted_turn_but_not_shutdown
+test_opencode2_sessionstart_nudge_prompts_with_flat_session_shape
+test_opencode2_seatbelts_block_only_the_shell_tool
+test_opencode2_prompt_session_never_resends_after_a_failed_attempt
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
