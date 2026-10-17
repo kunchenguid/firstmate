@@ -216,6 +216,33 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
    Until then the entry stays, so knowledge is never in limbo between owners.
    Leave no pointer behind by default, and at most one line only when the destination's discoverability is genuinely doubtful.
 
+## The durable-learning bar
+
+Every new durable learning must clear one counterfactual test before it is written: if this record disappeared, would a future engineer repeat the mistake it prevents?
+The bar exists so `data/learnings.md` and the skill stores fed by these findings grow deliberately rather than by accumulation, carrying knowledge that changes what a later session does instead of material that only describes the past.
+It decides admission only: a candidate that fails is written nowhere, and one that passes still follows its existing routing, ownership, and budget rules.
+It governs the knowledge classes the sweep exists to capture - operational learnings and project-intrinsic facts - while captain preferences, standing decisions, and undone next steps keep their own rules.
+
+- Ask the test of each candidate before anything is written, judged from the seat of a future session that never saw this conversation, because that session is exactly who the record is for.
+- Ask the question of the durable claim alone: incident chronology, transient task state, and this session's narrative are stripped from a candidate first, because they are not the learning.
+- A candidate passes only when the pass can name the concrete mistake a later session would make without it and the situation that would trigger that mistake.
+- A plausible but unnamed risk, "might be useful someday", a fact a stronger owner already preserves, and a restatement of what this session just did all fail, because none of them would change what a later session does.
+- A weak candidate cannot be made to pass by strengthening its wording: the test asks what would happen without the record, not how the record is phrased.
+- Passing the bar is necessary, never sufficient: an admitted learning still has to be genuinely new, have no stronger owner, and fit the budget.
+- A finding reported by a worker is a candidate like any other and asks the same question.
+- Admit at most one learning per `/stow` pass: the strongest passing candidate, meaning the one whose absence would repeat the most consequential or most likely mistake; a busy session earns no extra slots.
+- The cap is total across every destination this pass would write, so it is never one learning per file, tier, or skill store.
+- Drop every further passing candidate instead of queuing, stubbing, or parking it, because the bar sets a rate, not a backlog.
+- An admitted learning is written once, into the one destination its class owns, and never duplicated into a second surface to hedge.
+- A later pass asks the test fresh, and only new evidence, never repetition, changes an earlier answer.
+- Reclassifying a rejected learning as a preference or decision to keep it does not clear it; the class is decided by what the knowledge is for, not by which door is open.
+- Admitting one learning is as normal as admitting none: the bar is a test, not a presumption against new knowledge.
+- When nothing passes, write nothing: no filler entry, no placeholder, no paraphrase of an existing entry, and no rewrite made only to show that the pass ran.
+- An absent or empty `data/learnings.md` is not an invitation to fill it, and the bar is not relaxed for a pass that wrote nothing else.
+- An empty admission never leaves an uncaptured durable finding behind, because a candidate the bar rejects is not durable knowledge.
+- Never lower the test to avoid an empty result, and never treat a written learning as proof the pass was productive.
+- Reinforcing, retiering, consolidating, archiving, or offloading an entry already written is curation rather than admission, so it neither asks the test nor consumes the one slot.
+
 ## Knowledge sweep and routing
 
 1. **Sweep the session for uncaptured durable knowledge.**
@@ -224,15 +251,16 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 2. **Route each finding using AGENTS.md's knowledge-routing table.**
    AGENTS.md section 6 is the source of truth for destinations.
    Do not re-derive or duplicate that mapping here.
+   Before routing or reporting any operational-learning or project-intrinsic candidate, apply the durable-learning bar and pass-wide cap; write or report only the single admitted candidate.
    Match each finding against the home's declared memory tiers first and capture a tier-owned finding to that tier, falling back to the local files only for classes no declared tier owns.
    When the owning tier is unreachable from this session, write the finding to the startup-loaded local memory file its class would otherwise use, or keep it where it already lives, carrying the pending-capture marker for that tier; it is still an exception for the receipt, never a reason to treat the local copy as sufficient.
 3. **Write within the existing boundaries.**
    - Captain preferences and fleet-local operational facts belong in the destination selected by AGENTS.md after the required whole-file curation pass.
-     Create `data/learnings.md` only for a genuinely new local learning with no stronger owner.
+     Create `data/learnings.md` only for an admitted, genuinely new local learning with no stronger owner.
    - In a primary home, curate shared captain preferences only under the existing primary-authoritative shared-preference contract.
      In a secondmate home, route a newly discovered shared preference to the main firstmate through marked status or a document pointer instead of editing the inherited file.
    - Project-intrinsic knowledge never goes into a project's `AGENTS.md` through this fleet: a crewmate edits those files only to correct factually wrong information (AGENTS.md section 6), so no ship task carries an addition.
-     Keep the candidate in `data/learnings.md` or surface it in the completion receipt so the captain can extend the file by hand.
+     Keep an admitted project-intrinsic candidate in `data/learnings.md` or surface it in the completion receipt so the captain can extend the file by hand.
    - Knowledge general to every Firstmate user belongs in this repo's shared tracked material through the normal branch, no-mistakes, PR, and captain-merge path, which exists only under this home's firstmate-repository publication authority (`AGENTS.md` section 1's role boundary).
      A user/operator home instead keeps the lesson in `data/learnings.md` and may leave a sanitized local draft for the captain to carry upstream.
    - For task-scoped notes, inspect the item with `bin/fm-tasks-axi.sh show <id> --full`, classify the change as new, duplicate, superseding, or obsolete, then use a considered replacement body through `bin/fm-tasks-axi.sh update <id> --body-file <path>`.
@@ -274,6 +302,7 @@ Report the outcome in plain captain-facing language with all of these facts:
 - effective startup-memory budget and total estimated tokens before and after;
 - one or more actions for each of `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, using only `unchanged`, `added`, `rewritten`, `pruned`, `routed`, `archived`, or `proposed-offload`; adding or replacing a migration marker is `rewritten`, never a new action verb such as `migrated`;
 - each durable finding filed outside memory and its authoritative owner, including every capture to a declared memory tier;
+- the durable-learning bar's outcome: when none is admitted, write exactly `Admitted: none this pass` as the complete bar outcome and include no candidate names or rationale; otherwise name only the single admitted learning; rejected candidates and passing candidates dropped by the cap remain absent everywhere in the receipt;
 - every finding or entry a declared tier should hold but this session could not reach, left carrying its pending-capture marker and named so a session that can reach it captures it;
 - each archived entry's reason, each autonomous offload's live destination and actual relief, and, when a pinned candidate was proposed, the `proposed-offload` section with every candidate's fields;
 - every unresolved exception, including a primary-owned shared-file constraint in a secondmate home, and every concrete captain decision opened for an over-budget result;
