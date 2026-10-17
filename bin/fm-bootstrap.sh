@@ -162,9 +162,15 @@
 #          nothing.
 set -u
 
+TYPESAFE_API_KEY_SET=${TYPESAFE_API_KEY+x}
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
+LAYA_API_KEY_PRIVATE=${LAYA_API_KEY:-}
+DISPATCH_SYSTEMONE_PROVIDER_SET=${DISPATCH_SYSTEMONE_PROVIDER+x}
+DISPATCH_SYSTEMONE_PROVIDER_PRIVATE=${DISPATCH_SYSTEMONE_PROVIDER:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
-unset TYPESAFE_API_KEY
+export -n LAYA_API_KEY_PRIVATE 2>/dev/null || true
+export -n DISPATCH_SYSTEMONE_PROVIDER_PRIVATE 2>/dev/null || true
+unset TYPESAFE_API_KEY LAYA_API_KEY DISPATCH_SYSTEMONE_PROVIDER
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -1047,7 +1053,7 @@ EOF
 }
 
 crew_dispatch_validate() {
-  local file err verified_harnesses typed_key typed_active=false
+  local file err verified_harnesses typed_key typed_provider typed_active=false
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
@@ -1058,9 +1064,15 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  typed_key=$TYPESAFE_API_KEY_PRIVATE
-  [ -n "$typed_key" ] || typed_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-  [ -z "$typed_key" ] || typed_active=true
+  typed_provider=$DISPATCH_SYSTEMONE_PROVIDER_PRIVATE
+  [ -n "$DISPATCH_SYSTEMONE_PROVIDER_SET" ] || typed_provider=$(fmx_env_get DISPATCH_SYSTEMONE_PROVIDER "$FM_HOME/.env")
+  if [ "$typed_provider" = laya ]; then
+    typed_active=true
+  else
+    typed_key=$TYPESAFE_API_KEY_PRIVATE
+    [ -n "$TYPESAFE_API_KEY_SET" ] || typed_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+    [ -z "$typed_key" ] || typed_active=true
+  fi
   if $typed_active; then
     verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   else

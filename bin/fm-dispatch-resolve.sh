@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
 # fm-dispatch-resolve.sh - resolve one concrete crewmate or scout dispatch
-# profile from a task brief with typesafe.ai's System One model (Jev), opt-in.
+# profile from a task brief with the selected Jev-compatible System One provider, opt-in.
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
 #
-# Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
-#   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
-#   accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh). The environment wins.
-#   Absent in both: one "dispatch-resolve: off" line on stderr, nothing on
-#   stdout, exit 0, no network call, so firstmate dispatches exactly as today.
-#   The key lives in one shell variable and reaches curl as a header read from
-#   a file descriptor, never on argv; nothing logs or writes it.
+# Provider selection: DISPATCH_SYSTEMONE_PROVIDER is "typesafe" by default;
+#   setting it to "laya" explicitly selects a captain-controlled Laya-compatible
+#   endpoint. Values may come from the environment or $FM_HOME/.env, with the
+#   environment winning. TypeSafe requires TYPESAFE_API_KEY; Laya requires
+#   LAYA_SYSTEMONE_BASE_URL and accepts optional LAYA_API_KEY. With the default
+#   TypeSafe provider and no key, the resolver keeps the existing off behavior:
+#   one "dispatch-resolve: off" line on stderr, nothing on stdout, exit 0, and no
+#   network call. Provider keys remain private shell variables and reach curl
+#   only as an Authorization header read from a file descriptor, never argv.
 #
-# What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the brief's
+# What it does when on with at least one rule: one POST to the selected
+#   provider's /v1/systemone endpoint with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
 #   scout brief (the whole brief when it has neither section), as state and
 #   ONE Choice question whose options are every rule's `when` from
-#   config/crew-dispatch.json plus one fixed generic none option. Jev returns
+#   config/crew-dispatch.json plus one fixed generic none option. The provider returns
 #   the matched rule, a probability per option, and a confidence. Everything
 #   after that is jq: the confidence floor (0.6 on the answer confidence, or a
 #   rule's declared `min_confidence` on that rule's probability, falling to the
@@ -58,21 +60,34 @@
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
-#   Exit 2 only for a usage or configuration error (unreadable brief, an
+#   Exit 2 only for a usage or configuration error (unsupported provider, unreadable brief, an
 #   existing unreadable rules file, malformed rules, or missing jq), which is
 #   actionable, never selected around.
 #
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   DISPATCH_SYSTEMONE_PROVIDER selects "typesafe" (default) or "laya".
+#   TYPESAFE_API_KEY authenticates to the default TypeSafe endpoint.
+#   LAYA_SYSTEMONE_BASE_URL names the explicitly selected Laya server origin.
+#   LAYA_API_KEY optionally authenticates to that Laya server.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
 #   inspectable answer plus every candidate's evidence, in code.
 set -u
 
+TYPESAFE_API_KEY_SET=${TYPESAFE_API_KEY+x}
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
+LAYA_API_KEY_SET=${LAYA_API_KEY+x}
+LAYA_API_KEY_PRIVATE=${LAYA_API_KEY:-}
+DISPATCH_SYSTEMONE_PROVIDER_SET=${DISPATCH_SYSTEMONE_PROVIDER+x}
+DISPATCH_SYSTEMONE_PROVIDER_PRIVATE=${DISPATCH_SYSTEMONE_PROVIDER:-}
+LAYA_SYSTEMONE_BASE_URL_SET=${LAYA_SYSTEMONE_BASE_URL+x}
+LAYA_SYSTEMONE_BASE_URL_PRIVATE=${LAYA_SYSTEMONE_BASE_URL:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
-unset TYPESAFE_API_KEY
+export -n LAYA_API_KEY_PRIVATE 2>/dev/null || true
+export -n DISPATCH_SYSTEMONE_PROVIDER_PRIVATE 2>/dev/null || true
+export -n LAYA_SYSTEMONE_BASE_URL_PRIVATE 2>/dev/null || true
+unset TYPESAFE_API_KEY LAYA_API_KEY DISPATCH_SYSTEMONE_PROVIDER LAYA_SYSTEMONE_BASE_URL
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -92,11 +107,37 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
+TS_URL=https://api.typesafe.ai/v1/systemone
 TS_TIMEOUT=5
+LAYA_TIMEOUT=30
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
+emit_error() {
+  local reason=$1
+  echo "dispatch-resolve: error ($reason)" >&2
+  printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  exit 0
+}
+valid_laya_base_url() {
+  local base=$1 scheme authority_and_path authority path
+  case "$base" in
+    https://*) scheme=https; authority_and_path=${base#https://} ;;
+    http://*) scheme=http; authority_and_path=${base#http://} ;;
+    *) return 1 ;;
+  esac
+  authority=${authority_and_path%%/*}
+  path=${authority_and_path#"$authority"}
+  [[ "$authority" =~ ^([[:alnum:].-]+|\[[[:xdigit:].:]+\])(:[0-9]{1,5})?$ ]] || return 1
+  case "$path" in ''|/) ;; *) return 1 ;; esac
+  if [ "$scheme" = http ]; then
+    case "$authority" in
+      localhost|localhost:[0-9]*|127.0.0.1|127.0.0.1:[0-9]*|'[::1]'|'[::1]:'[0-9]*) ;;
+      *) return 1 ;;
+    esac
+  fi
+  return 0
+}
 no_rules() {
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
   exit 0
@@ -120,14 +161,50 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+# ---- provider selection and opt-in gate ----------------------------------------
+if [ -z "$DISPATCH_SYSTEMONE_PROVIDER_SET" ]; then
+  DISPATCH_SYSTEMONE_PROVIDER_PRIVATE=$(fmx_env_get DISPATCH_SYSTEMONE_PROVIDER "$FM_HOME/.env")
+fi
+[ -n "$DISPATCH_SYSTEMONE_PROVIDER_PRIVATE" ] || DISPATCH_SYSTEMONE_PROVIDER_PRIVATE=typesafe
+
+if [ -z "$TYPESAFE_API_KEY_SET" ]; then
   TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
 fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-  exit 0
+if [ -z "$LAYA_API_KEY_SET" ]; then
+  LAYA_API_KEY_PRIVATE=$(fmx_env_get LAYA_API_KEY "$FM_HOME/.env")
 fi
+if [ -z "$LAYA_SYSTEMONE_BASE_URL_SET" ]; then
+  LAYA_SYSTEMONE_BASE_URL_PRIVATE=$(fmx_env_get LAYA_SYSTEMONE_BASE_URL "$FM_HOME/.env")
+fi
+
+case "$DISPATCH_SYSTEMONE_PROVIDER_PRIVATE" in
+  typesafe)
+    if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+      echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+      exit 0
+    fi
+    SYSTEMONE_URL=$TS_URL
+    SYSTEMONE_TIMEOUT=$TS_TIMEOUT
+    SYSTEMONE_API_KEY_PRIVATE=$TYPESAFE_API_KEY_PRIVATE
+    ;;
+  laya)
+    [ -n "$LAYA_SYSTEMONE_BASE_URL_PRIVATE" ] \
+      || emit_error "LAYA_SYSTEMONE_BASE_URL absent from the environment and $FM_HOME/.env"
+    valid_laya_base_url "$LAYA_SYSTEMONE_BASE_URL_PRIVATE" \
+      || emit_error "invalid LAYA_SYSTEMONE_BASE_URL (use an HTTPS origin or a loopback HTTP origin without credentials, path, query, or fragment)"
+    SYSTEMONE_URL="${LAYA_SYSTEMONE_BASE_URL_PRIVATE%/}/v1/systemone"
+    SYSTEMONE_TIMEOUT=$LAYA_TIMEOUT
+    SYSTEMONE_API_KEY_PRIVATE=$LAYA_API_KEY_PRIVATE
+    ;;
+  *)
+    die "DISPATCH_SYSTEMONE_PROVIDER must be typesafe or laya"
+    ;;
+esac
+export -n SYSTEMONE_API_KEY_PRIVATE 2>/dev/null || true
+unset TYPESAFE_API_KEY LAYA_API_KEY DISPATCH_SYSTEMONE_PROVIDER LAYA_SYSTEMONE_BASE_URL
+case "$SYSTEMONE_API_KEY_PRIVATE" in
+  *$'\n'*|*$'\r'*) emit_error "provider API key contains a line break" ;;
+esac
 
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
@@ -230,13 +307,6 @@ done < <(jq -r '
 
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
-emit_error() {
-  local reason=$1
-  echo "dispatch-resolve: error ($reason)" >&2
-  printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
-  exit 0
-}
-
 if [ "$RULE_COUNT" -eq 0 ]; then
   no_rules
 fi
@@ -281,7 +351,20 @@ never_send_check() {
   done <<<"$list"
 }
 
-# Send Jev only the task-specific sections bin/fm-brief.sh scaffolds, plus a
+post_systemone() {
+  if [ -n "$SYSTEMONE_API_KEY_PRIVATE" ]; then
+    curl -sS --noproxy "localhost,127.0.0.1,::1,${no_proxy-${NO_PROXY-}}" --max-time "$SYSTEMONE_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+      -X POST "$SYSTEMONE_URL" -H 'Content-Type: application/json' \
+      -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$SYSTEMONE_API_KEY_PRIVATE") \
+      --data-binary @- 2>/dev/null
+  else
+    curl -sS --noproxy "localhost,127.0.0.1,::1,${no_proxy-${NO_PROXY-}}" --max-time "$SYSTEMONE_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+      -X POST "$SYSTEMONE_URL" -H 'Content-Type: application/json' \
+      --data-binary @- 2>/dev/null
+  fi
+}
+
+# Send System One only the task-specific sections bin/fm-brief.sh scaffolds, plus a
 # scout tag from the scout contract line; the rest of a scaffolded brief is
 # standard boilerplate whose safety language reads as high stakes on every task.
 # A brief with neither section goes whole. Ship delivery mode is deliberately
@@ -323,10 +406,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
     }')
   never_send_check
   T0=$(fm_timing_now_ms)
-  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-    -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
-    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
-    --data-binary @- 2>/dev/null) || HTTP=000
+  HTTP=$(printf '%s' "$REQUEST" | post_systemone) || HTTP=000
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
