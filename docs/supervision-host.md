@@ -84,6 +84,7 @@ The other owners read the file at every arm.
 ### The report surface
 
 `bin/fm-branch-report.sh` appends to the outcome store (`bin/fm-branch-outcome.sh`) plus a per-turn receipt the host requires.
+An identical re-mint of an event the store already recorded - same task, verdict, wake, claimed handling, silence class, and summary text, with the store's window bounding only re-mints that carry no handling claim, comparing only what main has not fully acknowledged - collapses into that existing record: the duplicate stores no second row, writes no second per-turn receipt line for a seq its turn already receipted, queues no second relay wake, and says so on stdout (naming the collapse and the existing seq, never claiming a fresh record).
 A non-silent row an away turn records after the captain returned is also queued for main as a durable check wake.
 Silent outcomes remain in the store but are not queued or relayed as notes.
 An attended turn queues nothing: its captain rows reach main through the host's `branch-outcome` exit and the drain, and its routine rows stay in the store.

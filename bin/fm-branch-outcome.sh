@@ -6,10 +6,18 @@
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false,
-#     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
-#     or status provenance remain valid and are treated as visible. A silent
+#     "statusEndpoint":N,"statusIdent":"...","handling":"..."}. Legacy rows
+#     without `handling`, without status provenance, or without `silent`
+#     remain valid, treated as visible with an empty handling token. A silent
 #     row must have verdict `routine`; the branch prompt and delivery consumers
-#     own the additional no-change eligibility rule.
+#     own the additional no-change eligibility rule. `handling` is the
+#     reporter's wake-row claim token: the wake queue rows the handling that
+#     recorded this outcome claimed (the comma-joined seqs of the Pi branch's
+#     eligible-row snapshot, or the space-joined seqs of the supervision host's
+#     turn record), empty for
+#     a caller with no claim. It is the dedup identity of one handling -
+#     different handlings are different fleet events - and nothing else:
+#     consumers must never read it as a task list, a proof, or a cursor.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -17,6 +25,48 @@
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
+#   - Re-mint dedup: one handled fleet event produces at most one store row
+#     per verdict class. `append` collapses a re-mint of an event the store
+#     already recorded - same task, verdict, wake text, handling token,
+#     silence class, summary text, and captured status identity (status
+#     endpoint plus status-filesystem identity), the original row still
+#     unprocessed and - for a re-mint carrying no handling token - still
+#     within OUTCOME_DUPLICATE_WINDOW_SECONDS (default 120, overridable
+#     through FM_OUTCOME_DUPLICATE_WINDOW for tests) - into
+#     that existing record: it writes nothing, prints the existing record's
+#     seq (stdout keeps being only the sequence number, so every caller's
+#     parse is unchanged), and prints one "duplicate:" line to stderr so a
+#     caller can name the collapse in its own receipt. Identity is structural
+#     and conjunctive, never prose equality alone: the summary text is a
+#     narrowing AND-term - the structural identity must match too, so one
+#     handling's several distinct dispositions of one task each record while
+#     a re-fire of one disposition word-for-word folds up. The handling token
+#     keeps fresh fleet events separate - each newly claimed wake row is
+#     a new handling, so one handling's re-mint flurry (the observed duplicate
+#     bursts) folds up while the next genuinely claimed row records normally,
+#     even when its wake line repeats over an unchanged status log. A re-mint
+#     naming a non-empty handling token is one handling's own repeat of one
+#     fleet event, not a later event, so it keeps collapsing into its one
+#     record for the whole life of that record's unprocessed span, however
+#     long the one prompt carrying it runs. The window bounds only the
+#     token-less residual (unscoped fleet reviews and caller-less appends),
+#     deliberately far below the watcher's repeat cadence. The silence class
+#     is structural, never prose: a silent fleet no-op and a visible fleet
+#     action remain separate records even inside one handling. Legacy rows
+#     without handling normalize to the empty token "",
+#     and without status provenance to the empty capture (endpoint 0, ident
+#     "-"), so they dedup against a candidate only when that candidate's own
+#     values are equally empty. The collapse changes no lifecycle state: the
+#     existing record keeps its unread, unprocessed, or acknowledged position
+#     exactly, so an unacknowledged record stays re-ringable until main
+#     acknowledges it and a settled event stays settled - nothing is
+#     suppressed, only re-mints of one row. Because the base is the unprocessed
+#     portion, a record main fully acknowledged never covers a later repeat:
+#     once its acknowledgment passes, the same identity records fresh again,
+#     so a verbatim follow-up is never swallowed by an already-settled
+#     predecessor. A malformed window, a failed scan, or an unreadable
+#     processed marker fails open to a normal append: the guard refines
+#     storage, it never blocks a record.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq presented
 #     by Pi as a routine merge note or sequence-keyed visible captain entry,
 #     emitted by Pi's locked session-start replay, silently consumed there
@@ -77,8 +127,14 @@
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
-#       --summary <text> [--wake <text>] [--silent true|false]
-#     Append one outcome record; prints the assigned seq.
+#       --summary <text> [--wake <text>] [--silent true|false] [--handling <text>]
+#     Append one outcome record; prints the assigned seq, or the existing
+#     record's seq when the re-mint dedup collapsed the append (with a
+#     "duplicate:" line on stderr). `--handling` carries the handling's
+#     wake-row claim token, recording as the empty token when omitted; a
+#     token carrying a tab, a newline, or more than 512 codepoints is refused
+#     - the bounds the store's own row validator enforces, so the append
+#     seam can never write a row the reader would reject.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
@@ -153,6 +209,16 @@ OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 OUTCOME_TAIL="$STATE/.branch-outcomes-tail.jsonl"
 OUTCOME_TAIL_ROWS=200
 OUTCOME_TAIL_MAX_BYTES=1048576
+# A re-mint of one already-recorded event collapses into that record instead of
+# appending a second (see the "Re-mint dedup" contract in the header). The
+# window bounds only the token-less residual of that collapse: a re-mint
+# naming a non-empty handling token keeps collapsing into its one record for
+# the whole life of that record's unprocessed span, while a later token-less
+# event that arrives with the same wake text over an unchanged status log is a
+# separate event and must record; repeats of that shape are observed an hour
+# apart, so the default stays far below them. FM_OUTCOME_DUPLICATE_WINDOW
+# lets a test use a small window without sleeping.
+OUTCOME_DUPLICATE_WINDOW_SECONDS=${FM_OUTCOME_DUPLICATE_WINDOW:-120}
 # The "recordedAgo" field present and unprocessed add to captain rows (see the
 # usage above).
 # Callers pass --argjson now "$(date +%s)".
@@ -245,6 +311,13 @@ last_seq() { # [<file> [<first expected seq, or null for a bounded suffix>]]
           and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
           and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not))
         )
+        or (
+          keys == ["epoch", "handling", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
+          and (.silent | type) == "boolean"
+          and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
+          and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not))
+          and ((.handling | type) == "string" and (.handling | test("[\\t\\n]") | not) and (.handling | length) <= 512)
+        )
       )
       and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
@@ -290,6 +363,68 @@ capture_status_position() { # <task>
   case "$ident" in *$'\t'*|*$'\n'*|'') return 0 ;; esac
   CAPTURED_STATUS_ENDPOINT=$size
   CAPTURED_STATUS_IDENT=$ident
+}
+
+# The re-mint guard behind the append dedup (header "Re-mint dedup"): print the
+# newest stored outcome sequence whose event identity matches the candidate
+# exactly, whose record is still unprocessed, and whose record is - when the
+# re-mint carries no handling token - still within
+# OUTCOME_DUPLICATE_WINDOW_SECONDS, or print nothing when this is a new event.
+# Identity is structural: task, verdict, the wake line the reporter names, the
+# handling token the caller names (the wake-row claim of the handling
+# re-minting, empty for callers without one), the record's silence class, the
+# record's summary text, and the captured status event (the status log's byte
+# endpoint plus its filesystem identity), never the summary prose alone.
+# Summary equality is a narrowing conjunction, never a sufficient key:
+# structural identity must match too, because one handling may carry several
+# distinct dispositions of one task and prose alone must never decide a
+# collapse. The silence class
+# is structural too: a silent no-op disposition and a visible action
+# disposition remain separate records even inside one handling.
+# Different handlings
+# of one task are different fleet events - one handling's re-mint flurry (the
+# observed duplicate bursts) collapses, while a freshly claimed wake row that
+# merely reuses a wake line records - so the window bounds only the
+# token-less residual. The base is the still-unprocessed portion of the store
+# (read_processed owns the marker): a record main fully acknowledged is
+# main's settled history, and a repeat report has nothing outstanding to
+# re-mint, so it records fresh, while every record still in flight - read but
+# not acknowledged - stays the collapse anchor for its handling's re-mint
+# flurry, the observed duplicate bursts. An unreadable processed marker keeps
+# the guard open to a normal append. Legacy rows without status provenance
+# normalize to the
+# captured defaults (endpoint 0, ident "-"), which can match only a candidate
+# whose own capture is equally empty - a fleet event or a retired task's
+# report - never a live task's status-backed event. An unreadable store, a
+# failed scan, or a malformed window fails open to a normal append: a dedup
+# guard must never block a record.
+duplicate_outcome_seq() { # <task> <verdict> <wake> <handling> <summary>
+  local seq cutoff
+  [ -s "$STORE" ] || return 0
+  case "$OUTCOME_DUPLICATE_WINDOW_SECONDS" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  cutoff=$(( $(date +%s) - OUTCOME_DUPLICATE_WINDOW_SECONDS )) || return 0
+  [ "$cutoff" -ge 0 ] || return 0
+  seq=$(jq -er -s --argjson cutoff "$cutoff" --arg task "$1" --arg verdict "$2" \
+      --arg wake "$3" --arg handling "$4" --arg summary "$5" \
+      --argjson endpoint "$CAPTURED_STATUS_ENDPOINT" \
+      --arg ident "$CAPTURED_STATUS_IDENT" \
+      --argjson silent "$(case "$SILENT" in true) printf true ;; *) printf false ;; esac)" \
+      --argjson processed "$(read_processed 2>/dev/null)" '
+    [ .[] | select(
+        .task == $task and .verdict == $verdict and .wake == $wake
+        and (.summary == $summary)
+        and ( $handling != "" or .epoch >= $cutoff )
+        and ((.handling // "") == $handling)
+        and ((.silent // false) == $silent)
+        and ((.statusEndpoint // 0) == $endpoint)
+        and ((.statusIdent // "-") == $ident)
+        and (.seq > $processed) ) ]
+    | max_by(.seq).seq
+  ' "$STORE" 2>/dev/null) || return 0
+  case "$seq" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s\n' "$seq"
 }
 
 write_outcome_index() { # <task> <seq> [<endpoint> <identity>]
@@ -502,6 +637,7 @@ case "$CMD" in
     VERDICT=''
     SUMMARY=''
     WAKE=''
+    HANDLING=''
     SILENT=false
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -509,6 +645,7 @@ case "$CMD" in
         --verdict) VERDICT=${2:-}; shift 2 || usage ;;
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
+        --handling) HANDLING=${2:-}; shift 2 || usage ;;
         --silent) SILENT=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
@@ -522,6 +659,20 @@ case "$CMD" in
       echo "error: silent outcomes must have the routine verdict" >&2
       exit 2
     fi
+    if [ -n "$HANDLING" ]; then
+      case "$HANDLING" in
+        *$'\t'*|*$'\n'*)
+          echo "error: refusing append because the handling token contains a tab or newline" >&2
+          exit 2
+          ;;
+      esac
+      HANDLING_LEN=$(printf '%s' "$HANDLING" | jq -Rr 'length' 2>/dev/null)
+      case "$HANDLING_LEN" in ''|*[!0-9]*) HANDLING_LEN=513 ;; esac
+      if [ "$HANDLING_LEN" -gt 512 ]; then
+        echo "error: refusing append because the handling token exceeds the 512-codepoint bound" >&2
+        exit 2
+      fi
+    fi
     fm_lock_acquire_wait "$LOCK"
     if ! LAST_SEQ=$(last_seq); then
       fm_lock_release "$LOCK"
@@ -533,13 +684,31 @@ case "$CMD" in
       echo "error: refusing append because the outcome cursor is invalid or ahead of the store" >&2
       exit 1
     fi
-    SEQ=$(( LAST_SEQ + 1 ))
+    # Dedup before the record is written: a re-mint of an event this store
+    # still holds in flight (same task, verdict, wake, handling token, and
+    # status identity, and the matching record unprocessed and, when the
+    # re-mint carries no handling token, within OUTCOME_DUPLICATE_WINDOW_SECONDS)
+    # prints that record's seq and writes nothing. The collapse goes to stderr
+    # so callers can name it; stdout keeps carrying only the sequence number.
+    # Collapsing into the existing record preserves its unread and
+    # unprocessed lifecycle exactly - nothing is deleted, nothing new is added,
+    # so an unacknowledged record stays re-ringable and a settled event stays
+    # settled.
     capture_status_position "$TASK"
+    DUPLICATE_CANDIDATE=$(duplicate_outcome_seq "$TASK" "$VERDICT" "$WAKE" "$HANDLING" "$SUMMARY")
+    if [ -n "$DUPLICATE_CANDIDATE" ]; then
+      fm_lock_release "$LOCK"
+      printf 'duplicate: outcome re-mint for task %s collapsed into the existing seq %s\n' \
+        "$TASK" "$DUPLICATE_CANDIDATE" >&2
+      printf '%s\n' "$DUPLICATE_CANDIDATE"
+      exit 0
+    fi
+    SEQ=$(( LAST_SEQ + 1 ))
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s","handling":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+      "$(json_escape "$CAPTURED_STATUS_IDENT")" "$(json_escape "$HANDLING")" >> "$STORE"
     write_outcome_tail || echo "warning: outcome $SEQ was stored but its display tail copy could not be refreshed" >&2
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would

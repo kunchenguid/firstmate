@@ -5,7 +5,15 @@
 #
 # It records exactly one handled fleet event in the durable outcome store
 # (bin/fm-branch-outcome.sh owns the store) and gives the host the receipt it
-# requires before it counts a wake handled. It enforces the same scoping the
+# requires before it counts a wake handled. A re-mint of an event the store
+# still holds in flight collapses into that existing record under the store's
+# own conjunctive identity and window (the turn's claimed wake rows ride
+# along as the handling token): the duplicate report adds no second store
+# record (stderr keeps the store's "duplicate:" note), says so on stdout -
+# naming the collapse and the existing seq, never claiming a fresh record -
+# writes no second per-turn receipt line for a seq its turn already
+# receipted, and queues no second relay wake. A repeat whose predecessor the store fully acknowledged has nothing outstanding to
+# re-mint and records fresh, as the store's own contract owns. It enforces the same scoping the
 # Pi tool does (docs/pi-supervision-branch.md "Components and their owners"):
 # while the host's current turn claims signal or stale rows, only the tasks
 # those rows resolve to may be reported - `fleet` and any remembered task are
@@ -20,7 +28,10 @@
 #
 # The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
 # or captain"); --silent true is legal only for a routine outcome.
-# --wake defaults to the wake reason the host recorded for the turn.
+# --wake defaults to the wake reason the host recorded for the turn. The
+# handling token is not an option here: it is taken from the host turn
+# record's claimed wake rows, so one host turn's re-mint flurry collapses
+# while a later turn's newly claimed rows record normally.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
 # must be "branch" and FM_BRANCH_REPORT_TURN must name the host's current turn
@@ -119,35 +130,74 @@ fi
 
 set -- append --task "$TASK" --verdict "$VERDICT" --summary "$SUMMARY" --silent "$SILENT"
 [ -z "$WAKE" ] || set -- "$@" --wake "$WAKE"
-if ! SEQ=$("$SCRIPT_DIR/fm-branch-outcome.sh" "$@"); then
+# The handling token for the store's re-mint dedup: the wake rows this turn
+# claimed (turn_field rows). A second report inside one turn collapses in the
+# store; a newly claimed row is a fresh handling and records normally.
+set -- "$@" --handling "$(turn_field rows)"
+APPEND_STDERR=$(mktemp "$STATE/.branch-report-append.XXXXXX") || {
+  echo "the store append could not be diagnosed: no stderr capture" >&2
+  exit 1
+}
+if ! SEQ=$("$SCRIPT_DIR/fm-branch-outcome.sh" "$@" 2>"$APPEND_STDERR"); then
+  cat "$APPEND_STDERR" >&2
+  rm -f -- "$APPEND_STDERR"
   echo "outcome store append failed (nothing recorded)" >&2
   exit 1
 fi
-printf '%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" >> "$RECEIPTS" || {
-  echo "recorded seq $SEQ, but the host receipt could not be written; the host will hand this wake to MAIN" >&2
-  exit 1
-}
+cat "$APPEND_STDERR" >&2
+DUPLICATE_COLLAPSED=false
+grep -q '^duplicate:' "$APPEND_STDERR" && DUPLICATE_COLLAPSED=true
+rm -f -- "$APPEND_STDERR"
+if [ "$DUPLICATE_COLLAPSED" != true ] \
+  || ! awk -F '\t' -v turn="$TURN" -v seq="$SEQ" \
+      '$1 == turn && $2 == seq { found = 1 } END { exit !found }' \
+      "$RECEIPTS" 2>/dev/null; then
+  printf '%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" >> "$RECEIPTS" || {
+    echo "recorded seq $SEQ, but the host receipt could not be written; the host will hand this wake to MAIN" >&2
+    exit 1
+  }
+fi
 if [ "$SILENT" = true ]; then
-  printf 'recorded seq %s [routine]; silent outcome remains in the outcome store\n' "$SEQ"
+  if [ "$DUPLICATE_COLLAPSED" = true ]; then
+    printf 'duplicate re-mint collapsed into the existing seq %s; the silent outcome remains in the outcome store\n' "$SEQ"
+  else
+    printf 'recorded seq %s [routine]; silent outcome remains in the outcome store\n' "$SEQ"
+  fi
   exit 0
 fi
 if [ "$(turn_field posture)" = attended ]; then
   if [ "$VERDICT" = captain ] && ! fm_afk_contract_away_present "$STATE"; then
-    printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
+    if [ "$DUPLICATE_COLLAPSED" = true ]; then
+      printf 'duplicate re-mint collapsed into the existing seq %s [captain]; MAIN processes the existing outcome from its next drain\n' "$SEQ"
+    else
+      printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
+    fi
   else
-    printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
+    if [ "$DUPLICATE_COLLAPSED" = true ]; then
+      printf 'duplicate re-mint collapsed into the existing seq %s [%s]; it already waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
+    else
+      printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
+    fi
   fi
   exit 0
 fi
 if ! fm_afk_contract_away_present "$STATE"; then
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+  if [ "$DUPLICATE_COLLAPSED" = true ]; then
+    printf 'duplicate re-mint collapsed into the existing seq %s; its relay wake was already queued, so none is queued twice\n' "$SEQ"
+    exit 0
+  fi
   if ! fm_wake_append check "supervision-host-return:$SEQ" \
     "check: supervision-host outcome $SEQ for $TASK [$VERDICT] was recorded after the captain returned, so the return brief may not show it; relay it to the captain: $SUMMARY"; then
     printf 'recorded seq %s [%s], but the captain has returned and its relay to MAIN could not be queued; the host hands this turn to MAIN\n' "$SEQ" "$VERDICT" >&2
     exit 0
   fi
   printf 'recorded seq %s [%s]; the captain has returned, so it is queued for MAIN to relay\n' "$SEQ" "$VERDICT"
+  exit 0
+fi
+if [ "$DUPLICATE_COLLAPSED" = true ]; then
+  printf 'duplicate re-mint collapsed into the existing seq %s [%s]; it already waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
   exit 0
 fi
 printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
