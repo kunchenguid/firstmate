@@ -49,7 +49,12 @@ case "$1 ${2:-}" in
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
+    if [ -n "${FM_FAKE_HERDR_HOLD:-}" ]; then
+      printf '%s\n' "$$" > "$state/$session.pid"
+      [ ! -e /dev/fd/9 ] || printf 'inherited fd 9\n' > "$state/$session.leak"
+    fi
     printf '%s\n' running > "$state/$session"
+    [ -z "${FM_FAKE_HERDR_HOLD:-}" ] || IFS= read -r release < "$FM_FAKE_HERDR_HOLD"
     ;;
   "status --json")
     if [ "$lab_state" = running ]; then
@@ -92,6 +97,7 @@ run_with_fake() {
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
+    FM_FAKE_HERDR_HOLD="${FM_FAKE_HERDR_HOLD:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -108,6 +114,38 @@ test_refuses_unsafe_names() {
   fm_herdr_lab_validate_name "$generated" || fail "generated lab session name was refused"
   [ "${#generated}" -le 40 ] || fail "generated lab session name is too long for Herdr socket paths: $generated"
   pass "fm-herdr-lab: names fail closed and require the lab prefix"
+}
+
+test_provision_releases_capture_pipes() {
+  local name="fm-lab-capture-$$" caller attempt returned=0 pid parent parent_comm status=0
+  mkfifo "$TMP_ROOT/server-hold"
+  (
+    output=$(exec 9>&1; FM_FAKE_HERDR_HOLD="$TMP_ROOT/server-hold" run_with_fake fm_herdr_lab_provision "$name" >/dev/null; printf returned)
+    printf '%s\n' "$output" > "$TMP_ROOT/provision-returned"
+  ) > "$TMP_ROOT/provision-caller.log" 2>&1 &
+  caller=$!
+  for ((attempt=0; attempt<100; attempt++)); do
+    if [ -f "$TMP_ROOT/provision-returned" ]; then returned=1; break; fi
+    sleep 0.1
+  done
+  pid='' parent='' parent_comm=''
+  [ ! -f "$FAKE_STATE/$name.pid" ] || pid=$(cat "$FAKE_STATE/$name.pid")
+  [ -z "$pid" ] || parent=$(ps -p "$pid" -o ppid= | tr -d '[:space:]')
+  [ -z "$parent" ] || parent_comm=$(ps -p "$parent" -o comm=)
+  if [ -n "$pid" ]; then
+    printf 'release\n' > "$TMP_ROOT/server-hold"
+  else
+    kill "$caller" 2>/dev/null || true
+  fi
+  wait "$caller" || status=$?
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "capture fixture teardown failed"
+  expect_code 0 "$status" "captured provision failed"
+  [ "$returned" = 1 ] || fail "provision held the capture pipe until the server exited"
+  assert_absent "$FAKE_STATE/$name.leak" "provision leaked an extra caller pipe on fd 9"
+  [ -n "$parent" ] && [ "$parent" != "$caller" ] || fail "provision server parent ($parent) is missing or the caller"
+  case "$parent_comm" in *bash) fail "provision retained a Bash wrapper parent ($parent $parent_comm)" ;; esac
+  [ "$(cat "$TMP_ROOT/provision-returned")" = returned ] || fail "provision changed capture output"
+  pass "fm-herdr-lab: captured provision closes inherited pipes and leaves no wrapper parent"
 }
 
 test_provision_run_and_guarded_teardown() {
@@ -535,6 +573,7 @@ test_viewer_launcher_refuses_unsafe_arguments() {
 }
 
 test_refuses_unsafe_names
+test_provision_releases_capture_pipes
 test_provision_run_and_guarded_teardown
 test_run_scopes_session_before_double_dash
 test_missing_tripwire_blocks_destruction

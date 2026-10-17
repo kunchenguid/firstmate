@@ -157,8 +157,18 @@ case "${1:-}" in
         printf '%s=%s\n' "$name" "$value"
       done
       printf 'args=%s\n' "$*"
+      printf 'executable=%s\n' "$0"
     } > "$FM_HERDR_SERVER_ENV_LOG"
+    if [ -n "${FM_HERDR_SERVER_HOLD:-}" ]; then
+      printf '%s\n' "$$" > "$FM_HERDR_SERVER_PROCESS"
+      if [ -e /dev/fd/9 ]; then
+        printf 'inherited fd 9\n' > "$FM_HERDR_SERVER_LEAK"
+      fi
+    fi
     : > "$FM_HERDR_SERVER_MARKER"
+    if [ -n "${FM_HERDR_SERVER_HOLD:-}" ]; then
+      IFS= read -r release < "$FM_HERDR_SERVER_HOLD"
+    fi
     ;;
 esac
 SH
@@ -1229,6 +1239,55 @@ test_server_ensure_scrubs_home_and_harness_identity() {
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
   pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
+}
+
+# shellcheck disable=SC2016
+test_server_ensure_releases_capture_pipes() {
+  local dir fb shell caller returned attempt pid parent parent_comm status=0
+  for shell in bash /bin/bash; do
+    dir="$TMP_ROOT/server-fds-${shell##*/}-${shell//\//_}"
+    mkdir -p "$dir"
+    fb=$(make_herdr_server_env_fakebin "$dir")
+    ln -s herdr "$fb/selected-herdr"
+    mkfifo "$dir/hold"
+    PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$dir/env" FM_HERDR_SERVER_MARKER="$dir/running" \
+      FM_HERDR_SERVER_HOLD="$dir/hold" FM_HERDR_SERVER_PROCESS="$dir/process" FM_HERDR_SERVER_LEAK="$dir/leak" \
+      "$shell" -c '
+        . "$1/bin/backends/herdr.sh"
+        # Exercise cached client routing and a redirected function inside a
+        # capture, plus an explicit extra copy of that capture pipe.
+        FM_BACKEND_HERDR_CLIENT_SESSION=fmtest
+        FM_BACKEND_HERDR_BIN="$3/selected-herdr"
+        output=$(exec 9>&1; fm_backend_herdr_server_ensure fmtest >/dev/null; printf returned)
+        printf "%s\n" "$output" > "$2/returned"
+      ' _ "$ROOT" "$dir" "$fb" > "$dir/caller.log" 2>&1 &
+    caller=$!
+    returned=0
+    for ((attempt=0; attempt<100; attempt++)); do
+      if [ -f "$dir/returned" ]; then returned=1; break; fi
+      sleep 0.1
+    done
+    pid='' parent='' parent_comm=''
+    [ ! -f "$dir/process" ] || read -r pid < "$dir/process"
+    [ -z "$pid" ] || parent=$(ps -p "$pid" -o ppid= | tr -d '[:space:]')
+    [ -z "$parent" ] || parent_comm=$(ps -p "$parent" -o comm=)
+    # Release the fake server before asserting, so old-code failures cannot
+    # leave a blocked capture or its long-lived fixture behind.
+    if [ -n "$pid" ]; then
+      printf 'release\n' > "$dir/hold"
+    else
+      kill "$caller" 2>/dev/null || true
+    fi
+    wait "$caller" || status=$?
+    expect_code 0 "$status" "server capture failed under $shell"
+    [ "$returned" = 1 ] || fail "server_ensure held a capture pipe until the server exited under $shell"
+    assert_absent "$dir/leak" "server inherited a caller pipe on fd 9 under $shell"
+    assert_contains "$(cat "$dir/env")" "executable=$fb/selected-herdr" "server ignored the selected client under $shell"
+    [ -n "$parent" ] && [ "$parent" != "$caller" ] || fail "server parent ($parent) is missing or the caller under $shell"
+    case "$parent_comm" in *bash) fail "server retained a Bash wrapper parent ($parent $parent_comm) under $shell" ;; esac
+    [ "$(cat "$dir/returned")" = returned ] || fail "server_ensure changed capture output under $shell"
+  done
+  pass "fm_backend_herdr_server_ensure: capture returns while server lives, closes extra pipes, and leaves no wrapper parent"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -4036,8 +4095,16 @@ test_composer_state_inactive_session_fails_fast_without_server_autostart() {
 
 # shellcheck disable=SC2016
 test_composer_state_piped_reader_does_not_hang() {
-  local out rc=0
-  out=$( timeout 3s bash -c '. "$0/bin/fm-backend.sh"; ( fm_backend_composer_state herdr nonexistent-session:p2 ) 2>&1 | head -20' "$ROOT" ) || rc=$?
+  local dir log resp fb out rc=0
+  dir="$TMP_ROOT/composer-piped-inactive"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '{"server":{"running":false}}\n' > "$resp/1.out"
+  # Use the portable watchdog and a stopped fake session rather than requiring
+  # GNU timeout or sending a read-only probe to an installed Herdr server.
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    fm_run_timed 10 bash -c '. "$0/bin/fm-backend.sh"; ( fm_backend_composer_state herdr nonexistent-session:p2 ) 2>&1 | head -20' "$ROOT" ) || rc=$?
   [ "$rc" -eq 0 ] || fail "piped composer probe on bad target hung or failed with rc=$rc"
   [ "$out" = unknown ] || fail "piped composer probe should print unknown, got '$out'"
   pass "fm_backend_composer_state (herdr): piped probe on bad target does not hang EOF-sensitive readers"
@@ -5987,6 +6054,7 @@ test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_server_ensure_scrubs_home_and_harness_identity
+test_server_ensure_releases_capture_pipes
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
