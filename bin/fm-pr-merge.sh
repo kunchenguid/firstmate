@@ -952,23 +952,36 @@ github_read_required_contexts() {
 }
 
 github_required_checks_missing() {
-  local json=$1 required=$2 producers=$3
-  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
+  local json=$1 required=$2 producers=$3 required_file='' producers_file='' rc=0
+  # The required set and the check-run producers travel through temp files
+  # (--slurpfile) rather than --argjson: a head with dozens of check runs
+  # makes producers larger than the kernel's single-argument limit, and exec
+  # of jq then fails with "Argument list too long".
+  required_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-required.XXXXXX") || return 1
+  producers_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-producers.XXXXXX") || {
+    rm -f "$required_file"
+    return 1
+  }
+  printf '%s' "$required" >"$required_file"
+  printf '%s' "$producers" >"$producers_file"
+  printf '%s' "$json" | jq -r --slurpfile required "$required_file" --slurpfile producers "$producers_file" '
     if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
     | .statusCheckRollup as $reported
-    | $required
+    | $required[0]
     | map(. as $requirement
       | select(any($reported[];
           if $requirement.app_id == null then
             (if .__typename == "CheckRun" then .name else .context end) == $requirement.context
           elif .__typename == "CheckRun" then
             .name == $requirement.context
-            and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
+            and any($producers[0][]; .name == $requirement.context and .app.id == $requirement.app_id)
           else
             .context == $requirement.context
           end) | not)
       | .context) | unique[]
-  ' 2>/dev/null || return 1
+  ' 2>/dev/null || rc=$?
+  rm -f "$required_file" "$producers_file"
+  return "$rc"
 }
 
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
@@ -1078,7 +1091,7 @@ EOF
       || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
         [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
           | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
-            then . else error("invalid check producer") end ]' 2>/dev/null); then
+            then {name: .name, app: {id: .app.id}} else error("invalid check producer") end ]' 2>/dev/null); then
       producers='[]'
       refusals="$refusals  - required check producers at head $live_head could not be read
 "

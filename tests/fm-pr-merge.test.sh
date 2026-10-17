@@ -4137,6 +4137,54 @@ test_app_bound_required_status_context_matches_by_name() {
   pass "fm-pr-merge matches an app-bound required commit status by name"
 }
 
+# A head with dozens of check runs makes the producers payload larger than the
+# kernel's single-argument limit; the guard must still verify it through the
+# live merge path instead of refusing the rollup as unreadable, and must still
+# refuse when a required check genuinely never reported in that same big set.
+test_large_check_run_set_verifies() {
+  local case_dir head i name filler size entries runs_json
+  head=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3
+  filler=$(head -c 3000 /dev/zero | tr '\0' 'x')
+  entries=("$(check_run ci COMPLETED SUCCESS)")
+  runs_json="{\"name\":\"ci\",\"app\":{\"id\":15368},\"head_sha\":\"$head\",\"title\":\"$filler\"}"
+  for i in $(seq 0 43); do
+    name=$(printf 'check-%02d' "$i")
+    entries+=("$(check_run "$name" COMPLETED SUCCESS)")
+    runs_json="$runs_json,{\"name\":\"$name\",\"app\":{\"id\":15368},\"head_sha\":\"$head\",\"title\":\"$filler\"}"
+  done
+  for variant in green missing; do
+    case_dir=$(make_case "large-check-runs-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rollup_json "$case_dir" "$head" "${entries[@]}"
+    if [ "$variant" = green ]; then
+      write_github_required "$case_dir" classic:ci
+    else
+      write_github_required "$case_dir" classic:ci classic:absent-check
+    fi
+    jq '.protection.required_status_checks.checks |= map(.app_id = 15368)' \
+      "$case_dir/github-branch.json" > "$case_dir/updated.json"
+    mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+    printf '{"check_runs":[%s]}\n' "$runs_json" > "$case_dir/github-runs.json"
+    size=$(wc -c < "$case_dir/github-runs.json")
+    [ "$size" -gt 131072 ] \
+      || fail "large-check-runs-$variant: fixture is $size bytes, not over the argument limit"
+    if [ "$variant" = green ]; then
+      run_required_case "$case_dir" 112
+      expect_code 0 "$RC" "large-check-runs-green: all-green big set must merge: $(cat "$case_dir/stderr")"
+      assert_logged_gh_merge "$case_dir" 112 example/repo --squash
+      assert_no_grep 'could not be read' "$case_dir/stderr" "large-check-runs-green: a read was reported unreadable"
+    else
+      run_required_case "$case_dir" 113
+      expect_code 1 "$RC" "large-check-runs-missing: an unreported check in a big set must refuse"
+      assert_grep "required check 'absent-check' has not reported" "$case_dir/stderr" \
+        "large-check-runs-missing: the unreported check was not named"
+      assert_no_grep 'pr merge' "$case_dir/gh.log" \
+        "large-check-runs-missing: gh pr merge ran with a check unreported"
+    fi
+  done
+  pass "fm-pr-merge verifies a check-run set over the argument limit"
+}
+
 test_required_partial_reads_report_all_failures() {
   local case_dir head variant
   head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
@@ -4502,6 +4550,7 @@ test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
+test_large_check_run_set_verifies
 test_required_partial_reads_report_all_failures
 
 
