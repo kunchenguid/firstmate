@@ -49,12 +49,15 @@ test_family_selection() {
       *) fail "family selection produced non-test path: $line" ;;
     esac
   done <<<"$listed"
+  listed=$("$RUNNER" --list --family pr-forge)
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-independent-review.test.sh' \
+    || fail "pr-forge must include fm-independent-review.test.sh"
   # Family mode must not equal the complete suite for a narrow family.
   local all_count fam_count
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
   fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
   [ "$fam_count" -lt "$all_count" ] \
-    || fail "pure-contract-unit must be a proper subset of --all"
+    || fail "pr-forge must be a proper subset of --all"
   pass "family selection returns a proper subset of the suite"
 }
 
@@ -120,12 +123,14 @@ init_changed_fixture_repo() {
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-control-herdr-smoke.test.sh \
+    fm-independent-review.test.sh \
     fm-backend-orca.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-independent-review.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
   : >"$repo/bin/fm-timeout-lib.sh"
@@ -340,6 +345,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/fm-independent-review.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-independent-review.test.sh" "independent review change selects its pr-forge suite"
+  git -C "$repo" add bin/fm-independent-review.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm independent-review-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
