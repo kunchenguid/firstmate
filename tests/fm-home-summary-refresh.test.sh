@@ -43,6 +43,10 @@ trap 'cleanup; exit 143' TERM
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
+# Repeated-failure cases below need every best-effort attempt to run; the
+# failure cooldown case sets its own window explicitly.
+export FM_HOME_SUMMARY_FAILURE_COOLDOWN=0
+
 cat > "$FAKEBIN/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -456,6 +460,31 @@ cmp -s "$TMP_ROOT/before-best-effort.json" "$HOME_DIR/state/home-summary.json" \
 grep -F 'summary producer failed' "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "best-effort refresh did not log its failure"
 pass "best-effort publication logs and continues"
+
+# A recent best-effort failure suppresses further best-effort refreshes for the
+# cooldown window; an old or missing error log lets the next one publish.
+COOLDOWN_NOW_ONE=2026-08-28T10:05:00Z
+COOLDOWN_EPOCH_ONE=1787911500
+COOLDOWN_NOW_TWO=2026-08-28T10:06:00Z
+COOLDOWN_EPOCH_TWO=1787911560
+FM_HOME_SUMMARY_FAILURE_COOLDOWN=900 \
+  run_writer "$COOLDOWN_NOW_ONE" "$COOLDOWN_EPOCH_ONE" --best-effort \
+  || fail "cooldown-suppressed refresh changed the best-effort caller result"
+cmp -s "$TMP_ROOT/before-best-effort.json" "$HOME_DIR/state/home-summary.json" \
+  || fail "a recent refresh failure did not suppress the next best-effort refresh"
+touch -t 200001010000 "$HOME_DIR/state/.home-summary-refresh.log"
+FM_HOME_SUMMARY_FAILURE_COOLDOWN=900 \
+  run_writer "$COOLDOWN_NOW_ONE" "$COOLDOWN_EPOCH_ONE" --best-effort \
+  || fail "post-cooldown refresh changed the best-effort caller result"
+[ "$(jq -r '.generated' "$HOME_DIR/state/home-summary.json")" = "$COOLDOWN_NOW_ONE" ] \
+  || fail "an old refresh failure still suppressed the best-effort refresh"
+rm -f "$HOME_DIR/state/.home-summary-refresh.log"
+FM_HOME_SUMMARY_FAILURE_COOLDOWN=900 \
+  run_writer "$COOLDOWN_NOW_TWO" "$COOLDOWN_EPOCH_TWO" --best-effort \
+  || fail "refresh without an error log changed the best-effort caller result"
+[ "$(jq -r '.generated' "$HOME_DIR/state/home-summary.json")" = "$COOLDOWN_NOW_TWO" ] \
+  || fail "a missing error log suppressed the best-effort refresh"
+pass "a recent refresh failure cools down best-effort refreshes"
 
 LOCK_MARKER="$TMP_ROOT/lock-held"
 rm -f "$HOME_DIR/state/.home-summary-refresh.log"

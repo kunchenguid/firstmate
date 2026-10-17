@@ -25,6 +25,12 @@
 # teardown use that mode so this side-band publication can never change their
 # result. Without it, failures are printed and returned to the direct caller
 # for tests and diagnostics.
+#
+# After a failed best-effort refresh, further best-effort refreshes are skipped
+# while the error log is younger than FM_HOME_SUMMARY_FAILURE_COOLDOWN seconds
+# (default 900; 0 disables), so per-spawn and watcher triggers cannot stampede a
+# failing producer. Successful refreshes leave the log untouched, so normal
+# cadence resumes once the window passes. Direct refreshes are never skipped.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +46,7 @@ REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
+HOME_SUMMARY_FAILURE_COOLDOWN=${FM_HOME_SUMMARY_FAILURE_COOLDOWN:-900}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
@@ -77,6 +84,26 @@ case "$HOME_SUMMARY_IF_IDLE" in
   0|1) ;;
   *) HOME_SUMMARY_IF_IDLE=0 ;;
 esac
+case "$HOME_SUMMARY_FAILURE_COOLDOWN" in
+  ''|*[!0-9]*) HOME_SUMMARY_FAILURE_COOLDOWN=900 ;;
+esac
+
+if [ "$BEST_EFFORT" -eq 1 ] && [ "$HOME_SUMMARY_MODE" = parent ] \
+  && [ "$HOME_SUMMARY_FAILURE_COOLDOWN" -gt 0 ] && [ -f "$ERROR_LOG" ]; then
+  if [ "$(uname)" = Darwin ]; then
+    error_log_mtime=$(/usr/bin/stat -f %m "$ERROR_LOG" 2>/dev/null) || error_log_mtime=
+  else
+    error_log_mtime=$(stat -c %Y "$ERROR_LOG" 2>/dev/null) || error_log_mtime=
+  fi
+  case "$error_log_mtime" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ $(( $(date +%s) - error_log_mtime )) -lt "$HOME_SUMMARY_FAILURE_COOLDOWN" ]; then
+        exit 0
+      fi
+      ;;
+  esac
+fi
 
 if [ "$HOME_SUMMARY_MODE" != parent ]; then
   # shellcheck source=bin/fm-wake-lib.sh
