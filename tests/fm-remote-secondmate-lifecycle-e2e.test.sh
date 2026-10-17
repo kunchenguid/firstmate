@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Full remote secondmate lifecycle over the deterministic generic SSH boundary.
+# Pass --watcher-only to exercise recovery without unrelated lifecycle cases.
 set -u
+WATCHER_ONLY=0
+case "${1:-}" in
+  --watcher-only) WATCHER_ONLY=1 ;;
+  '') ;;
+  *) printf 'usage: %s [--watcher-only]\n' "$0" >&2; exit 2 ;;
+esac
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -31,7 +38,26 @@ PARENT_ROUTE_INBOX="$REMOTE_HOME/state/parent-route/ios.inbox"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
+  local status=$? log
   local worker_pid=''
+  if [ "$status" -ne 0 ]; then
+    for log in spawn-concurrent.out watch-liveness.out watch-liveness.err watch-unreachable.err; do
+      [ ! -f "$TMP_ROOT/$log" ] || { printf 'diagnostic: %s\n' "$log"; cat "$TMP_ROOT/$log"; }
+    done
+    if [ -n "${watch_pid:-}" ]; then
+      printf 'diagnostic: watcher pid=%s and private fixture process inventory\n' "$watch_pid"
+      ps -eo pid,ppid,pgid,lstart,args
+      for log in "$WATCH_STATE/.wake-queue" \
+        "$WATCH_STATE/.secondmate-relaunch-ios" \
+        "$WATCH_STATE/ios.meta" \
+        "$WATCH_STATE/.watch.lock/"* \
+        "$REMOTE_HOME/state/parent-route/"*; do
+        [ ! -f "$log" ] || { printf 'diagnostic: %s\n' "$log"; cat "$log"; }
+      done
+      printf 'diagnostic: recent host endpoint operations\n'
+      tail -60 "$HERDR_LOG" 2>/dev/null || true
+    fi
+  fi
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" "$TMP_ROOT/race-clone.release" 2>/dev/null || true
   # A watcher leg cut short by a failed assertion is still polling the root.
@@ -909,6 +935,9 @@ pass "host launch validation confirms refusal before any agent starts"
 # Launch on the remote home's own configured backend. Parent metadata records
 # host placement separately from that backend and arms the reply source.
 printf 'pi\n' > "$PARENT/config/crew-harness"
+if [ "$WATCHER_ONLY" = 1 ]; then
+  out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate) || fail "watcher fixture launch failed: $out"
+else
 launches_before_inherit=0
 [ ! -f "$HERDR_LOG" ] || launches_before_inherit=$(grep -c '^tab create' "$HERDR_LOG" || true)
 if FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
@@ -1061,6 +1090,7 @@ assert_equals '' "$(sed -n 's/^model=//p' "$default_parent/state/ios.meta")" \
   "an unpinned remote route gained an explicit model"
 cp "$default_parent/state/.remote-inherit-ios.generation" "$PARENT/state/.remote-inherit-ios.generation"
 pass "undeclared unpinned remote spawn preserves default-model behavior"
+fi
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
@@ -1080,6 +1110,7 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
+if [ "$WATCHER_ONLY" != 1 ]; then
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
@@ -1463,24 +1494,22 @@ launches_after_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "the endpoint was not probed successfully after readiness repair"
 pass "startup repairs remote readiness before probing without relaunching"
+fi
 
 # --- ordinary-supervision recovery of a dead remote endpoint -----------------
 # The watcher's cadence-gated liveness tick (bin/fm-watch.sh
 # secondmate_liveness_tick) drives the same shared probe+relaunch library the
 # startup sweep used above: a positively dead remote endpoint relaunches
 # through the guarded remote spawn and emits exactly one check wake, while an
-# unreachable host is preserved untouched. The tick runs against a dedicated
-# state dir holding only this mate's endpoint meta so no other supervision
-# source can fire first.
+# unreachable host is preserved untouched. The tick uses the real fixture
+# parent state so the replacement and its seat ledger retain one owner.
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
-WATCH_STATE="$TMP_ROOT/watch-liveness-state"
-mkdir -p "$WATCH_STATE"
-cp "$PARENT/state/ios.meta" "$WATCH_STATE/ios.meta"
-# The remote spawn path mints its inheritance generation from a counter that
-# lives beside the task record, so the dedicated watch state needs the real
-# one; otherwise the pushed payload reads as superseded on the remote home.
-cp "$PARENT/state/.remote-inherit-ios.generation" "$WATCH_STATE/" 2>/dev/null || true
+WATCH_STATE="$PARENT/state"
+# Replace the synthetic healthy watcher identity with the real test watcher,
+# and make its first liveness tick due before other supervision sources run.
+rm -rf -- "$WATCH_STATE/.watch.lock"
+rm -f -- "$WATCH_STATE/.wake-queue" "$WATCH_STATE/.secondmate-liveness-tick"
 touch "$WATCH_STATE/home-summary.json"
 
 # A graceful agent exit leaves the pane with no registered agent - the exact
@@ -1538,11 +1567,12 @@ assert_grep '- ios ' "$PARENT/data/secondmates.md" \
   "the watcher relaunch changed the registry route"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "the auto-relaunched remote endpoint did not read alive"
-# Production relaunch updates the parent route meta and inheritance generation
-# in place; the dedicated watch state above kept the rest of this suite's
-# parent state out of scope, so fold both records back now.
-cp "$WATCH_STATE/ios.meta" "$PARENT/state/ios.meta"
-cp "$WATCH_STATE/.remote-inherit-ios.generation" "$PARENT/state/" 2>/dev/null || true
+if [ -d "$WATCH_STATE/fleet-seats/holders" ]; then
+  replacement_gen=$(sed -n 's/^fleet_seat_generation=//p' "$WATCH_STATE/ios.meta")
+  remote_env "$ROOT/bin/fm-fleet-seats.sh" show ios | jq -e --arg gen "$replacement_gen" \
+    '.incarnations | any(.generation == $gen and .lifecycle == "confirmed")' >/dev/null \
+    || fail "the watcher replacement is not confirmed in the parent's seat ledger"
+fi
 pass "watch liveness: a dead remote secondmate is auto-relaunched on its own host with one wake"
 
 # Host loss mid-supervision is never evidence of death: the same tick on an
@@ -1584,6 +1614,7 @@ assert_grep 'remote_host=remote-mac' "$WATCH_STATE_UNREACHABLE/ios.meta" \
 assert_grep '- ios ' "$PARENT/data/secondmates.md" \
   "an unreachable remote probe changed the registry route"
 pass "watch liveness: an unreachable remote secondmate is probed, preserved, and never failed over"
+[ "$WATCHER_ONLY" != 1 ] || exit 0
 
 # --- a stale herdr client shadowing the one the server accepts --------------
 # The remote host's job PATH can resolve an older self-updated herdr ahead of
