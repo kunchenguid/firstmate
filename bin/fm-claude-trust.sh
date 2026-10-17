@@ -53,7 +53,12 @@
 # canonicalization (`Fr`/`Se`) walks a linked worktree's `.git` file through
 # its `commondir` pointer back to the PRIMARY CHECKOUT, exactly the <project>
 # argument this script already receives for the worktree-mode scope test
-# below. So the trust flag is registered on BOTH the worktree entry (for
+# below. Filesystem identity (-ef), not path text, decides that scope: macOS
+# can retain different letter case in pwd -P for the same directory. The project
+# key uses the spelling reached through the launching worktree's common-dir
+# pointer, never the caller's project alias; the worktree key uses native
+# realpath's filesystem spelling, matching the pane's process.cwd().
+# So the trust flag is registered on BOTH the worktree entry (for
 # trust's ancestor-walk fallback and defense in depth) and the project entry
 # (the trust check's first, canonical-shaped, look); the two external-imports
 # flags land on those same two entries only when the project entry already
@@ -90,16 +95,17 @@
 # own word: a primary checkout (git dir == common dir), a worktree of an
 # unrelated repo, a subdirectory of a worktree, a plain directory, and a home
 # directory are each refused. Refusal is a non-zero exit, never a warning and
-# never a silent skip. When <project> is itself a linked worktree (a
-# secondmate home spawned from, rather than as, the primary checkout),
-# refusing outright would wedge a relaunch that is otherwise perfectly valid:
-# its own common dir already IS the primary checkout's own git dir (git's
+# never a silent skip. The project key is derived from the shared common dir,
+# whether <project> is the primary checkout or itself a linked worktree (a
+# secondmate home spawned from, rather than as, the primary checkout):
+# that common dir already IS the primary checkout's own git dir (git's
 # git-common-dir answer never changes by which worktree asks), so the
 # checkout is derived structurally from it - its parent directory in the
-# standard non-bare, non-GIT_DIR-overridden layout this script already
-# requires elsewhere - and verified, never assumed: the candidate's own
-# resolved git dir must equal that common dir, the same primary-checkout
-# definition used throughout, or this refuses rather than guess. The
+# standard non-bare, non-GIT_DIR-overridden layout - and verified, never
+# assumed: the candidate's own resolved git dir must identify that common
+# dir. When it does not, a primary <project> whose own git dir identifies the
+# common dir (a separate-git-dir layout) is used as itself; anything else is
+# refused rather than guessed. The
 # consent-gated external-imports flags land on that resolved canonical
 # checkout, never on the linked-worktree argument itself.
 #
@@ -275,18 +281,18 @@ fi
 # The filesystem root, a home directory, and the config directory are never
 # something this registers, in either mode. Checked explicitly so the refusal
 # names the real reason instead of the scope verdict behind it.
-[ "$TARGET_REAL" != / ] || refuse "'/' is the filesystem root, not a $SCOPE_NOUN"
-[ "$TARGET_REAL" != "$CONFIG_DIR_REAL" ] || refuse "'$TARGET_REAL' is the Claude config directory, not a $SCOPE_NOUN"
+[ ! "$TARGET_REAL" -ef / ] || refuse "'/' is the filesystem root, not a $SCOPE_NOUN"
+[ ! "$TARGET_REAL" -ef "$CONFIG_DIR_REAL" ] || refuse "'$TARGET_REAL' is the Claude config directory, not a $SCOPE_NOUN"
 if [ -n "${HOME:-}" ]; then
   HOME_REAL=$(real_dir "$HOME") || true
-  [ "$TARGET_REAL" != "${HOME_REAL:-}" ] || refuse "'$TARGET_REAL' is the home directory, not a $SCOPE_NOUN"
+  [ ! "$TARGET_REAL" -ef "${HOME_REAL:-}" ] || refuse "'$TARGET_REAL' is the home directory, not a $SCOPE_NOUN"
 fi
 
 if [ "$MODE" = worktree ]; then
   WT_TOP=$(git -C "$TARGET_REAL" rev-parse --show-toplevel 2>/dev/null) || true
   [ -n "$WT_TOP" ] || refuse "'$TARGET_REAL' is not inside a git repository"
   WT_TOP_REAL=$(real_dir "$WT_TOP") || true
-  [ "$WT_TOP_REAL" = "$TARGET_REAL" ] || refuse "'$TARGET_REAL' is not a worktree root (its root is '${WT_TOP_REAL:-unresolvable}')"
+  [ "$WT_TOP_REAL" -ef "$TARGET_REAL" ] || refuse "'$TARGET_REAL' is not a worktree root (its root is '${WT_TOP_REAL:-unresolvable}')"
 
   WT_GIT_DIR=$(git -C "$TARGET_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
   [ -n "$WT_GIT_DIR" ] || refuse "'$TARGET_REAL' has no resolvable git directory"
@@ -294,39 +300,46 @@ if [ "$MODE" = worktree ]; then
   [ -n "$WT_GIT_DIR" ] || refuse "'$TARGET_REAL' has an unresolvable git directory"
   WT_COMMON=$(common_dir_of "$TARGET_REAL") || true
   [ -n "$WT_COMMON" ] || refuse "'$TARGET_REAL' has no resolvable git common directory"
-  [ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$TARGET_REAL' is a primary checkout, not an isolated worktree"
+  [ ! "$WT_GIT_DIR" -ef "$WT_COMMON" ] || refuse "'$TARGET_REAL' is a primary checkout, not an isolated worktree"
 
   PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
   [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-  [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
+  [ "$WT_COMMON" -ef "$PROJ_COMMON" ] || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
 
   # The external-imports flags must land on the primary checkout - its own git
   # dir equals the common dir - because that is exactly the path Claude Code's
   # own git-root canonicalization collapses every linked worktree to. When
   # <project> is itself a linked worktree (a secondmate home spawned from,
   # rather than as, the primary checkout), refusing outright would wedge a
-  # relaunch that is otherwise perfectly valid: PROJ_COMMON already IS that
-  # primary checkout's own git dir (git's git-common-dir answer never changes
+  # relaunch that is otherwise perfectly valid: WT_COMMON already IS that
+  # primary checkout's own git dir (git's git-common-dir identity never changes
   # by which worktree asks), so the checkout is derived structurally from it -
   # its parent directory in the standard non-bare, non-GIT_DIR-overridden
-  # layout this script already requires elsewhere - and verified, never
-  # assumed: the candidate's own resolved git dir must equal PROJ_COMMON, the
-  # same primary-checkout definition used above, or this refuses rather than
-  # guess.
+  # layout - and verified, never assumed: the candidate's own resolved git dir
+  # must identify WT_COMMON, the same primary-checkout definition used above.
+  # A primary <project> whose own git dir identifies WT_COMMON is accepted as
+  # itself when that candidate fails (a separate-git-dir layout); otherwise
+  # this refuses rather than guess.
   PROJ_GIT_DIR=$(git -C "$PROJ_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
   [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has no resolvable git directory"
   PROJ_GIT_DIR=$(real_dir "$PROJ_GIT_DIR") || true
   [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has an unresolvable git directory"
-  if [ "$PROJ_GIT_DIR" = "$PROJ_COMMON" ]; then
-    PROJ_CANON=$PROJ_REAL
-  else
-    PROJ_CANON=$(real_dir "$(dirname -- "$PROJ_COMMON")") || true
-    [ -n "$PROJ_CANON" ] \
-      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
+  # pwd -P resolves symlinks but can preserve caller-supplied letter case on
+  # macOS. Identity is therefore tested with -ef, never path-text equality.
+  # Config keys are different: prefer the WORKTREE's common-dir pointer
+  # spelling, not the caller's project spelling, matching Claude's traversal
+  # from the pane. A primary <project> outside that standard layout (a
+  # separate git dir) is its own verified checkout.
+  PROJ_CANON=$(real_dir "$(dirname -- "$WT_COMMON")") || true
+  CANON_GIT_DIR=
+  if [ -n "$PROJ_CANON" ]; then
     CANON_GIT_DIR=$(git -C "$PROJ_CANON" rev-parse --absolute-git-dir 2>/dev/null) || true
     CANON_GIT_DIR=$(real_dir "${CANON_GIT_DIR:-}") || true
-    [ -n "$CANON_GIT_DIR" ] && [ "$CANON_GIT_DIR" = "$PROJ_COMMON" ] \
+  fi
+  if [ -z "$CANON_GIT_DIR" ] || [ ! "$CANON_GIT_DIR" -ef "$WT_COMMON" ]; then
+    [ "$PROJ_GIT_DIR" -ef "$WT_COMMON" ] \
       || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
+    PROJ_CANON=$PROJ_REAL
   fi
 elif [ "$MODE" = lab-home ]; then
   LAB_MARKER="$TARGET_REAL/$FM_GATE_LAB_MARKER"
@@ -455,7 +468,12 @@ fi
 TRUST_FLAG='hasTrustDialogAccepted'
 IMPORT_FLAGS='["hasClaudeMdExternalIncludesApproved","hasClaudeMdExternalIncludesWarningShown"]'
 if [ "$MODE" = worktree ]; then
-  WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "$PROJ_CANON" "$TRUST_FLAG" "$IMPORT_FLAGS")
+  # The pane's process.cwd() uses the filesystem spelling, including on macOS
+  # when its shell cd operand retained a case alias. Native realpath supplies
+  # that spelling for trust's worktree/ancestor fallback key.
+  TARGET_KEY=$(node -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$TARGET_REAL") \
+    || refuse "could not resolve the Claude launch key for '$TARGET_REAL'"
+  WRITE_ARGS=("$STORE" "$MODE" "$TARGET_KEY" "$PROJ_CANON" "$TRUST_FLAG" "$IMPORT_FLAGS")
 else
   WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "" "$TRUST_FLAG" "$IMPORT_FLAGS")
 fi
@@ -581,13 +599,15 @@ process.exit(1);
 NODE
 then
   if [ "$MODE" = worktree ]; then
-    refuse "could not record trust for '$TARGET_REAL' and project '$PROJ_CANON' in '$STORE'"
+    refuse "could not record trust for '$TARGET_KEY' and project '$PROJ_CANON' in '$STORE'"
   else
     refuse "could not record trust for '$TARGET_REAL' in '$STORE'"
   fi
 fi
 
-echo "trusted: $TARGET_REAL"
 if [ "$MODE" = worktree ]; then
+  echo "trusted: $TARGET_KEY"
   echo "trusted (project root): $PROJ_CANON"
+else
+  echo "trusted: $TARGET_REAL"
 fi
