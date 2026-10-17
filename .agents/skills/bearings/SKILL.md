@@ -3,7 +3,7 @@ name: bearings
 description: >-
   Generate a "pick up where I left off" fleet digest from firstmate's live fleet state.
   Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
-  Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
+  Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR and issue enrichment remain opt-in and compose with the other modes.
   Also use on a contributions check wake or when filing work linked to an upstream issue.
   Also load this skill's board-wake handling when a procevent lavish wake's source id matches the canonical source id of the stable bearings board path.
 user-invocable: true
@@ -28,6 +28,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
 - `/bearings lavish` gathers a fresh bounded snapshot, rebuilds and arms the interactive fleet board (the "Lavish board mode" section below), and renders the four-section chat digest with the board's URL inside it.
 - Treat `file` and `lavish` only as explicit invocation options in the slash command.
 - Do not treat natural-language requests such as "write a report", "save this", "persist it", "make a file", or "make a board" as file or lavish mode unless the invocation explicitly includes the standalone option.
+- When the captain asks to include issues, pass `--include-issues`; it composes with the existing invocation modes.
 - When the captain asks to include PRs, pass the snapshot command's live-PR opt-in.
 - `/bearings include PRs` remains chat-only and makes the live-PR opt-in.
 - `/bearings file include PRs` and `/bearings lavish include PRs` compose the same way.
@@ -43,6 +44,11 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
    The default performs bounded concurrent remote-ledger reads for registered remote homes under one shared snapshot budget and may refresh the parent-side cache.
    Only pass `--include-prs` when the captain asks for repository-wide live GitHub PR enrichment.
+   With `--include-issues`, render `issue_visibility` under Charted Next only: uncertain and unmeasured issue rows are action-free observations, never captain calls or admitted work.
+   Keep unresolved rows visible on every invocation, group children by their parent URL with the projected per-class counts, and show each parent's own classification, partial child scope, repo-qualified identity, coverage evidence and last activity.
+   Summarize covered and parked counts, retaining parking reasons/dates and every omitted/unmeasured disclosure; incomplete reads never mean clear.
+   For board payloads use the `kind:"issue"` row contract in `bin/fm-bearings-board.sh`, copy `issue_counts` from the projection counts, and use `charted_issue_more` for omitted observed rows.
+   Issue observations never become decision cards or options in `dispatch.charted`, and labels never authorize admission or execution.
    Registered owned contributions use the cached `contributions` projection independently of that opt-in; no invocation-time forge discovery is needed to read it.
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.

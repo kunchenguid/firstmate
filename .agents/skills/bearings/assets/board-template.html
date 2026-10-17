@@ -432,13 +432,15 @@ __FM_BEARINGS_BOARD_DATA__
     var n = document.createElement(tag);
     if (cls) n.className = cls;
     if (text != null) n.textContent = text;
+    if (cls === "bb-row__title" || cls === "bb-row__sub") n.title = text || "";
     return n;
   }
   function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
   /* Warnings ride the charted feed for layout only; they are alarms, not work,
      so every count of queued work excludes them. */
   function isWarning(t) { return t && t.kind === "warning"; }
-  function chartedQueued(rows) { return (rows || []).filter(function (t) { return !isWarning(t); }); }
+  function isIssue(t) { return t && t.kind === "issue"; }
+  function chartedQueued(rows) { return (rows || []).filter(function (t) { return !isWarning(t) && !isIssue(t); }); }
   /* Charted Next reads newest filed first, so the most recently filed upcoming
      work is at the top. ISO filed dates compare as text; a row with no
      comparable date keeps its payload order after every dated row. */
@@ -618,7 +620,7 @@ __FM_BEARINGS_BOARD_DATA__
   } else {
     deck.classList.add("bb-call--empty");
     deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
-    stackNav.hidden = true;
+    stackNav.remove();
   }
 
   /* Underway */
@@ -680,7 +682,7 @@ __FM_BEARINGS_BOARD_DATA__
   }
   chartedOrder(data.charted).forEach(function (t) {
     var row = el("div", "bb-row");
-    if (t.dispatchable && !isWarning(t)) {
+    if (t.dispatchable && !isWarning(t) && !isIssue(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
       pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;
@@ -698,12 +700,20 @@ __FM_BEARINGS_BOARD_DATA__
       row.appendChild(el("span", "bb-pick-spacer"));
     }
     var main = el("div", "bb-row__main");
-    main.appendChild(el("div", "bb-row__title", t.title));
+    var title = el("div", "bb-row__title");
+    if (isIssue(t)) {
+      var issueLink = el("a", "", t.id + " · " + t.title);
+      issueLink.href = t.issue_url; issueLink.target = "_blank"; issueLink.rel = "noopener";
+      title.appendChild(issueLink);
+    } else title.textContent = t.title;
+    title.title = title.textContent;
+    main.appendChild(title);
     /* second line keeps the title uncrowded in the half-width column */
     var chSub = t.repo || t.id;
     main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
     row.appendChild(main);
-    if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
+    if (isIssue(t)) row.appendChild(badge("warn", t.issue_class === "unmeasured" ? "unmeasured" : "coverage uncertain"));
+    else if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
     else if (t.reason) row.appendChild(badge("warn", "waiting"));
     ch.appendChild(row);
   });
@@ -716,6 +726,15 @@ __FM_BEARINGS_BOARD_DATA__
   }
   if (chartedMoreWarnings) {
     ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full chart"));
+  }
+
+  if (data.issue_counts) {
+    ch.appendChild(el("span", "bb-morechip", "Observed issues: " + data.issue_counts.covered + " covered, " +
+      data.issue_counts.parked + " parked, " + data.issue_counts.uncertain + " uncertain, " +
+      data.issue_counts.unmeasured + " unmeasured"));
+  }
+  if (data.charted_issue_more) {
+    ch.appendChild(el("span", "bb-morechip", "+" + data.charted_issue_more + " more observed issues - report only"));
   }
 
   if (anyPickable) {
