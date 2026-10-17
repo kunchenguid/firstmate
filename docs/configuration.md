@@ -619,6 +619,14 @@ The optional local, gitignored `config/pipeline-spend` presence flag opts this h
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
 An existing ledger is left untouched while recording is disabled.
 
+## Committed work pipeline steer (config/committed-not-shipped-steer)
+
+The optional local, gitignored `config/committed-not-shipped-steer` presence flag is off by default and opts this home into sending one start-the-pipeline instruction through `bin/fm-send.sh` for each detected task/head, instead of only waking the supervisor.
+The instruction tells the worker to invoke `/no-mistakes` under its existing brief and authorized intent; the watcher never starts a run or creates another delivery path.
+Successful durable delivery suppresses the detector wake, while failed delivery queues the actionable wake for supervisor handling.
+The flag is home-local and is not inherited by secondmate homes.
+[`architecture.md`](architecture.md) owns the state, handoff response window, and wake contract; `bin/fm-watch.sh` owns the per-head receipt and delivery mechanics.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
@@ -2520,8 +2528,9 @@ FM_CODEX_WATCH_CHECKPOINT_AWAY=3600  # requested away checkpoint bound on a home
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh, and per state-database run-inventory read behind a capped AXI overview
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # plain runs-ledger rows scanned for fallback attribution; does not change the CLI's AXI overview window (selection owner: bin/fm-nm-run-lib.sh)
+FM_COMMITTED_HANDOFF_GRACE_SECS=240  # seconds in the handoff response window (contract: docs/architecture.md)
 FM_TEARDOWN_NM_RUNS_LIMIT=200  # recent no-mistakes run rows scanned to prove an unresolved-head parked run belongs to teardown's task
-FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by watcher triage: the working/paused classification, and the wedge timer's parked-gate wait evidence
+FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by watcher triage, delivery-stall detection, and the wedge timer
 FM_MAIL_USER=      # mail-plane IMAP/SMTP login, from .env or environment (docs/configuration.md "Mail plane")
 FM_MAIL_PASS=      # mail-plane IMAP/SMTP password
 FM_IMAP_HOST=      # mail-plane IMAP server hostname

@@ -24,7 +24,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|committed-not-shipped|unknown> · source: <run-step|pane|status-log|git|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -145,7 +145,8 @@
 #      to reattach, not by escalating.
 #   4. No current run for this crew (pre-validation, uninitialized repository,
 #      proven historical head, or kind=scout): fall back to the recorded
-#      backend's pane busy state, then the resolved status declaration
+#      backend's pane busy state, then the committed-not-shipped detector
+#      (state and handoff contract: docs/architecture.md), then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
@@ -183,6 +184,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$SCRIPT_DIR/fm-tangle-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -1331,6 +1334,51 @@ if [ "$KIND" != secondmate ]; then
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+  esac
+fi
+
+# An idle no-mistakes ship with clean commits ahead of its recorded base has
+# delivery work left. Exact idle is required; unknown is never idle proof.
+# Decisions, blockers, and declared waits retain their existing state.
+# A current done: handoff suppresses this state for 240s by default, provided
+# its event stamp is at or after HEAD's commit time.
+if [ "$KIND" = ship ] && [ "$(meta_value mode)" = no-mistakes ] \
+  && [ -n "$CREW_BRANCH" ]; then
+  handoff_current=0
+  if [ "$LOG_VERB" = "done" ]; then
+    handoff_grace=${FM_COMMITTED_HANDOFF_GRACE_SECS:-240}
+    case "$handoff_grace" in ''|*[!0-9]*) handoff_grace=240 ;; esac
+    if handoff_at=$(status_line_at_epoch "$LOG_LINE"); then
+      head_at=$(git -C "$WT" show -s --format=%ct HEAD)
+      now=$(date +%s)
+      if [ "$handoff_at" -ge "$head_at" ] && [ "$((now - handoff_at))" -lt "$handoff_grace" ]; then
+        handoff_current=1
+      fi
+    fi
+  fi
+  case "$LOG_VERB" in
+    needs-decision|blocked|failed) ;;
+    *)
+      if [ "$handoff_current" = 0 ] && ! status_is_paused "$LOG_LINE"; then
+        base=$(meta_value base_branch)
+        [ -n "$base" ] || base=$(fm_default_branch "$WT") || base=
+        base_ref="refs/remotes/origin/$base"
+        # A named base must resolve exactly; never guess another branch.
+        if ! git -C "$WT" rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+          base_ref="refs/heads/$base"
+        fi
+        if [ -n "$base" ] \
+          && ahead=$(git -C "$WT" rev-list --count "$base_ref..HEAD" 2>/dev/null) \
+          && [ "$ahead" -gt 0 ] \
+          && tree_status=$(git -C "$WT" status --porcelain --untracked-files=normal 2>/dev/null) \
+          && [ -z "$tree_status" ]; then
+          head=$(git -C "$WT" rev-parse HEAD)
+          if fm_nm_head_run_absent "$WT" "$CREW_BRANCH" "$head" "$NM_TIMEOUT"; then
+            emit committed-not-shipped git "head: $head; $ahead commit(s) ahead of $base; clean idle ship has no no-mistakes run"
+          fi
+        fi
+      fi
+      ;;
   esac
 fi
 
