@@ -352,19 +352,19 @@ test_send_key_refuses_escape_until_supported() {
   pass "fm_backend_orca_send_key: refuses Escape instead of mapping it to interrupt"
 }
 
-test_kill_is_best_effort_close() {
+test_kill_reports_close_failure() {
   orca_case kill
   printf '1\n' > "$RESP/1.exit"
   PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_kill term-123' "$ROOT"
-  expect_code 0 $? "kill should stay best-effort when Orca close fails"
+  expect_code 1 $? "kill must report an unproven Orca close"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-123'$'\x1f''--json' \
     "kill did not call orca terminal close"
-  pass "fm_backend_orca_kill: calls terminal close and stays best-effort"
+  pass "fm_backend_orca_kill: reports terminal close failure"
 }
 
 # The paired direction - an `orca` stub present, a close command that exits
-# nonzero, still 0 - is test_kill_is_best_effort_close above. This case is the
+# nonzero, still 0 - is test_kill_reports_close_failure above. This case is the
 # distinction that arm exists to make, so the two are read together.
 test_kill_refuses_when_the_orca_cli_is_absent() {
   local out status orca_free
@@ -1367,7 +1367,7 @@ test_send_helpers_reject_orca_error_json
 test_send_key_enter_and_interrupt
 test_send_key_refuses_unknown_key
 test_send_key_refuses_escape_until_supported
-test_kill_is_best_effort_close
+test_kill_reports_close_failure
 test_kill_refuses_when_the_orca_cli_is_absent
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
