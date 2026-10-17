@@ -1152,9 +1152,78 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# A finished item whose PR only awaits merge (or a local-only branch awaiting
+# landing approval) is a normal lifecycle state, not an inconsistency.
+# A torn-down child (worktree gone) or a failed child stays invalid.
+test_home_summary_terminal_child_awaiting_landing_is_consistent() {
+  local home fakebin out
+  home=$(make_home summary-awaiting-landing)
+  mkdir -p "$home/projects/awaiting" "$home/projects/local"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] awaiting-ship - Finished, PR awaiting merge (repo: alpha) (kind: ship) (since 2026-07-11)
+- [ ] local-ship - Finished, ready branch awaiting landing (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/awaiting-ship.meta" \
+    "window=firstmate:fm-awaiting-ship" \
+    "worktree=$home/projects/awaiting" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "pr=https://github.com/example/alpha/pull/7" \
+    "mode=no-mistakes"
+  record_claude_idle "$home/state" awaiting-ship
+  printf 'done: complete\n' > "$home/state/awaiting-ship.status"
+  # local-only landing needs a git copy whose HEAD is reachable from the project clone.
+  git init -q "$home/projects/local"
+  git -C "$home/projects/local" -c user.name=t -c user.email=t@example.invalid \
+    commit -q --allow-empty -m ready
+  fm_write_meta "$home/state/local-ship.meta" \
+    "window=firstmate:fm-local-ship" \
+    "worktree=$home/projects/local" \
+    "project=$home/projects/local" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=local-only"
+  record_claude_idle "$home/state" local-ship
+  printf 'done: complete\n' > "$home/state/local-ship.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .reason == null
+      and .invalidity == {kind:null,ids:[]}
+      and (.awaiting_landing | sort) == ["awaiting-ship","local-ship"]
+  ' >/dev/null || fail "finished items awaiting merge or landing must be VALID: $out"
+
+  # Torn-down child: worktree removed while the item is still in flight.
+  rm -rf "$home/projects/awaiting"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false
+      and .invalidity.ids == ["awaiting-ship"]
+      and (.awaiting_landing == ["local-ship"])
+  ' >/dev/null || fail "in-flight item with a torn-down child must stay invalid: $out"
+
+  # A failed child is never an awaiting-landing state.
+  mkdir -p "$home/projects/awaiting"
+  printf 'failed: gave up\n' > "$home/state/awaiting-ship.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false
+      and .invalidity == {kind:"terminal_in_flight",ids:["awaiting-ship"]}
+  ' >/dev/null || fail "failed in-flight child must stay invalid: $out"
+  pass "terminal child awaiting merge or landing is consistent; torn-down and failed stay invalid"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
+test_home_summary_terminal_child_awaiting_landing_is_consistent
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
 test_main_inventory_orphan_and_unstructured_disclosure
