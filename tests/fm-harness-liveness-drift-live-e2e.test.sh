@@ -53,7 +53,19 @@ cleanup_all() {
 }
 trap cleanup_all EXIT
 
-mkdir -p "$LAB/shim" "$LAB/wt"
+mkdir -p "$LAB/shim" "$LAB/wt" "$LAB/kiro"
+# A non-shell stand-in for the Kiro CLI wrapper: a byte copy of kiro-cli-term
+# that holds the pane's tty and runs the shell on its own pty.
+KIRO_WRAPPER=
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+if [ -n "$CC_BIN" ] &&
+  { "$CC_BIN" -o "$LAB/kiro/kiro-cli-term" "$ROOT/tests/kiro-cli-term-standin.c" 2>/dev/null ||
+    "$CC_BIN" -o "$LAB/kiro/kiro-cli-term" "$ROOT/tests/kiro-cli-term-standin.c" -lutil 2>/dev/null; }; then
+  cp "$LAB/kiro/kiro-cli-term" "$LAB/kiro/sh (kiro-cli-term)"
+  KIRO_WRAPPER="$LAB/kiro/sh (kiro-cli-term)"
+else
+  note "no C compiler with forkpty: Kiro-wrapped liveness is not checked"
+fi
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
@@ -223,6 +235,33 @@ EOF
 
   note "$harness $version: ancestry verdicts=[$(printf '%s' "$verdicts" | tr '\n' ';')]"
   pass "harness detection: $harness $version is identified by the ancestry walk at comm strength"
+
+  # Launch the same installed binary below a Kiro-wrapped shell. A dead agent
+  # leaves this shell behind, so both the idle and live verdict matter.
+  if [ -n "$KIRO_WRAPPER" ]; then
+    wrapped_target="$SESSION:wrapped-$harness"
+    "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "wrapped-$harness" -c "$LAB/wt" -- "$KIRO_WRAPPER" /bin/sh -i \
+      || fail "$harness ($version): could not launch its wrapped shell"
+    wrapped_state=
+    for _ in $(seq 1 100); do
+      wrapped_state=$(fm_backend_agent_state tmux "$wrapped_target")
+      [ "$wrapped_state" = dead ] && break
+      sleep 0.1
+    done
+    [ "$wrapped_state" = dead ] || fail "$harness ($version): wrapped idle shell read '$wrapped_state', expected dead"
+    wrapped_command=$(printf '%q' "$bin_path")
+    [ -z "$launch_args" ] || wrapped_command="$wrapped_command $launch_args"
+    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$wrapped_target" "$wrapped_command" Enter
+    wrapped_state=
+    for _ in $(seq 1 300); do
+      wrapped_state=$(fm_backend_agent_state tmux "$wrapped_target")
+      [ "$wrapped_state" = alive ] && break
+      sleep 0.2
+    done
+    [ "$wrapped_state" = alive ] || fail "$harness ($version): live installed agent below wrapped shell read '$wrapped_state', expected alive"
+    "$REAL_TMUX" -L "$SOCKET" kill-window -t "$wrapped_target" || fail "$harness ($version): could not close its lab window"
+    pass "Kiro-wrapped liveness: $harness $version reads dead idle and alive with the installed agent"
+  fi
   CHECKED=$((CHECKED + 1))
 done
 
