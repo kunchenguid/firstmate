@@ -1,0 +1,3 @@
+warning: /home/seung/.no-mistakes/worktrees/471db19625ab/01M53Z7Z04BR3Q49GQFRBZ12S2/.e3-diagnostic/home/data/native-full-record/launch-brief.md records no ship branch; defaulting to legacy branch fm/native-full-record
+warning: /home/seung/.no-mistakes/worktrees/471db19625ab/01M53Z7Z04BR3Q49GQFRBZ12S2/.e3-diagnostic/home/data/native-full-record/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned native-full-record harness=codex kind=ship mode=no-mistakes yolo=off window=firstmate:fm-native-full-record worktree=/home/seung/.no-mistakes/worktrees/471db19625ab/01M53Z7Z04BR3Q49GQFRBZ12S2/.e3-diagnostic/wt
