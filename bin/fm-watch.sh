@@ -2602,8 +2602,23 @@ lane_target_value() {
 # Open lanes: every state/<task>.meta whose kind is ship (the default when a
 # meta omits it) or scout. A secondmate endpoint's own meta (kind=secondmate) is
 # not a lane of this home, so it never counts toward the floor.
+# Fork hook (thin layer over upstream): the fleet-flow add-on owns the rule that
+# a lane parked on a stale external wait stops counting toward the cap, so when
+# its installed check is present its `counted` column is the open-lane number and
+# this home never re-derives it. Absent, erroring, timing out, or a malformed row
+# falls back to the meta count below, byte-for-byte upstream behaviour; the
+# counting rule stays in the add-on, not here.
 open_lane_count() {
-  local meta kind count=0
+  local check counted meta kind count=0
+  check=${XDG_DATA_HOME:-$HOME/.local/share}/fm-fleet-flow/fm-flow-check.sh
+  if [ -f "$check" ] && [ -x "$check" ] \
+    && counted=$(fm_run_timed "${FM_FLOW_CHECK_TIMEOUT_SECS:-10}" "$check" "$FM_HOME" --summary 2>/dev/null); then
+    counted=$(printf '%s\n' "$counted" | awk -F '\t' 'NF == 9 && NR == 1 { print $8 }')
+    case "$counted" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "$counted"; return 0 ;;
+    esac
+  fi
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     kind=$(grep '^kind=' "$meta" 2>/dev/null | head -1 | cut -d= -f2- || true)

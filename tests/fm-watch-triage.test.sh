@@ -64,10 +64,14 @@ ack_stopped_cycle() {  # <state>
 # points at the case's hermetic fake fm-crew-state.sh (installed by make_case) so the
 # absorb-only-when-provably-working triage reads a canned verdict; a test fixes that
 # verdict via FM_FAKE_CREW_STATE in its environment before calling watch_bg.
+# XDG_DATA_HOME defaults to a per-case tree so the fleet-flow fork hook never reads
+# the host's installed add-on; a test that exercises the hook overrides it with its
+# own stub via an `env XDG_DATA_HOME=...` assignment.
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    XDG_DATA_HOME="$state/.xdg-data" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_SECONDMATE_LIVENESS_SECS=99999999 "$@" "$WATCH" > "$out" &
 }
@@ -6594,6 +6598,9 @@ test_heartbeat_wakes_an_idle_lead_with_ready_work() {
 # The same four panes are open in every round; the two spare endpoints are
 # secondmates (kind=secondmate), which are not lanes of this home, so the round
 # varies the lane count without ever orphaning a pane.
+# With no installed fleet-flow check this is today's meta-count floor; two extra
+# rounds exercise the fork hook that reads the add-on's counted column when the
+# check is present, and falls back to the meta count on a malformed row.
 test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
   local dir state fakebin out pid tasks expected windows spare
   if ! command -v tasks-axi >/dev/null 2>&1; then
@@ -6643,6 +6650,44 @@ test_heartbeat_lane_floor_wakes_with_free_lane_slots() {
   reap "$pid"
   [ ! -s "$out" ] || fail "a home at its lane floor printed a wake reason: $(cat "$out")"
   ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the absorbing cycle at the floor"
+
+  # Fork hook: when the fleet-flow add-on's installed check is present its
+  # `counted` column is the floor's open-lane number, so a home whose own meta
+  # count sits at the target can still be under it once a lane on a stale
+  # external wait frees its slot. The stub reports counted=2 under the target of
+  # 4 while this home's own four metas are open, and the wake fires with the
+  # counted number in its reason.
+  mkdir -p "$dir/xdg/fm-fleet-flow"
+  cat > "$dir/xdg/fm-fleet-flow/fm-flow-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'sm-lane-floor\t4\t2\t1\t0\t0\t0\t2\t0\n'
+SH
+  chmod +x "$dir/xdg/fm-fleet-flow/fm-flow-check.sh"
+  rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat" "$state/.ready-work-surfaced"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 XDG_DATA_HOME="$dir/xdg" \
+    FM_FAKE_TMUX_WINDOWS="$windows" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the flow check's counted value did not fire the lane-floor wake: $(cat "$out")"; }
+  grep -Fx "$expected" "$out" >/dev/null \
+    || fail "the lane-floor wake did not use the flow check's counted value: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the flow-check lane-floor wake"
+
+  # A malformed installed flow check (not the single TSV row) must not be read as
+  # a number: the home falls back to its meta count, so at the floor with its
+  # lanes provably working it stays absorbed exactly as before the hook existed.
+  cat > "$dir/xdg/fm-fleet-flow/fm-flow-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'not a summary row\n'
+SH
+  chmod +x "$dir/xdg/fm-fleet-flow/fm-flow-check.sh"
+  rm -f "$state/.heartbeat-streak" "$state/.last-heartbeat" "$state/.ready-work-surfaced"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_HEARTBEAT=1 XDG_DATA_HOME="$dir/xdg" \
+    FM_FAKE_TMUX_WINDOWS="$windows" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  pid=$!
+  wait_absorbed_heartbeat "$state" "$pid" || { reap "$pid"; fail "a malformed flow check row fired the lane-floor wake: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a malformed flow check row fired the lane-floor wake: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null || fail "could not acknowledge the absorbing flow-check fallback cycle"
 
   # Still holding after the window elapses, the same condition re-raises.
   printf 'window=test:fm-busythree\n%b' "$spare" > "$state/busythree.meta"
