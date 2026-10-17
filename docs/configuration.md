@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker account pool](#worker-account-pool-configaccount-pool), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker account pool](#worker-account-pool-configaccount-pool), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [launch environment hook](#launch-environment-hook-configlaunch-env-hook) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [host memory guard](#host-memory-guard-confighost-memory) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1178,6 +1178,14 @@ The optional local, gitignored `config/spawn-gate` is an executable that hard-bl
 When the file exists and is executable, `bin/fm-spawn.sh` runs `config/spawn-gate <task-id>` with `FM_HOME` set; a nonzero exit refuses the spawn and prints the gate's output.
 Secondmate spawns and relaunches never run it, and an absent file leaves spawn behavior unchanged.
 The gate's own content is home-local policy (for example a per-home lane limit); [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the invocation mechanics.
+
+## Launch environment hook (config/launch-env-hook)
+
+The optional local, gitignored `config/launch-env-hook` is an executable that adds environment to every local launch: ship, scout, secondmate, and relaunch.
+When the file exists and is executable, the pane runs `config/launch-env-hook <out-file>` from the launch directory (the worktree for ship and scout) right before the worker starts, then sources `<out-file>`, which must hold one plain `export` statement.
+It runs before the AI-trailer step in "Commit attribution", so `GIT_CONFIG_*` entries it appends after the inherited `GIT_CONFIG_COUNT` come before the trailer `core.hooksPath` entry.
+A nonzero exit, or an export the pane shell cannot source, stops the launch before the worker runs; an absent file changes nothing, and a present but non-executable file prints a warning at spawn and the launch proceeds without it.
+The hook's content is home-local policy, for example the firstmate-addons `git-identity` add-on, which pins a lane's git identity and pre-push identity check; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the invocation mechanics.
 
 ## Merge gate (config/merge-gate)
 

@@ -54,6 +54,10 @@
 #   anything; a nonzero exit refuses the spawn and prints the gate's output.
 #   Secondmate spawns and relaunches never run it, and an absent file changes
 #   nothing.
+#   When config/launch-env-hook is an executable file, every local launch runs
+#   it in the pane at the worktree as `config/launch-env-hook <out-file>` and
+#   sources the one export statement it writes before the AI-trailer step; a
+#   failure stops the launch, and an absent file changes nothing.
 #   Every local launch, relaunches and secondmates included, also checks host
 #   memory admission; docs/configuration.md "Host memory guard" owns refusal
 #   behavior, retry guidance, and thresholds.
@@ -5939,6 +5943,19 @@ LAUNCH_DIR="/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
 if [ "$KEEP_AI_TRAILERS" = 0 ]; then
   GIT_CONFIG_ENV_FILE=$(shell_quote "$LAUNCH_DIR/git-config.$SPAWN_GEN.sh")
   LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh") env-file $(shell_quote "$GIT_HOOKS_DIR") $GIT_CONFIG_ENV_FILE && . $GIT_CONFIG_ENV_FILE || return 1 2>/dev/null || exit 1; $LAUNCH"
+fi
+# Home launch-env hook (config/launch-env-hook, docs/configuration.md): when it
+# is an executable file, the pane runs it at the worktree as
+# `config/launch-env-hook <out-file>` and sources the one export statement it
+# writes, the same shape as the trailer step above. Prepended after it, so it
+# runs first and the trailer hooks dir is appended after its GIT_CONFIG_*
+# entries. A failure stops the launch. The firstmate-addons git-identity add-on
+# pins the lane's git identity and pre-push check through it.
+if [ -f "$CONFIG/launch-env-hook" ] && [ -x "$CONFIG/launch-env-hook" ]; then
+  LAUNCH_ENV_HOOK_FILE=$(shell_quote "$LAUNCH_DIR/launch-env.$SPAWN_GEN.sh")
+  LAUNCH="$(shell_quote "$CONFIG/launch-env-hook") $LAUNCH_ENV_HOOK_FILE && . $LAUNCH_ENV_HOOK_FILE || return 1 2>/dev/null || exit 1; $LAUNCH"
+elif [ -f "$CONFIG/launch-env-hook" ]; then
+  echo "warning: config/launch-env-hook exists but is not executable; the launch proceeds without it" >&2
 fi
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
 # spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
