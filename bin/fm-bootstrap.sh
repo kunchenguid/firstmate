@@ -26,6 +26,7 @@
 #                 (or "<tool> is pinned ... but not on PATH", or
 #                 "invalid config/tool-provenance line <n> - <reason>"),
 #                 "NO_MISTAKES_AGENTS: <config> agent: lists <name>, but <binary> is not installed; ...",
+#                 "CLAUDE_PERMISSIONS: Claude auto mode is on (<file>) but no Bash(...bin/fm-*...) allow rule ...",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
@@ -87,6 +88,11 @@
 #          skips a missing fallback agent. It runs in every home, secondmate
 #          homes included, because the no-mistakes install is a per-host fact;
 #          detect_no_mistakes_agents owns the parsing and name mapping.
+#          CLAUDE_PERMISSIONS reports, in a primary home whose own harness is
+#          claude, Claude settings that turn auto mode on with no allow rule for
+#          firstmate's bin/fm-* scripts, which the auto-mode classifier can then
+#          refuse; it reports a rule's presence only, never that auto mode works.
+#          detect_claude_permissions owns the settings layers it reads.
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -1592,6 +1598,42 @@ detect_local_config() {
   detect_home_summary_publication
   detect_tool_provenance
   detect_no_mistakes_agents
+  detect_claude_permissions
+}
+
+# Claude auto mode without an allow rule for firstmate's own scripts. Settings
+# layers, highest precedence first: <FM_ROOT>/.claude/settings.local.json,
+# <FM_ROOT>/.claude/settings.json, then the user file
+# (FM_BOOTSTRAP_CLAUDE_USER_SETTINGS, else $CLAUDE_CONFIG_DIR or ~/.claude,
+# /settings.json). The first layer that sets permissions.defaultMode decides the
+# mode; an allow entry in any layer of the form Bash(...bin/fm-...) counts as the
+# rule. A --permission-mode flag on the primary's command line is invisible here.
+# Primary homes only, and only when fm-harness.sh resolves this process's own
+# harness to claude; jq is required and its absence keeps the check silent.
+detect_claude_permissions() {
+  local user_settings file mode="" mode_file="" rule=0 harness
+  [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ] && return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  user_settings=${FM_BOOTSTRAP_CLAUDE_USER_SETTINGS:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json}
+  set -- "$FM_ROOT/.claude/settings.local.json" "$FM_ROOT/.claude/settings.json" "$user_settings"
+  [ -f "$1" ] || [ -f "$2" ] || [ -f "$3" ] || return 0
+  harness=$(fm_run_timed 5 "$SCRIPT_DIR/fm-harness.sh" 2>/dev/null) || return 0
+  [ "$harness" = claude ] || return 0
+  for file in "$@"; do
+    [ -f "$file" ] && [ -r "$file" ] || continue
+    if ! jq -e 'type == "object"' "$file" >/dev/null 2>&1; then
+      echo "CLAUDE_PERMISSIONS: $file is not a valid JSON settings object, so Claude may ignore the permissions it holds"
+      continue
+    fi
+    if [ -z "$mode_file" ]; then
+      mode=$(jq -r '.permissions.defaultMode? // empty | strings' "$file" 2>/dev/null)
+      [ -z "$mode" ] || mode_file=$file
+    fi
+    jq -e '[.permissions.allow? // [] | .[]? | strings | select(test("^Bash\\(.*bin/fm-"))] | length > 0' \
+      "$file" >/dev/null 2>&1 && rule=1
+  done
+  [ "$mode" = auto ] && [ "$rule" -eq 0 ] || return 0
+  echo "CLAUDE_PERMISSIONS: Claude auto mode is on ($mode_file) but no Bash(...bin/fm-*...) allow rule is in any Claude settings layer, so the auto-mode classifier may refuse firstmate's own scripts - add Bash($FM_ROOT/bin/fm-*:*) to $FM_ROOT/.claude/settings.local.json (a present rule does not prove the classifier honors it)"
 }
 
 # no-mistakes agent list. no-mistakes has no read-only config dump, and its own

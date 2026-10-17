@@ -76,12 +76,13 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 unset REX_SESSION REX_BLOCK
 
 # Point bootstrap's host-file checks at absent files. They read the developer's
-# own no-mistakes config by default, which would add lines to every suite that
+# own no-mistakes config and Claude user settings by default, which would add lines to every suite that
 # expects a silent bootstrap. The variables are firstmate-owned, so live tests
 # keep the real NM_HOME and Claude login, and deliberately not named FM_*_OVERRIDE,
 # which bin/fm-gate-refuse-lib.sh reads as a home redirect. A case that exercises a check sets
 # its override itself.
 export FM_BOOTSTRAP_NO_MISTAKES_HOME=/nonexistent/fm-test-no-mistakes-home
+export FM_BOOTSTRAP_CLAUDE_USER_SETTINGS=/nonexistent/fm-test-claude-settings.json
 
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override

@@ -261,6 +261,45 @@ assert_timeout_report() {
   [ "$elapsed" -ge "$timeout" ] || fail "expected elapsed >= timeout, got elapsed=${elapsed}s timeout=${timeout}s"
 }
 
+# Claude auto mode without a bin/fm-* allow rule. Each row:
+# <label>^<local settings or ->^<user settings or ->^<harness pin>^<home kind>^<expect>
+# The harness is pinned through the supervision-branch primary pin so the
+# verdict does not depend on the shell running the suite; @LINE@ expands to the
+# expected warning for the user settings file.
+test_claude_permissions() {
+  local label local_body user_body harness kind expect case_dir fakebin out n line
+  n=0
+  while IFS='^' read -r label local_body user_body harness kind expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/claude-perms-$n"
+    mkdir -p "$case_dir/home" "$case_dir/root/.claude" "$case_dir/user"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_real_jq "$fakebin"
+    [ "$local_body" = - ] || printf '%s\n' "$local_body" > "$case_dir/root/.claude/settings.local.json"
+    [ "$user_body" = - ] || printf '%s\n' "$user_body" > "$case_dir/user/settings.json"
+    [ "$kind" != secondmate ] || : > "$case_dir/home/.fm-secondmate-home"
+    line="CLAUDE_PERMISSIONS: Claude auto mode is on ($case_dir/user/settings.json) but no Bash(...bin/fm-*...) allow rule is in any Claude settings layer, so the auto-mode classifier may refuse firstmate's own scripts - add Bash($case_dir/root/bin/fm-*:*) to $case_dir/root/.claude/settings.local.json (a present rule does not prove the classifier honors it)"
+    expect=${expect//@LINE@/$line}
+    expect=${expect//@CASE@/$case_dir}
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/root" \
+      FM_BOOTSTRAP_CLAUDE_USER_SETTINGS="$case_dir/user/settings.json" \
+      FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS="$harness" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      "$ROOT/bin/fm-bootstrap.sh")
+    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
+  done <<'ROWS'
+auto mode without a rule is reported^-^{"permissions":{"defaultMode":"auto"}}^claude^primary^@LINE@
+a local allow rule clears it^{"permissions":{"allow":["Bash(/home/me/firstmate/bin/fm-*:*)"]}}^{"permissions":{"defaultMode":"auto"}}^claude^primary^
+a user allow rule clears it^-^{"permissions":{"defaultMode":"auto","allow":["Bash(bin/fm-*:*)"]}}^claude^primary^
+a local mode overrides user auto mode^{"permissions":{"defaultMode":"default"}}^{"permissions":{"defaultMode":"auto"}}^claude^primary^
+a non-Claude primary is never checked^-^{"permissions":{"defaultMode":"auto"}}^pi^primary^
+a secondmate home is never checked^-^{"permissions":{"defaultMode":"auto"}}^claude^secondmate^
+malformed settings are reported^{not json^{"permissions":{"defaultMode":"default"}}^claude^primary^CLAUDE_PERMISSIONS: @CASE@/root/.claude/settings.local.json is not a valid JSON settings object, so Claude may ignore the permissions it holds
+ROWS
+  pass "Claude auto mode with no bin/fm-* allow rule is reported only for a Claude primary home"
+}
+
 # no-mistakes' agent: setting, read from FM_BOOTSTRAP_NO_MISTAKES_HOME/config.yaml.
 # Each row: <label>^<config body, \n for newlines>^<expected output, exact>.
 # The fake toolchain has codex and acpx; nothing else named here is installed.
@@ -1551,6 +1590,7 @@ test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_tool_provenance_pins
 test_no_mistakes_agents
+test_claude_permissions
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
