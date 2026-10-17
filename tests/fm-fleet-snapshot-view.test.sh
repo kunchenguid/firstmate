@@ -255,6 +255,44 @@ test_fixture_snapshot_json() {
   pass "fixture snapshot covers task rows, backlog rows, pointers, stable ordering, and emission-time event age"
 }
 
+# task_json_lines builds each crew's row through a single jq pass instead of
+# the one-jq-call-per-field sequence it used before; this fixture exercises the
+# trickiest branch that collapse touched - a remote secondmate's recorded home,
+# whose presence is a literal null (home exists on ITS host, never locally
+# checked), not the local existence boolean every other path/home case uses.
+test_remote_secondmate_home_present_is_null() {
+  local home fakebin out remote_home
+  home=$(make_home remote-secondmate)
+  remote_home=$TMP_ROOT/remote-secondmate-home
+  mkdir -p "$remote_home"
+  fm_write_meta "$home/state/remote-sm.meta" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "harness=pi" \
+    "remote_host=host-fake" \
+    "remote_root=/remote/root" \
+    "home=$remote_home" \
+    "remote_backend=tmux" \
+    "remote_target=remote:pane"
+  printf 'working: delegated\n' > "$home/state/remote-sm.status"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/fake-ssh"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e --arg home "$remote_home" '
+    .tasks[] | select(.id == "remote-sm")
+    | .remote.host == "host-fake"
+      and .backend == "tmux"
+      and .paths.home.path == $home
+      and (.paths.home.present == null)
+  ' >/dev/null || fail "a remote secondmate home must report present:null, never a local existence boolean: $out"
+  pass "a remote secondmate's recorded home reports present:null rather than a local existence check"
+}
+
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
 test_hold_buckets_are_total_and_text_blind() {
@@ -1055,6 +1093,33 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_long_idle_paused_crew_skips_live_probe() {
+  local home fakebin out gen
+  home=$(make_home idle-paused)
+  mkdir -p "$home/projects/idle-wt"
+  fm_write_meta "$home/state/idle-paused.meta" \
+    "window=firstmate:fm-idle-paused" \
+    "worktree=$home/projects/idle-wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" idle-paused)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" idle-paused busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  printf 'paused: holding for the upstream tool release\n' > "$home/state/idle-paused.status"
+  touch -t 202001010000 "$home/state/idle-paused.status" "$home/state/idle-paused.meta"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "idle-paused")
+    | .current_state.state == "paused"
+      and .current_state.source == "status-log"
+      and (.current_state | tostring | contains("not live-probed"))
+  ' >/dev/null || fail "a long-idle paused crew must skip the live probe through the snapshot: $out"
+  pass "a long-idle paused crew skips the live probe through the fleet snapshot"
+}
+
 # Home-summary validity treats persistent secondmates as registered homes, not
 # in-flight children. They have no backlog rows, so they must not produce
 # unowned_current or terminal_in_flight. Ordinary crew/ship metas still do.
@@ -1154,6 +1219,7 @@ EOF
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_remote_secondmate_home_present_is_null
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
@@ -1166,6 +1232,7 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_long_idle_paused_crew_skips_live_probe
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
