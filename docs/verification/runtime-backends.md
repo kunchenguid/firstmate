@@ -301,7 +301,7 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.
-Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
+Zellij and Orca have no verified recovery-grade agent process probe, while cmux does not support secondmate spawns; none gains a liveness matcher from the process-name checks above.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
@@ -367,6 +367,7 @@ The refusal is reached only through a close that could not do its job, and each 
 | cmux | 0, silent | 0, not yet distinguishable |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
+The Orca row covers ordinary `fm_backend_orca_kill`; [local secondmate retirement](#local-secondmate-identity-surface) uses a separately verified close-and-confirm path.
 The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
 Guessing it is what a refusal must never rest on: a gate that refused an already-exited session would break ordinary cleanup on every task, which is a worse failure than the stranded endpoint it would be trying to prevent.
 tmux's re-read is deliberately exact - `=session` plus a whole-line window-name match - because a prefix match would read a neighboring window as this window's survivor, which is the same exactness the cleanup identity boundary above already requires.
@@ -2062,6 +2063,89 @@ tests/fm-bootstrap.test.sh
 ```
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+
+### Local secondmate identity surface
+
+Read-only inspection on 2026-10-16 (Sydney) used Orca runtime 1.4.224 and Pi 1.2.0.
+
+```sh
+orca status --json
+orca worktree show --worktree path:<isolated-test-worktree> --json
+orca project setups --host local --json
+orca terminal list --worktree path:<isolated-test-worktree> --limit 10000 --json
+orca orchestration worker-start --help
+pi --version
+```
+
+Observed fields:
+
+```text
+result.runtime.appVersion=1.4.224
+result.runtime.reachable=true
+result.runtime.state=ready
+result.worktree.id=<repo-id>::<absolute-path>
+result.worktree.repoId=<repo-id>
+result.setups[].id=<setup-id>
+result.setups[].repoId=<repo-id>
+result.setups[].path=<absolute-path>
+result.setups[].hostId=local
+result.setups[].setupState=ready
+result.terminals[].handle=<terminal-handle>
+result.terminals[].worktreeId=<repo-id>::<absolute-path>
+result.hostScope.omittedHostIds=[]
+result.totalCount=2
+result.truncated=false
+pi --version: 1.2.0
+```
+
+The seeded root-workspace response does not contain `projectHostSetupId`; the adapter resolves the matching path and repository from the separate local setup inventory.
+These reads establish workspace and terminal inventory shapes, not a Pi process-liveness proof.
+No native supervised Pi start/stop identity has been established, so `fm_backend_agent_state` stays `unverified` and exit/relaunch remains refused.
+`tests/fm-orca-secondmate-live-e2e.test.sh` owns the opted-in launch, worker-label and no-parent verification, visual checkpoint, and guarded-retirement refresh procedure.
+Its phases retain live resources between inspections and require explicit disposable paths.
+
+On the same runtime, a worker in another repository retained `parentWorktreeId=null` after creation with an explicit parent request.
+An explicit `orca worktree set --worktree id:<worker-workspace> --parent-worktree identity:<home-identity> --json` returned:
+
+```json
+{"ok":false,"error":{"code":"LINEAGE_PARENT_CONTEXT_CONFLICT","message":"Parent worktree must belong to the same repository, execution host, and project."}}
+```
+
+The adapter therefore uses independent placement and ownership labels only.
+`tests/fm-backend-orca.test.sh` verifies the worktree and terminal labels and refuses a false or missing no-parent postcondition.
+
+A fresh Pi scout launched through `fm-spawn.sh` on that runtime retained its custom label after the agent started.
+The refresh reads are `orca worktree show --worktree id:<worker-workspace> --json` and `orca terminal show --terminal <worker-terminal> --json`.
+The observed fields were:
+
+```text
+result.worktree.displayName=2ndmate-olilit-orca-test · fm-orca-proof-labels
+result.worktree.parentWorktreeId=null
+result.worktree.lineage=null
+result.terminal.title=2ndmate-olilit-orca-test · fm-orca-proof-labels
+result.terminal.agentIdentity=pi
+```
+
+`terminal rename --title` establishes the custom terminal title; a creation title alone can be replaced by Pi's own automatic title.
+The secondmate's original terminal retained its Pi-generated title, with the secondmate home name.
+
+Guarded secondmate retirement was verified on 2026-10-16 against Orca 1.4.224 and Pi 1.2.0 through the same opted-in live test's `retire` phase.
+The secondmate first completed its scout decision inventory, removed that scout through guarded teardown, and returned a correlated cleanup report; the parent resolved the reply before retirement.
+The live phase returned:
+
+```text
+ok - guarded Orca secondmate retirement completed
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=16532
+```
+
+Exact post-retirement reads confirmed the secondmate and proof scout terminals absent from complete worktree-scoped live inventories, the scout worktrees absent, and both owned home/project repository setups removed.
+The home, parent route, task metadata, and pending replies were removed, while the assigned code workspace retained its identity.
+The terminal inventory evidence had `terminals=[]`, `totalCount=0`, `truncated=false`, and `hostScope.omittedHostIds=[]`.
+One supplementary inventory read omitted the local host; it was not accepted as absence, and a sequential re-read returned a complete empty inventory.
+
+`orca terminal show` continued to return historical records after operator close, with `connected=false`, `writable=false`, and `exitCause.kind=operator_close`.
+Its continued success is therefore not evidence of a live terminal.
+The confirmed-close path uses the complete scoped live inventory before registration removal; it does not require historical terminal records to disappear or infer Pi process liveness from them.
 
 ### Orca environment source
 

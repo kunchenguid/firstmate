@@ -11,6 +11,138 @@
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+FM_ORCA_HOME_JSON="$(dirname -- "${BASH_SOURCE[0]}")/orca-home.js"
+
+fm_backend_orca_home_setup() { # <project-path> <repo-id>
+  local out
+  out=$(orca project setups --host local --json) || return 1
+  printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" setup "$1" "$2"
+}
+
+# One per-home lock serializes every registration receipt read-modify-write.
+fm_backend_orca_home_locked() { # <seeded-home> <command> [args...]
+  local home=$1 lock rc=0
+  shift
+  [ -d "$home/state" ] && [ ! -L "$home/state" ] || {
+    echo "error: unsafe secondmate state directory; preserving Orca registrations" >&2
+    return 1
+  }
+  if ! declare -F fm_lock_acquire_wait >/dev/null 2>&1; then
+    local STATE="$home/state"
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-wake-lib.sh" || return 1
+  fi
+  lock="$home/state/orca-registrations.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  "$@" || rc=$?
+  fm_lock_release "$lock" || true
+  return "$rc"
+}
+
+# Persistent homes are registered roots, never disposable Orca worktrees.
+# Each registration has an ownership receipt in state/orca-registrations.
+# Unknown add results retain a pending receipt and refuse automatic adoption.
+fm_backend_orca_home_repo() { # <seeded-home> <home-or-project-path>
+  fm_backend_orca_home_locked "$1" fm_backend_orca_home_register "$1" "$2"
+}
+
+fm_backend_orca_home_register() { # <seeded-home> <home-or-project-path>
+  local home=$1 project=$2 out repo previous setup owned=reused
+  previous=$(node "$FM_ORCA_HOME_JSON" receipt "$home" "$project") || return 1
+  out=$(orca repo show --repo "path:$project" --json) || true
+  if repo=$(printf '%s' "$out" | fm_backend_orca_json_get repo-id 2>/dev/null); then
+    if [ -n "$previous" ]; then
+      [ "$repo" = "$previous" ] || { echo "error: Orca repository identity changed" >&2; return 1; }
+      printf '%s' "$repo"
+      return 0
+    fi
+  else
+    [ -z "$previous" ] || { echo "error: recorded Orca registration disappeared" >&2; return 1; }
+    printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" missing || return 1
+    node "$FM_ORCA_HOME_JSON" pending "$home" "$project" || return 1
+    out=$(orca repo add --path "$project" --json) || return 1
+    repo=$(printf '%s' "$out" | fm_backend_orca_json_get repo-id) || return 1
+    owned=owned
+  fi
+  setup=$(fm_backend_orca_home_setup "$project" "$repo") || return 1
+  out=$(orca worktree show --worktree "path:$project" --json) || return 1
+  printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" record "$home" "$project" "$repo" "$owned" "$setup"
+}
+
+fm_backend_orca_home_workspace() { # <seeded-home> [read|ensure] [project-path]
+  local home=$1 mode=${2:-ensure} project=${3:-$1} out repo setup
+  if [ "$mode" = ensure ]; then
+    fm_backend_orca_home_repo "$home" "$project" >/dev/null || return 1
+  fi
+  repo=$(node "$FM_ORCA_HOME_JSON" receipt "$home" "$project") || return 1
+  [ -n "$repo" ] || { echo "error: missing persistent Orca workspace receipt" >&2; return 1; }
+  setup=$(fm_backend_orca_home_setup "$project" "$repo") || return 1
+  out=$(orca worktree show --worktree "path:$project" --json) || return 1
+  printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" workspace "$home" "$project" "$setup"
+}
+
+# A stale handle alone proves nothing. Scope a complete inventory to the
+# recorded workspace and validate every returned terminal before closing.
+fm_backend_orca_terminal_state() { # <worktree-id> <terminal>
+  local out
+  out=$(orca terminal list --worktree "id:$1" --limit 10000 --json) || return 1
+  printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" terminal-state "$1" "$2"
+}
+
+fm_backend_orca_close_confirmed() { # <worktree-id> <terminal>
+  local state attempt
+  state=$(fm_backend_orca_terminal_state "$1" "$2") || return 1
+  [ "$state" != absent ] || return 0
+  orca terminal close --terminal "$2" --json >/dev/null 2>&1 || true
+  for attempt in 1 2 3 4 5; do
+    state=$(fm_backend_orca_terminal_state "$1" "$2") || return 1
+    [ "$state" != absent ] || return 0
+    sleep 0.2
+  done
+  echo "error: Orca terminal $2 is not confirmed closed; preserving home and records" >&2
+  return 1
+}
+
+# Called only after the secondmate's child-work and pending-reply gates, and
+# its own exact terminal close. Preflight every registration before removing
+# any. The root-only and empty checks also protect unrecorded/foreign work.
+# Each successful deletion is confirmed and journaled for an idempotent retry.
+fm_backend_orca_home_retire() { # <seeded-home>
+  fm_backend_orca_home_locked "$1" fm_backend_orca_home_release "$1"
+}
+
+fm_backend_orca_home_release() { # <seeded-home>
+  local home=$1 rows project repo setup workspace ownership lifecycle out
+  rows=$(node "$FM_ORCA_HOME_JSON" registrations "$home") || return 1
+  while IFS=$'\t' read -r project repo setup workspace ownership lifecycle; do
+    [ -n "$project" ] || continue
+    out=$(orca repo show --repo "path:$project" --json) || true
+    if printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" missing 2>/dev/null; then
+      [ "$ownership" = owned ] && [ "$lifecycle" = releasing ] || {
+        echo "error: Orca registration disappeared outside its recorded retirement; preserving home" >&2
+        return 1
+      }
+      node "$FM_ORCA_HOME_JSON" released "$home" "$project" || return 1
+      continue
+    fi
+    setup=$(fm_backend_orca_home_setup "$project" "$repo") || return 1
+    out=$(orca worktree show --worktree "path:$project" --json) || return 1
+    printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" workspace "$home" "$project" "$setup" >/dev/null || return 1
+    out=$(orca worktree list --repo "id:$repo" --limit 10000 --json) || return 1
+    printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" root-only "$workspace" || return 1
+    out=$(orca terminal list --worktree "id:$workspace" --limit 10000 --json) || return 1
+    printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" empty "$workspace" || return 1
+  done <<<"$rows"
+  rows=$(node "$FM_ORCA_HOME_JSON" registrations "$home") || return 1
+  while IFS=$'\t' read -r project repo setup workspace ownership lifecycle; do
+    [ -n "$project" ] && [ "$ownership" = owned ] || continue
+    node "$FM_ORCA_HOME_JSON" releasing "$home" "$project" || return 1
+    orca project setup-delete --setup "$setup" --json >/dev/null || return 1
+    out=$(orca repo show --repo "path:$project" --json) || true
+    printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" missing || return 1
+    node "$FM_ORCA_HOME_JSON" released "$home" "$project" || return 1
+  done <<<"$rows"
+}
 
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
@@ -176,9 +308,14 @@ fm_backend_orca_repo_ensure() {  # <project-path>
   printf '%s' "$repo_id"
 }
 
-fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 repo_id out wt_id wt_path terminal
-  repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
+fm_backend_orca_worktree_create() {  # <project-path> <name> [secondmate-home]
+  local project=$1 name=$2 home=${3:-} repo_id out wt_id wt_path terminal
+  if [ -n "$home" ]; then
+    fm_backend_orca_home_workspace "$home" read >/dev/null || return 1
+    repo_id=$(fm_backend_orca_home_repo "$home" "$project") || return 1
+  else
+    repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
+  fi
   out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json) || return 1
   wt_id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id) || {
     echo "error: orca worktree create did not return a worktree id for $name" >&2
@@ -202,15 +339,61 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   [ -z "$terminal" ] || printf '\t%s' "$terminal"
 }
 
-fm_backend_orca_terminal_create() {  # <worktree-id> <title>
-  local worktree_id=$1 title=$2 out terminal
+# Labels express secondmate ownership across repositories; Orca lineage does
+# not. Apply only after the caller owns the allocated endpoint for cleanup.
+fm_backend_orca_worker_label() { # <secondmate-home> <task-window-name>
+  node "$FM_ORCA_HOME_JSON" worker-label "$1" "$2"
+}
+
+fm_backend_orca_label_worker() { # <worktree-id> <terminal> <label>
+  local workspace=$1 terminal=$2 label=$3 out
+  fm_backend_orca_run_json orca worktree set --worktree "id:$workspace" --display-name "$label" --json || return 1
+  fm_backend_orca_run_json orca terminal rename --terminal "$terminal" --title "$label" --json || return 1
+  out=$(orca worktree show --worktree "id:$workspace" --json) || return 1
+  printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" worker-workspace "$workspace" "$label" || return 1
+  out=$(orca terminal show --terminal "$terminal" --json) || return 1
+  printf '%s' "$out" | node "$FM_ORCA_HOME_JSON" worker-terminal "$workspace" "$terminal" "$label"
+}
+
+fm_backend_orca_terminal_create() {  # <worktree-id> <title> [attempt-receipt]
+  local worktree_id=$1 title=$2 receipt=${3:-} out terminal rc=0
   fm_backend_orca_tool_check || return 1
-  out=$(orca terminal create --worktree "id:$worktree_id" --title "$title" --json) || return 1
+  out=$(orca terminal create --worktree "id:$worktree_id" --title "$title" --json) || rc=$?
+  if [ -n "$receipt" ]; then
+    terminal=$(printf '%s' "$out" | node -e '
+const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const t = d.result?.terminal;
+if (!t || typeof t.handle !== "string" || !/^[A-Za-z0-9._@%+-]+$/.test(t.handle)) process.exit(1);
+process.stdout.write(t.handle);
+' 2>/dev/null) || terminal=
+    if [ -n "$terminal" ]; then
+      printf 'worktree=%s\nterminal=%s\n' "$worktree_id" "$terminal" >"$receipt" || return 1
+      printf '%s' "$terminal"
+      [ "$rc" = 0 ] && printf '%s' "$out" | fm_backend_orca_json_ok
+      return $?
+    fi
+  fi
+  [ "$rc" = 0 ] || return "$rc"
   terminal=$(printf '%s' "$out" | fm_backend_orca_json_get terminal-handle) || {
     echo "error: orca terminal create did not return a terminal handle for $title" >&2
     return 1
   }
   printf '%s' "$terminal"
+}
+
+fm_backend_orca_home_close() { # <home> <worktree-id> <terminal>
+  local home=$1 workspace=$2 terminal=$3 closed="$1/state/orca-retired-terminal" expected
+  expected=$(printf '%s\t%s' "$workspace" "$terminal")
+  if [ -f "$closed" ] && [ ! -L "$closed" ] && [ "$(cat "$closed")" = "$expected" ]; then
+    return 0
+  fi
+  if [ -e "$closed" ] || [ -L "$closed" ]; then
+    echo "error: inconsistent Orca terminal retirement receipt; preserving home" >&2
+    return 1
+  fi
+  [ "$(fm_backend_orca_home_workspace "$home" read)" = "$workspace" ] || return 1
+  fm_backend_orca_close_confirmed "$workspace" "$terminal" || return 1
+  ( umask 077; set -o noclobber; printf '%s\n' "$expected" >"$closed" )
 }
 
 fm_backend_orca_send_text_line() {  # <terminal-id> <text>

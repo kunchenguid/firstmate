@@ -528,6 +528,14 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
+      if [ "$(fm_backend_meta_exact_value "$meta" kind 2>/dev/null)" = secondmate ]; then
+        local home
+        home=$(fm_backend_meta_exact_value "$meta" home) || home=
+        if [ "$home" != "$worktree" ] || [ "$project" != "$home" ] || [ "${worktree_id#*::}" != "$home" ]; then
+          echo "REFUSED: Orca secondmate home/workspace binding is inconsistent; preserving task state." >&2
+          return 1
+        fi
+      fi
       window=$terminal
       ;;
     cmux)
@@ -1014,7 +1022,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # `dead` here (issue #4115) - then maps a positively stopped session server to
 # `missing` only in this recovery-grade view. Zellij remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
-# empirically validated. Orca and cmux do not support secondmate spawns.
+# empirically validated. Orca supports local secondmate homes but still has no
+# verified agent-process recovery classifier. Cmux refuses secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
