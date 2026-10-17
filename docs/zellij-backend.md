@@ -12,14 +12,16 @@ Prerequisites:
 
 - Zellij 0.44 or newer.
 - `jq` for JSON responses.
+- On native Windows under Git Bash/MSYS or MinGW, `powershell.exe` must be on the Bash `PATH`, and `zellij.exe` must be discoverable through the Windows environment used by PowerShell `Start-Process`.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
 Select it with local `config/backend` containing `zellij`, `FM_BACKEND=zellij` for one launch, or an explicit request to Firstmate.
 It is never auto-detected.
-A spawn stops before creating a session or acquiring a worktree when Zellij or `jq` is missing or Zellij is below 0.44.
+A spawn stops before creating a session or acquiring a worktree when Zellij or `jq` is missing or Zellij is below 0.44; on native Windows, failure to resolve or launch through PowerShell is reported when Firstmate creates the shared session.
 
 Firstmate uses one shared session named `firstmate` by default.
 `FM_ZELLIJ_SESSION` can select another name for isolated verification.
+On native Windows under Git Bash/MSYS or MinGW, the session name must match `[A-Za-z0-9._-]+`, because the headless session is launched through PowerShell there; every other platform accepts any name Zellij itself accepts.
 Attach with:
 
 ```sh
