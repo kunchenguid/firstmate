@@ -19,6 +19,17 @@
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
+# It also runs the doctor-inventory drift check whenever
+# docs/doctor-checks.json exists. That check scans the inventory's "emitters"
+# (glob patterns under bin/) plus every bin/ library they dot-source through a
+# `. "$VAR/<lib>.sh"` line, transitively, for stdout lines that start with an
+# upper-case prefix and a colon, or a bare upper-case token, skipping comments
+# and lines redirected to stderr or a file. It fails when an emitter prints a
+# prefix the inventory does not map (unless the inventory's "notLines" names
+# it), when the inventory maps a line or token prefix no emitter prints, or
+# when an owner command the inventory names is not an executable file under
+# bin/. bin/fm-doctor.sh still reports any unmapped line at run time, which
+# covers lines a scan cannot see, such as ones built from variables.
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
@@ -709,6 +720,79 @@ fm_lint_run_backend_purity() {
   }
 }
 
+# Doctor-inventory drift check; the header above owns what it enforces.
+fm_lint_run_doctor_inventory() {
+  local inventory="$ROOT/docs/doctor-checks.json" pattern path lib queue seen
+  local findings mapped printed owner
+  [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  [ -f "$inventory" ] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'fm-lint.sh: jq is required to check docs/doctor-checks.json\n' >&2
+    return 1
+  fi
+  if ! jq -e '(.emitters | type) == "array" and (.emitters | length) > 0' "$inventory" >/dev/null 2>&1; then
+    printf 'docs/doctor-checks.json: emitters must be a non-empty array of bin/ glob patterns\n' >&2
+    return 1
+  fi
+  queue=""
+  while IFS= read -r pattern; do
+    case "$pattern" in
+      bin/*) ;;
+      *) printf 'docs/doctor-checks.json: emitter %s is not under bin/\n' "$pattern" >&2; return 1 ;;
+    esac
+    for path in $pattern; do
+      [ -f "$path" ] && queue="$queue $path"
+    done
+  done < <(jq -r '.emitters[]' "$inventory")
+  seen=""
+  while [ -n "${queue# }" ]; do
+    queue=${queue# }
+    path=${queue%% *}
+    case "$queue" in *" "*) queue=${queue#* } ;; *) queue="" ;; esac
+    case " $seen " in *" $path "*) continue ;; esac
+    seen="$seen $path"
+    while IFS= read -r lib; do
+      [ -f "bin/$lib" ] && queue="$queue bin/$lib"
+    done < <(sed -nE 's/^[[:space:]]*\. "\$[A-Za-z_][A-Za-z0-9_]*\/([A-Za-z0-9._-]+\.sh)".*/\1/p' "$path")
+  done
+  # shellcheck disable=SC2086 # $seen is a space-separated list of bin/ paths.
+  printed=$(LC_ALL=C awk '
+    /^[[:space:]]*#/ { next }
+    match($0, /(echo|printf)[[:space:]]+(-[a-zA-Z]+[[:space:]]+)?('"'"'%s\\n'"'"'[[:space:]]+)?["'"'"'][A-Z][A-Z0-9_]*(:|["'"'"'])/) {
+      literal = substr($0, RSTART, RLENGTH)
+      rest = substr($0, RSTART)
+      if (rest ~ /(^|[^-=])>(&2|>|[[:space:]]*["$\/])/) next
+      sub(/^(echo|printf)[[:space:]]+(-[a-zA-Z]+[[:space:]]+)?('"'"'%s\\n'"'"'[[:space:]]+)?["'"'"']/, "", literal)
+      sub(/(:|["'"'"'])$/, "", literal)
+      print literal "\t" FILENAME ":" FNR
+    }' $seen)
+  mapped=$(jq -r '[.checks[]? | objects | select(.kind == "line" or .kind == "token") | .prefix] + (.notLines // []) | .[]' "$inventory")
+  findings=$(
+    printf '%s\n' "$printed" | while IFS="$(printf '\t')" read -r literal where; do
+      [ -n "$literal" ] || continue
+      printf '%s\n' "$mapped" | grep -Fqx -- "$literal" \
+        || printf '%s: prints %s, which docs/doctor-checks.json does not map\n' "$where" "$literal"
+    done
+    jq -r '.checks[]? | objects | select(.kind == "line" or .kind == "token") | .prefix' "$inventory" \
+      | while IFS= read -r literal; do
+        printf '%s\n' "$printed" | cut -f1 | grep -Fqx -- "$literal" \
+          || printf 'docs/doctor-checks.json: maps %s, which no emitter prints\n' "$literal"
+      done
+    jq -r '[(.sources // {})[]?.command[0]?, (.checks[]? | objects | .owner?, .command[0]?)] | map(strings) | unique[]' "$inventory" \
+      | while IFS= read -r owner; do
+        case "$owner" in
+          bin/*..* | bin/*[!A-Za-z0-9._/-]*) printf 'docs/doctor-checks.json: owner %s is not a plain path under bin/\n' "$owner" ;;
+          bin/?*) [ -f "$owner" ] && [ -x "$owner" ] || printf 'docs/doctor-checks.json: owner %s does not exist or is not executable\n' "$owner" ;;
+          *) printf 'docs/doctor-checks.json: owner %s is not under bin/\n' "$owner" ;;
+        esac
+      done
+  )
+  [ -z "$findings" ] || {
+    printf '%s\n' "$findings" >&2
+    return 1
+  }
+}
+
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
@@ -938,6 +1022,7 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'
   overall_rc=0
   fm_lint_run_backend_purity || overall_rc=$?
+  fm_lint_run_doctor_inventory || overall_rc=$?
   fm_lint_run_workflows || overall_rc=$?
   exit "$overall_rc"
 fi
@@ -1268,6 +1353,7 @@ fi
 
 purity_rc=0
 fm_lint_run_backend_purity || purity_rc=$?
+fm_lint_run_doctor_inventory || purity_rc=$?
 if [ "$overall_rc" -eq 0 ] && [ "$purity_rc" -ne 0 ]; then
   overall_rc=$purity_rc
 fi
