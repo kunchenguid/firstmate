@@ -310,6 +310,10 @@ phase_teardown() {
   printf '%s\tattempt\n' "$(date +%s)" > "$HOME_DIR/state/.secondmate-relaunch-design"
   printf '%s\tdead\n' "$(date +%s)" > "$HOME_DIR/state/.secondmate-relaunch-bound-design"
   : > "$LOG"
+  # The earlier send and handoff were consumed by this fixture's assertions.
+  # Acknowledge them before ordinary retirement, just as the secondmate would.
+  mkdir -p "$HOME_DIR/state/design.inbox/handled"
+  mv "$HOME_DIR/state/design.inbox/"*.msg "$HOME_DIR/state/design.inbox/handled/"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-teardown.sh" design 2>&1) \
     || fail "teardown failed for the empty secondmate home: $teardown_out"

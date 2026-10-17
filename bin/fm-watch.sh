@@ -937,7 +937,7 @@ secondmate_ring_to_drain() {  # <task> <window>
   [ "${#delivery_id}" -eq 16 ] || return 1
   rec=$(fm_task_inbox_write "$STATE" "$task" \
     "${FM_FROMFIRST_MARK}delivery=${delivery_id} Drain pending rows in this home's wake queue, then resume idle supervision." \
-    fire-and-forget) || return 1
+    fire-and-forget required) || return 1
   fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")"
 }
 

@@ -78,6 +78,8 @@ REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
+REAL_STAT_FOR_TEST=$(command -v stat)
+export REAL_STAT_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -592,8 +594,12 @@ add_stat_error() {
   local case_dir=$1
   cat > "$case_dir/fakebin/stat" <<'SH'
 #!/usr/bin/env bash
-echo "stat: simulated failure" >&2
-exit 1
+# Inject only the lock-mtime fault, not unrelated ownership/mode queries.
+if [ "${1:-}" = -c ] && [ "${2:-}" = %Y ]; then
+  echo "stat: simulated failure" >&2
+  exit 1
+fi
+exec "${REAL_STAT_FOR_TEST:?}" "$@"
 SH
   chmod +x "$case_dir/fakebin/stat"
 }

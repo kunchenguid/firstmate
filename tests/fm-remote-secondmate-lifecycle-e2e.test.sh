@@ -1576,6 +1576,10 @@ while [ ! -f "$TMP_ROOT/launch.entered" ]; do
   [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
   sleep 0.02
 done
+# Earlier steer/handoff assertions consumed these parent-route messages.
+# Ordinary retirement now requires the remote owner to acknowledge them.
+mkdir -p "$PARENT_ROUTE_INBOX/handled"
+mv "$PARENT_ROUTE_INBOX/"*.msg "$PARENT_ROUTE_INBOX/handled/"
 FM_FAKE_SSH_MODE=retire-lost-slot remote_env "$ROOT/bin/fm-teardown.sh" ios \
   > "$TMP_ROOT/teardown-serialized.out" 2> "$TMP_ROOT/teardown-serialized.err" &
 teardown_pid=$!
