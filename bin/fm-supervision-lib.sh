@@ -39,6 +39,11 @@ fm_sup_stat_mtime() {
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata),
 #                         or a registered custom check
+#   FM_SUP_CHECKS_ONLY    true/false - FM_SUP_NEEDED is true solely because of
+#                         registered custom checks: no task in flight, no event
+#                         source, and no X-mode relay poll. Background
+#                         maintenance checks only; no worker or external wait
+#                         rides on the watcher.
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -48,6 +53,7 @@ fm_supervision_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
+  FM_SUP_CHECKS_ONLY=false
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
@@ -77,6 +83,13 @@ fm_supervision_status() {
     || [ "$FM_SUP_SOURCES" -gt 0 ] \
     || [ "$FM_SUP_CHECKS" -gt 0 ]; then
     FM_SUP_NEEDED=true
+  fi
+  if [ "$FM_SUP_CHECKS" -gt 0 ] \
+    && [ "$FM_SUP_IN_FLIGHT" -eq 0 ] \
+    && [ "$FM_SUP_SOURCES" -eq 0 ] \
+    && [ ! -f "$state/x-watch.check.sh" ]; then
+    # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
+    FM_SUP_CHECKS_ONLY=true
   fi
 
   beat="$state/.last-watcher-beat"

@@ -9,7 +9,10 @@
 # condition set) and that supervision is not healthy, prints a loud, clearly
 # delimited banner so the agent cannot skim past
 # it in the tool output of whatever it was doing - the one channel every harness
-# has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
+# has. The one exception is an idle home whose only need is registered custom
+# checks (FM_SUP_CHECKS_ONLY) and whose beacon is past grace: that is the normal
+# state after a session-scoped harness was closed, so it stays silent.
+# Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
 # bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
 # between turns, so mid-turn a fresh beacon with no live watcher is healthy, and
 # a stale beacon is still healthy while fm_autoarm_midturn_healthy proves a
@@ -181,6 +184,15 @@ sources=$FM_SUP_SOURCES
 checks=$FM_SUP_CHECKS
 needed=$FM_SUP_NEEDED
 beacon_desc=$FM_SUP_BEACON_DESC
+# An idle home whose only need is background maintenance checks (no task in
+# flight, no event source, no X-mode relay poll) with a cold beacon is the
+# ordinary state after a session-scoped harness was closed across a break: no
+# worker or external wait rides on the watcher, so it is not a watcher-down
+# alarm. The turn-end guard still arms the watcher for those checks.
+idle_cold=false
+if [ "$FM_SUP_CHECKS_ONLY" = true ] && [ "$FM_SUP_WATCHER_FRESH" = false ]; then
+  idle_cold=true
+fi
 fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
 watcher_healthy=$FM_WATCHER_VERDICT_OK
 watcher_down_reason=$FM_WATCHER_VERDICT_REASON
@@ -211,6 +223,10 @@ fi
 # actor neither sees nor advances an episode (header).
 if [ "$GUARD_ACTOR" = branch ]; then
   :
+elif [ "$idle_cold" = true ]; then
+  # Idle checks-only home with a cold beacon (above): no alarm, and end any
+  # earlier episode so later work that finds the watcher down re-alarms in full.
+  [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
 elif [ "$watcher_healthy" = false ]; then
   episode_key=$(fm_guard_stale_episode_key "$watcher_down_reason")
   episode_key=${episode_key%$'\n'}
