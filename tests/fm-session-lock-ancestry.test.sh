@@ -620,7 +620,7 @@ while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 
   i=$((i + 1))
 done
 printf '%s\n' "$$" > "$FM_HOME/state/frontend-pid"
-CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/frontend-lock.out" 2>&1
+CLAUDE_CODE_SESSION_ID=${FM_FIXTURE_SOURCE_SESSION_ID:-S1} CLAUDE_PID=$$ "$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/frontend-lock.out" 2>&1
 printf '%s\n' "$?" > "$FM_HOME/state/frontend-lock.rc"
 "$FM_FIXTURE_CLAUDE" "$FM_HOME/daemon.sh" &
 disown
@@ -683,6 +683,23 @@ wait_for_file() {  # <path> <what>
   [ -s "$1" ] || fail "background-session fixture never produced $2"
 }
 
+# After the daemon bridge exits, the pty-host must leave both that daemon and
+# the live frontend. systemd user instances are child subreapers, so the new
+# parent is often that manager rather than pid 1; the product invariant is the
+# broken ancestry, not the specific init pid.
+wait_for_ancestry_divergence() {  # <child-pid> <old-parent-pid> <forbidden-pid> <what>
+  local child=$1 old_parent=$2 forbidden=$3 what=$4 i=0 ppid
+  while [ "$i" -lt 200 ]; do
+    ppid=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d ' ')
+    if [ -n "$ppid" ] && [ "$ppid" != "$old_parent" ] && [ "$ppid" != "$forbidden" ]; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fail "$what (child $child parent=${ppid:-gone}, daemon $old_parent, frontend $forbidden)"
+}
+
 fire_phase() {  # <dir> <n> <hook-environment-script>
   local dir=$1 n=$2
   printf '%s\n' "$3" > "$dir/state/fire-$n.tmp"
@@ -735,7 +752,7 @@ expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label> 
 
 # Not the owner: no arm, the guard's foreign-owner diagnostic naming the live
 # owner, and the lock refusal naming both the owner pid and its recorded id.
-expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
+expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label> [<session-id>]
   local dir=$1 n=$2 arms=$3 owner=$4 label=$5
   expect_code 0 "$(phase_value "$dir" "$n" hook.rc)" "$label: the Stop auto-arm did not stand down"
   [ "$(arm_count "$dir")" = "$arms" ] || fail "$label: a non-owner armed: $(arm_count "$dir") arm(s), expected $arms"
@@ -743,7 +760,7 @@ expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
   grep -q "OWNED BY ANOTHER LIVE SESSION.*lock owner pid $owner" "$dir/state/phase-$n/guard.out" \
     || fail "$label: the guard did not report the live owner $owner: $(cat "$dir/state/phase-$n/guard.out")"
   expect_code 1 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh accepted a lock this session does not own"
-  grep -q "another live firstmate session holds the lock (pid $owner, session S1)" "$dir/state/phase-$n/lock.out" \
+  grep -q "another live firstmate session holds the lock (pid $owner, session ${6:-S1})" "$dir/state/phase-$n/lock.out" \
     || fail "$label: the refusal did not name the owner pid and recorded session: $(cat "$dir/state/phase-$n/lock.out")"
   [ "$(phase_value "$dir" "$n" lock-after)" = "$owner" ] || fail "$label: a non-owner rewrote the lock"
 }
@@ -778,12 +795,7 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
   # the front-end that holds the lock stays alive.
   kill -TERM "$daemon"
-  i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
-    sleep 0.05
-    i=$((i + 1))
-  done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+  wait_for_ancestry_divergence "$ptyhost" "$daemon" "$frontend" "the pty-host was not reparented away from the daemon after it ended"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phases 2-4: before the spare proves anything, a different id, the right id
@@ -817,6 +829,193 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   : > "$dir/state/stop-frontend"
   : > "$dir/state/stop-spare"
   pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change"
+}
+
+# A real detached process tree with a newly keyed background conversation.
+# Native records are written only in this fixture's Claude config, whose path
+# and FM_HOME are present in the actual frontend and model-loop environments.
+test_e2e_background_continuation_keeps_the_live_frontend_lock() {
+  [ -r /proc/self/environ ] || { pass "session-lock: Linux continuation proof is capability-gated without procfs"; return; }
+  local dir frontend daemon ptyhost spare i source target mode=${1:-detached}
+  dir="$TMP_ROOT/e2e-background-continuation-$mode"
+  source=11111111-1111-4111-8111-111111111111
+  target=22222222-2222-4222-8222-222222222222
+  make_background_session_home "$dir"
+  mkdir -p "$dir/claude/sessions" "$dir/claude/projects/fixture"
+  ( cd "$dir" || exit 1
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" CLAUDE_CONFIG_DIR="$dir/claude" FM_FIXTURE_SOURCE_SESSION_ID="$source" \
+    FM_FIXTURE_CLAUDE="$NAMED_CLAUDE" FM_POLL=1 FM_HEARTBEAT=999999 \
+    FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0 \
+    bash -c '"$0" "$1" &' "$NAMED_CLAUDE" "$dir/frontend.sh"
+  )
+  wait_for_file "$dir/state/frontend-lock.rc" "the continuation frontend's lock"
+  wait_for_file "$dir/state/spare-pid" "the continuation model loop"
+  frontend=$(cat "$dir/state/frontend-pid")
+  daemon=$(cat "$dir/state/daemon-pid")
+  ptyhost=$(cat "$dir/state/ptyhost-pid")
+  spare=$(cat "$dir/state/spare-pid")
+  BG_FIXTURE_PIDS+=("$frontend" "$daemon" "$ptyhost" "$spare")
+  expect_code 0 "$(cat "$dir/state/frontend-lock.rc")" "continuation frontend did not acquire"
+  cp "$dir/state/.lock-session" "$dir/sidecar-initial"
+
+  python3 - "$dir" "$frontend" "$spare" "$source" "$target" <<'PY2'
+import datetime,json,sys,time
+from pathlib import Path
+home=Path(sys.argv[1]); owner,loop=map(int,sys.argv[2:4]); source,target=sys.argv[4:]
+def record(pid,sid,kind,**extra):
+    birth=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[19]
+    return dict(pid=pid,sessionId=sid,kind=kind,procStart=birth,startedAt=int(time.time()*1000)-1000,cwd=str(home),pidDomain='linux:'+Path('/etc/machine-id').read_text().strip()+':'+__import__('os').readlink('/proc/self/ns/pid'),**extra)
+for pid,doc in [(owner,record(owner,source,'interactive',parkedJobId=target[:8])),(loop,record(loop,target,'bg',jobId=target[:8]))]:
+    (home/'claude/sessions'/f'{pid}.json').write_text(json.dumps(doc))
+marker=dict(type='continued-in',sessionId=source,continuedInSessionId=target,timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
+(home/'claude/projects/fixture'/f'{source}.jsonl').write_text(json.dumps(marker)+'\n')
+PY2
+  cp -R "$dir/claude" "$dir/native-initial"
+  local scenario n=0 env_script
+  if [ "$mode" = ancestry-confirmed ]; then
+    [ ! -e "$dir/state/.lock-continuation" ] || fail "fixture already has a continuation binding"
+    n=$((n + 1))
+    fire_phase "$dir" "$n" "export CLAUDE_CODE_SESSION_ID=$target; export CLAUDE_PID=\$\$; \"\$FM_HOME/bin/fm-lock.sh\" > \"\$FM_HOME/state/ancestry-confirm.out\" 2>&1; printf '%s\\n' \"\$?\" > \"\$FM_HOME/state/ancestry-confirm.rc\""
+    grep -qx "$frontend" "$dir/state/phase-$n/ancestry" || fail "initial continuation is not ancestry-owned"
+    expect_code 0 "$(cat "$dir/state/ancestry-confirm.rc")" "ancestry-owned continuation confirmation failed"
+    [ "$(phase_value "$dir" "$n" lock-after)" = "$frontend" ] || fail "ancestry confirmation changed retained owner"
+    [ "$(phase_value "$dir" "$n" session-after)" = "$target" ] || fail "ancestry confirmation did not advance sidecar"
+  fi
+  kill -TERM "$daemon"
+  wait_for_ancestry_divergence "$ptyhost" "$daemon" "$frontend" "continuation chain did not diverge"
+  kill -0 "$frontend" || fail "continuation frontend is not alive"
+
+  if [ "$mode" = detached ]; then
+  for scenario in missing-parked forged-link wrong-source stale-owner stale-model duplicate-key \
+      symlink-registry symlink-transcript ambiguous-transcript duplicate-links cycle malformed \
+      resumed-source unrelated-child wrong-job wrong-domain another-home wrong-model-id forged-config future-link malformed-time; do
+    n=$((n + 1))
+    rm -rf "$dir/claude"
+    cp -R "$dir/native-initial" "$dir/claude"
+    python3 - "$dir" "$frontend" "$spare" "$source" "$target" "$scenario" <<'PY2'
+import json,sys
+from pathlib import Path
+home=Path(sys.argv[1]); owner,loop=map(int,sys.argv[2:4]); source,target,scenario=sys.argv[4:]
+a=home/'claude/sessions'/f'{owner}.json'; b=a.with_name(f'{loop}.json')
+t=home/'claude/projects/fixture'/f'{source}.jsonl'
+x=json.loads(a.read_text()); y=json.loads(b.read_text()); link=json.loads(t.read_text())
+if scenario=='missing-parked':x.pop('parkedJobId')
+if scenario=='forged-link':link['continuedInSessionId']='33333333-3333-4333-8333-333333333333'
+if scenario=='wrong-source':x['sessionId']=target
+if scenario=='stale-owner':x['procStart']='1'
+if scenario=='stale-model':y['procStart']='1'
+if scenario=='unrelated-child':y['spare']=True
+if scenario=='wrong-job':y['jobId']='00000000'
+if scenario=='wrong-domain':x['pidDomain']='another-namespace'
+if scenario=='wrong-model-id':y['sessionId']=source
+if scenario=='forged-config':x.pop('parkedJobId')
+if scenario=='future-link':link['timestamp']='2999-01-01T00:00:00+00:00'
+if scenario=='malformed-time':link['timestamp']=123
+for path,doc in [(a,x),(b,y)]:path.write_text(json.dumps(doc))
+t.write_text(json.dumps(link)+'\n')
+if scenario=='duplicate-key':a.write_text(a.read_text()[:-1]+',"sessionId":'+json.dumps(source)+'}')
+if scenario.startswith('symlink-'):
+    path=a if scenario=='symlink-registry' else t
+    saved=home/'symlink-target'; saved.write_bytes(path.read_bytes()); path.unlink(); path.symlink_to(saved)
+if scenario=='ambiguous-transcript':
+    d=t.parent.with_name('other'); d.mkdir(); (d/t.name).write_bytes(t.read_bytes())
+if scenario=='duplicate-links':t.write_text(t.read_text()*2)
+if scenario=='cycle':
+    reverse=dict(link,sessionId=target,continuedInSessionId=source)
+    t.with_name(f'{target}.jsonl').write_text(json.dumps(reverse)+'\n')
+if scenario=='malformed':t.write_text('{"type":"continued-in",\n')
+if scenario=='resumed-source':t.write_text(t.read_text()+json.dumps(dict(type='user',sessionId=source))+'\n')
+if scenario=='another-home':
+    other=home/'other/state'; other.mkdir(parents=True)
+    for name in ['.lock','.lock-session','task.meta']:(other/name).write_bytes((home/'state'/name).read_bytes())
+PY2
+    env_script="unset FM_STATE_OVERRIDE; export CLAUDE_CODE_SESSION_ID=$target; export CLAUDE_PID=\$\$"
+    [ "$scenario" != another-home ] || env_script="$env_script; export FM_STATE_OVERRIDE='$dir/other/state'"
+    if [ "$scenario" = forged-config ]; then
+      cp -R "$dir/native-initial" "$dir/forged-config"
+      env_script="$env_script; export CLAUDE_CONFIG_DIR='$dir/forged-config'"
+    else
+      env_script="$env_script; export CLAUDE_CONFIG_DIR='$dir/claude'"
+    fi
+    fire_phase "$dir" "$n" "$env_script"
+    expect_phase_foreign "$dir" "$n" 0 "$frontend" "$scenario" "$source"
+    cmp -s "$dir/state/.lock-session" "$dir/sidecar-initial" || fail "$scenario changed session identity"
+    [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "$scenario claimed an auto-arm epoch"
+  done
+  fi
+  rm -rf "$dir/claude"
+  cp -R "$dir/native-initial" "$dir/claude"
+  n=$((n + 1))
+  fire_phase "$dir" "$n" "unset FM_STATE_OVERRIDE; export CLAUDE_CODE_SESSION_ID=$target; export CLAUDE_PID=\$\$"
+  if grep -qx "$frontend" "$dir/state/phase-$n/ancestry"; then fail "continued model loop still reaches frontend"; fi
+  expect_code 2 "$(phase_value "$dir" "$n" hook.rc)" "verified continuation did not re-arm at Stop"
+  expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "verified continuation could not confirm ownership"
+  [ "$(phase_value "$dir" "$n" lock-after)" = "$frontend" ] || fail "continuation rewrote the live anchor"
+  [ "$(phase_value "$dir" "$n" session-after)" = "$target" ] || fail "continuation confirmation did not record the new session"
+  ! grep -q 'OWNED BY ANOTHER LIVE SESSION' "$dir/state/phase-$n/guard.out" || fail "continuation guard reported frontend foreign"
+  local sidecar rekey=33333333-3333-4333-8333-333333333333 arms
+  if [ "$mode" = ancestry-confirmed ]; then
+    python3 - "$dir/claude/sessions/$spare.json" "$rekey" <<'PY2'
+import json,sys
+from pathlib import Path
+path=Path(sys.argv[1]); record=json.loads(path.read_text())
+record['sessionId']=sys.argv[2]
+path.write_text(json.dumps(record))
+PY2
+    n=$((n + 1))
+    fire_phase "$dir" "$n" "export CLAUDE_CODE_SESSION_ID=$rekey; export CLAUDE_PID=\$\$"
+    expect_code 2 "$(phase_value "$dir" "$n" hook.rc)" "ancestry-confirmed continuation lost Stop supervision after detachment and re-key"
+    expect_code 0 "$(phase_value "$dir" "$n" guard.rc)" "ancestry-confirmed re-key guard failed"
+    ! grep -q 'OWNED BY ANOTHER LIVE SESSION' "$dir/state/phase-$n/guard.out" || fail "ancestry-confirmed re-key became foreign"
+    expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "ancestry-confirmed re-key publication failed"
+    [ "$(phase_value "$dir" "$n" lock-after)" = "$frontend" ] || fail "ancestry-confirmed re-key replaced retained owner"
+    [ "$(phase_value "$dir" "$n" session-after)" = "$rekey" ] || fail "ancestry-confirmed re-key did not publish identity"
+  fi
+  cp "$dir/state/.lock-continuation" "$dir/binding-initial"
+  for sidecar in "$source" "$target"; do
+    for scenario in stale-binding-owner stale-binding-model wrong-home wrong-config wrong-job wrong-model-id new-actor valid; do
+      cp "$dir/binding-initial" "$dir/state/.lock-continuation"
+      printf '%s\n' "$sidecar" > "$dir/state/.lock-session"
+      python3 - "$dir" "$spare" "$rekey" "$scenario" <<'PY2'
+import json,sys
+from pathlib import Path
+home=Path(sys.argv[1]); loop,sid,scenario=sys.argv[2:]
+p=home/'claude/sessions'/f'{loop}.json'
+y=json.loads((home/'native-initial/sessions'/p.name).read_text())
+y['sessionId']=sid
+if scenario=='wrong-job':y['jobId']='00000000'
+if scenario=='wrong-model-id':y['sessionId']='44444444-4444-4444-8444-444444444444'
+p.write_text(json.dumps(y))
+p=home/'state/.lock-continuation'; binding=json.loads(p.read_text())
+if scenario=='stale-binding-owner':binding['identity'][2][0]='1'
+if scenario=='stale-binding-model':binding['identity'][3][0]='1'
+if scenario=='wrong-home':binding['identity'][3][2]=str(home/'other')
+if scenario=='wrong-config':binding['identity'][3][3]=str(home/'other')
+p.write_text(json.dumps(binding))
+PY2
+      n=$((n + 1))
+      arms=$(arm_count "$dir")
+      env_script="export CLAUDE_CODE_SESSION_ID=$rekey; export CLAUDE_PID=\$\$"
+      [ "$scenario" != new-actor ] || env_script="export CLAUDE_CODE_SESSION_ID=$rekey; export CLAUDE_PID=$ptyhost"
+      fire_phase "$dir" "$n" "$env_script"
+      if [ "$scenario" = valid ]; then
+        expect_code 2 "$(phase_value "$dir" "$n" hook.rc)" "re-key with $sidecar sidecar did not re-arm"
+        expect_code 0 "$(phase_value "$dir" "$n" guard.rc)" "re-key guard failed"
+        ! grep -q 'OWNED BY ANOTHER LIVE SESSION' "$dir/state/phase-$n/guard.out" || fail "re-key guard lost ownership"
+        expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "re-key publication failed"
+        [ "$(phase_value "$dir" "$n" lock-after)" = "$frontend" ] || fail "re-key changed retained owner"
+        [ "$(phase_value "$dir" "$n" session-after)" = "$rekey" ] || fail "re-key did not publish new identity"
+        [ "$(arm_count "$dir")" = "$((arms + 2))" ] || fail "re-key did not arm supervision"
+      else
+        expect_phase_foreign "$dir" "$n" "$arms" "$frontend" "$scenario after re-key" "$sidecar"
+        [ "$(cat "$dir/state/.lock-session")" = "$sidecar" ] || fail "foreign re-key changed sidecar"
+      fi
+    done
+  done
+  : > "$dir/state/stop-frontend"
+  : > "$dir/state/stop-spare"
+  pass "session-lock e2e: $mode continuation retains ownership across same-model re-key with initial and confirmed sidecars"
 }
 
 # A same-session confirmation must refresh a /clear re-key even while another
@@ -1233,3 +1432,6 @@ test_failed_lock_write_removes_new_sidecar_when_none_existed
 test_verified_reclaim_keeps_new_sidecar
 test_reanchor_keeps_task_leases_live
 test_reanchor_keeps_autoarm_midturn_healthy
+
+test_e2e_background_continuation_keeps_the_live_frontend_lock
+test_e2e_background_continuation_keeps_the_live_frontend_lock ancestry-confirmed

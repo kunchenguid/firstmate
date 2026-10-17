@@ -94,11 +94,7 @@ The full digest updates the completion record in this order:
 
 So `clear` or `compact` cannot skip startup sweeps after a truncated run.
 
-`bin/fm-lock.sh` treats a lock as this session's own when it is owned through either of these:
-
-- The shared ancestry verdict.
-- A trusted same-session Claude id.
-
+`bin/fm-lock.sh` treats a lock as this session's own using the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
 So a proven `clear` or `compact` re-emit re-verifies ownership and proceeds.
 A lock another live session took meanwhile still produces the ordinary read-only digest.
 

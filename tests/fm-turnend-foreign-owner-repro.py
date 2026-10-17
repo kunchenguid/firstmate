@@ -59,6 +59,10 @@ def make(name):
         "FM_HOME_SUMMARY_INTERVAL": "999999",
         "FM_CHECK_INTERVAL": "999999",
         "FM_CLAUDE_AUTOARM_SYNC_WAIT_MS": "0",
+        # The repro does not source tests/lib.sh; without the sandbox bypass,
+        # fm-watch-arm.sh refuses to start a watcher from a gate worktree.
+        "FM_GATE_REFUSE_BYPASS": "1",
+        "FM_TEST_SEAM": "1",
     }
     return root, env
 

@@ -113,6 +113,38 @@ A single-process harness has no descendant that adds a distinct verdict, which i
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
+### Claude background continuation identity
+
+Verified on 2026-10-14 with Claude Code `2.1.299 (Claude Code)` on Linux `7.2.9-arch1-1`, using a named non-default Herdr lab and fresh Claude config with no copied credentials.
+Claude Code 2.1.302 resolves the global settings file as `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` (`path.join(process.env.CLAUDE_CONFIG_DIR||os.homedir(), ".claude.json")`; diagnostics name `~/.claude.json`).
+The daemon and session root remains `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`.
+The live guard copies only `cachedGrowthBookFeatures` from the global settings file.
+The native daemon starts independently before the foreground conversation, which prevents daemon ancestry from masking the background handoff.
+The guard verifies its config-derived private socket and process birth before launching the frontend, then proves the settled new-id continuation while the frontend remains live outside the model-loop ancestry.
+An independent foreground conversation remains excluded from the same home.
+`bin/fm-session-lock-lib.sh` owns the direct continuation proof and its platform and trust limits.
+
+Refresh the native proof with:
+
+```sh
+FM_CLAUDE_CONTINUATION_LIVE=1 bash tests/fm-claude-stop-autoarm-live-e2e.test.sh --continuation
+```
+
+Observed output:
+
+```text
+private daemon config, kernel birth and config-derived socket verified
+ok - independent live Claude conversation remains excluded from the same home
+ok - Claude 2.1.299 (Claude Code): settled native new-id handoff proves identity while frontend remains live outside model ancestry; model-issued Stop not exercised
+```
+
+This live guard exercises native process and continuation records through the shared identity predicate with an explicit verified pid list.
+Native `sessions/<pid>.json` and transcript `continued-in` records were observed on Claude Code 2.1.299 and 2.1.302.
+This work has not established a documented vendor compatibility contract for those formats.
+It does not claim an authenticated model-issued Stop.
+`tests/fm-session-lock-ancestry.test.sh` separately drives the real lock, Stop auto-arm and guard scripts in deterministic process trees, including malformed, forged, ambiguous, stale and cross-home negative controls.
+The new-id proof is Linux-only and fail-closed when its native records or required process facts are unavailable; other harnesses and existing same-id ownership retain their previous paths.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
