@@ -3576,6 +3576,17 @@ if (wakes("signal: streaming chain wake 2") !== 1) throw new Error(`wrong second
 await waitFor(() => arms() === 3, "successor after the second streaming-time delivery");
 if (beforeAgentStarts !== 0) throw new Error(`streaming follow-ups raised before_agent_start ${beforeAgentStarts} times`);
 
+// Pi 1.2 emits an idle custom-message trigger without prompt. Its content
+// matching a queued user wake must not mark that wake consumed.
+await handlers.get("before_agent_start")?.({
+  type: "before_agent_start",
+  messageType: "custom",
+  message: {
+    role: "custom", customType: "fixture", content: prompts[1],
+    display: false, timestamp: Date.now(),
+  },
+  systemPrompt: "fixture", systemPromptOptions: {},
+}, {});
 // The run reaches the first queued follow-up; the second is still queued when
 // the captain replaces the session, so only the second rides the handoff.
 consumeQueued(prompts[0]);

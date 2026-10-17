@@ -37,6 +37,7 @@ make_settle_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+window_file="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}.window"
 case "$*" in
   *"#{pane_current_path}"*)
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
@@ -54,8 +55,18 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$name" > "$window_file"
+    exit 0 ;;
+  kill-window) : > "$window_file"; exit 0 ;;
+  has-session|new-session) exit 0 ;;
   send-keys) exit 0 ;;
 esac
 exit 0
