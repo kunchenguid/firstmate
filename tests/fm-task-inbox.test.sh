@@ -102,6 +102,9 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    if [ -n "${FM_READ_ON_CAPTURE:-}" ]; then
+      "$FM_READ_COMMAND" "$FM_READ_ON_CAPTURE" || exit 1
+    fi
     if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
       cat "$FM_FAKE_TMUX_CAPTURE"
     else
@@ -476,17 +479,17 @@ test_handled_mv_dedups_by_sequence() {
   r1=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "first")
   r2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "second")
   [ "$r2" = "$state/t1.inbox/002.msg" ] || fail "second record should be 002.msg, got $r2"
-  oldest=$(inbox_lib "$state" fm_task_inbox_oldest_unhandled "$state" t1)
+  oldest=$(inbox_lib "$state" fm_task_inbox_oldest_unread "$state" t1)
   [ "$oldest" = "$r1" ] || fail "oldest unhandled should be 001, got $oldest"
   mv "$r1" "$state/t1.inbox/handled/"
-  oldest=$(inbox_lib "$state" fm_task_inbox_oldest_unhandled "$state" t1)
+  oldest=$(inbox_lib "$state" fm_task_inbox_oldest_unread "$state" t1)
   [ "$oldest" = "$r2" ] || fail "after the ack mv the oldest should advance to 002, got $oldest"
   # Re-acking the same message is a no-op: the record is already retired and
   # nothing re-lists it as unhandled.
   mv "$state/t1.inbox/001.msg" "$state/t1.inbox/handled/" 2>/dev/null \
     && fail "a second mv of an acked record should find nothing to move"
   mv "$r2" "$state/t1.inbox/handled/"
-  if inbox_lib "$state" fm_task_inbox_oldest_unhandled "$state" t1 >/dev/null; then
+  if inbox_lib "$state" fm_task_inbox_oldest_unread "$state" t1 >/dev/null; then
     fail "a fully handled inbox should report no unhandled record"
   fi
   # An acknowledged sequence is never reissued, so a message is processed at
@@ -741,6 +744,86 @@ test_watcher_waits_on_busy_pane() {
   [ "$(wc -l < "$dir/state/.wake-queue")" = "$wakes" ] || fail "busy escalation repeated"
   [ -f "$dir/state/t1.inbox/001.msg" ] || fail "busy escalation lost the steer"
   pass "watcher: busy deferrals survive restart, escalate once at the bound, and never type"
+}
+
+test_watcher_read_receipt_silences_long_running_steer() {
+  local dir rec next check
+  dir=$(busy_case read-long-running)
+  rec="$dir/state/t1.inbox/001.msg"
+  busy_steer_check "$dir"
+  [ -s "$dir/state/t1.inbox/.busy-state" ] || fail "fixture did not consume a busy deferral"
+  inbox_lib "$dir/state" fm_task_inbox_body "$rec" >/dev/null || fail "worker could not read steer"
+  "$ROOT/bin/fm-task-inbox-read.sh" "$rec" || fail "read receipt failed"
+  "$ROOT/bin/fm-task-inbox-read.sh" "$rec" || fail "repeated read receipt failed"
+  for check in 1 2 3 4; do
+    busy_steer_check "$dir"
+    [ ! -s "$dir/state/.wake-queue" ] || fail "read long-running steer escalated on check $check"
+  done
+  [ ! -e "$dir/state/t1.inbox/.busy-state" ] || fail "read receipt did not reset busy budget"
+  [ -f "$rec" ] || fail "read receipt marked unfinished work handled"
+  [ ! -s "$dir/send.log" ] || fail "read steer was rung again"
+  busy_steer_check "$dir" "$(idle_capture "$dir")"
+  [ ! -s "$dir/send.log" ] || fail "read steer was rung on idle transition"
+  next=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "never-read successor")
+  busy_steer_check "$dir"
+  [ ! -s "$dir/state/.wake-queue" ] || fail "unread successor inherited busy budget"
+  busy_steer_check "$dir"
+  grep -q 'stuck-busy after 2 consecutive' "$dir/state/.wake-queue" || fail "unread successor did not escalate"
+  grep -qF "$next" "$dir/state/.wake-queue" || fail "alarm did not identify unread successor"
+  mv "$rec" "$dir/state/t1.inbox/handled/"
+  "$ROOT/bin/fm-task-inbox-read.sh" "$rec" || fail "receipt retry after handling failed"
+  pass "watcher: read work survives restarts without unread alarms, while an unread successor still escalates"
+}
+
+test_watcher_read_during_check_does_not_escalate() {
+  local dir rec
+  dir=$(busy_case read-during-check)
+  rec="$dir/state/t1.inbox/001.msg"
+  busy_steer_check "$dir"
+  FM_READ_ON_CAPTURE="$rec" FM_READ_COMMAND="$ROOT/bin/fm-task-inbox-read.sh" busy_steer_check "$dir"
+  [ ! -s "$dir/state/.wake-queue" ] || fail "a receipt written during a due check still escalated"
+  [ ! -e "$dir/state/t1.inbox/.busy-state" ] || fail "a concurrent read did not reset the budget"
+  [ -f "$rec" ] || fail "a concurrent read retired unfinished work"
+  pass "watcher: a read receipt arriving during the due check prevents unread escalation"
+}
+
+test_read_receipt_silences_spent_ladder_and_retry() {
+  local state rec action
+  state="$TMP_ROOT/read-ladders/state"; mkdir -p "$state" "$TMP_ROOT/read-ladders/config"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "spent ladder")
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec"
+  "$ROOT/bin/fm-task-inbox-read.sh" "$rec" || fail "read receipt failed"
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=1 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "read receipt did not silence spent delivery budget: $action"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "retry steer" fire-and-forget)
+  inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$rec"
+  "$ROOT/bin/fm-task-inbox-read.sh" "$rec" || fail "retry read receipt failed"
+  : > "$TMP_ROOT/read-ladders/config/wait-no-turns"
+  action=$(FM_CONFIG_OVERRIDE="$TMP_ROOT/read-ladders/config" FM_TASK_INBOX_GRACE_SECS=0 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "read receipt left a retry ring due: $action"
+  [ ! -e "$state/t1.inbox/.retry-ring" ] || fail "read receipt left retry bookkeeping"
+  pass "inbox: read receipts silence spent delivery budgets and owed retry rings"
+}
+
+test_read_receipt_rejects_missing_or_invalid_records() {
+  local state rec candidate
+  state="$TMP_ROOT/read-invalid/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "read me")
+  for candidate in "$state/t1.inbox/002.msg" "$state/t1.inbox/not-a-message" "$state/001.msg"; do
+    if "$ROOT/bin/fm-task-inbox-read.sh" "$candidate" 2>/dev/null; then
+      fail "read receipt accepted invalid record: $candidate"
+    fi
+  done
+  mkdir "$state/t1.inbox/.read"
+  mkdir "$state/t1.inbox/.read/001.msg"
+  if "$ROOT/bin/fm-task-inbox-read.sh" "$rec" 2>/dev/null; then
+    fail "read receipt hid a write failure"
+  fi
+  [ "$(FM_TASK_INBOX_GRACE_SECS=0 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)" = "ring $rec" ] \
+    || fail "failed receipt suppressed unread detection"
+  pass "inbox: missing, invalid, and unwritable read receipts fail without suppressing unread detection"
 }
 
 test_watcher_busy_budget_resets_on_ring_and_ack() {
@@ -1210,6 +1293,10 @@ test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
+test_watcher_read_receipt_silences_long_running_steer
+test_watcher_read_during_check_does_not_escalate
+test_read_receipt_silences_spent_ladder_and_retry
+test_read_receipt_rejects_missing_or_invalid_records
 test_watcher_busy_budget_resets_on_ring_and_ack
 test_watcher_busy_bookkeeping_failure_surfaces
 test_watcher_successor_busy_reset_failure_surfaces idle
