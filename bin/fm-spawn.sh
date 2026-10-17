@@ -333,7 +333,8 @@
 #   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
 #   task teardown removes only the current home's launch namespace.
 # Launch environment (config/launch-env-allowlist):
-#   Absent means unchanged ambient inheritance. A present readable regular file
+#   Absent disables this filter; launch assignments and trace-context handling
+#   below still apply. A present readable regular file
 #   opts every launch (ship, scout, secondmate, raw command, and relaunch) into
 #   /usr/bin/env -i followed by /bin/sh -c of the existing launch command.
 #   Each line is one POSIX environment name, never a value or shell expression;
@@ -5825,7 +5826,7 @@ fi
 # raw launch expression. A pane that never had it, and a remote host whose
 # transport never carried it, both still start the agent with it set. It is
 # unconditional, with no config file or flag gating it, and is inserted outside
-# every generated launch prefix; relaunch trace cleanup may execute first but
+# every generated launch prefix; trace cleanup may execute first but
 # cannot change this value. The cleared-environment floor in the
 # LAUNCH_ENV_PREFIX construction below sets it again at the `env -i` boundary,
 # so under an enabled allowlist the switch is established before the wrapping
