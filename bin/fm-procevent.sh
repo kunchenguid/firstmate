@@ -910,17 +910,22 @@ publish_pending() {  # [result-file-to-skip]
 }
 
 # Start one command as the leader of a fresh process group, either waiting for
-# it (the public `start` boundary) or detaching from it (reconcile's restart and
-# the runner's own owner guard). The guard deliberately gets its OWN group
-# rather than joining the runner's: it has to survive the group signal it sends,
-# and a member of the runner's group would also make that group read as alive
-# after the runner itself is gone.
-isolate_process() {  # <wait|detach> <command> [argv...]
+# it (the public `start` boundary), detaching from it (reconcile's restart), or
+# leaving it as this shell's background child with its pid in `$!` (the runner's
+# own owner guard, so the runner can see the guard exit while it waits for the
+# guard to report). The guard deliberately gets its OWN group rather than
+# joining the runner's: it has to survive the group signal it sends, and a
+# member of the runner's group would also make that group read as alive after
+# the runner itself is gone.
+isolate_process() {  # <wait|detach|child> <command> [argv...]
   local mode=$1 program
   shift
   # shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
   program='my $mode = shift @ARGV;
-    defined(my $pid = fork) or exit 125;
+    my $pid = 0;
+    if ($mode ne "child") {
+      defined($pid = fork) or exit 125;
+    }
     if ($pid == 0) {
       setpgrp(0, 0) or exit 125;
       $ENV{FM_PROCEVENT_RUNNER_GROUP} = $$;
@@ -1473,30 +1478,33 @@ retire_owned_terminal_source() {  # <source-id>
 
 # Bind this runner's lifetime to the home that owns it. Started once the
 # claim is held, so the guard names the exact generation it protects, and
-# detached into its OWN process group so the group signal it may later send
+# started in its OWN process group so the group signal it may later send
 # reaches the runner and every descendant without killing the guard first.
 # If signalling cannot be proved safe or does not finish, the guard remains
 # alive and retries on its normal check cadence rather than abandoning cleanup.
+#
+# The runner waits until the guard reports or exits, not for a fixed interval.
+# The guard's startup is a whole process launch that a loaded host can delay by
+# seconds, and a runner that gave up on a guard still starting would exit and
+# release a claim its callers had already seen as listening. The cap only
+# backstops a guard that neither reports nor exits.
 start_owner_guard() {  # <source-id>
-  local identity ready value
+  local identity ready guard deadline value
   identity=$(fm_pid_identity "$$" 2>/dev/null) || return 1
   ready=$(umask 077; mktemp "$REG/.owner-guard-ready.XXXXXX") || return 1
-  if ! isolate_process detach "$SCRIPT_DIR/fm-procevent.sh" _owner-watchdog \
+  if ! isolate_process child "$SCRIPT_DIR/fm-procevent.sh" _owner-watchdog \
       "$1" "$$" "$identity" "$ready" "$CLAIM_STATE_DEVICE" "$CLAIM_STATE_INODE"; then
     rm -f -- "$ready"
     return 1
   fi
-  for _ in $(seq 1 50); do
-    if [ -s "$ready" ]; then
-      IFS= read -r value < "$ready" || value=
-      rm -f -- "$ready"
-      [ "$value" = ready ]
-      return $?
-    fi
+  guard=$!
+  deadline=$((SECONDS + 60))
+  while [ ! -s "$ready" ] && kill -0 "$guard" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
     sleep 0.1
   done
+  IFS= read -r value < "$ready" || value=
   rm -f -- "$ready"
-  return 1
+  [ "$value" = ready ]
 }
 
 # The runner's owner guard, which bounds an accidentally orphaned detached
