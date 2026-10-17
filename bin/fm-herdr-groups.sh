@@ -63,7 +63,7 @@ FM_HERDR_GROUPS_CONFIG="herdr-project-groups"
 FM_HERDR_GROUPS_SOURCE="firstmate"
 # agent.view.set, workspace.report_metadata, and pane.report_metadata with
 # token readback in workspace and pane lists are verified on protocol 22
-# (Herdr 0.9.3); no earlier protocol is verified.
+# (Herdr 0.9.5, wire schema from Herdr 0.9.3); no earlier protocol is verified.
 FM_HERDR_GROUPS_MIN_PROTOCOL=22
 FM_HERDR_GROUPS_UNSUPPORTED_PREFIX=".herdr-groups-unsupported-"
 FM_HERDR_GROUPS_UNMATCHED_RANK=999
@@ -316,7 +316,7 @@ session_supported() {
   [ "$protocol" -ge "$FM_HERDR_GROUPS_MIN_PROTOCOL" ] && return 0
   marker="$STATE/$FM_HERDR_GROUPS_UNSUPPORTED_PREFIX$protocol"
   if [ ! -e "$marker" ]; then
-    warn "Herdr protocol $protocol is below the verified protocol $FM_HERDR_GROUPS_MIN_PROTOCOL (Herdr 0.9.3); tags and the agents view stay off until Herdr is upgraded"
+    warn "Herdr protocol $protocol is below the verified protocol $FM_HERDR_GROUPS_MIN_PROTOCOL (Herdr 0.9.5); tags and the agents view stay off until Herdr is upgraded"
     : > "$marker" 2>/dev/null || true
   fi
   return 1

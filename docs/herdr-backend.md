@@ -955,7 +955,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ## Active limits
 
 - Presentation ordering needs protocol 16 and Python and is best-effort only.
-- Project groups need protocol 22 and Python, and are verified offline only.
+- Project groups need protocol 22 and Python, are tested offline, and were checked live once against Herdr 0.9.5 on protocol 22.
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
