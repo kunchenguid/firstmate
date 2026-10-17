@@ -32,6 +32,7 @@ if [ "${1:-}" = --continuation ]; then
   SESSION=$("$LAB_HELPER" name claude-bg-session-lock)
   export FM_HERDR_LAB_STATE_DIR="$LAB/herdr-state"
   CLAUDE_VERSION=$(claude --version)
+  # shellcheck disable=SC2329 # Invoked by the EXIT trap below.
   cleanup_continuation() {
     local rc=$?
     # Only native pids recorded in this fresh config, still matching both their
