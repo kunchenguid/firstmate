@@ -956,6 +956,18 @@ case "$*" in
   *"#{socket_path}"*) printf '%s/socket\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
 esac
 case "${1:-}" in
+  new-window)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -n ]; then
+        shift
+        printf '%s\n' "$1" > "$FM_FAKE_PANE_PATH.fake-tmux-window"
+        break
+      fi
+      shift
+    done
+    ;;
+  list-windows) cat "$FM_FAKE_PANE_PATH.fake-tmux-window" 2>/dev/null || true ;;
+  kill-window) rm -f "$FM_FAKE_PANE_PATH.fake-tmux-window" ;;
   display-message) printf 'firstmate\n' ;;
 esac
 exit 0
@@ -1787,7 +1799,7 @@ project=$home"
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
