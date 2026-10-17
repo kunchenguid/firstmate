@@ -1621,7 +1621,20 @@ That is the measured reason projection removal is tab-level: a `pane close` of t
 The workspace and tab `pane_count` fields count the sidebar, so a raw `pane_count == 1` shape gate silently skips every 0.9.x projection; the shared root-pane rule is the version-tolerant replacement.
 `tab create --no-focus` was also observed marking its new tab `focused: true` inside a workspace the client had not switched to, which is why the abort rollback treats its own workspace's active tab as a reachable shape.
 
-Re-run this lab probe after every Herdr upgrade that changes the sidebar, `pane close`, or `tab close` behavior; `tests/fm-backend-herdr.test.sh` pins the same shape with canned pane lists, and `tests/fm-backend-herdr-presentation-e2e.test.sh` exercises it live.
+The same run pinned the two supporting signals the adapter reads:
+
+```text
+tab get w1:t2 (live)      -> {"result":{"tab":{"tab_id":"w1:t2","workspace_id":"w1","pane_count":2,...}}}
+tab get w1:t2 (closed)    -> {"error":{"code":"tab_not_found","message":"tab w1:t2 not found"}}
+tab get w9:t9 (never)     -> {"error":{"code":"tab_not_found","message":"tab w9:t9 not found"}}
+api snapshot .result.snapshot.panes -> the same PaneInfo objects as pane list, label and tokens included
+```
+
+`tab_not_found` is therefore the confirmed absent-tab code `fm_backend_herdr_tab_presence_state` treats as gone, and an already-closed tab makes the exact tab close idempotent rather than a failed rollback.
+A fresh tab's sidebar pane was listed first with `label == "Sidebar"` and `tokens: null`, and only later carried `herdr-sidebar-*`; the label signal alone therefore has to exclude it, which is why the rule accepts either signal.
+The `api snapshot` pane entries carry the same two signals, so the session-start sweep's candidate rule sees the same shape it does through `pane list`; anything that carries neither signal still fails that rule closed and is never swept.
+
+Re-run this lab probe after every Herdr upgrade that changes the sidebar, `pane close`, `tab close`, `tab get`, or `api snapshot` behavior; `tests/fm-backend-herdr.test.sh` pins the same shape with canned and stateful fakes, and `tests/fm-backend-herdr-presentation-e2e.test.sh` exercises it live.
 
 ### Workspace-removal focus safety
 

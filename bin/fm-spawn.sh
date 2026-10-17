@@ -1517,12 +1517,13 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
-    # The rollback closes the exact task and seeded tabs (terminal plus the
-    # 0.9.x sidebar pane) so the disposable workspace empties, then removes its
-    # attempt journal because nothing is left to quarantine. The owned-workspace
-    # and prior-focus scope lets the close of a seeded tab that is itself the
-    # persisted active tab restore the captain's pre-spawn focus first, instead
-    # of bypassing the live-viewer guard.
+    # The rollback closes every exact tab the failed create recorded - the task
+    # tab when its create succeeded, the seeded default tab in any case - so the
+    # disposable workspace empties, then removes its attempt journal because
+    # nothing is left to quarantine. The owned-workspace and prior-focus scope
+    # lets the close of a seeded tab that is itself the persisted active tab
+    # restore the captain's pre-spawn focus first, instead of bypassing the
+    # live-viewer guard.
     fm_backend_herdr_projection_cleanup_tabs_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_TAB" \
@@ -4373,6 +4374,9 @@ else
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              # A create that already returned complete exact IDs arms the same
+              # rollback even when it failed later (a create-time focus restore,
+              # for instance), so no named workspace or journal can be orphaned.
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION

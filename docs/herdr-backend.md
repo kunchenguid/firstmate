@@ -263,10 +263,11 @@ Creation proceeds in this order:
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
 
 A failed fresh creation rolls back what it created.
-When both creates returned complete exact ids, the spawn closes the exact task and seeded tabs, empties the disposable workspace, and removes the attempt journal, so no orphan workspace or version 1 journal survives the abort.
+Each create response grants rollback authority for exactly the ids it returned, so the spawn closes the seeded tab after any complete workspace create and the task tab as well once that create has returned its ids.
+Either way the disposable workspace empties with its last tab and the attempt journal is retired, so no orphan workspace or version 1 journal survives the abort even when the failure is the create-time focus restore itself.
 Herdr 0.9.x create is not focus-authoritative, so the rollback can find its own seeded tab as the persisted active tab under a live client.
 It then restores the exact pre-spawn focus before that close, which keeps the live-viewer guard authoritative instead of bypassing it (see [Cleanup and focus safety](#cleanup-and-focus-safety)).
-An ambiguous create response still leaves the journal quarantined for the session-start sweep, because the adapter cannot safely identify what to roll back.
+An incomplete or ambiguous create response still leaves the journal quarantined for the session-start sweep, because the adapter cannot safely identify what to roll back.
 
 The token is visible in the workspace title, because Herdr exposes no verified hidden persistent field.
 Neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.

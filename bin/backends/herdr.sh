@@ -1201,7 +1201,13 @@ fm_backend_herdr_projection_close_tab_focus_preserving() {  # <session> <tab-id>
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
     [ "$state" = "$required_agent_state" ] || return 1
   fi
-  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || return 1
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || {
+    # A close can fail because the tab is already gone (a concurrent teardown,
+    # or the workspace emptying under it). Only a second exact presence read
+    # that proves the tab absent makes that the same outcome; any other reading
+    # stays a failed close so a record is never erased on an unconfirmed one.
+    [ "$(fm_backend_herdr_tab_presence_state "$session" "$tab_id")" = dead ] || return 1
+  }
   if [ "$skip_restore" -eq 0 ]; then
     fm_backend_herdr_projection_focus_restore "$session" "$before" "tab close" || return 2
   fi
@@ -2707,9 +2713,13 @@ EOF
 # PRE_CREATE_FOCUS is the exact workspace and tab that were active before this
 # call created anything; the same-process abort rollback restores it before it
 # closes a disposable tab that is itself the persisted active tab.
-# CLEANUP_SAFE becomes 1 only after both creates returned complete exact IDs.
-# A missing, failed, or malformed create response stays ambiguous and grants no
-# cleanup authority.
+# CLEANUP_SAFE becomes 1 as soon as one create response has returned complete
+# exact IDs for what it created: the workspace, its seeded tab, and its seeded
+# root pane from the workspace create, plus the task tab and pane when that
+# create also returned them. The same-process rollback then closes exactly the
+# IDs that are recorded, so a later failure can never orphan a workspace it can
+# already name. A missing, failed, or malformed create response stays ambiguous
+# and grants no cleanup authority for the IDs it did not return.
 fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label>
   local cwd=$1 workspace_label=$2 task_label=$3 session out tabs tab_count root_pane focus_before active_tab
   FM_BACKEND_HERDR_PROJECTION_SESSION=""
@@ -2737,11 +2747,10 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: herdr presentation workspace create failed ambiguously; leaving its journal quarantined" >&2
     return 1
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "workspace create" || {
-    echo "error: herdr presentation workspace create did not preserve exact active focus; leaving its journal quarantined" >&2
-    return 1
-  }
-  # shellcheck disable=SC2034  # caller consumes the response-derived global
+  # The response-derived scope is recorded before anything else can fail, so a
+  # create-time focus-restore failure still carries the exact workspace and
+  # seeded tab a same-process rollback must close.
+  # shellcheck disable=SC2034  # caller consumes the response-derived globals
   FM_BACKEND_HERDR_PROJECTION_SESSION=$session
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
@@ -2752,6 +2761,12 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: herdr presentation workspace create returned incomplete IDs; leaving its journal quarantined" >&2
     return 1
   fi
+  # shellcheck disable=SC2034  # caller consumes the same-process cleanup gate
+  FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "workspace create" || {
+    echo "error: herdr presentation workspace create did not preserve exact active focus; refusing the projection with its exact rollback scope recorded" >&2
+    return 1
+  }
 
   focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "error: herdr presentation task-tab create could not capture exact active workspace and tab; refusing a focus-unsafe projection" >&2
@@ -2766,18 +2781,17 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: herdr presentation task-tab create failed ambiguously; leaving its journal quarantined" >&2
     return 1
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "task-tab create" || {
-    echo "error: herdr presentation task-tab create did not preserve exact active focus; leaving its journal quarantined" >&2
-    return 1
-  }
+  # shellcheck disable=SC2034  # caller consumes the response-derived globals
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" ] || [ -z "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" ]; then
     echo "error: herdr presentation task-tab create returned incomplete IDs; leaving its journal quarantined" >&2
     return 1
   fi
-  # shellcheck disable=SC2034  # caller consumes the same-process cleanup gate
-  FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "task-tab create" || {
+    echo "error: herdr presentation task-tab create did not preserve exact active focus; refusing the projection with its exact rollback scope recorded" >&2
+    return 1
+  }
   focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "error: herdr presentation seeded-tab prune could not capture exact active workspace and tab; refusing a focus-unsafe prune" >&2
     return 1

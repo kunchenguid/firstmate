@@ -2147,6 +2147,153 @@ test_projection_abort_rollback_keeps_the_guard_outside_its_own_workspace() {
   pass "herdr presentation abort rollback: the live-viewer guard stays authoritative outside the owned scope"
 }
 
+# make_projection_create_statefake: a stateful Herdr CLI stand-in that models the
+# measured 0.9.1 removal behavior (a tab close removes the tab, and the emptied
+# workspace with it), so a rollback can be judged by the surviving live state.
+# make_projection_create_statefake <dir> <state-file> -> echoes the fakebin dir
+make_projection_create_statefake() {  # <dir> <state-file>
+  local dir=$1 state=$2 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+STATE='$state'
+save() { local tmp="\$STATE.tmp.\$\$"; cat > "\$tmp" && mv "\$tmp" "\$STATE"; }
+ws=""; label=""
+args=("\$@")
+for ((i=0; i<\${#args[@]}; i++)); do
+  case "\${args[\$i]}" in
+    --workspace) ws=\${args[\$((i+1))]:-} ;;
+    --label) label=\${args[\$((i+1))]:-} ;;
+  esac
+done
+case "\${1:-} \${2:-}" in
+  "workspace create")
+    jq --arg label "\$label" '
+      .workspaces += [{workspace_id:"w1", label:\$label}]
+      | .tabs += [{tab_id:"w1:t1", workspace_id:"w1", pane_id:"w1:p1"}]' "\$STATE" | save
+    printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}'
+    ;;
+  "workspace list")
+    jq -c '{result:{workspaces:.workspaces}}' "\$STATE"
+    ;;
+  "tab get")
+    tab=\${3:-}
+    if [ "\$(jq -r --arg t "\$tab" '[.tabs[]|select(.tab_id==\$t)]|length' "\$STATE")" = 0 ]; then
+      printf '%s\n' '{"error":{"code":"tab_not_found"}}'
+    else
+      printf '{"result":{"tab":{"tab_id":"%s"}}}\n' "\$tab"
+    fi
+    ;;
+  "tab close")
+    tab=\${3:-}
+    jq --arg t "\$tab" '
+      .tabs |= [.[]|select(.tab_id != \$t)]
+      | . as \$s
+      | .workspaces |= [ .[] | .workspace_id as \$w
+          | select([\$s.tabs[] | select(.workspace_id == \$w)] | length > 0) ]' "\$STATE" | save
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+test_projection_create_focus_restore_failure_keeps_its_rollback_scope() {
+  local dir fb state out status
+  dir="$TMP_ROOT/projection-create-restore-failure"; mkdir -p "$dir/state"
+  state="$dir/live.json"
+  printf '%s\n' '{"workspaces":[],"tabs":[]}' > "$state"
+  fb=$(make_projection_create_statefake "$dir" "$state")
+  # The workspace create succeeds with complete exact IDs and then the
+  # create-time focus restore fails, which is the abort shape the presentation
+  # rollback has to cover.
+  out=$(PATH="$fb:$PATH" STATE_DIR="$dir/state" ID=probe bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_version_check() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_session() { printf fmtest; }
+    fm_backend_herdr_projection_focus_snapshot() { printf "cap-ws\tcap-tab"; }
+    fm_backend_herdr_projection_focus_restore() { [ "${3:-}" != "workspace create" ]; }
+    journal=$(fm_backend_herdr_projection_journal_path "$STATE_DIR" "$ID") || exit 9
+    fm_backend_herdr_projection_journal_create "$STATE_DIR" "$ID" || exit 9
+    token=$(fm_backend_herdr_projection_journal_token "$journal" "$ID") || exit 9
+    label=$(fm_backend_herdr_projection_workspace_label "$ID" "$token")
+    if fm_backend_herdr_projection_create_task /tmp "$label" fm-probe; then
+      printf "create-unexpectedly-succeeded\n"; exit 9
+    fi
+    printf "safe=%s ws=%s tab=%s pane=%s focus=%s\n" \
+      "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-}" \
+      "${FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID:-}" \
+      "${FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID:-}" \
+      "${FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID:-}" \
+      "$(printf "%s" "${FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS:-}" | tr "\t" "/")"
+    fm_backend_herdr_projection_cleanup_tabs_exact \
+      "$FM_BACKEND_HERDR_PROJECTION_SESSION" \
+      "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
+      "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
+      "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
+      "$FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS" || printf "rollback-failed\n"
+    if fm_backend_herdr_projection_token_workspace_gone \
+      "$FM_BACKEND_HERDR_PROJECTION_SESSION" "$journal" "$ID"; then
+      printf "token-gone=yes\n"
+    else
+      printf "token-gone=no\n"
+    fi
+  ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the failing create did not reach the rollback probe: $out"
+  assert_contains "$out" "safe=1 ws=w1 tab=w1:t1 pane=w1:p1 focus=cap-ws/cap-tab" \
+    "a failing create-time focus restore did not keep the exact rollback scope: $out"
+  assert_contains "$out" "token-gone=yes" \
+    "the recorded scope did not let the rollback retire the token-bearing workspace: $out"
+  [ "$(jq -r '.workspaces | length' "$state")" = 0 ] \
+    || fail "the abort rollback left an orphan disposable workspace behind: $(jq -c '.workspaces' "$state")"
+  [ "$(jq -r '.tabs | length' "$state")" = 0 ] \
+    || fail "the abort rollback left a seeded or task tab behind: $(jq -c '.tabs' "$state")"
+  pass "herdr presentation create: a failing create-time focus restore still rolls back its exact workspace and seeded tab"
+}
+
+test_projection_close_is_idempotent_when_the_tab_vanished_mid_close() {
+  local vanished out reads
+  reads="$TMP_ROOT/projection-close-vanish-reads"
+  for vanished in 1 0; do
+    : > "$reads"
+    out=$(VANISHED="$vanished" READS="$reads" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_foreground_client_present() { return 0; }
+      fm_backend_herdr_projection_focus_snapshot() { printf "cap-ws\tcap-tab"; }
+      fm_backend_herdr_cli() {
+        shift
+        case "$1 $2" in
+          "tab get")
+            count=$(( $(cat "$READS" 2>/dev/null || printf 0) + 1 ))
+            printf "%s" "$count" > "$READS"
+            if [ "$VANISHED" = 1 ] && [ "$count" -ge 2 ]; then
+              printf "{\"error\":{\"code\":\"tab_not_found\"}}\n"
+            else
+              printf "{\"result\":{\"tab\":{\"tab_id\":\"%s\"}}}\n" "$3"
+            fi
+            ;;
+          *) return 1 ;;
+        esac
+      }
+      fm_backend_herdr_projection_close_tab_focus_preserving fmtest w9:t1
+      printf "rc=%s" "$?"
+    ' "$ROOT" 2>&1)
+    if [ "$vanished" = 1 ]; then
+      assert_contains "$out" "rc=0" \
+        "a tab that vanished between the presence read and the close must not fail the rollback: $out"
+    else
+      assert_contains "$out" "rc=1" \
+        "a failed close of a tab that is still present must stay a failure: $out"
+    fi
+  done
+  pass "herdr presentation cleanup: a failed tab close succeeds only when a second exact read proves the tab gone"
+}
+
 test_projection_focus_snapshot_requires_exact_workspace_and_tab() {
   local dir log resp fb out
   dir="$TMP_ROOT/projection-focus-snapshot"; mkdir -p "$dir/responses"
@@ -6136,6 +6283,8 @@ test_pane_for_tab_prefers_terminal_over_sidebar
 test_projection_cleanup_tabs_exact_closes_both_tabs
 test_projection_abort_rollback_restores_prior_focus_for_owned_active_tab
 test_projection_abort_rollback_keeps_the_guard_outside_its_own_workspace
+test_projection_create_focus_restore_failure_keeps_its_rollback_scope
+test_projection_close_is_idempotent_when_the_tab_vanished_mid_close
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
