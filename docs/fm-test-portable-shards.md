@@ -25,6 +25,7 @@ Collect successful per-script measurements for every member before calculating a
 That post-fix value has only one sample in this baseline, so further green runs must establish its variance.
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains its separate 5121 ms measurement from 2026-09-06T21:02Z instead of a portable capability skip.
 The session-start hint retains its pre-optimization maximum until CI measures the shorter fixture-only home-summary bound; do not discount a local speedup from CI packing weights.
+`tests/fm-flow-snapshot.test.sh` uses 25251 ms from run [37764585674](https://github.com/kunchenguid/firstmate/actions/runs/37764585674), its only successful sample, because that serial member was added after this baseline.
 
 ## Parallel lanes
 
