@@ -109,6 +109,10 @@
   ],
   "surfaces": [
     {
+      "path": "docs/omp-kepler-worker.md",
+      "audience": "operator-current"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
