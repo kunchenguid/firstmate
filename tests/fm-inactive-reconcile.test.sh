@@ -9,6 +9,7 @@ RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 GRANT="$ROOT/bin/fm-wake-grant.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
+BRANCH_OUTCOME="$ROOT/bin/fm-branch-outcome.sh"
 TMP_ROOT=$(fm_test_tmproot fm-inactive-reconcile)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -123,6 +124,7 @@ run_report() { # <home> <child>
 }
 
 wake_count() { # <home> <key prefix>
+  [ -f "$1/state/.wake-queue" ] || { printf '0\n'; return; }
   grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
 }
 
@@ -152,6 +154,166 @@ prime_seen() { # <state> <status>
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+
+branch_outcome() { # <home> <fm-branch-outcome.sh args>...
+  local home=$1
+  shift
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$BRANCH_OUTCOME" "$@"
+}
+
+# Store one captain outcome for <task> and let main read it; with `processed`,
+# main also acknowledges it as processed.
+branch_captain_outcome() { # <home> <task> <summary> <read|processed>
+  local home=$1 task=$2 summary=$3 main_ack=$4 seq
+  seq=$(branch_outcome "$home" append --task "$task" --verdict captain --summary "$summary") \
+    || fail "branch outcome append failed"
+  branch_outcome "$home" mark-read --through "$seq" || fail "branch outcome mark-read failed"
+  [ "$main_ack" = read ] && return 0
+  branch_outcome "$home" mark-processed --through "$seq" || fail "branch outcome mark-processed failed"
+}
+
+# Main presented a done ship's PR through the supervision session's branch
+# outcome and acknowledged it with mark-processed; the inactive scan must not
+# wake main again with "inactive terminal outcome awaiting captain
+# presentation" for the same PR, even after a re-posted ready line.
+test_processed_branch_outcome_counts_as_presented() {
+  make_world branch-presented
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  branch_captain_outcome "$MAIN" child \
+    'child is ready for review: https://example.test/owner/repo/pull/1' processed
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "an outcome main already processed as a branch outcome woke main again: $(cat "$MAIN/state/.wake-queue")"
+  [ "$(outcome_count "$MAIN" presented)" = 1 ] && [ "$(outcome_count "$MAIN" pending)" = 0 ] \
+    || fail "the branch-presented outcome did not leave a presented receipt"
+  printf 'working: tidying up after the run\n' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "later status prose reopened an outcome the branch outcome already presented"
+
+  make_world branch-reposted-ready
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  branch_captain_outcome "$MAIN" child \
+    'child is ready for review: https://example.test/owner/repo/pull/1' processed
+  printf 'done: PR https://example.test/owner/repo/pull/1 checks green\n' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "a re-posted ready line for the same PR woke main for an outcome it already processed"
+  pass "a processed branch outcome counts as the presentation of the same terminal outcome"
+}
+
+# Main drains, and must not see the queued inactive outcome, then its
+# ordinary acknowledgement must still consume the withheld row.
+drain_withholds_and_acknowledges_inactive_outcome() { # <when>
+  local when=$1 out="$WORLD/drain.out" err="$WORLD/drain.err" seq generation
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" > "$out" 2> "$err"
+  ! grep -q 'awaiting captain presentation' "$out" \
+    || fail "$when, the drain delivered an inactive outcome main already presented: $(cat "$out")"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$seq" ] && [ -n "$generation" ] \
+    || { cat "$err"; fail "$when, the drain withholding the row did not require its acknowledgement"; }
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" \
+    || fail "$when, the acknowledgement of the withheld row failed"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "$when, the acknowledgement left the withheld inactive-outcome row queued"
+  [ "$(outcome_count "$MAIN" presented)" = 1 ] && [ "$(outcome_count "$MAIN" pending)" = 0 ] \
+    || fail "$when, the withheld outcome did not end with a presented receipt"
+}
+
+# The scan queued the inactive presentation while the branch outcome was only
+# read, then main processed that branch outcome. Whether main drains before
+# the next scan (the watcher wakes it at once) or after a rescan recorded the
+# outcome as presented, the drain withholds the already-queued wake.
+test_wake_queued_before_branch_processing_is_withheld() {
+  local when
+  for when in 'draining before any rescan' 'draining after a rescan'; do
+    make_world "branch-processed-after-queue-${when// /-}"
+    write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+    branch_captain_outcome "$MAIN" child \
+      'child is ready for review: https://example.test/owner/repo/pull/1' read
+    FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+      || fail "the scan did not queue the inactive presentation for an unprocessed branch outcome"
+    branch_outcome "$MAIN" mark-processed --through 1 || fail "branch outcome mark-processed failed"
+    if [ "$when" = 'draining after a rescan' ]; then
+      age "$MAIN/state/.inactive-outcome-reconcile"
+      FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN"
+      [ "$(outcome_count "$MAIN" presented)" = 1 ] && [ "$(outcome_count "$MAIN" pending)" = 0 ] \
+        || fail "the rescan did not record the processed branch outcome as presented"
+    fi
+    drain_withholds_and_acknowledges_inactive_outcome "$when"
+  done
+  pass "a wake queued before main processed the branch outcome is withheld and still acknowledged"
+}
+
+# The inactive presentation stays the safety net for every outcome main did not
+# demonstrably process: one only read, one superseded by a changed terminal
+# state, one recorded before the PR existed, one for another task or another
+# PR, one that never named the PR, and one in a store that cannot be read.
+test_unprocessed_or_different_branch_outcome_still_presents() {
+  make_world branch-read-only
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  branch_captain_outcome "$MAIN" child \
+    'child is ready for review: https://example.test/owner/repo/pull/1' read
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a read but unprocessed branch outcome suppressed the inactive presentation"
+
+  make_world branch-new-state
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  branch_captain_outcome "$MAIN" child \
+    'child is ready for review: https://example.test/owner/repo/pull/1' processed
+  printf 'failed: the PR was closed after review\n' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a terminal event after the processed branch outcome was not presented"
+
+  make_world branch-handoff-then-ready
+  write_child "$MAIN" child 'done: handing off to validation'
+  branch_captain_outcome "$MAIN" child 'child handed its change to validation' processed
+  printf 'done: PR https://example.test/owner/repo/pull/1 checks green\n' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a PR-ready line after a processed pre-validation handoff was not presented"
+
+  make_world branch-other-pr
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/10 checks green'
+  branch_captain_outcome "$MAIN" child \
+    'child is ready for review: https://example.test/owner/repo/pull/10' processed
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a processed outcome naming pull/10 covered the recorded pull/1"
+
+  make_world branch-other-task
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  branch_captain_outcome "$MAIN" other \
+    'other is ready for review: https://example.test/owner/repo/pull/1' processed
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a processed branch outcome for another task suppressed this task's presentation"
+
+  make_world branch-no-pr
+  write_child "$MAIN" child 'done: shipped the change'
+  branch_captain_outcome "$MAIN" child 'child finished its work' processed
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a processed branch outcome that never named the recorded PR suppressed its presentation"
+
+  make_world branch-unreadable-store
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  branch_captain_outcome "$MAIN" child \
+    'child is ready for review: https://example.test/owner/repo/pull/1' processed
+  printf 'not json\n' >> "$MAIN/state/branch-outcomes.jsonl"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "an unreadable branch outcome store suppressed the inactive presentation"
+  pass "an outcome main did not process as a branch outcome is still presented"
+}
 
 # The main retains a terminal presentation receipt until the corresponding wake
 # is handled and acknowledged.
@@ -1040,6 +1202,9 @@ SH
 
 test_main_direct_terminal_presentation_receipt
 test_branch_ack_retires_inactive_outcome_receipt
+test_processed_branch_outcome_counts_as_presented
+test_wake_queued_before_branch_processing_is_withheld
+test_unprocessed_or_different_branch_outcome_still_presents
 test_unpushed_ci_ready_done_is_not_published
 test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line

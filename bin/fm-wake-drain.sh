@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, retire rows no actor could ever consume,
 # optionally acknowledge handled records,
+# withhold from the printed rows an inactive-outcome row whose outcome
+# `bin/fm-inactive-reconcile.sh presented` reports already presented (the row
+# stays queued inside the acknowledged range, so --ack-through consumes it),
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
@@ -263,6 +266,22 @@ inactive_outcome_fingerprints() { # <sequence> <key-prefix> [<rows-file>]
       "$prefix"*) printf '%s\n' "${key#"$prefix"}" ;;
     esac
   done < "$FM_WAKE_QUEUE"
+}
+
+# Print <rows> without the inactive-outcome rows whose outcome is already
+# presented; the caller still acknowledges through every row it claimed.
+withhold_presented_inactive_outcomes() { # <rows>
+  local fingerprints fingerprint presented=''
+  fingerprints=$(printf '%s\n' "$1" | awk -F '\t' '$3 == "check" && index($4, "inactive-outcome:") == 1 { print substr($4, 18) }')
+  while IFS= read -r fingerprint; do
+    [ -n "$fingerprint" ] || continue
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$fingerprint" 2>/dev/null \
+      && presented="$presented inactive-outcome:$fingerprint"
+  done <<< "$fingerprints"
+  printf '%s\n' "$1" | awk -F '\t' -v presented="$presented" '
+    BEGIN { n = split(presented, keys, " "); for (i = 1; i <= n; i++) skip[keys[i]] = 1 }
+    !($3 == "check" && ($4 in skip))
+  '
 }
 
 acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
@@ -1053,6 +1072,7 @@ RAW_ROWS=$(fm_wake_print_deduped "$DRAIN_VIEW_TMP") || exit "$?"
 rm -f -- "$DRAIN_VIEW_TMP" || exit 1
 DRAIN_VIEW_TMP=
 ACK_THROUGH=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }') || exit 1
+RAW_ROWS=$(withhold_presented_inactive_outcomes "$RAW_ROWS") || exit 1
 case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   0) ;;
   ''|*[!0-9]*) ;;
