@@ -78,6 +78,11 @@ SECONDMATES_MD="$DATA/secondmates.md"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
+# config push. Optional source: absent lib = never parked (stock behavior).
+fm_parked_meta() { return 1; }
+# shellcheck source=/dev/null
+[ ! -r "$SCRIPT_DIR/fm-parked-homes-lib.sh" ] || . "$SCRIPT_DIR/fm-parked-homes-lib.sh"
 
 print_item_report() {
   local report=$1 item status reason
@@ -117,6 +122,13 @@ while IFS='|' read -r id home _window meta; do
   [ -n "$id" ] || continue
   if [ -z "$home" ]; then
     printf 'secondmate %s: skipped - no home= in %s and no registry home\n' "$id" "$meta"
+    continue
+  fi
+  # Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
+  # config push and no reread nudge. One line names the skip. No-op without
+  # the add-on checkout.
+  if fm_parked_meta "$meta" "$id"; then
+    printf 'secondmate %s: skipped - its home is parked (config/parked-homes)\n' "$id"
     continue
   fi
   remote_host=$(fm_meta_get "$meta" remote_host)

@@ -125,6 +125,23 @@ for arg in "$@"; do
 done
 [ "${#IDS[@]}" -gt 0 ] || { usage >&2; exit 2; }
 
+# Parked-home guard (firstmate-addons/parked-homes): a parked secondmate home
+# gets no restart pass at all - no persist request, no relaunch, no nudge. One
+# line names each skip. Optional source: absent lib = never parked.
+fm_parked_meta() { return 1; }
+# shellcheck source=/dev/null
+[ ! -r "$SCRIPT_DIR/fm-parked-homes-lib.sh" ] || . "$SCRIPT_DIR/fm-parked-homes-lib.sh"
+LIVE_IDS=()
+for id in ${IDS[@]+"${IDS[@]}"}; do
+  if fm_parked_meta "$STATE/$id.meta" "$id"; then
+    printf 'parked: %s: its home is parked (config/parked-homes); the restart pass skipped it\n' "$id"
+  else
+    LIVE_IDS+=("$id")
+  fi
+done
+IDS=(${LIVE_IDS[@]+"${LIVE_IDS[@]}"})
+[ "${#IDS[@]}" -gt 0 ] || exit 0
+
 # Per-mate pass state, kept as parallel indexed arrays so this stays bash-3.2
 # safe. PLAN is the phase the mate reached: persisted-pending, awaiting-empty,
 # restarting, done, or fallback with the reason already decided.

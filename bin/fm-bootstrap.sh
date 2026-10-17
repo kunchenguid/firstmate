@@ -196,6 +196,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
+# config push or reread nudge. Optional source: absent lib = never parked.
+fm_parked_meta() { return 1; }
+# shellcheck source=/dev/null
+[ ! -r "$SCRIPT_DIR/fm-parked-homes-lib.sh" ] || . "$SCRIPT_DIR/fm-parked-homes-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
@@ -558,6 +563,12 @@ secondmate_sync() {
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
     validate_secondmate_home "$id" "$home" || continue
+    # Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
+    # inherited config push and no reread nudge. No-op without the add-on.
+    if fm_parked_meta "$STATE/$id.meta" "$id"; then
+      echo "CONFIG_REREAD: secondmate $id: skipped - its home is parked (config/parked-homes)"
+      continue
+    fi
     home_real="$VALIDATED_HOME"
     case " $FF_SEEN_HOMES " in
       *" $home_real "*) ;;
@@ -697,6 +708,12 @@ secondmate_sync() {
     parallel=1
   fi
   while IFS='|' read -r id _home _window meta; do
+    # Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
+    # remote inheritance push and no reread nudge. No-op without the add-on.
+    if fm_parked_meta "$meta" "$id"; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped - its home is parked (config/parked-homes)"
+      continue
+    fi
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
     if [ "$parallel" -eq 1 ]; then
@@ -744,6 +761,13 @@ secondmate_liveness_sweep() {
     # Identity for the timing record is read here, in the loop, so the per-meta
     # body below keeps its single-exit-per-outcome shape.
     id=$(basename "$meta" .meta)
+    # Parked-home guard (firstmate-addons/parked-homes): a parked home gets no
+    # liveness probe and no session-start relaunch - one line names the skip.
+    # No-op without the add-on checkout.
+    if fm_parked_meta "$meta" "$id"; then
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: its home is parked (config/parked-homes)"
+      continue
+    fi
     remote_host=$(fm_meta_get "$meta" remote_host)
     label=$id
     [ -z "$remote_host" ] || label="$id@$remote_host"

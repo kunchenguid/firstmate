@@ -352,6 +352,31 @@ add_sm_home() {
   } > "$w/home/state/$id.meta"
 }
 
+# make_parked_addon <w> <parked-id>...: a synthetic parked-homes add-on
+# checkout at the in-repo shim's documented resolution path
+# ($FM_HOME/projects/firstmate-addons/parked-homes/bin). It implements the
+# hook contract the shim sources - the four predicates answered from
+# $FM_HOME/config/parked-homes - so the sweep's parked guard is exercised
+# through the real sourcing boundary, not a stubbed function.
+make_parked_addon() {
+  local w=$1 id
+  local dir="$w/home/projects/firstmate-addons/parked-homes/bin"
+  mkdir -p "$dir" "$w/home/config"
+  : > "$w/home/config/parked-homes"
+  for id in "${@:2}"; do
+    printf '%s\n' "$id" >> "$w/home/config/parked-homes"
+  done
+  cat > "$dir/fm-parked-homes-lib.sh" <<'SH'
+fm_parked_homes_file() { [ -f "${FM_HOME:?}/config/parked-homes" ]; }
+fm_parked_home() {
+  fm_parked_homes_file || return 1
+  grep -Fxq "${1:?}" "$FM_HOME/config/parked-homes"
+}
+fm_parked_meta_id() { fm_parked_home "$(basename "${1%.meta}")"; }
+fm_parked_meta() { fm_parked_home "${2:?}"; }
+SH
+}
+
 run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> stdout
   local fb=$1 home=$2 cmd=$3 log=$4; shift 4
   PATH="$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$home" \
@@ -377,6 +402,30 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
     "the shared library did not leave the durable per-mate relaunch record"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+test_sweep_skips_parked_secondmate_without_touching_its_endpoint() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-parked)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  add_sm_home "$w" sm2 firstmate:fm-sm2
+  make_parked_addon "$w" sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+
+  [ "$(grep -cF 'secondmate sm1: skipped: its home is parked (config/parked-homes)' <<<"$out")" -eq 1 ] \
+    || fail "a parked secondmate should get exactly one skip line: $out"
+  grep -q 'fm-sm1' "$log" \
+    && fail "the sweep touched a parked home's endpoint: $(cat "$log")"
+  [ ! -e "$w/home/state/.secondmate-relaunch-sm1" ] \
+    || fail "a parked home consumed relaunch budget"
+  assert_contains "$(cat "$log")" 'new-window' \
+    "the unparked sibling must still relaunch"
+  assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm2" \
+    "the unparked sibling should complete its relaunch"
+  pass "sweep: a parked secondmate is skipped untouched while siblings relaunch"
 }
 
 test_sweep_serializes_distinct_secondmate_relaunches() {
@@ -823,6 +872,7 @@ fi
 
 test_memory_admission_defers_recovery
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_skips_parked_secondmate_without_touching_its_endpoint
 test_sweep_serializes_distinct_secondmate_relaunches
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
