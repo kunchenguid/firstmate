@@ -492,6 +492,14 @@ FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^P
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
 # text, and only the run's LAST row is ever matched against it.
+# The pattern stays deliberately narrow: the space after the separator is
+# required (`[[:space:]]+`, never `[[:space:]]*`), and it admits no mode word
+# beyond opencode's own Build/Plan pair, because this exemption is the one
+# path that can turn a row holding typed text into `empty`, and `empty` is the
+# verdict that authorizes typing into a live session. Widening it to admit a
+# colour that ghost stripping currently reaches (for example a differently
+# dimmed mode cell) belongs with a fresh live capture in
+# docs/verification/runtime-backends.md, not with a regex edit.
 FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # Claude draws its permission-mode hint on its own row directly below the
 # composer (` ⏵⏵ bypass permissions on (shift+tab to cycle)`, ` ⏵⏵ accept edits
@@ -1410,9 +1418,7 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
   # loop applies); the furniture run ends on the row above it, and a last row
   # that is not the footer leaves the region without such furniture.
   raw=$(_fm_composer_screen_row "$last" "$plain")
-  rest=$(_fm_composer_row_content "$raw" 0)
-  case "$rest" in '┃'*) rest=${rest#┃} ;; *) rest= ;; esac
-  fm_composer_normalize_trim_var rest
+  rest=$(_fm_composer_leftbar_plain_content "$raw")
   fm_composer_idle_matches "$rest" "$footer_re" sensitive || return 1
   # The region's width: the widest trimmed plain row across first..last. The
   # furniture is right-aligned and the widest rows reach the pane's right
@@ -1479,6 +1485,53 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
 # immediately above that footer, recognised by
 # _fm_composer_leftbar_cwd_start) is composer furniture too. Real content is
 # pending when styling can prove it real, unknown otherwise.
+# _fm_composer_row_is_leftbar_footer: 0 when the run's LAST row is opencode's
+# own mode/model/branch line (FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT above)
+# rather than typed text. Proved from BOTH forms of that row - the ghost-
+# stripped content and the ANSI-stripped plain row - because opencode draws
+# the footer's identifying cells DE-EMPHASISED: verified live on opencode
+# 1.19.0, which renders the mode word at RGB 67;133;190 and the middle-dot
+# separators at 111;110;105, luminances 119.8 and 109.7 against the 128
+# ghost threshold. fm_composer_strip_ghost exists to answer "what did the human
+# type?", so it deleted exactly the cells that identify the footer, the
+# column-zero anchor became unreachable on every styled backend (tmux, Herdr,
+# Zellij - which is all of them, since the unstyled row keeps its styling
+# bytes), and a real idle composer read `pending`: the verdict that refuses
+# every send, restart, and shutdown and skips every steer doorbell. Proving the
+# furniture on the row ghost stripping cannot reach is the fix. What makes that
+# safe is what the plain form can and cannot newly reach: a row is exempted by
+# the plain form only when the ghost-stripped row still fails the pattern,
+# which means the stripped content is non-empty while its own leading
+# `Build`/`Plan` cell was deleted as ghost. Nothing opencode draws
+# de-emphasises a typed row's own leading cells - only its furniture is drawn
+# dimmed - so the only rows the plain form admits beyond the stripped one are
+# de-emphasised furniture, and the mode footer is the only furniture opencode
+# draws that opens with a mode word. That makes the exemption self-confirming
+# rather than asserted, and it is the argument to recheck when a new opencode
+# release moves a colour.
+_fm_composer_row_is_leftbar_footer() {  # <stripped-content> <plain-content> <footer-re>
+  fm_composer_idle_matches "$1" "$3" sensitive && return 0
+  fm_composer_idle_matches "$2" "$3" sensitive
+}
+
+# _fm_composer_leftbar_plain_content: the left-bar content cell's second form,
+# normalized exactly like the ghost-stripped cell it is paired with, and the
+# ONE definition of that form: the classifier, the extractor, and the
+# cwd/branch recogniser all prove the footer from it, so they cannot drift.
+# Only the LAST row of a run can exempt anything (see
+# _fm_composer_row_is_leftbar_footer), so every call site takes it from here
+# inside its last-row branch rather than paying a second capture and sed on
+# every row of every composer read.
+_fm_composer_leftbar_plain_content() {  # <raw-row> -> plain content on stdout
+  local plain
+  plain=$(_fm_composer_row_content "$1" 0)
+  case "$plain" in
+    '┃'*) plain=${plain#┃} ;;
+  esac
+  fm_composer_normalize_trim_var plain
+  printf '%s' "$plain"
+}
+
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
   local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0 cwd_start
@@ -1507,7 +1560,8 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
       row=$((row + 1)); continue
     fi
     if [ "$row" -eq "$last" ] \
-       && fm_composer_idle_matches "$content" "$footer_re" sensitive; then
+       && _fm_composer_row_is_leftbar_footer "$content" \
+              "$(_fm_composer_leftbar_plain_content "$raw")" "$footer_re"; then
       row=$((row + 1)); continue
     fi
     pending_seen=1
@@ -1830,7 +1884,8 @@ EOF
             && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
-            && fm_composer_idle_matches "$content" "$footer_re" sensitive; }; then
+            && _fm_composer_row_is_leftbar_footer "$content" \
+                   "$(_fm_composer_leftbar_plain_content "$raw")" "$footer_re"; }; then
       row=$((row + 1))
       continue
     fi

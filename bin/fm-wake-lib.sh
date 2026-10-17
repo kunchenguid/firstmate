@@ -1722,6 +1722,8 @@ fm_failure_episode_reset() {
 #     "epoch=N owner_pid=P outcome=O updated_at=T" record. A "rewake" outcome
 #     also records "session_pid=S recovery_generation=G", binding that
 #     handling turn to its live session-lock owner and watcher recovery episode.
+#     A same-session re-anchor of state/.lock moves S with lock line 1
+#     (fm_autoarm_rekey_session).
 #     Line 2 is the claiming process's pid-identity, the same identity every other
 #     supervision lock in this repo records (fm_pid_identity above). The
 #     identity is MANDATORY: a claimant that cannot record it does not claim
@@ -2003,6 +2005,33 @@ fm_autoarm_reset_owned() {  # <state-dir> <gen>
   fi
   fm_lock_release "$lock"
   return 0
+}
+
+# Move the current entry's session_pid from <old-pid> to <new-pid> when
+# bin/fm-lock.sh re-anchors a live lock line 1 within the same session, so a
+# rewake stays bound to the session-lock owner fm_autoarm_midturn_healthy
+# reads. Every other field, the identity line, and the ledger mtime are kept,
+# so neither the rewake-versus-beacon order nor the stuck proof's age moves.
+# The caller holds state/.claude-autoarm.lock. Returns 0 when the entry records
+# another session_pid or none, and 1 when the rewrite failed.
+fm_autoarm_rekey_session() {  # <state-dir> <old-pid> <new-pid>
+  local state=$1 old=$2 new=$3 epoch tok line='' tmp
+  local -a toks=()
+  epoch="$state/.claude-autoarm-epoch"
+  [ "$(_fm_autoarm_epoch_field "$epoch" session_pid 2>/dev/null)" = "$old" ] || return 0
+  IFS=' ' read -r -a toks 2>/dev/null < "$epoch" || return 1
+  for tok in ${toks[@]+"${toks[@]}"}; do
+    [ "$tok" != "session_pid=$old" ] || tok="session_pid=$new"
+    line="${line:+$line }$tok"
+  done
+  tmp="$epoch.tmp.${BASHPID:-$$}"
+  if { printf '%s\n' "$line" && sed '1d' "$epoch"; } > "$tmp" 2>/dev/null \
+    && touch -r "$epoch" "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$epoch" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
 }
 
 # LEGACY shim (see the contract comment above): the abandonment proof for a

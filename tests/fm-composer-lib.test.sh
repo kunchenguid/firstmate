@@ -676,6 +676,9 @@ test_matrix_opencode_leftbar_signals() {
   # idle-placeholder pattern (works on plain captures) and the ghost strip
   # (works on styled captures even if the pattern is overridden away).
   local screen typed dim_screen captured_idle captured_pending out
+  local footer_119 cwd_119 captured_119_idle captured_119_pending
+  local mode_cell separator_cell model_cell provider_cell effort_cell branch_cell reset_cell
+  reset_cell="${ESC}[38;2;255;255;255m"
   screen=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
   assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$dim_screen" 1
@@ -705,6 +708,71 @@ test_matrix_opencode_leftbar_signals() {
   assert_screen "opencode placeholder-like input on plain backends" unknown "$CAPS_PLAIN" "$typed"
   typed=$'┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high'
   assert_screen "opencode multiline draft above blank cursor row" pending "$CAPS_TMUX" "$typed" 1
+  # The opencode 1.19.0 regression, carried over from an idle live pane
+  # captured through tmux -e on 2026-10-14 with an installed opencode 1.19.0.
+  # The footer row's mode word is RGB 67;133;190 and its separators are
+  # 111;110;105 - luminances 119.8 and 109.7, both under the 128 ghost
+  # threshold - so fm_composer_strip_ghost deleted them and left the row
+  # opening at the BRIGHT model cell instead of at `Build`. The
+  # `^(Build|Plan)·` exemption was therefore unreachable on every styled
+  # backend, this idle composer read `pending`, and `pending` is the verdict
+  # that refuses every fm-send, refuses every interrupt/exit/relaunch, and
+  # skips every fm-task-inbox-lib doorbell - the cost measured was three
+  # manual interventions into worker panes in one day. Only the foreground
+  # truecolor triples and the drawn glyphs are carried over; the background
+  # runs and pane padding are dropped, so this is not a byte-for-byte copy of
+  # the capture, matching captured_idle above. The cwd
+  # row opencode 1.19.0 also draws inside the box is de-emphasised too, so it
+  # is empty under the ghost strip and never reaches this verdict.
+  mode_cell="${ESC}[38;2;67;133;190mBuild${reset_cell}"
+  separator_cell="${ESC}[38;2;111;110;105m·${reset_cell} "
+  provider_cell="${ESC}[38;2;111;110;105mOpenCode Go${reset_cell} "
+  model_cell="${ESC}[38;2;206;205;195mSpace Bunny${reset_cell} "
+  effort_cell="${ESC}[1m${ESC}[38;2;218;112;44mmax${ESC}[0m${reset_cell}"
+  branch_cell="${ESC}[38;2;206;205;195mfm-composer-footer${reset_cell}"
+  footer_119="  ┃  ${mode_cell} ${separator_cell}${model_cell}${provider_cell}${separator_cell}${effort_cell}  ${branch_cell}"$'\n'
+  cwd_119="  ┃  ${ESC}[38;2;111;110;105m~/.treehouse/fm001-b8697d/1/fm001:fm/${reset_cell}"$'\n'
+  captured_119_idle=$'  ▣ Build · Space Bunny · 1.2s\n\n  ┃\n  ┃  '"${ESC}[2m"$'\n  ┃\n'
+  captured_119_idle+="$cwd_119"
+  captured_119_idle+="$footer_119"
+  captured_119_idle+=$'  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 1.19.0 de-emphasised footer row" empty "$CAPS_TMUX" "$captured_119_idle" 3
+  # The half that matters: the same de-emphasised footer must not buy a false
+  # `empty` over a composer holding unsent work. A bright input row above it
+  # stays pending on every styled backend.
+  captured_119_pending=$'  ▣ Build · Space Bunny · 1.2s\n\n  ┃\n  ┃  '"${ESC}[38;2;255;255;255mfix the doorbell skip${ESC}[38;2;255;255;255m"$'\n  ┃\n'
+  captured_119_pending+="$cwd_119"
+  captured_119_pending+="$footer_119"
+  captured_119_pending+=$'  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 1.19.0 typed composer above the de-emphasised footer" \
+    pending "$CAPS_TMUX" "$captured_119_pending" 3
+  assert_screen "opencode 1.19.0 typed composer on herdr" \
+    pending "$CAPS_STYLED" "$captured_119_pending"
+  assert_screen "opencode 1.19.0 de-emphasised footer row on herdr" \
+    empty "$CAPS_STYLED" "$captured_119_idle"
+  assert_screen "opencode 1.19.0 de-emphasised footer row on zellij" \
+    empty "$CAPS_STYLED_NOID" "$captured_119_idle"
+  # Plain backends keep the strict posture on the SAME bytes: opencode's cwd
+  # row survives an unstyled capture, and an unrecognized shape must defer
+  # rather than read empty, because firstmate types into an `empty` verdict.
+  assert_screen "opencode 1.19.0 idle on plain backends" unknown "$CAPS_PLAIN" "$captured_119_idle"
+  assert_screen "opencode 1.19.0 typed on plain backends" unknown "$CAPS_PLAIN" "$captured_119_pending"
+  # Signal separation for the fix itself: the exemption is proved from the row
+  # ghost stripping cannot reach, so an override that removes that proof must
+  # put the false `pending` straight back.
+  out=$(FM_COMPOSER_LEFTBAR_FOOTER_RE='^NEVER-MATCHES$' \
+    fm_composer_classify_screen "$CAPS_TMUX" "$captured_119_idle" 3)
+  [ "$out" = pending ] \
+    || fail "the 1.19.0 footer exemption must be the only reason this idle pane reads empty, got '$out'"
+  # The extractor reads the same run with the same rule, so a classified-empty
+  # pane must not hand back the footer as composer text: zellij's append proof
+  # requires the typed text and nothing else.
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$captured_119_idle")
+  [ -z "$out" ] \
+    || fail "the de-emphasised 1.19.0 footer must not be extracted as composer text, got '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$captured_119_pending")
+  [ "$out" = 'fix the doorbell skip' ] \
+    || fail "extracting above the de-emphasised 1.19.0 footer must yield only the typed row, got '$out'"
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
 }
 

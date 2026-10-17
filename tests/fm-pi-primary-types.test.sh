@@ -1,32 +1,26 @@
 #!/usr/bin/env bash
-# Strict no-emit contract check for the tracked Firstmate Pi extensions.
-set -u
+# Strict no-emit production-consumer checks against public Pi 1.1.0 and 1.2.0.
+# Owns temporary npm dependencies and TypeScript 5.9.3; never uses global tsc
+# or FM_PI_PACKAGE_DIR. Compiler-owning lint/CI phases run this check.
+set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-command -v npm >/dev/null 2>&1 || { echo "skip: Pi extension typecheck prerequisite not found: npm"; exit 0; }
-command -v tsc >/dev/null 2>&1 || { echo "skip: Pi extension typecheck prerequisite not found: tsc"; exit 0; }
+for tool in node npm; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "not ok - Pi extension typecheck prerequisite not found: $tool" >&2
+    exit 1
+  }
+done
 
-PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
-if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
-  echo "skip: Pi extension typecheck prerequisite not found: installed @earendil-works/pi-coding-agent package"
-  exit 0
-fi
-if [ ! -d "$PI_PACKAGE_DIR/node_modules/typebox" ] || \
-   [ ! -d "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" ] || \
-   [ ! -d "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-ai" ] || \
-   [ ! -d "$PI_PACKAGE_DIR/node_modules/@types/node" ]; then
-  echo "not ok - installed Pi package is missing pi-tui, pi-ai, typebox, or Node declarations" >&2
-  exit 1
-fi
+DEPENDENCY_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-pi-primary-types.XXXXXX")
+trap 'rm -rf "$DEPENDENCY_ROOT"' EXIT
 
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-pi-primary-types.XXXXXX")
-cleanup() {
-  rm -rf "$TMP_ROOT"
-}
-trap cleanup EXIT
-
-mkdir -p "$TMP_ROOT/lib" "$TMP_ROOT/node_modules/@earendil-works" "$TMP_ROOT/node_modules/@types"
+printf 'Pi production-consumer typechecks: npm %s\n' "$(npm --version)"
+result=0
+for version in 1.1.0 1.2.0; do
+TMP_ROOT="$DEPENDENCY_ROOT/sdk-$version"
+mkdir -p "$TMP_ROOT/lib"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$TMP_ROOT/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/fm-calm.ts" "$TMP_ROOT/fm-calm.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$TMP_ROOT/fm-primary-pi-watch.ts"
@@ -43,12 +37,6 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$TMP_ROOT/lib/fm-calm-visib
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$TMP_ROOT/lib/fm-calm-working-ship.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$TMP_ROOT/lib/fm-calm-working-ship-sprite.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$TMP_ROOT/lib/fm-operational-input.ts"
-ln -s "$PI_PACKAGE_DIR" "$TMP_ROOT/node_modules/@earendil-works/pi-coding-agent"
-ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$TMP_ROOT/node_modules/@earendil-works/pi-tui"
-ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-ai" "$TMP_ROOT/node_modules/@earendil-works/pi-ai"
-ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$TMP_ROOT/node_modules/typebox"
-ln -s "$PI_PACKAGE_DIR/node_modules/@types/node" "$TMP_ROOT/node_modules/@types/node"
-
 cat > "$TMP_ROOT/package.json" <<'JSON'
 {"type":"module"}
 JSON
@@ -68,6 +56,37 @@ cat > "$TMP_ROOT/tsconfig.json" <<'JSON'
 }
 JSON
 
-tsc -p "$TMP_ROOT/tsconfig.json" || exit 1
-version=$(jq -r '.version' "$PI_PACKAGE_DIR/package.json" 2>/dev/null || printf 'unknown')
-printf 'ok - tracked Pi extensions pass strict no-emit typecheck against Pi %s\n' "$version"
+# Pin the directly imported Pi packages together rather than allowing npm's
+# semver ranges to make the older SDK consumer resolve newer sibling types.
+(cd "$TMP_ROOT" && npm install --ignore-scripts --no-audit --no-fund --save-exact \
+  "@earendil-works/pi-coding-agent@$version" \
+  "@earendil-works/pi-ai@$version" \
+  "@earendil-works/pi-tui@$version" \
+  typebox@1.3.27 @types/node@22.19.19 typescript@5.9.3)
+
+# Emit real installed versions and npm-verified package integrity before the
+# temporary lock/vendor tree is removed; compiler diagnostics stay in CI logs.
+node - "$TMP_ROOT" <<'JS'
+const { readFileSync } = require("node:fs");
+const root = process.argv[2];
+const lock = JSON.parse(readFileSync(`${root}/package-lock.json`, "utf8"));
+const packages = {};
+for (const [name, expected] of Object.entries(lock.packages[""].dependencies)) {
+  const entry = lock.packages[`node_modules/${name}`];
+  const installed = JSON.parse(readFileSync(`${root}/node_modules/${name}/package.json`, "utf8"));
+  if (installed.version !== expected || entry.version !== expected || !entry.integrity) {
+    throw new Error(`Unexpected package provenance for ${name}`);
+  }
+  packages[name] = { version: installed.version, resolved: entry.resolved, integrity: entry.integrity };
+}
+console.log(JSON.stringify({ node: process.version, platform: process.platform, arch: process.arch, packages }));
+JS
+"$TMP_ROOT/node_modules/.bin/tsc" --version
+if "$TMP_ROOT/node_modules/.bin/tsc" -p "$TMP_ROOT/tsconfig.json"; then
+  printf 'ok - tracked Pi extensions pass strict no-emit typecheck against Pi %s\n' "$version"
+else
+  printf 'not ok - tracked Pi extensions fail strict no-emit typecheck against Pi %s\n' "$version" >&2
+  result=1
+fi
+done
+exit "$result"
