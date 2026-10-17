@@ -12,12 +12,37 @@ One term recurs throughout:
 
 | Question | Section |
 | --- | --- |
+| Which fresh launches receive the enforced startup pull | [Fresh primary launcher pull](#fresh-primary-launcher-pull) |
 | Which harness runs the digest and which only nudges it | [Tier by harness](#tier-by-harness) |
 | What each session-open source triggers | [Source routing](#source-routing) |
 | How long the digest may block and what happens when it runs out of time | [Runtime bound](#runtime-bound) |
 | When the wrappers stay silent and which exit codes they use | [Shared wrapper and safety](#shared-wrapper-and-safety) |
 | How one harness wires its session-open hook | [Harness transports](#harness-transports) |
 | Which tests prove each guarantee | [Regression coverage](#regression-coverage) |
+
+## Fresh primary launcher pull
+
+The startup pull is a prelaunch layer installed separately by dotfiles as `firstmate-start`; it is not another session-open tier.
+The existing `bash ./install.sh firstmate` selection remains configuration-only, while `bash ./install.sh firstmate-startup` owns launcher installation and enrollment.
+Its frozen trusted bundle calls `bin/fm-prelaunch.sh` against one enrolled physical independent-primary home, pins the approved source candidate locally, and completes every source and portable-preference check before it creates the agent process.
+The dotfiles launcher remains the child's real parent, blocks the child bootstrap on an inherited anonymous pipe until `attach` records its kernel generation, and passes one go byte only after that attachment succeeds.
+The genuine child then acquires the ordinary Firstmate session lock through `bin/fm-lock.sh`, which atomically exchanges the authenticated reservation for the normal harness lock and a verified handoff receipt.
+
+The version 1 supported entry is `firstmate-start <harness>` with no harness arguments and a harness profile that `capabilities` advertises and `profile` revalidates at launch time.
+Firstmate can advertise installed no-argument fresh profiles for `claude`, `codex`, `cursor`, `opencode`, `grok`, `kimi`, `pi`, `pi-signed`, and `omp`; an absent binary or an unrecognized version is not advertised.
+Any argument, including resume, continue, fork, or saved-session selection, is refused by this first version before fetch, reservation, publication, or child creation.
+
+These entries remain outside the enforced guarantee:
+
+- A raw vendor CLI invocation that bypasses `firstmate-start`.
+- A direct GUI or reopened conversation.
+- Codex's interactive TUI when opened directly.
+- In-process new, clear, compact, resume, reload, or fork operations.
+
+Those bypasses are not globally blocked or replaced.
+The native hook still runs its existing digest or nudge behavior, and a fresh full digest reports either a verified launcher handoff or an honest bypass.
+Hook adapters keep their ordinary always-zero compatibility and never turn a notice into a claim that the process exited or refreshed itself.
+The startup pull adds no fetch to `fm-session-start.sh`, no global agent-command replacement, and no daemon or scheduler.
 
 ## Session-open tiers
 

@@ -276,6 +276,45 @@ dirty_status() {
   fi
 }
 
+# True when an attributes stream activates, disables, or resets the external
+# `filter` attribute.  A startup pull must not run any candidate-selected
+# clean/smudge/process command, so every declaration is a refusal rather than
+# trying to decide whether the local filter configuration currently names a
+# command.
+ff_attributes_define_filter() {
+  LC_ALL=C awk '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      for (i = 2; i <= NF; i++) {
+        if ($i ~ /^[!-]?filter($|=)/) { found = 1; exit }
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+# True when revision $2 or this checkout's repository-local attributes would
+# activate an external checkout filter.  System/global attributes are disabled
+# on the actual startup merge; info/attributes cannot be disabled by config, so
+# it is inspected explicitly here.
+ff_external_filter_present() {  # <repo> <revision>
+  local dir=$1 revision=$2 path info
+  info=$(git -C "$dir" rev-parse --git-path info/attributes 2>/dev/null) || return 0
+  case "$info" in /*) ;; *) info="$dir/$info" ;; esac
+  if [ -e "$info" ] || [ -L "$info" ]; then
+    [ -f "$info" ] && [ ! -L "$info" ] && [ -r "$info" ] || return 0
+    ff_attributes_define_filter < "$info" && return 0
+  fi
+  while IFS= read -r -d '' path; do
+    case "$path" in .gitattributes|*/.gitattributes) ;;
+      *) continue ;;
+    esac
+    git -C "$dir" show "$revision:$path" 2>/dev/null \
+      | ff_attributes_define_filter && return 0
+  done < <(git -C "$dir" ls-tree -r -z --name-only "$revision" 2>/dev/null)
+  return 1
+}
+
 secondmate_update_reconcile_marker_path() { # <state> <id>
   local state=$1 id=$2
   case "$id" in *[!A-Za-z0-9._-]*|'') return 1 ;; esac
@@ -383,9 +422,23 @@ FF_STATUS=""
 FF_INSTR=""
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
-  local secondmate_id=${6:-} reconciliation_state=${7:-}
+  local secondmate_id=${6:-} reconciliation_state=${7:-} operation=${8:-normal}
   FF_STATUS="skipped"
   FF_INSTR=""
+
+  case "$operation" in
+    normal) ;;
+    startup-check|startup-update)
+      if [ "$base_mode" = origin ] || [ -n "$secondmate_id$reconciliation_state" ]; then
+        echo "$label: skipped: startup pull requires one pinned local commit"
+        return 0
+      fi
+      ;;
+    *)
+      echo "$label: skipped: unknown fast-forward operation"
+      return 0
+      ;;
+  esac
 
   if [ ! -d "$dir" ]; then
     echo "$label: skipped: not a directory"
@@ -396,7 +449,7 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out
+  local default base cur instr local_rev base_rev before after out dirty
   default=$(default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -432,7 +485,17 @@ ff_target() {
     return 0
   fi
 
-  if [ -n "$(dirty_status "$dir" "$ignore_seed_marker")" ]; then
+  if [ "$operation" = normal ]; then
+    dirty=$(dirty_status "$dir" "$ignore_seed_marker")
+  else
+    dirty=$(GIT_ATTR_NOSYSTEM=1 git -C "$dir" \
+      -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null \
+      -c core.fsmonitor=false status --porcelain --untracked-files=all 2>/dev/null) || {
+      echo "$label: skipped: cannot inspect working tree"
+      return 0
+    }
+  fi
+  if [ -n "$dirty" ]; then
     echo "$label: skipped: dirty working tree"
     return 0
   fi
@@ -484,9 +547,30 @@ ff_target() {
     return 0
   fi
 
+  if [ "$operation" != normal ]; then
+    if ff_external_filter_present "$dir" HEAD \
+      || ff_external_filter_present "$dir" "$base"; then
+      echo "$label: skipped: external checkout filter declared"
+      return 0
+    fi
+    if [ "$operation" = startup-check ]; then
+      FF_STATUS="updated"
+      FF_INSTR=$(changed_instr "$dir" "$base")
+      echo "$label: update available"
+      return 0
+    fi
+  fi
+
   instr=$(changed_instr "$dir" "$base")
   before=$(git -C "$dir" rev-parse --short HEAD)
-  if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
+  if [ "$operation" = startup-update ]; then
+    out=$(GIT_ATTR_NOSYSTEM=1 git -C "$dir" \
+      -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null \
+      merge --ff-only "$base" 2>&1) || {
+      echo "$label: skipped: fast-forward failed: $(first_line "$out")"
+      return 0
+    }
+  elif ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
     return 0
   fi
