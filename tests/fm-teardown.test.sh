@@ -63,6 +63,8 @@
 #   (z3d) forced secondmate + child return leaves residue    -> warning, retirement completes, exit 4
 #   (z3e) return removes the copy                            -> cannot-verify warning, exit 4
 #   (z4) scout + ignored file                                -> ignored file survives
+# Hidden-index regression focus: FM_TEARDOWN_HIDDEN_INDEX_ONLY=1 runs only
+# the isolated masked/unmasked/index-read-failure cases through this script.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -189,7 +191,7 @@ SH
   git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
   git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t \
     commit -q --allow-empty -m "origin baseline"
-  git -C "$case_dir/_seed" push -q origin main
+  git -C "$case_dir/origin.git" fetch -q "$case_dir/_seed" main:main
   rm -rf "$case_dir/_seed"
   # Clone as the project; give it a `main` branch and an origin/HEAD.
   git clone -q "$case_dir/origin.git" "$case_dir/project"
@@ -1326,6 +1328,129 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+# Real index/file fixtures with a synthetic pool lease and owner claim. The
+# service spies keep a regression from reaching host processes or real pools.
+make_hidden_index_case() {
+  local case_dir wt
+  case_dir=$(make_case "$1")
+  wt="$case_dir/pool/1/project"
+  mkdir -p "$case_dir/pool/1"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" "$wt"
+  write_meta "$case_dir" no-mistakes ship "$wt"
+  seed_backlog_in_flight "$case_dir"
+  printf 'working: synthetic hidden-index fixture\n' > "$case_dir/state/task-x1.status"
+  printf 'baseline\n' > "$wt/hidden proof.txt"
+  printf 'baseline\n' > "$wt/"$'hidden\nname.txt'
+  git -C "$wt" add .
+  git -C "$wt" commit -qm 'tracked hidden-index fixtures'
+  git -C "$wt" update-ref refs/remotes/origin/fm/task-x1 "$(git -C "$wt" rev-parse HEAD)"
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_id":"synthetic-lease","lease_holder":"task-x1"}]}\n' \
+    "$wt" > "$case_dir/pool/treehouse-state.json"
+  printf 'task=task-x1\nhome=%s\n' "$case_dir" > "$case_dir/pool/1/.fm-slot-owner"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+# Never let the unrelated global orphan-worker sweep see host workers.
+case "$*" in
+  "-u "*" -o pid=,command=") exit 0 ;;
+esac
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+# These fixtures have no resident processes.
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/ps" "$case_dir/fakebin/lsof"
+  printf '%s\n' "$case_dir"
+}
+
+test_hidden_index_flags_refuse_and_preserve() {
+  local flag case_dir wt path index before_head before_flags attempt rc
+  for flag in assume-unchanged skip-worktree; do
+    case_dir=$(make_hidden_index_case "hidden-$flag")
+    wt="$case_dir/pool/1/project"
+    git -C "$wt" update-index "--$flag" -- 'hidden proof.txt' $'hidden\nname.txt'
+    printf 'hidden edit\n' > "$wt/hidden proof.txt"
+    printf 'hidden newline-path edit\n' > "$wt/"$'hidden\nname.txt'
+    [ -z "$(git -C "$wt" status --porcelain)" ] || fail "$flag: fixture edit is not hidden"
+    before_head=$(git -C "$wt" rev-parse HEAD)
+    before_flags=$(git -C "$wt" ls-files -v)
+    index=$(git -C "$wt" rev-parse --git-path index)
+    case "$index" in /*) ;; *) index="$wt/$index" ;; esac
+    cp "$index" "$case_dir/index.before"
+    cp "$case_dir/state/task-x1.meta" "$case_dir/meta.before"
+    cp "$case_dir/state/task-x1.status" "$case_dir/status.before"
+    cp "$case_dir/data/backlog.md" "$case_dir/backlog.before"
+    cp "$case_dir/pool/treehouse-state.json" "$case_dir/lease.before"
+    cp "$case_dir/pool/1/.fm-slot-owner" "$case_dir/owner.before"
+    for attempt in 1 2; do
+      rc=0
+      FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      expect_code 1 "$rc" "$flag/$attempt: hidden tracked entries must refuse cleanup"
+      assert_grep 'assume-unchanged or skip-worktree' "$case_dir/stderr" "$flag: missing flag diagnostic"
+      for path in 'hidden proof.txt' $'hidden\nname.txt'; do
+        assert_grep "$(printf '%q' "$path")" "$case_dir/stderr" "$flag: flagged path not safely identified"
+      done
+      assert_grep 'Preserve and reconcile' "$case_dir/stderr" "$flag: missing preservation guidance"
+      [ "$(cat "$wt/hidden proof.txt")" = 'hidden edit' ] || fail "$flag: hidden bytes changed"
+      [ "$(cat "$wt/"$'hidden\nname.txt')" = 'hidden newline-path edit' ] || fail "$flag: newline-path bytes changed"
+      [ "$(git -C "$wt" rev-parse HEAD)" = "$before_head" ] || fail "$flag: HEAD changed"
+      [ "$(git -C "$wt" ls-files -v)" = "$before_flags" ] || fail "$flag: flags changed"
+      cmp -s "$index" "$case_dir/index.before" || fail "$flag: index bytes changed"
+      cmp -s "$case_dir/state/task-x1.meta" "$case_dir/meta.before" || fail "$flag: task record changed"
+      cmp -s "$case_dir/state/task-x1.status" "$case_dir/status.before" || fail "$flag: status record changed"
+      cmp -s "$case_dir/data/backlog.md" "$case_dir/backlog.before" || fail "$flag: backlog changed"
+      cmp -s "$case_dir/pool/treehouse-state.json" "$case_dir/lease.before" || fail "$flag: lease record changed"
+      cmp -s "$case_dir/pool/1/.fm-slot-owner" "$case_dir/owner.before" || fail "$flag: owner claim changed"
+      assert_absent "$case_dir/treehouse.log" "$flag: cleanup reached destructive return"
+    done
+    pass "$flag: repeated hidden-edit refusal preserves files/index/HEAD/task/lease/owner"
+  done
+}
+
+test_hidden_index_unmasked_control_refuses() {
+  local case_dir wt rc
+  case_dir=$(make_hidden_index_case hidden-unmasked)
+  wt="$case_dir/pool/1/project"
+  printf 'hidden edit\n' > "$wt/hidden proof.txt"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'unmasked control: ordinary tracked-edit refusal must remain'
+  assert_grep 'uncommitted changes' "$case_dir/stderr" 'unmasked control: existing dirty check did not run'
+  [ "$(cat "$wt/hidden proof.txt")" = 'hidden edit' ] || fail 'unmasked control: edited bytes changed'
+  assert_present "$case_dir/state/task-x1.meta" 'unmasked control: task removed'
+  assert_present "$case_dir/pool/1/.fm-slot-owner" 'unmasked control: owner removed'
+  assert_absent "$case_dir/treehouse.log" 'unmasked control: return was invoked'
+  pass 'same edit without index flags still reaches the normal dirty refusal'
+}
+
+test_hidden_index_inspection_failure_refuses() {
+  local case_dir rc
+  case_dir=$(make_hidden_index_case hidden-inspection-error)
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${3:-}" = ls-files ]; then
+  echo 'fatal: synthetic index read failure' >&2
+  exit 128
+fi
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'hidden-index inspection failure must not count as clean'
+  assert_grep 'cannot inspect worktree' "$case_dir/stderr" 'index inspection failure not explained'
+  assert_present "$case_dir/state/task-x1.meta" 'inspection failure: task removed'
+  assert_present "$case_dir/pool/1/.fm-slot-owner" 'inspection failure: owner removed'
+  assert_absent "$case_dir/treehouse.log" 'inspection failure: return was invoked'
+  pass 'hidden-index inspection failure refuses before return or record removal'
 }
 
 assert_dirty_diagnostic() {
@@ -5028,6 +5153,13 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+if [ "${FM_TEARDOWN_HIDDEN_INDEX_ONLY:-0}" = 1 ]; then
+  test_hidden_index_flags_refuse_and_preserve
+  test_hidden_index_unmasked_control_refuses
+  test_hidden_index_inspection_failure_refuses
+  exit 0
+fi
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -5079,6 +5211,9 @@ test_content_in_default_fallback_allows
 test_content_fallback_uses_recorded_base_branch
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_hidden_index_flags_refuse_and_preserve
+test_hidden_index_unmasked_control_refuses
+test_hidden_index_inspection_failure_refuses
 test_untracked_only_refusal_diagnostic
 test_tracked_edit_refusal_diagnostic
 test_mixed_refusal_diagnostic
