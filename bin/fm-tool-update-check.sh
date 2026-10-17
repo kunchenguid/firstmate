@@ -61,11 +61,34 @@
 # refused outright.
 #
 # The report record state/.tool-updates is written only when a sweep runs to its
-# end, and it carries the whole finding set the last report was made from,
-# uncut, so the same pending update is reported once rather than on every poll
-# while a new finding that lands past the one-line cut is still news. A sweep
-# killed part way through leaves no record and is retried, instead of
-# suppressing its finding.
+# end, and it carries every finding already reported, uncut, so the same pending
+# update is reported once rather than on every poll while a new finding that
+# lands past the one-line cut is still news. Each recorded finding carries the
+# tool and the kind of check it came from, and a reported finding is forgotten
+# only once that same kind of check for that same tool reaches a conclusion
+# again. What is no conclusion at all is exactly no answer: a probe cut short by
+# its bound or by a signal, a remote that could not be read, a budget that ran
+# out, a tool the sweep never reached. Those keep the memory, so an unanswered
+# remote does not erase an update already reported, and a git remote that cannot
+# be read does not erase what the command probe of the same tool answered. A
+# failure the probe did answer, such as a command that is no longer on PATH, is a
+# conclusion and settles that kind like any clean sweep does. A condition that
+# clears and later returns is news again. Only the newest unanswered entry of a
+# kind is kept, so a check that keeps getting no answer cannot grow the record a
+# sweep at a time. A sweep killed part way through leaves no record and is retried,
+# instead of suppressing its finding.
+#
+# A check that has no answer also says nothing the operator can act on, so it is
+# not reported for its own sake: a remote flapping between answering and not would
+# wake them on every failing poll. It is reported once a kind has gone unanswered
+# three sweeps in a row, once per such streak, and an answer ends the streak. A
+# sweep that runs out of time before it reached every tool counts as such a check
+# of its own, so a budget that is marginal does not wake anyone every other poll
+# either. What a check with no answer must never do is claim to know an update.
+# From its first unanswered probe onwards, whether a copy was cut short, the budget
+# ended the copy loop before the last copies were asked, or the announcement source
+# never answered, that kind of check reports no update at all that sweep, because
+# every comparison it could rest on is incomplete.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -81,7 +104,14 @@ CHECK_ID=tool-updates
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
-RECORD_SCHEMA=fm-tool-updates-v1
+RECORD_SCHEMA=fm-tool-updates-v5
+# One tool record per line of the registry read, and one reported finding per
+# entry of the report record, both built from fields joined with the unit
+# separator rather than a tab, because tab is IFS whitespace and `read` would
+# collapse the empty fields that an optional key or a sweep-wide finding leaves
+# behind.
+FIELD_SEP=$(printf '\037')
+RECORD_TAB=$'\t'
 # Wider than the digest default because one finding names two absolute paths and
 # their two versions, and several tools can report in the same sweep.
 MAX_LINE=1000
@@ -195,19 +225,200 @@ record_epoch_now() {
 real_epoch() { date +%s; }
 
 FINDINGS=
+# One entry per finding, in five parallel arrays because Bash 3.2 has no
+# associative arrays: the finding text, the watched tool it belongs to, the kind
+# of check that produced it, its class, and, for an unanswered one, how many
+# sweeps in a row that kind has now gone without an answer. A sweep-wide finding
+# has no tool. The three classes are:
+#
+#   answer      something the check established about the tool: an update.
+#   failure     a failure the probe answered, such as a command not on PATH.
+#   unanswered  no answer at all: a probe cut short, an unreadable remote, a
+#               budget that ran out.
+FINDING_ITEMS=()
+FINDING_OWNERS=()
+FINDING_KINDS=()
+FINDING_CLASSES=()
+FINDING_STREAKS=()
+# The watched tools this sweep read from the registry, and whether the sweep got
+# far enough to check each of them.
+TOOL_NAMES=()
+TOOL_REACHED=()
+# Whether the registry was read at all, so a sweep that could not read it is not
+# taken for a sweep that found nothing to watch.
+REGISTRY_READ=0
+# Per tool and kind of check: whether this sweep's check reached a conclusion. A
+# pair with no entry here was never checked, which is not a conclusion either.
+CHECK_KEYS=()
+CHECK_ANSWERED=()
+# The tool, kind of check, class, and unanswered streak the findings being emitted
+# belong to.
+FINDING_OWNER=
+FINDING_KIND=sweep
+FINDING_CLASS=answer
+FINDING_STREAK=0
 DEADLINE=0
 INCOMPLETE_REPORTED=0
 
 # Each finding is flattened to a single line here, because the whole report must
-# stay one line for the wake record.
+# stay one line for the wake record. The two record separators are flattened out
+# with it, so the report record can carry each finding's tool and kind of check
+# alongside its text without any escaping.
 emit() {
   local text
-  text=$(printf '%s' "$1" | tr '\t\r\n' '   ')
+  text=$(printf '%s' "$1" | tr '\t\r\n\037' '    ')
+  FINDING_ITEMS+=("$text")
+  FINDING_OWNERS+=("$FINDING_OWNER")
+  FINDING_KINDS+=("$FINDING_KIND")
+  FINDING_CLASSES+=("$FINDING_CLASS")
+  FINDING_STREAKS+=("$FINDING_STREAK")
   if [ -z "$FINDINGS" ]; then
     FINDINGS=$text
   else
     FINDINGS="$FINDINGS; $text"
   fi
+}
+
+# A finding about the sweep itself rather than about one watched tool, whichever
+# tool's check the sweep happens to be inside when it is emitted. The sweep running
+# out of time is a transient of the sweep as a whole, so for that one the sweep
+# counts as a check of its own, under an owner no watched tool name can spell,
+# which is what lets it be remembered and reported through the same streak as one
+# tool's unanswered check.
+SWEEP_OWNER='the sweep'
+
+emit_sweep() {
+  local owner=$FINDING_OWNER kind=$FINDING_KIND
+  FINDING_OWNER=
+  FINDING_KIND=sweep
+  emit "$1"
+  FINDING_OWNER=$owner
+  FINDING_KIND=$kind
+}
+
+emit_sweep_no_answer() {
+  local owner=$FINDING_OWNER kind=$FINDING_KIND
+  FINDING_OWNER=$SWEEP_OWNER
+  FINDING_KIND=sweep
+  emit_no_answer "$1"
+  FINDING_OWNER=$owner
+  FINDING_KIND=$kind
+}
+
+# A finding that is no answer at all: a probe cut short, a remote that could not be
+# read, a budget that ran out. Nothing was established, so what this check reported
+# earlier is neither confirmed nor cleared, and the finding itself waits for its
+# streak before it is worth a word.
+emit_no_answer() {
+  check_kind_unknown
+  FINDING_CLASS=unanswered
+  FINDING_STREAK=$(unanswered_streak "$FINDING_OWNER" "$FINDING_KIND")
+  emit "$1"
+  FINDING_CLASS=answer
+  FINDING_STREAK=0
+}
+
+# A check failure. Which class it becomes follows from what its check already
+# knows rather than from the call site: a failure the probe answered, such as a
+# command that is not on PATH, is a conclusion and settles what that kind of check
+# reported before, exactly as a clean sweep does. A failure reported by a check
+# that has already gone without an answer is no answer either, however definite it
+# sounds, so it is remembered and reported as one.
+emit_failed() {
+  if check_kind_answered; then
+    FINDING_CLASS=failure
+    emit "$1 check failed: $2"
+    FINDING_CLASS=answer
+  else
+    emit_no_answer "$1 check failed: $2"
+  fi
+}
+
+emit_unanswered() {
+  emit_no_answer "$1 check failed: $2"
+}
+
+# True while the check now running still has an answer to everything it asked.
+check_kind_answered() {
+  [ "$(check_kind_state "$FINDING_OWNER" "$FINDING_KIND")" = answered ]
+}
+
+# An update this check established, and the one gate every one of them passes: a
+# check that has gone without a single answer established nothing, because every
+# comparison it could draw rests on something it never heard, so from the first
+# unanswered probe onwards that kind of check reports no update at all this sweep.
+emit_update() {
+  check_kind_answered || return 0
+  emit "$1"
+}
+
+check_kind_index() {
+  local key=$1 i=0
+  while [ "$i" -lt "${#CHECK_KEYS[@]}" ]; do
+    if [ "${CHECK_KEYS[i]}" = "$key" ]; then
+      printf '%s' "$i"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+check_kind_begins() {
+  CHECK_KEYS+=("$1$FIELD_SEP$2")
+  CHECK_ANSWERED+=(1)
+}
+
+# Marks the check now running as having reached no conclusion. A no-op outside a
+# check that has begun, where there is no conclusion to reach.
+check_kind_unknown() {
+  local i
+  i=$(check_kind_index "$FINDING_OWNER$FIELD_SEP$FINDING_KIND") || return 0
+  CHECK_ANSWERED[i]=0
+}
+
+# answered when this sweep's check for the pair reached a conclusion, unknown
+# when it ran without one, and absent when it never ran.
+check_kind_state() {
+  local i
+  i=$(check_kind_index "$1$FIELD_SEP$2") || { printf 'absent'; return 0; }
+  if [ "${CHECK_ANSWERED[i]}" = 1 ]; then
+    printf 'answered'
+  else
+    printf 'unknown'
+  fi
+}
+
+# Runs one kind of check for one tool, with every finding it emits tagged as that
+# tool's and that kind's, so retention never has to read a finding's own text to
+# learn what it was about.
+check_kind() {
+  local kind=$1 name=$2
+  shift 2
+  check_kind_begins "$name" "$kind"
+  FINDING_OWNER=$name
+  FINDING_KIND=$kind
+  "$@"
+  FINDING_OWNER=
+  FINDING_KIND=sweep
+}
+
+# reached when this sweep checked the tool, unreached when the sweep read it from
+# the registry but never got to it, and absent when the registry no longer has it.
+tool_state() {
+  local i=0
+  while [ "$i" -lt "${#TOOL_NAMES[@]}" ]; do
+    if [ "${TOOL_NAMES[i]}" = "$1" ]; then
+      if [ "${TOOL_REACHED[i]}" = 1 ]; then
+        printf 'reached'
+      else
+        printf 'unreached'
+      fi
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  printf 'absent'
 }
 
 budget_exhausted() {
@@ -216,13 +427,15 @@ budget_exhausted() {
 
 # True while the sweep budget still has room for another probe. When it does not,
 # it records once which tool the sweep did not finish, so a sweep that cannot
-# finish says so rather than being killed by the watcher with nothing printed.
+# finish says so rather than being killed by the watcher with nothing printed, and
+# the check it stops inside reaches no conclusion rather than looking like one.
 budget_allows() {
   local name=$1
   budget_exhausted || return 0
+  check_kind_unknown
   if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
     INCOMPLETE_REPORTED=1
-    emit "check incomplete: the time budget ran out before $name"
+    emit_sweep_no_answer "check incomplete: the time budget ran out before $name"
   fi
   return 1
 }
@@ -362,11 +575,6 @@ config_validate() {
   return 0
 }
 
-# One record per tool, in config order. Fields are joined with the unit
-# separator rather than a tab, because tab is IFS whitespace and `read` would
-# collapse the empty fields that an optional key leaves behind.
-FIELD_SEP=$(printf '\037')
-
 config_records() {
   jq -r '
     .tools[] | [
@@ -420,35 +628,44 @@ command_findings() {
   # This tool's announcement source is dead if its pattern cannot be used, which
   # is reported here, for this tool alone, so the rest of the sweep still runs.
   if [ -n "$announce" ] && ! announce_pattern_usable "$announce"; then
-    emit "$name check failed: announce_pattern is not a usable extended regular expression"
+    emit_failed "$name" "announce_pattern is not a usable extended regular expression"
     announce=
   fi
 
   hits=$(path_hits "$command_name")
   if [ -z "$hits" ]; then
-    emit "$name check failed: $command_name is not on PATH"
+    emit_failed "$name" "$command_name is not on PATH"
     return 0
   fi
 
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     if budget_exhausted; then
-      emit "$name check failed: the time budget ran out before every copy answered"
+      emit_unanswered "$name" "the time budget ran out before every copy answered"
       break
     fi
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
     out=$(probe_output "$hit" $args_joined)
+    status=$?
     version=$(parse_version "$out")
+    if fm_timed_out "$status"; then
+      # A copy cut short at its bound did not answer, whatever it managed to print
+      # before it was cut off, so what it printed is dropped rather than read: a
+      # version taken from a partial answer would credit this copy with something it
+      # never finished saying. The hang is what it is reported as, and a copy that
+      # hung is not a copy that answered without a version.
+      emit_unanswered "$name" "$hit did not answer in time"
+      version=
+      out=
+    elif [ -z "$version" ]; then
+      [ -n "$unreadable" ] || unreadable=$hit
+    fi
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
       resolved_version=$version
       resolved_out=$out
     fi
-    if [ -z "$version" ]; then
-      [ -n "$unreadable" ] || unreadable=$hit
-      continue
-    fi
-    if [ -z "$best_version" ] || version_newer "$version" "$best_version"; then
+    if [ -n "$version" ] && { [ -z "$best_version" ] || version_newer "$version" "$best_version"; }; then
       best_version=$version
       best_path=$hit
     fi
@@ -466,16 +683,16 @@ EOF
       if budget_exhausted; then
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
-        emit "$name check failed: the time budget ran out before the update announcement was checked"
+        emit_unanswered "$name" "the time budget ran out before the update announcement was checked"
         announce_out=
       else
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
         announce_out=$(probe_output "$resolved_path" $announce_args)
         status=$?
-        if [ "$status" -eq 124 ]; then
+        if fm_timed_out "$status"; then
           # A source that was asked and never answered is not a source that had
           # nothing to say. The one that answers with nothing stays silent below.
-          emit "$name check failed: $resolved_path did not answer when asked for its update announcement"
+          emit_unanswered "$name" "$resolved_path did not answer when asked for its update announcement"
           announce_out=
         fi
       fi
@@ -486,7 +703,7 @@ EOF
       matched=$(grep -oE -- "$announce" <<< "$announce_out" 2>/dev/null)
       status=$?
       if [ "$status" -gt 1 ]; then
-        emit "$name check failed: announce_pattern is not a usable extended regular expression"
+        emit_failed "$name" "announce_pattern is not a usable extended regular expression"
       elif [ -n "$matched" ]; then
         matched_line=$(printf '%s\n' "$matched" | head -n 1)
         announced_version=$(parse_announced_version "$matched_line")
@@ -494,7 +711,7 @@ EOF
         # naming a version already installed is not an available update.
         if [ -z "$announced_version" ] || [ -z "$best_version" ] \
           || version_newer "$announced_version" "$best_version"; then
-          emit "$name update available: $matched_line"
+          emit_update "$name update available: $matched_line"
         fi
       fi
     fi
@@ -502,18 +719,22 @@ EOF
 
   if [ -z "$resolved_version" ]; then
     # No copy was probed at all when the path is empty, and the budget report
-    # already covers that, so do not blame a copy that was never asked.
-    [ -z "$resolved_path" ] || emit "$name check failed: $resolved_path did not report a version"
+    # already covers that, so do not blame a copy that was never asked. The copy
+    # PATH resolves is blamed for reporting no version only when it answered: one
+    # that hung is already reported above as the hang it was.
+    if [ -n "$resolved_path" ] && [ "$resolved_path" = "$unreadable" ]; then
+      emit_failed "$name" "$resolved_path did not report a version"
+    fi
     return 0
   fi
 
   if [ -n "$best_version" ] && [ "$best_path" != "$resolved_path" ] \
     && version_newer "$best_version" "$resolved_version"; then
-    emit "$name update not in effect: PATH resolves $resolved_version at $resolved_path but $best_version is installed at $best_path"
+    emit_update "$name update not in effect: PATH resolves $resolved_version at $resolved_path but $best_version is installed at $best_path"
   fi
 
   if [ -n "$unreadable" ]; then
-    emit "$name check failed: $unreadable did not report a version"
+    emit_failed "$name" "$unreadable did not report a version"
   fi
   return 0
 }
@@ -540,16 +761,14 @@ git_probe() {
 # reports an unanswered read the same way instead of taking it for the answer no.
 git_probe_answered() {
   local status=$1 name=$2 subject=$3 question=$4
-  case "$status" in
-    "$GIT_PROBE_NOT_ISSUED")
-      emit "$name check failed: the time budget ran out before $subject was asked $question"
-      return 1
-      ;;
-    124)
-      emit "$name check failed: $subject did not answer $question"
-      return 1
-      ;;
-  esac
+  if [ "$status" = "$GIT_PROBE_NOT_ISSUED" ]; then
+    emit_unanswered "$name" "the time budget ran out before $subject was asked $question"
+    return 1
+  fi
+  if fm_timed_out "$status"; then
+    emit_unanswered "$name" "$subject did not answer $question"
+    return 1
+  fi
   return 0
 }
 
@@ -562,11 +781,11 @@ git_findings() {
   local status remote_sha local_sha local_label count short symref
 
   if ! command -v git >/dev/null 2>&1; then
-    emit "$name check failed: git is not installed"
+    emit_failed "$name" "git is not installed"
     return 0
   fi
   if [ ! -d "$repo" ]; then
-    emit "$name check failed: $repo is not a directory"
+    emit_failed "$name" "$repo is not a directory"
     return 0
   fi
   budget_allows "$name" || return 0
@@ -574,7 +793,7 @@ git_findings() {
   status=$?
   git_probe_answered "$status" "$name" "$repo" "whether it is a git repository" || return 0
   if [ "$status" -ne 0 ]; then
-    emit "$name check failed: $repo is not a git repository"
+    emit_failed "$name" "$repo is not a git repository"
     return 0
   fi
 
@@ -588,12 +807,20 @@ git_findings() {
     # has no local record of the remote's default branch. Ask the remote itself
     # rather than reporting a check failure the operator cannot act on.
     symref=$(git_probe "$repo" ls-remote --symref "$remote" HEAD 2>/dev/null)
-    git_probe_answered "$?" "$name" "$remote" "which branch it uses by default" || return 0
+    status=$?
+    git_probe_answered "$status" "$name" "$remote" "which branch it uses by default" || return 0
+    if [ "$status" -ne 0 ]; then
+      # This probe is the same network read as the one below, so a remote that
+      # cannot be reached is reported as that, never as a default branch this
+      # check never got to ask about.
+      emit_unanswered "$name" "$remote could not be reached or read from $repo"
+      return 0
+    fi
     branch=$(printf '%s\n' "$symref" \
       | awk '$1 == "ref:" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
   fi
   if [ -z "$branch" ]; then
-    emit "$name check failed: cannot resolve the default branch of $remote in $repo"
+    emit_failed "$name" "cannot resolve the default branch of $remote in $repo"
     return 0
   fi
 
@@ -604,12 +831,12 @@ git_findings() {
     # The probe itself failed, so nothing at all is known about the branch. An
     # offline host and a deleted branch are different problems, and reporting a
     # missing branch here would name a cause that was never established.
-    emit "$name check failed: $remote could not be reached or read from $repo"
+    emit_unanswered "$name" "$remote could not be reached or read from $repo"
     return 0
   fi
   remote_sha=$(printf '%s\n' "$remote_sha" | awk 'NR == 1 { print $1 }')
   if [ -z "$remote_sha" ]; then
-    emit "$name check failed: $remote has no branch $branch"
+    emit_failed "$name" "$remote has no branch $branch"
     return 0
   fi
 
@@ -624,7 +851,7 @@ git_findings() {
     local_sha=$(git_probe "$repo" rev-parse --verify --quiet HEAD 2>/dev/null)
     git_probe_answered "$?" "$name" "$repo" "where HEAD points" || return 0
     if [ -z "$local_sha" ]; then
-      emit "$name check failed: $repo has no commit to compare"
+      emit_failed "$name" "$repo has no commit to compare"
       return 0
     fi
     local_label='local HEAD'
@@ -650,24 +877,42 @@ git_findings() {
       ''|*[!0-9]*|0) count= ;;
     esac
     if [ -n "$count" ]; then
-      emit "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
+      emit_update "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
       return 0
     fi
   fi
 
-  emit "$name update available: $remote/$branch is at $short which this copy does not have"
+  emit_update "$name update available: $remote/$branch is at $short which this copy does not have"
   return 0
 }
 
 # --- report record ----------------------------------------------------------
 
 RECORD_EPOCH=0
-RECORD_REPORTED=
+# The findings the record carries, in six parallel arrays shaped like this sweep's
+# own: text, tool, kind of check, class, unanswered streak, and whether the finding
+# was ever actually printed. The last one is what "already reported" means, because
+# a finding the streak gate held back is remembered without having been shown.
+RECORD_TEXTS=()
+RECORD_OWNERS=()
+RECORD_KINDS=()
+RECORD_CLASSES=()
+RECORD_STREAKS=()
+RECORD_SHOWN=()
 
+# Every array is indexed by hand rather than expanded with [@], because an empty
+# array expanded that way is a fatal unbound variable under `set -u` on Bash 3.2,
+# which is still the stock shell on macOS.
 record_read() {
-  local line first=1
+  local line first=1 entry owner kind class streak shown text i
+  local -a entries=()
   RECORD_EPOCH=0
-  RECORD_REPORTED=
+  RECORD_TEXTS=()
+  RECORD_OWNERS=()
+  RECORD_KINDS=()
+  RECORD_CLASSES=()
+  RECORD_STREAKS=()
+  RECORD_SHOWN=()
   [ -f "$RECORD" ] || return 0
   while IFS= read -r line; do
     if [ "$first" = 1 ]; then
@@ -683,10 +928,176 @@ record_read() {
           *) RECORD_EPOCH=$line ;;
         esac
         ;;
-      reported=*) RECORD_REPORTED=${line#reported=} ;;
+      reported=*)
+        line=${line#reported=}
+        [ -n "$line" ] || continue
+        IFS=$RECORD_TAB read -r -a entries <<< "$line"
+        i=0
+        while [ "$i" -lt "${#entries[@]}" ]; do
+          entry=${entries[i]}
+          i=$((i + 1))
+          IFS=$FIELD_SEP read -r owner kind class streak shown text <<< "$entry"
+          [ -n "$text" ] || continue
+          case "$streak" in
+            ''|*[!0-9]*) streak=0 ;;
+          esac
+          [ "$shown" = 1 ] || shown=0
+          RECORD_OWNERS+=("$owner")
+          RECORD_KINDS+=("$kind")
+          RECORD_CLASSES+=("$class")
+          RECORD_STREAKS+=("$streak")
+          RECORD_SHOWN+=("$shown")
+          RECORD_TEXTS+=("$text")
+        done
+        ;;
     esac
   done < "$RECORD"
   return 0
+}
+
+# Whether this text was already reported, which is not the same as being in the
+# record: a finding the streak gate held back is remembered without having been
+# shown, and must still be said once a sweep reaches it with an answer behind it.
+record_has() {
+  local i=0
+  while [ "$i" -lt "${#RECORD_TEXTS[@]}" ]; do
+    if [ "${RECORD_TEXTS[i]}" = "$1" ] && [ "${RECORD_SHOWN[i]}" = 1 ]; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# How many sweeps in a row this tool and kind of check has now gone without an
+# answer, counting this one. The count rides on the one unanswered entry the record
+# keeps for that pair, which a sweep that answers drops along with the rest of what
+# that kind reported, so the streak resets by itself.
+unanswered_streak() {
+  local i=0
+  while [ "$i" -lt "${#RECORD_TEXTS[@]}" ]; do
+    if [ "${RECORD_CLASSES[i]}" = unanswered ] && [ "${RECORD_OWNERS[i]}" = "$1" ] \
+      && [ "${RECORD_KINDS[i]}" = "$2" ]; then
+      printf '%s' "$(( RECORD_STREAKS[i] + 1 ))"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  printf 1
+}
+
+# An unanswered finding is not news on its own: a remote that flaps between
+# answering and not would otherwise wake the operator on every failing poll, which
+# says nothing it can act on. It speaks up once its check has gone unanswered this
+# many sweeps in a row, and only then, because the streak equals this number on one
+# sweep of a streak alone.
+UNANSWERED_REPORT_AFTER=3
+
+findings_are_news() {
+  local i=0
+  while [ "$i" -lt "${#FINDING_ITEMS[@]}" ]; do
+    if [ "${FINDING_CLASSES[i]}" = unanswered ]; then
+      [ "${FINDING_STREAKS[i]}" -ne "$UNANSWERED_REPORT_AFTER" ] || return 0
+    else
+      record_has "${FINDING_ITEMS[i]}" || return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+finding_was_emitted() {
+  local i=0
+  while [ "$i" -lt "${#FINDING_ITEMS[@]}" ]; do
+    [ "${FINDING_ITEMS[i]}" = "$1" ] && return 0
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# True when this sweep neither confirmed nor cleared an earlier reported finding,
+# which is decided per tool and per kind of check: the registry was unreadable,
+# the sweep never reached the tool, or that one kind of its checks got no answer
+# at all. A kind that did answer speaks for its own findings alone, so an
+# unanswered git probe cannot erase what the command probe answered, or the
+# reverse.
+prior_is_unsettled() {
+  local owner=$1 kind=$2
+  [ "$REGISTRY_READ" = 1 ] || return 0
+  if [ "$owner" != "$SWEEP_OWNER" ]; then
+    [ -n "$owner" ] || return 1
+    case "$(tool_state "$owner")" in
+      absent) return 1 ;;
+      unreached) return 0 ;;
+    esac
+  fi
+  case "$(check_kind_state "$owner" "$kind")" in
+    answered|absent) return 1 ;;
+  esac
+  return 0
+}
+
+# True unless this tool and kind of check has already carried over the one earlier
+# unanswered entry it is allowed to keep. Record order runs newest first, so the
+# newest earlier one wins. Only unanswered entries are capped, so a no-answer sweep
+# never evicts a failure some probe did answer.
+unanswered_cap_allows() {
+  local class=$1 owner=$2 kind=$3 capped=$4
+  [ "$class" = unanswered ] || return 0
+  case " $capped " in
+    *" $owner$FIELD_SEP$kind "*) return 1 ;;
+  esac
+  return 0
+}
+
+# This sweep's findings, plus each earlier reported finding it left unsettled. A
+# check that got no answer says nothing about what was reported before it, so it
+# keeps that memory; a check that did answer replaces its own earlier findings,
+# whether those were updates or failures it answered, so a condition that returns
+# later is news again.
+#
+# Of the unanswered entries earlier sweeps of a kind left behind, only the newest
+# is kept, because a check that keeps getting no answer would otherwise leave one
+# per sweep behind: some of those texts name the remote commit they could not ask
+# about, so a remote that moves makes every one of them distinct. This sweep's own
+# findings are all kept, however many dead ends one kind reached - a copy that hung
+# and an announcement command that never answered are two of the same kind having
+# no answer - because this record is also what remembers which findings the
+# operator has already been shown, and dropping one would report it again the
+# moment its check answers. That bounds the record by what a single sweep can find,
+# not by how long a check has gone unanswered. Nothing else can pile up: a kind
+# that answers replaces all of its own entries, and one that does not answer
+# reports no update at all, only that it has no answer.
+#
+# Each finding of this sweep is marked shown when this sweep printed, and stays
+# marked once it was, so a finding held back while its streak ran does not pass for
+# one the operator has seen, and one that was shown does not become news again
+# because a later sweep had no answer about it.
+findings_to_remember() {
+  local printed=$1 i out='' text shown capped=''
+  i=0
+  while [ "$i" -lt "${#FINDING_ITEMS[@]}" ]; do
+    shown=$printed
+    ! record_has "${FINDING_ITEMS[i]}" || shown=1
+    out="$out${out:+$RECORD_TAB}${FINDING_OWNERS[i]}$FIELD_SEP${FINDING_KINDS[i]}$FIELD_SEP${FINDING_CLASSES[i]}$FIELD_SEP${FINDING_STREAKS[i]}$FIELD_SEP$shown$FIELD_SEP${FINDING_ITEMS[i]}"
+    if [ "${FINDING_CLASSES[i]}" = unanswered ]; then
+      capped="$capped ${FINDING_OWNERS[i]}$FIELD_SEP${FINDING_KINDS[i]}"
+    fi
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt "${#RECORD_TEXTS[@]}" ]; do
+    text=${RECORD_TEXTS[i]}
+    if ! finding_was_emitted "$text" \
+      && prior_is_unsettled "${RECORD_OWNERS[i]}" "${RECORD_KINDS[i]}" \
+      && unanswered_cap_allows "${RECORD_CLASSES[i]}" "${RECORD_OWNERS[i]}" "${RECORD_KINDS[i]}" "$capped"; then
+      [ "${RECORD_CLASSES[i]}" != unanswered ] \
+        || capped="$capped ${RECORD_OWNERS[i]}$FIELD_SEP${RECORD_KINDS[i]}"
+      out="$out${out:+$RECORD_TAB}${RECORD_OWNERS[i]}$FIELD_SEP${RECORD_KINDS[i]}$FIELD_SEP${RECORD_CLASSES[i]}$FIELD_SEP${RECORD_STREAKS[i]}$FIELD_SEP${RECORD_SHOWN[i]}$FIELD_SEP$text"
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
 }
 
 record_write() {
@@ -706,7 +1117,7 @@ record_write() {
 
 action_check() {
   local name command_name args_joined announce announce_args repo remote branch
-  local line now
+  local line now printed
 
   [ -f "$CONFIG" ] || return 0
 
@@ -718,19 +1129,29 @@ action_check() {
   fi
 
   DEADLINE=$(($(real_epoch) + BUDGET_SECS))
+  check_kind_begins "$SWEEP_OWNER" sweep
 
   if [ -n "$BUDGET_CUT_FROM" ]; then
-    emit "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
+    emit_sweep "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
   fi
 
   if ! config_validate; then
-    emit "watched tool registry: $CONFIG_PROBLEM"
+    emit_sweep "watched tool registry: $CONFIG_PROBLEM"
   else
+    REGISTRY_READ=1
+    # The registry is read to its end even once the budget is gone, without
+    # probing anything further, so the sweep knows which tools it never reached
+    # and can keep what they last reported instead of forgetting it.
     while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch; do
       [ -n "$name" ] || continue
-      budget_allows "$name" || break
-      [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
-      [ -z "$repo" ] || git_findings "$name" "$repo" "$remote" "$branch"
+      TOOL_NAMES+=("$name")
+      if ! budget_allows "$name"; then
+        TOOL_REACHED+=(0)
+        continue
+      fi
+      TOOL_REACHED+=(1)
+      [ -z "$command_name" ] || check_kind command "$name" command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
+      [ -z "$repo" ] || check_kind git "$name" git_findings "$name" "$repo" "$remote" "$branch"
     done < <(config_records)
   fi
 
@@ -749,10 +1170,12 @@ action_check() {
   #
   # Report before recording, so a record that cannot be written costs a repeated
   # report rather than a lost one.
-  if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
+  printed=0
+  if [ -n "$line" ] && findings_are_news; then
     printf '%s\n' "$line"
+    printed=1
   fi
-  record_write "$FINDINGS" || true
+  record_write "$(findings_to_remember "$printed")" || true
   return 0
 }
 
