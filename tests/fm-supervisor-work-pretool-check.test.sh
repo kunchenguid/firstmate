@@ -22,7 +22,7 @@ git -C "$PRIMARY" init -q
 
 # The exact incident this guard exists for: a lead that answered its worker's
 # findings and then waited on the worker's pipeline inside one turn.
-INCIDENT_RESPOND='cd /home/umer/firstmate/work && no-mistakes axi respond --action fix --note ok'
+INCIDENT_RESPOND='cd /home/you/firstmate/work && no-mistakes axi respond --action fix --note ok'
 INCIDENT_POLL='sleep 110; no-mistakes axi run --wait'
 
 run_in() {  # <home> <state> <command...>

@@ -354,7 +354,7 @@ test_an_old_payload_renders_no_milestone_surfaces() {
 LINKS_PAYLOAD='{
   "schema":"fm-bearings-board.v1","home":"render-home","generated":"2026-10-03T12:00Z","prs_live":false,
   "projects":[
-    {"repo":"ownvoice","health":"G","board_url":"http://extreme.tail0de54.ts.net:4387/session/8e1e7e6e94d5f4b9"},
+    {"repo":"ownvoice","health":"G","board_url":"http://example.com/session/board-1"},
     {"repo":"takeone","health":"Y"}
   ],
   "captains_call":[
@@ -364,12 +364,12 @@ LINKS_PAYLOAD='{
   ],
   "underway":[
     {"id":"ov-rec","repo":"ownvoice","name":"Recorder","state":"working","kind":"ship","doing":"implementing",
-     "evidence_url":"http://extreme.tail0de54.ts.net:8080/recorder.webp"},
+     "evidence_url":"http://example.com/evidence/recorder.webp"},
     {"id":"to-clip","repo":"takeone","name":"Clip export","state":"working","kind":"ship","doing":"implementing",
      "evidence_url":"https://example.com/evidence/clip.mp4"}
   ],
   "landed":[
-    {"id":"ov-login","repo":"ownvoice","what":"Login","owner":"ship","evidence_url":"http://extreme.tail0de54.ts.net:8080/login.png"},
+    {"id":"ov-login","repo":"ownvoice","what":"Login","owner":"ship","evidence_url":"http://example.com/evidence/login.png"},
     {"id":"to-page","repo":"takeone","what":"Evidence page","owner":"ship","evidence_url":"https://example.com/evidence/page"},
     {"id":"to-none","repo":"takeone","what":"No evidence","owner":"ship"},
     {"id":"ov-local","repo":"ownvoice","what":"Local proof","owner":"ship","evidence_url":"evidence/local-proof.gif"},
@@ -387,15 +387,15 @@ test_project_cards_link_home_boards_and_image_evidence_shows_thumbnails() {
   printf '%s' "$out" | jq -e '
     [.projects[] | {repo, board}] == [
       {repo:"ownvoice", board:[{text:"open board ↗",
-        href:"http://extreme.tail0de54.ts.net:4387/session/8e1e7e6e94d5f4b9", target:"_blank", rel:"noopener"}]},
+        href:"http://example.com/session/board-1", target:"_blank", rel:"noopener"}]},
       {repo:"takeone", board:[]}
     ]
   ' >/dev/null || fail "project cards did not link their home board in a new tab, or linked one without board_url: $out"
   printf '%s' "$out" | jq -e '
     def thumb($u): [{href:$u, target:"_blank", src:$u, loading:"lazy"}];
     .calls[0].thumbs == thumb("https://example.com/evidence/hero.JPEG?v=2")
-      and .underway[0].thumbs == thumb("http://extreme.tail0de54.ts.net:8080/recorder.webp")
-      and .landed[0].thumbs == thumb("http://extreme.tail0de54.ts.net:8080/login.png")
+      and .underway[0].thumbs == thumb("http://example.com/evidence/recorder.webp")
+      and .landed[0].thumbs == thumb("http://example.com/evidence/login.png")
       and .landed[3].thumbs == thumb("evidence/local-proof.gif")
   ' >/dev/null || fail "image evidence did not render as a lazy new-tab thumbnail of the full image: $out"
   printf '%s' "$out" | jq -e '

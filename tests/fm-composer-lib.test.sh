@@ -781,7 +781,7 @@ tail+=$' steer, which lives in that worker\'s own steering inbox\n'
 tail+=$'\n Operation aborted\n'
 tail+=$'\n Warning: Memory auto-review failed in both transports. Direct:\n'
 tail+=$' parse_error. Subprocess: Warning: Extension package\n'
-tail+=$' "/home/umer/.pi/agent/npm/node_modules/pi-hermes-memory/package.jso\n'
+tail+=$' "/home/you/.pi/agent/npm/node_modules/pi-hermes-memory/package.jso\n'
 tail+=$' n": Host-provided extension packages must be declared in\n'
 tail+=$' peerDependencies with a "*" range, not dependencies:\n'
 tail+=$' @earendil-works/pi-tui. Installed copies can bypass the extension\n'
@@ -1060,7 +1060,7 @@ test_matrix_opencode_leftbar_signals() {
   # could neither relaunch nor exit a stuck OpenCode worker.
   local floor status_screen retry_screen retry_tail typed_status
   floor='  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  '
-  status_screen=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/3/71.6K (27%) · $0ctrl+p\n   firstmate                                                commands'
+  status_screen=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/3/71.6K (27%) · $0ctrl+p\n   firstmate                                                commands'
   assert_screen "opencode 1.18.x idle status rows below the floor on herdr" empty "$CAPS_STYLED" "$status_screen"
   assert_screen "opencode 1.18.x idle status rows below the floor on zellij" empty "$CAPS_STYLED_NOID" "$status_screen"
   assert_screen "opencode 1.18.x idle status rows below the floor on cmux/orca" empty "$CAPS_PLAIN" "$status_screen"
@@ -1068,7 +1068,7 @@ test_matrix_opencode_leftbar_signals() {
   # `commands` hint (`tab agents ctrl+p commands`), not the two-space gap the
   # 1.18.x rows above show, so the same below-floor furniture reads empty.
   local bare_status_screen
-  bare_status_screen=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/3/71.6K (27%) · $0ctrl+p\n   firstmate                                    tab agents ctrl+p commands'
+  bare_status_screen=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/3/71.6K (27%) · $0ctrl+p\n   firstmate                                    tab agents ctrl+p commands'
   assert_screen "opencode 1.18.35 idle status rows below the floor on herdr" empty "$CAPS_STYLED" "$bare_status_screen"
   assert_screen "opencode 1.18.35 idle status rows below the floor on cmux/orca" empty "$CAPS_PLAIN" "$bare_status_screen"
   local busy_status_screen
@@ -1090,7 +1090,7 @@ test_matrix_opencode_leftbar_signals() {
   assert_screen "opencode 1.18.x retry banner wrapped without its opening paren on herdr" empty "$CAPS_STYLED" "$retry_tail"
   # Typed text must survive the same furniture: the verdict comes from the
   # left-bar run above the floor, never from the status area below it.
-  typed_status=$'  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/3/71.6K (27%) · $0ctrl+p\n   firstmate                                                commands'
+  typed_status=$'  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/3/71.6K (27%) · $0ctrl+p\n   firstmate                                                commands'
   assert_screen "opencode typed draft above live status rows on herdr" pending "$CAPS_STYLED" "$typed_status"
   assert_screen "opencode typed draft above live status rows on zellij" pending "$CAPS_STYLED_NOID" "$typed_status"
   assert_screen "opencode typed draft above live status rows on plain backends" unknown "$CAPS_PLAIN" "$typed_status"
@@ -1100,7 +1100,7 @@ test_matrix_opencode_leftbar_signals() {
   # interrupt`, which must keep refusing. The home screen draws its own bare
   # `tab agents  ctrl+p commands` row under the floor.
   local v125_idle v125_busy home_status
-  v125_idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.no-mistakes/worktrees/bde6b4035eae/01M4FF56ACM65RSHMS9Y57MEZ2  36.9K (4%) · $0.01  ctrl+p commands'
+  v125_idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.no-mistakes/worktrees/bde6b4035eae/01M4FF56ACM65RSHMS9Y57MEZ2  36.9K (4%) · $0.01  ctrl+p commands'
   assert_screen "opencode 1.18.25 idle session row below the floor on herdr" empty "$CAPS_STYLED" "$v125_idle"
   assert_screen "opencode 1.18.25 idle session row below the floor on cmux/orca" empty "$CAPS_PLAIN" "$v125_idle"
   v125_busy=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                         36.9K (4%) · $0.01  ctrl+p commands'
@@ -1118,11 +1118,11 @@ test_matrix_opencode_leftbar_signals() {
   # could neither relaunch nor exit. A draft above the same footer still reads
   # pending (never empty).
   local wrap_idle wrap_typed wrap_error
-  wrap_idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-directory-name   commands'
+  wrap_idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-directory-name   commands'
   assert_screen "opencode 1.18.x wrapped status footer on herdr" empty "$CAPS_STYLED" "$wrap_idle"
   assert_screen "opencode 1.18.x wrapped status footer on zellij" empty "$CAPS_STYLED_NOID" "$wrap_idle"
   assert_screen "opencode 1.18.x wrapped status footer on cmux/orca" empty "$CAPS_PLAIN" "$wrap_idle"
-  wrap_typed=$'  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-directory-name   commands'
+  wrap_typed=$'  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-directory-name   commands'
   assert_screen "opencode 1.18.x typed draft above wrapped status footer on herdr" pending "$CAPS_STYLED" "$wrap_typed"
   assert_screen "opencode 1.18.x typed draft above wrapped status footer on cmux/orca" unknown "$CAPS_PLAIN" "$wrap_typed"
   # Shape (b): an assistant error block (opencode draws it as a `┃`-left-border
@@ -1132,7 +1132,7 @@ test_matrix_opencode_leftbar_signals() {
   # furniture; the composer below is still empty. The real capture behind this
   # fixture carried the same box with a different message (an upstream-provider
   # error); the shape is byte-identical, the text is not load-bearing.
-  wrap_error=$'  ┃  run the check\n  ┃\n  ┃\n  ┃  Failed to execute statement\n  ┃\n     ▣  Build · DeepSeek V4.1 Flash\n  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-directory-name   commands'
+  wrap_error=$'  ┃  run the check\n  ┃\n  ┃\n  ┃  Failed to execute statement\n  ┃\n     ▣  Build · DeepSeek V4.1 Flash\n  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-directory-name   commands'
   assert_screen "opencode 1.18.x assistant error block above empty composer on herdr" empty "$CAPS_STYLED" "$wrap_error"
   assert_screen "opencode 1.18.x assistant error block above empty composer on cmux/orca" empty "$CAPS_PLAIN" "$wrap_error"
   # Live 2026-10-09 THREE-row wrap (task fm-opencode-composer-err, driven in an
@@ -1141,10 +1141,10 @@ test_matrix_opencode_leftbar_signals() {
   # carrying the directory's middle fragment, and a bare trailing fragment
   # (`name`). The bare fragment is furniture only beside a real status row.
   local wrap3_idle wrap3_typed
-  wrap3_idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-dir-   commands\n   name'
+  wrap3_idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-dir-   commands\n   name'
   assert_screen "opencode 1.18.x three-row wrapped status footer on herdr" empty "$CAPS_STYLED" "$wrap3_idle"
   assert_screen "opencode 1.18.x three-row wrapped status footer on cmux/orca" empty "$CAPS_PLAIN" "$wrap3_idle"
-  wrap3_typed=$'  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-dir-   commands\n   name'
+  wrap3_typed=$'  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/8/a-   22.1K (2%) · $ctrl+p\n   really-quite-long-opencode-project-dir-   commands\n   name'
   assert_screen "opencode 1.18.x typed draft above three-row wrapped status footer on herdr" pending "$CAPS_STYLED" "$wrap3_typed"
   assert_screen "opencode 1.18.x typed draft above three-row wrapped status footer on cmux/orca" unknown "$CAPS_PLAIN" "$wrap3_typed"
   # Live 2026-10-09 ZERO-USAGE wrap (task fm-opencode-composer-err, real
@@ -1154,24 +1154,24 @@ test_matrix_opencode_leftbar_signals() {
   # matches the full status pattern; the palette hint `ctrl+p` anchors it. A
   # busy row carrying `esc interrupt` in the same area must still refuse.
   local wrap0_idle wrap0_typed wrap0_busy
-  wrap0_idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/8/relaunch-   tab ctrl+p\n   really-quite-long-opencode-project-directory-name   agents commands'
+  wrap0_idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/8/relaunch-   tab ctrl+p\n   really-quite-long-opencode-project-directory-name   agents commands'
   assert_screen "opencode 1.18.x zero-usage wrapped status footer on herdr" empty "$CAPS_STYLED" "$wrap0_idle"
   assert_screen "opencode 1.18.x zero-usage wrapped status footer on cmux/orca" empty "$CAPS_PLAIN" "$wrap0_idle"
-  wrap0_typed=$'  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/8/relaunch-   tab ctrl+p\n   really-quite-long-opencode-project-directory-name   agents commands'
+  wrap0_typed=$'  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/8/relaunch-   tab ctrl+p\n   really-quite-long-opencode-project-directory-name   agents commands'
   assert_screen "opencode 1.18.x typed draft above zero-usage wrapped status footer on herdr" pending "$CAPS_STYLED" "$wrap0_typed"
   assert_screen "opencode 1.18.x typed draft above zero-usage wrapped status footer on cmux/orca" unknown "$CAPS_PLAIN" "$wrap0_typed"
-  wrap0_busy=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/8/relaunch-   esc interrupt ctrl+p\n   really-quite-long-opencode-project-directory-name   agents commands'
+  wrap0_busy=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/8/relaunch-   esc interrupt ctrl+p\n   really-quite-long-opencode-project-directory-name   agents commands'
   assert_screen "opencode 1.18.x busy row above zero-usage wrapped footer still refuses on herdr" unknown "$CAPS_STYLED" "$wrap0_busy"
   assert_screen "opencode 1.18.x busy row above zero-usage wrapped footer still refuses on cmux/orca" unknown "$CAPS_PLAIN" "$wrap0_busy"
-  # Live 2026-10-09 UNANSWERED BUBBLE (Main1860): a doorbell `┃` user bubble
+  # Live 2026-10-09 UNANSWERED BUBBLE: a doorbell `┃` user bubble
   # sits above a blank row, then the composer is EMPTY. The footer wraps to a
   # path/usage/palette row and a bare `pockit` continuation. The bubble is
   # transcript furniture above the composer; the composer below is still empty.
   local unans_idle unans_typed
-  unans_idle=$'  ┃\n  ┃  : Firstmate instruction waiting: list "$FM_TASK_INBOX"/*.msg in your \'mx-\n  ┃  pm-9b.inbox\' steering inbox, read and act on each in numeric order, then\n  ┃  mv each into its handled/.\n  ┃\n\n  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/pockit-497a78/8/   538.6K (54%) · $1.0 ctrl+p commands\n   pockit'
+  unans_idle=$'  ┃\n  ┃  : Firstmate instruction waiting: list "$FM_TASK_INBOX"/*.msg in your \'mx-\n  ┃  pm-9b.inbox\' steering inbox, read and act on each in numeric order, then\n  ┃  mv each into its handled/.\n  ┃\n\n  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/pockit-497a78/8/   538.6K (54%) · $1.0 ctrl+p commands\n   pockit'
   assert_screen "opencode 1.18.x unanswered bubble above empty composer on herdr" empty "$CAPS_STYLED" "$unans_idle"
   assert_screen "opencode 1.18.x unanswered bubble above empty composer on cmux/orca" empty "$CAPS_PLAIN" "$unans_idle"
-  unans_typed=$'  ┃\n  ┃  : Firstmate instruction waiting: list "$FM_TASK_INBOX"/*.msg in your \'mx-\n  ┃  pm-9b.inbox\' steering inbox, read and act on each in numeric order, then\n  ┃  mv each into its handled/.\n  ┃\n\n  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/umer/.treehouse/pockit-497a78/8/   538.6K (54%) · $1.0 ctrl+p commands\n   pockit'
+  unans_typed=$'  ┃\n  ┃  : Firstmate instruction waiting: list "$FM_TASK_INBOX"/*.msg in your \'mx-\n  ┃  pm-9b.inbox\' steering inbox, read and act on each in numeric order, then\n  ┃  mv each into its handled/.\n  ┃\n\n  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n'"$floor"$'\n   /home/you/.treehouse/pockit-497a78/8/   538.6K (54%) · $1.0 ctrl+p commands\n   pockit'
   assert_screen "opencode 1.18.x typed draft under unanswered bubble on herdr" pending "$CAPS_STYLED" "$unans_typed"
   assert_screen "opencode 1.18.x typed draft under unanswered bubble on cmux/orca" unknown "$CAPS_PLAIN" "$unans_typed"
   # Live 2026-10-10 (OpenCode 1.18.25 through Herdr, the fm-model-scorecard
@@ -1192,13 +1192,13 @@ test_matrix_opencode_leftbar_signals() {
   # (unwrapped), and typed text in the fragment's position keeps its shallow
   # two-space indent and stays pending.
   local v11825_wrap v11825_nowrap v11825_typed v11825_typed_wrap
-  v11825_wrap=$'  ┃\n     ▣  Build · DeepSeek V4.1 Flash (Ollama)\n  ┃\n  ┃\n  ┃                                                                  ~/.treehouse/firstmate-cff959/2/\n  ┃  Build · DeepSeek V4.1 Flash (Ollama) Ollama Cloud                       firstmate:fm/fm-model-scorecard\n'"$floor"$'\n   /home/umer/.treehouse/firstmate-cff959/2/firstmate             87.1K (33%) · $0.33  ctrl+p commands    • OpenCode 1.18.25'
+  v11825_wrap=$'  ┃\n     ▣  Build · DeepSeek V4.1 Flash (Ollama)\n  ┃\n  ┃\n  ┃                                                                  ~/.treehouse/firstmate-cff959/2/\n  ┃  Build · DeepSeek V4.1 Flash (Ollama) Ollama Cloud                       firstmate:fm/fm-model-scorecard\n'"$floor"$'\n   /home/you/.treehouse/firstmate-cff959/2/firstmate             87.1K (33%) · $0.33  ctrl+p commands    • OpenCode 1.18.25'
   assert_screen "opencode 1.18.25 wrapped dir fragment above model row on herdr" empty "$CAPS_STYLED" "$v11825_wrap"
   assert_screen "opencode 1.18.25 wrapped dir fragment above model row on zellij" empty "$CAPS_STYLED_NOID" "$v11825_wrap"
   assert_screen "opencode 1.18.25 wrapped dir fragment above model row on cmux/orca" empty "$CAPS_PLAIN" "$v11825_wrap"
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$v11825_wrap")
   [ -z "$out" ] || fail "the wrapped dir fragment must never extract as composer content, got '$out'"
-  v11825_nowrap=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash (Ollama) Ollama Cloud          ~/pockit:fm/fm-model-scorecard\n'"$floor"$'\n   /home/umer/pockit  3.1K (1%) · $0.00  ctrl+p commands'
+  v11825_nowrap=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash (Ollama) Ollama Cloud          ~/pockit:fm/fm-model-scorecard\n'"$floor"$'\n   /home/you/pockit  3.1K (1%) · $0.00  ctrl+p commands'
   assert_screen "opencode 1.18.25 unwrapped dir:branch cell on the model row on herdr" empty "$CAPS_STYLED" "$v11825_nowrap"
   assert_screen "opencode 1.18.25 unwrapped dir:branch cell on the model row on cmux/orca" empty "$CAPS_PLAIN" "$v11825_nowrap"
   v11825_typed=$'  ┃\n  ┃\n  ┃  Reply with OK.\n  ┃  Build · DeepSeek V4.1 Flash (Ollama) Ollama Cloud          ~/pockit:fm/fm-model-scorecard\n'"$floor"
@@ -1224,7 +1224,7 @@ test_matrix_opencode_leftbar_signals() {
   # opening path row is still typed text, so a bare continuation above the
   # model row stays pending.
   local v11825_wrap2 v11825_typed2 v11825_orphan2
-  v11825_wrap2=$'  ┃\n  ┃\n  ┃                                                                  ~/.treehouse/desklink-f2d1d8/4/\n  ┃                                                                  desklink:fm/dl-engine-restart-keeps-\n  ┃  Build · DeepSeek V4.1 Flash pair\n'"$floor"$'\n   /home/umer/.treehouse/desklink-f2d1d8/4/desklink             87.1K (33%) · $0.33  ctrl+p commands    • OpenCode 1.18.25'
+  v11825_wrap2=$'  ┃\n  ┃\n  ┃                                                                  ~/.treehouse/desklink-f2d1d8/4/\n  ┃                                                                  desklink:fm/dl-engine-restart-keeps-\n  ┃  Build · DeepSeek V4.1 Flash pair\n'"$floor"$'\n   /home/you/.treehouse/desklink-f2d1d8/4/desklink             87.1K (33%) · $0.33  ctrl+p commands    • OpenCode 1.18.25'
   assert_screen "opencode 1.18.25 two-row wrapped dir fragment above model row on herdr" empty "$CAPS_STYLED" "$v11825_wrap2"
   assert_screen "opencode 1.18.25 two-row wrapped dir fragment above model row on zellij" empty "$CAPS_STYLED_NOID" "$v11825_wrap2"
   assert_screen "opencode 1.18.25 two-row wrapped dir fragment above model row on cmux/orca" empty "$CAPS_PLAIN" "$v11825_wrap2"

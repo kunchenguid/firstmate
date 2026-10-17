@@ -3,20 +3,20 @@
 This is home-local operator reference for the Qwen EXL3 server running on this machine's RTX 3090, not a portable firstmate guarantee.
 It records the current launch, the Pi provider entry, how to select reasoning effort, the measured speed and coding-quality evidence, what was tried and rejected, the safe concurrency ceiling, the rollback procedure, and what this model should and should not be trusted with.
 The deployment itself was qualified by the earlier EXL3 migration; this page only records what changed afterwards.
-Raw per-run evidence, prior-state backups, and the tuning chronology live under `/home/umer/models/qwen/tuning/20260921T132112Z/`, which is outside this repository.
+Raw per-run evidence, prior-state backups, and the tuning chronology live under `/home/you/models/qwen/tuning/20260921T132112Z/`, which is outside this repository.
 
 ## Current state
 
 | Piece | Value |
 | --- | --- |
-| Service | `systemctl --user qwen-local.service`, unit at `/home/umer/.config/systemd/user/qwen-local.service` |
+| Service | `systemctl --user qwen-local.service`, unit at `/home/you/.config/systemd/user/qwen-local.service` |
 | Unit SHA256 | `3da83671a431b6778083e2bcad1773057bf64f3f604638511f5fc5bf0c2db935` (unchanged by this work) |
 | Endpoint | `http://127.0.0.1:8080/v1`, loopback only, API key `local` |
 | Model id | `qwen3.8-27b` |
 | Model | `Qwen3.8-27B-EXL3-4.0bpw`, `turboderp/Qwen3.8-27B-exl3` at `113cf7ab958054860e43fb7f3063b1af19171095` |
-| Server script | `/home/umer/models/qwen/exl3-kit/tools/serve_openai.py`, SHA256 `9dcad544265e17cd825a3c647ec2c474f917c5e14488af3c69068c2a570ccba8` |
+| Server script | `/home/you/models/qwen/exl3-kit/tools/serve_openai.py`, SHA256 `9dcad544265e17cd825a3c647ec2c474f917c5e14488af3c69068c2a570ccba8` |
 | Server patch | [`serve_openai.py.effort-and-passthrough.patch`](serve_openai.py.effort-and-passthrough.patch), two hunks, applied on top of kit commit `622c7965ed5e02a13b188c9ef21bb9857fd2ba28` |
-| Pi provider entry | `/home/umer/.pi/agent/models.json`, SHA256 `1d894da0bee73dd22b38975f6589ccfcf72839a6d29b5804b9a2d7f3a78a611f`; the `qwen-local` entry alone is copied at [`qwen-local.provider.json`](qwen-local.provider.json) |
+| Pi provider entry | `/home/you/.pi/agent/models.json`, SHA256 `1d894da0bee73dd22b38975f6589ccfcf72839a6d29b5804b9a2d7f3a78a611f`; the `qwen-local` entry alone is copied at [`qwen-local.provider.json`](qwen-local.provider.json) |
 | Reasoning levels | `low`, `medium`, `xhigh` (what `/v1/models` advertises and what the chat template accepts), plus thinking off |
 | Restart | `systemctl --user restart qwen-local.service` reaches `/health` `ok` in about 10 seconds after a stop |
 
@@ -117,7 +117,7 @@ Two small hunks in `tools/serve_openai.py`, both in [`serve_openai.py.effort-and
 2. The wrapper forwards unknown engine flags from `EXL3_EXTRA_ARGS`.
    Nothing else reads that variable, so with it unset the launch is byte-identical to before; it exists so a draft-depth or cache experiment did not require forking the kit.
 
-One provider-entry change in `/home/umer/.pi/agent/models.json`, described under "Selecting reasoning effort".
+One provider-entry change in `/home/you/.pi/agent/models.json`, described under "Selecting reasoning effort".
 The mapping was proved with a loopback capture endpoint that logged the exact request bodies Pi produced, and then confirmed end to end: four `pi -p` runs against the real provider at thinking off, `low`, `medium`, and `high` each returned the correct answer through a real tool call.
 
 Nothing else changed: the systemd unit is byte-identical to its previous state, no model or quantization file was touched, and the launch flags are the qualified ones.
@@ -146,13 +146,13 @@ Adding a `CPU_CACHE_GB` second-tier cache, raising the KV cache precision above 
 
 ## Rollback
 
-Every prior artifact is preserved under `/home/umer/models/qwen/tuning/20260921T132112Z/`.
+Every prior artifact is preserved under `/home/you/models/qwen/tuning/20260921T132112Z/`.
 
 ```sh
-EVID=/home/umer/models/qwen/tuning/20260921T132112Z
-git -C /home/umer/models/qwen/exl3-kit checkout -- tools/serve_openai.py
-install -m 600 "$EVID/pi-models.json.baseline" /home/umer/.pi/agent/models.json
-install -m 600 "$EVID/qwen-local.service.baseline" /home/umer/.config/systemd/user/qwen-local.service
+EVID=/home/you/models/qwen/tuning/20260921T132112Z
+git -C /home/you/models/qwen/exl3-kit checkout -- tools/serve_openai.py
+install -m 600 "$EVID/pi-models.json.baseline" /home/you/.pi/agent/models.json
+install -m 600 "$EVID/qwen-local.service.baseline" /home/you/.config/systemd/user/qwen-local.service
 systemctl --user daemon-reload
 systemctl --user reset-failed qwen-local.service
 systemctl --user restart qwen-local.service

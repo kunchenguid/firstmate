@@ -4,7 +4,7 @@
     "gpu": "NVIDIA GeForce RTX 3090 24576 MiB",
     "driver": "610.57.04",
     "model": "Qwen3.8-27B-EXL3-4.0bpw (turboderp/Qwen3.8-27B-exl3 @ 113cf7ab958054860e43fb7f3063b1af19171095)",
-    "server_unit": "/home/umer/.config/systemd/user/qwen-local.service",
+    "server_unit": "/home/you/.config/systemd/user/qwen-local.service",
     "unit_sha256": "3da83671a431b6778083e2bcad1773057bf64f3f604638511f5fc5bf0c2db935",
     "endpoint": "http://127.0.0.1:8080/v1"
   },
@@ -1741,7 +1741,7 @@
     }
   },
   "notes": [
-    "Raw per-run evidence and the prior-state backups live under /home/umer/models/qwen/tuning/20260921T132112Z/.",
+    "Raw per-run evidence and the prior-state backups live under /home/you/models/qwen/tuning/20260921T132112Z/.",
     "Decode rate is measured with thinking off so a thinking-length change cannot move the number.",
     "Within one configuration, single speed samples spread about 10 percent and medians of five samples spread about 3 percent; a draft-sweep difference below that is not treated as real.",
     "Four earlier baseline probes whose engine arguments were silently truncated to the baseline launch were superseded by the correctly-parameterized sweep; only the surviving replicate is listed."

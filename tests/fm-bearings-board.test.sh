@@ -556,11 +556,11 @@ test_board_and_evidence_urls_accept_http_https_and_evidence_paths() {
   data="$home/payload.json"
   write_valid_payload "$data"
   jq '.projects = [
-        {"repo":"ownvoice","board_url":"http://extreme.tail0de54.ts.net:4387/session/8e1e7e6e94d5f4b9"},
+        {"repo":"ownvoice","board_url":"http://example.com/session/board-1"},
         {"repo":"takeone","board_url":"https://example.com/board"}
       ]
       | .landed = [
-          {"id":"l","repo":"ownvoice","what":"W","owner":"o","evidence_url":"http://extreme.tail0de54.ts.net:8080/shot.png"},
+          {"id":"l","repo":"ownvoice","what":"W","owner":"o","evidence_url":"http://example.com/evidence/shot.png"},
           {"id":"m","repo":"ownvoice","what":"M","owner":"o","evidence_url":"evidence/2026-10-03/login_v2.png"}
         ]
       | .underway = [{"id":"t","repo":"takeone","name":"T","state":"working","kind":"ship","doing":"x","evidence_url":"evidence/clip.mp4"}]
@@ -568,8 +568,8 @@ test_board_and_evidence_urls_accept_http_https_and_evidence_paths() {
   run_board "$home" build "$data" >/dev/null \
     || fail "an http or https board_url, or an http, https, or evidence/ evidence_url, was refused"
   extract_payload "$home/.lavish/bearings-board.html" | jq -e '
-    [.projects[].board_url] == ["http://extreme.tail0de54.ts.net:4387/session/8e1e7e6e94d5f4b9", "https://example.com/board"]
-      and [.landed[].evidence_url] == ["http://extreme.tail0de54.ts.net:8080/shot.png", "evidence/2026-10-03/login_v2.png"]
+    [.projects[].board_url] == ["http://example.com/session/board-1", "https://example.com/board"]
+      and [.landed[].evidence_url] == ["http://example.com/evidence/shot.png", "evidence/2026-10-03/login_v2.png"]
       and .underway[0].evidence_url == "evidence/clip.mp4"
   ' >/dev/null || fail "the built board did not carry the board and evidence URLs it was given"
   pass "board_url accepts http and https, and evidence_url also accepts an evidence/ path"

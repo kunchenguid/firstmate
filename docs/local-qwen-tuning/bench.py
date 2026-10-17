@@ -57,7 +57,7 @@ API_KEY = os.environ.get("QWEN_API_KEY", "local")
 
 # The real repository the comprehension, long-file, and patch tasks read.
 # Read-only: nothing in this harness ever writes inside it.
-REPO = Path(os.environ.get("QWEN_BENCH_REPO", "/home/umer/firstmate")).resolve()
+REPO = Path(os.environ.get("QWEN_BENCH_REPO", "/home/you/firstmate")).resolve()
 
 READ_CHARS_PER_CALL = 40_000
 SEARCH_MATCH_LIMIT = 60
