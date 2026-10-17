@@ -1585,19 +1585,31 @@ spawn_abort_cleanup() {
         echo "warning: could not close endpoint $T after the failed spawn of $ID; close it by hand so its slot returns to the pool" >&2
       fi
     fi
-    if [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
-      if [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] && [ -n "${WT:-}" ] && [ -n "${STATE_REAL:-}" ]; then
-        SPAWN_FRESH_WIRING_PENDING=0
-        clear_relaunch_harness_wiring "$HARNESS" "$WT" "$STATE_REAL" "$ID" "$KIND" ||
-          echo "warning: could not remove $HARNESS wiring after the failed spawn of $ID" >&2
-      fi
-      if [ "$SPAWN_TASK_TMP_CREATED" = 1 ] && [ -n "${TASK_TMP:-}" ]; then
-        SPAWN_TASK_TMP_CREATED=0
-        rm -rf -- "$TASK_TMP" 2>/dev/null || true
-      fi
-      if [ -n "$SPAWN_STAGED_LAUNCH_FILE" ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" != 1 ]; then
-        rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
-        rmdir -- "$(dirname "$SPAWN_STAGED_LAUNCH_FILE")" 2>/dev/null || true
+    # These paths are per task id, so the per-id spawn lock is retaken for them
+    # exactly as for the strip dir below: a retry of the same id that took the
+    # lock meanwhile may already be reusing them.
+    if { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
+      { [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] || [ "$SPAWN_TASK_TMP_CREATED" = 1 ] ||
+        [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; }; then
+      if fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+        if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+          if [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] && [ -n "${WT:-}" ] && [ -n "${STATE_REAL:-}" ]; then
+            SPAWN_FRESH_WIRING_PENDING=0
+            clear_relaunch_harness_wiring "$HARNESS" "$WT" "$STATE_REAL" "$ID" "$KIND" ||
+              echo "warning: could not remove $HARNESS wiring after the failed spawn of $ID" >&2
+          fi
+          if [ "$SPAWN_TASK_TMP_CREATED" = 1 ] && [ -n "${TASK_TMP:-}" ]; then
+            SPAWN_TASK_TMP_CREATED=0
+            rm -rf -- "$TASK_TMP" 2>/dev/null || true
+          fi
+          if [ -n "$SPAWN_STAGED_LAUNCH_FILE" ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" != 1 ]; then
+            rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
+            rmdir -- "$(dirname "$SPAWN_STAGED_LAUNCH_FILE")" 2>/dev/null || true
+          fi
+        fi
+        fm_lock_release "$SPAWN_TASK_LOCK" || true
+      else
+        echo "warning: another spawn of $ID holds its spawn lock; leaving its $HARNESS wiring, temp root, and staged launch file in place" >&2
       fi
     fi
   fi
