@@ -685,7 +685,7 @@ For the away posture:
 
 `tests/fm-wake-drain-outcome-backstop.test.sh` covers keyless resurfacing, causal suppression, same-second ordering, one-shot presentation, first-drain index self-healing under the outcome lock, store-fault fail-closed behavior, bounded history cost and output, and the oversized-line limit.
 
-`tests/fm-teardown.test.sh` covers removal of the retired task's outcome index and the append-side rule that a post-teardown report does not recreate it.
+`tests/fm-teardown.test.sh` covers removal of the retired task's outcome index and the append-side rule that a post-teardown report does not recreate it, and, with `tests/fm-teardown-endpoint-safety.test.sh`, the branch merge-proof rule: a pushed open, unreachable, missing-worktree, or reassigned-slot pull request refuses the branch actor, a merged one tears down, and main's pushed-branch cleanup is unchanged.
 
 Other tests remain where they were:
 
