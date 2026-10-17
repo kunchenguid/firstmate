@@ -64,7 +64,8 @@
 # retried once when that bound still has time. Other failures are reported
 # immediately, including a 404, which is how a lost login reads on a private
 # repository. A pull observation has three
-# dependent waves: core, seven independent reads, then the closing head read;
+# dependent waves: core, six independent reads (seven when FM_CONTRIBUTIONS_REPLY_AGE
+# is set), then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
 # reads are sorted by URL and rotated by the current five-minute epoch bucket
@@ -103,25 +104,33 @@
 # only the named pending token. A crash after enqueue can duplicate a wake but
 # cannot consume the pending signal.
 #
-# Acknowledging a signal never ends tracking of its thread. On an open pull
-# request, each maintainer inline review comment and each maintainer review in
-# state CHANGES_REQUESTED is an unanswered thread until the contribution author
-# replies or the thread is resolved. Plain issue comments and other reviews stay
+# Re-raising unanswered review threads is opt-in. Unless
+# FM_CONTRIBUTIONS_REPLY_AGE is set to a positive number of seconds, poll makes
+# no review-thread read, tracks no threads and raises no "unanswered" signal,
+# and records carry no threads[] entry. arm copies a set value into the
+# generated check, as it does FM_CONTRIBUTIONS_BUDGET, so the watcher honors it.
+# With it set, acknowledging a signal never ends tracking of its thread. On an
+# open pull request, each maintainer inline review comment and each maintainer
+# review in state CHANGES_REQUESTED is an unanswered thread until the
+# contribution author replies or the thread is resolved. Each inline comment is
+# its own thread, keyed by its comment id, so two maintainer comments in one
+# conversation raise two wakes. Plain issue comments and other reviews stay
 # one-shot signals and are never raised again. An inline comment is answered by
 # an author reply in its own thread, a review requesting changes by any later
 # author comment, review text or inline reply, or by a later APPROVED or
 # DISMISSED review from the same reviewer. A review requesting changes with an
-# empty body is not tracked, because its inline threads carry it. The record keeps one
-# threads[] entry per unanswered thread (key, source, author, at, raised). Once
-# a thread is FM_CONTRIBUTIONS_REPLY_AGE seconds old (default 86400, a day),
-# poll adds one pending "unanswered" signal and a wake whose text names the
-# comment's URL and its age: "check: contributions <task> <key> unanswered
-# <url> <age>". The same thread is raised again after every further reply age,
-# whatever the task's hold state, until it is answered, resolved or the pull
-# request closes. A wake raised for the comment itself counts as its first
-# raise. Apart from the reviewer's own later verdict, only the author's account
-# answers; a reply from another account does not. Resolution is read from the forge's review threads. Issue records and
-# the author's own comments are never tracked.
+# empty body is not tracked, because its inline threads carry it. The record
+# keeps one threads[] entry per unanswered thread (key, source, author, at,
+# raised). Once a thread is FM_CONTRIBUTIONS_REPLY_AGE seconds old, poll adds
+# one pending "unanswered" signal and a wake whose text names the comment's URL
+# and its age: "check: contributions <task> <key> unanswered <url> <age>". The
+# same thread is raised again after every further reply age, whatever the
+# task's hold state, until it is answered, resolved or the pull request
+# closes. A wake raised for the comment itself counts as its first raise.
+# Apart from the reviewer's own later verdict, only the author's account
+# answers; a reply from another account does not. Resolution is read from the
+# forge's review threads. Issue records and the author's own comments are never
+# tracked.
 # Source bodies are data, never commands.
 # All mutations serialize on this home's .contributions.lock. Writes refuse
 # symlinks and publish by rename. No forge writes are performed.
@@ -151,10 +160,16 @@ command -v jq >/dev/null 2>&1 || fail 'jq is required to measure contribution co
 NOW=${FM_CONTRIBUTIONS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 EPOCH=$(jq -nr --arg now "$NOW" '$now | fromdateiso8601') || fail 'invalid observation clock'
 MAX_AGE=${FM_CONTRIBUTIONS_MAX_AGE:-900}
-REPLY_AGE=${FM_CONTRIBUTIONS_REPLY_AGE:-86400}
+REPLY_AGE=${FM_CONTRIBUTIONS_REPLY_AGE:-}
 BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
-case "$REPLY_AGE" in ''|*[!0-9]*|0) fail 'invalid reply age' ;; esac
+TRACK_THREADS=false
+if [ -n "$REPLY_AGE" ]; then
+  case "$REPLY_AGE" in *[!0-9]*|0) fail 'invalid reply age' ;; esac
+  TRACK_THREADS=true
+else
+  REPLY_AGE=0
+fi
 case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 [ "$BUDGET" -ge 1 ] && [ "$BUDGET" -le 25 ] || fail 'poll budget must be 1..25 seconds'
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
@@ -385,11 +400,15 @@ observe() { # canonical GitHub URL -> normalized JSON
     local statuses_pid=$!
     FORGE_ERR="$TMP/repo.err" forge api "repos/$part" > "$TMP/repo.json" &
     local repo_pid=$!
-    FORGE_ERR="$TMP/threads.err" forge api graphql --paginate --slurp -f owner="${part%/*}" -f name="${part#*/}" -F number="$number" \
-      -f query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:1){nodes{databaseId}}}pageInfo{hasNextPage endCursor}}}}}' \
-      > "$TMP/threads.json" &
-    local threads_pid=$!
-    wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid" "$threads_pid" || return 1
+    local -a pids=("$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid")
+    printf '[]\n' > "$TMP/threads.json"
+    if [ "$TRACK_THREADS" = true ]; then
+      FORGE_ERR="$TMP/threads.err" forge api graphql --paginate --slurp -f owner="${part%/*}" -f name="${part#*/}" -F number="$number" \
+        -f query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:1){nodes{databaseId}}}pageInfo{hasNextPage endCursor}}}}}' \
+        > "$TMP/threads.json" &
+      pids+=("$!")
+    fi
+    wait_forges "${pids[@]}" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null \
       || unobserved 'comment pages returned an unexpected shape' || return 1
     jq -e 'type == "array" and all(.[]; (.data.repository.pullRequest.reviewThreads.nodes | type) == "array")' "$TMP/threads.json" >/dev/null \
@@ -400,7 +419,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || unobserved 'head changed during observation' || return 1
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" '
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" --argjson track "$TRACK_THREADS" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | ($comments[0] | add // []) as $issue_comments
@@ -425,15 +444,16 @@ observe() { # canonical GitHub URL -> normalized JSON
               | (.created_at // .submitted_at // "") as $at | (.in_reply_to_id // .id) as $root | . as $e
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
-                 author:.user.login,body:(.body // "" | .[:500]),at:$at,
-                 # A resolved inline thread counts as answered.
-                 unanswered:(if ._signal == "review-comment" then
-                     ($resolved | index($root)) == null
-                     and (any($inline_comments[]; .user.login == $c.user.login and (.in_reply_to_id // .id) == $root and .id > $e.id) | not)
-                   elif ._signal == "review" and .state == "CHANGES_REQUESTED" and (.body // "") != "" then
-                     (any($replied_at[]; . >= $at) | not)
-                     and (any($reviews[]; .user.login == $e.user.login and (.state | IN("APPROVED","DISMISSED")) and .id > $e.id) | not)
-                   else false end)}))}' > "$TMP/observation.json" \
+                 author:.user.login,body:(.body // "" | .[:500])}
+                 + (if $track then {at:$at,
+                   # A resolved inline thread counts as answered.
+                   unanswered:(if ._signal == "review-comment" then
+                       ($resolved | index($root)) == null
+                       and (any($inline_comments[]; .user.login == $c.user.login and (.in_reply_to_id // .id) == $root and .id > $e.id) | not)
+                     elif ._signal == "review" and .state == "CHANGES_REQUESTED" and (.body // "") != "" then
+                       (any($replied_at[]; . >= $at) | not)
+                       and (any($reviews[]; .user.login == $e.user.login and (.state | IN("APPROVED","DISMISSED")) and .id > $e.id) | not)
+                     else false end)} else {} end)))}' > "$TMP/observation.json" \
       || unobserved 'observation could not be assembled' || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
@@ -506,9 +526,10 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
-        $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null,threads:[],
-          pending:[$old[0].pending[] | select(.type != "unanswered")],
-          notified:[($old[0].notified // [])[] | select(startswith("unanswered:") | not)]}' > "$TMP/row.json"
+        $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null}
+        | .pending |= map(select(.type != "unanswered"))
+        | if has("notified") then .notified |= map(select(startswith("unanswered:") | not)) else . end
+        | if has("threads") then .threads = [] else . end' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done
@@ -581,7 +602,7 @@ poll() {
         ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
       if [ "$observed" -eq 0 ]; then
-        jq_lib -n --arg now "$NOW" --argjson epoch "$EPOCH" --argjson reply_age "$REPLY_AGE" \
+        jq_lib -n --arg now "$NOW" --argjson epoch "$EPOCH" --argjson reply_age "$REPLY_AGE" --argjson track "$TRACK_THREADS" \
           --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
@@ -590,18 +611,20 @@ poll() {
           | [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] as $arrived
           # An acknowledgement removes the signal, not the thread: a thread
           # with no author reply or resolution is raised again after reply_age.
-          | (if $o.state == "open" then tracked_threads($old.threads; $o.events; $arrived | map(.token); $now) else [] end) as $tracked
+          | (if $track and $o.state == "open" then tracked_threads($old.threads; $o.events; $arrived | map(.token); $now) else [] end) as $tracked
           | due_threads($tracked; $epoch; $reply_age) as $due
           | ($tracked | map(.key)) as $live
           | ($due | map(.key)) as $due_keys
           | $old + {checked_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
-            notified:[($old.notified // [])[] | select((startswith("unanswered:") | not) or IN($old.pending[]?.token))],
-            threads:[$tracked[] | if .key | IN($due_keys[]) then .raised = $now else . end],
             pending:((($old.pending // []) + $arrived
                 | map(select(.type != "unanswered" or (.thread as $k | ($live | index($k)) != null and ($due_keys | index($k)) == null))))
-              + [$due[] | reraise_event(.; $epoch; $now)] | unique_by(.token))}' > "$TMP/row.json"
+              + [$due[] | reraise_event(.; $epoch; $now)] | unique_by(.token))}
+          | (.pending | map(.token)) as $held
+          | if has("notified") then .notified |= map(select((startswith("unanswered:") | not) or IN($held[]))) else . end
+          | if $track then .threads = [$tracked[] | if .key | IN($due_keys[]) then .raised = $now else . end]
+            else del(.threads) end' > "$TMP/row.json"
       else
         error="forge observation unavailable: $why"
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
@@ -632,6 +655,9 @@ arm() {
     "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")")
   if [ -n "${FM_CONTRIBUTIONS_BUDGET:-}" ]; then
     shim+=("export FM_CONTRIBUTIONS_BUDGET=$(printf '%q' "$FM_CONTRIBUTIONS_BUDGET")")
+  fi
+  if [ -n "${FM_CONTRIBUTIONS_REPLY_AGE:-}" ]; then
+    shim+=("export FM_CONTRIBUTIONS_REPLY_AGE=$(printf '%q' "$FM_CONTRIBUTIONS_REPLY_AGE")")
   fi
   shim+=("exec $(printf '%q' "$SCRIPT_DIR/fm-contributions.sh") poll")
   printf '%s\n' "${shim[@]}" > "$staged"
