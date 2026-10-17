@@ -90,6 +90,11 @@
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
 #     reconcile_inventory independently of projection trust.
+#     A home summary reports its first invalidity in invalidity and joins every
+#     cause it detected, in the same order, into reason, so one cause never masks
+#     another. A working child with no in-flight backlog item is still
+#     live work: it appears in active_children with owned:false instead of being
+#     dropped, so an unavailable or contradicted sibling never hides it.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
@@ -1060,7 +1065,15 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
-            doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+            doing:((.current_state.detail // "") | trunc(120))} ]
+       + [ $tasks[]
+           | select(.kind != "secondmate" and .current_state.state == "working")
+           | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
+           | {id,kind,state:.current_state.state,
+              repo:((.project // null) | if . == null then null else trunc(120) end),
+              name:null,owned:false,
+              source:.current_state.source,
+              doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -1084,12 +1097,14 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
        and ($orphan_in_flight | length) == 0
        and ($unowned_children | length) == 0
        and ($terminal_in_flight | length) == 0) as $valid
-    | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0].reason
-       elif ($unknown_children | length) > 0 then
-         "child current state unavailable: " + ($unknown_children | map(.id) | join(", "))
+    | ($strict_invalidities
+       + [if ($unknown_children | length) > 0 then
+            {kind:"child_current_unavailable",ids:($unknown_children | map(.id)),
+             reason:("child current state unavailable: " + ($unknown_children | map(.id) | join(", ")))}
+          else empty end]) as $all_invalidities
+    | (if ($all_invalidities | length) > 0 then $all_invalidities | map(.reason) | join("; ")
        else null end) as $reason
-    | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0] | del(.reason)
-       elif ($unknown_children | length) > 0 then {kind:"child_current_unavailable",ids:($unknown_children | map(.id))}
+    | (if ($all_invalidities | length) > 0 then $all_invalidities[0] | del(.reason)
        else {kind:null,ids:[]} end) as $invalidity
     | (if ($valid | not)
           and (($unknown_children | length) > 0
