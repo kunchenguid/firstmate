@@ -7,8 +7,8 @@
 # account queue, refuses symlinks and malformed records, and executes only a
 # tracked non-symlink fm-*.sh under this worker's configured FM_ROOT/bin.
 #
-# Each child runs under env -i with the shared filesystem-composed PATH, HOME,
-# FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. Commands receive their
+# Each child runs under env -i with the environment the job library header
+# lists. Commands receive their
 # captured stdin and have a 360-second default timeout. Their stdout and stderr
 # are independently constrained to the job library's 1048576-byte bound. A
 # record is marked done only after its bounded outputs and numeric exit status
@@ -861,6 +861,7 @@ worker_run_job() { # <account-home> <job-dir>
   local account_home=$1 job=$2 root home command command_path git_bin rc deadline remaining
   local stdout_pipe stderr_pipe stdout_reader stderr_reader preemptible=0
   local -a argv child_env
+  local account_user
   root=$(worker_read_text "$job" root 8192) || { worker_publish_result "$job" 126; return; }
   home=$(worker_read_text "$job" home 8192) || { worker_publish_result "$job" 126; return; }
   root=$(fm_remote_job_canonical_existing_dir "$root") || { worker_publish_result "$job" 126; return; }
@@ -932,6 +933,10 @@ worker_run_job() { # <account-home> <job-dir>
     "FM_ROOT_OVERRIDE=$root"
     FM_REMOTE_JOB_ACTIVE=1
   )
+  account_user=$(id -un 2>/dev/null) || account_user=
+  if [ -n "$account_user" ]; then
+    child_env+=("USER=$account_user" "LOGNAME=$account_user")
+  fi
   if [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then
     child_env+=("FM_REMOTE_JOB_PLATFORM_OVERRIDE=$FM_REMOTE_JOB_PLATFORM_OVERRIDE")
   fi
