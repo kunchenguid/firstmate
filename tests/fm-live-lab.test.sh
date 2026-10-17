@@ -727,6 +727,32 @@ out=$("$LIVE_LAB" down "$U" 2>&1)
 expect_code 0 "$?" "down removes the up-built lab: $out"
 pass "up re-registers primary trust after a concurrent Claude write"
 
+# ---- claude-config ------------------------------------------------------------
+
+S="$TMP_ROOT/seed"
+mkdir -p "$S/home"
+out=$("$LIVE_LAB" claude-config "$S/home" 2>&1)
+expect_code 0 "$?" "claude-config seeds an empty lab home: $out"
+assert_contains "$out" "seeded" "the seed reports what it wrote"
+node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.exit(j.hasCompletedOnboarding===true&&j.theme==="dark"?0:1)' "$S/home/.claude.json" \
+  || fail "the seed carries the onboarding-complete and theme fields Claude v2.1.302 checks"
+
+printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{"keep":{}}}' > "$S/home/.claude.json"
+out=$("$LIVE_LAB" claude-config "$S/home" 2>&1)
+expect_code 0 "$?" "claude-config keeps an existing lab store: $out"
+assert_contains "$out" "kept" "keeping an existing store is reported"
+assert_grep '"keep"' "$S/home/.claude.json" "an existing store is never touched"
+
+mkdir -p "$S/real"
+printf '%s\n' '{}' > "$S/real/.claude.json"
+rm -f "$S/home/.claude.json"
+ln -s "$S/real/.claude.json" "$S/home/.claude.json"
+out=$("$LIVE_LAB" claude-config "$S/home" 2>&1)
+expect_code 1 "$?" "claude-config refuses a symlinked store"
+assert_contains "$out" "symlink" "the refusal names the symlink"
+assert_equals '{}' "$(cat "$S/real/.claude.json")" "the symlink target stays untouched"
+pass "claude-config seeds a lab-owned Claude store once and never a shared one"
+
 # ---- fm-claude-trust.sh --lab-home -------------------------------------------
 
 T="$TMP_ROOT/trust"

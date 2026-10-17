@@ -15,9 +15,10 @@
 #   - the primary and the lead each re-arm supervision (fresh watcher beacons);
 #   - the lead's reconcile relaunches the worker inside its recorded worktree.
 # Claude runs on a dedicated signed-in test HOME named by
-# FM_SENTINEL_E2E_CLAUDE_HOME (its .claude and .claude.json are symlinked into
-# a throwaway lab HOME, never copied); the live default Herdr session, the
-# operator's ~/.claude, and ~/.treehouse are never touched.
+# FM_SENTINEL_E2E_CLAUDE_HOME (only its .claude/.credentials.json is referenced
+# in place, by symlink, never copied; the lab's Claude config is the lab's own
+# seeded store); the live default Herdr session, the operator's ~/.claude, and
+# ~/.treehouse are never touched.
 # Set FM_SENTINEL_E2E_EVIDENCE=<dir> to keep pane captures and logs.
 # shellcheck disable=SC2016 # inner bash -c scripts expand their own arguments
 set -u
@@ -116,9 +117,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# A throwaway HOME whose Claude state is the test credential's, by symlink.
+# A throwaway HOME whose Claude config is the lab's own. Only the shared test
+# login's credential file is referenced, in place, by symlink; every other
+# Claude state file (config, trust, transcripts) is lab-owned, so a concurrent
+# lab or the shared login's own state can never reset what a lab Claude
+# records. The lab-owned store is seeded once with the first-run theme and
+# onboarding-complete fields Claude Code checks (v2.1.302:
+# hasCompletedOnboarding, theme), which is what keeps the first-run theme
+# picker from stopping a lab agent.
 # $LABROOT/treehouse is the pool root the treehouse.toml files below point at.
-mkdir -p "$FAKEBIN" "$LABROOT/treehouse"
+mkdir -p "$FAKEBIN" "$LABROOT/treehouse" "$LABHOME/.claude"
 [ -z "$EVID" ] || mkdir -p "$EVID"
 
 # Treehouse v2.0.1 resolves its pool root exclusively from a treehouse.toml
@@ -130,8 +138,8 @@ mkdir -p "$FAKEBIN" "$LABROOT/treehouse"
 wire_treehouse_root() {  # <repo-root>
   printf 'root = "%s"\n' "$LABROOT/treehouse" > "$1/treehouse.toml"
 }
-ln -s "$CRED_HOME/.claude" "$LABHOME/.claude"
-ln -s "$CRED_HOME/.claude.json" "$LABHOME/.claude.json"
+ln -s "$CRED_HOME/.claude/.credentials.json" "$LABHOME/.claude/.credentials.json"
+"$ROOT/bin/fm-live-lab.sh" claude-config "$LABHOME" >/dev/null || fail "cannot seed the lab's own Claude config"
 printf '[user]\n\tname = Umer\n\temail = umer@example.invalid\n' > "$LABHOME/.gitconfig"
 
 # Every Herdr call from a lab pane resolves this shim first: it strips the lab
@@ -308,11 +316,30 @@ dismiss_tips() {
   done
   return 0
 }
+# Fallback: if the first-run theme picker still shows in a lab pane despite the
+# seeded store, accept it with one Enter - once per pane - and log that the
+# fallback fired.
+dismiss_theme_picker() {  # <pane>
+  lab pane read "$1" --source visible 2>/dev/null | grep -q 'Choose the text style that looks best with your terminal' || return 0
+  printf 'theme picker still visible in pane %s; sending one Enter to accept it (fallback)\n' "$1"
+  [ -z "$EVID" ] || printf '%s pane=%s\n' "$(date -u +%FT%TZ)" "$1" >> "$EVID/theme-picker-fallback.log"
+  lab pane send-keys "$1" Enter >/dev/null 2>&1 || true
+  return 0
+}
 primary_armed() {
   ! lab pane read "$MAIN_PANE" --source visible 2>/dev/null | grep -q 'Please run /login' \
     || fail "the test Claude credential is signed out; sign it in again and rerun"
   dismiss_tips
+  dismiss_theme_picker "$MAIN_PANE"
   beacon_newer "$MAIN" "$START"
+}
+worker_settled() {
+  dismiss_theme_picker "$WORKER_PANE"
+  test -s "$LEAD/state/$WORKER_ID.status"
+}
+lead_armed() {
+  dismiss_theme_picker "$LEAD_PANE"
+  beacon_newer "$LEAD" "$START"
 }
 write_brief "$WORKER_ID"
 fm "$LEAD" "$LEAD/bin/fm-spawn.sh" "$WORKER_ID" "$NOTES" --mode local-only --yolo on \
@@ -322,11 +349,11 @@ WORKER_META="$LEAD/state/$WORKER_ID.meta"
 WORKER_WT=$(sed -n 's/^worktree=//p' "$WORKER_META" | tail -n 1)
 WORKER_PANE=$(pane_of_meta "$WORKER_META")
 [ -d "$WORKER_WT" ] && [ -n "$WORKER_PANE" ] || fail "worker record lacks a worktree or pane"
-wait_for 600 "the worker to settle on its brief" test -s "$LEAD/state/$WORKER_ID.status"
+wait_for 600 "the worker to settle on its brief" worker_settled
 fm "$MAIN" "$MAIN/bin/fm-spawn.sh" "$LEAD_ID" --secondmate >"$LABROOT/lead-spawn.out" 2>&1 \
   || fail "lead spawn failed: $(tail -5 "$LABROOT/lead-spawn.out")"
 LEAD_PANE=$(pane_of_meta "$MAIN/state/$LEAD_ID.meta")
-wait_for 600 "the lead's turn to end with its watcher armed" beacon_newer "$LEAD" "$START"
+wait_for 600 "the lead's turn to end with its watcher armed" lead_armed
 
 # The lab primary, launched the way an operator starts Firstmate.
 fm "$MAIN" "$MAIN/bin/fm-claude-trust.sh" --lab-home "$MAIN" >/dev/null || fail "cannot register trust for the lab primary"

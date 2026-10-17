@@ -14,6 +14,15 @@
 #   fm-live-lab.sh say <lab-root> [--window <name>] <text>
 #   fm-live-lab.sh pane <lab-root> [--window <name>] [--lines <n>]
 #   fm-live-lab.sh down <lab-root>
+#   fm-live-lab.sh claude-config <dir>
+#
+# claude-config seeds <dir>/.claude.json, when the lab does not have one yet,
+# with the first-run theme and onboarding-complete fields Claude Code checks
+# (verified against v2.1.302: hasCompletedOnboarding true, theme "dark"), so a
+# lab HOME that owns its Claude config starts past the first-run theme picker
+# without linking a shared Claude store. It refuses a symlinked store and
+# never touches an existing file, so a re-run cannot clobber trust entries a
+# live lab already recorded.
 #
 # up builds everything under <lab-root> (a fresh path; default a new
 # /tmp/fmlab.XXXXXX), verifies readiness itself, and prints one line per check.
@@ -844,6 +853,30 @@ cmd_down() {
   return "$rc"
 }
 
+# ---- claude-config ----------------------------------------------------------
+
+# The first-run seed a lab-owned Claude store starts with. Field names are
+# Claude Code's own: hasCompletedOnboarding ends the onboarding flow (the
+# binary's own eval fixture seeds exactly this field), theme takes the picker's
+# values and "dark" is what its picker highlights first.
+CLAUDE_LAB_SEED='{"hasCompletedOnboarding":true,"theme":"dark"}'
+
+cmd_claude_config() {  # <dir>: seed <dir>/.claude.json when the lab owns it
+  [ "$#" -eq 1 ] || usage
+  local dir store
+  dir=$(real_dir "$1") || die "no directory '$1'"
+  store="$dir/.claude.json"
+  if [ -L "$store" ]; then
+    die "refusing '$store': it is a symlink; a lab Claude config must be the lab's own file, never a link into a shared Claude store"
+  fi
+  if [ -e "$store" ]; then
+    echo "kept: $store (a lab Claude config is seeded once)"
+    return 0
+  fi
+  printf '%s\n' "$CLAUDE_LAB_SEED" > "$store" || die "cannot write $store"
+  echo "seeded: $store"
+}
+
 # ---- say / pane / check -----------------------------------------------------
 
 cmd_say() {
@@ -881,6 +914,7 @@ case "${1:-}" in
   say) shift; cmd_say "$@" ;;
   pane) shift; cmd_pane "$@" ;;
   down) shift; cmd_down "$@" ;;
+  claude-config) shift; cmd_claude_config "$@" ;;
   -h|--help) help_text ;;
   *) usage ;;
 esac
