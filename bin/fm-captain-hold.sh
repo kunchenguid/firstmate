@@ -172,7 +172,9 @@
 # could not be established, so a caller that must never close a live call can
 # treat "cannot tell" as its own case instead of as a no. With
 # `--distinguish-absent`, an absent local task returns 3 instead of 1; a home
-# with no backlog file counts as absent, because it records no captain calls.
+# with no backlog file counts as absent, because it records no captain calls,
+# and so does a non-markdown home the installed tasks-axi rejects as an
+# unsupported backend.
 # It prints nothing on these predicate results and mutates nothing, unless
 # `--identity` asks it to print this call's
 # LIFECYCLE identity, which it does on an exit 0 only. That identity - the
@@ -1969,7 +1971,9 @@ EOF
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction,
 # and so is a home with no backlog file at all, because a backlog that does not
-# exist holds nothing. Every read failure over a record that DOES exist is a 2,
+# exist holds nothing, and so is a non-markdown home the installed tasks-axi
+# reports as an unsupported backend, because that adapter can neither record nor
+# read a hold there. Every read failure over a record that DOES exist is a 2,
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
@@ -2030,12 +2034,15 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
     fi
     return 1
   fi
-  if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
-    [ "$distinguish_absent" = 0 ] || return 3
-    return 1
+  if [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
+    if [ "$backend" = markdown ] \
+      || [ "${FM_BACKLOG_ROW_ERROR#*Unsupported backend}" = "$FM_BACKLOG_ROW_ERROR" ]; then
+      printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_ROW_ERROR" >&2
+      exit 2
+    fi
   fi
-  printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_ROW_ERROR" >&2
-  exit 2
+  [ "$distinguish_absent" = 0 ] || return 3
+  return 1
 }
 
 case "${1:-}" in
