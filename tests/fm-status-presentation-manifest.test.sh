@@ -44,7 +44,7 @@ expect() {  # <label> <expected> <actual>
 }
 
 test_lookup_results_and_rejection_rules() {
-  local ident
+  local ident function task trailing
   make_status alpha 100; make_status beta 100; make_status gamma 100
   ident=$(_fm_open_decisions_file_ident "$STATE/beta.status")
 
@@ -79,6 +79,36 @@ test_lookup_results_and_rejection_rules() {
 
   { row alpha 40 7; printf '%s\textra\n' "$(row beta 60 90)"; } > "$MANIFEST"
   expect "an extra column rejects the presented lookup" "1:" "$(lookup status_presentation_cursor_offset beta)"
+  expect "an extra column rejects the backstop lookup" "1:" "$(lookup status_outcome_backstop_cursor_offset beta)"
+
+  for trailing in $'\textra' $'\t\textra' $'\t\t\textra'; do
+    { row alpha 40 7; printf '%s\t%s\n' "$(row beta 60 90)" "$trailing"; row gamma 10 0; } > "$MANIFEST"
+    for function in status_presentation_cursor_offset status_outcome_backstop_cursor_offset; do
+      expect "nonempty trailing fields on the match reject $function" "1:" "$(lookup "$function" beta)"
+      expect "nonempty trailing fields before the match reject $function" "1:" "$(lookup "$function" gamma)"
+      expect "nonempty trailing fields with no match reject $function" "1:" "$(lookup "$function" delta)"
+    done
+    expect "nonempty trailing fields after the match reject presentation" "1:" "$(lookup status_presentation_cursor_offset alpha)"
+    expect "backstop stops before nonempty trailing fields" "0:7" "$(lookup status_outcome_backstop_cursor_offset alpha)"
+  done
+
+  { row alpha 40 7; printf '%s\t\t\t\n' "$(row beta 60 90)"; } > "$MANIFEST"
+  expect "empty trailing fields preserve the presented offset" "0:60" "$(lookup status_presentation_cursor_offset beta)"
+  expect "empty trailing fields preserve the backstop offset" "0:90" "$(lookup status_outcome_backstop_cursor_offset beta)"
+
+  make_status 1 100; make_status 01 100
+  for task in 1 01; do
+    if [ "$task" = 1 ]; then
+      { row 01 60 90; row 1 40 7; } > "$MANIFEST"
+    else
+      { row 1 60 90; row 01 40 7; } > "$MANIFEST"
+    fi
+    expect "numeric task $task has a distinct presented offset" "0:40" "$(lookup status_presentation_cursor_offset "$task")"
+    expect "numeric task $task has a distinct backstop offset" "0:7" "$(lookup status_outcome_backstop_cursor_offset "$task")"
+    row "$task" 70 91 >> "$MANIFEST"
+    expect "an exact numeric duplicate rejects presentation" "1:" "$(lookup status_presentation_cursor_offset "$task")"
+    expect "an exact numeric duplicate preserves the first backstop" "0:7" "$(lookup status_outcome_backstop_cursor_offset "$task")"
+  done
 
   # A hand-damaged row with an empty identity or presented column used to be
   # shifted by the reader's tab collapsing and accepted; both columns are now

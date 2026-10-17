@@ -1503,8 +1503,9 @@ _fm_status_manifest_row() {  # <manifest> <task> <stop-at-first-match:0|1>
   # fleet. With <stop-at-first-match> 1 rows after the match are not examined.
   LC_ALL=C awk -F '\t' -v task="$2" -v first="$3" '
     $1 == "" { next }
-    $5 != "" || $2 == "" || $3 == "" || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]*$/ { bad = 1; exit }
-    $1 == task {
+    { for (i = 5; i <= NF; i++) if ($i != "") { bad = 1; exit } }
+    $2 == "" || $3 == "" || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]*$/ { bad = 1; exit }
+    ("id:" $1) == ("id:" task) {
       if (found && first != 1) { bad = 1; exit }
       if (!found) out = $2 "\t" $3 "\t" $4
       found = 1
