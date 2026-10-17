@@ -819,6 +819,17 @@ The first agent or shell sample in that window decides.
 No registered status outranks the process view, because an agent killed mid-turn leaves `working` behind just as a quit one leaves `idle`.
 The native busy verdict is verified the same way, so a shell-only pane never reads busy.
 
+The check also runs in the other direction.
+A pane with no registration (`agent get` answers `agent_not_found`) is not assumed agent-free.
+A vendor auto-update can drop the registration while the harness keeps running.
+So the classifier reads the process view for that pane too:
+
+| What the process view shows | Verdict |
+| --- | --- |
+| A harness process | `live`, with no registered status. |
+| A foreground holding a non-shell, non-harness process | `unknown`, which refuses relaunch and husk replacement. |
+| Shell-only, or an unreadable process view | `no-agent`. |
+
 ### Process-view version support
 
 The `pane process-info` subcommand that this process-level proof depends on is present in every supported release client from the 0.7.1 floor upward (measured 2026-09-10 on the pinned 0.7.1, 0.7.3, 0.7.4, and 0.7.5 release clients - [verification](verification/runtime-backends.md) "Stale agent registration").
