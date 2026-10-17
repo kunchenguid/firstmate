@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { SHELL_TOOL_NAMES, installV2ToolHook } from "./lib/fm-opencode-v2-adapter.js";
 
 // PreToolUse seatbelt for OpenCode: the arm mechanism itself lives entirely in
 // fm-primary-watch-arm.js (a plugin-owned child process, never a model tool
@@ -50,7 +51,7 @@ export const FmPrimaryPretoolCheck = async ({ directory, worktree }) => {
 
   return {
     "tool.execute.before": async (input, output) => {
-      if (!root || input?.tool !== "bash") return;
+      if (!root || !SHELL_TOOL_NAMES.has(input?.tool)) return;
       const command = output?.args?.command;
       if (!command || typeof command !== "string") return;
 
@@ -61,4 +62,14 @@ export const FmPrimaryPretoolCheck = async ({ directory, worktree }) => {
       throw new Error(reason);
     },
   };
+};
+
+// OpenCode v2 default export: the loader requires `{ id, setup(ctx) }`, and
+// `installV2ToolHook` adapts v2 onto the shared v1 hook object above.
+export default {
+  id: "fm-primary-pretool-check",
+  async setup(ctx) {
+    const hooks = await FmPrimaryPretoolCheck({ directory: ctx.location?.directory });
+    await installV2ToolHook(ctx, hooks);
+  },
 };
