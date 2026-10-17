@@ -1503,6 +1503,11 @@ detect_code_root_backlog_fork() {
 # been (re)published, and at least FM_HOME_SUMMARY_FAILURE_REPORT attempts have
 # failed since whenever it last was. No new record, no new state, no retry
 # policy - just the existing evidence, surfaced.
+#
+# The session start's own refresh runs detached and can still be in flight
+# here, so this verdict reflects publications up to the previous session start:
+# a refresh that recovers, or a failure that crosses the threshold, in this
+# session is reported only at the next one.
 detect_home_summary_publication() {
   local log="$STATE/.home-summary-refresh.log" ledger="$STATE/home-summary.json"
   local since='' counted failures last threshold
