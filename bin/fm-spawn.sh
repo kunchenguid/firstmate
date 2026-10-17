@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
+# Orca secondmates reuse the seeded home's registered root workspace. Their
+# state/orca-secondmate-launch receipt blocks duplicate or uncertain launches;
+# registration receipts remain in that home until guarded retirement.
+# Workers from an Orca secondmate stay independent in their project repository;
+# their worktree display name and terminal title carry 2ndmate-<id> ownership.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
@@ -1358,6 +1363,7 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ORCA_HOME_ATTEMPT=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1478,40 +1484,52 @@ spawn_abort_cleanup() {
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
-    if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
-    fi
-    if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-        if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-          if ! spawn_fresh_commit_rollback; then
-            status=1
+    if [ "$KIND" = secondmate ]; then
+      # Never remove a persistent home as an ordinary worker worktree. Keep
+      # the attempt receipt when creation, home binding, or close is
+      # uncertain: ORCA_TERMINAL is set only once the returned handle is proven
+      # present in the home workspace. That receipt refuses a duplicate spawn.
+      if [ -n "${ORCA_TERMINAL:-}" ] &&
+        fm_backend_orca_close_confirmed "$ORCA_WORKTREE_ID" "$ORCA_TERMINAL"; then
+        SPAWN_ENDPOINT_CLOSED=1
+        rm -f "$ORCA_HOME_ATTEMPT"
+      fi
+    else
+      if [ -n "${ORCA_TERMINAL:-}" ]; then
+        fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+      fi
+      if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+        if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+          if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+            if ! spawn_fresh_commit_rollback; then
+              status=1
+            fi
+            SPAWN_FRESH_COMMIT_PENDING=0
           fi
-          SPAWN_FRESH_COMMIT_PENDING=0
-        fi
-        mkdir -p "$STATE" 2>/dev/null || true
-        if [ -d "$STATE" ]; then
-          SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
-          {
-            echo "window=$W"
-            echo "endpoint_task_id=$ID"
-            echo "cleanup_recovery=orca"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            [ -z "${MODE:-}" ] || echo "mode=$MODE"
-            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
-            [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } >"$SPAWN_META_TMP" 2>/dev/null &&
-            fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
-            true
+          mkdir -p "$STATE" 2>/dev/null || true
+          if [ -d "$STATE" ]; then
+            SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
+            {
+              echo "window=$W"
+              echo "endpoint_task_id=$ID"
+              echo "cleanup_recovery=orca"
+              echo "worktree=${WT:-}"
+              echo "project=$PROJ_ABS"
+              echo "harness=$HARNESS"
+              echo "kind=$KIND"
+              [ -z "${MODE:-}" ] || echo "mode=$MODE"
+              [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
+              [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
+              echo "tasktmp=${TASK_TMP:-}"
+              echo "model=${MODEL:-default}"
+              echo "effort=${EFFORT:-default}"
+              echo "backend=orca"
+              echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+              [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            } >"$SPAWN_META_TMP" 2>/dev/null &&
+              fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
+              true
+          fi
         fi
       fi
     fi
@@ -1900,10 +1918,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=orca does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
   if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
@@ -3262,11 +3276,19 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 if [ "$KIND" = secondmate ]; then
+  if [ "$BACKEND" = orca ] && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+    echo "error: existing Orca secondmate metadata for $ID; recovery is unverified, refusing duplicate launch" >&2
+    exit 1
+  fi
   [ -n "$FIRSTMATE_HOME" ] || {
     echo "error: no firstmate home supplied or registered for $ID" >&2
     exit 1
   }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
+  if [ "$BACKEND" = orca ] && { [ -e "$PROJ_ABS/state/orca-secondmate-launch" ] || [ -L "$PROJ_ABS/state/orca-secondmate-launch" ]; }; then
+    echo "error: unfinished Orca secondmate launch; reconcile $PROJ_ABS/state/orca-secondmate-launch before retrying" >&2
+    exit 1
+  fi
   if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
     if ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
       echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
@@ -4258,29 +4280,53 @@ EOF
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
   orca)
-    set +e
-    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
-    ORCA_WT_STATUS=$?
-    set -e
-    if [ "$ORCA_WT_STATUS" -ne 0 ]; then
-      if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-        if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
-          ORCA_ABORT_CLEANUP=1
-        fi
+    if [ "$KIND" = secondmate ]; then
+      ORCA_WORKTREE_ID=$(fm_backend_orca_home_workspace "$WT") || exit 1
+      ORCA_HOME_ATTEMPT="$WT/state/orca-secondmate-launch"
+      ( set -o noclobber; printf 'worktree=%s\nterminal=pending\n' "$ORCA_WORKTREE_ID" >"$ORCA_HOME_ATTEMPT" ) || exit 1
+      ORCA_ABORT_CLEANUP=1
+      T=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "2ndmate-$ID" "$ORCA_HOME_ATTEMPT") || exit 1
+      printf 'worktree=%s\nterminal=%s\n' "$ORCA_WORKTREE_ID" "$T" >"$ORCA_HOME_ATTEMPT" || exit 1
+      [ "$(fm_backend_orca_terminal_state "$ORCA_WORKTREE_ID" "$T")" = present ] || {
+        echo "error: new Orca secondmate terminal $T is not bound to its home workspace; reconcile $ORCA_HOME_ATTEMPT before retrying" >&2
+        exit 1
+      }
+      ORCA_TERMINAL=$T
+    else
+      ORCA_SECONDMATE_HOME=
+      ORCA_WORKER_LABEL=$W
+      if [ -f "$FM_HOME/.fm-secondmate-home" ] &&
+        { [ -e "$FM_HOME/state/orca-secondmate-launch" ] || [ -L "$FM_HOME/state/orca-secondmate-launch" ]; }; then
+        ORCA_SECONDMATE_HOME=$(cd "$FM_HOME" && pwd -P)
+        ORCA_WORKER_LABEL=$(fm_backend_orca_worker_label "$ORCA_SECONDMATE_HOME" "$W") || exit 1
       fi
-      exit 1
+      set +e
+      ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W" "$ORCA_SECONDMATE_HOME")
+      ORCA_WT_STATUS=$?
+      set -e
+      if [ "$ORCA_WT_STATUS" -ne 0 ]; then
+        if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
+          if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
+            ORCA_ABORT_CLEANUP=1
+          fi
+        fi
+        exit 1
+      fi
+      parse_orca_worktree_result "$ORCA_WT_RAW" || true
+      ORCA_ABORT_CLEANUP=1
+      if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
+        echo "error: orca did not return a worktree id/path for $W" >&2
+        exit 1
+      fi
+      validate_spawn_worktree "orca worktree create" "$W"
+      if [ -z "$ORCA_TERMINAL" ]; then
+        ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$ORCA_WORKER_LABEL") || exit 1
+      fi
+      T="$ORCA_TERMINAL"
+      if [ -n "$ORCA_SECONDMATE_HOME" ]; then
+        fm_backend_orca_label_worker "$ORCA_WORKTREE_ID" "$ORCA_TERMINAL" "$ORCA_WORKER_LABEL" || exit 1
+      fi
     fi
-    parse_orca_worktree_result "$ORCA_WT_RAW" || true
-    ORCA_ABORT_CLEANUP=1
-    if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
-      echo "error: orca did not return a worktree id/path for $W" >&2
-      exit 1
-    fi
-    validate_spawn_worktree "orca worktree create" "$W"
-    if [ -z "$ORCA_TERMINAL" ]; then
-      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
-    fi
-    T="$ORCA_TERMINAL"
     ;;
   esac
 fi
@@ -4593,7 +4639,11 @@ rovo_spawn_fail() { # <detail>
 # for the record's own teardown, which owns worktree deletion.
 rovo_endpoint_cleanup() {
   if [ "$BACKEND" = orca ]; then
-    fm_backend_kill orca "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+    if [ "$KIND" = secondmate ]; then
+      fm_backend_orca_close_confirmed "$ORCA_WORKTREE_ID" "$T" && SPAWN_ENDPOINT_CLOSED=1 || true
+    else
+      fm_backend_kill orca "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+    fi
     return 0
   fi
   local tab_id=

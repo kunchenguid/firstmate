@@ -29,7 +29,7 @@ If `FM_HOME` is set, remember that operational state lives under `$FM_HOME` whil
 Before switching or spawning against Orca:
 
 - Confirm Orca is intentionally selected through `--backend orca`, `FM_BACKEND=orca`, or local `config/backend`.
-- Confirm the Orca app is running and the backend readiness checks pass before expecting spawn to work.
+- Confirm the selected Orca runtime is running and the backend readiness checks pass before expecting spawn to work.
 - Inspect active `state/*.meta` records before changing backend selection.
 - Treat a backend switch as affecting future spawns only; existing tasks keep their recorded backend.
 - Reconcile watcher wakes before unrelated work, especially if Orca tasks are already in flight.
@@ -48,6 +48,7 @@ After spawn, check the task with firstmate helpers:
 
 Do not manually create the Orca worktree or terminal for a normal firstmate task.
 Do not manually patch metadata to make an externally-created Orca terminal look like a firstmate task.
+For a local secondmate, follow `secondmate-provisioning` and the [persistent-home lifecycle](../../../docs/orca-backend.md#local-secondmates); its recorded workspace is its seeded home, never a disposable worker worktree.
 
 ## Supervision
 
@@ -88,5 +89,8 @@ Keep Orca smoke tests focused on lifecycle plumbing:
 4. Verify `bin/fm-peek.sh`, a short `bin/fm-send.sh` steer, watcher wake behavior, and `bin/fm-crew-state.sh`.
 5. Tear down through `bin/fm-teardown.sh` after the task is safely disposable or landed.
 6. Restore the previous backend selection if Orca was selected only for the smoke test.
+
+For a secondmate smoke, also verify its own terminal, one worker's ownership labels and independent placement, correlated replies, and guarded child-first retirement.
+Keep the home and registration receipts when cleanup cannot confirm closure.
 
 Do not mix a backend smoke test with unrelated feature work.
