@@ -63,7 +63,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
-The first mate detects and offers to install supported missing tools after you approve.
+The first mate detects supported missing or outdated tools and offers their install or upgrade after you approve.
 Backend-specific setup is linked in [Documentation](#documentation).
 
 ### Recommended harnesses
@@ -131,7 +131,7 @@ Pi's `/supervision-model` command pins a cheaper model and a shallower reasoning
 ```sh
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
 
-# firstmate checks its toolchain (asking your consent before installing anything),
+# firstmate checks its toolchain (asking your consent before installing or upgrading anything),
 # clones the project under projects/ and spawns two isolated workers in the active backend.
 # Minutes later:
 
