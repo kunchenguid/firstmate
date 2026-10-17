@@ -1,0 +1,301 @@
+# Markdown -> HTML for fm-berichte-dash.sh; that script's header owns the
+# generator contract and this file owns the rendered subset.
+#
+# Input:  [{id, datei, stand, ts, md}]   (md is the raw report text)
+# Output: [{id, titel, datei, stand, ts, html}]  newest first
+#
+# NOTHING FROM A REPORT EVER BECOMES MARKUP BY ACCIDENT. Every line is HTML
+# escaped first, and only this file's own constructions add tags afterwards, so
+# raw HTML in a report is shown as text, exactly as markdown-it's html:false
+# does in the reference implementation.
+#
+# Inline rendering runs in stages over {s, hold}: a stage that has produced
+# final markup parks it in `hold` and leaves "<index>" behind, so a
+# later stage can never look inside a code span or an href. unpark restores the
+# parked markup at the end, repeating while a restored fragment still carries a
+# placeholder of its own (a link whose text contained code).
+
+def htmlesc:
+  gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;");
+
+# Heading id, following mdit-py-plugins' anchors slugify: trim, lowercase,
+# spaces to dashes, then drop everything that is not a word character or dash.
+# German umlauts are lowercased explicitly because ascii_downcase cannot.
+def slugify:
+  gsub("^[[:space:]]+|[[:space:]]+$"; "")
+  | gsub("Ä"; "ä") | gsub("Ö"; "ö") | gsub("Ü"; "ü")
+  | ascii_downcase
+  | gsub("[[:space:]]"; "-")
+  | gsub("[^\\w-]"; "");
+
+# Inline markdown out of a heading, for the list title and the window title.
+def sauber:
+  gsub("!?\\[(?<t>[^\\]]*)\\]\\([^)]*\\)"; "\(.t)")
+  | gsub("`|\\*|~~"; "")
+  | gsub("^[[:space:]]+|[[:space:]]+$"; "");
+
+def emph:
+  gsub("\\*\\*(?<x>[^*]+)\\*\\*"; "<strong>\(.x)</strong>")
+  | gsub("(?<![A-Za-z0-9_])__(?<x>[^_]+)__(?![A-Za-z0-9_])"; "<strong>\(.x)</strong>")
+  | gsub("\\*(?<x>[^*]+)\\*"; "<em>\(.x)</em>")
+  | gsub("(?<![A-Za-z0-9_])_(?<x>[^_]+)_(?![A-Za-z0-9_])"; "<em>\(.x)</em>")
+  | gsub("~~(?<x>[^~]+)~~"; "<del>\(.x)</del>");
+
+# Bare URLs become links (markdown-it's linkify). Already-built links are parked
+# by then, so no href is ever rewritten. A URL never ends on punctuation that
+# reads as sentence punctuation.
+def linkify:
+  gsub("(?<p>^|[[:space:](\\[])(?<u>https?://[^[:space:]<>()\\[\\]\"'\\u0001]*[^[:space:]<>()\\[\\]\"'\\u0001.,;:!?])";
+       "\(.p)<a href=\"\(.u)\">\(.u)</a>");
+
+def park($markup):  # {s, hold} -> placeholder appended to s, markup kept aside
+  .s += ("" + ((.hold | length) | tostring) + "")
+  | .hold += [$markup];
+
+# Code spans by backtick run: an opening run of n backticks closes on the next
+# run of exactly n, which is what lets a report write a double-backtick span
+# containing single backticks without losing either.
+def inline_code:
+  .s as $t
+  | reduce ([$t | match("`+"; "g")][]) as $r
+      ({cur: 0, open: null, s: "", hold: .hold};
+        if .open == null then .open = $r
+        elif $r.length == .open.length then
+          .s += $t[(.cur):(.open.offset)]
+          | park("<code>" + ($t[(.open.offset + .open.length):($r.offset)] | gsub("^ | $"; "")) + "</code>")
+          | .cur = ($r.offset + $r.length)
+          | .open = null
+        else . end)
+  | {s: (.s + $t[(.cur):]), hold: .hold};
+
+def inline_links:
+  .s as $t
+  | reduce ([$t | match("(?<bang>!?)\\[(?<txt>[^\\]]*)\\]\\((?<url>[^)[:space:]]*)\\)"; "g")][]) as $m
+      ({cur: 0, s: "", hold: .hold};
+        ($m.captures[0].string // "") as $bang
+        | ($m.captures[1].string // "") as $txt
+        | ($m.captures[2].string // "") as $url
+        | if $m.offset < .cur then .
+          else
+            .s += $t[(.cur):($m.offset)]
+            | park(if $bang == "!"
+                then "<img src=\"" + $url + "\" alt=\"" + ($txt | gsub("[0-9]+"; "")) + "\" loading=\"lazy\">"
+                else "<a href=\"" + $url + "\">" + ($txt | emph) + "</a>" end)
+            | .cur = ($m.offset + $m.length)
+          end)
+  | {s: (.s + $t[(.cur):]), hold: .hold};
+
+def unpark:
+  .hold as $hold
+  | .s
+  | until(test("") | not; gsub("(?<n>[0-9]+)"; $hold[(.n | tonumber)]));
+
+# One run of inline markdown -> HTML.
+def inline:
+  {s: htmlesc, hold: []}
+  | inline_code
+  | inline_links
+  | .s |= (emph | linkify)
+  | unpark;
+
+# --- block level -------------------------------------------------------------
+# One pass over the lines. A construct that needs the next line to be decided (a
+# table header, a blank line inside a list) is held in the state instead of
+# looked ahead at, so the pass stays single and total.
+
+def indent_of: (match("^ *") | .length);
+
+def list_marker:
+  if test("^ *([-*+])[[:space:]]+") then
+    {t: "ul", ind: indent_of, text: sub("^ *[-*+][[:space:]]+"; "")}
+  elif test("^ *[0-9]+[.)][[:space:]]+") then
+    {t: "ol", ind: indent_of, text: sub("^ *[0-9]+[.)][[:space:]]+"; "")}
+  else null end;
+
+def is_table_rule:
+  test("^[[:space:]]*\\|?[[:space:]]*:?-+:?[[:space:]]*(\\|[[:space:]]*:?-+:?[[:space:]]*)*\\|?[[:space:]]*$")
+  and test("-");
+
+def table_cells:
+  sub("^[[:space:]]*\\|"; "") | sub("\\|[[:space:]]*$"; "")
+  | [splits("\\|")] | map(gsub("^[[:space:]]+|[[:space:]]+$"; ""));
+
+def align_of:
+  if test("^:.*:$") then "center"
+  elif test("^:") then "left"
+  elif test(":$") then "right"
+  else "" end;
+
+def cell_open($tag; $align):
+  "<" + $tag + (if $align == "" then "" else " style=\"text-align:" + $align + "\"" end) + ">";
+
+def fence_of:
+  gsub("^[[:space:]]*"; "") | match("^(`{3,}|~{3,})") | .string;
+
+def fence_lang:
+  gsub("^[[:space:]]*(`{3,}|~{3,})"; "")
+  | gsub("^[[:space:]]+|[[:space:]]+$"; "")
+  | (split(" ")[0] // "");
+
+def code_block($code):
+  "<pre><code"
+  + (if $code.lang == "" then "" else " class=\"language-" + ($code.lang | htmlesc) + "\"" end)
+  + ">" + (($code.lines | join("\n")) | htmlesc) + "\n</code></pre>";
+
+def flush_para:
+  if (.para | length) > 0
+  then .out += ["<p>" + (.para | join("\n") | inline) + "</p>"] | .para = []
+  else . end;
+
+def flush_quote:
+  if (.quote | length) > 0
+  then .out += ["<blockquote><p>" + (.quote | join("\n") | inline) + "</p></blockquote>"] | .quote = []
+  else . end;
+
+def flush_item:
+  if .item == null then .
+  else .out += [(.item | join("\n") | inline) + "</li>"] | .item = null end;
+
+def pop_list:
+  flush_item | .out += ["</" + .stack[-1].t + ">"] | .stack |= .[0:-1];
+
+def close_lists($to_ind):
+  until((.stack | length) == 0 or .stack[-1].ind < $to_ind; pop_list);
+
+def close_all_lists:
+  until((.stack | length) == 0; pop_list);
+
+def flush_table:
+  if .table == null then .
+  else
+    (.table) as $t
+    | .out += ["<table><thead><tr>"
+        + ([range(0; ($t.head | length)) as $i
+            | cell_open("th"; ($t.align[$i] // "")) + ($t.head[$i] | inline) + "</th>"] | join(""))
+        + "</tr></thead>"
+        + (if ($t.rows | length) == 0 then ""
+           else "<tbody>"
+             + ([$t.rows[] as $row
+                 | "<tr>" + ([range(0; ($t.head | length)) as $i
+                     | cell_open("td"; ($t.align[$i] // "")) + (($row[$i] // "") | inline) + "</td>"] | join(""))
+                 + "</tr>"] | join(""))
+             + "</tbody>" end)
+        + "</table>"]
+    | .table = null
+  end;
+
+def flush_candidate:
+  if .cand == null then . else .para += [.cand] | .cand = null end;
+
+# Everything open except a list, which survives a blank line.
+def flush_inline_blocks:
+  flush_candidate | flush_para | flush_quote | flush_table;
+
+# Heading ids are unique inside one report, so an in-report link can never be
+# ambiguous; a repeated heading gets -1, -2, ... as markdown-it's anchors do.
+def heading_key($raw):
+  ($raw | sauber | slugify) as $base
+  | if $base == "" then "abschnitt" else $base end;
+
+def md_to_html:
+  (gsub("\r"; "") | gsub(""; "") | split("\n")) as $lines
+  | reduce $lines[] as $line
+      ({out: [], para: [], quote: [], item: null, stack: [], table: null, cand: null,
+        code: null, seen: {}, blank: false};
+
+        # inside a fenced code block nothing is markdown
+        if .code != null then
+          if ($line | test("^[[:space:]]*(`{3,}|~{3,})[[:space:]]*$"))
+             and (($line | fence_of | .[0:1]) == (.code.fence | .[0:1]))
+             and (($line | fence_of | length) >= (.code.fence | length))
+          then .out += [code_block(.code)] | .code = null
+          else .code.lines += [$line] end
+
+        # fence open
+        elif ($line | test("^[[:space:]]*(`{3,}|~{3,})")) then
+          flush_inline_blocks
+          | close_all_lists
+          | .blank = false
+          | .code = {fence: ($line | fence_of), lang: ($line | fence_lang), lines: []}
+
+        # blank line: closes everything but a list, which may continue
+        elif ($line | test("^[[:space:]]*$")) then
+          flush_inline_blocks | .blank = true
+
+        # ATX heading
+        elif ($line | test("^#{1,6}[ \\t]+")) then
+          flush_inline_blocks | close_all_lists | .blank = false
+          | ($line | match("^#{1,6}") | .string | length) as $lvl
+          | ($line | sub("^#{1,6}[ \\t]+"; "") | sub("[ \\t]+#+[ \\t]*$"; "")) as $raw
+          | heading_key($raw) as $key
+          | ((.seen[$key]) // 0) as $n
+          | (if $n == 0 then $key else $key + "-" + ($n | tostring) end) as $id
+          | .seen[$key] = ($n + 1)
+          | .out += ["<h" + ($lvl | tostring) + " id=\"" + ($id | htmlesc) + "\">"
+              + ($raw | inline) + "</h" + ($lvl | tostring) + ">"]
+
+        # thematic break
+        elif ($line | test("^[[:space:]]*(-{3,}|\\*{3,}|_{3,})[[:space:]]*$")) then
+          flush_inline_blocks | close_all_lists | .blank = false | .out += ["<hr>"]
+
+        # blockquote
+        elif ($line | test("^[[:space:]]*>")) then
+          flush_candidate | flush_para | flush_table | close_all_lists | .blank = false
+          | .quote += [($line | sub("^[[:space:]]*> ?"; ""))]
+
+        # table: a pipe line is held until the next line says whether it was a header
+        elif .cand != null and ($line | is_table_rule) then
+          .table = {head: (.cand | table_cells),
+                    align: ($line | table_cells | map(align_of)),
+                    rows: []}
+          | .cand = null | .blank = false
+
+        elif .table != null and ($line | test("\\|")) and ($line | list_marker) == null then
+          .table.rows += [($line | table_cells)] | .blank = false
+
+        elif ($line | test("^[[:space:]]*\\|")) and ($line | list_marker) == null then
+          flush_candidate | flush_table | .cand = $line | .blank = false
+
+        # list item
+        elif ($line | list_marker) != null then
+          ($line | list_marker) as $m
+          | flush_candidate | flush_para | flush_quote | flush_table | .blank = false
+          | close_lists($m.ind)
+          | (if (.stack | length) == 0 or .stack[-1].ind < $m.ind
+             then flush_item | .out += ["<" + $m.t + ">"] | .stack += [{t: $m.t, ind: $m.ind}]
+             elif .stack[-1].t != $m.t
+             then flush_item | .out += ["</" + .stack[-1].t + ">", "<" + $m.t + ">"]
+               | .stack = (.stack | .[0:-1]) + [{t: $m.t, ind: $m.ind}]
+             else flush_item end)
+          | .item = [$m.text]
+          | .out += ["<li>"]
+
+        # continuation of an open list item
+        elif (.stack | length) > 0 and .item != null and ($line | indent_of) > .stack[-1].ind then
+          .item += [($line | gsub("^[[:space:]]+"; ""))] | .blank = false
+
+        # plain paragraph line
+        else
+          flush_candidate | flush_table
+          | (if .blank then close_all_lists else . end)
+          | .blank = false
+          | (if .item != null then .item += [($line | gsub("^[[:space:]]+"; ""))]
+             else .para += [$line] end)
+        end)
+
+  # end of input: close whatever is still open
+  | (if .code != null then .out += [code_block(.code)] | .code = null else . end)
+  | flush_inline_blocks
+  | close_all_lists
+  | .out | join("\n");
+
+def titel_of($md; $id):
+  (($md | gsub("\r"; "") | (match("(?m)^#[ \\t]+(?<t>.+)$") // null)) as $m
+   | if $m == null then "" else ($m.captures[0].string // "") end
+   | sauber) as $t
+  | if $t == "" then $id else $t end;
+
+map({id, datei, stand, ts,
+     titel: titel_of(.md; .id),
+     html: (.md | md_to_html)})
+| sort_by(-.ts)
