@@ -348,7 +348,7 @@ For a main-home call, the reconcile option is the recovery path for whatever sti
 ### Fleet snapshot buckets
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)`, `(hold-kind: ...)`, and `(hold-until: ...)` metadata alongside existing backlog fields.
-It resolves every repeated `blocked-by:` edge against structured Done records and keeps missing blockers unresolved.
+It resolves every repeated `blocked-by:` edge against structured Done records in the backlog or Done rows in the Done archive (the `archive` key under `[markdown]` in the home's `.tasks.toml`, else `data/done-archive.md`), and keeps missing blockers unresolved.
 It then assigns every captain hold exactly one `hold_bucket`.
 The bucket is decided only from structured fields: `hold_kind`, `state`, `hold_until`, `unresolved_blocker_ids`, and the machine-written hold-set timestamp.
 Hold reason and body prose are never matched, so no wording can hide, reveal, or reclassify a decision.
