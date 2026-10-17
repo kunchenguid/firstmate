@@ -35,7 +35,7 @@ A TUI-attached daemon stays alive while idle (verified minutes-scale) and exits 
 The daemon imposes no cap on consecutive `stop`-hook `continue` outcomes (verified live: five forced continuations all ran), so any future primary turn-end integration would need its own bounded latch.
 
 `../../../../../bin/fm-spawn.sh` owns autonomy (the generated config dir), the worktree hook and facet wiring, session discovery into task metadata (`polytoken sessions --format json` with the launch's `--config-dir` and `--sessions-dir`), the foreign-marker clearing (the fixed `env -u` set, including the generic `AGENT`, plus the ORCA_*/FM_ loop), and the readiness gate.
-A fresh polytoken spawn that fails and leaves no task record also closes the endpoint it opened before launch, removes its wiring, task temp root, and staged launch file, and drops its slot claim even after metadata publication; every other harness keeps the shared abort behavior.
+A fresh polytoken spawn that fails and leaves no task record also closes the endpoint it opened before launch, removes its wiring, task temp root, and staged launch file (only after retaking the per-id spawn lock with no task record present; a concurrent spawn of the same id holding the lock leaves them in place), and drops its slot claim even after metadata publication; every other harness keeps the shared abort behavior.
 `../../../../../bin/fm-polytoken-lib.sh` owns every generated artifact and the REST control core.
 `../../../../../bin/fm-control-lib.sh` owns the REST interrupt transport (`fm_control_interrupt_transport`), the `/quit` exit command, and the wiring tables.
 
