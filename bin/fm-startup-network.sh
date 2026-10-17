@@ -16,17 +16,18 @@
 # inactive-outcome scan also runs here because its local current-state reads can
 # be just as slow; that scan publishes its own findings to the durable wake queue.
 #
-# WHAT IS PRESERVED. Nothing is dropped. bin/fm-bootstrap.sh remains the single
+# WHAT IS PRESERVED. bin/fm-bootstrap.sh remains the single
 # owner of every network sweep and still runs all of them, unchanged, via its
 # FM_BOOTSTRAP_NETWORK=only phase. bin/fm-inactive-reconcile.sh remains the
 # owner of the startup scan and its separate watcher cadence. Deferral changes
-# WHEN they run, not WHETHER, and three properties make the later run safe:
+# WHEN they run; a refused fresh start is explicit in the digest rather than
+# treated as a completed sweep. Three properties make the later run safe:
 #   - The work is idempotent detection. A run whose report is lost (killed
 #     worker, truncated digest, crashed session) loses no finding: the next run
 #     re-derives the same inactive terminal child, dead secondmate, stuck clone,
 #     or undelivered handoff. There is no once-only signal to miss.
-#   - Results are durable and always surface. Network sweep output lands in
-#     state/.startup-network.report and reaches the agent either inline in the
+#   - Completed results are retained until delivery settles. Published network
+#     sweep output lands in state/.startup-network.report and reaches the agent either inline in the
 #     digest or, when it finishes too late for the digest to inline it, as a
 #     `check: startup-network` wake. Inactive-scan findings land directly in the
 #     ordinary durable wake queue. The report wakes only when the late result is
@@ -46,7 +47,9 @@
 #     that run settles, so old and new owners can never sweep concurrently.
 #
 # Usage: fm-startup-network.sh start --locked <0|1> --harvest-pid <pid>
-#          Launch the detached worker and return immediately. Single-flight: a
+#          Retry retained results before launching a detached worker, with bounded
+#          lock and delivery waits. Exit non-zero if recovery or reservation fails;
+#          no fresh checks start in that case. Single-flight: a
 #          running worker is reused only when its phases cover this request and,
 #          for locked work, it belongs to the same lock owner. A probe-only
 #          worker therefore cannot satisfy a later locked request; the later
@@ -67,9 +70,10 @@
 #          Print the digest's NETWORK CHECKS section and release the inline-print
 #          claim. Called by bin/fm-session-start.sh, not by hand.
 #        fm-startup-network.sh report
-#          Print the current state and report without changing anything, then the
-#          last run's per-step elapsed times. This is the ONLY command that prints
-#          those timings: `harvest` composes the session-start digest, and adding
+#          Print the current state and report without changing anything, selecting
+#          the current committed pending report when it is unpublished. Print only
+#          that result's per-step elapsed times, when available. This is the ONLY
+#          command that prints those timings: `harvest` composes the session-start digest, and adding
 #          diagnostic detail there would make every startup pay for a question
 #          only a slow run raises.
 #        fm-startup-network.sh wait [<seconds>]
@@ -79,8 +83,9 @@
 # STATE, all under this home's state/ and gitignored with it:
 #   .startup-network.status   key=value record - generation, lock_pid, state,
 #                             pid, started, finished, rc, locked, phases, and
-#                             whether the report was published. The single
-#                             source of truth for what ran and how it ended.
+#                             whether the report was published. Owns the current
+#                             generation and published run state; unpublished
+#                             completed results keep their metadata with the report.
 #   .startup-network.report   the sweep output, byte for byte as
 #                             bin/fm-bootstrap.sh produced it, plus a
 #                             NETWORK_CHECKS: line whenever the stage itself
@@ -104,16 +109,38 @@
 #                             decision, and losing it never downgrades a run.
 #   .startup-network.lock     serializes publication, harvest acknowledgement,
 #                             and the wake decision; every wait on it is bounded.
+#   .startup-network.reserve.lock
+#                             serializes generation reservation and pending commit.
+#   .startup-network.pending  one completed report, result metadata, and timings
+#                             retained until publication and delivery settle.
+#   .startup-network-pending.*
+#                             staged report and optional timings; writing status
+#                             last makes the completed result recoverable if its
+#                             bounded reservation-lock wait fails. Recovery and
+#                             reservation commit it only for the current generation
+#                             under .startup-network.reserve.lock; superseded
+#                             results are discarded. `report` reads only committed
+#                             pending results, not these staging directories.
 #
 # The whole stage is bounded by FM_STARTUP_NETWORK_TIMEOUT (default 120s), one
 # aggregate deadline covering both the inactive-outcome scan and network sweeps
-# plus every lock the worker waits on before them.
-# Publication and delivery are bounded the same way by FM_SESSION_START_TIMEOUT.
-# A lock that a live process still holds at either deadline ends the worker with
-# a failed record naming that holder and the rerun command, never a wait that
-# outlives the budget with its output discarded.
+# plus every lock the worker waits on before them, including the publication
+# lock checked before the probes and sweeps run.
+# Publication and delivery are bounded the same way by FM_SESSION_START_TIMEOUT,
+# including the wake append. A live inline claimant is checked once a second and
+# is not waited on past that deadline.
+# A lock that a live process still holds at either deadline ends the worker
+# inside the budget. Unpublished work is retained with a diagnostic naming that
+# holder and the rerun command. A later startup retries the current pending
+# result under the publication lock before reserving a fresh generation, and
+# refuses fresh checks if that result cannot settle. Only successfully published
+# reports can wake. Delivery may wait until a later startup, and an uncertain
+# timed append may duplicate a wake; broader delivery guarantees are tracked at
+# https://github.com/kunchenguid/firstmate/issues/5378.
 # Hitting the bound is reported as an actionable NETWORK_CHECKS: line, never as
-# silence. bin/fm-timeout-lib.sh remains the single owner of bounded execution.
+# silence. Focused retention, ownership, delivery, and matching-timing regressions
+# live in tests/fm-startup-network.test.sh.
+# bin/fm-timeout-lib.sh remains the single owner of bounded execution.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -127,6 +154,8 @@ CLAIM_FILE="$STATE/.startup-network.claim"
 DELIVERED_FILE="$STATE/.startup-network.delivered"
 TIMINGS_FILE="$STATE/.startup-network.timings"
 PUBLISH_LOCK="$STATE/.startup-network.lock"
+RESERVE_LOCK="$STATE/.startup-network.reserve.lock"
+PENDING_DIR="$STATE/.startup-network.pending"
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -153,6 +182,7 @@ status_get() {  # <key>
 
 write_atomic() {  # <dest>, content on stdin
   local dest=$1 tmp
+  [ ! -d "$dest" ] || return 1
   tmp=$(mktemp "$dest.XXXXXX" 2>/dev/null) || return 1
   if cat > "$tmp" 2>/dev/null && mv -f "$tmp" "$dest" 2>/dev/null; then
     return 0
@@ -238,6 +268,27 @@ worker_covers_request() {  # <locked> <lock-pid>
     && [ "$(status_get phases)" = probe,sweeps ]
 }
 
+reserve_generation() {
+  local generation=$1 pid=$2 started=$3 locked=$4 phases=$5 lock_pid=$6 deadline=$7 rc
+  take_lock "$RESERVE_LOCK" "$(seconds_until "$deadline")" || return 1
+  if ! commit_staged_pending || [ -e "$PENDING_DIR" ]; then
+    fm_lock_release "$RESERVE_LOCK"
+    return 1
+  fi
+  write_atomic "$STATUS_FILE" <<EOF
+state=running
+pid=$pid
+started=$started
+locked=$locked
+phases=$phases
+generation=$generation
+lock_pid=$lock_pid
+EOF
+  rc=$?
+  fm_lock_release "$RESERVE_LOCK"
+  return "$rc"
+}
+
 cmd_start() {  # <locked> <harvest-pid>
   local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started
   mkdir -p "$STATE" 2>/dev/null || return 1
@@ -249,7 +300,12 @@ cmd_start() {  # <locked> <harvest-pid>
     return 1
   fi
 
-  take_lock "$PUBLISH_LOCK" "$(delivery_budget)" || return 1
+  DELIVERY_DEADLINE=$(( $(now) + $(delivery_budget) ))
+  take_lock "$PUBLISH_LOCK" "$(seconds_until "$DELIVERY_DEADLINE")" || return 1
+  if ! recover_pending; then
+    fm_lock_release "$PUBLISH_LOCK"
+    return 1
+  fi
   if [ "$(status_get state)" = running ] && worker_alive \
     && worker_covers_request "$locked" "$lock_pid"; then
     # A worker whose phases cover this request is still going. Starting another
@@ -265,16 +321,7 @@ cmd_start() {  # <locked> <harvest-pid>
   started=$(now)
   phases=probe
   [ "$locked" != 1 ] || phases=probe,sweeps
-  if ! write_atomic "$STATUS_FILE" <<EOF
-state=running
-pid=0
-started=$started
-locked=$locked
-phases=$phases
-generation=$generation
-lock_pid=$lock_pid
-EOF
-  then
+  if ! reserve_generation "$generation" 0 "$started" "$locked" "$phases" "$lock_pid" "$DELIVERY_DEADLINE"; then
     fm_lock_release "$PUBLISH_LOCK"
     return 1
   fi
@@ -356,33 +403,120 @@ report_requires_wake() {  # <state>
     "$REPORT_FILE" 2>/dev/null
 }
 
-queue_result_wake() {  # <state>
-  fm_wake_append check startup-network \
-    "check: startup-network: deferred startup network checks finished ($1); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
-    || true
+# fm_wake_append takes the queue lock and then the recovery-marker lock with
+# unbounded waits. Bound the whole append so a live holder of either cannot keep
+# this worker alive past its deadline. The child still goes through
+# fm_wake_append, so an outstanding generation-bound recovery acknowledgement is
+# preserved. A killed append leaves the already published report in place.
+queue_result_wake() {  # <state> <seconds>
+  local state=$1 seconds=$2
+  # shellcheck disable=SC2016  # The child receives its arguments positionally.
+  fm_run_timed "$seconds" env FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$STATE" bash -c '
+      . "$1"
+      fm_wake_append check startup-network "$2"
+    ' _ "$SCRIPT_DIR/fm-wake-lib.sh" \
+    "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
+    >/dev/null 2>&1
+}
+
+pending_get() {
+  sed -n "s/^$1=//p" "$PENDING_DIR/status" 2>/dev/null | tail -1
+}
+
+commit_staged_pending() {
+  local pending generation current
+  current=$(status_get generation)
+  if [ -d "$PENDING_DIR" ] && [ -n "$current" ] && [ "$(pending_get generation)" != "$current" ]; then
+    rm -rf "$PENDING_DIR" || return 1
+  fi
+  for pending in "$STATE"/.startup-network-pending.*; do
+    [ -f "$pending/status" ] || continue
+    generation=$(sed -n 's/^generation=//p' "$pending/status" | tail -1)
+    if { [ -n "$current" ] && [ "$generation" != "$current" ]; } || [ -e "$PENDING_DIR" ]; then
+      rm -rf "$pending" || return 1
+    else
+      mv "$pending" "$PENDING_DIR" || return 1
+    fi
+  done
+}
+
+save_pending() {
+  local generation=$1 state=$2 phases=$3 locked=$4 started=$5 rc=$6 out=$7 timings=$8 deadline=$9 pending saved
+  pending=$(mktemp -d "$STATE/.startup-network-pending.XXXXXX") || return 1
+  if ! cp "$out" "$pending/report"; then
+    rm -rf "$pending"
+    return 1
+  fi
+  [ -z "$timings" ] || cp "$timings" "$pending/timings" 2>/dev/null || true
+  if ! write_atomic "$pending/status" <<EOF
+state=$state
+phases=$phases
+locked=$locked
+started=$started
+rc=$rc
+generation=$generation
+EOF
+  then
+    rm -rf "$pending"
+    return 1
+  fi
+  # Status is the completion marker. Leave the staged result recoverable when
+  # this bounded wait fails; reservation and recovery adjudicate its generation
+  # under the same lock, so an interrupted reservation cannot discard its report.
+  take_lock "$RESERVE_LOCK" "$(seconds_until "$deadline")" || return 1
+  commit_staged_pending && [ "$(pending_get generation)" = "$generation" ]
+  saved=$?
+  fm_lock_release "$RESERVE_LOCK"
+  return "$saved"
+}
+
+recover_pending() {
+  local generation state rc
+  take_lock "$RESERVE_LOCK" "$(seconds_until "$DELIVERY_DEADLINE")" || return 1
+  commit_staged_pending
+  rc=$?
+  fm_lock_release "$RESERVE_LOCK"
+  [ "$rc" -eq 0 ] || return "$rc"
+  [ -d "$PENDING_DIR" ] || return 0
+  generation=$(pending_get generation)
+  state=$(pending_get state)
+  if [ "$(status_get report_published)" != 1 ]; then
+    state=$(record_result "$generation" "$state" "$(pending_get phases)" \
+      "$(pending_get locked)" "$(pending_get started)" "$(pending_get rc)" \
+      "$PENDING_DIR/report" "$PENDING_DIR/timings") || return 1
+  fi
+  [ "$(status_get report_published)" = 1 ] || return 1
+  if [ ! -f "$DELIVERED_FILE" ] && report_requires_wake "$state"; then
+    queue_result_wake "$state" "$(seconds_until "$DELIVERY_DEADLINE")" || return 1
+  fi
+  rm -rf "$PENDING_DIR"
 }
 
 # Bounded by DELIVERY_DEADLINE, which publish() sets from the delivery budget.
 # Once the deadline passes, a still-live claimant is no longer waited for: the
-# wake decision is made as if it were gone, exactly as the old iteration cap did.
-await_delivery() {  # <generation> <state>
-  local generation=$1 state=$2 claim_record claim_generation claim_pid claim_live
+# wake decision is made as if it were gone.
+# The one-second cadence limits lock and subprocess work while harvest has its
+# bounded opportunity to acknowledge the report.
+await_delivery() {  # <generation>
+  local generation=$1 claim_record claim_generation claim_pid claim_live
   while :; do
     claim_live=0
     if ! take_lock "$PUBLISH_LOCK" "$(seconds_until "$DELIVERY_DEADLINE")"; then
-      # A live holder outlived the whole delivery budget, so the claim cannot be
-      # judged under the lock. A possible duplicate of an inline print is
-      # cheaper than an actionable result nobody is woken for.
-      ! report_requires_wake "$state" || queue_result_wake "$state"
-      return 1
+      return 0
     fi
     if [ "$(status_get generation)" != "$generation" ]; then
       fm_lock_release "$PUBLISH_LOCK"
       return 0
     fi
     if [ -f "$DELIVERED_FILE" ]; then
+      rm -rf "$PENDING_DIR"
       fm_lock_release "$PUBLISH_LOCK"
       return 0
+    fi
+    if [ "$(status_get report_published)" != 1 ]; then
+      fm_lock_release "$PUBLISH_LOCK"
+      return 1
     fi
     if [ -f "$CLAIM_FILE" ] && [ "$(now)" -lt "$DELIVERY_DEADLINE" ]; then
       claim_record=$(cat "$CLAIM_FILE" 2>/dev/null || true)
@@ -398,12 +532,12 @@ EOF
       [ "$claim_live" -eq 1 ] || rm -f "$CLAIM_FILE" 2>/dev/null || true
     fi
     if [ "$claim_live" -eq 0 ]; then
-      ! report_requires_wake "$state" || queue_result_wake "$state"
+      recover_pending || true
       fm_lock_release "$PUBLISH_LOCK"
       return 0
     fi
     fm_lock_release "$PUBLISH_LOCK"
-    sleep 0.1
+    [ "$(now)" -ge "$DELIVERY_DEADLINE" ] || sleep 1
   done
 }
 
@@ -416,8 +550,8 @@ record_result() {  # <generation> <state> <phases> <locked> <started> <rc> <outp
   # and whatever the killed sweeps managed to append is a real partial answer.
   # A timing record is diagnostic only, so a failure to publish it is discarded
   # rather than downgrading the run - the report itself is the contract.
-  if [ -n "$timings" ] && [ -f "$timings" ]; then
-    write_atomic "$TIMINGS_FILE" < "$timings" || true
+  if [ -z "$timings" ] || [ ! -f "$timings" ] || ! write_atomic "$TIMINGS_FILE" < "$timings"; then
+    rm -f "$TIMINGS_FILE" 2>/dev/null || true
   fi
   if ! write_atomic "$REPORT_FILE" < "$out"; then
     state=failed
@@ -425,7 +559,7 @@ record_result() {  # <generation> <state> <phases> <locked> <started> <rc> <outp
     report_published=0
   fi
   rm -f "$DELIVERED_FILE" 2>/dev/null || true
-  write_atomic "$STATUS_FILE" <<EOF || true
+  write_atomic "$STATUS_FILE" <<EOF || return 1
 state=$state
 pid=$$
 started=$started
@@ -444,37 +578,27 @@ publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-fil
   local generation=$1 state=$2 phases=$3 locked=$4 started=$5 rc=$6 out=$7 timings=${8:-}
   DELIVERY_DEADLINE=$(( $(now) + $(delivery_budget) ))
   if ! take_lock "$PUBLISH_LOCK" "$(seconds_until "$DELIVERY_DEADLINE")"; then
-    publish_lock_held "$generation" "$phases" "$locked" "$started" "$PUBLISH_LOCK" "$out" "$timings"
+    publish_lock_held "$generation" "$phases" "$locked" "$started" "$PUBLISH_LOCK" "$out" "$timings" "$DELIVERY_DEADLINE"
     return 1
   fi
   if [ "$(status_get generation)" != "$generation" ]; then
     fm_lock_release "$PUBLISH_LOCK"
     return 0
   fi
-  state=$(record_result "$generation" "$state" "$phases" "$locked" "$started" "$rc" "$out" "$timings")
-  fm_lock_release "$PUBLISH_LOCK"
-  await_delivery "$generation" "$state"
-}
-
-# A live process still held <lockdir> when this worker's budget ran out, so the
-# worker stops here with a failed record instead of spinning after it. The
-# record is written WITHOUT the publish lock: a holder that outlived the whole
-# budget is wedged, not mid-write, and a record `report` reads as failed-rerun
-# beats a worker burning CPU with its output discarded. The write is refused
-# only when the record now belongs to another live worker, the same test the
-# locked path applies. A wake is queued unconditionally because the claim
-# cannot be judged without the lock; a duplicate of an inline print is cheaper
-# than a failure nobody is woken for.
-publish_lock_held() {  # <generation> <phases> <locked> <started> <lockdir> <output-file> <timing-file>
-  local generation=$1 phases=$2 locked=$3 started=$4 lockdir=$5 out=$6 timings=${7:-}
-  printf 'NETWORK_CHECKS: the deferred check worker gave up because %s was still held by %s at its deadline, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s once that lock is released\n' \
-    "$lockdir" "$(held_by)" "$(phase_label "$phases")" "$FM_ROOT" "$locked" >> "$out"
-  if [ "$(status_get generation)" != "$generation" ] \
-    && [ "$(status_get state)" = running ] && worker_alive; then
+  if ! save_pending "$generation" "$state" "$phases" "$locked" "$started" "$rc" "$out" "$timings" "$DELIVERY_DEADLINE" \
+    || ! record_result "$generation" "$state" "$phases" "$locked" "$started" "$rc" "$out" "$timings" >/dev/null; then
+    fm_lock_release "$PUBLISH_LOCK"
     return 1
   fi
-  record_result "$generation" failed "$phases" "$locked" "$started" 124 "$out" "$timings" >/dev/null
-  queue_result_wake failed
+  fm_lock_release "$PUBLISH_LOCK"
+  await_delivery "$generation"
+}
+
+publish_lock_held() {  # <generation> <phases> <locked> <started> <lockdir> <output-file> <timing-file> <deadline>
+  local generation=$1 phases=$2 locked=$3 started=$4 lockdir=$5 out=$6 timings=$7 deadline=$8
+  printf 'NETWORK_CHECKS: the deferred check worker gave up because %s was still held by %s at its deadline, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s once that lock is released\n' \
+    "$lockdir" "$(held_by)" "$(phase_label "$phases")" "$FM_ROOT" "$locked" >> "$out"
+  save_pending "$generation" failed "$phases" "$locked" "$started" 124 "$out" "$timings" "$deadline"
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
@@ -496,7 +620,7 @@ cmd_run() {  # <locked> <lock-pid> <generation>
   [ -z "$timings" ] || fm_timing_start "$timings"
   if [ -n "$generation" ]; then
     if ! take_lock "$PUBLISH_LOCK" "$(seconds_until "$stage_deadline")"; then
-      publish_lock_held "$generation" "$phases" "$locked" "$started" "$PUBLISH_LOCK" "$out" "$timings"
+      publish_lock_held "$generation" "$(status_get phases)" "$locked" "$(status_get started)" "$PUBLISH_LOCK" "$out" "$timings" "$stage_deadline"
       run_cleanup "$out" "$timings"
       return 1
     fi
@@ -523,7 +647,13 @@ cmd_run() {  # <locked> <lock-pid> <generation>
   if [ "$internal" -eq 0 ]; then
     generation="$(now).$$.manual"
     if ! take_lock "$PUBLISH_LOCK" "$(seconds_until "$stage_deadline")"; then
-      publish_lock_held "$generation" "$phases" "$sweep_locked" "$started" "$PUBLISH_LOCK" "$out" "$timings"
+      publish_lock_held "$generation" "$phases" "$sweep_locked" "$started" "$PUBLISH_LOCK" "$out" "$timings" "$stage_deadline"
+      run_cleanup "$out" "$timings"
+      return 1
+    fi
+    DELIVERY_DEADLINE=$stage_deadline
+    if ! recover_pending; then
+      fm_lock_release "$PUBLISH_LOCK"
       run_cleanup "$out" "$timings"
       return 1
     fi
@@ -532,15 +662,11 @@ cmd_run() {  # <locked> <lock-pid> <generation>
       run_cleanup "$out" "$timings"
       return 1
     fi
-    write_atomic "$STATUS_FILE" <<EOF || true
-state=running
-pid=$$
-started=$started
-locked=$sweep_locked
-phases=$phases
-generation=$generation
-lock_pid=$lock_pid
-EOF
+    if ! reserve_generation "$generation" "$$" "$started" "$sweep_locked" "$phases" "$lock_pid" "$stage_deadline"; then
+      fm_lock_release "$PUBLISH_LOCK"
+      run_cleanup "$out" "$timings"
+      return 1
+    fi
     fm_lock_release "$PUBLISH_LOCK"
   fi
 
@@ -646,7 +772,7 @@ print_finished() {  # <state>
 # by the on-demand `report` command, so the timings cost a reader nothing until
 # a run is actually slow enough to ask about.
 print_timings() {
-  fm_timing_render "$TIMINGS_FILE"
+  fm_timing_render "$1"
 }
 
 print_pending() {
@@ -742,10 +868,21 @@ done
 case "$LOCKED" in 0|1) ;; *) LOCKED=0 ;; esac
 
 case "$MODE" in
-  start) cmd_start "$LOCKED" "${HARVEST_PID:-0}" ;;
+  start) cmd_start "$LOCKED" "${HARVEST_PID:-0}" || exit $? ;;
   run) cmd_run "$LOCKED" "$LOCK_PID" "$GENERATION" || exit $? ;;
   harvest) cmd_harvest "${HARVEST_PID:-}" ;;
-  report) print_state; print_timings ;;
+  report)
+    if [ -d "$PENDING_DIR" ] \
+      && [ "$(status_get report_published)" != 1 ] \
+      && { [ -z "$(status_get generation)" ] || [ "$(pending_get generation)" = "$(status_get generation)" ]; }; then
+      printf 'NETWORK_CHECKS: completed findings retained pending publication or delivery; a later startup will retry.\n'
+      cat "$PENDING_DIR/report"
+      print_timings "$PENDING_DIR/timings"
+    else
+      print_state
+      print_timings "$TIMINGS_FILE"
+    fi
+    ;;
   wait) cmd_wait "${1:-120}" || exit $? ;;
   -h|--help) usage ;;
   *)

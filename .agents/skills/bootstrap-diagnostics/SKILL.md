@@ -32,6 +32,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `NETWORK_CHECKS: <what did not complete>; rerun <command>` - the deferred network stage itself could not finish, so the checks it names are simply unknown, not failed.
   Rerun the printed command; it is idempotent and re-derives every finding.
   A `hit the ...s bound` line means one of those checks is slow or unreachable - most often a remote secondmate host - and the stage stopped rather than letting it wedge; a `lock was no longer held` line means the session that asked for the sweeps no longer owns them, so leave them to the session that does.
+- `NETWORK_CHECKS: fresh startup network checks could not start` - do not treat the accompanying report as confirmation of a fresh sweep; `bin/fm-session-start.sh`'s header owns this digest diagnostic, and `bin/fm-startup-network.sh`'s header owns retained-result recovery and delivery limits.
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
