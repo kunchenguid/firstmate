@@ -64,6 +64,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects supported missing or outdated tools and offers their install or upgrade after you approve.
+Run `bin/fm-doctor.sh` at any time for a read-only check of the home's setup; it exits non-zero when a check fails.
 Backend-specific setup is linked in [Documentation](#documentation).
 
 ### Recommended harnesses
