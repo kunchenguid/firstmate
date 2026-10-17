@@ -1439,7 +1439,54 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
+# The supervision branch cleans up only merged work, and a reassigned slot leaves
+# it no copy to inspect, so the recorded PR's forge state is its only proof: an
+# open PR refuses before any cleanup, a merged one finishes the task's own
+# cleanup while the slot stays the claimant's.
+test_branch_teardown_of_reassigned_slot_needs_merged_pr() {
+  local dir id=stale-pr-task other=reassigned-task state rc
+  for state in OPEN MERGED; do
+    dir=$(make_case "slot-reassigned-branch-$state")
+    mark_case_as_treehouse_pool "$dir"
+    rm -f "$dir/worktree/sentinel"
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "mode=direct-PR" \
+      "pr=https://github.com/example/repo/pull/7"
+    claim_pool_slot "$dir" "$other" "$dir/other-home"
+    cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" pr view "*"--json state "*) printf '%s\n' '$state' ; exit 0 ;;
+esac
+echo "error: unsupported gh stub call" >&2
+exit 1
+SH
+    chmod +x "$dir/fakebin/gh"
+
+    set +e
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_SUPERVISION_ACTOR=branch \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+
+    if [ "$state" = OPEN ]; then
+      [ "$rc" -ne 0 ] || fail "the branch tore down a reassigned-slot task whose PR is open"
+      assert_contains "$(cat "$dir/stderr")" "not proven merged" \
+        "the branch's reassigned-slot refusal should name the missing merge proof"
+      assert_present "$dir/home/state/$id.meta" "the refused branch teardown removed the task record"
+      [ ! -s "$dir/runtime.log" ] \
+        || fail "the refused branch teardown reached the runtime: $(cat "$dir/runtime.log")"
+    else
+      [ "$rc" -eq 0 ] || fail "the branch could not clean up a merged reassigned-slot task: $(cat "$dir/stderr")"
+      assert_reassigned_slot_left_alone "$dir" "$id" "$other" "branch teardown of a merged reassigned-slot task"
+    fi
+  done
+  pass "fm-teardown: the supervision branch cleans up a reassigned-slot task only when its recorded PR is merged"
+}
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_branch_teardown_of_reassigned_slot_needs_merged_pr
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down

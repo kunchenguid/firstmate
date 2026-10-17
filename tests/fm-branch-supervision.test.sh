@@ -62,8 +62,14 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
   # moment or the command, so the stale wake ended in the recovery playbook's
   # "nothing to recover".
   case "$out_a" in
-    *"A worker whose pull request has landed is finished, not stuck"*"\`check: merge landed:\` wake names exactly that moment"*"\`bin/fm-teardown.sh <task>\` with no flags"*"never forced, worked around, or repaired by hand"*) ;;
+    *"A worker whose pull request has landed is finished, not stuck"*"landed moment comes only from forge merge evidence"*"\`check: merge landed:\` wake names exactly that moment"*"\`bin/fm-teardown.sh <task>\` with no flags"*"never your merge evidence"*"never forced, worked around, or repaired by hand"*"Without that evidence the PR is still open or its state is unknown, so the task has not landed"*) ;;
     *) fail "branch prompt lost the landed-work cleanup rule" ;;
+  esac
+  # A pushed branch makes teardown succeed whatever the PR state, so the prompt
+  # must never present teardown as the merge proof (an open PR was once cleaned
+  # up and reported landed that way).
+  case "$out_a" in
+    *"the script proves the work landed"*) fail "branch prompt still treats teardown as merge proof" ;;
   esac
   case "$out_a" in
     *"A second mate's status log is a relay channel for its child work"*"retiring a second mate is MAIN's alone"*"Report a second mate's signal wake from the status lines that wake newly presents"*"A second mate's stale wake is a liveness event: report it even when it presents no new status lines."*) ;;
