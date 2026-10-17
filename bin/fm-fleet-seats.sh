@@ -324,6 +324,10 @@ resolve_authority() {
     fm_secondmate_parent_record_parse "$root/.fm-secondmate-parent" || return 1
     [ "$FM_SECONDMATE_PARENT_ROUTE" = remote ] || return 1
     ROOT_REMOTE=1
+  elif [ -e "$root/.fm-secondmate-home" ] || [ -L "$root/.fm-secondmate-home" ]; then
+    # A missing binding ends the walk, but cannot turn a secondmate into an
+    # independent authority with its own inherited policy and ledger.
+    return 1
   fi
   ROOT_HOME=$root
   if [ "$root" = "$home_canon" ]; then

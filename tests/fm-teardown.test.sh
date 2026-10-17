@@ -3613,8 +3613,15 @@ case "\$1" in
         ;;
     esac
     ;;
+  list-windows)
+    for child in child-a child-b nested-sm child-scout; do
+      [ -e "$case_dir/fm-\$child.stopped" ] || printf 'fm-%s\\n' "\$child"
+    done
+    ;;
   display-message)
-    if [ "\${!#}" = '#{pane_dead}' ]; then
+    if [ "\${!#}" = '#{socket_path}' ]; then
+      printf '%s\\n' "$case_dir/tmux.sock"
+    elif [ "\${!#}" = '#{pane_dead}' ]; then
       target=\${4//=/}
       if [ -e "$case_dir/\${target#*:}.stopped" ]; then
         printf '1\n'

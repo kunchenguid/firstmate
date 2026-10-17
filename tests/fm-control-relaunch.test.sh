@@ -3206,8 +3206,19 @@ test_unpooled_supervisor_spawn_keeps_prior_success_semantics() {
   pass "unpooled local supervisors preserve ordinary spawn success semantics"
 }
 
+replacement_launch_delivered() {  # <case-dir>: either supported launch carrier
+  grep -Eq 'encode launch-brief|Firstmate operational input waiting: read' "$1/fake/literal"
+}
+
 test_unconfirmed_predecessor_prevents_control_launch() {
   local dir out rc
+  dir=$(new_case launch-carrier-control sm69)
+  sm_case "$dir" sm69
+  out=$(run_control "$dir" sm69 relaunch --model pool-model-a); rc=$?
+  expect_code 0 "$rc" "a successful Claude relaunch must calibrate the delivery detector: $out"
+  replacement_launch_delivered "$dir" || fail "the delivery detector missed a successful Claude launch"
+  assert_equals claude "$(cat "$dir/fake/command")" "the calibration did not start Claude"
+
   dir=$(new_case unconfirmed-control sm61)
   sm_case "$dir" sm61
   printf 'bash' > "$dir/fake/command"
@@ -3222,12 +3233,18 @@ test_unconfirmed_predecessor_prevents_control_launch() {
   expect_code 1 "$rc" "a manual relaunch beside an executable buffered predecessor: $out"
   assert_contains "$out" "no replacement was launched" "control did not stop at the predecessor-release refusal"
   assert_equals reserved "$(case_seats "$dir" show sm61 | jq -r '.incarnations[] | select(.generation=="g-sm-old") | .lifecycle')" "control released the buffered predecessor"
-  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "control delivered a replacement over the buffered predecessor"
+  if replacement_launch_delivered "$dir"; then
+    fail "control delivered a replacement over the buffered predecessor"
+  fi
+  assert_equals bash "$(cat "$dir/fake/command")" "control started a replacement over the buffered predecessor"
   out=$(run_spawn "$dir" sm61 --relaunch --harness claude --model pool-model-a); rc=$?
   expect_code 1 "$rc" "standalone relaunch beside an executable buffered predecessor: $out"
   assert_contains "$out" "no replacement was launched" "standalone spawn ignored predecessor uncertainty"
   assert_equals reserved "$(case_seats "$dir" show sm61 | jq -r '.incarnations[] | select(.generation=="g-sm-old") | .lifecycle')" "standalone spawn freed the buffered predecessor"
-  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "standalone spawn delivered over the buffered predecessor"
+  if replacement_launch_delivered "$dir"; then
+    fail "standalone spawn delivered over the buffered predecessor"
+  fi
+  assert_equals bash "$(cat "$dir/fake/command")" "standalone spawn started a replacement over the buffered predecessor"
   pass "manual and standalone relaunches retain an executable buffered predecessor"
 }
 
@@ -3501,7 +3518,7 @@ test_control_terminalizes_all_observing_predecessor_receipts() {
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
+      test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done

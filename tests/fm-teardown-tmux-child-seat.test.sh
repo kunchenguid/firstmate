@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$ROOT/tests/git-config-helpers.sh"
 unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE FM_GATE_REFUSE_BYPASS
-LAB=$(mktemp -d "$ROOT/.tmux-child.XXXXXX")
+LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-tmux-child.XXXXXX")
 cleanup() {
   tmux -S "$LAB/p" kill-server 2>/dev/null || true
   tmux -S "$LAB/c" kill-server 2>/dev/null || true
@@ -52,10 +52,9 @@ tmux -S "$LAB/p" new-session -d -s unavailable -n fm-child -c "$ROOT" 'sleep 300
 rc=0
 "$ROOT/bin/fm-teardown.sh" parent --force > "$LAB/stdout" 2> "$LAB/stderr" || rc=$?
 [ "$rc" -ne 0 ] || fail 'forced teardown reported success while the child lived on another socket'
-# --force authorizes the named close on this server, so the recorded endpoint
-# is what must be reported honestly: a survivor is named, never assumed gone.
-grep -F 'survives as a live or unaddressable endpoint' "$LAB/stderr" >/dev/null \
-  || fail 'forced teardown did not name the surviving tmux endpoint'
+# A generation without a verified socket cannot authorize an ambient close.
+grep -F 'no verified ownership on this tmux socket' "$LAB/stderr" >/dev/null \
+  || { cat "$LAB/stderr" >&2; fail 'forced teardown did not name the surviving tmux endpoint'; }
 [ "$(tmux -S "$LAB/c" display-message -p -t '=unavailable:=fm-child' '#{pane_dead}')" = 0 ] || fail 'the child on the other server was stopped'
 [ -f "$HOME_CHILD/state/child.meta" ] || fail 'child identity was deleted'
 [ -d "$LAB/wt" ] || fail 'child worktree was removed'
@@ -77,12 +76,10 @@ fi
 for holder in "$HOME_PARENT/state/fleet-seats/holders/"*.json; do
   jq -e 'all(.incarnations[]; .lifecycle == "released")' "$holder" >/dev/null || fail 'successful retry retained a counted seat'
 done
-# Under --force the named close may reach a same-named window on this server,
-# so the decoy's fate is not a correctness signal. What must hold is that the
-# task's own recorded endpoint is closed once the retry reports success.
-if tmux -S "$LAB/p" display-message -p -t '=primary:=fm-parent' '#{pane_id}' >/dev/null 2>&1; then
-  [ "$(tmux -S "$LAB/p" display-message -p -t '=primary:=fm-parent' '#{pane_dead}')" = 1 ] \
-    || fail 'successful retry left the parent endpoint live'
+# The denied close leaves the unrelated same-named endpoint untouched.
+[ "$(tmux -S "$LAB/p" display-message -p -t '=unavailable:=fm-child' '#{pane_dead}')" = 0 ] || fail 'wrong-socket child cleanup stopped the decoy'
+if tmux -S "$LAB/p" list-windows -a -F '#{session_name}:#{window_name}' | grep -qxF 'primary:fm-parent'; then
+  fail 'successful retry left the parent endpoint live'
 fi
 echo 'ok - forced teardown preserves wrong-socket children until owning-home cleanup'
 
@@ -111,6 +108,44 @@ TMUX="$LAB/c,1,0" "$ROOT/bin/fm-teardown.sh" solo --force > "$LAB/solo.retry.std
 ledger=$("$ROOT/bin/fm-fleet-seats.sh" show solo)
 [ "$(printf '%s' "$ledger" | jq -r '.incarnations[0].lifecycle')" = released ] || fail 'verified destruction retained the seat'
 echo 'ok - top-level cleanup requires owning-socket destruction evidence'
+
+# Parent-driven destruction must accept the child's disappearance from a
+# readable owning-socket inventory, including tmux's empty post-kill pane query.
+HOME_NESTED="$LAB/nested"
+"$ROOT/bin/fm-lab-home.sh" create "$HOME_NESTED" >/dev/null
+printf 'nested\n' > "$HOME_NESTED/.fm-secondmate-home"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$HOME_PARENT" > "$HOME_NESTED/.fm-secondmate-parent"
+printf -- '- nested - Lab mate. (home: %s; scope: tests; projects: ; added 2026-10-07)\n' "$HOME_NESTED" > "$HOME_PARENT/data/secondmates.md"
+git -C "$LAB/project" worktree add -q -b fm/nested-child "$LAB/nested-wt"
+tmux -S "$LAB/c" new-session -d -s nested -n fm-nested -c "$HOME_NESTED" 'sleep 300'
+tmux -S "$LAB/c" new-window -d -t nested: -n fm-nested-child -c "$LAB/nested-wt" 'sleep 300'
+for task in nested nested-child; do
+  seat_home=$HOME_PARENT kind=secondmate worktree=$HOME_NESTED project=$HOME_NESTED
+  if [ "$task" = nested-child ]; then
+    seat_home=$HOME_NESTED kind=ship worktree="$LAB/nested-wt" project="$LAB/project"
+  fi
+  FM_HOME="$seat_home" "$ROOT/bin/fm-fleet-seats.sh" reserve "$task" --generation "g-$task" --harness claude --model pool-model-a --kind "$kind" --holder-pid "$$" >/dev/null
+  printf 'kind=%s\nmode=local-only\nbackend=tmux\nwindow=nested:fm-%s\nendpoint_task_id=%s\nworktree=%s\nproject=%s\nhome=%s\nspawn_gen=g-%s\nmodel=pool-model-a\n' "$kind" "$task" "$task" "$worktree" "$project" "$HOME_NESTED" "$task" > "$seat_home/state/$task.meta"
+  (umask 077; printf '{"placement":"local","backend":"tmux","target":"nested:fm-%s","spawn_gen":"g-%s"}\n' "$task" "$task" > "$LAB/$task.route")
+  FM_HOME="$seat_home" TMUX="$LAB/c,1,0" "$ROOT/bin/fm-fleet-seats.sh" dispatch "$task" --generation "g-$task" --route-file "$LAB/$task.route" >/dev/null
+done
+# A sibling already destroyed on this same verified route must remain retryable.
+printf '{"pools":[{"name":"shared","capacity":3,"models":["pool-model-a"]}]}\n' > "$HOME_PARENT/config/fleet-seats"
+FM_HOME="$HOME_NESTED" "$ROOT/bin/fm-fleet-seats.sh" reserve nested-gone --generation g-nested-gone --harness claude --model pool-model-a --kind ship --holder-pid "$$" >/dev/null
+git -C "$LAB/project" worktree add -q --detach "$LAB/nested-gone-wt"
+printf 'kind=ship\nmode=local-only\nbackend=tmux\nwindow=nested:fm-nested-gone\nendpoint_task_id=nested-gone\nspawn_gen=g-nested-gone\nmodel=pool-model-a\nworktree=%s\nproject=%s\n' "$LAB/nested-gone-wt" "$LAB/project" > "$HOME_NESTED/state/nested-gone.meta"
+(umask 077; printf '{"placement":"local","backend":"tmux","target":"nested:fm-nested-gone","spawn_gen":"g-nested-gone"}\n' > "$LAB/nested-gone.route")
+tmux -S "$LAB/c" new-window -d -t nested: -n fm-nested-gone -c "$HOME_NESTED" 'sleep 300'
+FM_HOME="$HOME_NESTED" TMUX="$LAB/c,1,0" "$ROOT/bin/fm-fleet-seats.sh" dispatch nested-gone --generation g-nested-gone --route-file "$LAB/nested-gone.route" >/dev/null
+tmux -S "$LAB/c" kill-window -t '=nested:=fm-nested-gone'
+
+TMUX="$LAB/c,1,0" "$ROOT/bin/fm-teardown.sh" nested --force > "$LAB/nested.stdout" 2> "$LAB/nested.stderr" || { cat "$LAB/nested.stderr" >&2; fail 'parent-driven owning-socket child cleanup failed'; }
+[ ! -e "$HOME_NESTED" ] || fail 'parent cleanup retained the child home'
+[ ! -e "$LAB/nested-wt" ] || fail 'parent cleanup retained the child worktree'
+for holder in "$HOME_PARENT/state/fleet-seats/holders/"*.json; do
+  jq -e 'all(.incarnations[]; .lifecycle == "released")' "$holder" >/dev/null || fail 'parent cleanup retained a counted seat'
+done
+echo 'ok - parent cleanup proves exact child destruction on the owning socket'
 
 "$ROOT/bin/fm-fleet-seats.sh" reserve remote --generation g-remote --harness claude --model pool-model-a --kind secondmate --holder-pid "$$" >/dev/null
 (umask 077; printf '{"placement":"remote","backend":"herdr","target":"fm-remote:p1","spawn_gen":"g-remote","operation":"g-remote","host":"remote-test","home":"/srv/mate","remote_root":"/srv/fm"}\n' > "$LAB/remote.route")

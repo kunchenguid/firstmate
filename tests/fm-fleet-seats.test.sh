@@ -328,6 +328,51 @@ test_nested_secondmate_records_share_capacity() {
   pass "nested local homes count existing agents once and refuse ambiguous occupancy"
 }
 
+test_orphan_secondmates_cannot_become_authorities() {
+  local base="$TMP_ROOT/orphan-authority" root child grandchild home orphan out
+  root="$base/primary"
+  child="$base/child"
+  grandchild="$base/grandchild"
+  make_home "$root"
+  pools "$root" 1
+  make_local_secondmate "$child" "$root" child
+  make_local_secondmate "$grandchild" "$child" grandchild
+  pools "$child" 1
+  pools "$grandchild" 1
+  task_record "$root" existing pool-model-a
+  new_holder
+  for home in "$root" "$child" "$grandchild"; do
+    out=$(reserve "$home" contender pool-model-a 2>&1)
+    expect_code 4 "$?" "a valid ancestry must share the occupied primary: $out"
+  done
+  for orphan in "$grandchild" "$child"; do
+    mv "$orphan/.fm-secondmate-parent" "$orphan/parent.saved"
+    # Test both a direct orphan and a descendant whose intermediate parent
+    # is orphaned, with and without an inherited pool declaration.
+    for home in "$child" "$grandchild"; do
+      [ "$orphan" != "$grandchild" ] || [ "$home" = "$grandchild" ] || continue
+      out=$(reserve "$home" contender pool-model-a 2>&1)
+      expect_code 5 "$?" "a marked unbound ancestry endpoint with inherited pools: $out"
+      mv "$home/config/fleet-seats" "$home/config/pools.saved"
+      out=$(reserve "$home" contender pool-model-a 2>&1)
+      expect_code 5 "$?" "a marked unbound ancestry endpoint without pools: $out"
+      mv "$home/config/pools.saved" "$home/config/fleet-seats"
+      assert_absent "$home/state/fleet-seats" "an orphan created an independent ledger"
+    done
+    mv "$orphan/parent.saved" "$orphan/.fm-secondmate-parent"
+    out=$(reserve "$grandchild" contender pool-model-a 2>&1)
+    expect_code 4 "$?" "restoring ancestry must return to the occupied primary: $out"
+  done
+  printf 'invalid-parent-record\n' > "$child/.fm-secondmate-parent"
+  out=$(reserve "$grandchild" contender pool-model-a 2>&1)
+  expect_code 5 "$?" "a corrupt intermediate binding: $out"
+  rm "$root/config/fleet-seats"
+  out=$(reserve "$root" optout pool-model-a 2>&1)
+  expect_code 0 "$?" "a genuine primary can opt out: $out"
+  assert_equals '' "$out" "primary opt-out must remain silent"
+  pass "orphaned direct and intermediate secondmates cannot create independent seat authorities"
+}
+
 test_live_supervisors_hold_seats_even_while_idle() {
   local root="$TMP_ROOT/supervisors/primary" mate="$TMP_ROOT/supervisors/mate" out status lockholder mateholder
   make_home "$root"
@@ -1742,7 +1787,7 @@ project=$home"
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -1754,6 +1799,7 @@ test_pool_names_do_not_escape_the_seat_directory
 test_legacy_unresolved_models_count_in_every_pool
 test_one_capacity_across_homes
 test_nested_secondmate_records_share_capacity
+test_orphan_secondmates_cannot_become_authorities
 test_live_supervisors_hold_seats_even_while_idle
 test_explicit_model_required_while_pooled
 test_stale_reservations_recover_without_preempting_live_work
