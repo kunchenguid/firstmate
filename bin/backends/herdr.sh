@@ -35,11 +35,12 @@
 # one or the focused one is last (upstream issue #1621, fixed by PR #1912);
 # both fixes first shipped in Herdr 0.8.0, which is the version floor for
 # default-on projection (FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION). Projected cleanup
-# therefore serializes under the session lock, repositions a doomed workspace
-# behind the focused one when needed, and ends its verified lone idle shell
-# so Herdr removes the emptied workspace through the focus-preserving
-# pane-death path, with the exact pre-close tab restore as the backstop and a
-# refusal to close the tab a live foreground client is viewing.
+# therefore serializes under the session lock and closes the exact tab through
+# the tab-level focus-preserving close, which removes the terminal and 0.9.x
+# sidebar panes together and restores the exact pre-close focus as the
+# backstop, refusing a close of the tab a live foreground client is viewing.
+# The pane-death repositioning plan remains only the legacy fallback for a
+# pane whose recorded tab id is unavailable.
 #
 # Target string shape: "<herdr-session>:<pane-id>", e.g. "default:w1:p2" (the
 # pane id itself contains a colon; the session is always the FIRST field, the
