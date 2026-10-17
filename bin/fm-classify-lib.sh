@@ -1784,6 +1784,8 @@ EOF
 }
 
 status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
+  # fully-presented-task-ids follows the presentation contract documented with
+  # the unread-status helpers below.
   local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
@@ -1795,11 +1797,6 @@ $fully_presented
       f="$state/$task.status"
       offset=$(status_presentation_cursor_offset "$f") || return 1
       lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
-      # Once any informational line in this span is presented fleet-wide, the
-      # contiguous cursor may advance through the captured endpoint. Routine
-      # lines remain unacknowledged only while they are the sole unread content,
-      # preserving delayed signal annotations without replaying a handled note
-      # that happened to follow a routine line.
       while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
           *[![:space:]]*)
@@ -1877,16 +1874,20 @@ EOF
 # These helpers are the ONE owner of "what is still unread since the last drain
 # presentation": one fleet manifest records each status identity and last-
 # presented byte offset, and one atomic replacement commits only the contiguous
-# status spans that were successfully presented. A quiet fleet scan leaves
-# routine working/done bytes unacknowledged so a subsequently published signal
-# can still annotate them. A missing manifest row or changed file identity is
-# offset 0 for the current file, while malformed or unreadable cursor state
-# aborts presentation without advancing any offset. A trusted cursor at EOF
-# prints nothing, so already-presented bytes are not replayed as new. Teardown
-# retires a task's manifest row with its status file, so reusing a task ID starts
-# the replacement log unread at byte 0. Informational `note:` lines and
-# reserved-key pending-reply resolutions are the fleet-wide unread surface;
-# they are not open decisions and are not persisted in the folded open-set.
+# status spans that were successfully presented. Any annotation path that
+# prints a task's unread bytes, whether direct or historical, commits through
+# the captured endpoint so those bytes cannot replay on a later drain.
+# tests/fm-wake-drain-unread-status.test.sh pins that commit.
+# A quiet fleet scan leaves routine working/done bytes unacknowledged so a subsequently
+# published signal can still annotate them. A missing manifest row or changed
+# file identity is offset 0 for the current file, while malformed or unreadable
+# cursor state aborts presentation without advancing any offset. A trusted
+# cursor at EOF prints nothing, so already-presented bytes are not replayed as
+# new. Teardown retires a task's manifest row with its status file, so reusing a
+# task ID starts the replacement log unread at byte 0. Informational `note:`
+# lines and reserved-key pending-reply resolutions are the fleet-wide unread
+# surface; they are not open decisions and are not persisted in the folded
+# open-set.
 
 # Read the legacy per-task open-decisions cursor used to seed the presentation
 # offset before the fleet manifest exists. A fold-version mismatch, identity
