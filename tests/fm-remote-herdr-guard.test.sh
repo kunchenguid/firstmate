@@ -6,7 +6,10 @@
 # process as the session-socket owner, and real holder processes whose
 # environment and ancestry carry the birth markers the guard reads. It pins
 # the decision table: no server -> start; an Aqua-born owner -> leave it; an
-# SSH-born or unprovable owner -> stop it, wait for the socket, start. Nothing
+# SSH-born or unprovable owner -> stop it, wait for the socket, start. A started
+# server must lead its own POSIX session (read from ps's `s` state flag), the
+# guard must forward stop signals to it and exit with its status, and a host
+# without perl falls back to exec. Nothing
 # here touches the runner's own herdr servers, launch agents, or login
 # session, and no live harness guard applies: the verdict comes from process
 # environment and ancestry, which are kernel facts rather than vendor output.
@@ -36,7 +39,13 @@ for tool in ps awk sed grep tr dirname basename sleep cat cp rm env bash sh id h
   real=$(command -v "$tool") || fail "test host lacks $tool"
   ln -sf "$real" "$TOOLS/$tool"
 done
+PERL=$(command -v perl || true)
+[ -z "$PERL" ] || ln -sf "$PERL" "$TOOLS/perl"
 ln -sf "$JQ" "$TOOLS/jq"
+TOOLS_NO_PERL="$TMP_ROOT/tools-no-perl"
+mkdir -p "$TOOLS_NO_PERL"
+cp -P "$TOOLS"/* "$TOOLS_NO_PERL/"
+rm -f "$TOOLS_NO_PERL/perl"
 FAKE="$TMP_ROOT/fake"
 mkdir -p "$FAKE"
 cat > "$FAKE/lsof" <<'SH'
@@ -90,7 +99,14 @@ case "$*" in
     fi
     ;;
   "server --session "*)
-    printf 'pid=%s session=%s\n' "$$" "${3:-}" > "$FM_FAKE_STATE/started"
+    case "$(ps -o stat= -p "$$" 2>/dev/null)" in *s*) leader=yes ;; *) leader=no ;; esac
+    printf 'pid=%s session=%s leader=%s\n' "$$" "${3:-}" "$leader" > "$FM_FAKE_STATE/started"
+    if [ -f "$FM_FAKE_STATE/serve" ]; then
+      trap 'printf "TERM\n" > "$FM_FAKE_STATE/signalled"; exit 0' TERM
+      printf 'ready\n' > "$FM_FAKE_STATE/ready"
+      while :; do sleep 0.1; done
+    fi
+    [ ! -f "$FM_FAKE_STATE/server-exit" ] || exit "$(cat "$FM_FAKE_STATE/server-exit")"
     ;;
 esac
 exit 0
@@ -122,7 +138,8 @@ hold_under() {
   mkfifo "$fifo"
   eval "exec ${HOLDER_FD}<>\"\$fifo\""
   ( export FM_HOLDER_JQ="$JQ" FM_HOLDER_FIFO="$fifo" FM_HOLDER_PIDFILE="$pidfile"
-    exec -a "$argv0" bash -c 'env -i FM_HOLDER=1 "$FM_HOLDER_JQ" . "$FM_HOLDER_FIFO" & printf "%s\n" "$!" > "$FM_HOLDER_PIDFILE"; wait' "$@" ) &
+    exec -a "$argv0" bash -c 'env -i FM_HOLDER=1 XPC_SERVICE_NAME=0 "$FM_HOLDER_JQ" . "$FM_HOLDER_FIFO" & printf "%s\n" "$!" > "$FM_HOLDER_PIDFILE"; wait' "$@" ) &
+  HOLDER_PARENT_PID=$!
   HOLDER_PIDS+=("$!")
   HOLDER_FD=$((HOLDER_FD + 1))
   local i=0
@@ -206,7 +223,70 @@ expect_code 0 "$GUARD_RC" "the guard failed when no server owned the session"
 assert_started "the guard did not start the server when none owned the session"
 assert_not_contains "$(herdr_calls)" 'server stop' "the guard stopped something when no server owned the session"
 assert_contains "$GUARD_OUT" "no server owns session $SESSION" "the guard did not report the empty session"
-pass "an empty session is started inside the launch agent"
+pass "an empty session starts a server without stopping another owner"
+
+if [ -n "$PERL" ]; then
+  assert_grep "leader=yes" "$CASE_STATE/started" "the started server does not lead its own session, so Herdr refuses it as a saved machine"
+  pass "an empty session is started inside the launch agent as its own session leader"
+
+  new_case stopped
+  printf '3\n' > "$CASE_STATE/server-exit"
+  guard
+  expect_code 3 "$GUARD_RC" "the guard did not exit with the server's status"
+  assert_contains "$GUARD_OUT" "exited with status 3" "the guard did not report the server's exit"
+  pass "the guard exits with the server's status so launchd's SuccessfulExit policy still applies"
+
+  new_case stopped
+  touch "$CASE_STATE/serve"
+  cat > "$CASE_STATE/forward-term.sh" <<'SH'
+kill() {
+  builtin kill "$@" || return "$?"
+  if [ "${1:-}" = -TERM ]; then
+    local attempts=0
+    while builtin kill -0 "$2" 2>/dev/null && [ "$attempts" -lt 100 ]; do
+      sleep 0.01
+      attempts=$((attempts + 1))
+    done
+    if ! builtin kill -0 "$2" 2>/dev/null; then
+      printf 'exited\n' > "$FM_FAKE_STATE/exited-before-trap-return"
+    fi
+  fi
+}
+SH
+  env -i PATH="$CASE_PATH" HOME="$TMP_ROOT" \
+    BASH_ENV="$CASE_STATE/forward-term.sh" \
+    FM_FAKE_STATE="$CASE_STATE" FM_FAKE_HERDR_LOG="$CASE_LOG" FM_FAKE_HERDR_RUNNING="$CASE_RUNNING" \
+    FM_FAKE_SOCKET_OWNER="$CASE_OWNER" FM_FAKE_HERDR_SOCKET="$CASE_SOCKET" \
+    "$GUARD" "$FAKE/herdr" "$SESSION" > "$CASE_STATE/guard.out" 2>&1 &
+  GUARD_PID=$!
+  i=0
+  while [ ! -s "$CASE_STATE/ready" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$CASE_STATE/ready" ] || fail "the server did not install its TERM handler"
+  assert_grep "leader=yes" "$CASE_STATE/started" "the long-running server does not lead its own session"
+  server_pid=$(sed -n 's/^pid=\([0-9]*\) .*/\1/p' "$CASE_STATE/started")
+  [ "$server_pid" != "$GUARD_PID" ] || fail "the server replaced the guard instead of running as its child"
+  kill -0 "$GUARD_PID" 2>/dev/null || fail "the guard left the foreground while its server was still running"
+  kill -TERM "$GUARD_PID"
+  set +e
+  wait "$GUARD_PID"
+  rc=$?
+  set -e
+  assert_grep "exited" "$CASE_STATE/exited-before-trap-return" "the server did not exit before the guard's TERM trap returned"
+  expect_code 0 "$rc" "the guard did not exit with the server's status after a forwarded TERM"
+  assert_grep "TERM" "$CASE_STATE/signalled" "the guard did not forward TERM to its server"
+  kill -0 "$server_pid" 2>/dev/null && fail "the server outlived the guard after TERM"
+  pass "the guard stays launchd's foreground job and forwards TERM to its session-leader server"
+else
+  echo "skip: perl not found (session-leader, exit-status and TERM-forwarding cases require perl)"
+fi
+
+new_case stopped
+CASE_PATH="$FAKE:$TOOLS_NO_PERL"
+guard
+expect_code 0 "$GUARD_RC" "the guard failed without perl"
+assert_contains "$GUARD_OUT" "perl does not resolve" "the guard did not report the missing perl"
+assert_grep "leader=no" "$CASE_STATE/started" "the exec fallback case is vacuous: its server already led a session"
+pass "a host without perl still gets an exec-started server, without saved-machine support"
 
 # --- an Aqua-born owner is left alone ----------------------------------------
 
@@ -226,6 +306,9 @@ hold_under herdr --session "$SESSION" remote-client-bridge
 BRIDGE_CHILD_PID=$HOLDER_PID
 hold_under 'sshd-session:' kunchen@notty
 SSHD_CHILD_PID=$HOLDER_PID
+hold_under bash fm-remote-herdr-guard.sh
+GUARD_CHILD_PID=$HOLDER_PID
+GUARD_JOB_PID=$HOLDER_PARENT_PID
 sleep 0.3
 
 new_case running
@@ -248,6 +331,26 @@ assert_not_contains "$(herdr_calls)" 'server stop' "the guard stopped a gui-doma
 assert_contains "$GUARD_OUT" "pid $WORKER_PID born in the Aqua login session (worker)" \
   "the guard did not name the worker owner"
 pass "launchd and worker markers require gui-domain launchctl proof"
+
+new_case running
+printf '%s\n' "$GUARD_CHILD_PID" > "$CASE_OWNER"
+load_job gui dev.firstmate.herdr.fm-remote "$GUARD_JOB_PID"
+guard
+expect_code 0 "$GUARD_RC" "the guard did not exit 0 for a server its own launchd job started"
+assert_not_started "the guard started a second server over the session-leader server its job started"
+assert_not_contains "$(herdr_calls)" 'server stop' "the guard stopped the session-leader server its own job started"
+assert_contains "$GUARD_OUT" "pid $GUARD_CHILD_PID born in the Aqua login session (launchd)" \
+  "a child of the gui-domain guard job was not classified as launchd-born"
+
+new_case running
+printf '%s\n' "$GUARD_CHILD_PID" > "$CASE_OWNER"
+load_job gui dev.firstmate.herdr.fm-remote "$LAUNCHD_PID"
+guard
+expect_code 0 "$GUARD_RC" "the guard failed to take over a server whose parent is not the job"
+assert_stop_before_start
+assert_contains "$GUARD_OUT" "pid $GUARD_CHILD_PID born outside the Aqua login session (unknown)" \
+  "XPC_SERVICE_NAME=0 under a parent that is not the gui-domain job was trusted as Aqua"
+pass "a server whose parent is the running gui-domain guard job is Aqua-born, and only then"
 
 # --- a foreign owner is stopped, then the guard becomes the server -----------
 
