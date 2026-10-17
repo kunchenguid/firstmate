@@ -108,8 +108,9 @@
 #                          the confirm window, so nothing is confirmed to be
 #                          collecting for it and every cycle will relaunch it
 #                          (bin/fm-procevent.sh reconcile queues it once per
-#                          failure episode, and a later cycle that finds the
-#                          source owned closes that episode); the queued
+#                          failure episode, which spans relaunches and
+#                          re-registrations and closes once a runner of that
+#                          source collects); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
 #   check: rejected unauthenticated state checks: <paths>

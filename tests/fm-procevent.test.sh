@@ -2253,10 +2253,10 @@ pass "start reclaims a reused-pid claim whose leftovers can still be tidied"
 # `bin/fm-watch.sh` discards reconcile's `failed=` count and exit status, so a
 # runner that dies before claiming - for any cause, not only the claim wedge -
 # would be relaunched and reported failed every cycle with nobody told: armed
-# in appearance, a dead drop in fact. The episode is keyed by the registration
-# identity the launch ran under and ends when a launch of that source confirms,
-# so the registration below is damaged and repaired IN PLACE to keep that
-# identity fixed across the whole sequence. The wake changes nothing about the
+# in appearance, a dead drop in fact. The episode's key names the registration
+# identity it began under and the episode ends when a runner of that source
+# collects, so the registration below is damaged and repaired IN PLACE to keep
+# that identity fixed across the whole sequence. The wake changes nothing about the
 # launch: every failing cycle below still relaunches and still reports failed.
 HEP="$TMP_ROOT/hep"; new_home "$HEP"
 EP_SOURCE_CMD="$TMP_ROOT/episode-source.sh"
@@ -2299,14 +2299,14 @@ assert_contains "$ep_wake" "episode-src" \
 # The payload may state only what confirmation observed: no claim proved
 # inside the window. It cannot know whether the runner died or was slow, so it
 # must not assert a cause, must not present `start` as the fix, and must say
-# that a later cycle finding the source owned closes the episode by itself.
+# that a runner of the source collecting closes the episode by itself.
 assert_contains "$ep_wake" "did not prove it took the source's claim within FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS" \
   "the launch-failed wake does not state what confirmation observed: $ep_wake"
 assert_contains "$ep_wake" "attached bin/fm-procevent.sh start episode-src to reproduce a refusal" \
   "the launch-failed wake does not say start reproduces rather than fixes: $ep_wake"
 assert_contains "$ep_wake" "adapter binary" \
   "the launch-failed wake does not name what to check: $ep_wake"
-assert_contains "$ep_wake" "finds the source owned ends this episode on its own" \
+assert_contains "$ep_wake" "the episode ends on its own when a runner of this source returns a result or a clean empty window" \
   "the launch-failed wake does not say a slow runner closes its own episode: $ep_wake"
 case "$ep_wake" in
   *"never claimed"*|*"exited without"*|*"runner died"*)
@@ -2344,6 +2344,100 @@ esac
 ep_repair
 pe "$HEP" retire episode-src >/dev/null 2>&1 || true
 pass "a launch that cannot confirm is announced once per failure episode"
+
+# --- one outage of a flapping source is one episode --------------------------
+# The reported shape: a remote secondmate's host is offline, so its source's
+# launches fail to confirm, then a runner briefly holds the claim while ssh
+# blocks and dies on the transport timeout with nothing read, and every session
+# start re-registers the source under a new identity. Each of those used to end
+# or re-key the episode, so one outage announced itself over and over. Only a
+# runner proving the source collected ends it; a real recovery still lets the
+# next failure announce.
+HFL="$TMP_ROOT/hfl"; new_home "$HFL"
+FL_SOURCE="$HFL/state/procevent/flap-src.source"
+FL_TRIGGER="$TMP_ROOT/flap-transport-timeout"
+FL_DEAD_READ="$TMP_ROOT/flap-dead-read.sh"
+cat > "$FL_DEAD_READ" <<'SH'
+#!/usr/bin/env bash
+# Blocks like ssh to an unreachable host, then fails as its timeout does:
+# exit 255 with nothing on stdout.
+while [ ! -e "$1" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || break
+  sleep 0.05
+done
+exit 255
+SH
+chmod +x "$FL_DEAD_READ"
+fl_damage() {  # truncate the argv in place, so the runner dies before claiming
+  if ! { awk '/^argv:$/ { print; exit } { print }' "$FL_SOURCE" > "$FL_SOURCE.tmp" \
+    && cat "$FL_SOURCE.tmp" > "$FL_SOURCE" && rm -f -- "$FL_SOURCE.tmp"; }; then
+    fail "could not damage the flapping registration"
+  fi
+}
+# A launch expected to confirm gets a generous window, which ends early on
+# evidence, and is asserted only as not failed: on a loaded host a runner from
+# an earlier cycle may be the one that ends up owning the source.
+fl_reconcile() {  # <expected-fragment> <msg> [confirm-seconds]; sets fl_out
+  fl_out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=${3:-2} pe "$HFL" reconcile) || true
+  assert_contains "$fl_out" "$1" "$2: $fl_out"
+}
+fl_wait_unclaimed() {  # <msg>
+  for _ in $(seq 1 100); do
+    [ -e "$FM_PROCEVENT_CLAIM_ROOT/flap-src.claim" ] || return 0
+    sleep 0.1
+  done
+  fail "$1"
+}
+fl_identity() { perl -e 'print((stat shift)[1])' "$FL_SOURCE"; }
+
+pe_register "$HFL" lavish flap-src -- "$FL_DEAD_READ" "$FL_TRIGGER" >/dev/null
+fl_damage
+fl_reconcile "failed=1" "the offline source's first launch was not reported failed"
+[ "$(launch_failed_wake_count "$HFL" flap-src)" = 1 ] \
+  || fail "the offline source's first failed launch was not announced: $fl_out"
+# Session start re-arms the source: a new registration whose runner claims and
+# blocks, is seen owned by a later cycle, then dies on the transport timeout.
+fl_first_identity=$(fl_identity)
+pe_register "$HFL" lavish flap-src -- "$FL_DEAD_READ" "$FL_TRIGGER" >/dev/null
+[ "$(fl_identity)" != "$fl_first_identity" ] \
+  || fail "fixture invalid: re-registration kept the registration identity"
+fl_reconcile "failed=0" "the briefly healthy runner did not confirm" 30
+fl_reconcile "started=0" "a cycle relaunched a source its runner still owned"
+assert_contains "$fl_out" "failed=0" "a cycle that found the source owned reported a failure: $fl_out"
+: > "$FL_TRIGGER"
+fl_wait_unclaimed "the dead-read runner never released its claim"
+[ -z "$(first_result "$HFL" flap-src)" ] \
+  || fail "fixture invalid: the dead read captured a result"
+# The outage goes on: the next launch fails again, under that same registration
+# and then under one more re-registration.
+fl_damage
+fl_reconcile "failed=1" "the offline source's launch after the dead read was not reported failed"
+pe_register "$HFL" lavish flap-src -- "$FL_DEAD_READ" "$FL_TRIGGER" >/dev/null
+fl_damage
+fl_reconcile "failed=1" "the re-registered offline source's launch was not reported failed"
+[ "$(launch_failed_wake_count "$HFL" flap-src)" = 1 ] \
+  || fail "one outage of a flapping source announced $(launch_failed_wake_count "$HFL" flap-src) launch failures: $(launch_failed_wake_keys "$HFL" flap-src)"
+# The host comes back: a runner returns a real result, which ends the episode,
+# so the next failure is a new outage and announces again.
+pe_register "$HFL" lavish flap-src -- "$EP_SOURCE_CMD" >/dev/null
+fl_reconcile "failed=0" "the recovered source did not confirm" 30
+for _ in $(seq 1 100); do
+  [ -z "$(first_result "$HFL" flap-src)" ] || break
+  sleep 0.1
+done
+[ -n "$(first_result "$HFL" flap-src)" ] \
+  || fail "fixture invalid: the recovered source captured no result"
+fl_wait_unclaimed "the recovered runner never released its claim"
+# Still registered, so it is the runner's result that ended the episode and
+# not a retirement clearing its marker.
+[ -f "$FL_SOURCE" ] || fail "fixture invalid: the recovered source was retired"
+pe_register "$HFL" lavish flap-src -- "$FL_DEAD_READ" "$FL_TRIGGER" >/dev/null
+fl_damage
+fl_reconcile "failed=1" "the source failing after a real recovery was not reported failed"
+[ "$(launch_failed_wake_count "$HFL" flap-src)" = 2 ] \
+  || fail "a failure after a real recovery was not announced as a new episode: $(launch_failed_wake_keys "$HFL" flap-src)"
+pe "$HFL" retire flap-src >/dev/null 2>&1 || true
+pass "one outage of a flapping source is announced once, and a real recovery reopens announcing"
 
 # --- the launch-failed key fits the watcher's seen marker at the id limit ----
 # bin/fm-watch.sh names the marker for a surfaced key `.seen-procevent-<hex>`,
