@@ -341,6 +341,28 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
+# fm_backend_cmux_task_description: the backlog title of the task behind the
+# fm-<id> <label>, or empty when the backlog has no readable title. The
+# workspace title stays the scoped fm-<home>-<id> name every lookup matches
+# on; this is display-only text for the cmux sidebar, which truncates that
+# name to its leading home tag. Never fails: a missing title only means the
+# workspace is created without a description.
+fm_backend_cmux_task_description() {  # <label>
+  local label=$1 id raw
+  id=${label#fm-}
+  raw=$(FM_HOME="$FM_HOME" "$FM_BACKEND_CMUX_ROOT/bin/fm-tasks-axi.sh" show "$id" 2>/dev/null \
+    | sed -n 's/^  title: //p' | head -1) || return 0
+  case "$raw" in
+    \"*\")
+      raw=${raw#\"}
+      raw=${raw%\"}
+      raw=$(printf '%s' "$raw" | sed -e 's/\\[nrt]/ /g' -e 's/\\\(["\\]\)/\1/g')
+      ;;
+  esac
+  [ "$raw" = "-" ] && raw=""
+  printf '%s' "$raw"
+}
+
 # fm_backend_cmux_create_task: create the task's workspace (one surface),
 # refusing an existing live <label> (finding #6: cmux enforces no uniqueness
 # itself). Resolves the fresh workspace's default surface via one list-panes
@@ -348,17 +370,21 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # so no separate new-surface call is needed). --focus false is passed for
 # defense in depth though verified to already be the default (finding:
 # workspace/surface/pane create all default focus to false) - no
-# focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
-# <surface_id>" on success.
+# focus-restore dance is needed, unlike zellij. Passes the task's backlog
+# title as --description when one exists (fm_backend_cmux_task_description).
+# Echoes "<workspace_id> <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title dup out wsid sfid desc
+  local -a desc_args=()
   title=$(fm_backend_cmux_scoped_title "$label")
   dup=$(fm_backend_cmux_workspace_id_for_label "$title")
   if [ -n "$dup" ]; then
     echo "error: cmux workspace '$title' already exists" >&2
     return 1
   fi
-  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids 2>&1) || {
+  desc=$(fm_backend_cmux_task_description "$label")
+  [ -z "$desc" ] || desc_args=(--description "$desc")
+  out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" ${desc_args[@]+"${desc_args[@]}"} --focus false --id-format uuids 2>&1) || {
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
