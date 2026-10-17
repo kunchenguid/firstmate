@@ -48,12 +48,6 @@
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
-#   When
-#   config/spawn-gate exists and is executable, a fresh ship or scout spawn
-#   runs it as `config/spawn-gate <task-id>` with FM_HOME set before creating
-#   anything; a nonzero exit refuses the spawn and prints the gate's output.
-#   Secondmate spawns and relaunches never run it, and an absent file changes
-#   nothing.
 #   When config/launch-env-hook is an executable file, every local launch runs
 #   it in the pane at the worktree as `config/launch-env-hook <out-file>` and
 #   sources the one export statement it writes before the AI-trailer step; a
@@ -1763,19 +1757,6 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
   if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
     echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
     exit 1
-  fi
-fi
-# Optional pre-spawn gate (header above): a fresh ship or scout spawn runs
-# config/spawn-gate before creating anything, so a home can hard-block lanes
-# past its limit. Secondmate spawns and relaunches never run it.
-if [ "$RELAUNCH" -eq 0 ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
-  if [ -f "$CONFIG/spawn-gate" ] && [ -x "$CONFIG/spawn-gate" ]; then
-    SPAWN_GATE_OUT=$(FM_HOME="$FM_HOME" "$CONFIG/spawn-gate" "$ID" 2>&1) || {
-      SPAWN_GATE_RC=$?
-      [ -n "$SPAWN_GATE_OUT" ] && printf '%s\n' "$SPAWN_GATE_OUT" >&2
-      echo "error: spawn refused by config/spawn-gate (exit $SPAWN_GATE_RC)" >&2
-      exit 1
-    }
   fi
 fi
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then

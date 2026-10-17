@@ -719,6 +719,31 @@ SH
   pass "termination cannot commit an alert without dispatching its interrupt"
 }
 
+# A host under memory pressure refuses every launch kind before anything is
+# created, records why in state/admission-refused, and a calm host lets the same
+# spawn through and clears the record.
+test_spawn_memory_admission() {
+  local home=$TMP_ROOT/spawn-admission out status
+  local spawn_env=(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_HOST_MEMORY_PROC="$home/proc" FM_HOST_MEMORY_CGROUP_ROOT="$home/cgroup")
+  mkdir -p "$home/data" "$home/config" "$home/projects/none"
+  git -C "$home/projects/none" init -q || fail "could not initialize project fixture"
+  fake_host "$home/proc" 30 42
+  out=$(env "${spawn_env[@]}" "$ROOT/bin/fm-spawn.sh" nope-mem-z5 projects/none --scout --harness 'true worker' 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a spawn under memory pressure should be refused"
+  assert_contains "$out" "host memory under pressure: pressure at or above 35%" "the refusal names the pressure"
+  assert_contains "$out" "task nope-mem-z5 stays queued" "the refusal says the task stays queued"
+  assert_contains "$(cat "$home/state/admission-refused")" $'\tnope-mem-z5\thost memory under pressure' \
+    "the refusal is recorded for the queue views"
+  [ ! -e "$home/state/nope-mem-z5.meta" ] || fail "a refused spawn created a task record"
+  out=$(env "${spawn_env[@]}" "$ROOT/bin/fm-spawn.sh" mate-mem-z6 / --secondmate --harness 'true worker' 2>&1)
+  assert_contains "$out" "task mate-mem-z6 stays queued" "a secondmate launch is refused too"
+  fake_host "$home/proc" 30 1
+  out=$(env "${spawn_env[@]}" "$ROOT/bin/fm-spawn.sh" nope-mem-z5 projects/none --scout --harness 'true worker' 2>&1)
+  assert_contains "$out" "has no brief" "a calm host lets the spawn through"
+  [ ! -e "$home/state/admission-refused" ] || fail "an admitted spawn left the refusal record behind"
+  pass "spawn: host memory pressure refuses every launch kind and records why"
+}
+
 test_default_supervision_poll() {
   local case i=0 first second
   case=$(make_case default-poll)
@@ -763,4 +788,5 @@ test_independent_sampler_lifecycle
 test_atomic_admission_publication
 test_failed_alert_publication
 test_shutdown_during_alert_publication
+test_spawn_memory_admission
 test_default_supervision_poll
