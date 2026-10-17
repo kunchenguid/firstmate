@@ -196,7 +196,7 @@ $ curl .../repos/fixture/fixture-repo/commits/<sha>/status
 {"state":"","sha":"","total_count":0,"statuses":null,...}
 ```
 
-This is read as `none`, the same way GitLab's null `head_pipeline` is read as `none` in `docs/gitlab-merge-watch.md`, and refuses the merge rather than treating an absent check as nothing to verify:
+This is read as `none`, the same way GitLab's null `head_pipeline` is read as `none` in `docs/gitlab-merge-watch.md`, and, absent an attended `--allow-no-ci` (see `bin/fm-pr-merge.sh`'s header), refuses the merge rather than treating an absent check as nothing to verify:
 
 ```
 $ fm-pr-merge.sh task-f2 https://localhost/fixture/fixture-repo/pulls/<open-mergeable-pr>

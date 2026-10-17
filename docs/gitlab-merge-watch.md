@@ -236,8 +236,9 @@ $ echo $?
 1
 ```
 
-A project that runs no pipeline at all therefore cannot merge through this path.
+A project that runs no pipeline at all therefore cannot merge through this path by default.
 That is the intended reading of the requirement rather than an oversight: a successful pipeline at the head is a condition, and "there is no pipeline" does not satisfy it.
+Only the attended `--allow-no-ci` accepts that absence, on terms `bin/fm-pr-merge.sh`'s header owns.
 
 Both refusals came after `pr=` was recorded and the merge poll was armed, as a failed live verification or `gh pr merge` does on the GitHub side, so a refusal still leaves the audit trail and the watch in place.
 

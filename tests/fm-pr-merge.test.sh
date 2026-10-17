@@ -4494,3 +4494,204 @@ test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo
+
+# --allow-no-ci accepts a head with no commit status or pipeline at all, the
+# shape a repository that runs no CI reports, and nothing else: any status or
+# pipeline that exists and is not green still refuses, the merge stays bound
+# to the verified head, and without the flag the absence still refuses.
+# Args: case_dir url [merge args]...; sets RC.
+run_no_ci_case() {
+  local case_dir=$1 url=$2
+  shift 2
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" "$@" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  RC=$?
+  set -e
+}
+
+test_allow_no_ci_merges_only_an_absent_forgejo_status() {
+  local case_dir merge_line
+  case_dir=$(make_forgejo_case forgejo-no-ci-allowed)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  run_no_ci_case "$case_dir" "$FJ_URL" --allow-no-ci
+  expect_code 0 "$RC" "forgejo-no-ci-allowed: an absent status with --allow-no-ci should merge: $(cat "$case_dir/stderr")"
+  merge_line=$(tea_merge_line "$case_dir/tea.log")
+  case "$merge_line" in
+    *"-X POST /repos/{owner}/{repo}/pulls/9/merge -f Do=merge -f head_commit_id=$FJ_HEAD"*) : ;;
+    *) fail "forgejo-no-ci-allowed: the merge was not bound to the verified head: '$merge_line'" ;;
+  esac
+  assert_grep "no commit status at all (allowed by --allow-no-ci) at head $FJ_HEAD" "$case_dir/stderr" \
+    "forgejo-no-ci-allowed: the allowance was not named in the verification"
+  [ "$(sed -n 6p "$case_dir/state/task-x1.merge-authority" 2>/dev/null || true)" = attended ] \
+    || fail "forgejo-no-ci-allowed: the persisted merge authority is not attended"
+
+  case_dir=$(make_forgejo_case forgejo-no-ci-without-flag)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  run_no_ci_case "$case_dir" "$FJ_URL"
+  expect_code 1 "$RC" "forgejo-no-ci-without-flag: an absent status without the flag should refuse"
+  assert_grep 'the combined commit status is "none", not success' "$case_dir/stderr" \
+    "forgejo-no-ci-without-flag: the absent status was not reported"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-ci-without-flag: a merge was attempted"
+
+  local spec name expected
+  for spec in \
+    "pending|state=pending|the combined commit status is \"pending\", not success" \
+    "failure|state=failure|the combined commit status is \"failure\", not success" \
+    "page2|page2|the combined commit status is \"failure\", not success" \
+    "unreadable|unreadable|the combined commit status is \"unreadable\", not success" \
+    "unmergeable|unmergeable|mergeable is \"false\", not true"; do
+    name=${spec%%|*}
+    expected=${spec##*|}
+    spec=${spec#*|}
+    spec=${spec%%|*}
+    case "$spec" in
+      unmergeable)
+        case_dir=$(make_forgejo_case "forgejo-no-ci-$name" mergeable=false)
+        write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+        ;;
+      page2)
+        case_dir=$(make_forgejo_case "forgejo-no-ci-$name")
+        write_forgejo_status_json "$case_dir/tea-status-page2.json" state=failure
+        ;;
+      unreadable)
+        case_dir=$(make_forgejo_case "forgejo-no-ci-$name")
+        : > "$case_dir/tea-status-fails"
+        ;;
+      *)
+        case_dir=$(make_forgejo_case "forgejo-no-ci-$name")
+        write_forgejo_status_json "$case_dir/tea-status.json" "$spec"
+        ;;
+    esac
+    run_no_ci_case "$case_dir" "$FJ_URL" --allow-no-ci
+    expect_code 1 "$RC" "forgejo-no-ci-$name: --allow-no-ci must still refuse"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "forgejo-no-ci-$name: the refusal did not name the failing condition"
+    [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+      || fail "forgejo-no-ci-$name: a merge was attempted despite the refusal"
+  done
+  pass "fm-pr-merge --allow-no-ci merges a head-bound Forgejo pull request with no status at all and still refuses any other non-green state"
+}
+
+test_allow_no_ci_merges_only_an_absent_gitlab_pipeline() {
+  local case_dir merge_line
+  case_dir=$(make_gitlab_case gitlab-no-ci-allowed pipeline=null)
+  run_no_ci_case "$case_dir" "$MR_URL" --allow-no-ci
+  expect_code 0 "$RC" "gitlab-no-ci-allowed: a null head pipeline with --allow-no-ci should merge: $(cat "$case_dir/stderr")"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+    || fail "gitlab-no-ci-allowed: the merge was not bound to the verified head: '$merge_line'"
+  assert_grep "no pipeline at all (allowed by --allow-no-ci) at head $MR_HEAD" "$case_dir/stderr" \
+    "gitlab-no-ci-allowed: the allowance was not named in the verification"
+
+  case_dir=$(make_gitlab_case gitlab-no-ci-without-flag pipeline=null)
+  run_no_ci_case "$case_dir" "$MR_URL"
+  expect_code 1 "$RC" "gitlab-no-ci-without-flag: a null head pipeline without the flag should refuse"
+  assert_grep 'the head pipeline status is "none", not success' "$case_dir/stderr" \
+    "gitlab-no-ci-without-flag: the absent pipeline was not reported"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-no-ci-without-flag: a merge was attempted"
+
+  local spec name expected
+  for spec in \
+    "failed|pipeline_status=failed|the head pipeline status is \"failed\", not success" \
+    "running|pipeline_status=running|the head pipeline status is \"running\", not success" \
+    "stale|pipeline_sha=$MR_STALE_HEAD|the head pipeline ran at \"$MR_STALE_HEAD\", not at the current head $MR_HEAD" \
+    "conflicts|conflicts=true|has_conflicts is \"true\", not false"; do
+    name=${spec%%|*}
+    expected=${spec##*|}
+    spec=${spec#*|}
+    if [ "$name" = conflicts ]; then
+      case_dir=$(make_gitlab_case "gitlab-no-ci-$name" pipeline=null "${spec%%|*}")
+    else
+      case_dir=$(make_gitlab_case "gitlab-no-ci-$name" "${spec%%|*}")
+    fi
+    run_no_ci_case "$case_dir" "$MR_URL" --allow-no-ci
+    expect_code 1 "$RC" "gitlab-no-ci-$name: --allow-no-ci must still refuse"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "gitlab-no-ci-$name: the refusal did not name the failing condition"
+    [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+      || fail "gitlab-no-ci-$name: a merge was attempted despite the refusal"
+  done
+  pass "fm-pr-merge --allow-no-ci merges a head-bound GitLab merge request with no pipeline at all and still refuses any other non-green state"
+}
+
+test_allow_no_ci_is_attended_only_and_one_shot() {
+  local case_dir
+  case_dir=$(make_forgejo_case forgejo-no-ci-away)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  write_away_record "$case_dir" --words 'merge the fix'
+  FM_TEST_HOME="$case_dir/home" run_no_ci_case "$case_dir" "$FJ_URL" --allow-no-ci
+  expect_code 2 "$RC" "forgejo-no-ci-away: --allow-no-ci must be refused while away"
+  assert_grep '--allow-no-ci is attended-only' "$case_dir/stderr" \
+    "forgejo-no-ci-away: the refusal did not name attended-only"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-ci-away: a merge was attempted while away"
+
+  case_dir=$(make_gitlab_case gitlab-no-ci-away pipeline=null)
+  write_away_record "$case_dir"
+  FM_TEST_HOME="$case_dir/home" run_no_ci_case "$case_dir" "$MR_URL" --allow-no-ci
+  expect_code 2 "$RC" "gitlab-no-ci-away: --allow-no-ci must be refused while away"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-no-ci-away: a merge was attempted while away"
+
+  case_dir=$(make_forgejo_case forgejo-no-ci-quiet)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  FM_AFK_MODE=quiet write_away_record "$case_dir"
+  FM_TEST_HOME="$case_dir/home" run_no_ci_case "$case_dir" "$FJ_URL" --allow-no-ci
+  expect_code 0 "$RC" "forgejo-no-ci-quiet: quiet mode is a present captain and must not refuse: $(cat "$case_dir/stderr")"
+  [ -n "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-ci-quiet: no merge was attempted under quiet mode"
+
+  case_dir=$(make_forgejo_case forgejo-no-ci-equals)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  run_no_ci_case "$case_dir" "$FJ_URL" --allow-no-ci=yes
+  expect_code 2 "$RC" "forgejo-no-ci-equals: a value must be refused"
+  assert_grep '--allow-no-ci takes no value' "$case_dir/stderr" \
+    "forgejo-no-ci-equals: the refusal did not name the value"
+  [ ! -s "$case_dir/tea.log" ] || fail "forgejo-no-ci-equals: tea ran despite the refused value"
+
+  case_dir=$(make_forgejo_case forgejo-no-ci-duplicate)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  run_no_ci_case "$case_dir" "$FJ_URL" --allow-no-ci --allow-no-ci
+  expect_code 2 "$RC" "forgejo-no-ci-duplicate: a repeated flag must be refused"
+  assert_grep '--allow-no-ci may be specified only once' "$case_dir/stderr" \
+    "forgejo-no-ci-duplicate: the refusal did not name the repeat"
+  [ ! -s "$case_dir/tea.log" ] || fail "forgejo-no-ci-duplicate: tea ran despite the repeated flag"
+  pass "fm-pr-merge --allow-no-ci is refused while away, kept under quiet mode, and takes no value once"
+}
+
+# GitHub has no absent-status refusal to waive: a pull request with no checks
+# reported and none required already merges, so the flag is refused there
+# rather than silently doing nothing.
+test_allow_no_ci_refused_on_github() {
+  local case_dir head url
+  head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+  url=https://github.com/example/repo/pull/91
+
+  case_dir=$(make_case github-no-checks-merges)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head"
+  run_no_ci_case "$case_dir" "$url"
+  expect_code 0 "$RC" "github-no-checks-merges: a pull request with no checks should merge without a flag: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 91 example/repo --squash
+
+  case_dir=$(make_case github-allow-no-ci)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head"
+  run_no_ci_case "$case_dir" "$url" --allow-no-ci
+  expect_code 2 "$RC" "github-allow-no-ci: --allow-no-ci must not apply on GitHub"
+  assert_grep '--allow-no-ci does not apply to GitHub' "$case_dir/stderr" \
+    "github-allow-no-ci: the refusal did not name GitHub"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-allow-no-ci: gh pr merge ran despite the refused flag"
+  pass "fm-pr-merge refuses --allow-no-ci on GitHub, where a pull request with no checks already merges"
+}
+
+test_allow_no_ci_merges_only_an_absent_forgejo_status
+test_allow_no_ci_merges_only_an_absent_gitlab_pipeline
+test_allow_no_ci_is_attended_only_and_one_shot
+test_allow_no_ci_refused_on_github

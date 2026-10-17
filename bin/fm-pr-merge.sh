@@ -58,7 +58,12 @@
 # refused while the away-posture record exists, and neither
 # applies on GitLab, where a merge already requires the head pipeline to have
 # succeeded, or on Forgejo, where a merge already requires the head's combined
-# commit status to have succeeded. After gh returns success, GitHub's live
+# commit status to have succeeded. A third attended waiver, --allow-no-ci,
+# takes no value and applies the other way round: only on GitLab and Forgejo,
+# whose sections below own what it accepts, and never on GitHub, where a pull
+# request with no checks reported and none required already merges. It is
+# refused while the away-posture record exists, like the other two.
+# After gh returns success, GitHub's live
 # state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
@@ -94,7 +99,12 @@
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
 # blocking_discussions_resolved is true, and the head pipeline succeeded at the
-# exact current head commit. Every failing condition is reported, not just the
+# exact current head commit. An attended --allow-no-ci accepts, in place of
+# that pipeline, a null head_pipeline: no pipeline at all for the head, as a
+# project that runs no CI reports. A pipeline that exists in any state but
+# success still refuses, and a pipeline not yet created for a project that has
+# CI reads the same as none, so the flag is the caller's word that the project
+# runs none. Every failing condition is reported, not just the
 # first. The verified head is then passed to glab as --sha, so a push that lands
 # between that read and the merge fails the merge instead of landing commits
 # nothing verified. A recorded pr_head that disagrees with the live head is
@@ -107,7 +117,10 @@
 # true, and the combined commit status at the exact current head, read across
 # every status page, is success (an unconfigured status, reported as "none",
 # refuses rather than being treated as nothing to check, the same reading
-# GitLab's null head_pipeline gets above). Every
+# GitLab's null head_pipeline gets above, and the attended --allow-no-ci
+# accepts that absence and nothing else, on the same terms as on GitLab: a
+# non-empty status set that is not success, or an unreadable page, still
+# refuses). Every
 # failing condition is reported, not just the first. tea exposes no head-
 # binding flag on its own merge subcommand, so the verified head is instead
 # passed as head_commit_id to a direct call against Forgejo/Gitea's REST API
@@ -168,7 +181,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-ci] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -229,6 +242,7 @@ shift 2
 ATTENDED_OVERRIDE=false
 ALLOW_RED=()
 ALLOW_MISSING=()
+ALLOW_NO_CI=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --attended-override)
@@ -257,6 +271,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --allow-missing=*)
       echo "error: --allow-missing requires a separate check name argument" >&2
+      exit 2
+      ;;
+    --allow-no-ci)
+      [ "$ALLOW_NO_CI" = false ] || { echo "error: --allow-no-ci may be specified only once" >&2; exit 2; }
+      ALLOW_NO_CI=true
+      shift
+      ;;
+    --allow-no-ci=*)
+      echo "error: --allow-no-ci takes no value" >&2
       exit 2
       ;;
     --) shift; break ;;
@@ -292,6 +315,13 @@ if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
       exit 2
       ;;
   esac
+fi
+# --allow-no-ci accepts a head with no pipeline or commit status at all, a case
+# only GitLab and Forgejo refuse. GitHub has no such case to waive, so the flag
+# is refused there for the same reason as above.
+if [ "$ALLOW_NO_CI" = true ] && [ "$PROVIDER" = github ]; then
+  echo "error: --allow-no-ci does not apply to GitHub, where a pull request with no checks reported and none required already merges" >&2
+  exit 2
 fi
 
 caller_has_merge_method() {
@@ -530,9 +560,9 @@ FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
 gitlab_verify_mergeable() {
   local json fields line
-  local total=0 named=0 refusals=''
+  local total=0 named=0 refusals='' ci_verdict=''
   local state='' detail='' conflicts='' discussions=''
-  local live_head='' pipeline_sha='' pipeline_status='' async_configured=''
+  local live_head='' pipeline_sha='' pipeline_status='' pipeline_absent='' async_configured=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -555,6 +585,7 @@ gitlab_verify_mergeable() {
         "head=" + ((.sha // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
+        "pipeline_absent=" + (has("head_pipeline") and .head_pipeline == null | tostring),
         "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
       else
         error("merge request payload is not an object")
@@ -572,6 +603,7 @@ gitlab_verify_mergeable() {
       head=*) live_head=${line#head=} ;;
       pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
+      pipeline_absent=*) pipeline_absent=${line#pipeline_absent=} ;;
       async_configured=*) async_configured=${line#async_configured=} ;;
       *) continue ;;
     esac
@@ -582,7 +614,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 8 ] || [ "$total" -ne 8 ]; then
+  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -610,20 +642,25 @@ FIELDS
   [ "$discussions" = true ] \
     || refusals="$refusals  - blocking_discussions_resolved is \"${discussions:-unreadable}\", not true
 "
-  [ "$pipeline_status" = success ] \
-    || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
+  if [ "$ALLOW_NO_CI" = true ] && [ "$pipeline_absent" = true ]; then
+    ci_verdict="no pipeline at all (allowed by --allow-no-ci)"
+  else
+    ci_verdict="a successful pipeline"
+    [ "$pipeline_status" = success ] \
+      || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
 "
-  [ "$pipeline_sha" = "$live_head" ] \
-    || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+    [ "$pipeline_sha" = "$live_head" ] \
+      || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
 "
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
-    "$URL" "$live_head" >&2
+  printf 'verified: %s is open and mergeable, with %s at head %s\n' \
+    "$URL" "$ci_verdict" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
 }
@@ -642,6 +679,7 @@ forgejo_verify_mergeable() {
   local pr_json status_json fields line
   local total=0 named=0 refusals=''
   local state='' mergeable='' draft='' live_head='' ci_state='' page_state='' page_count='' page=1
+  local ci_verdict='a successful combined status'
 
   if ! pr_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
       "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$pr_json" ]; then
@@ -743,17 +781,21 @@ FIELDS
   [ "$draft" != true ] \
     || refusals="$refusals  - the pull request is a draft
 "
-  [ "$ci_state" = success ] \
-    || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
+  if [ "$ALLOW_NO_CI" = true ] && [ "$ci_state" = none ]; then
+    ci_verdict="no commit status at all (allowed by --allow-no-ci)"
+  else
+    [ "$ci_state" = success ] \
+      || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
 "
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with a successful combined status at head %s\n' \
-    "$URL" "$live_head" >&2
+  printf 'verified: %s is open and mergeable, with %s at head %s\n' \
+    "$URL" "$ci_verdict" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
 }
 
@@ -1389,6 +1431,10 @@ require_current_away_authority() {
   fi
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
     echo "error: --allow-missing is attended-only; while the away-posture record exists every required check must report" >&2
+    return 2
+  fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "$ALLOW_NO_CI" = true ]; then
+    echo "error: --allow-no-ci is attended-only; while the away-posture record exists a head with no pipeline or commit status refuses" >&2
     return 2
   fi
 }
