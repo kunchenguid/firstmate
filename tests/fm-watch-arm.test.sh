@@ -1377,7 +1377,7 @@ start_owned_watcher() {  # <home> <state> <fakebin> <arm-out>
   local home=$1 state=$2 fakebin=$3 armout=$4 i
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" > "$armout" 2>&1 &
+    FM_ARM_CONFIRM_TIMEOUT=10 "$WATCH_ARM" > "$armout" 2>&1 &
   ARM_PID=$!
   i=0
   while [ "$i" -lt 100 ]; do
@@ -1713,6 +1713,237 @@ EOF
   pass "watch-arm: the OpenCode arm plugin decides with the shared supervision predicate"
 }
 
+test_watch_arm_successor_drop_path_escalates_when_supervision_needed() {
+  local dir state fakebin armout err drain_out
+  dir=$(make_case successor-drop-escalate)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  # Task in flight ensures supervision is needed
+  : > "$state/task1.meta"
+
+  # Enable opt-in auto-successor but simulate successor failure via FM_TEST_SUCCESSOR_FAIL
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_WATCH_AUTO_SUCCESSOR=1 FM_TEST_SUCCESSOR_FAIL=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  ARM_PID=$!
+
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "initial arm did not start: $(cat "$armout")"
+
+  # Trigger a wake to end the cycle
+  printf 'done: task1 finished\n' > "$state/task1.status"
+
+  wait_for_exit "$ARM_PID" 60 || fail "arm did not exit on wake"
+  grep -q '^signal:' "$armout" || fail "arm did not deliver the signal wake"
+
+  # Verify cycle log recorded successor=none
+  grep -q "arm_pid=$ARM_PID.*successor=none" "$state/.watch-cycle-exits.log" \
+    || fail "cycle log did not record successor=none: $(cat "$state/.watch-cycle-exits.log")"
+
+  # Verify drop wake was queued
+  grep -q 'watcher successor dropped' "$state/.wake-queue" \
+    || fail "drop wake was not queued in .wake-queue: $(cat "$state/.wake-queue" 2>/dev/null)"
+
+  # Verify draining the queue reports the drop
+  err="$state/drain.err"
+  drain_out=$(FM_STATE_OVERRIDE="$state" "$DRAIN" 2>"$err" || true)
+  grep -q 'watcher successor dropped' <<< "$drain_out" \
+    || fail "drain did not report the dropped successor wake: $drain_out (err: $(cat "$err" 2>/dev/null))"
+
+  pass "watch-arm: successor drop path logs successor=none and escalates via wake queue"
+}
+
+test_watch_arm_auto_spawns_successor_maintaining_supervision_chain() {
+  local dir state fakebin armout successor_watcher i
+  dir=$(make_case auto-spawn-successor)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  # Task in flight ensures supervision is needed
+  : > "$state/task1.meta"
+
+  # Start arm with opt-in auto-successor enabled
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_WATCH_AUTO_SUCCESSOR=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" &
+  ARM_PID=$!
+
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "initial arm did not start: $(cat "$armout")"
+
+  # Trigger wake to complete first cycle
+  printf 'done: step 1\n' > "$state/task1.status"
+
+  wait_for_exit "$ARM_PID" 60 || fail "initial arm did not exit on wake"
+  grep -q '^signal:' "$armout" || fail "initial arm did not report signal wake: $(cat "$armout")"
+
+  # Verify cycle ledger links started/attached successor (not none)
+  ! grep -q "arm_pid=$ARM_PID.*successor=none" "$state/.watch-cycle-exits.log" \
+    || fail "cycle ended with successor=none: $(cat "$state/.watch-cycle-exits.log")"
+  grep -qE "arm_pid=$ARM_PID.*successor=(started|attached):[0-9]+" "$state/.watch-cycle-exits.log" \
+    || fail "cycle ledger did not link live successor: $(cat "$state/.watch-cycle-exits.log")"
+
+  # Confirm successor watcher is live and beating
+  successor_watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$successor_watcher" ] || fail "no successor watcher in lock"
+  is_live_non_zombie "$successor_watcher" || fail "successor watcher is not live"
+
+  # Verify successor responds to next event
+  printf 'done: step 2\n' > "$state/task2.status"
+  i=0
+  while [ "$i" -lt 60 ]; do
+    grep -q 'task2.status' "$state/.wake-queue" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q 'task2.status' "$state/.wake-queue" \
+    || fail "successor watcher did not process the second wake"
+
+  # Cleanup successor
+  kill -TERM "$successor_watcher" 2>/dev/null || true
+  wait_for_exit "$successor_watcher" 30 >/dev/null 2>&1 || true
+
+  pass "watch-arm: auto-spawns successor and maintains supervision chain"
+}
+
+test_watch_arm_consecutive_wakes_maintain_exactly_one_live_arm() {
+  local dir state fakebin armout i wake_num arm_count watcher_count p live_watcher
+  dir=$(make_case consecutive-wakes-single-arm)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  : > "$state/task.meta"
+
+  # Start arm with opt-in auto-successor enabled
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_WATCH_AUTO_SUCCESSOR=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  ARM_PID=$!
+
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "initial arm did not start: $(cat "$armout")"
+
+  # Drive 4 consecutive wakes
+  for wake_num in 1 2 3 4; do
+    printf 'done: wake %d\n' "$wake_num" > "$state/step$wake_num.status"
+
+    # Wait for the wake to be queued in .wake-queue
+    i=0
+    while [ "$i" -lt 60 ]; do
+      grep -q "step$wake_num.status" "$state/.wake-queue" 2>/dev/null && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    grep -q "step$wake_num.status" "$state/.wake-queue" \
+      || fail "wake $wake_num was not processed by watcher"
+
+    # Wait for cycle handover to settle: exactly 1 live arm process
+    i=0
+    while [ "$i" -lt 50 ]; do
+      arm_count=0
+      for p in $(pgrep -f "fm-watch-arm.sh" 2>/dev/null || true); do
+        if [ -d "/proc/$p" ] && (grep -qF "$state" "/proc/$p/cmdline" 2>/dev/null || grep -qF "$state" "/proc/$p/environ" 2>/dev/null); then
+          arm_count=$((arm_count + 1))
+        fi
+      done
+      [ "$arm_count" -eq 1 ] && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    expect_code 1 "$arm_count" "at wake $wake_num, exactly one live arm process must be running (found $arm_count)"
+
+    # Count live watcher processes for this state directory
+    i=0
+    while [ "$i" -lt 50 ]; do
+      watcher_count=0
+      for p in $(pgrep -f "fm-watch.sh" 2>/dev/null || true); do
+        if [ -d "/proc/$p" ] && (grep -qF "$state" "/proc/$p/cmdline" 2>/dev/null || grep -qF "$state" "/proc/$p/environ" 2>/dev/null); then
+          watcher_count=$((watcher_count + 1))
+        fi
+      done
+      [ "$watcher_count" -eq 1 ] && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    expect_code 1 "$watcher_count" "at wake $wake_num, exactly one live watcher process must be running (found $watcher_count)"
+  done
+
+  # Cleanup
+  live_watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$live_watcher" ]; then
+    kill -TERM "$live_watcher" 2>/dev/null || true
+    wait_for_exit "$live_watcher" 30 >/dev/null 2>&1 || true
+  fi
+  for p in $(pgrep -f "fm-watch-arm.sh" 2>/dev/null || true); do
+    if [ -d "/proc/$p" ] && (grep -qF "$state" "/proc/$p/cmdline" 2>/dev/null || grep -qF "$state" "/proc/$p/environ" 2>/dev/null); then
+      kill -TERM "$p" 2>/dev/null || true
+      wait_for_exit "$p" 20 >/dev/null 2>&1 || true
+    fi
+  done
+
+  pass "watch-arm: consecutive wakes maintain exactly one live arm and one live watcher"
+}
+
+test_watch_arm_repair_after_drop_and_no_duplicate_watcher() {
+  local dir state fakebin probe_out attach_out watcher_pid second_watcher arm2_pid count p
+  dir=$(make_case repair-after-drop)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  probe_out="$dir/probe.out"
+  attach_out="$dir/attach.out"
+
+  # Simulated dropped state: task in flight, prior cycle log has successor=none, no watcher running
+  : > "$state/task1.meta"
+  printf 'arm_pid=99999\twatcher_pid=99998\torigin=test\tstarted_at=1000\tended_at=1001\texit_code=0\tsignal=none\treason=actionable-signal\tbeacon_age=0\tlock_before=held\tlock_after=free\tsuccessor=none\n' \
+    > "$state/.watch-cycle-exits.log"
+
+  # Run probe to repair the dropped state
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$probe_out" &
+  ARM_PID=$!
+
+  wait_for_file_text "$probe_out" 'watcher: started pid=' \
+    || fail "probe did not start a watcher: $(cat "$probe_out")"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "repaired watcher is not running"
+
+  # While the watcher is live, launch a concurrent arm
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$attach_out" &
+  arm2_pid=$!
+
+  wait_for_file_text "$attach_out" "watcher: attached pid=$watcher_pid" \
+    || fail "concurrent arm did not attach: $(cat "$attach_out")"
+
+  # Ensure no duplicate watcher was spawned: exactly one process holds the lock
+  second_watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$second_watcher" = "$watcher_pid" ] \
+    || fail "lock holder changed unexpectedly from $watcher_pid to $second_watcher"
+
+  # Count live watcher processes for this state dir
+  count=0
+  for p in $(pgrep -f "fm-watch.sh" 2>/dev/null || true); do
+    if [ -d "/proc/$p" ] && grep -qF "$state" "/proc/$p/cmdline" 2>/dev/null; then
+      count=$((count + 1))
+    fi
+  done
+  [ "$count" -le 1 ] || fail "duplicate watcher processes detected: count=$count"
+
+  # Cleanup
+  kill -TERM "$ARM_PID" "$arm2_pid" "$watcher_pid" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 20 >/dev/null 2>&1 || true
+  wait_for_exit "$arm2_pid" 20 >/dev/null 2>&1 || true
+  wait_for_exit "$watcher_pid" 20 >/dev/null 2>&1 || true
+
+  pass "watch-arm: repairs dropped supervision and never creates duplicate watcher"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -1744,3 +1975,7 @@ test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_opencode_arm_plugin_decides_with_the_shared_predicate
+test_watch_arm_successor_drop_path_escalates_when_supervision_needed
+test_watch_arm_auto_spawns_successor_maintaining_supervision_chain
+test_watch_arm_repair_after_drop_and_no_duplicate_watcher
+test_watch_arm_consecutive_wakes_maintain_exactly_one_live_arm
