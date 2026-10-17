@@ -905,7 +905,7 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
 test_network_phase_partitions_the_run() {
   local case_dir fakebin all_out skip_out only_out combined
   case_dir="$TMP_ROOT/network-phase"
-  mkdir -p "$case_dir/home/config"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   # Break the two diagnostics that stand for the two halves: a local tool floor
@@ -917,8 +917,12 @@ exit 1
 SH
   chmod +x "$fakebin/gh"
 
+  # A non-git fixture root is ordinary here, so the default-branch probe must
+  # not leak git's own complaint ahead of the diagnostics this case is reading.
   all_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>"$case_dir/all.err")
+  assert_not_contains "$(cat "$case_dir/all.err")" "not a git repository" \
+    "bootstrap leaked git's own diagnostic for a non-git root"
   assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
