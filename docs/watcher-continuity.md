@@ -45,6 +45,16 @@ Each adapter:
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 A failed follow-up never cancels continuity restoration.
 
+### Pi captain inbox priority
+
+While attended, the Pi watcher uses `steer` for a wake with a pending, unanswered captain inbox note identified by an `inbox:<id>` check row and its matching durable note.
+This places the notification after the current assistant/tool batch and before the next model step, rather than waiting for the entire agent run to end.
+The priority prompt asks main to read and answer the inbox first, arrange larger requests, then resume supervision without cancelling workers or expanding authority.
+Other wakes retain `followUp` delivery, and the away posture retains its existing branch ownership.
+Notes already covered by an unconsumed priority wake are not added to another queued priority notification.
+The existing actionable handoff carries selected note IDs across session replacement, including when the wake row has already been drained; missing, handled or answered notes no longer justify priority.
+Delivery never consumes a note, adds another inbox row, or acknowledges work on the captain's behalf.
+
 ### Pi session replacement
 
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`:
@@ -56,14 +66,14 @@ Pi same-process session replacement follows the generation-owner contract in `.p
 
 A state-scoped replacement handoff carries every actionable close whose delivery overlapped `session_shutdown`, including:
 
-- A main follow-up Pi accepted but had not yet consumed.
+- A main wake (steering or follow-up) Pi accepted but had not yet consumed.
 - Branch handling.
 - A retiring child that reports after the successor claim.
 
 A handoff marker never satisfies the extension-ownership tolerance.
 So a running Pi process whose replacement did not load this extension is reported as missing, rather than borrowing stale load evidence from its predecessor.
 
-A main follow-up counts as delivered once Pi accepts it, never once the model reads it.
+A main wake, steering or follow-up, counts as delivered once Pi accepts it, never once the model reads it.
 The reason is that a follow-up queued while main is streaming joins the running run without a `before_agent_start`.
 The extension header owns how consumption is observed and why it only decides what a replacement replays.
 
