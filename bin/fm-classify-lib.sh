@@ -1198,6 +1198,8 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 FM_OPEN_DECISIONS_FOLD_VERSION=9
 
 # Portable device:inode identity for the rotation/recreation check below.
+# Linux renders the birth time as local time, so TZ is pinned: a recorded
+# identity must read the same in every actor's timezone.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
   local f=$1 epoch birth ident
   if [ -n "${FM_STATUS_IDENTITY_READER:-}" ]; then
@@ -1211,7 +1213,7 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
   else
     ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
     epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C TZ=UTC0 stat -c '%w' "$f" 2>/dev/null) || birth=''; else birth=''; fi
   fi
   case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
   if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
