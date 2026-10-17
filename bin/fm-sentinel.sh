@@ -59,7 +59,10 @@
 #   - A ship or scout whose current state (bin/fm-crew-state.sh) is not done or
 #     failed is relaunched in its recorded worktree through bin/fm-control.sh,
 #     with a note carrying its current status line, when its agent is dead,
-#     missing, or alive outside that worktree. Alive inside it, the lane is
+#     missing, or alive outside that worktree. A dead lane that acted since the
+#     restart is left alone, and no lane is relaunched while it is an open
+#     captain call (bin/fm-captain-hold.sh open exits 0, or 2 when unreadable).
+#     Alive inside the worktree, the lane is
 #     properly waiting and left alone when crew state reads parked, paused, or
 #     blocked or its status log's current line (fm-classify-lib.sh) is an open
 #     needs-decision or blocked, a paused wait, or a captain hold; otherwise its
@@ -73,6 +76,9 @@
 #
 # Knobs: FM_SENTINEL_HERDR_SESSION (HERDR_SESSION, else default), FM_SENTINEL_INTERVAL (60),
 # FM_SENTINEL_REWAKE_SECS (1800), FM_GUARD_GRACE (300).
+# FM_SENTINEL_DRY_RUN=1 with reconcile decides as usual and prints each line to
+# stdout, but runs no fm-control action, takes no lock, and writes nothing to the
+# home; it is refused for tick and loop.
 # Exit: 0 after a pass (including deferred work), 1 when the pass hit an error
 # it logged, 2 for usage or a missing FM_HOME.
 set -u
@@ -97,6 +103,9 @@ INTERVAL=${FM_SENTINEL_INTERVAL:-60}
 REWAKE=${FM_SENTINEL_REWAKE_SECS:-1800}
 GRACE=${FM_GUARD_GRACE:-300}
 LOG="$STATE/.sentinel.log"
+DRY_RUN=${FM_SENTINEL_DRY_RUN:-0}
+case "$DRY_RUN" in 0|1) ;; *) echo "fm-sentinel: FM_SENTINEL_DRY_RUN must be 0 or 1" >&2; exit 2 ;; esac
+[ "$DRY_RUN" = 0 ] || [ "$CMD" = reconcile ] || { echo "fm-sentinel: FM_SENTINEL_DRY_RUN applies only to reconcile" >&2; exit 2; }
 
 if [ "$CMD" = unit ]; then
   unit_quote() {
@@ -140,6 +149,7 @@ fm_backend_source herdr || { echo "fm-sentinel: cannot load the Herdr adapter" >
 
 say() {
   printf '%s\n' "$*"
+  [ "$DRY_RUN" = 1 ] && return 0
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG" 2>/dev/null || true
 }
 
@@ -158,6 +168,10 @@ herdr_identity() {
 act() {  # <task-id> <done-message> <command...>
   local id=$1 done=$2 out
   shift 2
+  if [ "$DRY_RUN" = 1 ]; then
+    say "$id: dry run, no action: $done"
+    return 0
+  fi
   if out=$("$@" 2>&1); then
     say "$id: $done"
   else
@@ -204,8 +218,23 @@ nudge_once() {  # <id> <meta> <done-message> <text>
     return 0
   fi
   [ "$(fm_meta_get "$2" kind)" != secondmate ] || ff=(--fire-and-forget "$key")
-  act "$1" "$3" "$SCRIPT_DIR/fm-send.sh" "$1" ${ff[@]+"${ff[@]}"} "$4" \
-    && printf '%s\n' "$key" >"$rec"
+  act "$1" "$3" "$SCRIPT_DIR/fm-send.sh" "$1" ${ff[@]+"${ff[@]}"} "$4" || return 1
+  [ "$DRY_RUN" = 1 ] || printf '%s\n' "$key" >"$rec"
+}
+
+# Whether <id> is an open captain call, which no automatic relaunch may touch.
+# Exit 1 (not open, or absent from the backlog) lets the lane through; exit 0
+# (open) and exit 2 (cannot tell) hold it, so an unreadable hold fails closed.
+captain_held() {  # <id>
+  local rc=0
+  "$SCRIPT_DIR/fm-captain-hold.sh" open "$1" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 1 ] || return 1
+  if [ "$rc" -eq 0 ]; then
+    say "$1: captain hold open; left alone"
+  else
+    say "$1: captain hold unreadable (exit $rc); left alone"
+  fi
+  return 0
 }
 
 reconcile() {  # <episode>
@@ -284,12 +313,15 @@ reconcile() {  # <episode>
             fi
             ;;
           *)
+            captain_held "$id" && continue
             act "$id" "was live in ${cwd:-an unreadable folder}; relaunched in $wt" \
               "$SCRIPT_DIR/fm-control.sh" "$id" relaunch --note "$note"
             ;;
         esac
         ;;
       *)
+        captain_held "$id" && continue
+        [ "$acted" -eq 0 ] || { say "$id: acted since the restart; left alone"; continue; }
         act "$id" "agent $agent; relaunched in $wt" \
           "$SCRIPT_DIR/fm-control.sh" "$id" relaunch --note "$note"
         ;;
@@ -364,6 +396,7 @@ tick() {
 
 locked() {
   local lock="$STATE/.sentinel.lock" rc=0
+  if [ "$DRY_RUN" = 1 ]; then "$@"; return $?; fi
   fm_lock_try_acquire "$lock" || return 0
   "$@" || rc=$?
   fm_lock_release "$lock"
