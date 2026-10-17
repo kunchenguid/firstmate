@@ -627,6 +627,104 @@ assert_contains "$out" "captured:" "the replacement registration remains indepen
 pe_adapter "$HREPLACE" retire replace-src >/dev/null
 pass "terminal retirement preserves and releases a concurrently replaced registration"
 
+# A relistening source whose every capture is terminal for its registration
+# (the remote-reply shape) is re-armed by its own autohandle. A second re-arm
+# while the runner polls - a handler re-handling an already applied capture -
+# unlinks the claimed registration, and filesystems that recycle freed inodes
+# (ext4) can hand its identity to a later file, including the next re-arm. The
+# runner retires its terminal registration by that identity, so it must keep the
+# claimed identity from being reused for as long as it holds the claim. Probe
+# files created after the concurrent re-arm stand in for that later
+# registration: where freed inodes are reused, one of them reaches the claimed
+# identity unless it is still held.
+cat > "$ADAPTER_ROOT/bin/fm-procevent-rearming.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1-}" in
+  self-announcing|relisten) exit 0 ;;
+  terminal) [ -s "${2-}" ] ;;
+  autohandle)
+    "$FM_PROCEVENT_UNDER_TEST" register rearming "$2" -- "$FM_REARM_SOURCE" >/dev/null || exit 1
+    "$FM_PROCEVENT_UNDER_TEST" handled "$2" "$3" >/dev/null
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$ADAPTER_ROOT/bin/fm-procevent-rearming.sh"
+file_identity() { stat -c %d:%i "$1" 2>/dev/null || stat -f %d:%i "$1"; }
+HRECYCLE="$TMP_ROOT/hrecycle"; new_home "$HRECYCLE"
+fm_test_track_procevent_home "$HRECYCLE"
+REARM_SOURCE="$TMP_ROOT/rearm-source.sh"
+cat > "$REARM_SOURCE" <<'SH'
+#!/usr/bin/env bash
+# One capture per trigger, so a relistening runner blocks again afterwards.
+printf 'polling\n' >> "$FM_HOME/polls"
+while [ ! -e "$FM_HOME/trigger" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.05
+done
+rm -f "$FM_HOME/trigger"
+printf 'payload\n'
+SH
+chmod +x "$REARM_SOURCE"
+pe_rearm() { FM_REARM_SOURCE="$REARM_SOURCE" pe_adapter "$HRECYCLE" "$@"; }
+recycle_registration="$HRECYCLE/state/procevent/recycle-src.source"
+recycle_case="a concurrent re-arm cannot recycle a live relistening source's claimed registration"
+RECYCLE_PROBES=100
+# The hold directory exists before any inode is freed, so it never takes one.
+recycle_hold="$TMP_ROOT/recycle-probes"
+mkdir -p "$recycle_hold"
+# Creates probe files in the registry directory, holding every one so each takes
+# a different free inode, until one receives <identity> (status 0) or the probe
+# budget is exhausted (status 1).
+recycle_probe() {  # <identity>
+  local probe
+  for _ in $(seq 1 "$RECYCLE_PROBES"); do
+    probe=$(mktemp "$HRECYCLE/state/procevent/.probe.XXXXXX") || fail "cannot create a recycle probe"
+    mv -- "$probe" "$recycle_hold/"
+    [ "$(file_identity "$recycle_hold/${probe##*/}")" = "$1" ] && return 0
+  done
+  return 1
+}
+pe_rearm register rearming recycle-src -- "$REARM_SOURCE" >/dev/null
+# Control: the probes only prove the pin where this directory hands a freed
+# inode back within the budget. Filesystems that never recycle inodes (tmpfs,
+# APFS) cannot reproduce the race, so the case is skipped there, not passed.
+recycle_control=$(mktemp "$HRECYCLE/state/procevent/.control.XXXXXX")
+control_identity=$(file_identity "$recycle_control")
+rm -f -- "$recycle_control"
+if ! recycle_probe "$control_identity"; then
+  rm -f -- "$recycle_hold"/.probe.*
+  pe_rearm retire recycle-src >/dev/null
+  printf 'skip: %s: no freed inode was reused within %s files\n' "$recycle_case" "$RECYCLE_PROBES"
+else
+  rm -f -- "$recycle_hold"/.probe.*
+  pe_rearm start recycle-src > "$TMP_ROOT/recycle.out" 2>&1 &
+  recycle_pid=$!
+  for round in 1 2; do
+    wait_for_lines "$HRECYCLE/polls" "$round" || fail "the re-arming runner never polled (round $round)"
+    claimed=$(file_identity "$recycle_registration") || fail "the claimed registration is missing (round $round)"
+    pe_rearm register rearming recycle-src -- "$REARM_SOURCE" >/dev/null
+    recycle_probe "$claimed" \
+      && fail "a new file received the claimed registration's identity while its runner held the claim (round $round)"
+    rm -f -- "$recycle_hold"/.probe.*
+    : > "$HRECYCLE/trigger"
+    for _ in $(seq 1 300); do
+      [ "$(grep -c '^captured:' "$TMP_ROOT/recycle.out")" -ge "$round" ] && break
+      sleep 0.1
+    done
+    [ "$(grep -c '^captured:' "$TMP_ROOT/recycle.out")" -ge "$round" ] \
+      || fail "re-arming capture $round never completed: $(cat "$TMP_ROOT/recycle.out")"
+    assert_not_contains "$(cat "$TMP_ROOT/recycle.out")" "retired: recycle-src" \
+      "the runner retired a fresh re-registration as its own claimed registration"
+    assert_present "$recycle_registration" \
+      "a relistening source lost its registration after a concurrent re-arm (round $round)"
+  done
+  kill -0 "$recycle_pid" 2>/dev/null || fail "the re-arming runner stopped listening"
+  pe_rearm retire recycle-src >/dev/null
+  wait "$recycle_pid" 2>/dev/null || true
+  pass "$recycle_case"
+fi
+
 HRETFAIL="$TMP_ROOT/hretfail"; new_home "$HRETFAIL"
 fm_test_track_procevent_home "$HRETFAIL"
 FAIL_RM_BIN=$(fm_fakebin "$TMP_ROOT/retire-fail-bin")
