@@ -789,7 +789,7 @@ SH
 }
 
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note() {
-  local case_dir out real_tasks_axi url
+  local case_dir out real_tasks_axi url forge
   local gitlab_url=https://gitlab.example.com/group/sub/repo/-/merge_requests/12
   case_dir=$(make_case tasks-axi-close-gitlab)
   write_meta "$case_dir" no-mistakes ship
@@ -823,7 +823,8 @@ SH
     "a landed GitLab close left its pending-close record behind"
 
   for url in https://github.com/example/repo/pull/7 https://forgejo.example.com/example/repo/pulls/7; do
-    case_dir=$(make_case "tasks-axi-close-pr-under-gitlab-refusal-${url%%.*}")
+    forge=${url#https://}
+    case_dir=$(make_case "tasks-axi-close-pr-under-gitlab-refusal-${forge%%.*}")
     write_meta "$case_dir" no-mistakes ship
     printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
     seed_backlog_in_flight "$case_dir"
