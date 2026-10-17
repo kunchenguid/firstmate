@@ -2287,7 +2287,7 @@ test_terminal_stale_surfaced() {
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
-# log gets no new entry once firstmate hands it to a no-mistakes validation
+# log from a legacy brief gets no new entry once validation starts
 # (AGENTS.md's sparse status-reporting contract), so the log keeps showing its
 # pre-validation "done:" line as the LAST line for the run's entire (possibly
 # many-minutes) duration. stale_is_terminal alone has no run-step awareness and
@@ -2302,7 +2302,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   window="test:fm-validating"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
-  # The crew reported done BEFORE firstmate triggered no-mistakes validation;
+  # The legacy crew reported done BEFORE no-mistakes validation started;
   # this line never gets superseded by a newer status-log entry while the
   # pipeline itself runs.
   printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
