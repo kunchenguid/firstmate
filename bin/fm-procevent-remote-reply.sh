@@ -420,7 +420,7 @@ summarize_fetch_reason() { # <stderr-file> <remote-relative>
 # leaves the reader's own explanation in FETCH_DOC_REASON.
 FETCH_DOC_REASON=''
 fetch_document() { # <id> <remote-relative> <result-var>
-  local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp err local_rel rc=0
+  local id=$1 rel=$2 result_var=$3 base base_real destination parent parent_real tmp err local_rel rc=0
   FETCH_DOC_REASON=''
   if ! safe_doc_path "$rel"; then
     FETCH_DOC_REASON='pointer is not a confined data/*.md path'
@@ -431,8 +431,9 @@ fetch_document() { # <id> <remote-relative> <result-var>
   parent=$(dirname "$destination")
   mkdir -p "$parent" || return "$DOCUMENT_LOCAL_FAILURE"
   [ ! -L "$base" ] && [ ! -L "$parent" ] || return "$DOCUMENT_LOCAL_FAILURE"
+  base_real=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P) || return "$DOCUMENT_LOCAL_FAILURE"
   parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return "$DOCUMENT_LOCAL_FAILURE"
-  case "$parent_real" in "$base"|"$base"/*) ;; *) return "$DOCUMENT_LOCAL_FAILURE" ;; esac
+  case "$parent_real" in "$base_real"|"$base_real"/*) ;; *) return "$DOCUMENT_LOCAL_FAILURE" ;; esac
   [ ! -L "$destination" ] || return "$DOCUMENT_LOCAL_FAILURE"
   err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-doc-reason.XXXXXX") || return "$DOCUMENT_LOCAL_FAILURE"
   tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || { rm -f -- "$err"; return "$DOCUMENT_LOCAL_FAILURE"; }
