@@ -79,6 +79,23 @@
 # Any other watcher, or one that outlives the stop,
 # is attached to exactly as a plain arm attaches.
 #
+# FM_WATCH_ARM_LEFT_RECORD names the record an owner writes ("<pid>\t...")
+# when it leaves this arm running for main with no one reading its close
+# (bin/fm-supervision-host.sh). While that record names this argument-free
+# arm, a cycle that delivers a wake does not end the arm: the wake is already
+# durable in the queue, so the arm re-executes itself in place as a handling
+# successor (same pid and command line, so --take-over still matches it) and
+# the home keeps a live watcher through main's turn. Any other close, a signal,
+# a record that no longer names this arm, or a close after at most 20 re-arms
+# (a condition that closes every cycle at once must not spin) ends it as usual.
+# An arm attached to that left arm's watcher does not follow the re-armed one:
+# when the next healthy holder is a child of the same live fm-watch-arm.sh
+# parent as the watcher whose cycle ended (only a re-armed left arm starts a
+# second watcher child), the attached arm reports that cycle's delivered reason
+# and exits 0 (attach_and_wait), so a re-arm in place never hides a close from
+# it. Watchers another parent starts back to back, such as the away daemon's,
+# are followed as ordinary successors.
+#
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
 # its own supervision cycle on purpose (the supervision host's park boundary,
 # bin/fm-supervision-host.sh). The stopped watcher publishes downtime exactly
@@ -169,6 +186,7 @@ WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
 cycle_active=0
 cycle_watcher_pid=none
 cycle_watcher_identity=none
+cycle_watcher_ppid=
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
@@ -177,6 +195,10 @@ cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
   cycle_watcher_identity=$3
+  cycle_watcher_ppid=
+  if [ "$2" = attached ]; then
+    cycle_watcher_ppid=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  fi
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
   cycle_active=1
@@ -383,6 +405,23 @@ attached_holder_live() {
   [ "$FM_WATCHER_MATCHED_IDENTITY" = "$cycle_watcher_identity" ]
 }
 
+# A left arm (header, FM_WATCH_ARM_LEFT_RECORD) re-arms in place after a
+# delivered close, so its next watcher shares the ended one's parent. Report the
+# ended cycle's delivered reason instead of following the re-armed cycle.
+report_rearmed_close() {
+  local ppid
+  case "$cycle_watcher_ppid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  ppid=$(ps -o ppid= -p "$HEALTHY_PID" 2>/dev/null | tr -d ' ')
+  [ "$ppid" = "$cycle_watcher_ppid" ] || return 1
+  case " $(ps -o command= -p "$ppid" 2>/dev/null) " in
+    *" $0 "*|*" $SCRIPT_DIR/fm-watch-arm.sh "*) ;;
+    *) return 1 ;;
+  esac
+  cycle_delivered_reason || return 1
+  printf '%s\n' "$DELIVERED_REASON"
+  cycle_log_append unknown unknown attached-delivered-wake none
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, report the wake that cycle durably
 # delivered, or fail loudly - never a clean empty completion that an adapter could
@@ -397,6 +436,7 @@ attach_and_wait() {
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
+        report_rearmed_close && return 0
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
         cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
@@ -416,6 +456,7 @@ attach_and_wait() {
       return 1
     fi
     if wait_for_healthy_successor; then
+      report_rearmed_close && return 0
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
       cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
@@ -479,6 +520,9 @@ mode=arm
 handling_generation=
 handling_watcher_pid=
 take_over_arm_pid=
+# Only a plain, argument-free arm can re-arm in place as itself (finish_arm).
+LEFT_ARM_ELIGIBLE=0
+[ "$#" -ne 0 ] || LEFT_ARM_ELIGIBLE=1
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
@@ -596,6 +640,26 @@ take_over_cycle() {  # <watcher-pid> <identity>
   return 0
 }
 
+# End this arm with <status>, unless it is an arm left for main (header,
+# FM_WATCH_ARM_LEFT_RECORD) whose cycle just delivered a wake: nothing reads
+# that close, so it re-arms in place - same pid, same command line - and the
+# home keeps a watcher until the next park takes this arm over.
+finish_arm() {  # <status>
+  local left_pid="" rearms
+  if [ "$1" -eq 0 ] && [ "$LEFT_ARM_ELIGIBLE" -eq 1 ] \
+    && [ -f "${FM_WATCH_ARM_LEFT_RECORD:-}" ] && [ ! -L "$FM_WATCH_ARM_LEFT_RECORD" ]; then
+    IFS=$'\t' read -r left_pid _ < "$FM_WATCH_ARM_LEFT_RECORD" 2>/dev/null || true
+    rearms=${FM_WATCH_ARM_LEFT_REARMS:-0}
+    case "$rearms" in ''|*[!0-9]*) rearms=0 ;; esac
+    if [ "$left_pid" = "$ARM_PID" ] && [ "$rearms" -lt 20 ]; then
+      trap - HUP TERM INT
+      export FM_WATCH_PREDECESSOR_ARM_PID=$ARM_PID FM_WATCH_ARM_LEFT_REARMS=$((rearms + 1))
+      exec "$0"
+    fi
+  fi
+  exit "$1"
+}
+
 TAKEN_OVER=0
 if [ "$mode" = take-over ]; then
   mode=arm
@@ -618,7 +682,7 @@ if [ "$mode" = arm ] && healthy_watcher; then
   cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
   report_attached
   attach_and_wait "$HEALTHY_PID"
-  exit $?
+  finish_arm $?
 fi
 
 # Start a watcher as a tracked child and confirm it before settling in. The child
@@ -766,20 +830,20 @@ while :; do
       wait "$child"
       rc=$?
       owned_child_finished "$rc"
-      exit $?
+      finish_arm $?
     fi
     # Another watcher won the singleton; our child stood down.
     wait "$child"
     rc=$?
     owned_child_finished "$rc"
-    exit $?
+    finish_arm $?
   fi
   if [ "$child_done" -eq 0 ] && ! fm_pid_alive "$child"; then
     wait "$child"
     rc=$?
     child_done=1
     owned_child_finished "$rc"
-    exit $?
+    finish_arm $?
   fi
   [ "$(date +%s)" -ge "$deadline" ] && break
   sleep 0.2
