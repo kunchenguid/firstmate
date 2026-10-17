@@ -759,6 +759,50 @@ test_direct_pr_unpushed_commit_refuses_registration() {
   pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
 }
 
+# A record-only task names no existing worktree: the forge head is still read
+# from the full PR URL, so a no-mistakes registration records it, while an
+# invalid head or a mode whose named head lives in the copy is still refused.
+test_record_only_task_reads_forge_head() {
+  local dir expected wt_line
+  expected=0123456789abcdef0123456789abcdef01234567
+  for wt_line in '' "worktree=/nonexistent/fm-record-only-wt"; do
+    dir=$(make_case "record-only-${wt_line:+missing}${wt_line:-absent}")
+    fm_write_meta "$dir/home/state/task-a.meta" \
+      "window=firstmate:fm-task-a" "endpoint_task_id=task-a" ${wt_line:+"$wt_line"} \
+      "project=$dir/project" "kind=ship" "mode=no-mistakes"
+    FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/o/r/pull/5 \
+      > "$dir/stdout" 2> "$dir/stderr" \
+      || fail "record-only no-mistakes registration was refused: $(cat "$dir/stderr")"
+    grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" \
+      || fail "record-only registration did not record the forge head"
+    if [ -z "$wt_line" ]; then
+      assert_no_grep 'worktree=' "$dir/home/state/task-a.meta" "record-only registration wrote a worktree into metadata"
+    fi
+  done
+
+  dir=$(make_case record-only-invalid-head)
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" \
+    "project=$dir/project" "kind=ship" "mode=no-mistakes"
+  FM_TEST_GH_HEAD=not-a-head run_check_entry "$dir" task-a https://github.com/o/r/pull/5 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "record-only registration accepted an invalid forge head"
+  grep -Fq "named head cannot be verified: worktree missing" "$dir/stderr" \
+    || fail "invalid-head refusal changed: $(cat "$dir/stderr")"
+  assert_no_grep 'pr_head=' "$dir/home/state/task-a.meta" "invalid forge head reached metadata"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "invalid-head record-only task still armed a poll"
+
+  dir=$(make_case record-only-direct-pr)
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" \
+    "project=$dir/project" "kind=ship" "mode=direct-PR"
+  FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/o/r/pull/5 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "record-only direct-PR registration bypassed the copy gate"
+  grep -Fq "named head cannot be verified: worktree missing" "$dir/stderr" \
+    || fail "record-only direct-PR refusal changed: $(cat "$dir/stderr")"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "record-only direct-PR task still armed a poll"
+  pass "fm-pr-check records the forge head for a record-only task and keeps its refusals"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -3633,6 +3677,7 @@ test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
+test_record_only_task_reads_forge_head
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
