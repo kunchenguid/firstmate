@@ -1737,11 +1737,28 @@ fm_failure_episode_reset() {
 #     than the guard grace, which proves the owner hung mid-arm with nothing
 #     supervising (every legitimate arming phase with no watcher is bounded in
 #     seconds, while a healthy hours-long cycle keeps the beacon beating).
-#   - Every firing DEFERS (exits 0) to an open claim; anything else - a
-#     terminal outcome, a dead or identity-mismatched owner, a stuck owner, an
+#   - Every firing DEFERS to an open claim; anything else - a terminal
+#     outcome, a dead or identity-mismatched owner, a stuck owner, an
 #     identityless entry, or no claim at all - lets the next firing take
 #     generation N+1 (fm_autoarm_claim_next). Taking a newer generation IS the
 #     reclaim: a steady-state predecessor is never signalled or revoked.
+#   - A deferring firing PARKS on the open claim instead of exiting
+#     (fm_autoarm_park): once a newer Stop fires, the owner's own exit 2 belongs
+#     to a superseded Stop, and the incidents in issue #7252 lost it, so the
+#     newest Stop's firing delivers instead (a live Claude Code 2.1.301 lab
+#     still delivered the superseded exit 2: docs/verification/supervision.md).
+#     The ledger's companion record
+#     state/.claude-autoarm-parked ("epoch=N parked_pid=P updated_at=T" plus the
+#     parker's mandatory pid-identity on line 2) names the one parked firing; a
+#     newer Stop's firing replaces it and the replaced one exits silently. An
+#     owner whose exit-2 commit finds a live parked firing for its generation
+#     transfers the claim to it in the same micro-mutex hold instead of
+#     committing (fm_autoarm_write_owned's handoff argument): the ledger becomes
+#     the parker's generation N+1 at "arming", the owner's banner and intended
+#     outcome are published at state/.claude-autoarm-handoff, the owner exits 0,
+#     and the parked firing delivers that close as its own. An owner that ends
+#     any other way leaves a claim that is no longer open, and the parked firing
+#     then runs the ordinary claim path a later Stop would have run.
 #   - NO mutex is ever held across a blocking step. The owner lock
 #     state/.claude-autoarm.lock survives only as a micro-mutex serializing
 #     individual ledger reads-then-writes (a few non-blocking file
@@ -1933,16 +1950,93 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   return 0
 }
 
+# Park this process on the current open claim as its one parked firing (the
+# contract comment above), replacing any earlier parked firing, under one short
+# micro-mutex hold. Returns 0 with FM_AUTOARM_PARKED_GEN set when parked, 1
+# when the claim is no longer open (the caller claims instead), and 2 when the
+# micro-mutex stays contended, the mandatory identity cannot be computed, or the
+# write failed.
+fm_autoarm_park() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock parked pid identity tmp i
+  lock="$state/.claude-autoarm.lock"
+  parked="$state/.claude-autoarm-parked"
+  FM_AUTOARM_PARKED_GEN=
+  pid=${BASHPID:-$$}
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 2
+  [ -n "$identity" ] || return 2
+  i=0
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$i" -lt 20 ] || return 2
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if ! fm_autoarm_claim_open "$state" "$grace"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  tmp="$parked.tmp.$pid"
+  if ! printf 'epoch=%s parked_pid=%s updated_at=%s\n%s\n' \
+      "$FM_AUTOARM_GEN" "$pid" "$(date +%s)" "$identity" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$parked" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$lock"
+    return 2
+  fi
+  fm_lock_release "$lock"
+  # shellcheck disable=SC2034 # Read by callers after parking succeeds.
+  FM_AUTOARM_PARKED_GEN=$FM_AUTOARM_GEN
+  return 0
+}
+
+# Lockless check for a parked firing: true while the parked record still names
+# this process for <gen> and the ledger is still at <gen>. False means a newer
+# Stop's firing parked in its place or another generation was claimed.
+fm_autoarm_still_parked() {  # <state-dir> <gen>
+  local state=$1 gen=$2 parked pid
+  parked="$state/.claude-autoarm-parked"
+  pid=${BASHPID:-$$}
+  [ "$(_fm_autoarm_epoch_field "$parked" epoch 2>/dev/null)" = "$gen" ] || return 1
+  [ "$(_fm_autoarm_epoch_field "$parked" parked_pid 2>/dev/null)" = "$pid" ] || return 1
+  fm_autoarm_ledger_read "$state" || return 1
+  [ "$FM_AUTOARM_GEN" = "$gen" ]
+}
+
+# True when a live, identity-matched firing is parked on <gen>; sets
+# FM_AUTOARM_PARKER_PID and FM_AUTOARM_PARKER_IDENTITY.
+_fm_autoarm_parker_live() {  # <state-dir> <gen>
+  local state=$1 gen=$2 parked current
+  parked="$state/.claude-autoarm-parked"
+  FM_AUTOARM_PARKER_PID=
+  FM_AUTOARM_PARKER_IDENTITY=
+  [ "$(_fm_autoarm_epoch_field "$parked" epoch 2>/dev/null)" = "$gen" ] || return 1
+  FM_AUTOARM_PARKER_PID=$(_fm_autoarm_epoch_field "$parked" parked_pid 2>/dev/null) || return 1
+  case "$FM_AUTOARM_PARKER_PID" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$FM_AUTOARM_PARKER_PID" != "${BASHPID:-$$}" ] || return 1
+  fm_pid_alive "$FM_AUTOARM_PARKER_PID" || return 1
+  FM_AUTOARM_PARKER_IDENTITY=$(sed -n '2p' "$parked" 2>/dev/null || true)
+  [ -n "$FM_AUTOARM_PARKER_IDENTITY" ] || return 1
+  current=$(fm_pid_identity "$FM_AUTOARM_PARKER_PID" 2>/dev/null) || return 1
+  [ "$current" = "$FM_AUTOARM_PARKER_IDENTITY" ]
+}
+
 # Write a new outcome for a generation this process still owns, re-verified
 # under the micro-mutex so a superseded owner can never clobber a newer claim.
 # With a fourth argument, create that marker after the ledger rename in the same
 # owned critical section (the once-per-episode failure notice). A marker failure
 # refuses the commit even though its terminal ledger entry remains; marker-first
 # ordering could permanently suppress a notice whose ledger write never won.
-# Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
-# unable (bounded contention or ledger-write failure).
-fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-pid] [recovery-generation]
-  local state=$1 gen=$2 outcome=$3 marker=${4:-} session=${5:-} recovery=${6:-} lock epoch pid identity tmp i
+# With a seventh argument, a handoff file the caller prepared for generation
+# <gen>+1, a live firing parked on <gen> takes the close instead: the file is
+# published as state/.claude-autoarm-handoff and the ledger becomes that
+# parker's <gen>+1 claim at "arming" (the contract comment above). A failed
+# transfer falls back to the ordinary commit.
+# Returns 0 committed, 3 handed to the parked firing, 2 refused (superseded or
+# required-marker failure), and 1 unable (bounded contention or ledger-write
+# failure).
+fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-pid] [recovery-generation] [handoff-file]
+  local state=$1 gen=$2 outcome=$3 marker=${4:-} session=${5:-} recovery=${6:-} handoff=${7:-} lock epoch pid identity tmp i
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   pid=${BASHPID:-$$}
@@ -1956,6 +2050,18 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
     || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
     fm_lock_release "$lock"
     return 2
+  fi
+  if [ -n "$handoff" ] && [ -f "$handoff" ] && _fm_autoarm_parker_live "$state" "$gen"; then
+    tmp="$epoch.tmp.$pid"
+    if mv -f "$handoff" "$state/.claude-autoarm-handoff" 2>/dev/null \
+      && printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
+        "$((gen + 1))" "$FM_AUTOARM_PARKER_PID" "$(date +%s)" "$FM_AUTOARM_PARKER_IDENTITY" > "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$epoch" 2>/dev/null; then
+      rm -f "$state/.claude-autoarm-parked" 2>/dev/null || true
+      fm_lock_release "$lock"
+      return 3
+    fi
+    rm -f "$tmp" "$state/.claude-autoarm-handoff" 2>/dev/null || true
   fi
   identity=$FM_AUTOARM_IDENTITY
   tmp="$epoch.tmp.$pid"

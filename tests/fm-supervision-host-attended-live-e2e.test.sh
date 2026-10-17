@@ -29,6 +29,19 @@
 #
 #   FM_SUPERVISION_HOST_ATTENDED_LIVE_E2E=1 tests/fm-supervision-host-attended-live-e2e.test.sh
 #
+# FM_SUPERVISION_HOST_ATTENDED_LIVE_SCENARIO=superseded-stop runs only the
+# superseded-Stop scenario (issue #7252) instead: while the host parks under the
+# setup turn's Stop hook, an operator turn ends in a newer Stop whose hook parks
+# on that live claim; the host then passes a main-only close through, and the
+# rewake must start a primary turn carrying the owner's banner, with the ledger
+# recording outcome=rewake owned by the parked hook.
+# FM_SUPERVISION_HOST_ATTENDED_LIVE_GAP_SECONDS (default 3) is how long the
+# primary sits idle between the operator turn's end and the event the host
+# hands back. This scenario has no negative control: the pre-fix hook's own
+# exit 2 still woke the primary live on Claude Code 2.1.301
+# (docs/verification/supervision.md), so the loss is pinned by
+# tests/fm-claude-stop-autoarm.test.sh instead.
+#
 # FM_SUPERVISION_HOST_ATTENDED_LIVE_MODEL (default haiku) picks the primary's
 # model. Claude keeps its existing managed authentication; the lab path gets a
 # workspace-trust entry and a project transcript directory in Claude's own store.
@@ -45,6 +58,12 @@ fm_live_gate opt-in FM_SUPERVISION_HOST_ATTENDED_LIVE_E2E claude tmux jq node pe
 CLAUDE_VERSION=$(claude --version 2>/dev/null | head -n 1)
 MODEL=${FM_SUPERVISION_HOST_ATTENDED_LIVE_MODEL:-haiku}
 CONTROL_REF=${FM_SUPERVISION_HOST_ATTENDED_LIVE_CONTROL_REF:-}
+SCENARIO=${FM_SUPERVISION_HOST_ATTENDED_LIVE_SCENARIO:-handbacks}
+GAP_SECONDS=${FM_SUPERVISION_HOST_ATTENDED_LIVE_GAP_SECONDS:-3}
+case "$SCENARIO" in
+  handbacks|superseded-stop) ;;
+  *) printf 'not ok - unknown FM_SUPERVISION_HOST_ATTENDED_LIVE_SCENARIO: %s\n' "$SCENARIO" >&2; exit 2 ;;
+esac
 LAB=$(fm_test_tmproot fm-sh-attended-live)
 LAB=$(cd -P "$LAB" && pwd -P)
 SOCKET="fmshal-$$"
@@ -450,6 +469,122 @@ run_control() {
   pass "attended live control ($CLAUDE_VERSION): on $CONTROL_REF the idle primary is not woken, so the scenario catches the bug"
 }
 
+# --- superseded Stop (issue #7252) -------------------------------------------
+
+parked_record() { head -n 1 "$1/fm/state/.claude-autoarm-parked" 2>/dev/null; }
+parked_pid() { sed -n '1s/^.*parked_pid=\([0-9]*\) .*$/\1/p' "$1/fm/state/.claude-autoarm-parked" 2>/dev/null; }
+ledger_field() { sed -n "1s/^.*[[:space:]]\{0,1\}$2=\([^ ]*\).*\$/\1/p" "$1/fm/state/.claude-autoarm-epoch" 2>/dev/null; }
+hook_live() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
+hook_dead() { ! hook_live "$1"; }
+handback_since() {  # <lab> <epoch>: the host handed a close to main at or after <epoch>
+  host_log_since "$1" "$2" $'\t(to-main|pass-through)\t' | head -n 1
+}
+handed_back() { [ -n "$(handback_since "$1" "$2")" ]; }
+
+# Record every ledger entry the moment it changes, with its observation time,
+# so a generation that a later turn end supersedes still shows in the evidence.
+start_ledger_history() {  # <lab>
+  local lab=$1
+  ( last=
+    while [ -d "$lab/fm/state" ]; do
+      line=$(head -n 1 "$lab/fm/state/.claude-autoarm-epoch" 2>/dev/null)
+      if [ -n "$line" ] && [ "$line" != "$last" ]; then
+        printf '%s %s\n' "$(date +%s)" "$line" >> "$lab/ledger-history"
+        last=$line
+      fi
+      sleep 0.05
+    done ) &
+  LEDGER_HISTORY_PID=$!
+}
+
+# Quiet: the primary sits idle, no engine turn is running, and the current Stop
+# hook owns a live arming claim with the host parked, continuously for 8s.
+host_quiet() {
+  [ ! -e "$1/fm/state/.supervision-host-turn" ] && [ ! -e "$1/fm/state/.supervision-host.engine-pid" ] \
+    && host_live "$1" && [ "$(ledger_field "$1" outcome)" = arming ] && hook_live "$(ledger_field "$1" owner_pid)" \
+    && (claude_ready_state "$SOCKET-$(basename "$1")" primary >/dev/null)
+}
+settle() {  # <lab>
+  local i=0 quiet=0
+  while [ "$i" -lt 1800 ]; do
+    if host_quiet "$1"; then quiet=$((quiet + 1)); else quiet=0; fi
+    [ "$quiet" -ge 80 ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# The current Stop hook owns the parked host. An operator turn supersedes that
+# Stop; returns once its own turn has ended. Sets OWNER_PID, OWNER_GEN, and
+# OPERATOR_AT.
+supersede_with_operator_turn() {  # <lab>
+  local lab=$1 sock
+  sock="$SOCKET-$(basename "$lab")"
+  settle "$lab" || fail "$(basename "$lab"): the host never settled parked under a live Stop hook claim"$'\n'"$(diagnose "$lab")"
+  OWNER_GEN=$(ledger_field "$lab" epoch)
+  OWNER_PID=$(ledger_field "$lab" owner_pid)
+  evidence "$(basename "$lab"): owner Stop hook pid $OWNER_PID holds generation $OWNER_GEN (ledger: $(ledger "$lab")); host pid $(awk -F '\t' '$1 == "host" { print $2; exit }' "$lab/fm/state/.supervision-host") parked; host log so far: $(cut -f2 "$lab/fm/state/.supervision-host.log" | tr '\n' ' ')"
+  OPERATOR_AT=$(date +%s)
+  tmux -L "$sock" send-keys -t primary -l 'Reply with exactly TURN2 now and use no tools.'
+  sleep 1
+  tmux -L "$sock" send-keys -t primary Enter
+  evidence "$(basename "$lab"): operator turn submitted at $OPERATOR_AT"
+  wait_until "$TURN_POLLS" turn_idle "$lab" "$OPERATOR_AT" \
+    || fail "$(basename "$lab"): the operator turn never ended"$'\n'"$(diagnose "$lab")"
+  evidence "$(basename "$lab"): operator turn ended; its Stop superseded the owner's Stop; owner hook $OWNER_PID still live: $(hook_live "$OWNER_PID" && echo yes || echo no); host live: $(host_live "$lab" && echo yes || echo no)"
+}
+
+# Trigger the host's next hand-back to main and wait for it. Sets HANDBACK_AT.
+hand_back() {  # <lab> <label>
+  local lab=$1 e1
+  e1=$(fire "$lab" "$lab/fm/state/demo.status" lab-s1 'pick export format A or B')
+  evidence "$2: main-only event appended at $e1 (demo.status needs-decision)"
+  wait_until "$TURN_POLLS" handed_back "$lab" "$OPERATOR_AT" \
+    || fail "$2: the host never handed a close to main"$'\n'"$(diagnose "$lab")"
+  HANDBACK_AT=$(handback_since "$lab" "$OPERATOR_AT" | cut -f1)
+  evidence "$2: host log: $(handback_since "$lab" "$OPERATOR_AT" | cut -f1-4 | cut -c1-220)"
+  wait_until 300 hook_dead "$OWNER_PID" || fail "$2: the owner hook $OWNER_PID never exited"$'\n'"$(diagnose "$lab")"
+  evidence "$2: owner hook $OWNER_PID exited by $(date +%s)"
+}
+
+run_superseded() {
+  local lab parked rewaked line
+  lab=$(make_lab superseded)
+  start_primary "$lab"
+  start_ledger_history "$lab"
+  supersede_with_operator_turn "$lab"
+  wait_until 300 sh -c 'grep -q "parked_pid=" "$1" 2>/dev/null' _ "$lab/fm/state/.claude-autoarm-parked" \
+    || fail "superseded: the operator turn's Stop hook did not park on the live claim"$'\n'"$(diagnose "$lab")"
+  parked=$(parked_pid "$lab")
+  hook_live "$parked" || fail "superseded: the parked hook $parked is not running"
+  evidence "superseded: operator turn's Stop hook pid $parked parked on generation $OWNER_GEN: $(parked_record "$lab")"
+  [ "$(ledger_field "$lab" epoch)" = "$OWNER_GEN" ] && [ "$(ledger_field "$lab" owner_pid)" = "$OWNER_PID" ] \
+    || fail "superseded: parking changed the owner's claim: $(ledger "$lab")"
+  evidence "superseded: idling ${GAP_SECONDS}s before the hand-back"
+  sleep "$GAP_SECONDS"
+  hand_back "$lab" superseded
+  wait_until "$TURN_POLLS" rewoke_since "$lab" "$HANDBACK_AT" \
+    || fail "superseded: no rewake started a primary turn after the hand-back"$'\n'"$(diagnose "$lab")"
+  rewaked=$(rewakes_since "$lab" "$HANDBACK_AT" | head -n 1)
+  evidence "superseded: rewake delivered at $rewaked ($((rewaked - HANDBACK_AT))s after the hand-back)"
+  wait_until 100 grep -q " epoch=$((OWNER_GEN + 1)) owner_pid=$parked outcome=rewake " "$lab/ledger-history" \
+    || fail "superseded: the ledger never recorded the rewake as owned by the parked hook $parked: $(cat "$lab/ledger-history")"
+  evidence "superseded: ledger history (observed-at entry):"
+  while IFS= read -r line; do evidence "  $line"; done < "$lab/ledger-history"
+  wait_until "$TURN_POLLS" acked_since "$lab" "$HANDBACK_AT" \
+    || fail "superseded: the rewoken primary did not drain and acknowledge the hand-back"$'\n'"$(diagnose "$lab")"
+  evidence "superseded: primary turn ran: $(commands_since "$lab" "$HANDBACK_AT" | tr '\n' ';' | cut -c1-240)"
+  kill "$LEDGER_HISTORY_PID" 2>/dev/null || true
+  stop_lab "$lab"
+  pass "superseded-Stop live ($CLAUDE_VERSION): the operator turn's parked Stop hook delivered the superseded owner's hand-back as a rewake turn"
+}
+
+if [ "$SCENARIO" = superseded-stop ]; then
+  [ -z "$CONTROL_REF" ] || printf 'skip: control: the superseded-stop scenario has no negative control\n'
+  run_superseded
+  exit 0
+fi
 if [ -n "$CONTROL_REF" ]; then
   run_control
 else
