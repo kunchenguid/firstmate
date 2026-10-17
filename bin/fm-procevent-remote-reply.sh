@@ -19,8 +19,9 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. `relisten` tells that runner to poll again in the same
 # process, still holding the claim, after an empty window and after that re-arm.
-# A window the remote job worker preempted is reported to the runner as an empty
-# window, so it relistens too (see JOB_PREEMPTED below).
+# A window the remote job worker preempted, or one that hit its hard wall-clock
+# bound because the transport went ghost, is reported to the runner as an empty
+# window, so it relistens too (see JOB_PREEMPTED and BOUND_SECONDS below).
 # A continuity break is escalated and not re-armed, so the registration is dropped
 # and the runner stops. The runner does not refresh the owner lease.
 #
@@ -79,6 +80,16 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CURSOR_DIR="$STATE/remote-replies"
 REMOTE_LOG='state/parent-replies.status'
 WAIT_SECONDS=${FM_REMOTE_REPLY_WAIT_SECONDS:-55}
+# Hard wall-clock bound on one poll, window plus transport and queue slack.
+# The read itself ends after WAIT_SECONDS, so a poll still running at
+# BOUND_SECONDS is a ghost: the remote end died without closing the link,
+# which keepalive probes do not always convict. Killing it loses nothing -
+# the read is cursor-anchored and non-destructive - and the runner relistens
+# exactly as after a preemption, publishing no caught-up watermark.
+# A timeout status can also be the remote job worker's OWN execution deadline
+# reporting through fm-on.sh; cmd_source separates the two by elapsed time,
+# because only a remote deadline can arrive before the local bound fires.
+BOUND_SECONDS=${FM_REMOTE_REPLY_BOUND_SECONDS:-$((WAIT_SECONDS + 120))}
 MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 # fm-on.sh returns ssh's status unchanged, so 255 alone means unavailable
 # transport or unknown remote completion. Any other nonzero status is the remote
@@ -95,6 +106,8 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -306,15 +319,37 @@ WINDOW_CLOSED_EMPTY=75
 JOB_PREEMPTED=76
 
 cmd_source() {
-  local id=${1:-} started rc=0
+  local id=${1:-} started rc=0 elapsed
   validate_id "$id"
+  case "$BOUND_SECONDS" in
+    '' | *[!0-9]*)
+      die "FM_REMOTE_REPLY_BOUND_SECONDS must be a positive integer of seconds, got '$BOUND_SECONDS'"
+      ;;
+  esac
+  # All-digit strings can still be invalid octal literals (08, 09) or encode
+  # zero (00): force base 10 before any arithmetic, then reject non-positive.
+  BOUND_SECONDS=$((10#$BOUND_SECONDS))
+  if [ "$BOUND_SECONDS" -le 0 ]; then
+    die "FM_REMOTE_REPLY_BOUND_SECONDS must be a positive integer of seconds, got '$BOUND_SECONDS'"
+  fi
   read_cursor "$id"
   started=$(fm_pending_reply_now)
-  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
+  fm_run_timed "$BOUND_SECONDS" "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
     "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
   if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
     fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
   elif [ "$rc" -eq "$JOB_PREEMPTED" ]; then
+    rc=$WINDOW_CLOSED_EMPTY
+  elif fm_timed_out "$rc"; then
+    # A timeout before the local bound could have fired is the remote job
+    # worker's own execution deadline (bin/fm-remote-job-lib.sh): the read
+    # FAILED, so exit like any other failed read instead of relistening into
+    # a worker that may keep missing its deadline. Epoch truncation can hide
+    # one second, so the guard band is one second under the bound.
+    elapsed=$(($(fm_pending_reply_now) - started))
+    if [ "$elapsed" -lt $((BOUND_SECONDS - 1)) ]; then
+      return "$rc"
+    fi
     rc=$WINDOW_CLOSED_EMPTY
   fi
   return "$rc"
