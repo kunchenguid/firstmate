@@ -12,13 +12,14 @@
 # carries the primary's resolved firstmate-repository role with a
 # proof-of-state receipt (so a secondmate inherits only what the primary
 # resolves), and primary
-# config/herdr-presentation-spaces carries the same Herdr presentation-projection
+# config/herdr-presentation-spaces carries the same Herdr task container shape
 # preference - an absent primary file and an absent destination file both mean
 # the same unconfigured default, so the generic absence mirror below converges
-# a secondmate without deciding the release-dependent floor; explicit "on" and
-# "off" preferences propagate as files. Primary config/herdr-project-groups
-# carries the opt-in Herdr project-group rules, because the agents view they
-# sort is one per Herdr server and every home's tasks share it. Primary
+# a secondmate without deciding the release-dependent floor; explicit
+# "project", "on", and "off" preferences propagate as files. Primary
+# config/herdr-project-groups carries the opt-in Herdr project-group rules,
+# because the agents view they sort is one per Herdr server and every home's
+# tasks share it. Primary
 # config/trace-context is copied at the launch convergence point as part of the
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
 # Primary config/lavish-axi-host carries the one per-machine Lavish server address
