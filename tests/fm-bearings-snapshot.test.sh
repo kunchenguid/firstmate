@@ -4,6 +4,8 @@
 # GitHub/network calls), the --include-prs opt-in path, graceful degradation on a
 # partial PR-fetch failure, end-to-end unresolved-decision durability, and current
 # report pointers.
+# Pins snapshot completion for a backlog sized above the argv transport limits
+# so the bearings board keeps its bounded main-inventory source.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2278,6 +2280,51 @@ EOF
   pass "counterfactual meta clears main inventory warning and projects the live task"
 }
 
+# The canonical snapshot once passed the whole backlog and task documents through
+# jq --argjson argv elements; a large real backlog overflowed the ~128 KiB Linux
+# MAX_ARG_STRLEN cap, abruptly killed the main inventory summary, and left the
+# bearings board with no bounded source. bin/fm-fleet-snapshot.sh now files both
+# documents through temp files, and this fixture pins every wrapper on that path
+# above the observed payload so reintroducing argv transport fails loudly.
+test_large_backlog_survives_main_inventory_transport() {
+  local home fakebin canonical json i filler
+  home=$(make_home large-main-backlog)
+  : > "$home/data/secondmates.md"
+  filler=$(printf 'filler %.0s' $(seq 1 240))
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 120 ]; do
+      printf -- '- [ ] bulk-%03d - Bulk queued work %03d %s (repo: firstmate) (kind: ship)\n' \
+        "$i" "$i" "$filler"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  [ "$(wc -c < "$home/data/backlog.md")" -gt 131072 ] \
+    || fail "large backlog fixture did not exceed the per-argument exec limit"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot died for a backlog above the per-argument exec limit"
+  printf '%s' "$canonical" | jq -e '
+    .main_inventory == {valid:true,
+                        reason:null,
+                        orphan_in_flight:[],
+                        unstructured_current_count:0}
+      and (.tasks | length) == 0
+  ' >/dev/null || fail "large main inventory summary lost or invalid: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.in_flight | length) == 0
+      and (.gates | any(.id == "bulk-001"))
+      and (.gates | any(.id == "(main-inventory)") | not)
+      and (.decisions_open | length) == 0
+  ' >/dev/null || fail "bearings lost the bounded source for a large main backlog: $json"
+  pass "a backlog sized above argv limits keeps a valid main inventory source"
+}
+
 seed_working_child() {  # <mate-home> <id> <doing> [repo]
   local mate=$1 id=$2 doing=$3 repo=${4-sample} repo_field=
   mkdir -p "$mate/projects/$id"
@@ -3395,6 +3442,7 @@ test_captains_call_anti_leak
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
+test_large_backlog_survives_main_inventory_transport
 test_working_captain_holds_keep_their_bucket_surfaces
 test_active_children_project_independent_of_home_captain_hold
 test_nameless_legacy_summary_uses_its_durable_identifier
