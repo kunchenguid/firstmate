@@ -337,6 +337,8 @@ The captain context it acts on is the [dialog mirror](#the-dialog-mirror) at the
 ### Where engine cost is read
 
 `state/.supervision-host.log` records where every close went.
+When the host cannot compute branch eligibility, it keeps the first error line that `bin/fm-branch-dispatch.mjs` wrote, for example a Node.js refusal of the TypeScript import.
+That line appears in this log and in the `supervision-host:` line of an away hand-back.
 Each engine turn's line carries these fields, and this log is where engine cost is read today:
 
 - Its result.

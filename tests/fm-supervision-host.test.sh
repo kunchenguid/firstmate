@@ -1133,6 +1133,136 @@ test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
   pass "host: an attended close whose task turns main-only before its turn still reaches main unchanged"
 }
 
+# A node whose every bin/fm-branch-dispatch.mjs call fails, writing
+# <home>/dispatch.stderr to stderr, while every other node call still runs.
+node_failing_dispatch() {  # <home>
+  local real_node
+  real_node=$(command -v node)
+  cat > "$1/fakebin/node" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *fm-branch-dispatch.mjs*) cat '$1/dispatch.stderr' >&2; exit 1 ;;
+esac
+exec "$real_node" "\$@"
+SH
+  chmod +x "$1/fakebin/node"
+  : > "$1/dispatch.stderr"
+}
+
+# A Node.js built without TypeScript type stripping (Ubuntu's packaged 22.22.1,
+# issue #6685): every bin/fm-branch-dispatch.mjs call dies on its .ts import
+# with the error report Node prints, while every other node call still runs.
+node_without_type_stripping() {  # <home>
+  node_failing_dispatch "$1"
+  cat > "$1/dispatch.stderr" <<'ERR'
+node:internal/modules/esm/get_format:219
+  throw new ERR_UNKNOWN_FILE_EXTENSION(ext, filepath);
+        ^
+
+TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension ".ts" for /firstmate/.pi/extensions/lib/fm-branch-dispatch.ts
+    at Object.getFileProtocolModuleFormat [as file:] (node:internal/modules/esm/get_format:219:9) {
+  code: 'ERR_UNKNOWN_FILE_EXTENSION'
+}
+
+Node.js v22.22.1
+ERR
+}
+
+test_attended_close_without_type_stripping_logs_the_node_error() {
+  local home
+  home=$(make_home attended-no-typescript attended)
+  node_without_type_stripping "$home"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "no-typescript: the host never started a watcher cycle"
+  append_status "$home" 'step one'
+  wait_until 250 host_exited "$home" || fail "no-typescript: the close did not reach main: $(cat "$home/state/.supervision-host.log")"
+  expect_code 0 "$(cat "$home/host.rc")" "the close must exit 0"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the close must carry the watcher's reason line"
+  assert_no_re '^supervision-host' "$home/host.out" "the close must reach main exactly as the arm printed it"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "no-typescript: the engine ran without a branch offer"
+  assert_re '	pass-through	attended	branch eligibility could not be computed: TypeError \[ERR_UNKNOWN_FILE_EXTENSION\]: Unknown file extension "\.ts" for /firstmate/\.pi/extensions/lib/fm-branch-dispatch\.ts	signal:' \
+    "$home/state/.supervision-host.log" "the ledger must name the dispatch call's own error, not only the symptom"
+  assert_no_re 'getFileProtocolModuleFormat|Node.js v22' "$home/state/.supervision-host.log" "the ledger must keep only the error line, not the stack"
+  find "$home/state" -maxdepth 1 -name '.supervision-host-errors.*' | grep -q . && fail "no-typescript: the host left a dispatch error capture behind"
+  pass "host: an attended close whose eligibility Node cannot compute logs Node's error and reaches main unchanged"
+}
+
+test_away_wake_without_type_stripping_hands_back_with_the_node_error() {
+  local home
+  home=$(make_home away-no-typescript away)
+  node_without_type_stripping "$home"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "away no-typescript: the host never started a watcher cycle"
+  append_status "$home" 'needs a look'
+  wait_until 250 host_exited "$home" || fail "away no-typescript: the host did not hand the wake to main"
+  expect_code 0 "$(cat "$home/host.rc")" "a handed-back wake must exit 0 for the owner to deliver"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the handed-back close must carry the reason line"
+  assert_re '^supervision-host: the away session could not take this wake: branch eligibility could not be computed: TypeError \[ERR_UNKNOWN_FILE_EXTENSION\]: Unknown file extension "\.ts" for /firstmate/\.pi/extensions/lib/fm-branch-dispatch\.ts; this wake is yours$' \
+    "$home/host.out" "the handback must name the dispatch call's own error"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "away no-typescript: the engine ran without a branch scope"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "the unhandled wake must stay durable for main"
+  find "$home/state" -maxdepth 1 -name '.supervision-host-errors.*' | grep -q . && fail "away no-typescript: the host left a dispatch error capture behind"
+  pass "host: an away wake whose scope Node cannot compute hands back naming Node's error"
+}
+
+# An attended close whose dispatch call failed writing <home>/dispatch.stderr:
+# it must reach main unchanged, leaving no error capture behind.
+attended_dispatch_failure_reaches_main() {  # <home> <label>
+  start_host "$1"
+  wait_until 150 watcher_live "$1" || fail "$2: the host never started a watcher cycle"
+  append_status "$1" 'step one'
+  wait_until 250 host_exited "$1" || fail "$2: the close did not reach main: $(cat "$1/state/.supervision-host.log")"
+  expect_code 0 "$(cat "$1/host.rc")" "the close must exit 0"
+  assert_no_re '^supervision-host' "$1/host.out" "the close must reach main exactly as the arm printed it"
+  [ "$(engine_calls "$1")" -eq 0 ] || fail "$2: the engine ran without a branch offer"
+  if find "$1/state" -maxdepth 1 -name '.supervision-host-errors.*' | grep -q .; then
+    fail "$2: the host left a dispatch error capture behind"
+  fi
+}
+
+test_attended_close_with_silent_dispatch_failure_logs_the_bare_reason() {
+  local home row
+  home=$(make_home attended-dispatch-silent attended)
+  node_failing_dispatch "$home"
+  attended_dispatch_failure_reaches_main "$home" "silent dispatch"
+  row=$(grep '	pass-through	attended	' "$home/state/.supervision-host.log")
+  case "$row" in
+    *'	pass-through	attended	branch eligibility could not be computed	signal:'*) ;;
+    *) fail "silent dispatch: the ledger must keep the bare reason with no cause: $row" ;;
+  esac
+  pass "host: an attended close whose dispatch call fails silently logs the bare reason"
+}
+
+test_attended_close_with_headerless_dispatch_error_logs_its_first_line() {
+  local home row
+  home=$(make_home attended-dispatch-headerless attended)
+  node_failing_dispatch "$home"
+  printf '\n  \nfm-branch-dispatch: cannot read the config\nsecond line\n' > "$home/dispatch.stderr"
+  attended_dispatch_failure_reaches_main "$home" "headerless dispatch"
+  row=$(grep '	pass-through	attended	' "$home/state/.supervision-host.log")
+  case "$row" in
+    *'	pass-through	attended	branch eligibility could not be computed: fm-branch-dispatch: cannot read the config	signal:'*) ;;
+    *) fail "headerless dispatch: the ledger must carry the first nonblank line: $row" ;;
+  esac
+  pass "host: an attended close whose dispatch error has no Node header logs its first nonblank line"
+}
+
+test_attended_close_with_control_characters_in_dispatch_error_keeps_one_field() {
+  local home row
+  home=$(make_home attended-dispatch-control attended)
+  node_failing_dispatch "$home"
+  printf '\033[31mwarning:\tbad\tconfig\r\033[0m\nsecond\tline\n' > "$home/dispatch.stderr"
+  attended_dispatch_failure_reaches_main "$home" "control dispatch"
+  row=$(grep '	pass-through	attended	' "$home/state/.supervision-host.log")
+  [ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" -eq 1 ] || fail "control dispatch: the ledger must keep one row: $row"
+  [ "$(printf '%s\n' "$row" | awk -F '\t' '{ print NF }')" -eq 5 ] || fail "control dispatch: the ledger row must keep its five fields: $row"
+  case "$row" in
+    *'	pass-through	attended	branch eligibility could not be computed: [31mwarning: bad config[0m	signal:'*) ;;
+    *) fail "control dispatch: the ledger must carry the flattened first line: $row" ;;
+  esac
+  pass "host: an attended close whose dispatch error has control characters keeps one ledger field"
+}
+
 # --- the Claude re-arm owner around the host ----------------------------------
 
 # A fixture home that is also a genuine primary checkout whose bin is this
@@ -2985,6 +3115,11 @@ test_main_only_pass_through_leaves_the_successor_watcher_running
 test_attended_close_with_unidentified_main_session_passes_to_main
 test_close_accepted_away_that_turns_attended_passes_to_main
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
+test_attended_close_without_type_stripping_logs_the_node_error
+test_away_wake_without_type_stripping_hands_back_with_the_node_error
+test_attended_close_with_silent_dispatch_failure_logs_the_bare_reason
+test_attended_close_with_headerless_dispatch_error_logs_its_first_line
+test_attended_close_with_control_characters_in_dispatch_error_keeps_one_field
 test_claude_stop_hook_delivers_a_main_only_pass_through
 test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
 test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out
