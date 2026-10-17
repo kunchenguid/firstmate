@@ -31,6 +31,17 @@ It is also usable for reliable collision detection only after extension binding,
 Deferring registration to `session_start` is not an equivalent path: Pi constructs restored tool rows from an earlier tool-registry snapshot during reload, new-session, fork, and session switching, so those rows retain the definition captured before `session_start`.
 `tests/fm-calm-pi-extension.test.sh` covers the resulting split contract: no load-time claims while Calm is off, synchronous claims while it is already on, collision-checked first activation with a warning, preservation of a contested tool's execution, and the non-retroactive bound for rows rendered before first activation.
 
+## Codemode presentation boundary
+
+Codemode arrived in Pi 0.99.0 and composes its nested calls inside its own result renderer rather than mounting the child tools' transcript rows.
+A child `read` or `fm_branch_outcomes` renderer therefore cannot hide the parent script, nested-call summary or emitted output.
+Calm uses the supported `pi.registerToolRenderer()` resolver chain introduced in Pi 1.0.1 for the exact `codemode` name, obtains the installed renderers through `next()`, and adds only presentation functions.
+An empty self-rendered call and result remove the complete text shell and its leading spacer.
+While visible, Calm retains the installed slot components and reproduces Pi's default framing or preserves an installed self-framed renderer.
+Each resolution returns a fresh wrapper that applies Calm only after a live transcript row reads its `renderShell`; Pi's HTML exporter frames slots itself and never reads it, so every `/export` and `/share` render delegates to the installed renderers whenever it runs, including a share that first awaits credential I/O, while live rows keep Calm's presentation throughout.
+The registrar, call/result slots and optional padding setter are capability-probed, with the missing-capability behavior owned by [`calm.md`](calm.md#codemode-presentation-capability).
+The current empirical guard and older-surface verification are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#pi-calm-codemode).
+
 ## Pi 0.81.1 end-to-end reproduction
 
 The Pi version installed at the time was verified on 2026-07-22.
@@ -195,17 +206,19 @@ Calm classifies only at Pi's transcript-presentation owner through the canonical
 The session-start nudge already originates as a non-displayed custom message, so it remains on that existing path while retaining model context and session persistence.
 Legacy Calm custom entries and messages remain in existing session artifacts, and their presentation entry still uses the supported zero-height renderer while active.
 Toggling Calm cycles tool expansion and restores its original value, which rebuilds controllable rows and leaves final `Ctrl+O` state unchanged.
+Calm renders stock for the one macrotask in which a submit key dispatches `/export` or `/share`; Pi runs terminal input listeners before its editor applies a selected slash completion on that same Enter, so a completed command such as `/exp` is recognized from the completion itself through a delegating `ctx.ui.addAutocompleteProvider()` wrapper, while unrelated completions and Tab never enter that window.
 Returning from stock export rendering instead invalidates only the tool rows Calm currently presents: Pi 0.83.0 made every expansion change emit its own status line, and Pi coalesces consecutive status lines, so an expansion cycle there overwrote the `Session exported to:` confirmation the export had just printed.
 Exported and shared HTML retain genuine user prompts, genuine assistant responses, current operational user messages, ordinary tool rendering, and the complete session artifact.
 Serialized session data and Pi 0.81.1's sidebar tree also retain legacy hidden operational custom messages.
 
 ## Firstmate Pi tool audit
 
-Every tool registered or supplied by Firstmate under `.pi/extensions` has this disposition:
+Every tool registered or supplied by Firstmate under `.pi/extensions`, plus the Pi Codemode tool whose presentation Calm owns, has this disposition:
 
 | Tool | Registration surface | Calm disposition |
 | --- | --- | --- |
 | `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` | Calm wrappers for Pi's seven main-session built-ins | Their call and text-result shells hide while Calm is active; ordinary and stock export rendering delegate to Pi's original renderers. |
+| `codemode` | Pi's built-in Codemode extension | On surfaces exposing `pi.registerToolRenderer()`, its script, nested-call summaries and text-result shell hide at zero height through a presentation-only resolver; Calm off and every export or share render delegate to the installed renderers without replacing execution. |
 | `fm_watch_arm_pi` | Main-session custom tool in `fm-primary-pi-watch.ts` | Its complete self-rendered shell hides while Calm is active and returns unchanged when Calm is off or stock export rendering is active. |
 | `fm_branch_outcomes` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete self-rendered shell hides while Calm is active; when visible, the self-renderer reconstructs Pi's ordinary boxed fallback shell, matches Pi's collapsed or expanded call-argument header, and probes Pi's rendered stock fallback to preserve that installed surface's collapsed or all-line result policy plus expanded state, while stock export rendering deliberately falls through to Pi's structured fallback. |
 | `fm_branch_processed` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete self-rendered shell hides while Calm is active, exactly like `fm_branch_outcomes`; when visible, the self-renderer preserves Pi's call-argument header around the one-line acknowledgement result, while stock export rendering deliberately falls through to Pi's structured fallback. |
@@ -213,6 +226,7 @@ Every tool registered or supplied by Firstmate under `.pi/extensions` has this d
 | branch-local `read` built-in | Branch-session built-in enabled through `createAgentSession` | It runs only in the headless supervision session and has no main-session `ToolExecutionComponent`, so its file output cannot emit a row in the captain's transcript. |
 | branch-local `bash` override | Branch-session replacement supplied directly to `createAgentSession` | It runs only in the headless supervision session and has no main-session `ToolExecutionComponent`, so its command output cannot emit a row in the captain's transcript. |
 
+The Codemode row is presentation-only: Firstmate neither registers nor supplies that tool.
 No other `.pi/extensions` file registers or supplies a tool. Commands, lifecycle handlers, custom message renderers, and presentation adapters are not tool registrations and remain covered by the transcript taxonomy below.
 
 ## Complete currently reachable Pi transcript taxonomy
@@ -226,8 +240,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | Each settled text block follows the cross-harness preservation contract in [`calm.md`](calm.md); hidden blocks are removed from the shallow presentation copy before layout, a `toolUse` message carrying only short narration occupies zero rows (verified on Pi 0.84.1), and a still-streaming `pending` message is never filtered. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
-| `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, `fm_branch_outcomes`, and `fm_branch_processed` hidden; other arbitrary custom tools remain an unsupported boundary. |
-| `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
+| `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, Codemode where renderer registration is available, `fm_watch_arm_pi`, `fm_branch_outcomes`, and `fm_branch_processed` hidden; other arbitrary custom tools remain outside Calm's owned coverage. |
+| `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden, including Codemode's nested-call summaries; other arbitrary custom results remain outside Calm's owned coverage. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
@@ -244,7 +258,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
-The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
+The inspected Pi 0.81.1 extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
+Pi 1.0.1 added `pi.registerToolRenderer()`, a presentation-only resolver chain for named tools; Calm uses it narrowly for Codemode and delegates every other name unchanged.
 Pi 0.81.1 through 0.82.0, Pi 0.84.4, and Pi 0.85.1 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
 General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
@@ -308,6 +323,8 @@ The operational provider path covers Calm loaded on, loaded off, default prefere
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 Queued-row coverage drives Pi's real listing and restore methods over a stand-in session for each capability-check branch, including a hidden row kept when the classifier cannot answer again and a refused continuation that re-queues instead of dropping, and repeats Escape in a real Pi TUI with Calm on, with a captain message queued beside the notification, and with Calm off.
+`tests/fm-calm-pi-extension.test.sh` also exercises Codemode capability degradation, exact installed stock-renderer parity, zero-height nested-call presentation, repeated real sandbox execution, toggle and restart restoration, provider context, nested usage and stock export/share rendering, including slash-autocompleted submissions and a share whose HTML export renders after asynchronous I/O with Calm on and off, through its `tests/assets/fm-calm-codemode*` fixtures.
+Its Codemode TUI runs on a private tmux server or a guarded named Herdr lab and never opens a real outcome store or uses an authenticated model.
 `tests/fm-calm-pi-queue-retention-live-e2e.test.sh` is the default-on, token-free guard that probes a running Pi session for every member the check requires and fails naming the installed Pi version.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 [`tests/fm-pi-primary-types.test.sh`](../tests/fm-pi-primary-types.test.sh) owns the strict production-consumer typecheck and its dependency contract.

@@ -1,23 +1,9 @@
-// Firstmate's home-persistent Pi transcript presentation toggle.
-//
-// Verified against Pi 0.81.1, 0.82.0, and 0.84.4, which expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons, agent_start and
-// agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
-// with a disposable component factory, and setHiddenThinkingLabel().
-// ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
-// installs. The focused tests pin those assumptions but never reject a
-// newer Pi solely for its version. The collapsed-thinking, operational-user, and
-// queued-operational presentation adapters probe the exact API they patch and degrade
-// independently with a diagnostic (see installCalmPresentationAdapter below) if a future
-// Pi removes it; Pi still exposes no global renderer for arbitrary built-in or custom rows.
-// docs/configuration.md owns the home-local Calm preference contract.
-//
-// Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
-// unregister operation. Keep Calm-off registration empty; keep Calm-on load-time
-// registration synchronous because restored rows capture the registry before
-// session_start; and collision-check only the later first-activation path, when
-// getAllTools() is reliable. docs/calm-mode-feasibility.md owns the Pi-source evidence
-// and docs/calm.md owns the user-facing behavior and non-retroactive first-toggle bound.
+/**
+ * Present Firstmate's home-persistent Calm choice without changing transcript data.
+ * docs/calm.md owns presentation capabilities; docs/calm-mode-feasibility.md owns the
+ * built-in override constraints and Pi-source evidence; docs/configuration.md owns the
+ * preference, and lib/fm-calm-working-ship.ts owns the boat.
+ */
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
@@ -61,6 +47,7 @@ import {
 import {
   calmPresentationHides,
   calmPresentationIsActive,
+  calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
@@ -86,6 +73,13 @@ type RenderTheme<TParams extends TSchema, TDetails, TState> = Parameters<
 type RenderResult<TParams extends TSchema, TDetails, TState> = Parameters<
   NonNullable<ToolDefinition<TParams, TDetails, TState>["renderResult"]>
 >[0];
+
+type ToolPresentation = Pick<ToolDefinition<any, any, any>, "renderShell" | "renderCall" | "renderResult">;
+type RendererRegistrar = {
+  registerToolRenderer?: (
+    resolver: (name: string, next: () => ToolPresentation | undefined) => ToolPresentation | undefined,
+  ) => void;
+};
 
 type StandardShellState = {
   shell?: Box;
@@ -121,6 +115,37 @@ function installCalmPresentationAdapter(name: string, install: () => void): void
     const reason = error instanceof Error ? error.message : String(error);
     console.error(`Firstmate Calm: ${name} presentation adapter unavailable, skipping. ${reason}`);
   }
+}
+
+/**
+ * Reproduce Pi's default tool framing, including its configured output padding, around
+ * a row's retained slot components.
+ */
+function refreshStandardShell(
+  shell: StandardShellState,
+  theme: RenderTheme<any, any, any>,
+  context: RenderContext<any, any, any> & { outputPad?: number },
+): Box {
+  const background = context.isPartial
+    ? (text: string) => theme.bg("toolPendingBg", text)
+    : context.isError
+      ? (text: string) => theme.bg("toolErrorBg", text)
+      : (text: string) => theme.bg("toolSuccessBg", text);
+  const outputPad = context.outputPad ?? 1;
+  const box = shell.shell ?? new Box(outputPad, 1, background);
+  shell.shell = box;
+  box.setBgFn(background);
+  (box as Box & { setPaddingX?: (padding: number) => void }).setPaddingX?.(outputPad);
+  box.clear();
+  if (shell.call) box.addChild(shell.call);
+  if (shell.result) box.addChild(shell.result);
+  return box;
+}
+
+/** Report whether submitted editor text runs Pi's /export or /share command. */
+function isExportCommand(text: string): boolean {
+  const input = text.trim();
+  return input === "/share" || input === "/export" || input.startsWith("/export ");
 }
 
 export default function (pi: ExtensionAPI) {
@@ -228,6 +253,97 @@ export default function (pi: ExtensionAPI) {
     for (const invalidate of calmToolRowRepaints.values()) invalidate();
   };
 
+  // Stock slot components each visible row retains apart from Calm's zero-height ones,
+  // keyed by the row-local state Pi hands every render slot.
+  const standardShells = new WeakMap<object, StandardShellState>();
+
+  /** Return one row's retained stock slot components, creating them on first use. */
+  function standardShellFor(rowState: object): StandardShellState {
+    let shell = standardShells.get(rowState);
+    if (!shell) {
+      shell = {};
+      standardShells.set(rowState, shell);
+    }
+    return shell;
+  }
+
+  let codemodeUI: ExtensionUIContext | undefined;
+  let codemodeWarningShown = false;
+
+  /** Disclose a missing Codemode presentation capability once, through the UI when one exists, else stderr. */
+  function reportCodemodeLimitation(reason: string): void {
+    if (codemodeWarningShown || !calmPresentationIsActive()) return;
+    codemodeWarningShown = true;
+    const message = `Firstmate Calm: Codemode transcript remains visible because ${reason}. Tool execution is unchanged.`;
+    // Raw stderr would draw over the live TUI and linger as a stray transcript line.
+    if (codemodeUI) codemodeUI.notify(message, "warning");
+    else console.error(message);
+  }
+
+  /** Warn only when Codemode exists on a Pi surface without renderer registration. */
+  function reportMissingCodemodeRegistrar(): void {
+    if (codemodeRegistrarLimitation && pi.getAllTools?.().some((tool) => tool.name === "codemode")) {
+      reportCodemodeLimitation(codemodeRegistrarLimitation);
+    }
+  }
+
+  /** Wrap only Codemode's installed renderers, preserving their components and framing. */
+  function wrapCodemodePresentation(original: ToolPresentation): ToolPresentation {
+    const renderCall = original.renderCall!;
+    const renderResult = original.renderResult!;
+    let liveRow = false;
+
+    return {
+      /**
+       * Claim the row's framing. Only a live transcript row reads this; Pi's HTML exporter
+       * frames slots itself, so a resolution it makes keeps the installed presentation.
+       */
+      get renderShell(): "self" {
+        liveRow = true;
+        return "self";
+      },
+      /** Hide the entire script shell, or delegate to the installed call renderer. */
+      renderCall(args, theme, context) {
+        if (!liveRow) return renderCall(args, theme, context);
+        if (calmPresentationIsActive() && !calmTranscriptClassIsVisible("assistant-tool-call")) return new Container();
+        const shell = standardShellFor(context.state);
+        shell.call = renderCall(args, theme, { ...context, lastComponent: shell.call });
+        return original.renderShell === "self" ? shell.call : refreshStandardShell(shell, theme, context);
+      },
+      /** Hide nested-call summaries and output, or delegate to the installed result renderer. */
+      renderResult(result, options, theme, context) {
+        if (!liveRow) return renderResult(result, options, theme, context);
+        if (calmPresentationIsActive() && !calmTranscriptClassIsVisible("tool-result")) return new Container();
+        const shell = standardShellFor(context.state);
+        shell.result = renderResult(result, options, theme, { ...context, lastComponent: shell.result });
+        if (original.renderShell === "self") return shell.result;
+        refreshStandardShell(shell, theme, context);
+        return new Container();
+      },
+    };
+  }
+
+  const rendererRegistrar = pi as ExtensionAPI & RendererRegistrar;
+  let codemodeRegistrarLimitation: string | undefined = "pi.registerToolRenderer() is unavailable";
+  if (typeof rendererRegistrar.registerToolRenderer === "function") {
+    try {
+      /** Wrap only Codemode, leaving every other tool's resolver chain untouched. */
+      rendererRegistrar.registerToolRenderer((name, next) => {
+        const original = next();
+        if (name !== "codemode") return original;
+        if (!original?.renderCall || !original.renderResult) {
+          reportCodemodeLimitation("its installed call/result renderers are unavailable");
+          return original;
+        }
+        return wrapCodemodePresentation(original);
+      });
+      codemodeRegistrarLimitation = undefined;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      codemodeRegistrarLimitation = `pi.registerToolRenderer() could not register its presentation: ${reason}`;
+    }
+  }
+
   function wrapBuiltIn<TParams extends TSchema, TDetails, TState>(
     factory: DefinitionFactory<TParams, TDetails, TState>,
   ): ToolDefinition<TParams, TDetails, TState> {
@@ -245,42 +361,10 @@ export default function (pi: ExtensionAPI) {
     const originalRenderCall = original.renderCall;
     const originalRenderResult = original.renderResult;
     const originalSelfShell = original.renderShell === "self";
-    const standardShells = new WeakMap<object, StandardShellState>();
 
     if (!originalRenderCall || !originalRenderResult) {
       throw new Error(`Firstmate calm mode requires both render slots for Pi built-in tool ${original.name}`);
     }
-
-    const shellStateFor = (
-      context: RenderContext<TParams, TDetails, TState>,
-    ): StandardShellState => {
-      const rowState = context.state as object;
-      let shellState = standardShells.get(rowState);
-      if (!shellState) {
-        shellState = {};
-        standardShells.set(rowState, shellState);
-      }
-      return shellState;
-    };
-
-    const refreshStandardShell = (
-      state: StandardShellState,
-      theme: RenderTheme<TParams, TDetails, TState>,
-      context: RenderContext<TParams, TDetails, TState>,
-    ): Box => {
-      const background = context.isPartial
-        ? (text: string) => theme.bg("toolPendingBg", text)
-        : context.isError
-          ? (text: string) => theme.bg("toolErrorBg", text)
-          : (text: string) => theme.bg("toolSuccessBg", text);
-      const shell = state.shell ?? new Box(1, 1, background);
-      state.shell = shell;
-      shell.setBgFn(background);
-      shell.clear();
-      if (state.call) shell.addChild(state.call);
-      if (state.result) shell.addChild(state.result);
-      return shell;
-    };
 
     return {
       ...original,
@@ -300,7 +384,7 @@ export default function (pi: ExtensionAPI) {
         if (calmPresentationHides("assistant-tool-call")) return new Container();
         if (originalSelfShell) return originalRenderCall(args, theme, context);
 
-        const state = shellStateFor(context);
+        const state = standardShellFor(context.state as object);
         state.call = originalRenderCall(args, theme, {
           ...context,
           lastComponent: state.call,
@@ -319,7 +403,7 @@ export default function (pi: ExtensionAPI) {
         if (calmPresentationHides("tool-result")) return new Container();
         if (originalSelfShell) return originalRenderResult(result, options, theme, context);
 
-        const state = shellStateFor(context);
+        const state = standardShellFor(context.state as object);
         state.result = originalRenderResult(result, options, theme, {
           ...context,
           lastComponent: state.result,
@@ -349,17 +433,19 @@ export default function (pi: ExtensionAPI) {
   let builtInsRegistered = false;
 
   // Gate on Calm already being on at load time. This must stay synchronous and
-  // unconditional here (see file header): a foreign-claim check is not reachable at
-  // this point, while deferral would make restored rows capture the wrong definition.
-  // A Calm-off session or reload registers nothing and creates no collision exposure.
+  // unconditional here (see docs/calm-mode-feasibility.md): a foreign-claim check is
+  // not reachable at this point, while deferral would make restored rows capture the
+  // wrong definition. A Calm-off session or reload registers no built-in override and
+  // creates no collision exposure.
   if (loadCalmPreference()) {
     for (const tool of wrappedBuiltIns) pi.registerTool(tool);
     builtInsRegistered = true;
   }
 
   // Which of the 7 built-ins are currently owned by a different, non-builtin
-  // extension. Only safe to call once every extension has finished loading (see file
-  // header); never call this during the factory's own synchronous execution above.
+  // extension. Only safe to call once every extension has finished loading (see
+  // docs/calm-mode-feasibility.md); never call this during the factory's own synchronous
+  // execution above.
   function contestedBuiltIns(): ToolDefinition<any, any, any>[] {
     let registered: ToolInfo[];
     try {
@@ -431,6 +517,8 @@ export default function (pi: ExtensionAPI) {
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
     setCalmStockExportRendering(false);
+    codemodeUI = ctx.hasUI ? ctx.ui : undefined;
+    reportMissingCodemodeRegistrar();
     publishPresentationState();
     agentRunActive = false;
     workingShipShown = false;
@@ -440,18 +528,10 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);
     removeTerminalInputHandler?.();
-    removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
-      if (!getKeybindings().matches(data, "tui.input.submit")) return undefined;
-
-      const input = ctx.ui.getEditorText().trim();
-      if (
-        input !== "/share" &&
-        input !== "/export" &&
-        !input.startsWith("/export ")
-      ) {
-        return undefined;
-      }
-
+    let handlingSubmitKey = false;
+    /** Render Calm's tool rows through their stock renderers until this submission's export or share has run. */
+    const beginStockExportRendering = (): void => {
+      if (exportRendering) return;
       exportRendering = true;
       setCalmStockExportRendering(true);
       publishPresentationState();
@@ -471,8 +551,25 @@ export default function (pi: ExtensionAPI) {
         repaintCalmToolRows();
         ctx.ui.setStatus("firstmate-calm", undefined);
       }, 0);
+    };
+    removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
+      handlingSubmitKey = getKeybindings().matches(data, "tui.input.submit");
+      if (handlingSubmitKey && isExportCommand(ctx.ui.getEditorText())) beginStockExportRendering();
       return undefined;
     });
+    // Pi's editor applies a selected slash completion and submits it on the same Enter,
+    // after terminal input listeners have already read the uncompleted text.
+    ctx.ui.addAutocompleteProvider((current) => ({
+      triggerCharacters: current.triggerCharacters,
+      getSuggestions: current.getSuggestions.bind(current),
+      shouldTriggerFileCompletion: current.shouldTriggerFileCompletion?.bind(current),
+      /** Delegate the completion, entering stock export rendering when this Enter submits /export or /share. */
+      applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+        const completion = current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+        if (handlingSubmitKey && isExportCommand(completion.lines.join("\n"))) beginStockExportRendering();
+        return completion;
+      },
+    }));
   });
 
   pi.on("agent_start", (_event, ctx) => {
@@ -498,6 +595,7 @@ export default function (pi: ExtensionAPI) {
       persistCalmPreference(active);
       setCalmPresentation(active);
       if (active) activateBuiltInsIfNeeded(ctx.ui);
+      reportMissingCodemodeRegistrar();
       publishPresentationState();
       applyWorkingPresentation(ctx.ui, true);
       // Pi re-runs every assistant row's layout from this call even when the label is
