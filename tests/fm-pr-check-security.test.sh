@@ -128,6 +128,7 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  fm_test_fake_simctl "$fakebin"
   git -C "$dir/wt" init -q
   git -C "$dir/wt" commit -q --allow-empty -m init
   git -C "$dir/wt" update-ref refs/remotes/origin/main "$(git -C "$dir/wt" rev-parse HEAD)"

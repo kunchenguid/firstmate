@@ -390,6 +390,35 @@ SH
   pass "shared helpers and runner keep fixture Git off an inherited repository location"
 )
 
+
+test_simctl_stubs_isolate_host_tools() {
+  local dir="$TMP_ROOT/simctl-isolation" fakebin out curated
+  mkdir -p "$dir/host"
+  printf '%s\n' '{"devices":{"runtime":[{"udid":"FIXTURE-SIM","name":"fm-fixture","state":"Shutdown"}]}}' > "$dir/devices.json"
+  cat > "$dir/host/xcrun" <<'SH'
+#!/usr/bin/env bash
+printf 'host xcrun\n' >> "$FM_FAKE_HOST_XCRUN_LOG"
+exit 7
+SH
+  chmod +x "$dir/host/xcrun"
+  out=$(FM_FAKE_HOST_XCRUN_LOG="$dir/host.log" FM_FAKE_SIMCTL_LIST_FILE="$dir/devices.json" \
+    PATH="$dir/host:$PATH" bash -c '. "$1"; xcrun simctl list devices -j' _ "$ROOT/tests/lib.sh") \
+    || fail "shared test setup reached the host xcrun"
+  [ "$(printf '%s' "$out" | jq -r '.devices.runtime[0].udid')" = FIXTURE-SIM ] || fail "shared test setup did not return simulator fixture data"
+  fakebin=$(fm_fakebin "$dir/case")
+  out=$(FM_FAKE_HOST_XCRUN_LOG="$dir/host.log" FM_FAKE_SIMCTL_LIST_FILE="$dir/devices.json" \
+    PATH="$fakebin:$dir/host:/usr/bin:/bin" xcrun simctl list devices -j) \
+    || fail "case fakebin reached the host xcrun on a restricted PATH"
+  [ "$(printf '%s' "$out" | jq -r '.devices.runtime[0].udid')" = FIXTURE-SIM ] || fail "case fakebin did not return simulator fixture data"
+  curated=$(fm_test_base_path_sans "$PATH" orca)
+  out=$(FM_FAKE_HOST_XCRUN_LOG="$dir/host.log" FM_FAKE_SIMCTL_LIST_FILE="$dir/devices.json" \
+    PATH="$curated:$dir/host" xcrun simctl list devices -j) \
+    || fail "curated test PATH reached the host xcrun"
+  [ "$(printf '%s' "$out" | jq -r '.devices.runtime[0].udid')" = FIXTURE-SIM ] || fail "curated test PATH did not retain the simulator stub"
+  [ ! -e "$dir/host.log" ] || fail "simulator fixture invoked a host tool"
+  pass "shared setup, case fakebins and curated paths isolate host xcrun"
+}
+
 test_git_config_isolation || fail "Git fixture config isolation"
 test_inherited_git_location_isolation || fail "Git fixture location isolation"
 test_agent_standin_survives_a_multicall_sleep || fail "agent stand-in multicall case"
@@ -400,3 +429,5 @@ test_fake_gh_and_gh_axi
 test_spawn_tmux_and_fakebin
 test_send_stubs_and_ssh
 test_spawn_home_layout
+
+test_simctl_stubs_isolate_host_tools
