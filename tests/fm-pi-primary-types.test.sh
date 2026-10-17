@@ -37,6 +37,7 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$TMP_ROOT/lib/fm-calm-visib
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$TMP_ROOT/lib/fm-calm-working-ship.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$TMP_ROOT/lib/fm-calm-working-ship-sprite.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$TMP_ROOT/lib/fm-operational-input.ts"
+cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$TMP_ROOT/lib/fm-home-resolve.ts"
 cat > "$TMP_ROOT/package.json" <<'JSON'
 {"type":"module"}
 JSON

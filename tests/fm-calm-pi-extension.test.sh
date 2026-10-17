@@ -207,6 +207,7 @@ test_home_resolution() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$fixture/project/.pi/extensions/lib/fm-home-resolve.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
@@ -332,6 +333,7 @@ test_pi_compat_degraded_adapter() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$fixture/project/.pi/extensions/lib/fm-home-resolve.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
@@ -434,6 +436,7 @@ test_pi_compat_missing_adapter_exports() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$fixture/project/.pi/extensions/lib/fm-home-resolve.ts"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' \
     '{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}' \
@@ -814,6 +817,7 @@ test_builtin_gate_load_time() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$fixture/project/.pi/extensions/lib/fm-home-resolve.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
@@ -903,6 +907,7 @@ test_calm_activation_collision_and_regression_bound() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$fixture/project/.pi/extensions/lib/fm-home-resolve.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
@@ -1120,6 +1125,7 @@ test_rendering_and_session_lifecycle() {
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$fixture/lib/fm-home-resolve.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/lib/fm-async-exec.ts"
@@ -1845,6 +1851,7 @@ test_calm_mid_turn_working_notes() {
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$fixture/lib/fm-home-resolve.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
@@ -2152,6 +2159,7 @@ test_operational_followup_turn_e2e() {
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$project/.pi/extensions/lib/fm-home-resolve.ts"
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
 
   cat >"$project/followup-e2e.ts" <<'TS'
@@ -2521,6 +2529,7 @@ test_queued_operational_escape_e2e() {
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$project/.pi/extensions/lib/fm-home-resolve.ts"
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
 
   cat >"$project/queued-escape-e2e.ts" <<'TS'
@@ -2738,6 +2747,7 @@ test_hidden_block_geometry_e2e() {
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$project/.pi/extensions/lib/fm-home-resolve.ts"
   printf '%s\n' on >"$home/config/calm"
   printf '%s\n' '{"hideThinkingBlock":true,"terminal":{"clearOnShrink":false}}' >"$config/settings.json"
   printf '%s\n' 'tool result one' >"$project/probe-one.txt"
@@ -2990,6 +3000,7 @@ test_working_ship_geometry_and_lifecycle() {
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$fixture/lib/fm-home-resolve.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
@@ -4079,6 +4090,7 @@ test_interactive_terminal_e2e() {
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$project/.pi/extensions/lib/fm-home-resolve.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$project/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$project/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$project/.pi/extensions/lib/fm-async-exec.ts"
@@ -4091,6 +4103,7 @@ test_interactive_terminal_e2e() {
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
     "$project/bin/"
+  cp "$ROOT/bin/fm-home-lib.sh" "$project/bin/fm-home-lib.sh"
   # The real digest is out of scope here: this lab is about how Calm RENDERS the
   # session-open message and whether it keeps its operational provenance, not
   # about what session start reports. A stub keeps the run tier's real routing

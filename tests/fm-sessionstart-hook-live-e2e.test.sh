@@ -122,6 +122,7 @@ make_lab() {  # <harness> -> echoes lab dir
   ln -sf "$ROOT/bin/fm-startup-network.sh" "$lab/bin/fm-startup-network.sh"
   ln -sf "$ROOT/bin/fm-timeout-lib.sh" "$lab/bin/fm-timeout-lib.sh"
   ln -sf "$ROOT/bin/fm-wake-lib.sh" "$lab/bin/fm-wake-lib.sh"
+  ln -sf "$ROOT/bin/fm-home-lib.sh" "$lab/bin/fm-home-lib.sh"
   ln -sf "$ROOT/bin/fm-session-lock-lib.sh" "$lab/bin/fm-session-lock-lib.sh"
   cat > "$lab/bin/fm-bootstrap.sh" <<'SH'
 #!/usr/bin/env bash
@@ -175,6 +176,7 @@ SH
       cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$lab/.pi/extensions/"
       cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
         "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$lab/.pi/extensions/lib/"
+      cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$lab/.pi/extensions/lib/fm-home-resolve.ts"
       cp "$ROOT/bin/fm-operational-input.sh" "$lab/bin/"
       printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$lab/.pi/settings.json"
       ;;
@@ -351,6 +353,7 @@ probe_pi_sessionstart_prerequisite() {
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
     "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$project/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$project/.pi/extensions/lib/fm-home-resolve.ts"
   cp "$ROOT/bin/fm-operational-input.sh" "$project/bin/"
   cat > "$project/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash

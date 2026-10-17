@@ -995,6 +995,37 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+# fm_backend_endpoint_pid: READ-ONLY pid of the process <target>'s endpoint
+# was created with (tmux `#{pane_pid}`, Herdr `pane process-info` shell_pid).
+# Its age is the endpoint's age: a restore after a host reboot or backend
+# restart recreates it, and every secondmate launch runs inside it. Fails when
+# the backend has no such read or the read fails. Like the tmux pane reads
+# above, callers must already know the exact target exists.
+fm_backend_endpoint_pid() {  # <backend> <target>
+  local backend=$1 target=$2 session pane pid
+  case "$backend" in
+    tmux)
+      pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 1
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      pid=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null \
+        | jq -er --arg pane "$pane" '
+          select(.result.type == "pane_process_info" and .result.process_info.pane_id == $pane)
+          | .result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) \
+        || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$pid"
+}
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:

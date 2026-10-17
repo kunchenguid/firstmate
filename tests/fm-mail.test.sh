@@ -478,6 +478,7 @@ test_poll_missing_wake_lib_does_not_suppress() {
   # next to fm-mail.sh, not from $FM_HOME/bin. Copy only the plane scripts.
   cp "$ROOT/bin/fm-mail.sh" "$miss_bin/fm-mail.sh"
   cp "$ROOT/bin/fm-mail.py" "$miss_bin/fm-mail.py"
+  cp "$ROOT/bin/fm-home-lib.sh" "$miss_bin/fm-home-lib.sh"
   chmod +x "$miss_bin/fm-mail.sh"
 
   cat > "$fakebin/python3" <<'SH'

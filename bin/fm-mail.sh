@@ -65,6 +65,8 @@ set -euo pipefail
 
 # --- resolve home, env, and endpoints -------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-home-lib.sh
+. "$SCRIPT_DIR/fm-home-lib.sh"
 FM_HOME="${FM_HOME:-}"
 if [ -z "$FM_HOME" ]; then
   FM_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"

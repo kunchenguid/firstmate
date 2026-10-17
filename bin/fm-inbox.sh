@@ -118,6 +118,8 @@ unset _extra
 export PATH
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-home-lib.sh
+. "$SELF_DIR/fm-home-lib.sh"
 FM_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"

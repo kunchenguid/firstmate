@@ -69,7 +69,7 @@ A re-emit (`--reemit`) reprints the digest for a process that already has the he
 | --- | --- | --- |
 | `startup`, `new` | Full digest | This is a true session start that has not taken the helm; Pi CLI continuations are refined to `resume` by the adapter before reaching this boundary. |
 | `clear`, `compact` | `--reemit` after a proven complete startup, otherwise full digest | This process normally has the helm and lost only its context, but an earlier hook may have been truncated after acquiring the lock. |
-| `resume`, `reload`, `fork` | Delegate to the nudge wrapper | Prior context is restored, so re-running is redundant when the lock is still ours and an instruction is enough when a new process resumed an old session. |
+| `resume`, `reload`, `fork` | Nudge when this session already holds the home lock, otherwise full digest | Prior context is restored, so re-running is redundant while the lock is still ours. A lock this process does not hold - absent, or naming a dead or other process - means no live process ever took the helm for it, and an advisory nudge can be silently deferred by an idle restored agent, so the wrapper takes the helm itself. |
 | unreadable or unrecognized | Full digest | Taking the helm redundantly is cheap and idempotent; not taking it is the bug this tier exists to fix. |
 
 ### Change from the previous nudge matcher
@@ -77,7 +77,8 @@ A re-emit (`--reemit`) reprints the digest for a process that already has the he
 This routing deliberately inverts the previous nudge matcher, which fired on `startup|resume|clear` and excluded `compact`.
 
 - Compaction is covered where a tracked adapter delivers that source, because a compacted session has lost exactly the digest it needs.
-- Resume is excluded from the run because it restores that digest instead of losing it.
+- A resume that still owns the lock is excluded from the run because it restores that digest instead of losing it.
+- A resume that does NOT own the lock is a restored session whose predecessor never took the helm, so it is treated exactly like a startup: the run tier exists because the nudge can only ask, and a restored agent can sit idle indefinitely without asking.
 
 ### Lock and completion interlock
 
@@ -104,7 +105,7 @@ A lock another live session took meanwhile still produces the ordinary read-only
 
 ### Nudge wrapper on a run-tier harness
 
-On a run-tier harness, only `resume`, `reload`, and `fork` are routed to the nudge wrapper.
+On a run-tier harness, only `resume`, `reload`, and `fork` are routed to the nudge wrapper, and only after the shared same-session verdict (`fm_session_lock_owned_by_self`) confirms this process already holds the lock.
 The nudge wrapper has its own separate ancestry-only check, which normally stays silent when this process already holds the lock.
 A background Claude helper-chain recycle can break that ancestry.
 The wrapper may then emit a redundant nudge even though the shared same-session verdict still owns the lock.

@@ -452,6 +452,7 @@ install_omp_extension_fixture() {  # <repo>
   mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$repo/node_modules/typebox"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$repo/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$repo/.pi/extensions/lib/fm-home-resolve.ts"
   cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-supervision-engine-lib.sh" "$repo/bin/"
   chmod +x "$repo/bin/fm-operational-input.sh"
   printf '{"name":"typebox","type":"module","exports":"./index.js"}\n' > "$repo/node_modules/typebox/package.json"
@@ -517,6 +518,45 @@ EOF
   expect_code 0 "$status" "omp turn-end guard extension contract: $out"
   [ -z "$out" ] || fail "omp guard extension test printed output: $out"
   pass ".omp turn-end guard: digest delivery, seatbelt block, one compelled continuation, flagged stop stands down"
+}
+
+test_omp_extension_corrects_leaked_launcher_home() {
+  local repo home log out status
+  repo="$TMP_ROOT/leak/repo"; home="$TMP_ROOT/leak/leaked-main"; log="$TMP_ROOT/leak/runner.log"
+  install_omp_extension_fixture "$repo"
+  # This repo IS a seeded secondmate home (its marker), while the launcher
+  # environment that restarted the session names a DIFFERENT home, exactly as a
+  # restored or rebound pane does. The extension must operate on its own root.
+  printf 'bosun\n' > "$repo/.fm-secondmate-home"
+  mkdir -p "$repo/state" "$home/state"
+  cat > "$repo/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'runner FM_HOME=%s FM_ROOT_OVERRIDE=%s\n' "${FM_HOME:-}" "${FM_ROOT_OVERRIDE:-}" >> "${FM_LEAK_LOG:?}"
+printf 'OMP DIGEST\n'
+SH
+  chmod +x "$repo/bin/"*.sh
+  : > "$log"
+  out=$(FM_LEAK_LOG="$log" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const pi = { on(e, h) { handlers.set(e, h); }, sendMessage() {} };
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+const ctx = { sessionManager: { getSessionId: () => "leak-session" } };
+handlers.get("session_start")({ type: "session_start" }, ctx);
+const result = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "hi" }, ctx);
+if (!result?.message?.content?.includes("OMP DIGEST")) throw new Error(`own digest not delivered: ${JSON.stringify(result)}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp extension leaked-home correction: $out"
+  assert_contains "$(cat "$log")" "runner FM_HOME=$repo FM_ROOT_OVERRIDE=$repo" \
+    "the omp extension carried the leaked launcher home into its session-start chain"
+  assert_present "$repo/state/.omp-turnend-extension-loaded" \
+    "the omp extension did not mark itself loaded in its own home"
+  assert_absent "$home/state/.omp-turnend-extension-loaded" \
+    "the omp extension marked itself loaded in the leaked home"
+  pass ".omp turn-end guard: a seeded secondmate root wins over a leaked launcher FM_HOME/FM_ROOT_OVERRIDE"
 }
 
 test_watch_extension_arms_and_delivers() {
@@ -871,6 +911,7 @@ test_busy_extension_lifecycle
 test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
+test_omp_extension_corrects_leaked_launcher_home
 test_watch_extension_arms_and_delivers
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_runs_the_supervision_host quiet

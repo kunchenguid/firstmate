@@ -9,6 +9,11 @@ import {
   encodeFirstmateOperationalInput,
   firstmateShellInvocation,
 } from "./lib/fm-operational-input.ts";
+import {
+  firstmateChildEnv,
+  resolveFirstmateHome,
+  resolveFirstmateRoot,
+} from "./lib/fm-home-resolve.ts";
 
 let guardFollowupActive = false;
 
@@ -17,8 +22,10 @@ type LockOwnership = "owned" | "missing" | "other";
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
-const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+const fmHome = resolveFirstmateHome(root);
+const fmRoot = resolveFirstmateRoot(root);
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
@@ -299,6 +306,7 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
         invocation.command,
         invocation.args,
         {
+          env: firstmateChildEnv(fmHome, fmRoot),
           detached: supervised,
           stdio: supervised
             ? ["ignore", "pipe", "ignore", "ipc"]
@@ -477,6 +485,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
     let child: ChildProcess;
     try {
       child = spawn(invocation.command, invocation.args, {
+        env: firstmateChildEnv(fmHome, fmRoot),
         stdio: ["pipe", "ignore", "pipe"],
       });
     } catch {
@@ -510,6 +519,7 @@ function runChecker(script: string, command: string): Promise<{ code: number; st
     let child: ChildProcess;
     try {
       child = spawn(invocation.command, invocation.args, {
+        env: firstmateChildEnv(fmHome, fmRoot),
         stdio: ["ignore", "ignore", "pipe"],
       });
     } catch {

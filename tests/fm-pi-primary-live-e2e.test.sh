@@ -176,12 +176,14 @@ run_native_ahoy_regressions() {
   git init -q "$AHOY_PROJECT"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$AHOY_PROJECT/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$AHOY_PROJECT/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$AHOY_PROJECT/.pi/extensions/lib/fm-home-resolve.ts"
   cp \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
     "$AHOY_PROJECT/bin/"
+  cp "$ROOT/bin/fm-home-lib.sh" "$AHOY_PROJECT/bin/fm-home-lib.sh"
   cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$AHOY_PROJECT/.agents/skills/ahoy/SKILL.md"
   chmod +x "$AHOY_PROJECT/bin/fm-sessionstart-nudge.sh"
   # shellcheck disable=SC2016 # Variables expand in the generated script, not this test shell.
@@ -262,6 +264,7 @@ cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$PROJECT/.pi/extensions/lib
 cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$PROJECT/.pi/extensions/lib/fm-native-contract.ts"
 cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$PROJECT/.pi/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/fm-operational-input.ts"
+cp "$ROOT/.pi/extensions/lib/fm-home-resolve.ts" "$PROJECT/.pi/extensions/lib/fm-home-resolve.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
 cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-operational-input.sh"

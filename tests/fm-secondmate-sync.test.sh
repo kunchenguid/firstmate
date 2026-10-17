@@ -44,6 +44,28 @@ fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-sync)
 export FM_BACKEND=tmux
 
+# One live "harness" process the healthy-supervision fixtures point their lock
+# at, so the bootstrap alive-branch supervision check stays silent for a fixture
+# that is meant to model a running secondmate. bash's `exec -a pi` gives it a pi
+# argv[0] while ps reports the sleep exec name, the same identity rule
+# bin/fm-session-lock-lib.sh applies.
+SYNC_FAKE_HARNESS_PID=
+cleanup_sync_fake_harness() {
+  if [ -n "${SYNC_FAKE_HARNESS_PID:-}" ]; then
+    kill "$SYNC_FAKE_HARNESS_PID" 2>/dev/null || true
+    SYNC_FAKE_HARNESS_PID=
+  fi
+  fm_test_cleanup
+}
+trap cleanup_sync_fake_harness EXIT
+trap 'cleanup_sync_fake_harness; exit 130' INT
+trap 'cleanup_sync_fake_harness; exit 143' TERM
+trap 'cleanup_sync_fake_harness; exit 129' HUP
+trap 'cleanup_sync_fake_harness; exit 131' QUIT
+bash -c 'exec -a pi sleep 60000' &
+SYNC_FAKE_HARNESS_PID=$!
+sleep 0.2
+
 # --- world builders --------------------------------------------------------
 
 # new_world <name>: a PRIMARY firstmate repo on `main` with one commit (the
@@ -77,6 +99,13 @@ add_sm_worktree() {
   local w=$1 id=$2 commit=$3
   git -C "$w/main" worktree add -q --detach "$w/$id" "$commit"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
+  # Healthy supervision record: a lock naming the live fake harness plus matching
+  # startup completion, so the alive-branch supervision check is silent for a
+  # fixture that models a running, supervised secondmate.
+  mkdir -p "$w/$id/state"
+  printf '%s\n' "$SYNC_FAKE_HARNESS_PID" > "$w/$id/state/.lock"
+  printf '%s\n' "$SYNC_FAKE_HARNESS_PID" > "$w/$id/state/.session-start-complete"
+  touch "$w/$id/state/.last-watcher-beat"
   {
     printf 'window=firstmate:fm-%s\n' "$id"
     printf 'kind=secondmate\n'

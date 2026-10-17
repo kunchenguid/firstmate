@@ -24,6 +24,7 @@ install_runner() {  # <case-dir>
   mkdir -p "$dir/bin" "$dir/home/state" "$dir/home/data" "$dir/home/config"
   cp "$ROOT/bin/fm-afk-return.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-home-lib.sh" "$dir/bin/fm-home-lib.sh"
   cp "$ROOT/bin/fm-lock-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/"

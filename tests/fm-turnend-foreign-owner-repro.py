@@ -59,6 +59,9 @@ def make(name):
         "FM_HOME_SUMMARY_INTERVAL": "999999",
         "FM_CHECK_INTERVAL": "999999",
         "FM_CLAUDE_AUTOARM_SYNC_WAIT_MS": "0",
+        # The FM_ scrub above drops the sandbox bypass tests/lib.sh exports, so
+        # a suite run from a no-mistakes validation checkout would refuse to arm.
+        "FM_GATE_REFUSE_BYPASS": "1",
     }
     return root, env
 

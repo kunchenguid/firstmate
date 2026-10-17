@@ -126,6 +126,8 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 #   FM_SM_LIVE_WHERE   backend=<b> or host=<h>, on relaunchable
 #   FM_SM_LIVE_REASON  exact skip suffix, on skipped
 #   FM_SM_LIVE_LINE    verbose already-live line body, on alive
+#   FM_SM_LIVE_BACKEND, FM_SM_LIVE_TARGET
+#                      the probed local endpoint, empty for a remote mate
 #
 # `silent` means the meta records no endpoint at all - that shape is owned by
 # secondmate-provisioning recovery, not liveness.
@@ -136,6 +138,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   local meta=$1 id=$2 mode=$3
   FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0
   FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE=''
+  FM_SM_LIVE_BACKEND='' FM_SM_LIVE_TARGET=''
   local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }
@@ -217,6 +220,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target="$window"
+  FM_SM_LIVE_BACKEND=$backend FM_SM_LIVE_TARGET=$target
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;

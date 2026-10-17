@@ -653,7 +653,7 @@ test_changed_mode_drops_external_sources_and_excludes_cross_file_codes() {
     "changed-mode local lint did not disclose dropped source following"
   assert_grep $'analysis_mode\tlocal' "$telemetry" \
     "telemetry did not record local analysis mode"
-  assert_grep $'source_directives\t5' "$telemetry" \
+  assert_grep $'source_directives\t6' "$telemetry" \
     "telemetry did not count the changed root's source directives"
   assert_grep $'source_followed_directives\t0' "$telemetry" \
     "telemetry reported followed sources in no-external-sources mode"
@@ -1589,7 +1589,14 @@ SH
     if [ "$mode" -eq 1 ]; then
       assert_grep $'meta\tbounds_enforced\t1' "$tmp/pass.$mode.roots.tsv" \
         "the bounded fallback did not enforce bounds"
-      case "$rss_kib" in ''|*[!0-9]*) fail "the fallback attempts lost per-root RSS reporting: $rss_kib" ;; esac
+      # Per-root RSS comes from /usr/bin/time; a host without it reports the
+      # documented "unavailable" instead of a number.
+      if [ -x /usr/bin/time ]; then
+        case "$rss_kib" in ''|*[!0-9]*) fail "the fallback attempts lost per-root RSS reporting: $rss_kib" ;; esac
+      else
+        [ "$rss_kib" = unavailable ] \
+          || fail "the bounded fallback reported RSS without /usr/bin/time: $rss_kib"
+      fi
     else
       assert_grep $'meta\tbounds_enforced\t0' "$tmp/pass.$mode.roots.tsv" \
         "the unbounded fallback unexpectedly enforced bounds"
