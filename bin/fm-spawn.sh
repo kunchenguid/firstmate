@@ -1166,7 +1166,7 @@ spawn_remote_secondmate() {
   if [ "$account_config" != "$CONFIG" ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: $account_config/$(fm_worker_account_file "$harness") cannot pin remote secondmate $id from this host; configure its account on the launching host" >&2
+    echo "error: $account_config/$(fm_worker_account_file "$harness") cannot pin remote secondmate $id from this host; configure config/$(fm_worker_account_file "$harness") in its home $home on $host instead" >&2
     return 1
   fi
   model=${MODEL:--}

@@ -124,14 +124,14 @@ fm_worker_account_config() {
   esac
 }
 
-# fm_worker_account_resolve <harness> <config-dir>
+# fm_worker_account_resolve <harness> <config-dir> <setting>
 # Prints "declared<TAB>root<TAB>providers" for a valid pin, where root is the
 # directory the launch selects (empty for ordinary Claude, meaning
 # CLAUDE_CONFIG_DIR unset). Prints nothing and returns 0 when the runner is
 # not pinnable or the home has no pin. On refusal prints one error naming the
 # file and returns 1.
 fm_worker_account_resolve() {
-  local harness=$1 config=$2 file cfg token rc declared root fallback
+  local harness=$1 config=$2 setting=$3 file cfg token rc declared root fallback
   file=$(fm_worker_account_file "$harness") || return 0
   cfg="$config/$file"
   token=$(fm_worker_account_read "$harness" "$cfg")
@@ -141,14 +141,14 @@ fm_worker_account_resolve() {
   3) return 0 ;;
   4) return 1 ;;
   5)
-    echo "error: config/$file must be a readable regular file: $cfg" >&2
+    echo "error: $setting must be a readable regular file: $cfg" >&2
     return 1
     ;;
   *)
     if [ "$file" = pi-account ]; then
-      echo "error: config/$file must hold 'ordinary' or one absolute path on line 1 and the providers this home may spend on line 2, separated by spaces, with no other lines or control characters: $cfg" >&2
+      echo "error: $setting must hold 'ordinary' or one absolute path on line 1 and the providers this home may spend on line 2, separated by spaces, with no other lines or control characters: $cfg" >&2
     else
-      echo "error: config/$file must hold 'ordinary' or one absolute path on a single line with no control characters: $cfg" >&2
+      echo "error: $setting must hold 'ordinary' or one absolute path on a single line with no control characters: $cfg" >&2
     fi
     return 1
     ;;
@@ -167,7 +167,7 @@ fm_worker_account_resolve() {
     esac
   fi
   if [ -n "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
-    echo "error: config/$file must name a readable, searchable existing directory (ordinary means $fallback): $cfg -> $root" >&2
+    echo "error: $setting must name a readable, searchable existing directory (ordinary means $fallback): $cfg -> $root" >&2
     return 1
   fi
   printf '%s\t%s\t%s\n' "$declared" "$root" "${token#*$'\t'}"
@@ -251,14 +251,14 @@ fm_worker_account_select() {
   local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} mate=${6:-}
   local selection declared root providers word provider='' selected_config setting
   selected_config=$(fm_worker_account_config "$harness" "$config" "$mate") || return 1
-  selection=$(fm_worker_account_resolve "$harness" "$selected_config") || return 1
-  if [ -z "$selection" ]; then
-    [ "$selected_config" = "$config" ] && return 0
-    echo "error: secondmate account pin disappeared during selection: $selected_config/$(fm_worker_account_file "$harness")" >&2
-    return 1
-  fi
   setting="config/$(fm_worker_account_file "$harness")"
   [ "$selected_config" = "$config" ] || setting="$selected_config/$(fm_worker_account_file "$harness")"
+  selection=$(fm_worker_account_resolve "$harness" "$selected_config" "$setting") || return 1
+  if [ -z "$selection" ]; then
+    [ "$selected_config" = "$config" ] && return 0
+    echo "error: secondmate account pin disappeared during selection: $setting" >&2
+    return 1
+  fi
   declared=${selection%%$'\t'*}
   root=${selection#*$'\t'}
   providers=${root#*$'\t'}
