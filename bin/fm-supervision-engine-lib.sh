@@ -332,7 +332,8 @@ _fm_engine_reap() {
 #     [<pid-file>]
 # Runs one bounded engine turn from $FM_ROOT and returns the engine's exit
 # status (124 or 137 when the bound was hit, 127 when the engine could not
-# run). <result-file> receives the engine's machine-readable result and
+# run). <result-file> receives the engine's machine-readable result (a
+# standalone Claude result object or a verbose JSON event array), and
 # <error-file> its diagnostics. While the turn runs, <pid-file> (when given)
 # holds the bounded process's pid and identity, so a restarted host can stop
 # an engine its crashed predecessor left running.
@@ -412,7 +413,8 @@ fm_supervision_engine_turn() {
 # fm_supervision_engine_result <engine> <result-file> [<prior-conversation-cost>]:
 # print one line "error=0|1 cost=<usd> conversation_cost=<usd> input=<n>
 # cache_read=<n> cache_write=<n> output=<n> turns=<n>" from the engine's
-# machine-readable result, where cost is this turn's and conversation_cost the
+# machine-readable result (a standalone object or the last result event in a
+# verbose JSON array), where cost is this turn's and conversation_cost the
 # conversation's running total (the caller records it and passes it back for
 # the next turn; 0 for a new conversation). Claude's total_cost_usd is that
 # running total on a resumed conversation, while its usage and num_turns are
@@ -428,6 +430,7 @@ fm_supervision_engine_result() {
         const fs = require("node:fs");
         let j;
         try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
+        if (Array.isArray(j)) j = j.filter((event) => event && event.type === "result").pop() || {};
         if (!j || typeof j !== "object") process.exit(1);
         const u = j.usage && typeof j.usage === "object" ? j.usage : {};
         const finite = (v) => typeof v === "number" && Number.isFinite(v);
