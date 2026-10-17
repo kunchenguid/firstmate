@@ -28,6 +28,23 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
 #                                  or null; schema 5 ignores $lane.
+#   quota_model_scopes($provider; $model)
+#                                  the scopes, beyond the provider-wide
+#                                  all_models and all_products, that bound the
+#                                  candidate's model, named the way quota-axi
+#                                  names its own windows. The model id is taken
+#                                  after its last "/" without a trailing
+#                                  "[...]" context tag; an omitted model and
+#                                  "default" name no model. Every provider
+#                                  keeps the exact model:<id> and product:<id>.
+#                                  claude adds model:<family>, because quota-axi
+#                                  keys a Claude model window by the vendor's
+#                                  family (model:fable), so claude-fable-5-1
+#                                  and the fable alias read the same window.
+#                                  agy adds gemini for a gemini-* model and
+#                                  claude_gpt for a claude-* or gpt-* model,
+#                                  the two groups quota-axi reports for
+#                                  Antigravity.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
 FM_QUOTA_ROW_JQ='
   def quota_lane($harness; $model):
@@ -35,6 +52,19 @@ FM_QUOTA_ROW_JQ='
     elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
     then ($model | split("/") | first | if . == "codex-native" then "codex-home" else . end)
     else "" end;
+  def quota_model_scopes($provider; $model):
+    (($model // "") | split("/") | last // "" | sub("\\[[^]]*\\]$"; "")) as $id |
+    if $id == "" or $id == "default" then []
+    else ["model:" + $id, "product:" + $id] +
+      if $provider == "claude" then
+        ([$id | split("-") | if first == "claude" then .[1:] else . end | .[] | select(test("^[a-z]+$"))] | first) as $family |
+        if $family == null or $family == $id then [] else ["model:" + $family] end
+      elif $provider == "agy" then
+        if ($id | startswith("gemini")) then ["gemini"]
+        elif ($id | startswith("claude")) or ($id | startswith("gpt")) then ["claude_gpt"]
+        else [] end
+      else [] end
+    end;
   def quota_row($snapshot; $provider; $lane):
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
     if $snapshot.schemaVersion == 6 then
