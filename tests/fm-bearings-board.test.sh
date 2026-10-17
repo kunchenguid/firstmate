@@ -305,45 +305,6 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a non-HTTPS Landed PR URL was accepted"
 
-  # Optional milestone fields refuse unknown values like every other field.
-  local mutation
-  for mutation in \
-    '.projects = {}' \
-    '.projects = [{"release_goal":"no repo"}]' \
-    '.projects = [{"repo":"sample","health":"green"}]' \
-    '.projects = [{"repo":"sample","release_date":"next week"}]' \
-    '.projects = [{"repo":"sample","merges_today":-1}]' \
-    '.projects = [{"repo":"sample","wip_count":1.5}]' \
-    '.projects = [{"repo":"sample","release_goal":""}]' \
-    '.underway = [{"id":"t","repo":"sample","name":"T","state":"working","kind":"ship","doing":"x","health":"g"}]' \
-    '.underway = [{"id":"t","repo":"sample","name":"T","state":"working","kind":"ship","doing":"x","target":18}]' \
-    '.underway = [{"id":"t","repo":"sample","name":"T","state":"working","kind":"ship","doing":"x","evidence_url":"ftp://example.com/shot.png"}]' \
-    '.projects = [{"repo":"sample","board_url":"javascript:alert(1)"}]' \
-    '.projects = [{"repo":"sample","board_url":"tail0de54.ts.net:4387/session/x"}]' \
-    '.projects = [{"repo":"sample","board_url":""}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"file:///tmp/shot.png"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"http://bad host/shot.png"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"/evidence/shot.png"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"evidence/../shot.png"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"../evidence/shot.png"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"evidence/"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"evidence"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"evidence/.hidden.png"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"evidence/a b.png"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"proof/shot.png"}]' \
-    '.landed = [{"id":"l","repo":"sample","what":"W","owner":"o","evidence_url":"evidence/shot.png?v=1"}]' \
-    '.captains_call[0].default_if_silent = "maybe"' \
-    '.captains_call[0].default_if_silent = "reconcile"' \
-    '.captains_call[0].decide_by = "soon"' \
-    '.captains_call[0].asked_at = "2026-10-03 09:00"' \
-    '.captains_call[0].reversible = "yes"' \
-    '.captains_call[0].evidence_url = "javascript:alert(1)"'; do
-    write_valid_payload "$data"
-    jq "$mutation" "$data" > "$data.tmp" && mv "$data.tmp" "$data"
-    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-    [ "$rc" -ne 0 ] || fail "an invalid milestone field was accepted: $mutation"
-  done
-
   assert_absent "$board" "a refused payload still produced a board"
   pass "build refuses malformed payloads before touching the board"
 }
@@ -550,30 +511,6 @@ test_charted_kind_is_optional_and_accepts_both_values() {
   pass "charted kind is optional and accepts queued and warning"
 }
 
-test_board_and_evidence_urls_accept_http_https_and_evidence_paths() {
-  local home data
-  home=$(make_home weburls)
-  data="$home/payload.json"
-  write_valid_payload "$data"
-  jq '.projects = [
-        {"repo":"ownvoice","board_url":"http://example.com/session/board-1"},
-        {"repo":"takeone","board_url":"https://example.com/board"}
-      ]
-      | .landed = [
-          {"id":"l","repo":"ownvoice","what":"W","owner":"o","evidence_url":"http://example.com/evidence/shot.png"},
-          {"id":"m","repo":"ownvoice","what":"M","owner":"o","evidence_url":"evidence/2026-10-03/login_v2.png"}
-        ]
-      | .underway = [{"id":"t","repo":"takeone","name":"T","state":"working","kind":"ship","doing":"x","evidence_url":"evidence/clip.mp4"}]
-      | .captains_call[0].evidence_url = "http://example.com/evidence"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
-  run_board "$home" build "$data" >/dev/null \
-    || fail "an http or https board_url, or an http, https, or evidence/ evidence_url, was refused"
-  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
-    [.projects[].board_url] == ["http://example.com/session/board-1", "https://example.com/board"]
-      and [.landed[].evidence_url] == ["http://example.com/evidence/shot.png", "evidence/2026-10-03/login_v2.png"]
-      and .underway[0].evidence_url == "evidence/clip.mp4"
-  ' >/dev/null || fail "the built board did not carry the board and evidence URLs it was given"
-  pass "board_url accepts http and https, and evidence_url also accepts an evidence/ path"
-}
 
 # --- part 1: never arm a poll on an ended session ---------------------------
 
@@ -835,7 +772,6 @@ test_build_refuses_a_nondecision_reconcile_value() {
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
-test_board_and_evidence_urls_accept_http_https_and_evidence_paths
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails

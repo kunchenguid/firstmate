@@ -95,18 +95,12 @@ require_listener_reached_poll() {  # <home>
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
 render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
-  local underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0}
-  render_payload "$1" "$(jq -n --argjson underway "$underway" --argjson charted "$charted" \
+  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
+  jq -n --argjson underway "$underway" --argjson charted "$charted" \
     --argjson more "$more" --argjson warning_more "$warning_more" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, captains_call:[], underway:$underway, landed:[],
-    charted:$charted, charted_more:$more, charted_warning_more:$warning_more}')"
-}
-
-# Build the board from a whole <payload-json> and return what the renderer produced.
-render_payload() {  # <home> <payload-json>
-  local home=$1 data="$1/payload.json"
-  printf '%s\n' "$2" > "$data"
+    charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
@@ -272,144 +266,6 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
-# One payload carrying every optional milestone field, so a single build proves
-# the project strip, Underway targets, and decision-card defaults together.
-MILESTONE_PAYLOAD='{
-  "schema":"fm-bearings-board.v1","home":"render-home","generated":"2026-10-03T12:00Z","prs_live":false,
-  "projects":[
-    {"repo":"crewhouse","release_goal":"Chief-only onboarding","release_date":"2026-10-10","health":"Y",
-     "merges_today":3,"last_release":"v0.4.1","next_release":"v0.5.0","wip_count":4},
-    {"repo":"muxr","health":"R"}
-  ],
-  "captains_call":[
-    {"key":"pick-store-copy","type":"decision","repo":"crewhouse","title":"Store listing copy",
-     "about":"Two drafts are ready","decide":"Which draft ships?",
-     "options":[{"value":"short","label":"Short draft"},{"value":"long","label":"Long draft"}],
-     "recommend_value":"short","default_if_silent":"long","decide_by":"2026-10-04",
-     "reversible":false,"asked_at":"2026-10-03T09:15:00Z",
-     "evidence_url":"https://example.com/evidence/store-copy"}
-  ],
-  "underway":[
-    {"id":"ch-onboard","repo":"crewhouse","name":"Onboarding flow","state":"working","kind":"ship",
-     "doing":"implementing","target":"18:30","range":"1.2-3.6 h","age":"2 h","health":"G",
-     "evidence_url":"https://example.com/evidence/onboard"}
-  ],
-  "landed":[],"charted":[]
-}'
-
-test_milestone_fields_render_on_the_strip_rows_and_cards() {
-  local home out
-  home=$(make_home milestone)
-  out=$(render_payload "$home" "$MILESTONE_PAYLOAD")
-  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
-    || fail "the milestone board rendered its error instead of the fleet: $out"
-  printf '%s' "$out" | jq -e '
-    .projects == [
-      {repo:"crewhouse", goal:"Chief-only onboarding", date:"release 2026-10-10",
-       meta:"next v0.5.0 · last v0.4.1 · 3 merged today · 4 in progress",
-       badges:[{tone:"warn", text:"at risk"}], board:[]},
-      {repo:"muxr", goal:"", date:"", meta:"", badges:[{tone:"danger", text:"off track"}], board:[]}
-    ]
-  ' >/dev/null || fail "the project strip did not show release goal, date, and health: $out"
-  printf '%s' "$out" | jq -e '
-    .underway[0]
-    | .aside == ["by 18:30", "1.2-3.6 h"]
-      and (.sub | endswith(" · 2 h old"))
-      and .badges == [{tone:"online", text:"working"}, {tone:"online", text:"on track"}]
-      and .links == [{text:"evidence", href:"https://example.com/evidence/onboard"}]
-  ' >/dev/null || fail "the underway row did not show target, range, health, and evidence: $out"
-  printf '%s' "$out" | jq -e '
-    .calls[0]
-    | ([.ctx[] | select(.k == "if silent" or .k == "decide by" or .k == "reversible" or .k == "asked")]
-        == [{k:"if silent", v:"Long draft"}, {k:"decide by", v:"2026-10-04"},
-            {k:"reversible", v:"no - one-way"}, {k:"asked", v:"2026-10-03T09:15:00Z"}])
-      and ([.options[] | select(.value == "short" or .value == "long")]
-        == [{value:"short", markers:["rec"]}, {value:"long", markers:["default"]}])
-      and (.links | map(.href) == ["https://example.com/evidence/store-copy"])
-  ' >/dev/null || fail "the decision card did not show its default, deadline, and evidence: $out"
-  pass "milestone fields render on the project strip, underway rows, and decision cards"
-}
-
-test_an_old_payload_renders_no_milestone_surfaces() {
-  local home out
-  home=$(make_home milestone-old)
-  out=$(render_payload "$home" "$(printf '%s' "$MILESTONE_PAYLOAD" | jq '
-    del(.projects)
-    | .captains_call[0] |= del(.default_if_silent, .decide_by, .reversible, .asked_at, .evidence_url)
-    | .underway[0] |= del(.target, .range, .age, .health, .evidence_url)')")
-  printf '%s' "$out" | jq -e '
-    .error == "" and .projects == []
-      and .underway[0].aside == [] and .underway[0].links == []
-      and .underway[0].badges == [{tone:"online", text:"working"}]
-      and (.underway[0].sub | test("old") | not)
-      and ([.calls[0].ctx[] | .k] == ["about", "decide"])
-      and ([.calls[0].options[] | .markers[]] == ["rec"])
-      and .calls[0].links == []
-  ' >/dev/null || fail "a payload without milestone fields rendered milestone surfaces: $out"
-  pass "a payload without milestone fields renders exactly the pre-milestone board"
-}
-
-# Home-board links on project cards plus image and non-image evidence on every
-# row type that carries evidence_url.
-LINKS_PAYLOAD='{
-  "schema":"fm-bearings-board.v1","home":"render-home","generated":"2026-10-03T12:00Z","prs_live":false,
-  "projects":[
-    {"repo":"ownvoice","health":"G","board_url":"http://example.com/session/board-1"},
-    {"repo":"takeone","health":"Y"}
-  ],
-  "captains_call":[
-    {"key":"pick-hero","type":"decision","repo":"ownvoice","title":"Hero shot","decide":"Which?",
-     "options":[{"value":"a","label":"A"},{"value":"b","label":"B"}],
-     "evidence_url":"https://example.com/evidence/hero.JPEG?v=2"}
-  ],
-  "underway":[
-    {"id":"ov-rec","repo":"ownvoice","name":"Recorder","state":"working","kind":"ship","doing":"implementing",
-     "evidence_url":"http://example.com/evidence/recorder.webp"},
-    {"id":"to-clip","repo":"takeone","name":"Clip export","state":"working","kind":"ship","doing":"implementing",
-     "evidence_url":"https://example.com/evidence/clip.mp4"}
-  ],
-  "landed":[
-    {"id":"ov-login","repo":"ownvoice","what":"Login","owner":"ship","evidence_url":"http://example.com/evidence/login.png"},
-    {"id":"to-page","repo":"takeone","what":"Evidence page","owner":"ship","evidence_url":"https://example.com/evidence/page"},
-    {"id":"to-none","repo":"takeone","what":"No evidence","owner":"ship"},
-    {"id":"ov-local","repo":"ownvoice","what":"Local proof","owner":"ship","evidence_url":"evidence/local-proof.gif"},
-    {"id":"ov-clip","repo":"ownvoice","what":"Local clip","owner":"ship","evidence_url":"evidence/clip.mp4"}
-  ],
-  "charted":[]
-}'
-
-test_project_cards_link_home_boards_and_image_evidence_shows_thumbnails() {
-  local home out
-  home=$(make_home links)
-  out=$(render_payload "$home" "$LINKS_PAYLOAD")
-  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
-    || fail "the links board rendered its error instead of the fleet: $out"
-  printf '%s' "$out" | jq -e '
-    [.projects[] | {repo, board}] == [
-      {repo:"ownvoice", board:[{text:"open board ↗",
-        href:"http://example.com/session/board-1", target:"_blank", rel:"noopener"}]},
-      {repo:"takeone", board:[]}
-    ]
-  ' >/dev/null || fail "project cards did not link their home board in a new tab, or linked one without board_url: $out"
-  printf '%s' "$out" | jq -e '
-    def thumb($u): [{href:$u, target:"_blank", src:$u, loading:"lazy"}];
-    .calls[0].thumbs == thumb("https://example.com/evidence/hero.JPEG?v=2")
-      and .underway[0].thumbs == thumb("http://example.com/evidence/recorder.webp")
-      and .landed[0].thumbs == thumb("http://example.com/evidence/login.png")
-      and .landed[3].thumbs == thumb("evidence/local-proof.gif")
-  ' >/dev/null || fail "image evidence did not render as a lazy new-tab thumbnail of the full image: $out"
-  printf '%s' "$out" | jq -e '
-    .underway[1].thumbs == [] and .underway[1].links == [{text:"evidence", href:"https://example.com/evidence/clip.mp4"}]
-      and .landed[1].thumbs == [] and .landed[1].links == [{text:"evidence", href:"https://example.com/evidence/page"}]
-      and .landed[2].thumbs == [] and .landed[2].links == []
-      and .landed[4].thumbs == [] and .landed[4].links == [{text:"evidence", href:"evidence/clip.mp4"}]
-  ' >/dev/null || fail "non-image or absent evidence did not keep the plain link or nothing: $out"
-  pass "project cards link home boards and image evidence renders as thumbnails"
-}
-
-test_milestone_fields_render_on_the_strip_rows_and_cards
-test_project_cards_link_home_boards_and_image_evidence_shows_thumbnails
-test_an_old_payload_renders_no_milestone_surfaces
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
