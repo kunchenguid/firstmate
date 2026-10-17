@@ -645,12 +645,13 @@ SH
 }
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
+# FM_TEARDOWN_TEST_HOME explicitly selects a marked home for parent-channel cases.
 run_teardown() {
   local case_dir=$1; shift
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
-  FM_HOME="$case_dir/primary-home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="${FM_TEARDOWN_TEST_HOME:-$case_dir/primary-home}" FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
@@ -2947,7 +2948,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   printf 'working: shipping\ndone: PR https://github.com/example/repo/pull/9 checks green\n' \
     > "$case_dir/state/task-x1.status"
   set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_TEARDOWN_TEST_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 0 "$rc" "mate-teardown-delivers: teardown should succeed: $(cat "$case_dir/stderr")"
@@ -2970,7 +2971,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
   printf 'done: PR https://github.com/example/repo/pull/9 checks green\n' > "$case_dir/state/task-x1.status"
   set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_TEARDOWN_TEST_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "mate-teardown-refuses: teardown proceeded with an undelivered final line"
@@ -2990,7 +2991,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   [ -z "$seq" ] || FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$generation" >/dev/null
   set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  FM_TEARDOWN_TEST_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?
   set -e
   expect_code 0 "$rc" "mate-teardown-refuses: rerun after repair should succeed: $(cat "$case_dir/stderr2")"
@@ -5696,6 +5697,7 @@ test_retirement_refuses_invalid_inherited_episode() {
 if [ "$#" -gt 0 ]; then
   for selected_test in "$@"; do
     case "$selected_test" in
+      test_secondmate_home_teardown_delivers_final_line_or_refuses) "$selected_test" ;;
       test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed|test_accounting_failure_preserves_the_containing_home|test_forced_secondmate_teardown_holds_descendant_lifecycle_locks|test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed|test_retirement_adopts_ancestor_episode|test_retirement_refuses_invalid_inherited_episode|test_descendant_episode_refuses_before_coordination) "$selected_test" ;;
       *) fail "unknown focused test: $selected_test" ;;
     esac
