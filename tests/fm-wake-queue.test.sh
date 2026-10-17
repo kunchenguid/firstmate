@@ -408,7 +408,7 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
   local beat="$dir/state/.last-watcher-beat" sent="$dir/sent"
   local pid i=0 limit=600 met=0
   local marker='' want='' progress='' progress_start='' row_key='' bound=0
-  local body key observed_at=0 first=0 mark=0 mtime
+  local body key observed_at=0 first=0 mark=0 mtime cycle
   case "$mode" in
     alert|reject|tick)
       ;;
@@ -481,11 +481,11 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
     met=0
     case "$mode" in
       tick)
-        if [ -e "$beat" ]; then
-          mtime=$(stall_watch_beat_epoch "$beat")
+        cycle=$(fm_beacon_cycle "$beat")
+        if [ -n "$cycle" ]; then
           if [ "$first" -eq 0 ]; then
-            first=$mtime
-          elif [ "$mtime" -gt "$first" ]; then
+            first=$cycle
+          elif [ "$cycle" -gt "$first" ]; then
             met=1
           fi
         fi
@@ -506,15 +506,14 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
               ''|*[!0-9]*) observed_at=0 ;;
             esac
           fi
-        elif [ -e "$beat" ]; then
+        else
+          cycle=$(fm_beacon_cycle "$beat")
           mtime=$(stall_watch_beat_epoch "$beat")
-          if [ "$mtime" -ge $((observed_at + bound)) ]; then
-            if ! is_live_non_zombie "$pid" && stall_watch_has_wake "$out"; then
+          if [ -n "$cycle" ] && [ "$mtime" -ge $((observed_at + bound)) ]; then
+            if [ "$mark" -eq 0 ]; then
+              mark=$cycle
+            elif [ "$cycle" -gt $((mark + 1)) ]; then
               met=1
-            elif [ "$mark" -gt 0 ] && [ "$mtime" -gt "$mark" ]; then
-              met=1
-            else
-              mark=$mtime
             fi
           fi
         fi
@@ -541,10 +540,10 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
           [ ! -e "$marker" ] && met=1
           ;;
         defer)
-          if [ "$observed_at" -gt 0 ] && stall_watch_has_wake "$out" \
+          if [ "$mark" -gt 0 ] && stall_watch_has_wake "$out" \
             && ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null 2>&1; then
-            mtime=$(stall_watch_beat_epoch "$beat")
-            [ "$mtime" -ge $((observed_at + bound)) ] && met=1
+            cycle=$(fm_beacon_cycle "$beat")
+            [ -n "$cycle" ] && [ "$cycle" -gt "$mark" ] && met=1
           fi
           ;;
         *)
