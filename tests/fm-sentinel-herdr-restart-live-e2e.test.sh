@@ -117,8 +117,19 @@ cleanup() {
 trap cleanup EXIT
 
 # A throwaway HOME whose Claude state is the test credential's, by symlink.
+# $LABROOT/treehouse is the pool root the treehouse.toml files below point at.
 mkdir -p "$FAKEBIN" "$LABROOT/treehouse"
 [ -z "$EVID" ] || mkdir -p "$EVID"
+
+# Treehouse v2.0.1 resolves its pool root exclusively from a treehouse.toml
+# inside the repository of its working directory (default root $HOME), never
+# from the TREEHOUSE_ROOT environment variable, so wire that config into every
+# lab repo a lab treehouse call can run from (the worker's project and the lab
+# home), keeping every copy under $LABROOT. The file stays untracked: only the
+# get that allocates a copy reads it, never the copies.
+wire_treehouse_root() {  # <repo-root>
+  printf 'root = "%s"\n' "$LABROOT/treehouse" > "$1/treehouse.toml"
+}
 ln -s "$CRED_HOME/.claude" "$LABHOME/.claude"
 ln -s "$CRED_HOME/.claude.json" "$LABHOME/.claude.json"
 printf '[user]\n\tname = Umer\n\temail = umer@example.invalid\n' > "$LABHOME/.gitconfig"
@@ -161,7 +172,7 @@ cat > "$LABHOME/.bashrc" <<EOF
 export PATH='$FAKEBIN':"\$PATH"
 export HERDR_SESSION='$HERDR_LAB_SESSION' HERDR_LAB_SESSION='$HERDR_LAB_SESSION'
 export HERDR_LAB_HELPER='$HERDR_LAB_HELPER' REAL_HERDR='$REAL_HERDR' HERDR_ORIGINAL_PATH='$HERDR_ORIGINAL_PATH'
-export TREEHOUSE_ROOT='$LABROOT/treehouse' DISABLE_AUTOUPDATER=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
 EOF
 printf '. ~/.bashrc\n' > "$LABHOME/.bash_profile"
 
@@ -170,7 +181,7 @@ printf '. ~/.bashrc\n' > "$LABHOME/.bash_profile"
 lab_env() {
   env -i HOME="$LABHOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" LANG="${LANG:-C.UTF-8}" \
     TERM=xterm-256color SHELL=/bin/bash PATH="$HERDR_ORIGINAL_PATH" \
-    FM_HERDR_LAB_FLEET_HOME="$HOME" TREEHOUSE_ROOT="$LABROOT/treehouse" DISABLE_AUTOUPDATER=1 "$@"
+    FM_HERDR_LAB_FLEET_HOME="$HOME" DISABLE_AUTOUPDATER=1 "$@"
 }
 lab() { lab_env "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
 # Production entrypoints the test itself drives, routed like a lab pane.
@@ -242,6 +253,7 @@ cp -R "$ROOT/bin/." "$MAIN/bin/"
 git -C "$MAIN" add -A bin
 git -C "$MAIN" -c user.name=Umer -c user.email=umer@example.invalid commit -q -m "lab: working tree" >/dev/null || true
 mkdir -p "$MAIN/state" "$MAIN/data" "$MAIN/config" "$MAIN/projects"
+wire_treehouse_root "$MAIN"
 printf 'herdr\n' > "$MAIN/config/backend"
 printf 'claude\n' > "$MAIN/config/crew-harness"
 printf 'claude %s low\n' "$MODEL" > "$MAIN/config/secondmate-harness"
@@ -264,6 +276,7 @@ git -C "$LABROOT/notes-seed" add -A
 git -C "$LABROOT/notes-seed" -c user.name=Umer -c user.email=umer@example.invalid commit -q -m seed
 git clone -q --bare "$LABROOT/notes-seed" "$LABROOT/notes.git"
 git clone -q "$LABROOT/notes.git" "$NOTES"
+wire_treehouse_root "$NOTES"
 printf '# Projects\n\n- notes [local-only +yolo] - lab notes fixture\n' > "$LEAD/data/projects.md"
 
 write_brief() {  # <id>
