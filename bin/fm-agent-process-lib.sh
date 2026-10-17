@@ -115,3 +115,70 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     printf 'other'
   fi
 }
+
+fm_process_tree_holds_drive_call() {  # <root-pid> [quiet-secs]
+  local root=$1 quiet_secs=${2:-0} pid comm argv0 argv0b sub1 sub2 etimes args generic us
+  case "$root" in ''|*[!0-9]*) return 1 ;; esac
+  case "$quiet_secs" in ''|*[!0-9]*) quiet_secs=0 ;; esac
+  generic=
+  us=$(printf '\037')
+  while IFS=$us read -r pid comm argv0 sub1 sub2 etimes args; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    argv0b=${argv0##*/}
+    if { [ "$argv0b" = axi ] || [ "$comm" = axi ]; } \
+      && { [ "$sub1" = run ] || [ "$sub1" = respond ] || [ "$sub1" = sync ] || [ "$sub1" = answer ]; }; then
+      printf '%s %s\n' "$pid" "$comm"
+      return 0
+    fi
+    if { [ "$argv0b" = no-mistakes ] || [ "$comm" = no-mistakes ]; } \
+      && { [ "$sub1" = attach ] || [ "$sub1" = rerun ] \
+           || { [ "$sub1" = axi ] && { [ "$sub2" = run ] || [ "$sub2" = respond ] || [ "$sub2" = sync ] || [ "$sub2" = answer ]; }; }; }; then
+      printf '%s %s\n' "$pid" "$comm"
+      return 0
+    fi
+    [ -z "$generic" ] || continue
+    [ "$pid" != "$root" ] || continue
+    case "$etimes" in ''|*[!0-9]*) continue ;; esac
+    { [ "$quiet_secs" -gt 0 ] && [ "$etimes" -le "$quiet_secs" ]; } || continue
+    case "$comm" in fm-*guard*|fm-*hook*) continue ;; esac
+    case "$argv0b" in fm-*guard*|fm-*hook*) continue ;; esac
+    case "$(fm_agent_process_classify "$comm" "$argv0" "$args" "$pid")" in agent|shell) continue ;; esac
+    generic="$pid $comm"
+  done < <(LC_ALL=C ps -axo pid=,ppid=,stat=,etimes=,comm=,args= 2>/dev/null | awk -v root="$root" '
+    {
+      pid[NR] = $1; ppid[NR] = $2; stat[NR] = $3; etimes[NR] = $4
+      line = $0
+      sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[^ \t]+[ \t]+[0-9]+[ \t]+/, "", line)
+      sub(/^[ \t]+/, "", line)
+      c = line; sub(/[ \t].*$/, "", c); comm[NR] = c
+      sub(/^[^ \t]+[ \t]*/, "", line)
+      args[NR] = line
+      a = line; sub(/[ \t].*$/, "", a)
+      argv0[NR] = a
+      sub(/^[^ \t]+[ \t]*/, "", line)
+      sub1[NR] = ""; sub2[NR] = ""
+      while (line != "" && sub2[NR] == "") {
+        t = line; sub(/[ \t].*$/, "", t)
+        sub(/^[^ \t]+[ \t]*/, "", line)
+        if (t ~ /^-/) { if (t == "--skip") sub(/^[^ \t]+[ \t]*/, "", line); continue }
+        if (sub1[NR] == "") sub1[NR] = t; else sub2[NR] = t
+      }
+    }
+    END {
+      want[root] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (n = 1; n <= NR; n++) {
+          if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
+        }
+      }
+      for (n = 1; n <= NR; n++) {
+        if (!(pid[n] in want) || stat[n] ~ /^Z/) continue
+        printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\n", pid[n], comm[n], argv0[n], sub1[n], sub2[n], etimes[n], args[n]
+      }
+    }')
+  [ -n "$generic" ] || return 1
+  printf '%s\n' "$generic"
+}
+
