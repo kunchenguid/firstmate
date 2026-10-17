@@ -3071,6 +3071,7 @@ test_pane_is_busy_herdr_native_busy_state() {
     fm_backend_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
     FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
       || fail "pane_is_busy should report busy from herdr's native busy_state"
+    [ "$PANE_BUSY_SOURCE" = native ] || fail "Herdr native busy source was not retained"
   ) || fail "herdr native-busy pane_is_busy subshell failed"
   pass "pane_is_busy: herdr native busy_state='busy' short-circuits without a capture fallback"
 }
@@ -3086,6 +3087,110 @@ test_primary_busy_guard_is_harness_scoped() {
       || fail "OpenCode's rendered signature should classify an OpenCode primary busy"
   ) || fail "harness-scoped primary busy guard subshell failed"
   pass "primary busy guard isolates rendered signatures by detected harness"
+}
+
+test_primary_busy_source_with_live_processes() {
+  command -v tmux >/dev/null 2>&1 || { pass "primary busy-source regression skipped: tmux unavailable"; return; }
+  local dir state
+  dir=$(make_supercase primary-busy-sources)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    tmux() { command tmux -L "fm-daemon-busy-$$" "$@"; }
+    trap 'tmux kill-server 2>/dev/null || true' EXIT
+    tmux -f /dev/null new-session -d -s source -x 100 -y 25 \
+      'sleep 30 & printf "1 shell still running\n"; wait' || exit 1
+    tmux new-window -d -t source -n rendered \
+      'printf "✢ Pollinating… (16s · thought for 1s)\n"; exec sleep 30' || exit 1
+    # The shell and its background process are alive while their rendered pane
+    # has no busy footer. The second pane has a busy footer while native is idle.
+    wait_for_pane_text() {  # <target> <text>
+      local i=0
+      until tmux capture-pane -p -t "$1" -S -40 | grep -qF "$2"; do
+        [ "$i" -lt 50 ] || return 1
+        sleep 0.1
+        i=$((i + 1))
+      done
+    }
+    wait_for_pane_text source:0 '1 shell still running' || fail "background pane did not render its output"
+    wait_for_pane_text source:rendered 'Pollinating' || fail "rendered pane did not render its busy footer"
+    [ "$(tmux display-message -p -t source:0 '#{pane_dead}')" = 0 ] || fail "background pane died"
+    [ "$(tmux display-message -p -t source:rendered '#{pane_dead}')" = 0 ] || fail "rendered pane died"
+    local idle busy
+    idle=$(tmux capture-pane -p -t source:0 -S -40)
+    busy=$(tmux capture-pane -p -t source:rendered -S -40)
+    printf '%s' "$idle" | fm_busy_lines_match claude && fail "background shell accidentally rendered a Claude busy signal"
+    printf '%s' "$busy" | fm_busy_lines_match claude || fail "rendered pane did not render a Claude busy signal"
+    fm_backend_busy_state() { [ "$2" = source:0 ] && printf busy || printf idle; }
+    FM_DAEMON_PRIMARY_VERSION=2.1.test
+    FM_DAEMON_PRIMARY_HARNESS=claude
+    pane_is_busy source:0 tmux || fail "native busy source lost with idle rendered pane"
+    [ "$PANE_BUSY_SOURCE" = native ] || fail "native busy verdict was not attributed to native"
+    pane_is_busy source:rendered tmux || fail "rendered busy source lost with native idle"
+    [ "$PANE_BUSY_SOURCE" = rendered ] || fail "rendered busy verdict was not attributed to rendered"
+    LOG="$dir/daemon.log" FM_SUPERVISOR_TARGET=source:rendered FM_SUPERVISOR_BACKEND=tmux
+    inject_msg 'escalation' "$state" && fail "a rendered-busy pane must defer injection"
+    assert_contains "$(<"$LOG")" 'source=rendered, backend=tmux, harness=claude, version_at_daemon_start=2.1.test' \
+      "deferred injection did not identify the rendered signal and harness version"
+    FM_SUPERVISOR_TARGET=source:0
+    inject_msg 'escalation' "$state" && fail "a native-busy pane must defer injection"
+    assert_contains "$(<"$LOG")" 'source=native, backend=tmux, harness=claude, version_at_daemon_start=2.1.test' \
+      "deferred injection did not identify the native signal and harness version"
+  ) || fail "live-process busy-source subshell failed"
+  pass "primary busy source: native and rendered signals remain independent and a deferral names the evidence"
+}
+
+test_primary_version_resolved_once_at_daemon_start() {
+  local dir state bin calls
+  dir=$(make_supercase primary-version-once)
+  state="$dir/state"
+  bin="$dir/harness-bin"
+  calls="$dir/version-calls"
+  mkdir -p "$bin"
+  cat > "$bin/cursor-agent" <<SH
+#!/usr/bin/env bash
+printf 'cursor-agent %s\n' "\$*" >> "$calls"
+printf '2026.09.01-test\nsecond line\n'
+SH
+  cat > "$bin/cursor" <<SH
+#!/usr/bin/env bash
+printf 'cursor %s\n' "\$*" >> "$calls"
+SH
+  cat > "$bin/claude" <<'SH'
+#!/usr/bin/env bash
+exec sleep 30
+SH
+  cat > "$bin/codex" <<'SH'
+#!/usr/bin/env bash
+printf '\033[1mcodex %s\033[0m\n' "$(printf 'x%.0s' {1..200})"
+SH
+  chmod +x "$bin/cursor-agent" "$bin/cursor" "$bin/claude" "$bin/codex"
+  afk_enter "$state"
+  (
+    fm_backend_busy_state() { printf busy; }
+    LOG="$dir/daemon.log" FM_SUPERVISOR_TARGET=fakepane FM_SUPERVISOR_BACKEND=tmux
+    FM_DAEMON_PRIMARY_HARNESS=cursor
+    PATH="$bin:$PATH" fm_daemon_resolve_primary
+    PATH="$dir/fakebin:$PATH" inject_msg 'escalation' "$state" && fail "a busy pane must defer injection"
+    PATH="$dir/fakebin:$PATH" inject_msg 'escalation' "$state" && fail "a busy pane must defer injection"
+    [ "$(grep -c 'harness=cursor, version_at_daemon_start=2026.09.01-test)' "$LOG")" = 2 ] \
+      || fail "busy deferrals did not reuse the cursor-agent version found at daemon start: $(<"$LOG")"
+    [ "$(<"$calls")" = 'cursor-agent --version' ] \
+      || fail "the cursor primary was not probed exactly once through cursor-agent: $(<"$calls")"
+    FM_DAEMON_PRIMARY_HARNESS=claude
+    SECONDS=0
+    PATH="$bin:$PATH" fm_daemon_resolve_primary
+    [ "$SECONDS" -lt 15 ] || fail "a hung --version stalled daemon start for ${SECONDS}s"
+    PATH="$dir/fakebin:$PATH" inject_msg 'escalation' "$state" && fail "a busy pane must defer injection"
+    assert_contains "$(<"$LOG")" 'harness=claude, version_at_daemon_start=unavailable)' \
+      "a hung --version was not reported as unavailable"
+    FM_DAEMON_PRIMARY_HARNESS=codex
+    PATH="$bin:$PATH" fm_daemon_resolve_primary
+    PATH="$dir/fakebin:$PATH" inject_msg 'escalation' "$state" && fail "a busy pane must defer injection"
+    assert_contains "$(<"$LOG")" "harness=codex, version_at_daemon_start=[1mcodex $(printf 'x%.0s' {1..71}))" \
+      "an escape sequence and over-long --version line were not logged sanitized and truncated to 80 chars"
+  ) || fail "primary version subshell failed"
+  pass "primary version: probed once at daemon start through the harness CLI, bounded, and reused by every busy deferral"
 }
 
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
@@ -3363,6 +3468,8 @@ test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
+test_primary_busy_source_with_live_processes
+test_primary_version_resolved_once_at_daemon_start
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
