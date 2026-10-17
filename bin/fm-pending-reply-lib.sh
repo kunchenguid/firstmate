@@ -18,7 +18,17 @@
 # escalate once if the recovery turn also completes without a correlated
 # report. Never loop, never repeatedly inject, never silently expire unresolved
 # records, and never treat wrong-home or structured-home heuristics as
-# acknowledgement. A same-basename restatement-copy of the mate home's
+# acknowledgement. A later reminder for an unresolved escalation is opt-in
+# (config/pending-reply-resurface; docs/configuration.md). When that flag is
+# absent, the escalation is surfaced once and later sessions do not remind.
+# When it is present, bin/fm-pending-reply-remind.sh enqueues one check wake
+# per later live session, with no second recovery and no second status
+# injection, and Bearings lists that record until it resolves.
+# Only the operator's keyed close of the escalation (fm-send --resolve-key
+# pending-reply-<corr>) ends the reminder and the Bearings row early.
+# The same-session escalation wake is the first surface, so the reminder
+# waits for a different session token. A poll with the same token does not
+# wake again. A same-basename restatement-copy of the mate home's
 # state/<task_id>.status onto the parent channel is a repair of the
 # FM_HOME-relative mixup, not acknowledgement of an arbitrary mate-home file.
 #
@@ -57,6 +67,18 @@
 #   recovery_turn_seen_busy=
 #   recovery_turn_completed_epoch=
 #   escalated_epoch=
+#   surfaced_session=       session that already received this escalation,
+#                           recorded when it is opened and updated when a
+#                           later session is reminded; empty until then
+#   escalation_dismissed_epoch=
+#                           when a reminder pass, in any session, found the
+#                           operator's keyed close of this escalation
+#                           (flag present only); once set, the record is
+#                           neither reminded nor rescanned. Cleared when the
+#                           record escalates
+#   escalation_dismiss_scan=
+#                           file signature and open|dismissed from the last
+#                           dismissal scan; a matching signature is not read again
 #   escalation_closed_epoch=
 #                           when the durable status decision opened by that
 #                           escalation was closed again (see the escalation
@@ -362,6 +384,9 @@ recovery_delivery_outcome=
 recovery_turn_seen_busy=0
 recovery_turn_completed_epoch=
 escalated_epoch=
+surfaced_session=
+escalation_dismissed_epoch=
+escalation_dismiss_scan=
 resolved_epoch=
 resolved_via=
 wrong_home_hits=0
@@ -1196,6 +1221,12 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   return "$rc"
 }
 
+# True when this home opted into a later reminder for an unresolved escalation.
+# Absent means escalate once, which is the behaviour without the flag.
+fm_pending_reply_resurface_enabled() {
+  [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/pending-reply-resurface" ]
+}
+
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
   local open_line open_key open_note now close_line close_rc _task _via
@@ -1346,6 +1377,12 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1
+  # This session already receives the status wake. Record it even when
+  # re-surfacing is off, so turning the flag on later in this session does
+  # not send another wake. The reminder still runs only when the flag is on.
+  fm_pending_reply_set "$rec" surfaced_session \
+    "$("$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" --token "$state")" || return 1
+  fm_pending_reply_set "$rec" escalation_dismissed_epoch '' || return 1
   return 0
 }
 
@@ -1548,7 +1585,7 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
-  local -a observation_tasks=() observation_values=() records=() selected=()
+  local -a observation_tasks=() observation_values=() records=() selected=() live=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -1577,6 +1614,7 @@ fm_pending_reply_tick() {  # <state-dir>
       fm_pending_reply_close_escalation "$state" "$corr" || true
       continue
     fi
+    live+=("$rec")
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -1666,6 +1704,14 @@ fm_pending_reply_tick() {  # <state-dir>
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
+  if fm_pending_reply_resurface_enabled; then
+    for rec in ${live[@]+"${live[@]}"}; do
+      [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+      [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || continue
+      FM_HOME="${FM_HOME:-}" "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" "$state" || true
+      break
+    done
+  fi
   return 0
 }
 
