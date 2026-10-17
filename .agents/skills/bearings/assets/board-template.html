@@ -256,6 +256,13 @@ a { color: inherit; text-decoration: none; }
   font-size: var(--fs-xs); font-weight: 800; color: var(--text-muted);
   border: 1.5px dashed var(--ink-300); border-radius: var(--radius-pill); padding: 5px 12px; width: fit-content;
 }
+/* focus window: which projects hold the captain's attention, and every
+   outcome held back from the others - listed, never hidden */
+.bb-focus { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px;
+  background: var(--surface-card-warm); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); }
+.bb-focus__head { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); }
+.bb-focus__row { font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.4; overflow-wrap: anywhere; }
+.bb-focus[hidden] { display: none; }
 .bb-empty { padding: 18px; font-size: var(--fs-sm); color: var(--text-muted); }
 
 /* ---- Charted Next dispatch picker ---- */
@@ -306,6 +313,7 @@ a { color: inherit; text-decoration: none; }
       <span class="fm-sign fm-sign--muted" id="bb-call-sub"></span>
     </div>
     <div class="bb-callwrap">
+      <div class="bb-focus" id="bb-focus" hidden></div>
       <div class="bb-call" id="bb-call"></div>
       <!-- nav sits under the stack so the active card's top edge aligns with
            the Charted Next card across the row -->
@@ -475,6 +483,23 @@ __FM_BEARINGS_BOARD_DATA__
   document.getElementById("bb-call-sub").textContent =
     callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
 
+  /* focus window banner: present only while the captain's focus is set or
+     held outcomes wait; every held outcome is listed by project */
+  if (data.focus && (data.focus.state === "unreadable" || data.focus.projects.length || data.focus.held.length)) {
+    var fb = document.getElementById("bb-focus");
+    var held = data.focus.held || [];
+    fb.appendChild(el("div", "bb-focus__head",
+      data.focus.state === "unreadable"
+        ? "Held outcomes may be awaiting delivery: the held ledger or delivery marker is unreadable."
+        : (data.focus.projects.length ? "Focus: " + data.focus.projects.join(", ") : "Focus ended") +
+      " · " + held.length + " held from other projects"));
+    held.forEach(function (h) {
+      fb.appendChild(el("div", "bb-focus__row",
+        (h.repo || "no project") + " · " + (h.class ? h.class + " · " : "") + h.summary));
+    });
+    fb.hidden = false;
+  }
+
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
   function ctxRow(k, v, rec) {
@@ -492,6 +517,7 @@ __FM_BEARINGS_BOARD_DATA__
     if (item.type === "merge") {
       top.appendChild(badge("online", "checks green"));
       top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
+      if (item.repo) top.appendChild(el("span", "bb-decision__repo", item.repo));
     } else {
       top.appendChild(badge("solid", "decision"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
@@ -599,11 +625,20 @@ __FM_BEARINGS_BOARD_DATA__
   var stackPrev = document.getElementById("bb-stack-prev");
   var stackNext = document.getElementById("bb-stack-next");
   var stackNav = stackCount.parentNode;
+  /* build groups the cards by project; name the active card's project and
+     its place inside that group so one project is answered in one pass */
+  function groupLabel(i) {
+    var repo = data.captains_call[i].repo || "";
+    var members = data.captains_call.filter(function (c) { return (c.repo || "") === repo; });
+    var before = data.captains_call.slice(0, i).filter(function (c) { return (c.repo || "") === repo; }).length;
+    return (repo || "no project") + " " + (before + 1) + " of " + members.length;
+  }
   function showCard(i) {
     active = Math.max(0, Math.min(cards.length - 1, i));
     cards.forEach(function (c, j) { c.hidden = j !== active; });
     var answered = deck.querySelectorAll(".is-queued").length;
     stackCount.textContent = "card " + (active + 1) + " of " + cards.length +
+      " · " + groupLabel(active) +
       (answered ? " · " + answered + " answered" : "");
     stackPrev.disabled = active === 0;
     stackNext.disabled = active === cards.length - 1;
