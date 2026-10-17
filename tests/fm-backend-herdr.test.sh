@@ -1962,13 +1962,13 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/4.out"
   printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
-  # The emptying-close plan's tab list proves the seeded prune is NOT
-  # workspace-emptying (the task tab remains), so the close stays plain.
-  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/10.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/11.out"
+  # The focus-preserving seeded-tab prune closes the exact seeded TAB (terminal
+  # plus any 0.9.x sidebar pane), not its pane; response 6 is the silent
+  # `tab close`.
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
+  # The converged workspace lists a 0.9.x sidebar pane beside the task's
+  # terminal root pane; pane_for_tab must still resolve the root pane.
+  printf '{"result":{"panes":[{"pane_id":"w9:p3","tab_id":"w9:t2","label":"Sidebar","tokens":{"herdr-sidebar-explorer":"a","herdr-sidebar-git":"b"}},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '
@@ -1993,8 +1993,8 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
     "projection workspace create did not use the corner label, full token, and --no-focus"
   assert_contains "$(cat "$log")" $'tab\x1fcreate\x1f--workspace\x1fw9\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffm-task-p2\x1f--no-focus' \
     "projection task tab did not target the exact new workspace"
-  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
-    "projection create did not prune the exact seeded root pane"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw9:t1' \
+    "projection create did not prune the exact seeded default tab"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
     "projection create must never call workspace close"
   pass "herdr presentation create: exact response IDs yield one normal task pane with no workspace-close authority"
@@ -2009,11 +2009,9 @@ test_projection_create_never_closes_a_concurrent_same_label_tab() {
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/4.out"
   printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/10.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/11.out"
+  # response 6 is the silent `tab close` of the exact seeded default tab.
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2' "$ROOT" 2>&1)
@@ -2026,6 +2024,40 @@ test_projection_create_never_closes_a_concurrent_same_label_tab() {
   assert_not_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p3' \
     "projection closed a concurrent same-label pane"
   pass "herdr presentation create: concurrent same-label tabs are never prune targets"
+}
+
+test_pane_for_tab_prefers_terminal_over_sidebar() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/pane-for-tab-sidebar"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Herdr 0.9.x lists the chrome sidebar pane before the terminal root pane.
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t1","label":"Sidebar","tokens":{"herdr-sidebar-explorer":"a","herdr-sidebar-git":"b"}},{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_for_tab fmtest w1 w1:t1' "$ROOT") \
+    || fail "pane_for_tab failed to resolve a root pane"
+  [ "$out" = "w1:p1" ] || fail "pane_for_tab returned the sidebar pane instead of the terminal root pane: $out"
+  pass "herdr pane_for_tab: prefers the terminal root pane over a 0.9.x sidebar pane"
+}
+
+test_projection_cleanup_tabs_exact_closes_both_tabs() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-cleanup-tabs"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }
+      fm_backend_herdr_projection_focus_restore() { return 0; }
+      fm_backend_herdr_projection_cleanup_tabs_exact fmtest w9:t2 w9:t1
+    ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "exact tab rollback should succeed: $out"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw9:t2' "rollback did not close the task tab"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw9:t1' "rollback did not close the seeded tab"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "rollback should close tabs, never panes"
+  pass "herdr presentation cleanup: exact tab rollback closes both tabs via tab close"
 }
 
 test_projection_focus_snapshot_requires_exact_workspace_and_tab() {
@@ -3051,10 +3083,8 @@ test_projection_seeded_prune_refuses_active_tab() {
   printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/3.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t1","focused":true}]}}' > "$resp/4.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","focused":true},{"tab_id":"w9:t2","focused":false}]}}' > "$resp/5.out"
-  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}' > "$resp/6.out"
-  cp "$resp/1.out" "$resp/7.out"
-  cp "$resp/4.out" "$resp/8.out"
-  cp "$resp/5.out" "$resp/9.out"
+  cp "$resp/4.out" "$resp/6.out"
+  cp "$resp/5.out" "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_FAKE_HERDR_FOREGROUND_REASON=cleared \
@@ -3063,7 +3093,7 @@ test_projection_seeded_prune_refuses_active_tab() {
   [ "$status" -ne 0 ] || fail "projected seeded pruning must refuse the active tab"
   assert_contains "$out" "target is the captain's active tab" \
     "projected seeded prune did not explain its active-tab refusal"
-  assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
+  assert_not_contains "$(cat "$log")" $'tab\x1fclose' \
     "projected seeded prune closed the captain's active tab"
   pass "herdr presentation focus: projected seeded pruning refuses the active tab"
 }
@@ -5451,7 +5481,7 @@ EOF
   [ "$tabcount" = 1 ] || fail "the auto-created default tab should be pruned once a real task tab exists, $tabcount tab(s) remain: $(jq -c '.tabs' "$state")"
   jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)][0].label' "$state" | grep -qx 'fm-prunetest' \
     || fail "the surviving tab should be the real task tab, not the default: $(jq -c '.tabs' "$state")"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "create_task did not close the default tab's pane"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' "create_task did not close the default tab"
   pass "fm_backend_herdr_create_task: prunes exactly the seeded default tab container_ensure identified, once the first real task tab exists"
 }
 
@@ -6022,6 +6052,8 @@ test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
+test_pane_for_tab_prefers_terminal_over_sidebar
+test_projection_cleanup_tabs_exact_closes_both_tabs
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab

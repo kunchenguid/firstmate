@@ -1122,6 +1122,37 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   [ "$close_status" -eq 0 ]
 }
 
+# fm_backend_herdr_projection_close_tab_focus_preserving: close one exact
+# projection tab - its terminal root pane AND any 0.9.x sidebar pane - without
+# leaving the captain focused anywhere else. Herdr 0.9.x keeps a tab alive
+# after `pane close` removes only its terminal pane (the sidebar pane remains),
+# so a tab close is the version-tolerant removal primitive; Herdr 0.8.0's focus
+# fixes make that close focus-safe. The live-viewer guard is inherited from the
+# pane-level path: a close whose target is the exact active tab of a live
+# foreground client is refused rather than changing focus, and the exact
+# pre-close focus is restored as the backstop. Return codes: 0 closed, 1 the
+# guard refused or the close was not confirmed, 2 focus could not be restored.
+fm_backend_herdr_projection_close_tab_focus_preserving() {  # <session> <tab-id>
+  local session=$1 tab_id=$2 before active_tab skip_restore=0
+  [ -n "$tab_id" ] || return 0
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+    echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe tab close" >&2
+    return 1
+  }
+  active_tab=${before#*$'\t'}
+  fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$tab_id" || return 1
+  if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
+    before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
+    skip_restore=0
+  fi
+  [ "$tab_id" != "$active_tab" ] || skip_restore=1
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || return 1
+  if [ "$skip_restore" -eq 0 ]; then
+    fm_backend_herdr_projection_focus_restore "$session" "$before" "tab close" || return 2
+  fi
+  return 0
+}
+
 # Herdr 0.7.5 workspace-removal focus rules (verified against the installed
 # 0.7.5 binary, its v0.7.5 tag source, and the isolated named lab):
 # - An EXPLICIT close that empties a workspace (API pane.close of its last
@@ -1906,6 +1937,12 @@ fm_backend_herdr_launcher_identity() {  # <session>
 # workspace - callers only invoke it once at least one other (real task) tab
 # exists alongside it, never right after workspace creation - and this
 # function independently re-checks the tab count as a second layer.
+#
+# The close is a `tab close` of the exact seeded tab, not a `pane close`: on
+# Herdr 0.9.x a `pane close` of the tab's terminal pane leaves its sidebar pane
+# alive, so the seeded tab survives and the projection never converges. A tab
+# close removes the terminal and sidebar panes together on every release that
+# has the sidebar, and is the same single-pane close on releases without it.
 fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id> [focus-preserving]
   local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count current_label pane_id agent_out agent_status
   [ -n "$tab_id" ] || return 0
@@ -1920,9 +1957,9 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
   agent_status=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   [ "$agent_status" = working ] && return 0
   if [ "$close_mode" = focus-preserving ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id"
+    fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$tab_id"
   else
-    fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || true
+    fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || true
   fi
 }
 
@@ -2595,7 +2632,7 @@ EOF
 # A missing, failed, or malformed create response stays ambiguous and grants no
 # cleanup authority.
 fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label>
-  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before active_tab
+  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs tab_count root_pane focus_before active_tab
   FM_BACKEND_HERDR_PROJECTION_SESSION=""
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=""
   FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=""
@@ -2683,24 +2720,21 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: could not verify the disposable herdr presentation workspace shape" >&2
     return 1
   }
-  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" 2>/dev/null) || {
-    echo "error: could not verify the disposable herdr presentation pane shape" >&2
-    return 1
-  }
-  if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 \
-     || ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
+  if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
     echo "error: could not parse the disposable herdr presentation workspace shape" >&2
     return 1
   fi
   tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs | length' 2>/dev/null)
-  pane_count=$(printf '%s' "$panes" | jq -r '.result.panes | length' 2>/dev/null)
-  if [ "$tab_count" != 1 ] || [ "$pane_count" != 1 ] \
+  # The single remaining tab must be the task tab whose root (terminal) pane is
+  # the exact recorded task pane. fm_backend_herdr_pane_for_tab excludes Herdr
+  # 0.9.x's sidebar pane, so a converged projection may still list one extra
+  # chrome pane; the old pane_count == 1 assertion would fail that shape for no
+  # reason.
+  root_pane=$(fm_backend_herdr_pane_for_tab "$session" "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID")
+  if [ "$tab_count" != 1 ] || [ "$root_pane" != "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" ] \
      || ! printf '%s' "$tabs" | jq -e --arg task "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
        --arg seeded "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
-       '.result.tabs[0].tab_id == $task and ([.result.tabs[] | select(.tab_id == $seeded)] | length) == 0' >/dev/null 2>&1 \
-     || ! printf '%s' "$panes" | jq -e --arg pane "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" \
-       --arg tab "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
-       '.result.panes[0].pane_id == $pane and .result.panes[0].tab_id == $tab' >/dev/null 2>&1; then
+       '.result.tabs[0].tab_id == $task and ([.result.tabs[] | select(.tab_id == $seeded)] | length) == 0' >/dev/null 2>&1; then
     echo "error: disposable herdr presentation workspace did not converge to exactly one task pane" >&2
     return 1
   fi
@@ -2716,6 +2750,26 @@ fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-p
   if [ -n "$seeded_pane" ] && [ "$seeded_pane" != "$task_pane" ]; then
     fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$seeded_pane" || true
   fi
+}
+
+# fm_backend_herdr_projection_cleanup_tabs_exact: same-process rollback for a
+# fresh projection whose create calls returned complete exact TAB ids. It
+# closes the exact task and seeded tabs (terminal and 0.9.x sidebar panes
+# together) so the disposable workspace empties, mirroring
+# fm_backend_herdr_projection_cleanup_exact but through the tab-level primitive
+# a pane close no longer provides. Returns 0 only when every close it attempted
+# reported success, so a caller can tell a clean rollback from a quarantined
+# leftover it must leave for the session-start sweep.
+fm_backend_herdr_projection_cleanup_tabs_exact() {  # <session> <task-tab> <seeded-tab>
+  local session=$1 task_tab=$2 seeded_tab=$3 status=0
+  if [ -n "$task_tab" ] && ! fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$task_tab"; then
+    status=1
+  fi
+  if [ -n "$seeded_tab" ] && [ "$seeded_tab" != "$task_tab" ] \
+     && ! fm_backend_herdr_projection_close_tab_focus_preserving "$session" "$seeded_tab"; then
+    status=1
+  fi
+  return "$status"
 }
 
 # fm_backend_herdr_projection_parent_workspace_exact: resolve one exact parent
@@ -2742,7 +2796,7 @@ fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-labe
 # This read-only predicate grants no mutation authority by itself.
 fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
   local session=$1 token=$2 workspace=$3 tab=$4 pane=$5 parent_workspace=$6
-  local parent_label=$7 workspace_label=$8 task_label=$9 list tabs panes
+  local parent_label=$7 workspace_label=$8 task_label=$9 list tabs root_pane
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$list" | jq -e \
     --arg token "$token" \
@@ -2781,13 +2835,12 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
     and .result.tabs[0].tab_id == $tab
     and .result.tabs[0].label == $task_label
   ' >/dev/null 2>&1 || return 1
-  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
-  printf '%s' "$panes" | jq -e --arg tab "$tab" --arg pane "$pane" '
-    (.result.panes | type) == "array"
-    and (.result.panes | length) == 1
-    and .result.panes[0].pane_id == $pane
-    and .result.panes[0].tab_id == $tab
-  ' >/dev/null 2>&1
+  # The exact task tab's root (terminal) pane must be the recorded pane. Herdr
+  # 0.9.x also lists a sidebar pane for the tab, so a pane-count assertion would
+  # fail a converged binding for no reason; pane_for_tab resolves the root pane
+  # instead.
+  root_pane=$(fm_backend_herdr_pane_for_tab "$session" "$workspace" "$tab") || return 1
+  [ "$root_pane" = "$pane" ]
 }
 
 fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
@@ -3803,11 +3856,18 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
 # fm_backend_herdr_pane_for_tab: the root pane id for <tab_id> in <workspace_id>
 # of <session>, via one pane list call filtered by tab_id (never assumes a
 # tab-number/pane-number correspondence - herdr numbers them independently).
+# Herdr 0.9.x gives every tab a chrome "Sidebar" pane beside its terminal root
+# pane, and `pane list` sorts the sidebar first, so the filter below excludes
+# it and returns the terminal pane an agent actually runs in. The sidebar is
+# identified structurally by its `herdr-sidebar-*` token namespace with the
+# rendered "Sidebar" label as a second independent signal; on releases without
+# the sidebar neither signal fires and the sole pane is returned unchanged, so
+# this is version-tolerant rather than gated on 0.9.1.
 fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
   local session=$1 wsid=$2 tab_id=$3 panes
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
   printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
-    '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1
+    '.result.panes[]? | select(.tab_id == $tab) | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0) | .pane_id' 2>/dev/null | head -1
 }
 
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an

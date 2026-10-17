@@ -118,6 +118,10 @@ Workspace and tab creation use `--no-focus`.
 The first workspace in a completely empty Herdr session must become focused, because no prior target exists.
 Later task creation does not intentionally steal focus.
 
+On Herdr 0.9.x, `workspace create --no-focus` no longer reliably leaves the launcher's workspace focused, and a `tab create --no-focus` can mark its new tab focused inside a workspace that is not focused.
+The adapter does not rely on `--no-focus` as focus authority.
+It captures the exact pre-create workspace and tab, and the exact pre-prune focus, then restores that exact tab after every creation or removal that can move focus.
+
 ### Placement beside the launcher
 
 Herdr does not enforce workspace or tab label uniqueness, so a label can never decide where a worker goes.
@@ -257,6 +261,10 @@ Creation proceeds in this order:
 
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
 
+A failed fresh creation rolls back what it created.
+When both creates returned complete exact ids, the spawn closes the exact task and seeded tabs, empties the disposable workspace, and removes the attempt journal, so no orphan workspace or version 1 journal survives the abort.
+An ambiguous create response still leaves the journal quarantined for the session-start sweep, because the adapter cannot safely identify what to roll back.
+
 The token is visible in the workspace title, because Herdr exposes no verified hidden persistent field.
 Neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
 
@@ -271,6 +279,11 @@ The normal `fm-<id>` task tab is created in the exact new workspace returned by 
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
+
+Herdr 0.9.x gives every tab a chrome sidebar pane beside its terminal root pane.
+The adapter's pane operations identify and address only the terminal root pane, so the sidebar is never mistaken for a task pane.
+The seeded-tab prune and a failed spawn's rollback close the seeded or task tab with `tab close`, because a `pane close` of the terminal pane on 0.9.x leaves the sidebar pane alive and the tab behind.
+A tab close removes its terminal and sidebar panes together on releases that have the sidebar, and is the same single-pane close on releases without it.
 
 ### Ordering
 

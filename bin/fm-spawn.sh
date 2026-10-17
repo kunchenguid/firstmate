@@ -1406,6 +1406,9 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_PROJECTION_ABORT_TASK_TAB=
+HERDR_PROJECTION_ABORT_SEEDED_TAB=
+HERDR_PROJECTION_ABORT_JOURNAL=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -1514,10 +1517,23 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
-      "$HERDR_PROJECTION_ABORT_SESSION" \
-      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+    # A fresh projection rolls back through its exact tab ids (terminal plus
+    # the 0.9.x sidebar pane) so the disposable workspace empties, then removes
+    # its attempt journal because nothing is left to quarantine. The reclaim
+    # path below still uses the pane-level primitive and keeps its journal.
+    if [ -n "${HERDR_PROJECTION_ABORT_TASK_TAB:-}" ]; then
+      if fm_backend_herdr_projection_cleanup_tabs_exact \
+        "$HERDR_PROJECTION_ABORT_SESSION" \
+        "$HERDR_PROJECTION_ABORT_TASK_TAB" \
+        "$HERDR_PROJECTION_ABORT_SEEDED_TAB"; then
+        [ -z "${HERDR_PROJECTION_ABORT_JOURNAL:-}" ] || rm -f -- "$HERDR_PROJECTION_ABORT_JOURNAL" 2>/dev/null || true
+      fi
+    else
+      fm_backend_herdr_projection_cleanup_exact \
+        "$HERDR_PROJECTION_ABORT_SESSION" \
+        "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+        "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+    fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -4354,8 +4370,9 @@ else
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
-                HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-                HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+                HERDR_PROJECTION_ABORT_TASK_TAB=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+                HERDR_PROJECTION_ABORT_SEEDED_TAB=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+                HERDR_PROJECTION_ABORT_JOURNAL=$HERDR_PRESENTATION_JOURNAL
               fi
               exit 1
             fi
@@ -4367,8 +4384,9 @@ else
             HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
             HERDR_PROJECTION_ABORT_CLEANUP=1
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-            HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            HERDR_PROJECTION_ABORT_TASK_TAB=$HERDR_TAB_ID
+            HERDR_PROJECTION_ABORT_SEEDED_TAB=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+            HERDR_PROJECTION_ABORT_JOURNAL=$HERDR_PRESENTATION_JOURNAL
             # Opt-in project groups (docs/herdr-backend.md "Project groups"):
             # an empty key keeps the block-end placement. Off costs one file test.
             HERDR_GROUP_ORDER_KEY=
