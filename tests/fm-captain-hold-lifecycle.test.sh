@@ -1903,6 +1903,12 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
   assert_contains "$show" "Resolution mode: reconciled" "the moot call did not record how it closed"
   assert_contains "$show" "Reconciliation evidence:" "the moot call did not record the evidence"
   assert_contains "$show" "0.1.38 was published" "the recorded evidence was lost"
+  assert_contains "$show" "reconciled: 0.1.38 was published" \
+    "the moot call close note was not recorded under the reconciled kind"
+  if [ "${show#*answered:}" != "$show" ]
+  then
+    fail "a reconciled close recorded an answered: note"
+  fi
   case "$show" in
     *"Captain decision:"*) fail "a reconciled close was recorded as the captain's own words" ;;
   esac
